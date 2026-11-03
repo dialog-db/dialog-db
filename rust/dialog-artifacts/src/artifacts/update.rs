@@ -92,13 +92,14 @@ pub struct Standing {
     pub version: Option<(Edition, [u8; 32])>,
     /// The claim's cause.
     pub cause: Cause,
-    /// How many derived successions stand between the claim and this
-    /// candidate: zero for the claim itself, one for the conclusion of
-    /// a rule whose body read the claim and derived another value for
-    /// its cell, and one more for each conclusion that rewrites that
-    /// one in turn. A derived successor stands strictly after what it
-    /// succeeds, as a written one does, and before every claim of a
-    /// newer version.
+    /// How many rewrites stand between the claim and this candidate:
+    /// zero for the claim itself, one for the conclusion of a rule
+    /// whose body read the claim and derived another value for its
+    /// cell, and one more for each conclusion that rewrites that one in
+    /// turn. Rewrites that read each other back, a cycle, share one
+    /// rank, so they stand as concurrent candidates. A derived
+    /// successor stands strictly after what it succeeds, as a written
+    /// one does, and before every claim of a newer version.
     pub succession: u32,
 }
 
@@ -110,16 +111,6 @@ impl Standing {
             version,
             cause,
             succession: 0,
-        }
-    }
-
-    /// The standing of a candidate succeeding one of this standing:
-    /// strictly after it, before anything of a newer version or cause.
-    pub fn successor(&self) -> Self {
-        Standing {
-            version: self.version,
-            cause: self.cause.clone(),
-            succession: self.succession.saturating_add(1),
         }
     }
 }
@@ -921,8 +912,11 @@ mod tests {
     fn a_successor_stands_after_its_claim_and_before_a_newer_one() {
         use super::{Cause, Edition, Pick, Standing, Value};
         let claim = Standing::new(Some((Edition::new(3), [1; 32])), Cause([1; 32]));
-        let successor = claim.successor();
-        let twice = successor.successor();
+        let at = |succession: u32| Standing {
+            succession,
+            ..claim.clone()
+        };
+        let (successor, twice) = (at(1), at(2));
         let newer_cause = Standing::new(Some((Edition::new(3), [1; 32])), Cause([2; 32]));
         let newer_version = Standing::new(Some((Edition::new(4), [0; 32])), Cause([0; 32]));
         assert!(successor > claim);

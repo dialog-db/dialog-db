@@ -164,16 +164,15 @@ struct Frame {
 }
 
 /// One cell a rule's body read of the relation the rule derives: the
-/// entity, the key when the relation is a keyed collection, the value
-/// found and the standing it holds. A conclusion for the same cell with
-/// another value succeeds the reading; one with the value read stands
-/// as it does.
+/// entity, the key when the relation is a keyed collection, and the
+/// value found. A conclusion for the same cell with another value
+/// displaces the value read; one with the value read displaces
+/// nothing.
 #[derive(Clone, Debug)]
 pub(crate) struct Reading {
     pub this: Value,
     pub key: Option<Value>,
     pub value: Value,
-    pub standing: Option<Standing>,
 }
 
 /// What a row brings to a cardinality-one election: the standing of
@@ -284,36 +283,22 @@ impl Match {
         self.readings.push(reading);
     }
 
-    /// The standing a conclusion of `value` for the cell of `this` (and
-    /// `key`, for a keyed collection) succeeds: the newest among the
-    /// readings of that cell the body made, when it made any and none
-    /// of them found `value` itself. `None` when the conclusion succeeds
-    /// nothing: the body did not read the cell, or read the value it
-    /// derives, which stands as the reading does. A reading no fact
-    /// stands behind is succeeded at the standing nothing has.
-    pub(crate) fn succeeds(
+    /// The values a conclusion of `value` for the cell of `this` (and
+    /// `key`, for a keyed collection) displaces: every other value of
+    /// that cell the body read, by its identity key. Empty when the body
+    /// did not read the cell, or read only the value it derives.
+    pub(crate) fn displaced(
         &self,
         this: &Value,
         key: Option<&Value>,
         value: &Value,
-    ) -> Option<Standing> {
-        let mut succeeded: Option<Standing> = None;
-        for reading in self.readings() {
-            if reading.this != *this || reading.key.as_ref() != key {
-                continue;
-            }
-            if reading.value == *value {
-                return None;
-            }
-            let standing = reading
-                .standing
-                .clone()
-                .unwrap_or_else(|| Standing::new(None, dialog_artifacts::Cause([0; 32])));
-            if succeeded.as_ref().is_none_or(|held| *held < standing) {
-                succeeded = Some(standing);
-            }
-        }
-        succeeded
+    ) -> Vec<Vec<u8>> {
+        self.readings()
+            .filter(|reading| {
+                reading.this == *this && reading.key.as_ref() == key && reading.value != *value
+            })
+            .map(|reading| reading.value.identity_key())
+            .collect()
     }
 
     /// Every binding of this row, its own and its frames'. A name is
@@ -344,9 +329,9 @@ impl Match {
     /// The row's standing: the newest among the facts it cites. A row
     /// derived by a rule stands as recent as the latest fact its body
     /// consumed, which is how it competes in an attribute's election
-    /// against stored rows; one that rewrites a cell it read stands past
-    /// the reading as well (see `succeeds`). `None` for a row citing
-    /// nothing.
+    /// against stored rows; one that rewrites a cell it read is ranked
+    /// past the reading as well, once its component is derived (see
+    /// `displaced`). `None` for a row citing nothing.
     pub fn standing(&self) -> Option<Standing> {
         self.standings()
             .map(|(_, standing)| standing)

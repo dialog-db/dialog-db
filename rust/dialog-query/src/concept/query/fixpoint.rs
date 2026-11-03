@@ -34,10 +34,12 @@
 //! with [`EvaluationError::AbsenceThroughRecursion`]. A read under
 //! `last` is not one: inside its component it reads every candidate the
 //! fixpoint has derived, and its readers elect the newest at the exit.
-//! A rule that rewrites a cell it reads under `last` derives a
-//! successor of the reading, standing after it (see `standing_of`), so
-//! the exit elects the rewrite; a cycle of rewrites raises its
-//! standings every round and fails at [`MAX_ROUNDS`].
+//! A rule that rewrites a cell it reads under `last` is a set read
+//! inside the component too; its row remembers the values it displaced
+//! ([`Answer::displaced`]), and the exit ranks each cell's candidates by
+//! those successions ([`rank_successions`]) before it elects, so the
+//! rewrite wins over what it read, and a cycle of rewrites, which no
+//! rank can order, is elected among as concurrent candidates.
 //! A fold inside a component has no reading at all and stays refused
 //! ([`ProgramAnalysis::check`]).
 //!
@@ -92,6 +94,23 @@ pub struct Answer {
     pub row: Row,
     /// The newest standing among the row's derivations.
     pub standing: Option<Standing>,
+    /// The other values of the row's own cell its derivations read, by
+    /// identity key: what the row displaces as a candidate for the
+    /// cell. The exit ranks a cell's candidates by these successions
+    /// ([`rank_successions`]). Empty for a row of a concept that is not
+    /// an attribute, or of a rule that does not read its own relation.
+    pub displaced: BTreeSet<Vec<u8>>,
+}
+
+impl Answer {
+    /// A row standing as `standing`, displacing nothing.
+    pub fn new(row: Row, standing: Option<Standing>) -> Self {
+        Answer {
+            row,
+            standing,
+            displaced: BTreeSet::new(),
+        }
+    }
 }
 
 /// Storage for the answers accumulated during a fixpoint run. The
@@ -99,12 +118,14 @@ pub struct Answer {
 /// implementations; the evaluator only ever appends, advances, and
 /// scans.
 pub trait AnswerTable {
-    /// Stage a freshly derived row, standing as `standing`. Returns
-    /// `true` when the row is new, or known but now stands newer than
-    /// any earlier derivation of it (the newer standing must reach the
-    /// rows derived from it, so the row re-enters the delta); `false`
-    /// otherwise.
-    fn insert(&mut self, concept: &Entity, row: Row, standing: Option<Standing>) -> bool;
+    /// Stage a freshly derived row. Returns `true` when the row is new,
+    /// or known but now stands newer than any earlier derivation of it
+    /// (the newer standing must reach the rows derived from it, so the
+    /// row re-enters the delta); `false` otherwise. What a known row
+    /// displaces grows by what this derivation displaced either way:
+    /// nothing derived from the row reads it, so it need not re-enter
+    /// the delta for that.
+    fn insert(&mut self, concept: &Entity, answer: Answer) -> bool;
 
     /// End the round: staged rows become the new delta and join the
     /// total. Returns `true` when the new delta is non-empty (the
@@ -172,23 +193,28 @@ impl InMemoryAnswerTable {
 }
 
 impl AnswerTable for InMemoryAnswerTable {
-    fn insert(&mut self, concept: &Entity, row: Row, standing: Option<Standing>) -> bool {
-        let key = row_key(&row);
-        if let Some(known) = self.total.get(concept).and_then(|rows| rows.get(&key))
-            && known.standing >= standing
+    fn insert(&mut self, concept: &Entity, answer: Answer) -> bool {
+        let key = row_key(&answer.row);
+        if let Some(known) = self
+            .total
+            .get_mut(concept)
+            .and_then(|rows| rows.get_mut(&key))
+            && known.standing >= answer.standing
         {
+            known.displaced.extend(answer.displaced);
             return false;
         }
         match self.staged.entry(concept.clone()).or_default().entry(key) {
             Entry::Vacant(slot) => {
-                slot.insert(Answer { row, standing });
+                slot.insert(answer);
                 true
             }
             Entry::Occupied(mut slot) => {
                 let staged = slot.get_mut();
-                if staged.standing < standing {
-                    staged.standing = standing;
+                if staged.standing < answer.standing {
+                    staged.standing = answer.standing;
                 }
+                staged.displaced.extend(answer.displaced);
                 false
             }
         }
@@ -235,29 +261,133 @@ impl InMemoryAnswerTable {
 /// which bound the concept's attribute field, when it is an attribute
 /// concept and a fact did, else the newest fact the match cites. This
 /// is how a rule's row stands outside a cycle, so a value stands the
-/// same whether or not its relation is recursive.
-///
-/// A conclusion that rewrites a cell its body read succeeds the
-/// reading, as a write does: it stands strictly after the reading
-/// ([`Standing::successor`]), or at the newest fact its body consumed
-/// when that is newer still. A conclusion of the value it read stands
-/// as the reading does, so a rule deriving a relation from itself
-/// settles. One that rewrites a cell in a cycle, each round reading
-/// what the last derived, never does, and fails at [`MAX_ROUNDS`].
+/// same whether or not its relation is recursive. What the row
+/// displaces of its own cell is kept apart ([`Answer::displaced`]) and
+/// ranked at the exit.
 fn standing_of(descriptor: &ConceptDescriptor, matched: &Match) -> Option<Standing> {
+    descriptor
+        .attribute_field()
+        .and_then(|(name, _)| matched.standing_of(name))
+        .or_else(|| matched.standing())
+}
+
+/// The values of its own cell a row projected from `matched` displaces:
+/// every other value of the cell the body read, when the concept is an
+/// attribute concept and the row names its entity and value.
+fn displaced_by(descriptor: &ConceptDescriptor, matched: &Match) -> BTreeSet<Vec<u8>> {
     let Some((name, _)) = descriptor.attribute_field() else {
-        return matched.standing();
+        return BTreeSet::new();
     };
-    let standing = matched.standing_of(name).or_else(|| matched.standing());
-    let succeeded = match (matched.value_of("this"), matched.value_of(name)) {
-        (Some(this), Some(value)) => {
-            matched.succeeds(this, matched.value_of(&The::key_operand(name)), value)
+    match (matched.value_of("this"), matched.value_of(name)) {
+        (Some(this), Some(value)) => matched
+            .displaced(this, matched.value_of(&The::key_operand(name)), value)
+            .into_iter()
+            .collect(),
+        _ => BTreeSet::new(),
+    }
+}
+
+/// Rank each cell's candidates among `rows` by succession, writing the
+/// rank into each row's standing, so the election that follows prefers
+/// a rewrite to what it read. A candidate that displaces another ranks
+/// after it; the rank is the longest chain of displacements leading to
+/// the candidate. Rewrites that read each other back form a cycle,
+/// which no rank orders: its members share the rank of the chain into
+/// the cycle, and stand as concurrent candidates the election settles
+/// by version, cause and value. `field` is the operand the rows hold
+/// the cell's value under.
+pub fn rank_successions(rows: &mut [Answer], field: &str) {
+    // Nothing displaced, nothing to rank: the case of every relation no
+    // rule rewrites from itself.
+    if rows.iter().all(|answer| answer.displaced.is_empty()) {
+        return;
+    }
+    let key_operand = The::key_operand(field);
+    // The rows of each cell, by the cell's identity, with each row's
+    // value identity.
+    let mut cells: BTreeMap<Vec<u8>, Vec<(usize, Vec<u8>)>> = BTreeMap::new();
+    for (index, answer) in rows.iter().enumerate() {
+        let (Some(this), Some(value)) = (answer.row.get("this"), answer.row.get(field)) else {
+            continue;
+        };
+        let mut cell = this.identity_key();
+        if let Some(key) = answer.row.get(&key_operand) {
+            cell.extend(key.identity_key());
         }
-        _ => None,
-    };
-    match succeeded {
-        Some(read) => standing.max(Some(read.successor())),
-        None => standing,
+        cells
+            .entry(cell)
+            .or_default()
+            .push((index, value.identity_key()));
+    }
+    for members in cells.values() {
+        if members.len() < 2 {
+            continue;
+        }
+        // Edges from each candidate to the candidates displacing it,
+        // among the cell's rows.
+        let position = |value: &[u8]| members.iter().position(|(_, held)| held == value);
+        let count = members.len();
+        let mut displaces: Vec<Vec<usize>> = vec![Vec::new(); count];
+        for (to, (index, _)) in members.iter().enumerate() {
+            for value in &rows[*index].displaced {
+                if let Some(from) = position(value)
+                    && from != to
+                {
+                    displaces[from].push(to);
+                }
+            }
+        }
+        // Reachability by displacement, closed: two candidates reaching
+        // each other are one cycle.
+        let mut reaches: Vec<Vec<bool>> = (0..count)
+            .map(|from| {
+                let mut seen = vec![false; count];
+                let mut stack = displaces[from].clone();
+                while let Some(next) = stack.pop() {
+                    if !seen[next] {
+                        seen[next] = true;
+                        stack.extend(displaces[next].iter().copied());
+                    }
+                }
+                seen
+            })
+            .collect();
+        for (from, reached) in reaches.iter_mut().enumerate() {
+            reached[from] = false;
+        }
+        let same_cycle = |a: usize, b: usize| reaches[a][b] && reaches[b][a];
+        // The longest chain of displacements into each candidate,
+        // counted across cycles only: relaxed until nothing moves,
+        // which a chain of at most `count` steps bounds.
+        let mut rank = vec![0u32; count];
+        loop {
+            let mut moved = false;
+            for from in 0..count {
+                for &to in &displaces[from] {
+                    let through = if same_cycle(from, to) {
+                        rank[from]
+                    } else {
+                        rank[from] + 1
+                    };
+                    if rank[to] < through {
+                        rank[to] = through;
+                        moved = true;
+                    }
+                }
+            }
+            if !moved {
+                break;
+            }
+        }
+        for (at, (index, _)) in members.iter().enumerate() {
+            if rank[at] == 0 {
+                continue;
+            }
+            let standing = rows[*index]
+                .standing
+                .get_or_insert_with(|| Standing::new(None, dialog_artifacts::Cause([0; 32])));
+            standing.succession = rank[at];
+        }
     }
 }
 
@@ -350,8 +480,8 @@ fn in_component<'p>(
 /// row resolved to `Absent`, and binds so. Every variable the row
 /// binds cites the row's standing, so what a rule derives from it
 /// stands at least as new. An occurrence of the rule's `own` relation
-/// records the cell it read, so the conclusion can tell whether it
-/// rewrites it ([`standing_of`]). Returns `false` when the row
+/// records the cell it read, so the conclusion can tell what it
+/// displaces ([`displaced_by`]). Returns `false` when the row
 /// conflicts with the bindings accumulated so far (the combination is
 /// a non-match).
 fn bind_occurrence(
@@ -379,7 +509,6 @@ fn bind_occurrence(
                         .get(&The::key_operand(ConceptDescriptor::VALUE))
                         .cloned(),
                     value: value.clone(),
-                    standing: answer.standing.clone(),
                 });
             }
             true
@@ -718,6 +847,7 @@ fn answer_complete(descriptor: &ConceptDescriptor, matched: &Match) -> Option<An
     project_complete(descriptor, matched).map(|row| Answer {
         row,
         standing: standing_of(descriptor, matched),
+        displaced: displaced_by(descriptor, matched),
     })
 }
 
@@ -735,11 +865,7 @@ where
     Env: crate::Scope<'a>,
 {
     for answer in collect_rule_rows(member, split, rest, matched, scope, env).await? {
-        table.insert(
-            &ProgramAnalysis::node(&member.descriptor),
-            answer.row,
-            answer.standing,
-        );
+        table.insert(&ProgramAnalysis::node(&member.descriptor), answer);
     }
     Ok(())
 }
@@ -796,7 +922,7 @@ where
                 }
                 let node = ProgramAnalysis::node(&member.descriptor);
                 for answer in derived {
-                    table.insert(&node, answer.row, answer.standing);
+                    table.insert(&node, answer);
                 }
             }
         }
@@ -895,8 +1021,11 @@ where
             for matched in results {
                 table.insert(
                     &ProgramAnalysis::node(&member.descriptor),
-                    project(&member.descriptor, &matched),
-                    standing_of(&member.descriptor, &matched),
+                    Answer {
+                        row: project(&member.descriptor, &matched),
+                        standing: standing_of(&member.descriptor, &matched),
+                        displaced: displaced_by(&member.descriptor, &matched),
+                    },
                 );
             }
         }
@@ -1388,10 +1517,7 @@ where
                                     .get(&target)
                                     .map(|rows| {
                                         rows.values()
-                                            .map(|row| Answer {
-                                                row: row.clone(),
-                                                standing: None,
-                                            })
+                                            .map(|row| Answer::new(row.clone(), None))
                                             .collect()
                                     })
                                     .unwrap_or_default()
@@ -1468,8 +1594,8 @@ where
             };
             let mut survived: Vec<Vec<u8>> = Vec::new();
             for (key, row) in rows {
-                if let Some(standing) = derivable(member, row, table, env).await? {
-                    table.insert(&entity, row.clone(), standing);
+                if let Some(answer) = derivable(member, row, table, env).await? {
+                    table.insert(&entity, answer);
                     survived.push(key.clone());
                     rederived = true;
                 }
@@ -1498,18 +1624,19 @@ where
 /// operands into each rule body (occurrences read the current
 /// table, base premises the current store) and check whether any
 /// result projects back to the row. A row that does stands as the
-/// newest of its surviving derivations, which every derivation is
-/// read for: the one it stood by may be the one deleted.
+/// newest of its surviving derivations, and displaces what any of them
+/// does, which every derivation is read for: the one it stood by may
+/// be the one deleted.
 async fn derivable<'a, Env>(
     member: &Member,
     row: &Row,
     table: &InMemoryAnswerTable,
     env: &'a Env,
-) -> Result<Option<Option<Standing>>, EvaluationError>
+) -> Result<Option<Answer>, EvaluationError>
 where
     Env: crate::Scope<'a>,
 {
-    let mut derived: Option<Option<Standing>> = None;
+    let mut derived: Option<Answer> = None;
     for split in &member.rules {
         let mut seed = Match::new();
         let mut seed_scope = Environment::new();
@@ -1562,9 +1689,14 @@ where
             let rows =
                 collect_rule_rows(member, split, split.base.clone(), matched, &scope, env).await?;
             for candidate in rows {
-                if candidate.row == *row {
-                    derived = Some(derived.flatten().max(candidate.standing));
+                if candidate.row != *row {
+                    continue;
                 }
+                let held = derived.get_or_insert_with(|| Answer::new(row.clone(), None));
+                if held.standing < candidate.standing {
+                    held.standing = candidate.standing;
+                }
+                held.displaced.extend(candidate.displaced);
             }
         }
     }

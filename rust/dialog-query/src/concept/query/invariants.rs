@@ -700,9 +700,10 @@ async fn a_rewrite_of_a_derived_value_succeeds_it_in_turn() -> anyhow::Result<()
 /// just past the claim, and `x/status(e) := "blocked" :- x/status(e) =
 /// "triage", x/flag(e) = _` stands at the flag: `last` reads
 /// `"blocked"`, though `"todo"` sorts after it. A conclusion whose body
-/// does not read the cell keeps today's standing, that of the newest
-/// fact it read, so a value derived from the flag alone ties with the
-/// one that read the cell as well and the value decides.
+/// does not read the cell displaces nothing: a value derived from the
+/// flag alone stands at the flag too, but ranks below the one that
+/// read the cell and rewrote it, so `"blocked"` still wins, though
+/// `"waiting"` sorts after it.
 #[dialog_common::test]
 async fn rules_succeeding_one_claim_elect_by_the_newer_reading() -> anyhow::Result<()> {
     let (operator, profile) = test_session_with_peer().await;
@@ -760,47 +761,80 @@ async fn rules_succeeding_one_claim_elect_by_the_newer_reading() -> anyhow::Resu
     let source = TestEnv::new(&branch, &operator, registry);
     assert_eq!(
         relation_under(&source, "x/status", "last").await?,
-        vec![(Value::Entity(e), Value::String("waiting".into()))],
-        "two conclusions standing at the flag tie, and the greater value wins"
+        vec![(Value::Entity(e), Value::String("blocked".into()))],
+        "at one version, the conclusion that rewrote the cell outranks one that did not read it"
     );
     Ok(())
 }
 
-/// Rewrites that never settle fail loudly. `"triage"` to `"todo"` beside
-/// `"todo"` to `"triage"` over a stored `"triage"`: each round's
-/// conclusion succeeds the last round's, so no round's table stands
-/// still, and the fixpoint gives up at `MAX_ROUNDS` with
-/// [`FixpointDivergence`](crate::EvaluationError::FixpointDivergence),
-/// as a formula generating without end does. (Before successions, the
-/// two values stood equal, the fixpoint converged, and the read came
-/// down to value order.)
+/// Rewrites that read each other back are concurrent candidates.
+/// `"triage"` to `"todo"` beside `"todo"` to `"triage"` over a stored
+/// `"triage"`: each displaces the other, so no succession ranks them,
+/// and the fixpoint converges with both as candidates of one rank. A
+/// `last` read then settles them as it settles two concurrent writes,
+/// by version, then value: `"triage"`. The cycle still ranks past a
+/// value it displaced: over a stored `"old"` that a third rule rewrites
+/// to `"triage"`, both members of the cycle beat `"old"`, and the cycle
+/// settles the same way. An `all` read keeps every candidate.
 #[dialog_common::test]
-async fn rewrites_that_never_settle_fail_at_the_round_limit() -> anyhow::Result<()> {
-    let (operator, profile) = test_session_with_peer().await;
-    let repo = test_repo(&operator, &profile).await;
-    let branch = repo.branch("main").open().perform(&operator).await?;
+async fn a_cycle_of_rewrites_elects_as_concurrent_candidates() -> anyhow::Result<()> {
     let e: Entity = "id:e".parse()?;
-    branch
-        .transaction()
-        .assert(the!("x/status").of(e.clone()).is("triage".to_string()))
-        .commit()
-        .publish()
-        .perform(&operator)
-        .await?;
-    let mut registry = RuleRegistry::new();
-    registry.register(rewrite("triage", "todo")?)?;
-    registry.register(rewrite("todo", "triage")?)?;
-    let source = TestEnv::new(&branch, &operator, registry);
-    let error = relation_under(&source, "x/status", "last")
-        .await
-        .expect_err("a rewrite cycle has no fixpoint");
-    assert!(
-        matches!(
-            error.downcast_ref::<crate::EvaluationError>(),
-            Some(crate::EvaluationError::FixpointDivergence { .. })
-        ),
-        "expected FixpointDivergence, got {error:?}"
-    );
+    let triage_and_todo = |e: &Entity| {
+        let mut both = vec![
+            (Value::Entity(e.clone()), Value::String("triage".into())),
+            (Value::Entity(e.clone()), Value::String("todo".into())),
+        ];
+        both.sort_by_key(|pair| format!("{pair:?}"));
+        both
+    };
+    {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        branch
+            .transaction()
+            .assert(the!("x/status").of(e.clone()).is("triage".to_string()))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        let mut registry = RuleRegistry::new();
+        registry.register(rewrite("triage", "todo")?)?;
+        registry.register(rewrite("todo", "triage")?)?;
+        let source = TestEnv::new(&branch, &operator, registry);
+        assert_eq!(
+            relation_under(&source, "x/status", "last").await?,
+            vec![(Value::Entity(e.clone()), Value::String("triage".into()))],
+            "the cycle's members tie on rank and the value decides"
+        );
+        assert_eq!(
+            relation_under(&source, "x/status", "all").await?,
+            triage_and_todo(&e),
+            "under `all` both members of the cycle are candidates"
+        );
+    }
+    {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        branch
+            .transaction()
+            .assert(the!("x/status").of(e.clone()).is("old".to_string()))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        let mut registry = RuleRegistry::new();
+        registry.register(rewrite("old", "triage")?)?;
+        registry.register(rewrite("triage", "todo")?)?;
+        registry.register(rewrite("todo", "triage")?)?;
+        let source = TestEnv::new(&branch, &operator, registry);
+        assert_eq!(
+            relation_under(&source, "x/status", "last").await?,
+            vec![(Value::Entity(e.clone()), Value::String("triage".into()))],
+            "the cycle ranks past the value it displaced, and settles by value"
+        );
+    }
     Ok(())
 }
 

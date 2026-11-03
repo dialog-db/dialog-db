@@ -71,11 +71,14 @@ newest, `max` the greatest, `all` keeps every distinct value. A derived
 row's standing is the standing of the newest claim its body consumed:
 the row exists because of those claims and is as recent as the latest
 of them. A row that derives another value for a cell its body read
-succeeds the reading, as a write does: it stands strictly after it, at
-the same version and cause, unless a newer fact its body consumed puts
-it later still. A row deriving the value it read stands as the reading
-does, so a relation derived from itself settles; a rewrite that reads
-its own conclusion back never does, and fails at the round limit.
+displaces the value read, as a write succeeds a claim: once the
+component is derived, the cell's candidates are ranked by these
+successions, a rewrite after what it read, and the election prefers the
+higher rank among candidates of one version and cause. A row deriving
+the value it read displaces nothing. Rewrites that read each other
+back form a cycle no rank orders; its members share one rank and are
+elected among as concurrent candidates, so the component stays finite
+and a merge that closes such a cycle leaves every query answerable.
 
 **Election happens at the boundary.** Inside a recursive component the
 attribute is read with set semantics: every candidate value is a row,
@@ -268,10 +271,11 @@ carries, carried across every concept boundary with the value. A
 change to an unrelated input of the body does not move it. A value a
 formula computed cites no fact of its own and stands as the newest
 fact the body consumed. A candidate that rewrites the cell its body
-read stands one succession past the reading: after the claim, before
+read ranks one succession past the reading: after the claim, before
 any claim of a newer version, so a later write still succeeds it. Two
 rules rewriting one claim elect by which read newer facts, and by
-value only when they stand equal.
+value only when they stand equal; so do the members of a cycle of
+rewrites.
 
 Nothing about the write is a second policy. A relation that should be
 read one way and written another is two attributes: read through one,
@@ -360,10 +364,10 @@ standing. A stored row's standing is its artifact's, the revision
 version then the cause, exactly what the stored election compares. A
 derived row's is the maximum standing among the facts its `Match`
 cites, which is every fact a premise bound on the way to the head,
-carried across every concept boundary the row crossed, raised one
-succession past a reading of its own cell that it rewrites. The
-election is commutative, so the order rows arrive in does not matter. A tie
-falls to the value's bytes. Inside a recursive component the election
+carried across every concept boundary the row crossed, ranked past
+the values of its own cell it displaced once its component is derived.
+The election is commutative, so the order rows arrive in does not
+matter. A tie falls to the value's bytes. Inside a recursive component the election
 is skipped and the rows stay a set; under `all` they stay a set
 everywhere, each distinct value once.
 

@@ -564,19 +564,17 @@ impl ConceptQuery {
                 // under a choosing pick elects one of them at the exit,
                 // so a reader outside the component sees one value. Each
                 // row stands as the newest fact any of its derivations
-                // consumed, so under `last` it competes as it would had
+                // consumed, ranked past the values of its cell it
+                // displaced, so under `last` it competes as it would had
                 // its relation not been recursive.
-                let table: Vec<fixpoint::Answer> = match app.predicate.attribute_field() {
-                    Some((name, field)) => {
-                        let election = Election::of(field);
-                        if election.pick.elects() {
-                            election.elect_rows(table.to_vec(), name)?
-                        } else {
-                            table.to_vec()
-                        }
+                let mut table: Vec<fixpoint::Answer> = table.to_vec();
+                if let Some((name, field)) = app.predicate.attribute_field() {
+                    fixpoint::rank_successions(&mut table, name);
+                    let election = Election::of(field);
+                    if election.pick.elects() {
+                        table = election.elect_rows(table, name)?;
                     }
-                    None => table.to_vec(),
-                };
+                }
                 let rows = stream::iter([Ok(first)]).chain(selection);
                 for await each in rows {
                     let input = each?;

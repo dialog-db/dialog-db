@@ -24,13 +24,15 @@ the way a write does. Its conclusion stood as the newest fact its body
 consumed, which for such a rule is the very claim it rewrites, so the
 two tied on standing and a `last` read fell to value order: `"triage"`
 won over `"todo"`, and the reverse rewrite only appeared to work because
-`"triage"` sorts after `"todo"`. A conclusion that derives another value
-for a cell its body read now stands strictly after the reading, at the
-same version and cause, or at the newest fact its body read when that is
-newer still. A conclusion of the value it read stands as the reading
-does, so a rule deriving a relation from itself still settles; one whose
-body does not read the cell stands as before, as the newest fact it
-consumed.
+`"triage"` sorts after `"todo"`. Inside its component the rule still
+reads the cell as a set, and its conclusion now remembers the values of
+the cell it displaced. When the component is derived, each cell's
+candidates are ranked by those successions, a rewrite after what it
+read and a rewrite of a rewrite one further, and the pick elects over
+the ranks: by version, then cause, then rank, then value. A conclusion
+of the value it read displaces nothing, so a rule deriving a relation
+from itself still settles; one whose body does not read the cell
+stands as before, as the newest fact it consumed.
 
 What this changes for you:
 
@@ -38,23 +40,25 @@ What this changes for you:
   whatever the values' order. Two rules rewriting one claim elect by
   which one read newer facts, as concurrent writes do, and a later
   write to the cell still wins. `all` is unchanged and keeps both.
-- A rewrite of a rewrite stands one succession further, so a chain of
-  rewrites reads its last link.
-- Rewrites that never settle, `"triage"` to `"todo"` beside `"todo"`
-  to `"triage"`, or a counter deriving `?n + 1` from `?n`, fail with
-  `EvaluationError::FixpointDivergence` at the round limit, where they
-  converged quietly before. A transaction writing such a cell, or a
-  subscription reading it, fails with it too.
+- A chain of rewrites reads its last link.
+- Rewrites that read each other back, `"triage"` to `"todo"` beside
+  `"todo"` to `"triage"`, form a cycle no rank orders. Its members
+  share one rank and are elected among as concurrent candidates, by
+  version then value, so a merge that closes such a cycle leaves every
+  query answerable. Before, the same pair also fell to value order,
+  but so did every rewrite.
 - `dialog_artifacts::Standing` carries a `succession`, zero for every
-  claim; `Standing::new` builds a claim's standing and
-  `Standing::successor` a candidate's that succeeds it. Code building a
+  claim, and `Standing::new` builds a claim's standing. Code building a
   `Standing` by its fields names the new one. Nothing stored or synced
-  changes: a successor's standing is derived at read time.
+  changes: a rank is computed when a component is read.
 
 Why: a succession orders a cell's candidates by what each saw, and a
 conclusion that read a claim and replaced its value saw it. Letting
 value order decide made the result of a rewrite depend on the spelling
-of its values and on unrelated facts its body happened to read.
+of its values and on unrelated facts its body happened to read. Ranking
+at the exit rather than inside the fixpoint keeps the component
+positive and finite, so a cycle of rewrites converges instead of
+failing, which an open rule set has to guarantee under every merge.
 
 ### A subscription learns of the readable change to a single-valued cell, not only the moved row
 
