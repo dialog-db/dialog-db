@@ -135,11 +135,6 @@ pub struct Match {
     claims: Vec<(Arc<str>, Arc<Claim>)>,
     /// The standing of the fact that bound each cited variable.
     standings: Vec<(Arc<str>, Standing)>,
-    /// The cells of its own relation a rule's body read on this row:
-    /// what its conclusion succeeds when it derives another value for
-    /// one of them. Empty on every row of a rule that does not read
-    /// the relation it derives.
-    readings: Vec<Reading>,
     /// The bindings and claims this row extends, shared with every other
     /// row extending the same ones.
     frame: Option<Arc<Frame>>,
@@ -159,20 +154,7 @@ struct Frame {
     bindings: Vec<(Arc<str>, Binding)>,
     claims: Vec<(Arc<str>, Arc<Claim>)>,
     standings: Vec<(Arc<str>, Standing)>,
-    readings: Vec<Reading>,
     parent: Option<Arc<Frame>>,
-}
-
-/// One cell a rule's body read of the relation the rule derives: the
-/// entity, the key when the relation is a keyed collection, and the
-/// value found. A conclusion for the same cell with another value
-/// displaces the value read; one with the value read displaces
-/// nothing.
-#[derive(Clone, Debug)]
-pub(crate) struct Reading {
-    pub this: Value,
-    pub key: Option<Value>,
-    pub value: Value,
 }
 
 /// What a row brings to a cardinality-one election: the standing of
@@ -229,18 +211,13 @@ impl Match {
     /// so clones of it (every row a premise extends it into) share them
     /// instead of each copying them.
     pub fn share(&mut self) {
-        if self.bindings.is_empty()
-            && self.claims.is_empty()
-            && self.standings.is_empty()
-            && self.readings.is_empty()
-        {
+        if self.bindings.is_empty() && self.claims.is_empty() && self.standings.is_empty() {
             return;
         }
         let frame = Frame {
             bindings: mem::take(&mut self.bindings),
             claims: mem::take(&mut self.claims),
             standings: mem::take(&mut self.standings),
-            readings: mem::take(&mut self.readings),
             parent: self.frame.take(),
         };
         self.frame = Some(Arc::new(frame));
@@ -267,38 +244,6 @@ impl Match {
         self.standings
             .iter()
             .chain(self.frames().flat_map(|frame| frame.standings.iter()))
-    }
-
-    /// Every cell of its own relation the rule's body read on this row,
-    /// its own first, then its frames' innermost first.
-    fn readings(&self) -> impl Iterator<Item = &Reading> {
-        self.readings
-            .iter()
-            .chain(self.frames().flat_map(|frame| frame.readings.iter()))
-    }
-
-    /// Record that the rule's body read a cell of the relation the rule
-    /// derives, so the conclusion can tell whether it rewrites it.
-    pub(crate) fn read(&mut self, reading: Reading) {
-        self.readings.push(reading);
-    }
-
-    /// The values a conclusion of `value` for the cell of `this` (and
-    /// `key`, for a keyed collection) displaces: every other value of
-    /// that cell the body read, by its identity key. Empty when the body
-    /// did not read the cell, or read only the value it derives.
-    pub(crate) fn displaced(
-        &self,
-        this: &Value,
-        key: Option<&Value>,
-        value: &Value,
-    ) -> Vec<Vec<u8>> {
-        self.readings()
-            .filter(|reading| {
-                reading.this == *this && reading.key.as_ref() == key && reading.value != *value
-            })
-            .map(|reading| reading.value.identity_key())
-            .collect()
     }
 
     /// Every binding of this row, its own and its frames'. A name is
@@ -329,9 +274,7 @@ impl Match {
     /// The row's standing: the newest among the facts it cites. A row
     /// derived by a rule stands as recent as the latest fact its body
     /// consumed, which is how it competes in an attribute's election
-    /// against stored rows; one that rewrites a cell it read is ranked
-    /// past the reading as well, once its component is derived (see
-    /// `displaced`). `None` for a row citing nothing.
+    /// against stored rows. `None` for a row citing nothing.
     pub fn standing(&self) -> Option<Standing> {
         self.standings()
             .map(|(_, standing)| standing)
@@ -501,7 +444,6 @@ impl Match {
             }
         }
         self.adopt_standings(other);
-        self.readings.extend(other.readings().cloned());
         if self.caller.is_none() {
             self.caller = other.caller.clone();
         }

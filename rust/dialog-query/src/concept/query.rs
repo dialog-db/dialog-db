@@ -569,9 +569,9 @@ impl ConceptQuery {
                 // its relation not been recursive.
                 let mut table: Vec<fixpoint::Answer> = table.to_vec();
                 if let Some((name, field)) = app.predicate.attribute_field() {
-                    fixpoint::rank_successions(&mut table, name);
                     let election = Election::of(field);
                     if election.pick.elects() {
+                        fixpoint::rank_successions(&mut table, name);
                         table = election.elect_rows(table, name)?;
                     }
                 }

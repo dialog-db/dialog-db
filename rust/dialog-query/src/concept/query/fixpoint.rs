@@ -35,11 +35,12 @@
 //! `last` is not one: inside its component it reads every candidate the
 //! fixpoint has derived, and its readers elect the newest at the exit.
 //! A rule that rewrites a cell it reads under `last` is a set read
-//! inside the component too; its row remembers the values it displaced
-//! ([`Answer::displaced`]), and the exit ranks each cell's candidates by
-//! those successions ([`rank_successions`]) before it elects, so the
-//! rewrite wins over what it read, and a cycle of rewrites, which no
-//! rank can order, is elected among as concurrent candidates.
+//! inside the component too; its row records the values of the cell it
+//! displaced ([`Answer::displaced`]), and the exit ranks each cell's
+//! candidates by those successions ([`rank_successions`]) before it
+//! elects, so the rewrite wins over what it read, and a cycle of
+//! rewrites, which no rank can order, is elected among as concurrent
+//! candidates.
 //! A fold inside a component has no reading at all and stays refused
 //! ([`ProgramAnalysis::check`]).
 //!
@@ -59,7 +60,7 @@ use crate::planner::{Conjunction, Planner};
 use crate::premise::Premise;
 use crate::proposition::Proposition;
 use crate::rule::deductive::DeductiveRule;
-use crate::selection::{Binding, Match, Reading, Standing};
+use crate::selection::{Binding, Match, Standing};
 use crate::session::ProgramAnalysis;
 use crate::source::SelectRules;
 use crate::term::Term;
@@ -71,7 +72,7 @@ use dialog_capability::Provider;
 use futures_util::TryStreamExt;
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 
 /// Upper bound on fixpoint rounds before the query fails loudly. A
 /// round derives at least one new row (otherwise the fixpoint has
@@ -271,20 +272,54 @@ fn standing_of(descriptor: &ConceptDescriptor, matched: &Match) -> Option<Standi
         .or_else(|| matched.standing())
 }
 
-/// The values of its own cell a row projected from `matched` displaces:
-/// every other value of the cell the body read, when the concept is an
-/// attribute concept and the row names its entity and value.
-fn displaced_by(descriptor: &ConceptDescriptor, matched: &Match) -> BTreeSet<Vec<u8>> {
-    let Some((name, _)) = descriptor.attribute_field() else {
-        return BTreeSet::new();
-    };
-    match (matched.value_of("this"), matched.value_of(name)) {
-        (Some(this), Some(value)) => matched
-            .displaced(this, matched.value_of(&The::key_operand(name)), value)
-            .into_iter()
-            .collect(),
-        _ => BTreeSet::new(),
+/// The key operand beside the canonical value operand, which an
+/// occurrence of an attribute concept binds a keyed collection's key
+/// under.
+static VALUE_KEY: LazyLock<String> = LazyLock::new(|| The::key_operand(ConceptDescriptor::VALUE));
+
+/// The values of its own cell a row `split` derived as `matched`
+/// displaces: every other value of the cell an occurrence of the rule's
+/// own relation read, by identity key. The values an occurrence read
+/// are bound on the row under the occurrence's terms, so nothing is
+/// recorded at the read; the row is asked once, here, when the
+/// concept is an attribute concept and the row names its entity and
+/// value. Empty for a rule with no such occurrence, at no cost.
+fn displaced_by(member: &Member, split: &SplitRule, matched: &Match) -> BTreeSet<Vec<u8>> {
+    let mut displaced = BTreeSet::new();
+    if !split.own.iter().any(|own| *own) {
+        return displaced;
     }
+    let Some((name, _)) = member.descriptor.attribute_field() else {
+        return displaced;
+    };
+    let (Some(this), Some(value)) = (matched.value_of("this"), matched.value_of(name)) else {
+        return displaced;
+    };
+    let key = matched.value_of(&member.key_operand);
+    for (occurrence, own) in split.occurrences.iter().zip(&split.own) {
+        if !own {
+            continue;
+        }
+        let read = |param: &str| -> Option<&Value> {
+            match occurrence.terms.get(param)? {
+                Term::Constant(constant) => Some(constant),
+                Term::Variable {
+                    name: Some(variable),
+                    ..
+                } => matched.value_of(variable),
+                Term::Variable { name: None, .. } => None,
+            }
+        };
+        if read("this") != Some(this) || read(&VALUE_KEY) != key {
+            continue;
+        }
+        if let Some(found) = read(ConceptDescriptor::VALUE)
+            && found != value
+        {
+            displaced.insert(found.identity_key());
+        }
+    }
+    displaced
 }
 
 /// Rank each cell's candidates among `rows` by succession, writing the
@@ -435,16 +470,19 @@ struct SplitRule {
     rule: DeductiveRule,
     occurrences: Vec<ConceptQuery>,
     /// For each occurrence, whether it reads the relation the rule
-    /// derives: a cell it binds is one the conclusion may succeed.
+    /// derives: a cell it binds is one the conclusion may displace
+    /// ([`displaced_by`]).
     own: Vec<bool>,
     base: Vec<Premise>,
 }
 
-/// A component member: its descriptor (for row projection) and its
-/// split rules.
+/// A component member: its descriptor (for row projection), its split
+/// rules, and the key operand beside its attribute field when it is an
+/// attribute concept over a keyed collection.
 struct Member {
     descriptor: ConceptDescriptor,
     rules: Vec<SplitRule>,
+    key_operand: String,
 }
 
 /// The premise's in-component occurrence, when it reads a concept in
@@ -479,37 +517,15 @@ fn in_component<'p>(
 /// [`join`] does: an operand the row lacks is an optional field the
 /// row resolved to `Absent`, and binds so. Every variable the row
 /// binds cites the row's standing, so what a rule derives from it
-/// stands at least as new. An occurrence of the rule's `own` relation
-/// records the cell it read, so the conclusion can tell what it
-/// displaces ([`displaced_by`]). Returns `false` when the row
-/// conflicts with the bindings accumulated so far (the combination is
-/// a non-match).
-fn bind_occurrence(
-    matched: &mut Match,
-    occurrence: &ConceptQuery,
-    answer: &Answer,
-    own: bool,
-) -> bool {
+/// stands at least as new. Returns `false` when the row conflicts
+/// with the bindings accumulated so far (the combination is a
+/// non-match).
+fn bind_occurrence(matched: &mut Match, occurrence: &ConceptQuery, answer: &Answer) -> bool {
     match join(matched, &occurrence.terms, &answer.row) {
         Ok(Some(merged)) => {
             *matched = merged;
             if let Some(standing) = &answer.standing {
                 cite(matched, &occurrence.terms, &answer.row, standing);
-            }
-            if own
-                && let (Some(this), Some(value)) = (
-                    answer.row.get("this"),
-                    answer.row.get(ConceptDescriptor::VALUE),
-                )
-            {
-                matched.read(Reading {
-                    this: this.clone(),
-                    key: answer
-                        .row
-                        .get(&The::key_operand(ConceptDescriptor::VALUE))
-                        .cloned(),
-                    value: value.clone(),
-                });
             }
             true
         }
@@ -658,7 +674,18 @@ where
                 base,
             });
         }
-        members.insert(entity, Member { descriptor, rules });
+        let key_operand = descriptor
+            .attribute_field()
+            .map(|(name, _)| The::key_operand(name))
+            .unwrap_or_default();
+        members.insert(
+            entity,
+            Member {
+                descriptor,
+                rules,
+                key_operand,
+            },
+        );
     }
     Ok(members)
 }
@@ -691,7 +718,7 @@ where
     .await?;
     Ok(results
         .iter()
-        .filter_map(|result| answer_complete(&member.descriptor, result))
+        .filter_map(|result| answer_complete(member, split, result))
         .collect())
 }
 
@@ -728,12 +755,9 @@ where
         for stage in stages.iter() {
             partials = match stage {
                 Stage::Plan(plan) => evaluate_stage(plan, partials, env).await?,
-                Stage::Sibling(index) => join_sibling(
-                    partials,
-                    &split.occurrences[*index],
-                    split.own[*index],
-                    &totals[*index],
-                ),
+                Stage::Sibling(index) => {
+                    join_sibling(partials, &split.occurrences[*index], &totals[*index])
+                }
             };
             if partials.is_empty() {
                 break;
@@ -768,7 +792,7 @@ where
             });
             let index = siblings.remove(connected.unwrap_or(0));
             let occurrence = &split.occurrences[index];
-            partials = join_sibling(partials, occurrence, split.own[index], &totals[index]);
+            partials = join_sibling(partials, occurrence, &totals[index]);
             add_terms(&mut scope, occurrence);
             stages.push(Stage::Sibling(index));
         } else {
@@ -814,17 +838,12 @@ where
 
 /// Each of `partials` joined with each of `rows` that binds against it
 /// as `occurrence` reads them.
-fn join_sibling(
-    partials: Vec<Match>,
-    occurrence: &ConceptQuery,
-    own: bool,
-    rows: &[&Answer],
-) -> Vec<Match> {
+fn join_sibling(partials: Vec<Match>, occurrence: &ConceptQuery, rows: &[&Answer]) -> Vec<Match> {
     let mut next = Vec::new();
     for partial in &partials {
         for row in rows {
             let mut joined = partial.clone();
-            if bind_occurrence(&mut joined, occurrence, row, own) {
+            if bind_occurrence(&mut joined, occurrence, row) {
                 next.push(joined);
             }
         }
@@ -842,12 +861,13 @@ pub(crate) fn project_complete(descriptor: &ConceptDescriptor, matched: &Match) 
         .then_some(row)
 }
 
-/// [`project_complete`] with the standing the projected row holds.
-fn answer_complete(descriptor: &ConceptDescriptor, matched: &Match) -> Option<Answer> {
-    project_complete(descriptor, matched).map(|row| Answer {
+/// [`project_complete`] with the standing the projected row holds and
+/// the values of its cell it displaces, for a row `split` derived.
+fn answer_complete(member: &Member, split: &SplitRule, matched: &Match) -> Option<Answer> {
+    project_complete(&member.descriptor, matched).map(|row| Answer {
         row,
-        standing: standing_of(descriptor, matched),
-        displaced: displaced_by(descriptor, matched),
+        standing: standing_of(&member.descriptor, matched),
+        displaced: displaced_by(member, split, matched),
     })
 }
 
@@ -951,7 +971,7 @@ where
     let mut stages: Vec<Stage> = Vec::new();
     for row in delta {
         let mut matched = Match::new();
-        if !bind_occurrence(&mut matched, leading, row, split.own[delta_index]) {
+        if !bind_occurrence(&mut matched, leading, row) {
             continue;
         }
         let mut scope = Environment::new();
@@ -979,7 +999,7 @@ where
         derived.extend(
             complete
                 .iter()
-                .filter_map(|complete| answer_complete(&member.descriptor, complete)),
+                .filter_map(|complete| answer_complete(member, split, complete)),
         );
     }
     Ok(derived)
@@ -1021,11 +1041,10 @@ where
             for matched in results {
                 table.insert(
                     &ProgramAnalysis::node(&member.descriptor),
-                    Answer {
-                        row: project(&member.descriptor, &matched),
-                        standing: standing_of(&member.descriptor, &matched),
-                        displaced: displaced_by(&member.descriptor, &matched),
-                    },
+                    Answer::new(
+                        project(&member.descriptor, &matched),
+                        standing_of(&member.descriptor, &matched),
+                    ),
                 );
             }
         }
@@ -1328,7 +1347,7 @@ where
                             split.occurrences.iter().zip(&combination).enumerate()
                         {
                             let row = &choices[index][*row_index];
-                            if !bind_occurrence(&mut matched, occurrence, row, split.own[index]) {
+                            if !bind_occurrence(&mut matched, occurrence, row) {
                                 compatible = false;
                                 break;
                             }
@@ -1534,7 +1553,7 @@ where
                             split.occurrences.iter().zip(&combination).enumerate()
                         {
                             let row = &choices[index][*row_index];
-                            if !bind_occurrence(&mut matched, occurrence, row, split.own[index]) {
+                            if !bind_occurrence(&mut matched, occurrence, row) {
                                 compatible = false;
                                 break;
                             }
@@ -1673,7 +1692,7 @@ where
                 split.occurrences.iter().zip(&combination).enumerate()
             {
                 let bound = &choices[index][*row_index];
-                if !bind_occurrence(&mut matched, occurrence, bound, split.own[index]) {
+                if !bind_occurrence(&mut matched, occurrence, bound) {
                     compatible = false;
                     break;
                 }
