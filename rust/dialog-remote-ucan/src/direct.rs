@@ -59,10 +59,15 @@ pub(crate) fn deadline(answer: std::time::Duration, payload: usize) -> std::time
 /// taken and the others are aborted. The copies carry one invocation, so
 /// a service that remembers what was presented refuses every copy after
 /// the first that reaches it; such a refusal is passed over while a copy
-/// is still waiting, since the copy it refers to will be answered. Each copy goes out on a connection
-/// the one before is not holding, so a read that met forgotten
-/// connections is answered within a few of these intervals, where it
-/// would wait out the deadline on each one.
+/// is still waiting, since the copy it refers to will be answered.
+///
+/// Each copy goes out on a connection the ones before are not holding.
+/// When fewer connections were forgotten than a browser keeps to the
+/// service, a copy soon lands on a live one. When all of them were,
+/// the copies hold every connection the browser allows, and the last
+/// copy waits until the first gives up at its deadline, then goes out
+/// on a new connection: the read is answered once, not after a deadline
+/// for each forgotten connection.
 const RESEND_READ_AFTER: std::time::Duration = std::time::Duration::from_secs(3);
 /// One more than the connections a browser keeps open to one host over
 /// HTTP/1.1, so that when every one of them was forgotten the last copy
