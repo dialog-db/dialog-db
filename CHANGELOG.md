@@ -16,7 +16,7 @@ says how to cut a release.
 
 ### A request the access service never answers is given up on
 
-[PR](https://github.com/dialog-db/dialog-db/pulls?q=head%3Aclaude%2Fproject-thread-n2n1af)
+[#727](https://github.com/dialog-db/dialog-db/pull/727)
 
 An invocation `dialog-remote-ucan` sends as an HTTP request (every one
 when the service names no socket, a block read or write, or the fallback
