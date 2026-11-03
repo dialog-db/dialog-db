@@ -34,6 +34,10 @@
 //! with [`EvaluationError::AbsenceThroughRecursion`]. A read under
 //! `last` is not one: inside its component it reads every candidate the
 //! fixpoint has derived, and its readers elect the newest at the exit.
+//! A rule that rewrites a cell it reads under `last` derives a
+//! successor of the reading, standing after it (see `standing_of`), so
+//! the exit elects the rewrite; a cycle of rewrites raises its
+//! standings every round and fails at [`MAX_ROUNDS`].
 //! A fold inside a component has no reading at all and stays refused
 //! ([`ProgramAnalysis::check`]).
 //!
@@ -44,7 +48,7 @@
 
 use super::ConceptQuery;
 use crate::artifact::Artifact;
-use crate::attribute::Relation;
+use crate::attribute::{Relation, The};
 use crate::concept::descriptor::ConceptDescriptor;
 use crate::error::EvaluationError;
 use crate::negation::Negation;
@@ -53,7 +57,7 @@ use crate::planner::{Conjunction, Planner};
 use crate::premise::Premise;
 use crate::proposition::Proposition;
 use crate::rule::deductive::DeductiveRule;
-use crate::selection::{Binding, Match, Standing};
+use crate::selection::{Binding, Match, Reading, Standing};
 use crate::session::ProgramAnalysis;
 use crate::source::SelectRules;
 use crate::term::Term;
@@ -232,11 +236,29 @@ impl InMemoryAnswerTable {
 /// concept and a fact did, else the newest fact the match cites. This
 /// is how a rule's row stands outside a cycle, so a value stands the
 /// same whether or not its relation is recursive.
+///
+/// A conclusion that rewrites a cell its body read succeeds the
+/// reading, as a write does: it stands strictly after the reading
+/// ([`Standing::successor`]), or at the newest fact its body consumed
+/// when that is newer still. A conclusion of the value it read stands
+/// as the reading does, so a rule deriving a relation from itself
+/// settles. One that rewrites a cell in a cycle, each round reading
+/// what the last derived, never does, and fails at [`MAX_ROUNDS`].
 fn standing_of(descriptor: &ConceptDescriptor, matched: &Match) -> Option<Standing> {
-    descriptor
-        .attribute_field()
-        .and_then(|(name, _)| matched.standing_of(name))
-        .or_else(|| matched.standing())
+    let Some((name, _)) = descriptor.attribute_field() else {
+        return matched.standing();
+    };
+    let standing = matched.standing_of(name).or_else(|| matched.standing());
+    let succeeded = match (matched.value_of("this"), matched.value_of(name)) {
+        (Some(this), Some(value)) => {
+            matched.succeeds(this, matched.value_of(&The::key_operand(name)), value)
+        }
+        _ => None,
+    };
+    match succeeded {
+        Some(read) => standing.max(Some(read.successor())),
+        None => standing,
+    }
 }
 
 /// Join one caller row against one derived row: bind the caller's
@@ -282,6 +304,9 @@ pub fn join(
 struct SplitRule {
     rule: DeductiveRule,
     occurrences: Vec<ConceptQuery>,
+    /// For each occurrence, whether it reads the relation the rule
+    /// derives: a cell it binds is one the conclusion may succeed.
+    own: Vec<bool>,
     base: Vec<Premise>,
 }
 
@@ -324,15 +349,38 @@ fn in_component<'p>(
 /// [`join`] does: an operand the row lacks is an optional field the
 /// row resolved to `Absent`, and binds so. Every variable the row
 /// binds cites the row's standing, so what a rule derives from it
-/// stands at least as new. Returns `false` when the row conflicts
-/// with the bindings accumulated so far (the combination is a
-/// non-match).
-fn bind_occurrence(matched: &mut Match, occurrence: &ConceptQuery, answer: &Answer) -> bool {
+/// stands at least as new. An occurrence of the rule's `own` relation
+/// records the cell it read, so the conclusion can tell whether it
+/// rewrites it ([`standing_of`]). Returns `false` when the row
+/// conflicts with the bindings accumulated so far (the combination is
+/// a non-match).
+fn bind_occurrence(
+    matched: &mut Match,
+    occurrence: &ConceptQuery,
+    answer: &Answer,
+    own: bool,
+) -> bool {
     match join(matched, &occurrence.terms, &answer.row) {
         Ok(Some(merged)) => {
             *matched = merged;
             if let Some(standing) = &answer.standing {
                 cite(matched, &occurrence.terms, &answer.row, standing);
+            }
+            if own
+                && let (Some(this), Some(value)) = (
+                    answer.row.get("this"),
+                    answer.row.get(ConceptDescriptor::VALUE),
+                )
+            {
+                matched.read(Reading {
+                    this: this.clone(),
+                    key: answer
+                        .row
+                        .get(&The::key_operand(ConceptDescriptor::VALUE))
+                        .cloned(),
+                    value: value.clone(),
+                    standing: answer.standing.clone(),
+                });
             }
             true
         }
@@ -453,6 +501,7 @@ where
         let mut rules = Vec::new();
         for rule in bundle.rules() {
             let mut occurrences = Vec::new();
+            let mut own = Vec::new();
             let mut base = Vec::new();
             for premise in rule.analysis().premises() {
                 match in_component(premise, analysis, &root_entity)? {
@@ -461,6 +510,12 @@ where
                         // premise's spelling; the table holds the
                         // concept's rows under its canonical one.
                         let query = query.clone().canonical();
+                        let target = ProgramAnalysis::node(&query.predicate);
+                        own.push(
+                            target == entity
+                                && query.predicate.attribute_field().is_some()
+                                && descriptor.attribute_field().is_some(),
+                        );
                         queue.push(query.predicate.clone());
                         occurrences.push(query);
                     }
@@ -470,6 +525,7 @@ where
             rules.push(SplitRule {
                 rule: rule.clone(),
                 occurrences,
+                own,
                 base,
             });
         }
@@ -543,9 +599,12 @@ where
         for stage in stages.iter() {
             partials = match stage {
                 Stage::Plan(plan) => evaluate_stage(plan, partials, env).await?,
-                Stage::Sibling(index) => {
-                    join_sibling(partials, &split.occurrences[*index], &totals[*index])
-                }
+                Stage::Sibling(index) => join_sibling(
+                    partials,
+                    &split.occurrences[*index],
+                    split.own[*index],
+                    &totals[*index],
+                ),
             };
             if partials.is_empty() {
                 break;
@@ -580,7 +639,7 @@ where
             });
             let index = siblings.remove(connected.unwrap_or(0));
             let occurrence = &split.occurrences[index];
-            partials = join_sibling(partials, occurrence, &totals[index]);
+            partials = join_sibling(partials, occurrence, split.own[index], &totals[index]);
             add_terms(&mut scope, occurrence);
             stages.push(Stage::Sibling(index));
         } else {
@@ -626,12 +685,17 @@ where
 
 /// Each of `partials` joined with each of `rows` that binds against it
 /// as `occurrence` reads them.
-fn join_sibling(partials: Vec<Match>, occurrence: &ConceptQuery, rows: &[&Answer]) -> Vec<Match> {
+fn join_sibling(
+    partials: Vec<Match>,
+    occurrence: &ConceptQuery,
+    own: bool,
+    rows: &[&Answer],
+) -> Vec<Match> {
     let mut next = Vec::new();
     for partial in &partials {
         for row in rows {
             let mut joined = partial.clone();
-            if bind_occurrence(&mut joined, occurrence, row) {
+            if bind_occurrence(&mut joined, occurrence, row, own) {
                 next.push(joined);
             }
         }
@@ -761,7 +825,7 @@ where
     let mut stages: Vec<Stage> = Vec::new();
     for row in delta {
         let mut matched = Match::new();
-        if !bind_occurrence(&mut matched, leading, row) {
+        if !bind_occurrence(&mut matched, leading, row, split.own[delta_index]) {
             continue;
         }
         let mut scope = Environment::new();
@@ -1135,7 +1199,7 @@ where
                             split.occurrences.iter().zip(&combination).enumerate()
                         {
                             let row = &choices[index][*row_index];
-                            if !bind_occurrence(&mut matched, occurrence, row) {
+                            if !bind_occurrence(&mut matched, occurrence, row, split.own[index]) {
                                 compatible = false;
                                 break;
                             }
@@ -1344,7 +1408,7 @@ where
                             split.occurrences.iter().zip(&combination).enumerate()
                         {
                             let row = &choices[index][*row_index];
-                            if !bind_occurrence(&mut matched, occurrence, row) {
+                            if !bind_occurrence(&mut matched, occurrence, row, split.own[index]) {
                                 compatible = false;
                                 break;
                             }
@@ -1482,7 +1546,7 @@ where
                 split.occurrences.iter().zip(&combination).enumerate()
             {
                 let bound = &choices[index][*row_index];
-                if !bind_occurrence(&mut matched, occurrence, bound) {
+                if !bind_occurrence(&mut matched, occurrence, bound, split.own[index]) {
                     compatible = false;
                     break;
                 }

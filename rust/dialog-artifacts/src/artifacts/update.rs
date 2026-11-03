@@ -78,10 +78,12 @@ pub enum Pick {
     Top(Vec<Value>),
 }
 
-/// The standing of a claim: the deepest revision version it carries, as
-/// the edition and the hash of that version, and its cause. Ordered as
-/// an election orders claims: a versioned claim beats an unversioned
-/// one, a deeper version a shallower, then the cause decides.
+/// The standing of a candidate: the deepest revision version the claim
+/// behind it carries, as the edition and the hash of that version, its
+/// cause, and how far past that claim the candidate stands. Ordered as
+/// an election orders candidates: a versioned claim beats an
+/// unversioned one, a deeper version a shallower, then the cause
+/// decides, then a successor beats what it succeeds.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Standing {
     /// The deepest revision version the claim carries, as its edition
@@ -90,15 +92,48 @@ pub struct Standing {
     pub version: Option<(Edition, [u8; 32])>,
     /// The claim's cause.
     pub cause: Cause,
+    /// How many derived successions stand between the claim and this
+    /// candidate: zero for the claim itself, one for the conclusion of
+    /// a rule whose body read the claim and derived another value for
+    /// its cell, and one more for each conclusion that rewrites that
+    /// one in turn. A derived successor stands strictly after what it
+    /// succeeds, as a written one does, and before every claim of a
+    /// newer version.
+    pub succession: u32,
+}
+
+impl Standing {
+    /// The standing of a claim: at `version`, with `cause`, succeeded
+    /// by nothing.
+    pub fn new(version: Option<(Edition, [u8; 32])>, cause: Cause) -> Self {
+        Standing {
+            version,
+            cause,
+            succession: 0,
+        }
+    }
+
+    /// The standing of a candidate succeeding one of this standing:
+    /// strictly after it, before anything of a newer version or cause.
+    pub fn successor(&self) -> Self {
+        Standing {
+            version: self.version,
+            cause: self.cause.clone(),
+            succession: self.succession.saturating_add(1),
+        }
+    }
 }
 
 impl Ord for Standing {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.version.cmp(&other.version).then_with(|| {
-            self.cause
-                .partial_cmp(&other.cause)
-                .unwrap_or(Ordering::Equal)
-        })
+        self.version
+            .cmp(&other.version)
+            .then_with(|| {
+                self.cause
+                    .partial_cmp(&other.cause)
+                    .unwrap_or(Ordering::Equal)
+            })
+            .then_with(|| self.succession.cmp(&other.succession))
     }
 }
 
@@ -879,6 +914,35 @@ impl Statement for Changes {
 
 #[cfg(test)]
 mod tests {
+    /// A successor stands strictly after the claim it succeeds and
+    /// before any claim of a newer version or cause, however the
+    /// values compare: the order a `last` election runs on.
+    #[dialog_common::test]
+    fn a_successor_stands_after_its_claim_and_before_a_newer_one() {
+        use super::{Cause, Edition, Pick, Standing, Value};
+        let claim = Standing::new(Some((Edition::new(3), [1; 32])), Cause([1; 32]));
+        let successor = claim.successor();
+        let twice = successor.successor();
+        let newer_cause = Standing::new(Some((Edition::new(3), [1; 32])), Cause([2; 32]));
+        let newer_version = Standing::new(Some((Edition::new(4), [0; 32])), Cause([0; 32]));
+        assert!(successor > claim);
+        assert!(twice > successor);
+        assert!(newer_cause > twice);
+        assert!(newer_version > twice);
+        assert_eq!(successor.succession, 1);
+        assert_eq!(twice.succession, 2);
+        // The successor's lesser value does not hold it back.
+        let (todo, triage) = (Value::String("todo".into()), Value::String("triage".into()));
+        assert!(Pick::newer(
+            (&todo, Some(&successor)),
+            (&triage, Some(&claim))
+        ));
+        assert!(!Pick::newer(
+            (&triage, Some(&claim)),
+            (&todo, Some(&successor))
+        ));
+    }
+
     /// The instructions of a batch come in entity then attribute order,
     /// a cell's in the order they were recorded, however the facts were
     /// recorded: the batch the tree is handed is the same from one

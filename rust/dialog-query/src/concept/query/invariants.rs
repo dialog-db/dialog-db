@@ -604,6 +604,206 @@ async fn a_derived_value_stands_by_the_fact_that_bound_it_through_a_fixpoint() -
     Ok(())
 }
 
+/// `x/status(e) := to :- x/status(e) = from`: a rule rewriting the
+/// value of the cell its body reads.
+fn rewrite(from: &str, to: &str) -> anyhow::Result<DeductiveRule> {
+    compile(serde_json::json!({
+        "deduce": { "with": { "status": { "the": "x/status", "as": "text:" } } },
+        "when": [
+            {
+                "assert": { "with": { "status": { "the": "x/status", "as": "text:" } } },
+                "where": { "this": { "?": { "name": "this" } }, "status": from }
+            },
+            {
+                "assert": "==",
+                "where": { "this": to, "is": { "?": { "name": "status" } } }
+            }
+        ]
+    }))
+}
+
+/// "A conclusion under `last` succeeds the claim its body read."
+/// `x/status(e) := "todo" :- x/status(e) = "triage"` over a stored
+/// `x/status(e) = "triage"`: the rule rewrites the cell's value, so a
+/// `last` read returns `"todo"`, and returns `"triage"` for the
+/// rewrite the other way over a stored `"todo"`, though `"triage"`
+/// sorts after `"todo"`: the successor stands after the claim, whatever
+/// the values' order. An `all` read keeps both.
+#[dialog_common::test]
+async fn a_derived_value_succeeds_the_claim_its_body_read_under_last() -> anyhow::Result<()> {
+    for (stored, derived) in [("triage", "todo"), ("todo", "triage")] {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let e: Entity = "id:e".parse()?;
+        branch
+            .transaction()
+            .assert(the!("x/status").of(e.clone()).is(stored.to_string()))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        let mut registry = RuleRegistry::new();
+        registry.register(rewrite(stored, derived)?)?;
+        let source = TestEnv::new(&branch, &operator, registry);
+        assert_eq!(
+            relation_under(&source, "x/status", "last").await?,
+            vec![(Value::Entity(e.clone()), Value::String(derived.into()))],
+            "the derived value succeeds the stored claim the rule read"
+        );
+        let mut both = vec![
+            (Value::Entity(e.clone()), Value::String(stored.into())),
+            (Value::Entity(e.clone()), Value::String(derived.into())),
+        ];
+        both.sort_by_key(|pair| format!("{pair:?}"));
+        assert_eq!(
+            relation_under(&source, "x/status", "all").await?,
+            both,
+            "under `all` the claim and its successor are both candidates"
+        );
+    }
+    Ok(())
+}
+
+/// A rewrite of a rewrite succeeds it in turn: `"triage"` to `"todo"`
+/// and `"todo"` to `"done"` over a stored `"triage"` read `"done"`
+/// under `last`, the least of the three values. Each conclusion stands
+/// one succession past what it read.
+#[dialog_common::test]
+async fn a_rewrite_of_a_derived_value_succeeds_it_in_turn() -> anyhow::Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    let e: Entity = "id:e".parse()?;
+    branch
+        .transaction()
+        .assert(the!("x/status").of(e.clone()).is("triage".to_string()))
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    let mut registry = RuleRegistry::new();
+    registry.register(rewrite("triage", "todo")?)?;
+    registry.register(rewrite("todo", "done")?)?;
+    let source = TestEnv::new(&branch, &operator, registry);
+    assert_eq!(
+        relation_under(&source, "x/status", "last").await?,
+        vec![(Value::Entity(e), Value::String("done".into()))],
+        "the second rewrite succeeds the first"
+    );
+    Ok(())
+}
+
+/// Two rules succeeding one claim elect by which one read newer facts,
+/// as concurrent writes do. Over a stored `"triage"` and a later
+/// `x/flag`, `x/status(e) := "todo" :- x/status(e) = "triage"` stands
+/// just past the claim, and `x/status(e) := "blocked" :- x/status(e) =
+/// "triage", x/flag(e) = _` stands at the flag: `last` reads
+/// `"blocked"`, though `"todo"` sorts after it. A conclusion whose body
+/// does not read the cell keeps today's standing, that of the newest
+/// fact it read, so a value derived from the flag alone ties with the
+/// one that read the cell as well and the value decides.
+#[dialog_common::test]
+async fn rules_succeeding_one_claim_elect_by_the_newer_reading() -> anyhow::Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    let e: Entity = "id:e".parse()?;
+    branch
+        .transaction()
+        .assert(the!("x/status").of(e.clone()).is("triage".to_string()))
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    branch
+        .transaction()
+        .assert(the!("x/flag").of(e.clone()).is("set".to_string()))
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    let flagged = |reads_cell: bool, to: &str| {
+        let mut when = Vec::new();
+        if reads_cell {
+            when.push(serde_json::json!({
+                "assert": { "with": { "status": { "the": "x/status", "as": "text:" } } },
+                "where": { "this": { "?": { "name": "this" } }, "status": "triage" }
+            }));
+        }
+        when.push(serde_json::json!({
+            "assert": { "with": { "flag": { "the": "x/flag", "as": "text:" } } },
+            "where": { "this": { "?": { "name": "this" } }, "flag": { "?": { "name": "flag" } } }
+        }));
+        when.push(serde_json::json!({
+            "assert": "==",
+            "where": { "this": to, "is": { "?": { "name": "status" } } }
+        }));
+        compile(serde_json::json!({
+            "deduce": { "with": { "status": { "the": "x/status", "as": "text:" } } },
+            "when": when
+        }))
+    };
+
+    let mut registry = RuleRegistry::new();
+    registry.register(rewrite("triage", "todo")?)?;
+    registry.register(flagged(true, "blocked")?)?;
+    {
+        let source = TestEnv::new(&branch, &operator, registry.clone());
+        assert_eq!(
+            relation_under(&source, "x/status", "last").await?,
+            vec![(Value::Entity(e.clone()), Value::String("blocked".into()))],
+            "the rule that read the newer fact wins, not the greater value"
+        );
+    }
+    registry.register(flagged(false, "waiting")?)?;
+    let source = TestEnv::new(&branch, &operator, registry);
+    assert_eq!(
+        relation_under(&source, "x/status", "last").await?,
+        vec![(Value::Entity(e), Value::String("waiting".into()))],
+        "two conclusions standing at the flag tie, and the greater value wins"
+    );
+    Ok(())
+}
+
+/// Rewrites that never settle fail loudly. `"triage"` to `"todo"` beside
+/// `"todo"` to `"triage"` over a stored `"triage"`: each round's
+/// conclusion succeeds the last round's, so no round's table stands
+/// still, and the fixpoint gives up at `MAX_ROUNDS` with
+/// [`FixpointDivergence`](crate::EvaluationError::FixpointDivergence),
+/// as a formula generating without end does. (Before successions, the
+/// two values stood equal, the fixpoint converged, and the read came
+/// down to value order.)
+#[dialog_common::test]
+async fn rewrites_that_never_settle_fail_at_the_round_limit() -> anyhow::Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    let e: Entity = "id:e".parse()?;
+    branch
+        .transaction()
+        .assert(the!("x/status").of(e.clone()).is("triage".to_string()))
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    let mut registry = RuleRegistry::new();
+    registry.register(rewrite("triage", "todo")?)?;
+    registry.register(rewrite("todo", "triage")?)?;
+    let source = TestEnv::new(&branch, &operator, registry);
+    let error = relation_under(&source, "x/status", "last")
+        .await
+        .expect_err("a rewrite cycle has no fixpoint");
+    assert!(
+        matches!(
+            error.downcast_ref::<crate::EvaluationError>(),
+            Some(crate::EvaluationError::FixpointDivergence { .. })
+        ),
+        "expected FixpointDivergence, got {error:?}"
+    );
+    Ok(())
+}
+
 /// A rule reading its own relation under `last` recurses: `x/label(e)
 /// := l :- x/next(e) = n, x/label(n) = l` carries the tail's stored
 /// label down the chain `a -> b -> c -> tail`. Inside the cycle the
