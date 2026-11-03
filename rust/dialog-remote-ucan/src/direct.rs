@@ -49,6 +49,66 @@ pub(crate) fn deadline(answer: std::time::Duration, payload: usize) -> std::time
     answer + std::time::Duration::from_millis(payload as u64 * 1000 / SLOWEST_UPLOAD)
 }
 
+/// How long a read waits for the service to begin answering before it
+/// is sent again, beside the one still waiting, and the most times it is
+/// sent.
+///
+/// A connection the network forgot (see [`deadline`]) looks, to the
+/// client, like any other idle one, and the client sends on it again.
+/// A read is safe to send twice: whichever copy is answered first is
+/// taken and the others are aborted. The copies carry one invocation, so
+/// a service that remembers what was presented refuses every copy after
+/// the first that reaches it; such a refusal is passed over while a copy
+/// is still waiting, since the copy it refers to will be answered. Each copy goes out on a connection
+/// the one before is not holding, so a read that met forgotten
+/// connections is answered within a few of these intervals, where it
+/// would wait out the deadline on each one.
+const RESEND_READ_AFTER: std::time::Duration = std::time::Duration::from_secs(3);
+const MOST_READ_COPIES: usize = 4;
+
+/// [`invoke`] a read, which carries no payload and changes nothing,
+/// sending it again every [`RESEND_READ_AFTER`] while no copy has been
+/// answered, or at once when every copy sent has failed, up to
+/// [`MOST_READ_COPIES`] copies. The first answer is taken; when every
+/// copy failed, the last failure is.
+pub(crate) async fn read(
+    answer: std::time::Duration,
+    address: &UcanAddress,
+    authorization: &UcanAuthorization,
+) -> Result<Answer, S3Error> {
+    use futures::StreamExt;
+    use futures::stream::FuturesUnordered;
+
+    let mut copies = FuturesUnordered::new();
+    copies.push(invoke(answer, address, authorization, None));
+    let mut sent = 1;
+    loop {
+        match crate::socket::within(RESEND_READ_AFTER, copies.next()).await {
+            // A copy that reached the service after another did is refused
+            // as replayed, the same invocation presented twice; the one
+            // that reached it first is answered. A refusal is taken only
+            // once no copy is left waiting.
+            Some(Some(Ok(answered))) if answered.is_refusal() && !copies.is_empty() => {}
+            Some(Some(Ok(answered))) => return Ok(answered),
+            Some(Some(Err(failed))) if copies.is_empty() => {
+                if sent == MOST_READ_COPIES {
+                    return Err(failed);
+                }
+                copies.push(invoke(answer, address, authorization, None));
+                sent += 1;
+            }
+            // Another copy is still waiting for its answer.
+            Some(Some(Err(_))) => {}
+            Some(None) => unreachable!("a copy is always waiting while none was answered"),
+            None if sent < MOST_READ_COPIES => {
+                copies.push(invoke(answer, address, authorization, None));
+                sent += 1;
+            }
+            None => {}
+        }
+    }
+}
+
 /// The `Authorization` header value that carries `container`: the
 /// scheme, a space, and the container in the spec's text serialization,
 /// gzipped when that comes out shorter.

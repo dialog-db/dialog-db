@@ -755,7 +755,7 @@ async fn it_answers_a_lost_publish_as_retryable_and_the_retry_finds_it(
 /// deadline passes, rather than holding its caller for ever; the read
 /// tried again, with an invocation of its own, is answered. Runs on
 /// native and in the browser alike.
-#[dialog_common::test(fault = crate::helpers::Fault::Unanswered { times: 1 })]
+#[dialog_common::test(fault = crate::helpers::Fault::Unanswered { from: 0, times: 1 })]
 async fn it_answers_a_request_the_service_never_answers_as_unavailable(
     service: UcanServiceAddress,
 ) -> anyhow::Result<()> {
@@ -784,6 +784,84 @@ async fn it_answers_a_request_the_service_never_answers_as_unavailable(
 
     let again = perform(&service, &signer, cell.resolve()).await?;
     assert_eq!(again, None, "the read tried again is answered");
+    Ok(())
+}
+
+/// A block read the service never answers, as one sent on a pooled
+/// connection a NAT forgot, is sent again on another connection and
+/// answered, long before the deadline the first copy waits out. Runs on
+/// native and in the browser alike.
+#[dialog_common::test(fault = crate::helpers::Fault::Unanswered { from: 1, times: 1 })]
+async fn it_sends_a_read_again_when_the_service_does_not_answer_it(
+    service: UcanServiceAddress,
+) -> anyhow::Result<()> {
+    let (signer, subject) = owner().await;
+    let content = b"a block read over a connection that was forgotten".to_vec();
+    let digest = Blake3Hash::hash(&content);
+    perform(
+        &service,
+        &signer,
+        subject
+            .clone()
+            .writer()
+            .archive()
+            .catalog("index")
+            .put(Buffer::from(content.clone())),
+    )
+    .await?;
+
+    // The deadline is far beyond the time the read is sent again after,
+    // so only a copy sent again can answer within it.
+    let served = crate::socket::within(
+        std::time::Duration::from_secs(20),
+        perform(
+            &service,
+            &signer,
+            subject.reader().archive().catalog("index").get(digest),
+        ),
+    )
+    .await
+    .expect("the read is answered before the first copy's deadline")?;
+    assert_eq!(served, Some(content));
+    Ok(())
+}
+
+/// A read the service is slow to answer, but answers, is answered: the
+/// copy sent again meanwhile carries the same invocation, which the
+/// service refuses as replayed, and that refusal is not taken for the
+/// read's answer. Runs on native and in the browser alike.
+#[dialog_common::test(
+    fault = crate::helpers::Fault::Slow {
+        from: 1,
+        times: 1,
+        by: std::time::Duration::from_secs(5),
+    }
+)]
+async fn it_takes_a_slow_answer_over_the_refusal_of_its_copy(
+    service: UcanServiceAddress,
+) -> anyhow::Result<()> {
+    let (signer, subject) = owner().await;
+    let content = b"a block the service is slow to serve".to_vec();
+    let digest = Blake3Hash::hash(&content);
+    perform(
+        &service,
+        &signer,
+        subject
+            .clone()
+            .writer()
+            .archive()
+            .catalog("index")
+            .put(Buffer::from(content.clone())),
+    )
+    .await?;
+
+    let served = perform(
+        &service,
+        &signer,
+        subject.reader().archive().catalog("index").get(digest),
+    )
+    .await?;
+    assert_eq!(served, Some(content));
     Ok(())
 }
 

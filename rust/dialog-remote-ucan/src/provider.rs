@@ -66,11 +66,10 @@ impl Provider<ForkInvocation<UcanSite, Get>> for UcanSite {
         if invocation.address.exchange() == Exchange::Permit {
             return through_permits(self, invocation).await;
         }
-        let answer = direct::invoke(
+        let answer = direct::read(
             self.answer(),
             &invocation.address,
             &invocation.authorization,
-            None,
         )
         .await?;
         match answer {
@@ -211,11 +210,10 @@ impl Provider<ForkInvocation<UcanSite, Read>> for UcanSite {
         if invocation.address.exchange() == Exchange::Permit {
             return through_permits(self, invocation).await;
         }
-        let answer = direct::invoke(
+        let answer = direct::read(
             self.answer(),
             &invocation.address,
             &invocation.authorization,
-            None,
         )
         .await?;
         match answer {

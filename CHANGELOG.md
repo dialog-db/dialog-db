@@ -14,7 +14,7 @@ says how to cut a release.
 
 ## Unreleased
 
-### A request the access service never answers is given up on
+### A request the access service never answers is given up on, and a read is sent again
 
 [#727](https://github.com/dialog-db/dialog-db/pull/727)
 
@@ -34,6 +34,12 @@ What this changes for you:
   silent socket already did; a blob read or write fails with a transport
   error. Either may be tried again with an invocation of its own.
 - `UcanSite::with_liveness` now bounds these requests too.
+- A block or blob read the service has not begun answering after 3 s
+  is sent again, up to four copies, and the first answer is taken. A
+  read that met connections the network forgot is answered in seconds
+  rather than failing after 30 s each. The copies carry one invocation,
+  so a service may see it presented more than once; the refusal of a
+  copy as replayed is not taken for the read's answer.
 
 Why: in tonk, a sync whose request was lost this way held the sync of
 every space behind it, so after a few minutes idle on a NATed network,
