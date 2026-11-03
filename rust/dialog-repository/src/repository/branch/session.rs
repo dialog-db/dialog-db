@@ -1168,10 +1168,10 @@ impl<'a> QueryEnv<'a> {
                 }
                 Err(error) => return Err(error),
             };
-            let standing = Standing {
-                version: row.standing(),
-                cause: Claim::from(artifact.clone()).cause().clone(),
-            };
+            let standing = Standing::new(
+                row.standing(),
+                Claim::from(artifact.clone()).cause().clone(),
+            );
             artifacts.push((artifact, standing));
         }
         Ok(artifacts)

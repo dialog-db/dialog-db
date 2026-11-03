@@ -1521,15 +1521,15 @@ where
                             }
                             let versions: Vec<Version> =
                                 current_element.versions().copied().collect();
-                            let standing = Standing {
-                                version: versions
+                            let standing = Standing::new(
+                                versions
                                     .iter()
                                     .map(|version| {
                                         (version.edition, make_reference(version.key_bytes()))
                                     })
                                     .max(),
-                                cause: current.cause.clone().unwrap_or(Cause([0; 32])),
-                            };
+                                current.cause.clone().unwrap_or(Cause([0; 32])),
+                            );
                             priors.push((candidate.key, versions, current.is, standing));
                         }
                     }

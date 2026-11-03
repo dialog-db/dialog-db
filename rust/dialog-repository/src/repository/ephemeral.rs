@@ -506,10 +506,7 @@ impl State {
                 }
                 let standings: Vec<Standing> = cell
                     .iter()
-                    .map(|prior| Standing {
-                        version: None,
-                        cause: prior.cause.clone().unwrap_or(Cause([0; 32])),
-                    })
+                    .map(|prior| Standing::new(None, prior.cause.clone().unwrap_or(Cause([0; 32]))))
                     .collect();
                 let elected = policy.elect(
                     cell.iter()

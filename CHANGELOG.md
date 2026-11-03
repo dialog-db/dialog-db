@@ -14,6 +14,52 @@ says how to cut a release.
 
 ## Unreleased
 
+### A rule's conclusion under `last` succeeds the claim its body read
+
+Fixes [#724](https://github.com/dialog-db/dialog-db/issues/724)
+
+A deductive rule that reads a cell and derives another value for it,
+`x/status(e) := "todo" :- x/status(e) = "triage"`, rewrites the cell,
+the way a write does. Its conclusion stood as the newest fact its body
+consumed, which for such a rule is the very claim it rewrites, so the
+two tied on standing and a `last` read fell to value order: `"triage"`
+won over `"todo"`, and the reverse rewrite only appeared to work because
+`"triage"` sorts after `"todo"`. Inside its component the rule still
+reads the cell as a set, and its conclusion now remembers the values of
+the cell it displaced. When the component is derived, each cell's
+candidates are ranked by those successions, a rewrite after what it
+read and a rewrite of a rewrite one further, and the pick elects over
+the ranks: by version, then cause, then rank, then value. A conclusion
+of the value it read displaces nothing, so a rule deriving a relation
+from itself still settles; one whose body does not read the cell
+stands as before, as the newest fact it consumed.
+
+What this changes for you:
+
+- A `last` read of a cell some rule rewrites returns the rule's value,
+  whatever the values' order. Two rules rewriting one claim elect by
+  which one read newer facts, as concurrent writes do, and a later
+  write to the cell still wins. `all` is unchanged and keeps both.
+- A chain of rewrites reads its last link.
+- Rewrites that read each other back, `"triage"` to `"todo"` beside
+  `"todo"` to `"triage"`, form a cycle no rank orders. Its members
+  share one rank and are elected among as concurrent candidates, by
+  version then value, so a merge that closes such a cycle leaves every
+  query answerable. Before, the same pair also fell to value order,
+  but so did every rewrite.
+- `dialog_artifacts::Standing` carries a `succession`, zero for every
+  claim, and `Standing::new` builds a claim's standing. Code building a
+  `Standing` by its fields names the new one. Nothing stored or synced
+  changes: a rank is computed when a component is read.
+
+Why: a succession orders a cell's candidates by what each saw, and a
+conclusion that read a claim and replaced its value saw it. Letting
+value order decide made the result of a rewrite depend on the spelling
+of its values and on unrelated facts its body happened to read. Ranking
+at the exit rather than inside the fixpoint keeps the component
+positive and finite, so a cycle of rewrites converges instead of
+failing, which an open rule set has to guarantee under every merge.
+
 ### A subscription learns of the readable change to a single-valued cell, not only the moved row
 
 Following [#710](https://github.com/dialog-db/dialog-db/pull/710) and
