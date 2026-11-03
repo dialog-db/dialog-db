@@ -530,6 +530,42 @@ where
         }
     }
 
+    /// [`differentiate_within`](Self::differentiate_within), reading both
+    /// trees through their node caches.
+    ///
+    /// For a caller that diffs the same two roots many times, each within
+    /// its own scope (the subscriptions a commit re-checks, say): only the
+    /// first difference reads a changed block from storage. The changes are
+    /// the ones the uncached walk yields; a block the storage lacks but the
+    /// cache holds is read instead of failing the walk.
+    pub fn differentiate_within_cached<'a, Env>(
+        &'a self,
+        other: &'a Self,
+        scope: &'a [core::ops::RangeInclusive<Key>],
+        self_storage: &'a Env,
+        other_storage: &'a Env,
+    ) -> impl Differential<Key, Value> + ConditionalSend + 'a
+    where
+        Env: Provider<LoadBlock> + ConditionalSync,
+        Key: ConditionalSync,
+        Value: PartialEq + ConditionalSync,
+        D: ConditionalSync,
+    {
+        async_stream::try_stream! {
+            let difference = TreeDifference::compute_within_cached(
+                self,
+                other,
+                self_storage,
+                other_storage,
+                scope,
+            )
+            .await?;
+            for await change in difference.changes_within(scope) {
+                yield change?;
+            }
+        }
+    }
+
     /// Builds a persistent tree from a sealed root hash and a node cache. Used
     /// by [`TransientTree::persist`] to turn a finished edit batch back into a
     /// [`PersistentTree`] while carrying its cache forward. The batch's new nodes

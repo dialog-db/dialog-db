@@ -38,13 +38,48 @@ use rkyv::{
 };
 
 use crate::{
-    DialogSearchTreeError, Distribution, Entry, Key, Link, LoadBlock, NodeBody, NoveltyEntry,
-    NoveltyOp, PersistentNode, PersistentTree, Separator, Value, into_owned, resolve_pending,
+    DialogSearchTreeError, Distribution, Entry, Key, Link, LoadBlock, NodeBody, NodeCache,
+    NoveltyEntry, NoveltyOp, PersistentNode, PersistentTree, Separator, Value, into_owned,
+    resolve_pending,
 };
 
 /// How many frontier blocks a comparison pass fetches concurrently in the
 /// loading sweep (see `compute_scoped`).
 const LOAD_CONCURRENCY: usize = 16;
+
+/// Reads and parses the node at `hash`, through `cache` when one is given.
+///
+/// Each side of a comparison reads through its tree's node cache when
+/// absence on that side is a fault ([`MissingBlocks::Deny`]): a cached node
+/// is the same bytes the store holds, so it answers the read without one.
+/// Many differences over the same pair of roots (every subscription a
+/// commit re-checks diffs the same two trees) then read each changed block
+/// from the store once, not once per difference. A side whose absence is
+/// information ([`MissingBlocks::Boundary`]) passes no cache: there the
+/// question is what its store holds, which the cache cannot answer.
+async fn read_node<Key, Value, Env>(
+    storage: &Env,
+    cache: Option<&NodeCache<Key, Value>>,
+    hash: &Blake3Hash,
+) -> Result<Option<PersistentNode<Key, Value>>, DialogSearchTreeError>
+where
+    Key: self::Key,
+    Value: self::Value,
+    Value::Archived: for<'a> CheckBytes<
+        Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+    >,
+    Env: Provider<LoadBlock> + ConditionalSync,
+{
+    let fetch =
+        async |hash: &Blake3Hash| match LoadBlock::new(hash.clone()).perform(storage).await? {
+            Some(buffer) => Ok(Some(PersistentNode::try_from(buffer)?)),
+            None => Ok(None),
+        };
+    match cache {
+        Some(cache) => cache.get_or_fetch(hash, fetch).await,
+        None => fetch(hash).await,
+    }
+}
 
 /// One read of the loading sweep: fetches and parses a node, reporting it
 /// back tagged with the frontier slot it was collected for. Absence and
@@ -52,6 +87,7 @@ const LOAD_CONCURRENCY: usize = 16;
 /// needs the block owns the error and the [`MissingBlocks`] policy.
 async fn preload_block<Key, Value, Env>(
     storage: &Env,
+    cache: Option<NodeCache<Key, Value>>,
     is_target: bool,
     offset: usize,
     hash: Blake3Hash,
@@ -64,10 +100,10 @@ where
     >,
     Env: Provider<LoadBlock> + ConditionalSync,
 {
-    let node = match LoadBlock::new(hash.clone()).perform(storage).await {
-        Ok(Some(buffer)) => PersistentNode::try_from(buffer).ok(),
-        _ => None,
-    };
+    let node = read_node(storage, cache.as_ref(), &hash)
+        .await
+        .ok()
+        .flatten();
     (is_target, offset, node)
 }
 
@@ -83,6 +119,7 @@ type FetchedChild<Key, Value> =
 /// index is consumed — so errors are returned for the descent to own.
 async fn fetch_block<Key, Value, Env>(
     storage: &Env,
+    cache: Option<NodeCache<Key, Value>>,
     at: usize,
     hash: Blake3Hash,
 ) -> (
@@ -97,12 +134,7 @@ where
     >,
     Env: Provider<LoadBlock> + ConditionalSync,
 {
-    let result = match LoadBlock::new(hash.clone()).perform(storage).await {
-        Ok(Some(buffer)) => PersistentNode::try_from(buffer).map(Some),
-        Ok(None) => Ok(None),
-        Err(error) => Err(error),
-    };
-    (at, result)
+    (at, read_node(storage, cache.as_ref(), &hash).await)
 }
 
 /// How a comparison side treats a block that is absent from its storage.
@@ -441,6 +473,9 @@ where
     Env: Provider<LoadBlock>,
 {
     storage: &'a Env,
+    /// The node cache this side reads through, when its absence policy
+    /// lets it (see [`read_node`]).
+    cache: Option<NodeCache<Key, Value>>,
     nodes: Vec<SparseTreeNode<Key, Value>>,
     expanded: Vec<PersistentNode<Key, Value>>,
     /// Every hash that ever entered this side's frontier, including nodes
@@ -554,9 +589,10 @@ where
     /// Reads a node from storage by hash.
     async fn load(
         storage: &Env,
+        cache: Option<&NodeCache<Key, Value>>,
         hash: &Blake3Hash,
     ) -> Result<PersistentNode<Key, Value>, DialogSearchTreeError> {
-        Self::try_load(storage, hash).await?.ok_or_else(|| {
+        Self::try_load(storage, cache, hash).await?.ok_or_else(|| {
             DialogSearchTreeError::Node(format!("Block not found in storage: {hash}"))
         })
     }
@@ -564,12 +600,10 @@ where
     /// Reads a node from storage by hash; `None` when the block is absent.
     async fn try_load(
         storage: &Env,
+        cache: Option<&NodeCache<Key, Value>>,
         hash: &Blake3Hash,
     ) -> Result<Option<PersistentNode<Key, Value>>, DialogSearchTreeError> {
-        match LoadBlock::new(hash.clone()).perform(storage).await? {
-            Some(buffer) => Ok(Some(PersistentNode::try_from(buffer)?)),
-            None => Ok(None),
-        }
+        read_node(storage, cache, hash).await
     }
 
     /// Initializes a sparse tree from a stored root hash. The root is not
@@ -583,14 +617,19 @@ where
     async fn from_root(
         root: Option<&Blake3Hash>,
         storage: &'a Env,
+        cache: Option<NodeCache<Key, Value>>,
         missing: MissingBlocks,
     ) -> Result<SparseTree<'a, Key, Value, Env>, DialogSearchTreeError> {
+        let cache = cache.filter(|_| missing == MissingBlocks::Deny);
         if let Some(root) = root
             && missing == MissingBlocks::Boundary
-            && Self::try_load(storage, root).await?.is_none()
+            && Self::try_load(storage, cache.as_ref(), root)
+                .await?
+                .is_none()
         {
             return Ok(SparseTree {
                 storage,
+                cache,
                 nodes: vec![],
                 expanded: vec![],
                 seen: HashSet::from([root.clone()]),
@@ -606,7 +645,8 @@ where
             });
         }
         let nodes = if let Some(root) = root {
-            let node: PersistentNode<Key, Value> = Self::load(storage, root).await?;
+            let node: PersistentNode<Key, Value> =
+                Self::load(storage, cache.as_ref(), root).await?;
             // A root's frontier bound must be the separator the SAME subtree
             // would carry as a link child on the other side, or equal
             // subtrees at different heights never line up. That propagated
@@ -636,6 +676,7 @@ where
             .collect();
         Ok(SparseTree {
             storage,
+            cache,
             nodes,
             expanded: vec![],
             seen,
@@ -678,7 +719,7 @@ where
                 // A block planning fetched ahead is read from there, once.
                 let found = match self.prefetched.remove(&link.node) {
                     Some(found) => found,
-                    None => Self::try_load(self.storage, &link.node).await?,
+                    None => Self::try_load(self.storage, self.cache.as_ref(), &link.node).await?,
                 };
                 match found {
                     Some(node) => node,
@@ -1503,7 +1544,7 @@ where
                     }
                     SparseTreeNode::Ref(link) | SparseTreeNode::Pending { link, .. } => {
                         let pending = pending_ops(sparse_node).to_vec();
-                        match Self::try_load(self.storage, &link.node).await? {
+                        match Self::try_load(self.storage, self.cache.as_ref(), &link.node).await? {
                             Some(node) => (node, pending),
                             // Absent and absence bounds the walk: the stored
                             // entries are held by reference (not this side's
@@ -1573,7 +1614,12 @@ where
                                         let Some((at, hash)) = queue.next() else {
                                             break;
                                         };
-                                        reads.push(fetch_block(self.storage, at, hash));
+                                        reads.push(fetch_block(
+                                            self.storage,
+                                            self.cache.clone(),
+                                            at,
+                                            hash,
+                                        ));
                                     }
                                     match reads.next().await {
                                         Some((at, result)) => fetched[at] = Some(result),
@@ -2009,6 +2055,39 @@ where
         .await
     }
 
+    /// [`compute_within`](Self::compute_within), reading each side through
+    /// its tree's node cache.
+    ///
+    /// For a caller that diffs the same pair of roots many times over, such
+    /// as the subscriptions a commit re-checks, each scoped to its own
+    /// demand: the first difference reads a changed block from storage and
+    /// keeps it, and every later one finds it in memory. A cached node is
+    /// the bytes its hash names, so the changes are the ones an uncached
+    /// walk finds; what differs is that a block the store lacks but the
+    /// cache holds is read rather than refused.
+    pub async fn compute_within_cached<D>(
+        source_tree: &PersistentTree<Key, Value, D>,
+        target_tree: &PersistentTree<Key, Value, D>,
+        source_storage: &'a Env,
+        target_storage: &'a Env,
+        scope: &[core::ops::RangeInclusive<Key>],
+    ) -> Result<TreeDifference<'a, Key, Value, Env>, DialogSearchTreeError>
+    where
+        D: Distribution,
+    {
+        Self::compute_scoped_reading(
+            source_tree,
+            target_tree,
+            source_storage,
+            target_storage,
+            Some(scope),
+            MissingPolicy::default(),
+            Reads::Planned,
+            true,
+        )
+        .await
+    }
+
     async fn compute_scoped<D>(
         source_tree: &PersistentTree<Key, Value, D>,
         target_tree: &PersistentTree<Key, Value, D>,
@@ -2021,6 +2100,35 @@ where
     where
         D: Distribution,
     {
+        Self::compute_scoped_reading(
+            source_tree,
+            target_tree,
+            source_storage,
+            target_storage,
+            scope,
+            missing,
+            reads,
+            false,
+        )
+        .await
+    }
+
+    /// The comparison itself; `cached` says whether each side reads
+    /// through its tree's node cache (see [`read_node`]).
+    #[allow(clippy::too_many_arguments)]
+    async fn compute_scoped_reading<D>(
+        source_tree: &PersistentTree<Key, Value, D>,
+        target_tree: &PersistentTree<Key, Value, D>,
+        source_storage: &'a Env,
+        target_storage: &'a Env,
+        scope: Option<&[core::ops::RangeInclusive<Key>]>,
+        missing: MissingPolicy,
+        reads: Reads,
+        cached: bool,
+    ) -> Result<TreeDifference<'a, Key, Value, Env>, DialogSearchTreeError>
+    where
+        D: Distribution,
+    {
         let planned = reads == Reads::Planned;
         // Identical trees (including two empty trees) share their root
         // hash; nothing needs to be read at all.
@@ -2028,6 +2136,7 @@ where
             return Ok(TreeDifference {
                 source: SparseTree {
                     storage: source_storage,
+                    cache: None,
                     nodes: vec![],
                     expanded: vec![],
                     seen: HashSet::new(),
@@ -2038,6 +2147,7 @@ where
                 },
                 target: SparseTree {
                     storage: target_storage,
+                    cache: None,
                     nodes: vec![],
                     expanded: vec![],
                     seen: HashSet::new(),
@@ -2055,8 +2165,18 @@ where
             SparseTree<'a, Key, Value, Env>,
             SparseTree<'a, Key, Value, Env>,
         ) = futures_util::future::try_join(
-            SparseTree::from_root(source_tree.stored_root(), source_storage, missing.source),
-            SparseTree::from_root(target_tree.stored_root(), target_storage, missing.target),
+            SparseTree::from_root(
+                source_tree.stored_root(),
+                source_storage,
+                cached.then(|| source_tree.node_cache()),
+                missing.source,
+            ),
+            SparseTree::from_root(
+                target_tree.stored_root(),
+                target_storage,
+                cached.then(|| target_tree.node_cache()),
+                missing.target,
+            ),
         )
         .await?;
 
@@ -2126,17 +2246,18 @@ where
                     if wanted.is_empty() {
                         break;
                     }
+                    let (source_cache, target_cache) = (source.cache.clone(), target.cache.clone());
                     let mut wanted =
                         wanted
                             .into_iter()
                             .enumerate()
                             .map(|(at, (is_target, hash))| {
-                                let storage = if is_target {
-                                    target_storage
+                                let (storage, cache) = if is_target {
+                                    (target_storage, target_cache.clone())
                                 } else {
-                                    source_storage
+                                    (source_storage, source_cache.clone())
                                 };
-                                (at, is_target, storage, hash)
+                                (at, is_target, storage, cache, hash)
                             });
                     #[cfg(test)]
                     let batch = wanted.len();
@@ -2144,11 +2265,11 @@ where
                     let mut reads = futures_util::stream::FuturesUnordered::new();
                     loop {
                         while reads.len() < LOAD_CONCURRENCY {
-                            let Some((at, is_target, storage, hash)) = wanted.next() else {
+                            let Some((at, is_target, storage, cache, hash)) = wanted.next() else {
                                 break;
                             };
                             sides.push((is_target, hash.clone()));
-                            reads.push(fetch_block(storage, at, hash));
+                            reads.push(fetch_block(storage, cache, at, hash));
                         }
                         let Some((at, read)) = reads.next().await else {
                             break;
@@ -2235,7 +2356,12 @@ where
                         let Some((is_target, offset, storage, hash)) = pending.next() else {
                             break;
                         };
-                        reads.push(preload_block(storage, is_target, offset, hash));
+                        let cache = if is_target {
+                            target.cache.clone()
+                        } else {
+                            source.cache.clone()
+                        };
+                        reads.push(preload_block(storage, cache, is_target, offset, hash));
                     }
                     match reads.next().await {
                         Some((is_target, offset, Some(node))) => {
@@ -2535,6 +2661,7 @@ where
                     SparseTreeNode::Ref(link) | SparseTreeNode::Pending { link, .. } => {
                         match SparseTree::<Key, Value, Env>::try_load(
                             self.target.storage,
+                            self.target.cache.as_ref(),
                             &link.node,
                         )
                         .await?
@@ -2833,6 +2960,70 @@ mod tests {
             scoped_reads < full_reads,
             "scoped diff must skip out-of-scope subtrees: \
              scoped {scoped_reads} reads vs full {full_reads} reads"
+        );
+        Ok(())
+    }
+
+    /// Many differences over the same two roots, as the subscriptions a
+    /// commit re-checks compute, read each changed block from storage once
+    /// when they read through the trees' node cache: the first reads the
+    /// changed path, every later one reads nothing, and each yields the
+    /// changes the uncached walk does.
+    #[dialog_common::test]
+    async fn it_reads_a_changed_block_once_across_cached_differences() -> Result<()> {
+        let mut storage = CountingBackend::new();
+        let manifest = Manifest {
+            max_segment: 512,
+            frame_ceiling_factor: 0,
+            ..Manifest::default()
+        };
+        let base =
+            build_with_manifest((0..250u32).map(|i| (i, vec![0])), manifest, &mut storage).await?;
+        let mut delta = Delta::zero();
+        let target = base
+            .edit()
+            .insert(17u32.to_le_bytes(), vec![1], &storage)
+            .await?
+            .persist(&mut delta)?;
+        for (_, buffer) in delta.flush() {
+            storage.store(buffer);
+        }
+
+        // Reopen both roots over one cold cache, as a replica that pulled
+        // the target finds them: nothing it is about to compare is in
+        // memory yet.
+        let cache = crate::NodeCache::new();
+        let base = TestTree::from_hash_with_cache(base.root().clone(), cache.clone());
+        let target = TestTree::from_hash_with_cache(target.root().clone(), cache.clone());
+        let scopes = [
+            vec![0u32.to_le_bytes()..=40u32.to_le_bytes()],
+            vec![10u32.to_le_bytes()..=20u32.to_le_bytes()],
+            vec![17u32.to_le_bytes()..=17u32.to_le_bytes()],
+        ];
+
+        let uncached = collect_scoped_changes(&base, &target, &scopes[0], &storage).await?;
+        let mut reads = Vec::new();
+        for scope in &scopes {
+            let before = storage.reads();
+            let stream = base.differentiate_within_cached(&target, scope, &storage, &storage);
+            futures_util::pin_mut!(stream);
+            let mut changes = vec![];
+            while let Some(change) = stream.next().await {
+                changes.push(change?);
+            }
+            reads.push(storage.reads() - before);
+            assert_eq!(
+                format!("{changes:?}"),
+                format!("{uncached:?}"),
+                "the cached walk finds the same changes"
+            );
+        }
+
+        assert!(reads[0] > 0, "the first difference reads the changed path");
+        assert_eq!(
+            &reads[1..],
+            &[0, 0],
+            "later differences over the same roots read nothing from storage"
         );
         Ok(())
     }

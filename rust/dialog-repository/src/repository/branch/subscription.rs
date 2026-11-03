@@ -876,7 +876,7 @@ where
         let previous = index_at(pinned);
         let next = index_at(target);
 
-        let changes = previous.differentiate_within(&next, &scope, &storage, &storage);
+        let changes = previous.differentiate_within_cached(&next, &scope, &storage, &storage);
         let mut changes = Box::pin(changes);
         let mut subjects = BTreeSet::new();
         let mut asserted = Vec::new();
