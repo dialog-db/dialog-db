@@ -16,7 +16,7 @@ says how to cut a release.
 
 ### A tree reads every node through its store, which keeps what it checked
 
-Branch `worker/confident-tesla-y27ghw` (pull request to follow).
+[#730](https://github.com/dialog-db/dialog-db/pull/730)
 
 A search tree no longer carries a node cache. The store a tree reads
 through implements the new `dialog_search_tree::Nodes` trait: `kept()`
@@ -89,7 +89,7 @@ through it.
 
 ### A read finds its remote without deriving every upstream
 
-Branch `worker/confident-tesla-y27ghw` (pull request to follow).
+[#730](https://github.com/dialog-db/dialog-db/pull/730)
 
 Every select, subscription poll and migration check asked the branch
 where a read held by reference falls back to, and the branch answered
