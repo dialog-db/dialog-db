@@ -894,6 +894,12 @@ impl ArtifactTreeExt for ArtifactTree {
         // The range must be built under the manifest the facts were written
         // with, the same requirement `scan` has.
         let manifest = tree.manifest(&storage).await?;
+        // A tree with a band for each number type scans such a selector without
+        // its bounds, so it can state no size for the range. A planner that
+        // chooses by size then keeps its fixed order on such a tree.
+        if selector.narrows_numbers() && manifest.value_encoding != crate::NUMBER_BAND {
+            return Ok(None);
+        }
         let selector = selector.for_manifest(&manifest);
         let range = selector_range(&selector, &manifest);
         // `range_scale` intersects half-open `[lower, upper)`; the selector's

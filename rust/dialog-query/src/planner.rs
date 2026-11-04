@@ -69,15 +69,70 @@ impl Planner {
     /// Repeatedly selects the cheapest feasible premise until all
     /// premises have been ordered. Returns an error if some premise's
     /// prerequisites can never be satisfied by the others.
+    ///
+    /// The fixed costs cannot tell how wide a range is. So when more than
+    /// one scan can start the plan, and one of them reads a range, the plan
+    /// also keeps the order that starts from each of the others
+    /// ([`Conjunction::alternatives`]), and evaluation takes the narrowest.
     pub fn plan(mut self, scope: &Environment) -> Result<Conjunction, TypeError> {
         // Narrow the premises to their rule-level inferred kinds once,
         // up front, before ordering. Inference is order-independent
         // (per-premise unification).
         self.narrow()?;
 
+        let premises = mem::take(&mut self.premises);
+        let starts = self.starts(&premises, scope);
+        if starts.len() < 2 || !starts.iter().any(|(_, ranged)| *ranged) {
+            return self.order(premises, scope, None);
+        }
+        let mut plan = self.order(premises.clone(), scope, None)?;
+        for (index, _) in starts {
+            let other = self.order(premises.clone(), scope, Some(index))?;
+            if other.steps != plan.steps {
+                plan.alternatives.push(other);
+            }
+        }
+        Ok(plan)
+    }
+
+    /// The scans that can start a plan under `scope`, each with whether it
+    /// reads a range: the attribute is known, the entity is free, and the
+    /// value is known or narrowed by a range. A scan of a whole attribute
+    /// is left out, since a range is never wider than the attribute's
+    /// rows by enough to lose to it, and an estimate of it would only
+    /// cost a walk of the tree.
+    fn starts(&self, premises: &[Premise], scope: &Environment) -> Vec<(usize, bool)> {
+        premises
+            .iter()
+            .enumerate()
+            .filter_map(|(index, premise)| {
+                let Premise::Assert(Proposition::Attribute(query)) = premise else {
+                    return None;
+                };
+                if premise.feasible(scope).is_err()
+                    || query.of().is_bound(scope)
+                    || !(query.the().is_bound(scope) || query.the().is_ranged())
+                {
+                    return None;
+                }
+                if query.is().is_bound(scope) {
+                    return Some((index, false));
+                }
+                self.reads_range(query).then_some((index, true))
+            })
+            .collect()
+    }
+
+    /// Order `premises` greedily under `scope`, starting from the premise
+    /// at `first` when one is named.
+    fn order(
+        &self,
+        mut remaining: Vec<Premise>,
+        scope: &Environment,
+        mut first: Option<usize>,
+    ) -> Result<Conjunction, TypeError> {
         let env = scope.clone();
         let mut bound = scope.clone();
-        let mut remaining: Vec<Premise> = mem::take(&mut self.premises);
         let mut steps = vec![];
         let mut cost = 0;
 
@@ -85,9 +140,14 @@ impl Planner {
             // Pick the cheapest feasible premise under the current
             // bound set. Feasibility (which vars it binds, or which it
             // still needs) is the shared `categorize`; cost is the
-            // premise's own estimate over the bound variables.
+            // premise's own estimate over the bound variables. Between
+            // two of one cost, the one that binds less goes first: it
+            // filters the rows that the other would then read.
             let mut best: Option<(usize, usize, Environment)> = None;
             for (index, premise) in remaining.iter().enumerate() {
+                if first.is_some_and(|first| first != index) {
+                    continue;
+                }
                 let Ok(binds) = premise.feasible(&bound) else {
                     continue;
                 };
@@ -95,13 +155,13 @@ impl Planner {
                     .ranged_cost(premise, &bound)
                     .or_else(|| premise.estimate(&bound))
                     .unwrap_or(usize::MAX);
-                if best
-                    .as_ref()
-                    .is_none_or(|(best_cost, _, _)| cost < *best_cost)
-                {
+                if best.as_ref().is_none_or(|(best_cost, _, best_binds)| {
+                    (cost, binds.iter().count()) < (*best_cost, best_binds.iter().count())
+                }) {
                     best = Some((cost, index, binds));
                 }
             }
+            first = None;
 
             let Some((step_cost, index, binds)) = best else {
                 return Self::fail(&remaining, &bound);
@@ -136,6 +196,7 @@ impl Planner {
             cost,
             binds,
             env,
+            alternatives: Vec::new(),
         })
     }
 
@@ -540,6 +601,7 @@ mod plan_ordering {
     use crate::formula::string::Length;
     use crate::optional::OptionalAttributeQuery;
     use crate::the;
+    use crate::types::Any;
     use crate::{
         AttributeDescriptor, Cardinality, ConceptDescriptor, Parameters, Proposition, Term, Type,
     };
@@ -920,5 +982,70 @@ mod plan_ordering {
         // Deterministic across replans.
         let replanned = Planner::from(premises).plan(&scope).unwrap();
         assert_eq!(kinds(&plan), kinds(&replanned));
+    }
+
+    /// A scan of `the` with its value bound or free, as a plan reads it.
+    fn scan_of(the: Relation, value: Term<Any>) -> Premise {
+        AttributeQuery::new(
+            Term::from(the),
+            Term::<Entity>::var("this"),
+            value,
+            Term::blank(),
+            Some(Cardinality::One),
+        )
+        .into()
+    }
+
+    /// A plan keeps each start only when more than one scan can start it and one
+    /// of them reads a range. Every other plan asks the tree for nothing.
+    #[dialog_common::test]
+    fn it_keeps_each_start_only_when_a_scan_reads_a_range() {
+        let mut scope = Environment::new();
+        scope.add("channel");
+        let mut ranged = Environment::new();
+        ranged.add("number");
+
+        let both = Planner::from(vec![
+            scan_of(the!("message/channel"), Term::var("channel")),
+            scan_of(the!("message/number"), Term::var("number")),
+        ])
+        .with_ranged(ranged.clone())
+        .plan(&scope)
+        .unwrap();
+        assert_eq!(both.alternatives.len(), 1);
+        assert_ne!(both.steps[0], both.alternatives[0].steps[0]);
+
+        let no_range = Planner::from(vec![
+            scan_of(the!("message/channel"), Term::var("channel")),
+            scan_of(the!("message/number"), Term::var("number")),
+        ])
+        .plan(&scope)
+        .unwrap();
+        assert!(no_range.alternatives.is_empty());
+
+        let one_start = Planner::from(vec![
+            scan_of(the!("message/number"), Term::var("number")),
+            scan_of(the!("message/author"), Term::var("author")),
+        ])
+        .with_ranged(ranged)
+        .plan(&Environment::new())
+        .unwrap();
+        assert!(one_start.alternatives.is_empty());
+    }
+
+    /// A scan with its entity bound and its value bound only filters, so it goes
+    /// before a scan of one cost that binds a value for the rows to carry.
+    #[dialog_common::test]
+    fn it_runs_a_filter_before_a_read_of_the_same_cost() {
+        let mut scope = Environment::new();
+        scope.add("channel");
+        scope.add("this");
+        let plan = Planner::from(vec![
+            scan_of(the!("message/author"), Term::var("author")),
+            scan_of(the!("message/channel"), Term::var("channel")),
+        ])
+        .plan(&scope)
+        .unwrap();
+        assert!(plan.steps[0].header().binds.iter().next().is_none());
     }
 }

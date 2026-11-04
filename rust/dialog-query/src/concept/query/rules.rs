@@ -472,6 +472,7 @@ impl ConceptRules {
             cost,
             binds,
             env: scope.clone(),
+            alternatives: Vec::new(),
         }
     }
 }

@@ -625,6 +625,15 @@ impl ArtifactSelector<Constrained> {
         self
     }
 
+    /// Whether a bound of this selector only narrows the scan
+    /// ([`narrowing_numbers`](Self::narrowing_numbers)).
+    pub fn narrows_numbers(&self) -> bool {
+        [&self.value_lower, &self.value_upper]
+            .into_iter()
+            .flatten()
+            .any(|bound| bound.narrowing)
+    }
+
     /// This selector as a tree written under `manifest` can scan it: bounds
     /// across number types, and bounds that only narrow the scan, are dropped
     /// where the tree keys each type in its own band.

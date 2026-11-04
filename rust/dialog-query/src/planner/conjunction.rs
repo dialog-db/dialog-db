@@ -16,6 +16,7 @@ use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
 use futures_util::{StreamExt, stream};
 use std::collections::HashSet;
+use std::mem;
 
 /// Largest ratio of the widest to narrowest scan range estimate that still
 /// takes the merge path. Above it, one scan is selective enough that a nested
@@ -54,6 +55,13 @@ pub struct Conjunction {
     pub binds: Environment,
     /// Variables required in the environment to execute this join
     pub env: Environment,
+    /// The same steps from each other scan that can start them, when more
+    /// than one can and one of them reads a range. A plan is a pure function
+    /// of the rule and its binding pattern, and how wide a range is depends
+    /// on the data and on the bounds of the call. So evaluation chooses:
+    /// see [`narrowest`](Self::narrowest). Empty on all other plans, which
+    /// ask the tree for nothing.
+    pub alternatives: Vec<Conjunction>,
 }
 
 impl Conjunction {
@@ -64,6 +72,11 @@ impl Conjunction {
     /// comparison above still filters its rows.
     pub fn bounded(&self, bounds: &[(String, Kind)]) -> Self {
         let mut bounded = self.clone();
+        bounded.alternatives = self
+            .alternatives
+            .iter()
+            .map(|alternative| alternative.bounded(bounds))
+            .collect();
         for step in &mut bounded.steps {
             let Plan::Scan(_, query) = step else {
                 continue;
@@ -101,6 +114,10 @@ impl Conjunction {
     where
         Env: crate::Scope<'a>,
     {
+        if !self.alternatives.is_empty() {
+            return self.evaluate_narrowest(Box::pin(selection), env);
+        }
+
         // A conjunction whose every step is an attribute scan sorted on the
         // same free variable is an equi-join on that variable (the shape a
         // concept's implicit rule always has). Such a run *can* be evaluated
@@ -116,6 +133,83 @@ impl Conjunction {
         }
 
         self.into_fold(selection, env)
+    }
+
+    /// Evaluate the plan that starts from the narrowest scan, chosen once,
+    /// on the first row. As with the choice of a merge, every row of a
+    /// selection shares one binding pattern, and how wide a range is follows
+    /// mostly from that pattern, so a walk of the tree for each row would
+    /// cost about what the scan does. An empty selection asks for nothing.
+    fn evaluate_narrowest<'a, Env>(
+        self,
+        selection: Pin<Box<dyn Selection + 'a>>,
+        env: &'a Env,
+    ) -> Pin<Box<dyn Selection + 'a>>
+    where
+        Env: crate::Scope<'a>,
+    {
+        Box::pin(crate::try_stream! {
+            let mut selection = Box::pin(selection.peekable());
+            let first = match selection.as_mut().peek().await {
+                Some(Ok(first)) => Some(first.clone()),
+                _ => None,
+            };
+            let plan = match first {
+                Some(first) => self.narrowest(&first, env).await,
+                None => self.without_alternatives(),
+            };
+            for await row in plan.evaluate(selection, env) {
+                yield row?;
+            }
+        })
+    }
+
+    /// This plan with no alternatives of its own.
+    fn without_alternatives(mut self) -> Self {
+        self.alternatives = Vec::new();
+        self
+    }
+
+    /// The alternative that starts from the scan with the narrowest range,
+    /// as the tree estimates it for `row`. Each estimate reads the two edge
+    /// paths of a range in each layer. A scan that cannot be turned into a
+    /// selector, or that the store cannot estimate, counts as maximally
+    /// broad, and a tie keeps the order of the fixed costs, so a store with
+    /// no estimates runs the plan it ran before.
+    async fn narrowest<Env>(mut self, row: &Match, env: &Env) -> Self
+    where
+        Env: Provider<Estimate> + ConditionalSync,
+    {
+        let alternatives = mem::take(&mut self.alternatives);
+        let mut best = self.start_size(row, env).await;
+        let mut chosen = self;
+        for alternative in alternatives {
+            let size = alternative.start_size(row, env).await;
+            if size < best {
+                best = size;
+                chosen = alternative;
+            }
+        }
+        chosen.without_alternatives()
+    }
+
+    /// The estimate of the range that the first scan of this plan reads.
+    async fn start_size<Env>(&self, row: &Match, env: &Env) -> u64
+    where
+        Env: Provider<Estimate> + ConditionalSync,
+    {
+        let selector = self.steps.iter().find_map(|step| match step {
+            Plan::Scan(_, query) => Some(query.resolved_selector(row)),
+            _ => None,
+        });
+        let Some(Ok(selector)) = selector else {
+            return u64::MAX;
+        };
+        Provider::<Estimate>::execute(env, selector)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or(u64::MAX)
     }
 
     /// The nested-loop fold: each step feeds its output to the next.

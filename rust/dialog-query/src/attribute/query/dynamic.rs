@@ -149,6 +149,12 @@ impl DynamicAttributeQuery {
         };
         let cause = self.cause().resolve(source);
         let resolved = AttributeQueryAll::lookup(the, of, is, cause);
+        // A marked scan's selector says so, for a tree that cannot use its bounds.
+        let resolved = if self.is_ranged() {
+            resolved.ranged()
+        } else {
+            resolved
+        };
         ArtifactSelector::try_from(&resolved)
     }
 

@@ -897,6 +897,198 @@ async fn it_answers_as_a_read_with_no_range_under_random_writes() -> Result<()> 
     Ok(())
 }
 
+/// The channels of the tests that compare a channel with a range.
+const CHANNELS: usize = 20;
+
+/// A narrow range starts the plan: the range `[180, 184)` holds 4 rows of each
+/// channel, 80 in all, and a channel holds 200. A wide range does not: `[0, 160)`
+/// holds 3,200 rows, so the plan starts from the channel. Each plan answers the rows
+/// of the one channel in the range.
+#[dialog_common::test]
+async fn it_starts_a_segment_from_whichever_scan_is_narrowest() -> Result<()> {
+    let (branch, operator) = opened(CHANNELS, 200).await?;
+    let general = channel(0);
+    let narrow = Segment {
+        channel: Some(&general),
+        lower: Some(180),
+        upper: Some(184),
+        fields: 5,
+    };
+    let (rows, read) = first_read(&branch, &operator, narrow).await?;
+    assert_eq!(numbers(&rows)?, (180..184).collect::<Vec<_>>());
+    assert!(
+        read <= 3 * 80 + 3 * 4,
+        "80 entries, 80 winners, 80 channels, and 3 fields of 4 rows, got {read}"
+    );
+
+    let wide = Segment {
+        channel: Some(&general),
+        lower: Some(0),
+        upper: Some(160),
+        fields: 5,
+    };
+    let (rows, read) = first_read(&branch, &operator, wide).await?;
+    assert_eq!(numbers(&rows)?, (0..160).collect::<Vec<_>>());
+    assert!(
+        read <= 6 * 200,
+        "the rows of the channel, and not the 3,200 of the range, got {read}"
+    );
+    Ok(())
+}
+
+/// The chat at its full size: a segment of 99 rows, over 100,000 messages in 20
+/// channels. Not part of the regular suite, because its fixture writes 500,000 facts:
+/// `cargo test -p dialog-repository --lib it_reads_a_segment_of_a_large_chat -- --ignored --nocapture`.
+#[dialog_common::test]
+#[ignore]
+async fn it_reads_a_segment_of_a_large_chat() -> Result<()> {
+    let (branch, operator) = opened(CHANNELS, 5_000).await?;
+    let general = channel(0);
+    let segment = Segment {
+        channel: Some(&general),
+        lower: Some(4_901),
+        upper: Some(5_000),
+        fields: 5,
+    };
+    let (rows, read) = first_read(&branch, &operator, segment).await?;
+    assert_eq!(numbers(&rows)?, (4_901..5_000).collect::<Vec<_>>());
+    println!("a segment of 99 rows reads {read} rows of the store");
+    assert!(
+        read <= 3 * 1_980 + 3 * 99,
+        "1,980 entries, as many winners and channels, and 3 fields of 99 rows, got {read}"
+    );
+    Ok(())
+}
+
+/// A live query keeps the cover of the plan that it took. A new message outside the
+/// range of a segment below the top is outside that cover, so the query reads nothing.
+#[dialog_common::test]
+async fn it_does_no_work_for_a_new_message_outside_the_range_of_a_segment() -> Result<()> {
+    let (branch, operator) = opened(CHANNELS, 200).await?;
+    let general = channel(0);
+    let segment = Segment {
+        channel: Some(&general),
+        lower: Some(180),
+        upper: Some(184),
+        fields: 5,
+    };
+    let mut subscription = branch
+        .query()
+        .with(segment.rule()?)
+        .subscribe(segment.query()?);
+    subscription.poll(&operator).await?.expect("the first read");
+    let read = subscription.rows_read();
+    let of: Entity = general.parse()?;
+    let this: Entity = "message:new".parse()?;
+    branch
+        .transaction()
+        .assert(
+            dialog_query::the!("chat.message/channel")
+                .of(this.clone())
+                .is(of),
+        )
+        .assert(
+            dialog_query::the!("chat.message/number")
+                .of(this.clone())
+                .is(600u64),
+        )
+        .assert(
+            dialog_query::the!("chat.message/author")
+                .of(this.clone())
+                .is("ana".to_string()),
+        )
+        .assert(
+            dialog_query::the!("chat.message/time")
+                .of(this.clone())
+                .is(600u64),
+        )
+        .assert(
+            dialog_query::the!("chat.message/text")
+                .of(this)
+                .is("hello".to_string()),
+        )
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    assert!(subscription.poll(&operator).await?.is_none());
+    assert_eq!(subscription.rows_read(), read);
+    Ok(())
+}
+
+/// The top segment has no upper bound, so a new message of another channel with a
+/// greater number lands in its cover. The query reads that one entity, and sends
+/// nothing, and a new message of its own channel reaches it as one row.
+#[dialog_common::test]
+async fn it_reads_one_entity_for_a_new_message_of_another_channel_in_the_top_segment() -> Result<()>
+{
+    let (branch, operator) = opened(CHANNELS, 200).await?;
+    let general = channel(0);
+    let segment = Segment {
+        channel: Some(&general),
+        lower: Some(195),
+        upper: None,
+        fields: 5,
+    };
+    let mut subscription = branch
+        .query()
+        .with(segment.rule()?)
+        .subscribe(segment.query()?);
+    let first = subscription.poll(&operator).await?.expect("the first read");
+    assert_eq!(numbers(&first.asserted)?, (195..200).collect::<Vec<_>>());
+    let post = |at: usize, name: &str, number: u64| -> Result<_> {
+        let of: Entity = channel(at).parse()?;
+        let this: Entity = format!("message:{name}").parse()?;
+        Ok(branch
+            .transaction()
+            .assert(
+                dialog_query::the!("chat.message/channel")
+                    .of(this.clone())
+                    .is(of),
+            )
+            .assert(
+                dialog_query::the!("chat.message/number")
+                    .of(this.clone())
+                    .is(number),
+            )
+            .assert(
+                dialog_query::the!("chat.message/author")
+                    .of(this.clone())
+                    .is("ana".to_string()),
+            )
+            .assert(
+                dialog_query::the!("chat.message/time")
+                    .of(this.clone())
+                    .is(number),
+            )
+            .assert(
+                dialog_query::the!("chat.message/text")
+                    .of(this)
+                    .is("hello".to_string()),
+            ))
+    };
+    let read = subscription.rows_read();
+    post(1, "other", 600)?
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    if let Some(delta) = subscription.poll(&operator).await? {
+        assert!(delta.asserted.is_empty() && delta.retracted.is_empty());
+    }
+    let cost = subscription.rows_read() - read;
+    assert!(cost <= 12, "the cells of one entity, got {cost}");
+
+    post(0, "own", 601)?
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    let delta = subscription.poll(&operator).await?.expect("a new row");
+    assert_eq!(numbers(&delta.asserted)?, vec![601]);
+    Ok(())
+}
+
 /// A sized kind reads 5.5 as 5, and `<= 5` keeps what it reads, though the stored
 /// number stands above the bound. The row stays, as with no range.
 #[dialog_common::test]
@@ -1042,5 +1234,98 @@ async fn it_answers_nothing_when_bounds_cross_over_a_session_store() -> Result<(
     )
     .await?;
     assert_eq!(rows, Vec::<String>::new());
+    Ok(())
+}
+
+/// On a tree with a band for each number type, a constant number is an exact key to a
+/// scan and a lens to a read of a cell, so which scan starts could decide whether a row
+/// answers. The choice of a start keeps the fixed order there, so a row does not depend
+/// on how many rows of other channels stand in the range.
+#[dialog_common::test]
+async fn it_keeps_the_fixed_order_on_a_tree_that_is_not_migrated() -> Result<()> {
+    let lens_row_answers = |others: u64| async move {
+        let (branch, operator) = opened(0, 0).await?;
+        let lens: Entity = "message:lens".parse()?;
+        branch
+            .transaction()
+            .assert(
+                dialog_query::the!("chat.message/channel")
+                    .of(lens.clone())
+                    .is(1.5f64),
+            )
+            .assert(dialog_query::the!("chat.message/number").of(lens).is(5u64))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        let mut transaction = branch.transaction();
+        for at in 0..300u64 {
+            let this: Entity = format!("message:one-{at}").parse()?;
+            transaction = transaction
+                .assert(
+                    dialog_query::the!("chat.message/channel")
+                        .of(this.clone())
+                        .is(1u64),
+                )
+                .assert(dialog_query::the!("chat.message/number").of(this).is(5u64));
+        }
+        for at in 0..others {
+            let this: Entity = format!("message:other-{at}").parse()?;
+            transaction = transaction
+                .assert(
+                    dialog_query::the!("chat.message/channel")
+                        .of(this.clone())
+                        .is(2u64),
+                )
+                .assert(
+                    dialog_query::the!("chat.message/number")
+                        .of(this)
+                        .is(5u64 + at % 3),
+                );
+        }
+        transaction.commit().publish().perform(&operator).await?;
+        branch.rekey_storage(0).perform(&operator).await?;
+
+        let field = |the: &str| json!({ "the": the, "as": "natural:" });
+        let variable = |name: &str| json!({ "?": { "name": name } });
+        let head = json!({ "with": {
+            "channel": field("test.segment/channel"),
+            "number": field("test.segment/number")
+        }});
+        let descriptor: DeductiveRuleDescriptor = serde_json::from_value(json!({
+            "deduce": head.clone(),
+            "when": [
+                {
+                    "assert": { "with": {
+                        "channel": field("chat.message/channel"),
+                        "number": field("chat.message/number")
+                    }},
+                    "where": {
+                        "this": variable("this"),
+                        "channel": variable("channel"),
+                        "number": variable("number")
+                    }
+                },
+                { "assert": "==", "where": { "this": variable("channel"), "is": 1 } },
+                { "assert": ">=", "where": { "of": variable("number"), "with": 5 } },
+                { "assert": "<", "where": { "of": variable("number"), "with": 6 } }
+            ],
+        }))?;
+        let predicate: ConceptDescriptor = serde_json::from_value(head)?;
+        let mut terms = Parameters::new();
+        terms.insert("this".into(), Term::var("this"));
+        terms.insert("channel".into(), Term::var("channel"));
+        terms.insert("number".into(), Term::var("number"));
+        let query = ConceptQuery { predicate, terms };
+        let mut subscription = branch.query().with(descriptor.compile()?).subscribe(query);
+        let first = subscription.poll(&operator).await?.expect("the first read");
+        anyhow::Ok(
+            first
+                .asserted
+                .iter()
+                .any(|row| row.entity().to_string() == "message:lens"),
+        )
+    };
+    assert_eq!(lens_row_answers(0).await?, lens_row_answers(300).await?);
     Ok(())
 }
