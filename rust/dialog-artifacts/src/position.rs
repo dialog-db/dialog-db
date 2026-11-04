@@ -937,13 +937,15 @@ mod tests {
     /// the same one.
     #[dialog_common::test]
     fn it_disperses_members_that_share_a_prefix() {
+        use std::collections::BTreeSet;
+
         let members = [
             "did:key:z6Mk8Zd4DSY5RqsmJeB1U8AXw1swKBQDG4oUUGm6X7W6dWfq",
             "did:key:z6MkHcggCT8Uuz74QoCBpGa6Kv45NMZHEKm9ZsTMR2GyjoXB",
             "did:key:z6Mk6LNJD7BAhSQMYuotSbBQU7h2t7MqFRVD8ophnvzSFUVN",
             "did:key:z6MkE3wZ5GHZddSstPkiA66tk8iLWzAUhJfKq2ZVvtv8ivUo",
         ];
-        let biases: std::collections::BTreeSet<Vec<u8>> = members
+        let biases: BTreeSet<Vec<u8>> = members
             .iter()
             .map(|member| bias(member.as_bytes()).0)
             .collect();
@@ -951,7 +953,7 @@ mod tests {
 
         let low = position("N");
         let high = position("O");
-        let positions: std::collections::BTreeSet<Position> = members
+        let positions: BTreeSet<Position> = members
             .iter()
             .map(|member| insert(&bias(member.as_bytes()), &low..&high).expect("derives"))
             .collect();
