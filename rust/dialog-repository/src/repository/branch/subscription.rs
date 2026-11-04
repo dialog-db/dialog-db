@@ -70,7 +70,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::ops::RangeInclusive;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::repository::fetch::Driven;
@@ -119,6 +119,9 @@ const MAINTAIN_WINDOW: usize = 16;
 pub struct Demand {
     /// Ranges read by fact scans: the query's data demand.
     facts: Arc<Mutex<Ranges>>,
+    /// The rows that the fact scans of this cover's subscription gave to its
+    /// evaluations so far, whichever cover recorded them.
+    rows: Arc<AtomicUsize>,
     /// Ranges read by rule-discovery scans (`dialog.rule/*`). Kept
     /// apart because a change here can install a rule, which can
     /// affect any row — it invalidates the whole result, not one
@@ -255,6 +258,30 @@ impl Demand {
         if selects_head(selector, &metadata) {
             self.head.store(true, Ordering::Relaxed);
         }
+    }
+
+    /// `rows`, a stream of a fact scan that this cover recorded, counting each
+    /// row that it gives.
+    pub(crate) fn counting<'a>(
+        &self,
+        rows: dialog_artifacts::ArtifactStream<'a>,
+    ) -> dialog_artifacts::ArtifactStream<'a> {
+        let count = Arc::clone(&self.rows);
+        Box::pin(futures_util::StreamExt::inspect(rows, move |_| {
+            count.fetch_add(1, Ordering::Relaxed);
+        }))
+    }
+
+    /// The rows that a fact scan gave so far.
+    pub(crate) fn rows_read(&self) -> usize {
+        self.rows.load(Ordering::Relaxed)
+    }
+
+    /// Takes the count of rows from `earlier`, the cover that this one
+    /// replaces, so that the count goes on across evaluations.
+    fn counting_on(mut self, earlier: &Demand) -> Self {
+        self.rows = Arc::clone(&earlier.rows);
+        self
     }
 
     /// Anchor the branch entity that carries the head-bearing
@@ -852,6 +879,13 @@ where
         &self.demand
     }
 
+    /// The rows that the evaluations of this subscription read so far, from
+    /// each fact scan. A host can compare it across two polls, to measure what
+    /// one evaluation costs.
+    pub fn rows_read(&self) -> usize {
+        self.demand.rows_read()
+    }
+
     /// Full evaluations performed so far (the first poll plus every
     /// fallback from incremental maintenance).
     pub fn recomputes(&self) -> usize {
@@ -1084,7 +1118,7 @@ where
             for observer in &self.observers {
                 observer.retarget_everything();
             }
-            let demand = Demand::new();
+            let demand = Demand::new().counting_on(&self.demand);
             let results = self.evaluate(env, &demand, &self.query).await?;
             self.recomputes += 1;
 
