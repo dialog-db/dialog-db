@@ -68,3 +68,89 @@ pub async fn repoll(size: usize) -> Result<Box<dyn Prepared>> {
     );
     Ok(Box::new(Repoll { env, subscription }))
 }
+
+/// The note concept a per-entity display reads: a title and a body.
+fn note() -> dialog_query::ConceptDescriptor {
+    crate::env::concept(serde_json::json!({ "with": {
+        "title": { "the": "note/title", "as": "text:" },
+        "body": { "the": "note/body", "as": "text:" }
+    }}))
+}
+
+struct Fanout {
+    env: Env,
+    subscriptions: Vec<Subscription<ConceptQuery>>,
+    size: usize,
+}
+
+impl Prepared for Fanout {
+    fn env(&self) -> &Env {
+        &self.env
+    }
+
+    fn measure<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = Result<Outcome>> + 'a>> {
+        Box::pin(async move {
+            let added = entity("note", self.size);
+            self.env
+                .commit(assert_all(
+                    [
+                        fact(&added, "note/title", text("new")),
+                        fact(&added, "note/body", text("written elsewhere")),
+                    ],
+                    Pick::Last,
+                ))
+                .await?;
+            let mut changed = 0u64;
+            for subscription in &mut self.subscriptions {
+                if subscription.poll(&self.env.operator).await?.is_some() {
+                    changed += 1;
+                }
+            }
+            Ok(Outcome::from([
+                ("subscriptions".into(), self.subscriptions.len() as u64),
+                ("changed".into(), changed),
+            ]))
+        })
+    }
+}
+
+/// `subscribe-fanout`: `size` notes, one subscription to each note's
+/// fields (as a list view renders one display per item) and one to the
+/// list; then a commit adding a note and a poll of every subscription.
+pub async fn fanout(size: usize) -> Result<Box<dyn Prepared>> {
+    let mut env = Env::open().await?;
+    let facts = (0..size).flat_map(|index| {
+        let this = entity("note", index);
+        [
+            fact(&this, "note/title", text(format!("Note {index}"))),
+            fact(
+                &this,
+                "note/body",
+                text(format!(
+                    "Body of note {index}, long enough to be a real payload."
+                )),
+            ),
+        ]
+    });
+    env.commit(assert_all(facts, Pick::Last)).await?;
+    env.reopen().await?;
+    let mut subscriptions = vec![
+        env.branch
+            .subscribe(query(&note(), &["title", "body"], None)),
+    ];
+    for index in 0..size {
+        subscriptions.push(env.branch.subscribe(query(
+            &note(),
+            &["title", "body"],
+            Some(&entity("note", index)),
+        )));
+    }
+    for subscription in &mut subscriptions {
+        subscription.poll(&env.operator).await?;
+    }
+    Ok(Box::new(Fanout {
+        env,
+        subscriptions,
+        size,
+    }))
+}

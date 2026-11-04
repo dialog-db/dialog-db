@@ -278,6 +278,14 @@ pub fn catalog() -> Vec<Spec> {
             cross_cpu_pct: 0.0,
             prepare: |size| Box::pin(subscribe::repoll(size)),
         },
+        Spec {
+            name: "subscribe-fanout",
+            size: 200,
+            about: "a commit adding one note, then the poll of a subscription per note and one to the list",
+            volatile: false,
+            cross_cpu_pct: 0.0,
+            prepare: |size| Box::pin(subscribe::fanout(size)),
+        },
     ]
 }
 
