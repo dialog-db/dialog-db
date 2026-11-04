@@ -761,8 +761,13 @@ async fn committed_placements(
         if placed_name(&claim.of).is_none() {
             continue;
         }
-        let scope = scope_value(&claim.of.to_string(), &claim.is)?;
-        declared.placed.place(&claim.of, scope);
+        // A peer can bring a declaration whose value names no scope. It places
+        // nothing, and each read and each commit of the layer goes on. A commit
+        // that writes such a declaration itself still fails, in `resolve`.
+        match scope_value(&claim.of.to_string(), &claim.is) {
+            Ok(scope) => declared.placed.place(&claim.of, scope),
+            Err(error) => tracing::warn!(%error, "ignoring a placement that names no scope"),
+        }
     }
     // One default per repository; a layer reads the one for its own
     // repository. Any other subject is ignored.
@@ -770,7 +775,10 @@ async fn committed_placements(
     let repository = source.subject().did().this();
     for claim in committed(source, defaults_selector(), env).await? {
         if claim.of == repository {
-            declared.default = Some(scope_value("dialog.attribute/default", &claim.is)?);
+            match scope_value("dialog.attribute/default", &claim.is) {
+                Ok(scope) => declared.default = Some(scope),
+                Err(error) => tracing::warn!(%error, "ignoring a default that names no scope"),
+            }
         }
     }
     for claim in committed(source, transients_selector(), env).await? {
