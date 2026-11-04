@@ -182,6 +182,23 @@ vs 160.3 MiB, tokens+frames 9.1 vs 9.0 MiB). A replica that pulled its
 history from a peer wrote those files when it pulled, so its order, and
 with it the delta models, is only as good as its file times.
 
+The census can also rebuild a replica's commits when its archive holds
+only the head tree, as a replica that pulled its history does:
+
+```sh
+cargo run --release -p dialog-baseline --example single_file_census -- \
+  history path/to/replica
+```
+
+`path/to/replica` holds `archive/` and `blob/`. The head tree's history
+region keeps one record per claim every revision made, under that
+revision's version, so grouping records by version and replaying the
+groups in edition order reproduces the commit sequence through today's
+code. Concurrent writers' revisions replay as one line, not as merges.
+Checked the same way: the 1024-commit replay on disk rebuilds as exactly
+1024 revisions and 2590 claims, and replays to 159.5 MiB written against
+160.3 MiB for the original.
+
 ## Not done
 
 - **tonk-team, or a replica like the 2 GB one.** The doc asks for it

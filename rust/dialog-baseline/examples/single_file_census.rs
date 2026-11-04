@@ -58,25 +58,32 @@
 //!   archive path/to/replica/archive
 //! ```
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
+use base58::ToBase58 as _;
+use dialog_artifacts::history::{Edition, Record};
+use dialog_artifacts::tree::{ArtifactTree, fetch_spilled};
 use dialog_artifacts::{
-    ATTRIBUTE_KEY_TAG, BLOB_KEY_TAG, Datum, ENTITY_KEY_TAG, Key, State, VALUE_KEY_TAG,
+    ATTRIBUTE_KEY_TAG, Artifact, BLOB_KEY_TAG, Datum, DialogArtifactsError, ENTITY_KEY_TAG,
+    Instruction, Key, LoadBlob, Pick, State, VALUE_KEY_TAG, history_region_range,
 };
 use dialog_baseline::metered::Meter;
 use dialog_baseline::nodes::TreeNode;
 use dialog_baseline::repo::DialogRepo;
 use dialog_baseline::se::{SeLog, se_instructions};
+use dialog_capability::Provider;
 use dialog_common::{Blake3Hash, Buffer};
 use dialog_search_tree::{
-    Entry, Key as TreeKey, Link, Manifest, NodeBody, NoveltyBuffer, NoveltyEntry, NoveltyOp,
-    PersistentNodeBody, PersistentSegment, Scale, Separator, into_owned,
+    DialogSearchTreeError, Entry, Key as TreeKey, Link, LoadBlock, Manifest, MemoryBlocks,
+    NodeBody, Nodes, NoveltyBuffer, NoveltyEntry, NoveltyOp, PersistentNodeBody, PersistentSegment,
+    Scale, Separator, into_owned,
 };
+use futures_util::TryStreamExt as _;
 
 /// Get-by-hash index entry per block in the log models: the hash and an
 /// 8-byte offset.
@@ -696,20 +703,34 @@ fn parse_nodes<'a>(blocks: impl IntoIterator<Item = &'a Written>) -> HashMap<Bla
 /// branch, recording every block its archive is asked to store.
 fn replay(count: usize) -> anyhow::Result<Source> {
     let log = SeLog::load(count)?;
+    let commits = log
+        .transactions
+        .iter()
+        .map(|commit| se_instructions(commit))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    replay_commits(commits)
+}
+
+/// Commits each batch of `commits` in turn through an in-memory branch,
+/// recording every block its archive is asked to store.
+fn replay_commits(commits: Vec<Vec<Instruction>>) -> anyhow::Result<Source> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
     let recorder = Recorder::default();
-    let mut roots: Vec<Blake3Hash> = Vec::with_capacity(log.transactions.len());
+    let mut roots: Vec<Blake3Hash> = Vec::with_capacity(commits.len());
+    let facts: usize = commits.iter().map(Vec::len).sum();
+    let count = commits.len();
     let started = Instant::now();
     runtime.block_on(async {
         let repo = DialogRepo::metered(recorder.clone()).await?;
-        for (at, commit) in log.transactions.iter().enumerate() {
+        for (at, commit) in commits.into_iter().enumerate() {
             recorder.commit.store(at + 1, Ordering::Relaxed);
             repo.branch()
                 .transaction()
-                .integrate(se_instructions(commit)?.into_iter().collect())
+                .integrate(commit.into_iter().collect())
                 .commit()
+                .allow_empty()
                 .publish()
                 .perform(repo.operator())
                 .await?;
@@ -718,9 +739,7 @@ fn replay(count: usize) -> anyhow::Result<Source> {
         anyhow::Ok(())
     })?;
     eprintln!(
-        "replayed {} commits ({} facts) in {:.1}s",
-        log.transactions.len(),
-        log.fact_count(),
+        "replayed {count} commits ({facts} instructions) in {:.1}s",
         started.elapsed().as_secs_f64()
     );
     let written = std::mem::take(&mut recorder.blocks.lock().expect("recorder lock").1);
@@ -879,6 +898,124 @@ fn scan(directory: &Path) -> anyhow::Result<Source> {
     })
 }
 
+/// A replica's file-per-block store, read as an archive the artifact tree
+/// can load nodes and spilled values from: nodes from memory, spilled
+/// values from the replica's blob directory.
+#[derive(Clone)]
+struct Replica {
+    nodes: MemoryBlocks,
+    blobs: PathBuf,
+}
+
+#[async_trait::async_trait]
+impl Provider<LoadBlock> for Replica {
+    async fn execute(
+        &self,
+        LoadBlock { hash }: LoadBlock,
+    ) -> Result<Option<Buffer>, DialogSearchTreeError> {
+        Ok(self.nodes.get(&hash))
+    }
+}
+
+impl Nodes<Key, State<Datum>> for Replica {}
+
+#[async_trait::async_trait]
+impl Provider<LoadBlob> for Replica {
+    async fn execute(
+        &self,
+        LoadBlob { hash }: LoadBlob,
+    ) -> Result<Option<Buffer>, DialogArtifactsError> {
+        Ok(std::fs::read(self.blobs.join(hash.as_bytes().to_base58()))
+            .ok()
+            .map(Buffer::from))
+    }
+}
+
+/// The commits of a replica, rebuilt from its head tree: the history
+/// region keeps one record per claim every revision made, under that
+/// revision's version, with the claim, its polarity and the versions it
+/// superseded. Records are grouped by version and the groups ordered by
+/// edition, then origin, which is a causal order of the revisions but
+/// replays concurrent writers' revisions as one line rather than merging
+/// them. A record that superseded something becomes an assert that
+/// replaces the newest claim of its cell; one that did not, an additive
+/// assert; a retraction, a retraction. A spilled value whose bytes the
+/// replica does not hold is replayed as a stand-in of a spilling size, so
+/// the tree's keys keep their shape.
+fn history(directory: &Path) -> anyhow::Result<Vec<Vec<Instruction>>> {
+    let archive = scan(&directory.join("archive"))?;
+    let head = archive
+        .blocks
+        .iter()
+        .rev()
+        .find(|block| archive.roots.contains(&block.hash))
+        .map(|block| block.hash.clone())
+        .ok_or_else(|| anyhow::anyhow!("the archive holds no tree root"))?;
+    let replica = Replica {
+        nodes: MemoryBlocks::new(),
+        blobs: directory.join("blob"),
+    };
+    for block in &archive.blocks {
+        replica.nodes.store(block.bytes.clone());
+    }
+    drop(archive);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let mut revisions: BTreeMap<(Edition, [u8; 32]), Vec<Instruction>> = BTreeMap::new();
+    let mut stand_ins = 0usize;
+    runtime.block_on(async {
+        let tree = ArtifactTree::from_hash(head.clone());
+        let (from, to) = history_region_range();
+        let stream = tree.stream_range(from..=to, &replica);
+        futures_util::pin_mut!(stream);
+        while let Some(entry) = stream.try_next().await? {
+            let State::Added(datum) = entry.value else {
+                continue;
+            };
+            let Some(version) = datum.version else {
+                continue;
+            };
+            let spilled = match fetch_spilled(&replica, &entry.key).await {
+                Ok(spilled) => spilled,
+                Err(_) => {
+                    stand_ins += 1;
+                    Some(vec![b'x'; 8192])
+                }
+            };
+            let record = Record::try_from_key_datum_with_value(&entry.key, datum, spilled)?;
+            let assertion = record.is_assertion();
+            let claim = record.claim().clone();
+            let superseding = !claim.cause.versions().is_empty();
+            let artifact = Artifact {
+                the: claim.the,
+                of: claim.of,
+                is: claim.is,
+                cause: None,
+            };
+            let instruction = match (assertion, superseding) {
+                (true, true) => Instruction::Assert(artifact, Pick::Last),
+                (true, false) => Instruction::Assert(artifact, Pick::All),
+                (false, _) => Instruction::Retract(artifact),
+            };
+            revisions
+                .entry((version.edition, version.origin.0))
+                .or_default()
+                .push(instruction);
+        }
+        anyhow::Ok(())
+    })?;
+    let origins: HashSet<[u8; 32]> = revisions.keys().map(|(_, origin)| *origin).collect();
+    eprintln!(
+        "history of {}: head {head}, {} revisions from {} origins, {} claims, {stand_ins} spilled values stood in for",
+        directory.display(),
+        revisions.len(),
+        origins.len(),
+        revisions.values().map(Vec::len).sum::<usize>(),
+    );
+    Ok(revisions.into_values().collect())
+}
+
 /// Parses `raw` as a comma-separated list of commit counts, kept within
 /// `count` and ending at it.
 fn checkpoints(raw: Option<String>, count: usize) -> Vec<usize> {
@@ -903,6 +1040,14 @@ fn main() -> anyhow::Result<()> {
                 .next()
                 .ok_or_else(|| anyhow::anyhow!("usage: archive <directory> [checkpoints]"))?;
             let source = scan(Path::new(&directory))?;
+            let count = source.roots.len();
+            (source, checkpoints(args.next(), count))
+        }
+        "history" => {
+            let directory = args.next().ok_or_else(|| {
+                anyhow::anyhow!("usage: history <replica directory> [checkpoints]")
+            })?;
+            let source = replay_commits(history(Path::new(&directory))?)?;
             let count = source.roots.len();
             (source, checkpoints(args.next(), count))
         }
