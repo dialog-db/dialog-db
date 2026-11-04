@@ -36,6 +36,7 @@ use futures_util::{StreamExt, TryStreamExt, stream};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Display;
+use std::future;
 use std::mem;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -77,6 +78,23 @@ fn extract_parameters(source: &Match, terms: &Parameters) -> Result<Match, Evalu
     }
 
     Ok(matched)
+}
+
+/// [`merge_parameters`] for a row of a concept's plan. A value that the kind
+/// of the caller's term does not read is a non-match, as it is for a scan
+/// ([`AttributeQueryAll::admit`](crate::attribute::query::all)): `?n >= 3`
+/// makes `?n` a natural, and a concept's row of `-4` falls out. The concept
+/// read the row through its own declared type, so only the merge can see it.
+fn merge_row(
+    base: &Match,
+    result: &Match,
+    terms: &Parameters,
+) -> Result<Option<Match>, EvaluationError> {
+    match merge_parameters(base, result, terms) {
+        Ok(merged) => Ok(Some(merged)),
+        Err(EvaluationError::KindMismatch { .. }) => Ok(None),
+        Err(error) => Err(EvaluationError::Store(error.to_string())),
+    }
 }
 
 /// Merge a Match with parameter names back into a Match with user
@@ -748,15 +766,16 @@ impl ConceptQuery {
         });
         let results = plan.clone().evaluate(scoped, env);
         if elect.is_none() && !widen {
-            return Box::pin(results.map(move |result| {
-                let mut result = result?;
-                let caller = result.take_caller().ok_or_else(|| {
-                    EvaluationError::Store(
-                        "a concept's result lost the row it was evaluated for".to_string(),
-                    )
-                })?;
-                merge_parameters(&caller, &result, &back)
-                    .map_err(|e| EvaluationError::Store(e.to_string()))
+            return Box::pin(results.filter_map(move |result| {
+                let merged = result.and_then(|mut result| {
+                    let caller = result.take_caller().ok_or_else(|| {
+                        EvaluationError::Store(
+                            "a concept's result lost the row it was evaluated for".to_string(),
+                        )
+                    })?;
+                    merge_row(&caller, &result, &back)
+                });
+                future::ready(merged.transpose())
             }));
         }
         // An attribute concept read under a pick: what the pick
@@ -777,8 +796,9 @@ impl ConceptQuery {
                 let caller_id = Arc::as_ptr(&caller) as usize;
                 matched.insert(caller_id);
                 if elect.is_none() {
-                    yield merge_parameters(&caller, &result, &back)
-                        .map_err(|e| EvaluationError::Store(e.to_string()))?;
+                    if let Some(merged) = merge_row(&caller, &result, &back)? {
+                        yield merged;
+                    }
                     continue;
                 }
                 let this = match result.lookup(&Term::<Any>::var("this")) {
@@ -810,8 +830,9 @@ impl ConceptQuery {
                         if !agrees(&result, &caller, &back, &[ConceptDescriptor::VALUE, &key_operand])? {
                             continue;
                         }
-                        yield merge_parameters(&caller, &result, &back)
-                            .map_err(|e| EvaluationError::Store(e.to_string()))?;
+                        if let Some(merged) = merge_row(&caller, &result, &back)? {
+                            yield merged;
+                        }
                     }
                 }
             }
