@@ -120,7 +120,7 @@ use thiserror::Error;
 mod guide;
 
 pub use guide::Divergence;
-pub(crate) use guide::{Divergences, Guide, GuidedLayer};
+pub(crate) use guide::{Divergences, Guide, GuidedLayer, RuleShape};
 
 use crate::placement::{Bindings, Placements, Target, elected};
 use crate::repository::branch::QueryLayer;
@@ -3299,6 +3299,11 @@ where
     pub fn maintenances(&self) -> usize {
         self.inner.maintenances()
     }
+
+    /// The demand cover of the last evaluation.
+    pub fn demand(&self) -> &crate::Demand {
+        self.inner.demand()
+    }
 }
 
 /// The layers that a write of `artifact` lands in, by its placement: the
@@ -3374,8 +3379,8 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
-    use crate::Placement;
     use crate::helpers::test_repo;
+    use crate::{DefaultScope, Placement, PrefixPlacement};
     use crate::{Demand, Drained};
     use anyhow::Result;
     use dialog_artifacts::{ArtifactSelector, Value};
@@ -6052,9 +6057,14 @@ mod tests {
                 }
             }]
         }))?;
+        // A first commit gives the bottom a watermark for the lag to run from.
         shared
             .transaction()
-            .assert(notice)
+            .assert(
+                dialog_query::the!("note/first")
+                    .of("note:first".parse::<Entity>()?)
+                    .is("hi".to_string()),
+            )
             .commit()
             .publish()
             .perform(&operator)
@@ -6069,6 +6079,9 @@ mod tests {
             .overlay()
             .assert(crate::TransientAttribute::new("notice/seen".parse()?))?;
         let application = Ephemeral::create().perform(&operator).await;
+        let mut rule = Changes::new();
+        notice.assert(&mut rule);
+        application.apply(rule)?;
         let top = Ephemeral::create().perform(&operator).await;
         let stack = Stack::open(top.clone())
             .link(&top, &application, name("application"))
@@ -6667,14 +6680,6 @@ mod tests {
                 }
             }]
         }))?;
-        shared
-            .transaction()
-            .assert(copy)
-            .commit()
-            .publish()
-            .perform(&operator)
-            .await?;
-        shared.refresh(&operator).await?;
         let (stack, application, _) = read_only_stack(&operator, &shared, &index).await?;
         let (index_head, shared_head) = (index.revision(), shared.revision());
         let note: Entity = "note:1".parse()?;
@@ -6691,6 +6696,7 @@ mod tests {
                     .is("Eve".to_string()),
             )
             .dispatch(dialog_query::the!("cmd/open").of(note.clone()).is(true))
+            .dispatch(copy)
             .commit()
             .perform(&operator)
             .await;
@@ -7091,14 +7097,6 @@ mod tests {
             }]
         }))?;
         shared
-            .transaction()
-            .assert(derive)
-            .commit()
-            .publish()
-            .perform(&operator)
-            .await?;
-        shared.refresh(&operator).await?;
-        shared
             .overlay()
             .assert(Placement::new("idx/sync".parse()?, name("device")))?
             .assert(crate::TransientAttribute::new("idx/sync".parse()?))?;
@@ -7128,6 +7126,7 @@ mod tests {
                     .of(note.clone())
                     .is("hi".to_string()),
             )
+            .dispatch(derive)
             .commit()
             .perform(&operator)
             .await;
@@ -7538,14 +7537,6 @@ mod tests {
             }]
         }))?;
         space
-            .transaction()
-            .assert(command)
-            .commit()
-            .publish()
-            .perform(&operator)
-            .await?;
-        space.refresh(&operator).await?;
-        space
             .overlay()
             .assert(Placement::new(
                 "cmd.create/name".parse()?,
@@ -7575,6 +7566,7 @@ mod tests {
                     .of("intent:zI".parse::<Entity>()?)
                     .is("Garden".to_string()),
             )
+            .dispatch(command)
             .commit()
             .perform(&operator)
             .await?;
@@ -7656,14 +7648,6 @@ mod tests {
             }]
         }))?;
         shared
-            .transaction()
-            .assert(misplace)
-            .commit()
-            .publish()
-            .perform(&operator)
-            .await?;
-        shared.refresh(&operator).await?;
-        shared
             .overlay()
             .assert(Placement::new("lost/name".parse()?, name("nowhere")))?
             .assert(Placement::new("app/note".parse()?, name("application")))?;
@@ -7671,6 +7655,7 @@ mod tests {
 
         assert!(
             create_garden(&stack)?
+                .dispatch(misplace)
                 .commit()
                 .perform(&operator)
                 .await
@@ -7789,14 +7774,6 @@ mod tests {
                 }
             }]
         }))?;
-        shared
-            .transaction()
-            .assert(notice)
-            .commit()
-            .publish()
-            .perform(&operator)
-            .await?;
-        shared.refresh(&operator).await?;
         for attribute in ["result/status", "notice/seen"] {
             shared
                 .overlay()
@@ -7806,6 +7783,9 @@ mod tests {
             .overlay()
             .assert(crate::TransientAttribute::new("notice/seen".parse()?))?;
         let application = Ephemeral::create().perform(&operator).await;
+        let mut rule = Changes::new();
+        notice.assert(&mut rule);
+        application.apply(rule)?;
         let top = Ephemeral::create().perform(&operator).await;
         let stack = Stack::open(top.clone())
             .link(&top, &application, name("application"))
@@ -8194,7 +8174,12 @@ mod tests {
         );
         application.apply(result)?;
         for _ in 0..2 {
-            let refused = stack.transaction().commit().perform(&operator).await;
+            let refused = stack
+                .transaction()
+                .dispatch(record_results()?)
+                .commit()
+                .perform(&operator)
+                .await;
             assert!(
                 matches!(
                     refused,
@@ -8254,6 +8239,7 @@ mod tests {
         assert!(
             stack
                 .transaction()
+                .dispatch(record_results()?)
                 .commit()
                 .perform(&operator)
                 .await
@@ -9085,6 +9071,637 @@ mod tests {
                 .len(),
             1,
             "an empty transaction's view is the stack's"
+        );
+        Ok(())
+    }
+
+    /// The values of `the` that a query of its concept answers, facts and
+    /// rules alike. An attribute query reads stored facts alone.
+    async fn concluded(
+        layer: StackSelect<dialog_query::ConceptQuery>,
+        env: &impl StackEnv,
+    ) -> Result<Vec<Value>> {
+        let rows = layer.perform(env).try_vec().await?;
+        Ok(pairs(&rows).into_iter().map(|(_, value)| value).collect())
+    }
+
+    /// A query of the concept with the one attribute `the`.
+    fn named(the: &str) -> Result<dialog_query::ConceptQuery> {
+        let predicate: dialog_query::ConceptDescriptor =
+            serde_json::from_value(serde_json::json!({ "with": {
+                "value": { "the": the, "as": "text:" }
+            }}))?;
+        let mut terms = dialog_query::Parameters::new();
+        terms.insert("this".into(), Term::var("this"));
+        terms.insert("value".into(), Term::var("value"));
+        Ok(dialog_query::ConceptQuery { predicate, terms })
+    }
+
+    /// A deductive rule that gives `head` the name of each `test.source`
+    /// row.
+    fn naming_rule(head: &str) -> Result<dialog_query::DeductiveRule> {
+        Ok(serde_json::from_value(serde_json::json!({
+            "deduce": { "with": { "name": { "the": head, "as": "text:" } } },
+            "when": [{
+                "assert": { "with": { "name": { "the": "test.source/name", "as": "text:" } } },
+                "where": {
+                    "this": { "?": { "name": "this" } },
+                    "name": { "?": { "name": "name" } }
+                }
+            }]
+        }))?)
+    }
+
+    /// An inductive rule that writes `head` for each `test.command/name`.
+    fn firing_rule(head: &str) -> Result<dialog_query::InductiveRule> {
+        Ok(serde_json::from_value(serde_json::json!({
+            "assert!": { "with": { "name": { "the": head, "as": "text:" } } },
+            "when": [{
+                "assert": { "with": { "name": { "the": "test.command/name", "as": "text:" } } },
+                "where": {
+                    "this": { "?": { "name": "this" } },
+                    "name": { "?": { "name": "name" } }
+                }
+            }]
+        }))?)
+    }
+
+    /// `test.source/name` of `row` in `shared`, and a stack over it: the
+    /// ephemeral layer `state` under `memory:state`, `other` under
+    /// `memory:other`, both beside the bottom, which is under `memory:shared`.
+    async fn scoped_stack(
+        operator: &impl StackSyncEnv,
+        shared: &Branch,
+        row: &Entity,
+    ) -> Result<(Stack, Ephemeral, Ephemeral)> {
+        shared
+            .transaction()
+            .assert(
+                dialog_query::the!("test.source/name")
+                    .of(row.clone())
+                    .is("Ana".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(operator)
+            .await?;
+        shared.refresh(operator).await?;
+        let state = Ephemeral::create().perform(operator).await;
+        let other = Ephemeral::create().perform(operator).await;
+        let top = Ephemeral::create().perform(operator).await;
+        let stack = Stack::open(top.clone())
+            .link(&top, shared, name("shared"))
+            .link(&top, &state, name("state"))
+            .link(&top, &other, name("other"))
+            .perform(operator)
+            .await?;
+        Ok((stack, state, other))
+    }
+
+    /// Writes one `the` fact through the stack, and answers which of the
+    /// bottom, `state`, and `other` took it.
+    async fn landed_in(
+        stack: &Stack,
+        operator: &impl StackSyncEnv,
+        shared: &Branch,
+        layers: [&Ephemeral; 2],
+        the: &str,
+    ) -> Result<&'static str> {
+        let row: Entity = format!("row:{the}").parse()?;
+        let relation: dialog_artifacts::Relation = the.parse()?;
+        let statement = AttributeStatement {
+            the: Relation::from(relation.clone()),
+            of: row.clone(),
+            is: Value::String("x".into()),
+            cause: None,
+            cardinality: Some(dialog_query::Cardinality::One),
+            pick: None,
+        };
+        stack
+            .transaction()
+            .assert(statement)
+            .commit()
+            .publish()
+            .perform(operator)
+            .await?;
+        shared.refresh(operator).await?;
+        let selector = ArtifactSelector::new().the(relation).of(row.clone());
+        if !layers[0].scan(&selector).is_empty() {
+            return Ok("state");
+        }
+        if !layers[1].scan(&selector).is_empty() {
+            return Ok("other");
+        }
+        assert!(
+            !committed(shared, operator, the, &row).await?.is_empty(),
+            "the write of {the} landed in no layer"
+        );
+        Ok("shared")
+    }
+
+    /// The scope of an attribute comes from the origin of its placement
+    /// first. Within one origin, an exact attribute ranks above a prefix,
+    /// and a longer prefix above a shorter one. With no placement, the
+    /// default scope applies.
+    #[dialog_common::test]
+    async fn it_finds_the_scope_by_the_origin_then_the_length() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let row: Entity = "row:1".parse()?;
+        let (stack, state, other) = scoped_stack(&operator, &shared, &row).await?;
+        let session = |placement: PrefixPlacement| shared.overlay().assert(placement);
+
+        session(PrefixPlacement::new("app.hidden/", name("state"))?)?;
+        session(PrefixPlacement::new("app.", name("state"))?)?;
+        session(PrefixPlacement::new("app.deep/", name("other"))?)?;
+        shared
+            .overlay()
+            .assert(Placement::new("app.exact/name".parse()?, name("other")))?;
+        shared
+            .overlay()
+            .assert(PrefixPlacement::new("app.exact/", name("state"))?)?;
+        // What the bottom holds names other scopes, as a writer can.
+        shared.refresh(&operator).await?;
+        shared
+            .transaction()
+            .assert(Placement::new("app.hidden/name".parse()?, name("other")))
+            .assert(Placement::new("held.exact/name".parse()?, name("state")))
+            .assert(PrefixPlacement::new("held.exact/", name("other"))?)
+            .assert(PrefixPlacement::new("held.deep/", name("other"))?)
+            .assert(PrefixPlacement::new("held.", name("state"))?)
+            .assert(DefaultScope::new(shared.of(), name("shared")))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        stack.advance(&operator).await?;
+
+        for (the, layer, why) in [
+            (
+                "app.hidden/name",
+                "state",
+                "the session store outranks an exact placement that the layer holds",
+            ),
+            (
+                "app.exact/name",
+                "other",
+                "an exact attribute ranks above a prefix",
+            ),
+            (
+                "app.exact/age",
+                "state",
+                "the prefix covers each other attribute",
+            ),
+            (
+                "app.deep/name",
+                "other",
+                "a longer prefix ranks above a shorter one",
+            ),
+            (
+                "app.flat/name",
+                "state",
+                "the shorter prefix covers the rest",
+            ),
+            (
+                "held.exact/name",
+                "state",
+                "within what the layer holds, the exact ranks first",
+            ),
+            ("held.deep/name", "other", "and then the longest prefix"),
+            ("held.flat/name", "state", "and then a shorter one"),
+            (
+                "plain/name",
+                "shared",
+                "with no placement, the default scope applies",
+            ),
+        ] {
+            assert_eq!(
+                landed_in(&stack, &operator, &shared, [&state, &other], the).await?,
+                layer,
+                "{the}: {why}"
+            );
+        }
+        Ok(())
+    }
+
+    /// A read of an attribute under a prefix looks only in the layer of its
+    /// scope, and a prefix never moves the machinery under `dialog.`.
+    #[dialog_common::test]
+    async fn it_reads_an_attribute_by_the_placement_of_its_prefix() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let row: Entity = "row:1".parse()?;
+        shared
+            .transaction()
+            .assert(
+                dialog_query::the!("app.hidden/name")
+                    .of(row.clone())
+                    .is("forged".to_string()),
+            )
+            .assert(naming_rule("test.named/name")?)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        let (stack, state, _) = scoped_stack(&operator, &shared, &row).await?;
+        shared
+            .overlay()
+            .assert(PrefixPlacement::new("app.hidden/", name("state"))?)?;
+        shared
+            .overlay()
+            .assert(PrefixPlacement::new("dialog.", name("state"))?)?;
+        assert!(
+            values::<String>(&stack, &operator, "app.hidden/name", &row)
+                .await?
+                .is_empty(),
+            "a fact of the prefix in the bottom reaches no read"
+        );
+        assert_eq!(stack.divergences().len(), 1);
+        let mut kept = Changes::new();
+        dialog_query::the!("app.hidden/name")
+            .of(row.clone())
+            .is("kept".to_string())
+            .assert(&mut kept);
+        state.apply(kept).unwrap();
+        assert_eq!(
+            values::<String>(&stack, &operator, "app.hidden/name", &row).await?,
+            vec![Value::String("kept".into())],
+            "the layer of the scope gives the fact"
+        );
+        assert_eq!(
+            concluded(stack.query().select(named("test.named/name")?), &operator).await?,
+            vec![Value::String("Ana".into())],
+            "the rule of the bottom stays where its layer holds it"
+        );
+        Ok(())
+    }
+
+    /// A rule whose head names a scope that the stack does not bind reaches
+    /// no read, and its inductive form fires in no commit, whether the rule
+    /// was already in the bottom or enters it through the lag of a commit.
+    #[dialog_common::test]
+    async fn it_takes_no_rule_of_a_scope_that_the_stack_does_not_bind() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let row: Entity = "row:1".parse()?;
+        shared
+            .transaction()
+            .assert(naming_rule("hidden.list/name")?)
+            .assert(firing_rule("hidden.fired/name")?)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        let (stack, _, _) = scoped_stack(&operator, &shared, &row).await?;
+        shared
+            .overlay()
+            .assert(PrefixPlacement::new("hidden.", name("nowhere"))?)?;
+        shared
+            .overlay()
+            .assert(crate::TransientAttribute::new("test.command/name".parse()?))?;
+
+        assert!(
+            concluded(stack.query().select(named("hidden.list/name")?), &operator)
+                .await?
+                .is_empty(),
+            "no row of the rule shows"
+        );
+        let fire = |of: &str| {
+            dialog_query::the!("test.command/name")
+                .of(of.parse::<Entity>().expect("entity"))
+                .is("Ben".to_string())
+        };
+        stack
+            .transaction()
+            .dispatch(fire("cmd:1"))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        shared.refresh(&operator).await?;
+        assert!(
+            committed(&shared, &operator, "hidden.fired/name", &"cmd:1".parse()?)
+                .await?
+                .is_empty(),
+            "the rule fires in no commit"
+        );
+
+        // A handle of the bottom with no stack brings a rule past the
+        // stack, as a pull does, and the next commit of the stack reads it
+        // in its lag.
+        let another = repo.branch("main").open().perform(&operator).await?;
+        another
+            .transaction()
+            .assert(firing_rule("hidden.late/name")?)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        shared.refresh(&operator).await?;
+        let (stack, _, _) = scoped_stack(&operator, &shared, &row).await?;
+        stack
+            .transaction()
+            .dispatch(fire("cmd:2"))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        shared.refresh(&operator).await?;
+        for (the, of) in [
+            ("hidden.late/name", "cmd:2"),
+            ("hidden.fired/name", "cmd:2"),
+        ] {
+            assert!(
+                committed(&shared, &operator, the, &of.parse()?)
+                    .await?
+                    .is_empty(),
+                "a rule of {the} fires in no commit"
+            );
+        }
+        Ok(())
+    }
+
+    /// A placement in the session store keeps a rule that concludes its
+    /// namespace out of each layer but the one under its scope: a rule of
+    /// the bottom adds no row, and the same rule in that layer does.
+    #[dialog_common::test]
+    async fn it_takes_a_rule_only_from_the_layer_of_its_head() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let row: Entity = "row:1".parse()?;
+        shared
+            .transaction()
+            .assert(naming_rule("library.list/from-bottom")?)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        let (stack, state, _) = scoped_stack(&operator, &shared, &row).await?;
+        shared
+            .overlay()
+            .assert(PrefixPlacement::new("library.", name("state"))?)?;
+        let mut rule = Changes::new();
+        naming_rule("library.list/from-layer")?.assert(&mut rule);
+        state.apply(rule).unwrap();
+
+        assert!(
+            concluded(
+                stack.query().select(named("library.list/from-bottom")?),
+                &operator
+            )
+            .await?
+            .is_empty(),
+            "the rule of the bottom reaches no read"
+        );
+        assert_eq!(
+            concluded(
+                stack.query().select(named("library.list/from-layer")?),
+                &operator
+            )
+            .await?,
+            vec![Value::String("Ana".into())],
+            "the rule of the layer of its scope does"
+        );
+        Ok(())
+    }
+
+    /// A placement that the bottom holds is a choice of its writers, so a
+    /// rule of the bottom concludes an attribute that it placed on another
+    /// layer of the stack: a space writes the state of a page this way.
+    #[dialog_common::test]
+    async fn it_takes_a_rule_of_the_bottom_that_its_own_placement_sends_away() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let row: Entity = "row:1".parse()?;
+        shared
+            .transaction()
+            .assert(Placement::new("page.ui/name".parse()?, name("state")))
+            .assert(firing_rule("page.ui/name")?)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        let (stack, state, _) = scoped_stack(&operator, &shared, &row).await?;
+        shared
+            .overlay()
+            .assert(crate::TransientAttribute::new("test.command/name".parse()?))?;
+        let command: Entity = "cmd:1".parse()?;
+        stack
+            .transaction()
+            .dispatch(
+                dialog_query::the!("test.command/name")
+                    .of(command.clone())
+                    .is("Ben".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        assert_eq!(
+            state
+                .scan(&ArtifactSelector::new().of(command.clone()))
+                .len(),
+            1,
+            "the conclusion lands in the layer that the placement names"
+        );
+        Ok(())
+    }
+
+    /// A rule whose head spans two scopes reaches a read only from a layer
+    /// that binds both.
+    #[dialog_common::test]
+    async fn it_takes_a_rule_that_spans_two_scopes_from_a_layer_of_both() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let row: Entity = "row:1".parse()?;
+        shared
+            .transaction()
+            .assert(
+                dialog_query::the!("test.source/name")
+                    .of(row.clone())
+                    .is("Ana".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        shared.refresh(&operator).await?;
+        let spanning = |from: &str| -> Result<dialog_query::DeductiveRule> {
+            Ok(serde_json::from_value(serde_json::json!({
+                "deduce": { "with": {
+                    "first": { "the": format!("one.{from}/first"), "as": "text:" },
+                    "second": { "the": format!("two.{from}/second"), "as": "text:" }
+                }},
+                "when": [{
+                    "assert": { "with": {
+                        "name": { "the": "test.source/name", "as": "text:" }
+                    }},
+                    "where": {
+                        "this": { "?": { "name": "this" } },
+                        "name": { "?": { "name": "first" } }
+                    }
+                }, {
+                    "assert": "==",
+                    "where": { "this": { "?": { "name": "first" } }, "is": { "?": { "name": "second" } } }
+                }]
+            }))?)
+        };
+        let both = Ephemeral::create().perform(&operator).await;
+        let single = Ephemeral::create().perform(&operator).await;
+        let top = Ephemeral::create().perform(&operator).await;
+        let stack = Stack::open(top.clone())
+            .link(&top, &shared, name("shared"))
+            .link(&top, &both, name("one"))
+            .link(&top, &both, name("two"))
+            .link(&top, &single, name("three"))
+            .perform(&operator)
+            .await?;
+        for (prefix, scope) in [
+            ("one.both/", "one"),
+            ("two.both/", "two"),
+            ("one.single/", "three"),
+            ("two.single/", "two"),
+        ] {
+            shared
+                .overlay()
+                .assert(PrefixPlacement::new(prefix, name(scope))?)?;
+        }
+        let mut rule = Changes::new();
+        spanning("both")?.assert(&mut rule);
+        both.apply(rule).unwrap();
+        let mut rule = Changes::new();
+        spanning("single")?.assert(&mut rule);
+        single.apply(rule).unwrap();
+
+        assert_eq!(
+            concluded(stack.query().select(named("one.both/first")?), &operator).await?,
+            vec![Value::String("Ana".into())],
+            "a layer that binds both scopes gives the rule"
+        );
+        assert!(
+            concluded(stack.query().select(named("one.single/first")?), &operator)
+                .await?
+                .is_empty(),
+            "a layer that binds one of them does not"
+        );
+        Ok(())
+    }
+
+    /// A rule that a query brings answers that query, whatever the scope of
+    /// its head, and it reaches no other query.
+    #[dialog_common::test]
+    async fn it_answers_a_rule_of_a_query_whatever_the_scope_of_its_head() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let row: Entity = "row:1".parse()?;
+        let (stack, _, _) = scoped_stack(&operator, &shared, &row).await?;
+        shared
+            .overlay()
+            .assert(PrefixPlacement::new("segment.", name("nowhere"))?)?;
+        let answer = concluded(
+            stack
+                .query()
+                .with(naming_rule("segment.row/name")?)
+                .select(named("segment.row/name")?),
+            &operator,
+        )
+        .await?;
+        assert_eq!(answer.len(), 1, "the query takes its own rule");
+        let other = concluded(stack.query().select(named("segment.row/name")?), &operator).await?;
+        assert!(other.is_empty(), "no other query takes it");
+        Ok(())
+    }
+
+    /// A commit under a hidden prefix makes a live query do no evaluation,
+    /// and its demand cover holds no range of the prefix.
+    #[dialog_common::test]
+    async fn it_keeps_a_hidden_prefix_out_of_a_live_query() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let row: Entity = "row:1".parse()?;
+        let (stack, _, _) = scoped_stack(&operator, &shared, &row).await?;
+        shared
+            .overlay()
+            .assert(PrefixPlacement::new("hidden.", name("nowhere"))?)?;
+        let hidden = "hidden.row/name";
+        let mut reading = stack.query().subscribe(AttributeQuery::from(
+            Term::<Relation>::from(dialog_query::the!("hidden.row/name"))
+                .of(Term::<Entity>::var("e"))
+                .is(Term::<String>::var("v")),
+        ));
+        let mut visible = stack.query().subscribe(AttributeQuery::from(
+            Term::<Relation>::from(dialog_query::the!("test.source/name"))
+                .of(Term::<Entity>::var("e"))
+                .is(Term::<String>::var("v")),
+        ));
+        assert!(
+            reading
+                .poll(&operator)
+                .await?
+                .expect("initial")
+                .asserted
+                .is_empty()
+        );
+        assert_eq!(
+            visible
+                .poll(&operator)
+                .await?
+                .expect("initial")
+                .asserted
+                .len(),
+            1
+        );
+        let manifest = dialog_search_tree::Manifest::default();
+        use dialog_artifacts::tree::selector_range;
+
+        let range = selector_range(&ArtifactSelector::new().the(hidden.parse()?), &manifest);
+        for subscription in [reading.demand(), visible.demand()] {
+            assert!(
+                !subscription
+                    .ranges()
+                    .iter()
+                    .any(|held| held.start() <= range.end() && range.start() <= held.end()),
+                "the demand cover holds no range of the prefix"
+            );
+        }
+        let counts = |reading: &StackSubscription<_>, visible: &StackSubscription<_>| {
+            (
+                reading.recomputes() + reading.maintenances(),
+                visible.recomputes() + visible.maintenances(),
+            )
+        };
+        let before = counts(&reading, &visible);
+
+        // Through a handle with no stack, as a pull brings it: the commit
+        // moves the head of the bottom.
+        let another = repo.branch("main").open().perform(&operator).await?;
+        another
+            .transaction()
+            .assert(
+                dialog_query::the!("hidden.row/name")
+                    .of(row.clone())
+                    .is("forged".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        shared.refresh(&operator).await?;
+        stack.pull(&operator).await?;
+        assert!(reading.poll(&operator).await?.is_none());
+        assert!(visible.poll(&operator).await?.is_none());
+        assert_eq!(
+            counts(&reading, &visible),
+            before,
+            "neither live query evaluates for the hidden commit"
         );
         Ok(())
     }
