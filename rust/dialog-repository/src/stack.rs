@@ -2197,6 +2197,7 @@ impl Stack {
             stack: self,
             changes: Staged::default(),
             transients: Staged::default(),
+            context: Changes::new(),
             edits: Vec::new(),
             stores: Vec::new(),
         }
@@ -2606,6 +2607,9 @@ pub struct StackTransaction<'a> {
     /// that elects settles its succession at commit.
     changes: Staged,
     transients: Staged,
+    /// The facts that each round of the induction reads, and nothing commits:
+    /// see [`context`](Self::context).
+    context: Changes,
     edits: Vec<LinkEdit>,
     /// Maintenance of the ephemeral layers under a scope, in order.
     stores: Vec<(Entity, Maintenance)>,
@@ -2644,6 +2648,16 @@ impl<'a> StackTransaction<'a> {
     /// commit's induction, never written anywhere.
     pub fn dispatch<C: Statement>(mut self, claim: C) -> Self {
         self.transients.assert(claim);
+        self
+    }
+
+    /// Give each round of the induction of this commit the facts of `claim`,
+    /// such as a value that holds for the whole commit. Each rule reads them in
+    /// each round, as it reads a transient of its round. They are no change of
+    /// the commit: they fire no rule by themselves, no observer sees them, and
+    /// no layer holds them, whatever their placement.
+    pub fn context<C: Statement>(mut self, claim: C) -> Self {
+        claim.assert(&mut self.context);
         self
     }
 
@@ -2757,6 +2771,7 @@ impl<'a> StackTransaction<'a> {
             stack: self.stack,
             changes: self.changes,
             transients: self.transients,
+            context: self.context,
             edits: self.edits,
             stores: self.stores,
         }
@@ -2768,6 +2783,7 @@ pub struct StackCommit<'a> {
     stack: &'a Stack,
     changes: Staged,
     transients: Staged,
+    context: Changes,
     edits: Vec<LinkEdit>,
     stores: Vec<(Entity, Maintenance)>,
 }
@@ -3067,6 +3083,7 @@ impl<'a> StackCommit<'a> {
             &staged,
             &mut changes,
             self.transients.export(),
+            self.context.clone(),
             stimulus,
             &mut witness,
             env,
@@ -9820,6 +9837,99 @@ mod tests {
                 .joins_cycle(&head(&reader), &operator)
                 .await?,
             "reading a recursive concept joins no cycle"
+        );
+        Ok(())
+    }
+
+    /// The context of a commit stands through each round of its induction. A
+    /// rule of the second round reads it, as a rule of the first does. It is no
+    /// change of the commit: a rule that reads it alone does not fire, and no
+    /// layer holds it.
+    #[dialog_common::test]
+    async fn it_gives_each_round_of_a_commit_its_context() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let row: Entity = "row:1".parse()?;
+        let (stack, state, other) = scoped_stack(&operator, &shared, &row).await?;
+        for attribute in ["test.command/name", "test.next/name"] {
+            shared
+                .overlay()
+                .assert(crate::TransientAttribute::new(attribute.parse()?))?;
+        }
+        let stamping = |premise: &str, head: &str| -> Result<dialog_query::InductiveRule> {
+            Ok(serde_json::from_value(serde_json::json!({
+                "assert!": { "with": { "stamp": { "the": head, "as": "natural:" } } },
+                "when": [
+                    {
+                        "assert": { "with": { "name": { "the": premise, "as": "text:" } } },
+                        "where": { "this": { "?": { "name": "this" } }, "name": { "?": {} } },
+                    },
+                    {
+                        "assert": { "with": { "now": { "the": "test.time/now", "as": "natural:" } } },
+                        "where": { "this": { "?": { "name": "clock" } }, "now": { "?": { "name": "stamp" } } },
+                    },
+                ]
+            }))?)
+        };
+        let forwarding: dialog_query::InductiveRule = serde_json::from_value(serde_json::json!({
+            "assert!": { "with": { "name": { "the": "test.next/name", "as": "text:" } } },
+            "when": [{
+                "assert": { "with": { "name": { "the": "test.command/name", "as": "text:" } } },
+                "where": { "this": { "?": { "name": "this" } }, "name": { "?": { "name": "name" } } },
+            }]
+        }))?;
+        let alone: dialog_query::InductiveRule = serde_json::from_value(serde_json::json!({
+            "assert!": { "with": { "now": { "the": "test.alone/now", "as": "natural:" } } },
+            "when": [{
+                "assert": { "with": { "now": { "the": "test.time/now", "as": "natural:" } } },
+                "where": { "this": { "?": { "name": "this" } }, "now": { "?": { "name": "now" } } },
+            }]
+        }))?;
+        let time = || {
+            dialog_query::the!("test.time/now")
+                .of("clock:1".parse::<Entity>().expect("entity"))
+                .is(7u32)
+        };
+        let command: Entity = "cmd:1".parse()?;
+        stack
+            .transaction()
+            .dispatch(stamping("test.command/name", "test.first/stamp")?)
+            .dispatch(stamping("test.next/name", "test.second/stamp")?)
+            .dispatch(forwarding)
+            .dispatch(alone)
+            .dispatch(
+                dialog_query::the!("test.command/name")
+                    .of(command.clone())
+                    .is("Ana".to_string()),
+            )
+            .context(time())
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        shared.refresh(&operator).await?;
+        for head in ["test.first/stamp", "test.second/stamp"] {
+            assert_eq!(
+                committed(&shared, &operator, head, &command).await?,
+                vec![Value::UnsignedInt(7)],
+                "{head}: the rule of each round reads the context"
+            );
+        }
+        assert!(
+            committed(&shared, &operator, "test.alone/now", &"clock:1".parse()?)
+                .await?
+                .is_empty(),
+            "the context alone fires no rule"
+        );
+        let selector = ArtifactSelector::new().the("test.time/now".parse()?);
+        assert!(
+            committed(&shared, &operator, "test.time/now", &"clock:1".parse()?)
+                .await?
+                .is_empty()
+                && state.scan(&selector).is_empty()
+                && other.scan(&selector).is_empty(),
+            "no layer holds it"
         );
         Ok(())
     }

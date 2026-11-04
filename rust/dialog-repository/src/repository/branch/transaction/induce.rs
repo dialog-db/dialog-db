@@ -111,6 +111,7 @@ pub(crate) async fn induce<Env, W: Witness>(
     placements: &Placements,
     changes: &mut Changes,
     mut transients: Changes,
+    context: Changes,
     entered: Vec<Instruction>,
     witness: &mut W,
     env: &Env,
@@ -304,9 +305,12 @@ where
             layer = layer.join(QueryLayer::from(SourceRef::from(line)));
         }
         let metadata = layer.overlay(&operator);
+        // The context of the commit stands through each round. It is no
+        // stimulus, and no round witnesses it, so it fires no rule by itself.
         let view = QueryEnv::over(view.clone(), metadata, env).with_layers(vec![
             Staged::from(changes.clone()),
             Staged::from(transient_overlay.clone()),
+            Staged::from(context.clone()),
         ]);
 
         // Close the touched set over derivation: a base-fact write
