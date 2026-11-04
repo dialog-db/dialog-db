@@ -6229,6 +6229,72 @@ mod tests {
         );
         Ok(())
     }
+
+    /// A rule lookup that the head cache answers still records the read of
+    /// `dialog.rule/derives` as demand: a subscription that evaluates while
+    /// the cache is warm evaluates again when a rule is committed for the
+    /// attribute that it reads.
+    #[dialog_common::test]
+    async fn it_sees_a_rule_committed_for_an_attribute_read_through_a_warm_cache()
+    -> anyhow::Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let row: Entity = "row:1".parse()?;
+        branch
+            .transaction()
+            .assert(
+                the!("test.source/name")
+                    .of(row.clone())
+                    .is("Ana".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        let query = || -> anyhow::Result<dialog_query::ConceptQuery> {
+            let predicate: dialog_query::ConceptDescriptor =
+                serde_json::from_value(serde_json::json!({ "with": {
+                    "name": { "the": "test.named/name", "as": "text:" }
+                }}))?;
+            let mut terms = dialog_query::Parameters::new();
+            terms.insert("this".into(), Term::var("this"));
+            terms.insert("name".into(), Term::var("name"));
+            Ok(dialog_query::ConceptQuery { predicate, terms })
+        };
+        // A query warms the head cache of the lookup and the rule set.
+        let warm = branch.select(query()?).perform(&operator).try_vec().await?;
+        assert!(warm.is_empty());
+        let mut subscription = branch.subscribe(query()?);
+        let initial = subscription.poll(&operator).await?.expect("initial");
+        assert!(initial.asserted.is_empty());
+        let recomputes = subscription.recomputes();
+
+        let rule: dialog_query::DeductiveRule = serde_json::from_value(serde_json::json!({
+            "deduce": { "with": { "name": { "the": "test.named/name", "as": "text:" } } },
+            "when": [{
+                "assert": { "with": { "name": { "the": "test.source/name", "as": "text:" } } },
+                "where": {
+                    "this": { "?": { "name": "this" } },
+                    "name": { "?": { "name": "name" } }
+                }
+            }]
+        }))?;
+        branch
+            .transaction()
+            .assert(rule)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        let delta = subscription
+            .poll(&operator)
+            .await?
+            .expect("the new rule evaluates the subscription again");
+        assert_eq!(delta.asserted.len(), 1, "the row of the new rule arrives");
+        assert_eq!(subscription.recomputes(), recomputes + 1);
+        Ok(())
+    }
 }
 
 #[cfg(test)]
