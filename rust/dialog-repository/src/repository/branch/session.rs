@@ -1300,7 +1300,11 @@ impl<'a> Provider<Select<'a>> for QueryEnv<'a> {
                     .chain(changes)
                     .collect()
             };
-        Ok(merge_grouped(streams, manifest, format.keys))
+        let merged = merge_grouped(streams, manifest, format.keys);
+        Ok(match &self.demand {
+            Some(demand) => demand.counting(merged),
+            None => merged,
+        })
     }
 }
 
