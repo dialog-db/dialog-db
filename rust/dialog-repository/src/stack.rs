@@ -3333,6 +3333,11 @@ where
     pub fn demand(&self) -> &crate::Demand {
         self.inner.demand()
     }
+
+    /// The rows that the evaluations of this subscription read so far.
+    pub fn rows_read(&self) -> usize {
+        self.inner.rows_read()
+    }
 }
 
 /// The layers that a write of `artifact` lands in, by its placement: the
@@ -9913,6 +9918,62 @@ mod tests {
                 && state.scan(&selector).is_empty()
                 && other.scan(&selector).is_empty(),
             "no layer holds it"
+        );
+        Ok(())
+    }
+
+    /// A subscription counts the rows that its evaluations read: a query of one
+    /// attribute reads each row of that attribute, and no row of another.
+    #[dialog_common::test]
+    async fn it_counts_the_rows_that_an_evaluation_reads() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let row: Entity = "row:1".parse()?;
+        let (stack, _, _) = scoped_stack(&operator, &shared, &row).await?;
+        let mut transaction = stack.transaction();
+        for index in 0..4 {
+            let of = format!("title:{index}").parse::<Entity>()?;
+            transaction = transaction.assert(
+                dialog_query::the!("test.other/title")
+                    .of(of)
+                    .is("T".to_string()),
+            );
+        }
+        for index in 0..3 {
+            let of = format!("other:{index}").parse::<Entity>()?;
+            transaction = transaction.assert(
+                dialog_query::the!("test.other/note")
+                    .of(of)
+                    .is("N".to_string()),
+            );
+        }
+        transaction.commit().publish().perform(&operator).await?;
+        let mut subscription = stack.query().subscribe(AttributeQuery::from(
+            Term::<Relation>::from(dialog_query::the!("test.other/title"))
+                .of(Term::<Entity>::var("e"))
+                .is(Term::<String>::var("v")),
+        ));
+        assert_eq!(subscription.rows_read(), 0);
+        subscription.poll(&operator).await?.expect("initial");
+        assert_eq!(subscription.rows_read(), 4, "the 4 titles, and no note");
+
+        stack
+            .transaction()
+            .assert(
+                dialog_query::the!("test.other/title")
+                    .of("title:new".parse::<Entity>()?)
+                    .is("T".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        subscription.poll(&operator).await?.expect("the delta");
+        assert_eq!(
+            subscription.rows_read(),
+            5,
+            "maintenance reads the one new row, and the count goes on"
         );
         Ok(())
     }
