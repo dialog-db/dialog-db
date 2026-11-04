@@ -33,8 +33,16 @@ use crate::term::Term;
 /// for a particular calling pattern.
 ///
 /// [`ConceptDescriptor::sorted_operands`]: crate::concept::descriptor::ConceptDescriptor::sorted_operands
+///
+/// A second set of bits names the free operands that the call narrows by a
+/// range. The values of the bounds are not part of it, so a plan stays a pure
+/// function of the rule and the pattern: the plan puts a ranged scan where a
+/// range belongs, and evaluation states the bounds of each call on that scan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Adornment(u64);
+pub struct Adornment {
+    bound: u64,
+    ranged: u64,
+}
 
 impl Adornment {
     /// The adornment of a call binding exactly the operands `scope`
@@ -47,7 +55,10 @@ impl Adornment {
                 bits |= 1 << i;
             }
         }
-        Adornment(bits)
+        Adornment {
+            bound: bits,
+            ranged: 0,
+        }
     }
 
     /// Derive an adornment for a call of a concept whose operands are
@@ -72,7 +83,21 @@ impl Adornment {
             }
         }
 
-        Adornment(bits)
+        Adornment {
+            bound: bits,
+            ranged: 0,
+        }
+    }
+
+    /// This adornment with the operands in `ranged` narrowed by a range.
+    pub fn ranged(mut self, operands: &[String], ranged: &Environment) -> Self {
+        self.ranged = 0;
+        for (i, operand) in operands.iter().enumerate() {
+            if ranged.contains(operand) {
+                self.ranged |= 1 << i;
+            }
+        }
+        self
     }
 
     /// Reconstruct the scope a rule is planned in from this adornment and
@@ -89,7 +114,7 @@ impl Adornment {
     pub fn into_environment(self, operands: &[String]) -> Environment {
         let mut env = Environment::new();
         for (i, operand) in operands.iter().enumerate() {
-            if self.0 & (1 << i) != 0 {
+            if self.bound & (1 << i) != 0 {
                 env.add(operand.clone());
             }
         }
@@ -102,6 +127,14 @@ impl Adornment {
 mod tests {
     use super::*;
     use crate::{Term, Value};
+
+    /// The adornment that binds exactly these operands.
+    fn bound(bits: u64) -> Adornment {
+        Adornment {
+            bound: bits,
+            ranged: 0,
+        }
+    }
 
     /// The operands of a concept with the given names, in order.
     fn operands(names: &[&str]) -> Vec<String> {
@@ -122,7 +155,7 @@ mod tests {
         let frame = Match::new();
         let adornment = Adornment::derive(&operands(&["age", "name"]), &terms, &frame);
 
-        assert_eq!(adornment, Adornment(0));
+        assert_eq!(adornment, bound(0));
     }
 
     #[dialog_common::test]
@@ -135,7 +168,7 @@ mod tests {
         let adornment = Adornment::derive(&operands(&["age", "name"]), &terms, &candidate);
 
         // "age" sorts first → bit 0 (bound), "name" → bit 1 (free)
-        assert_eq!(adornment, Adornment(0b01));
+        assert_eq!(adornment, bound(0b01));
     }
 
     #[dialog_common::test]
@@ -150,7 +183,7 @@ mod tests {
         let adornment = Adornment::derive(&operands(&["age", "name"]), &terms, &frame);
 
         // "age" = bit 0 (free), "name" = bit 1 (bound via match)
-        assert_eq!(adornment, Adornment(0b10));
+        assert_eq!(adornment, bound(0b10));
     }
 
     #[dialog_common::test]
@@ -163,7 +196,7 @@ mod tests {
         let adornment = Adornment::derive(&operands(&["age", "name"]), &terms, &frame);
 
         // "age" = bit 0 (blank = free), "name" = bit 1 (constant = bound)
-        assert_eq!(adornment, Adornment(0b10));
+        assert_eq!(adornment, bound(0b10));
     }
 
     #[dialog_common::test]
@@ -175,7 +208,7 @@ mod tests {
         let frame = Match::new();
         let adornment = Adornment::derive(&operands(&["age", "name"]), &terms, &frame);
 
-        assert_eq!(adornment, Adornment(0b11));
+        assert_eq!(adornment, bound(0b11));
     }
 
     #[dialog_common::test]
@@ -280,11 +313,11 @@ mod tests {
 
         assert_eq!(
             Adornment::derive(&names, &by_entity, &entity_bound),
-            Adornment(0b100)
+            bound(0b100)
         );
         assert_eq!(
             Adornment::derive(&names, &by_name, &name_bound),
-            Adornment(0b010)
+            bound(0b010)
         );
     }
 }

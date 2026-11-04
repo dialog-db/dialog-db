@@ -41,6 +41,10 @@ pub struct Header {
     pub binds: Environment,
     /// Variables already bound in the environment when this step runs.
     pub env: Environment,
+    /// Variables that a comparison with a constant, among the premises of the
+    /// same rule, filters. A concept can narrow its scans by the interval of
+    /// such a variable, since the comparison keeps the answer exact.
+    pub proved: Environment,
 }
 
 /// A finalized, ready-to-execute query step produced by the planner.
@@ -199,7 +203,7 @@ impl Plan {
         match self {
             Plan::Scan(_, query) => Application::evaluate(*query, selection, env),
             Plan::OptionalScan(_, query) => Application::evaluate(*query, selection, env),
-            Plan::Concept(_, query) => query.evaluate(selection, env),
+            Plan::Concept(header, query) => query.evaluate_proved(selection, env, header.proved),
             Plan::Formula(_, query) => query.evaluate(selection, env),
             Plan::Constraint(_, constraint) => constraint.evaluate(selection),
             Plan::Resolver(_, query) => query.evaluate(env, selection),
@@ -231,7 +235,9 @@ impl Plan {
             // an allocation.
             Plan::Scan(_, query) => query.evaluate(env, selection),
             Plan::OptionalScan(_, query) => Box::pin(Application::evaluate(*query, selection, env)),
-            Plan::Concept(_, query) => Box::pin(query.evaluate(selection, env)),
+            Plan::Concept(header, query) => {
+                Box::pin(query.evaluate_proved(selection, env, header.proved))
+            }
             Plan::Formula(_, query) => Box::pin(query.evaluate(selection, env)),
             Plan::Constraint(_, constraint) => Box::pin(constraint.evaluate(selection)),
             Plan::Resolver(_, query) => Box::pin(query.evaluate(env, selection)),
