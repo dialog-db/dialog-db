@@ -9977,4 +9977,55 @@ mod tests {
         );
         Ok(())
     }
+
+    /// A peer can bring a placement whose value names no scope. It places
+    /// nothing, and each read of the stack goes on.
+    #[dialog_common::test]
+    async fn it_reads_past_a_held_placement_that_names_no_scope() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let row: Entity = "row:1".parse()?;
+        let (stack, _, _) = scoped_stack(&operator, &shared, &row).await?;
+        // A raw commit, as a pull brings it: no placement of this handle judges
+        // it.
+        for of in ["namespace:evil/", "attribute:evil/name"] {
+            let other = repo.branch("main").open().perform(&operator).await?;
+            other
+                .commit(stream::iter(vec![Instruction::Assert(
+                    Fact {
+                        the: "dialog.attribute/scope".parse()?,
+                        of: of.parse()?,
+                        is: Value::String("no scope".into()),
+                        cause: None,
+                    },
+                    Pick::Last,
+                )]))
+                .perform(&operator)
+                .await?;
+        }
+        shared.refresh(&operator).await?;
+        stack.advance(&operator).await?;
+        assert_eq!(
+            values::<String>(&stack, &operator, "test.source/name", &row).await?,
+            vec![Value::String("Ana".into())]
+        );
+        stack
+            .transaction()
+            .assert(
+                dialog_query::the!("evil/name")
+                    .of(row.clone())
+                    .is("kept".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        assert_eq!(
+            values::<String>(&stack, &operator, "evil/name", &row).await?,
+            vec![Value::String("kept".into())],
+            "the attribute stays where no placement sends it"
+        );
+        Ok(())
+    }
 }
