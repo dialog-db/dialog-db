@@ -1336,16 +1336,28 @@ impl<'a> Provider<LoadBlock> for QueryEnv<'a> {
 impl QueryEnv<'_> {
     /// Whether a rule that concludes `head` joins a cycle of rules, over each
     /// rule that this read takes: the attribute concept of a field of the head
-    /// reads itself, through this rule or through others. A rule that only reads
-    /// a recursive concept joins no cycle.
+    /// reads itself, through this rule or through others. The cycle can run
+    /// through an optional read too, which the analysis sets aside a rule for. A
+    /// rule that only reads a recursive concept joins no cycle.
     pub(crate) async fn joins_cycle(
         &self,
         head: &ConceptDescriptor,
     ) -> Result<bool, EvaluationError> {
+        let plan_cache = self
+            .sources
+            .first()
+            .map(|source| source.as_ref().plan_cache())
+            .unwrap_or_default();
         for (_, field) in head.with().iter() {
             let concept = ConceptDescriptor::of_attribute(field);
-            let rules = Provider::<SelectRules>::execute(self, concept).await?;
-            if rules.recursion().is_some() {
+            let bundle = self.resolve_bundle(&concept, plan_cache.clone()).await?;
+            let analysis = self.program_analysis(&concept, &bundle).await?;
+            let node = ProgramAnalysis::node(&concept);
+            let set_aside = analysis
+                .quarantined()
+                .iter()
+                .any(|quarantine| quarantine.concept == node || quarantine.cycle.contains(&node));
+            if set_aside || analysis.is_recursive(&node) {
                 return Ok(true);
             }
         }

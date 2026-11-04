@@ -9824,6 +9824,50 @@ mod tests {
             "the rule of the space closes the cycle"
         );
 
+        // A cycle that runs through an optional read: the analysis sets a rule
+        // of it aside, and the query must not lose its own rule to that.
+        let optional: dialog_query::DeductiveRule = serde_json::from_value(serde_json::json!({
+            "deduce": { "with": { "name": { "the": "space.note/name", "as": "text:" } } },
+            "when": [{
+                "assert": { "with": { "name": { "the": "query.note/name", "as": "text:" } } },
+                "where": { "this": { "?": { "name": "this" } }, "name": { "?": { "name": "name" } } }
+            }]
+        }))?;
+        shared
+            .transaction()
+            .assert(optional)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        stack.advance(&operator).await?;
+        let reading_optionally: dialog_query::DeductiveRule =
+            serde_json::from_value(serde_json::json!({
+                "deduce": { "with": {
+                    "name": { "the": "query.note/name", "as": "text:" },
+                    "note": { "the": "query.note/note", "as": "text:", "optional": true }
+                } },
+                "when": [{
+                    "assert": { "with": {
+                        "name": { "the": "test.source/name", "as": "text:" },
+                        "note": { "the": "space.note/name", "as": "text:", "optional": true }
+                    } },
+                    "where": {
+                        "this": { "?": { "name": "this" } },
+                        "name": { "?": { "name": "name" } },
+                        "note": { "?": { "name": "note" } }
+                    }
+                }]
+            }))?;
+        assert!(
+            stack
+                .query()
+                .with(reading_optionally.clone())
+                .joins_cycle(&head(&reading_optionally), &operator)
+                .await?,
+            "a cycle through an optional read"
+        );
+
         // A recursive rule of the bottom, which the rule of the query only reads.
         let recursive = reading("space.loop/name", "space.loop/name")?;
         shared
