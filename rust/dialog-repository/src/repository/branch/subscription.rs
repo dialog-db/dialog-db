@@ -195,6 +195,11 @@ fn selects_head(selector: &ArtifactSelector<Constrained>, metadata: &BTreeSet<En
 type Ranges = BTreeMap<Key, Key>;
 
 fn record_range(ranges: &Mutex<Ranges>, range: RangeInclusive<Key>) {
+    // A scan of bounds that cross, such as `>= 10` and `< 1`, reads no key,
+    // so no change of a key can change what it read.
+    if range.start() > range.end() {
+        return;
+    }
     merge_range(&mut ranges.lock().expect("demand lock"), range);
 }
 
@@ -253,6 +258,15 @@ impl Demand {
         manifest: &dialog_search_tree::Manifest,
     ) {
         self.keyed_under(manifest);
+        // A tree with a band for each number type scans some selectors without
+        // their bounds, and the cover must hold what the scan reads.
+        let fitted;
+        let selector = if manifest.value_encoding == dialog_artifacts::NUMBER_BAND {
+            selector
+        } else {
+            fitted = selector.clone().for_manifest(manifest);
+            &fitted
+        };
         record_range(&self.facts, selector_range(selector, manifest));
         let metadata = self.metadata.lock().expect("demand metadata lock");
         if selects_head(selector, &metadata) {

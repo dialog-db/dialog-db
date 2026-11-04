@@ -36,6 +36,11 @@ pub struct ValueBound {
     /// 34.5 as 34, and a natural bound does not see -3 (see
     /// [`ArtifactSelector::across_numbers`]).
     pub across: bool,
+    /// Whether the caller filters each row itself, and the bound is only here
+    /// to narrow the scan. A number read through a lens can come from any
+    /// number type, so such a bound can narrow only a tree that keys every
+    /// number in one band (see [`ArtifactSelector::narrowing_numbers`]).
+    pub narrowing: bool,
     /// The bound as a number-band key encodes it. The scan sets it when it
     /// fits the selector to a tree that keys numbers in one band
     /// ([`ArtifactSelector::for_manifest`]), so each row is compared with
@@ -504,6 +509,7 @@ where
             value,
             inclusive: true,
             across: false,
+            narrowing: false,
             encoded: None,
         })
     }
@@ -515,6 +521,7 @@ where
             value,
             inclusive: false,
             across: false,
+            narrowing: false,
             encoded: None,
         })
     }
@@ -526,6 +533,7 @@ where
             value,
             inclusive: true,
             across: false,
+            narrowing: false,
             encoded: None,
         })
     }
@@ -537,6 +545,7 @@ where
             value,
             inclusive: false,
             across: false,
+            narrowing: false,
             encoded: None,
         })
     }
@@ -601,14 +610,29 @@ impl ArtifactSelector<Constrained> {
         self
     }
 
+    /// Mark each number bound as one that only narrows the scan, for a caller
+    /// that filters each row itself. A tree that keys each number type in its
+    /// own band scans such a selector without its bounds: the bound's own band
+    /// holds only some of the numbers its lens reads, so a range of that band
+    /// would lose the rest.
+    pub fn narrowing_numbers(mut self) -> Self {
+        for bound in [&mut self.value_lower, &mut self.value_upper]
+            .into_iter()
+            .flatten()
+        {
+            bound.narrowing = bound.value.data_type().is_number();
+        }
+        self
+    }
+
     /// This selector as a tree written under `manifest` can scan it: bounds
-    /// across number types are dropped where the tree keys each type in its
-    /// own band.
+    /// across number types, and bounds that only narrow the scan, are dropped
+    /// where the tree keys each type in its own band.
     pub fn for_manifest(mut self, manifest: &dialog_search_tree::Manifest) -> Self {
         let across = [&self.value_lower, &self.value_upper]
             .into_iter()
             .flatten()
-            .any(|bound| bound.across);
+            .any(|bound| bound.across || bound.narrowing);
         if across && manifest.value_encoding != crate::NUMBER_BAND {
             self.value_lower = None;
             self.value_upper = None;
@@ -629,6 +653,7 @@ impl ArtifactSelector<Constrained> {
                 value,
                 inclusive: true,
                 across: false,
+                narrowing: false,
                 encoded: None,
             };
             self.value_lower = Some(bound.clone());

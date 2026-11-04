@@ -40,6 +40,12 @@ pub struct AttributeQueryAll {
     cause: Term<Cause>,
     /// Internal handle for claim storage.
     source: Term<Record>,
+    /// Whether a comparison of the same rule filters each row, so that the
+    /// interval of `is` is free to narrow how this scan reads. Only a planner
+    /// that saw the comparison sets it, with [`ranged`](Self::ranged). An
+    /// interval without it keeps the meaning it has with no comparison.
+    #[serde(skip)]
+    ranged: bool,
 }
 
 impl AttributeQueryAll {
@@ -86,6 +92,7 @@ impl AttributeQueryAll {
             is,
             cause,
             source,
+            ranged: false,
         }
     }
 
@@ -115,6 +122,20 @@ impl AttributeQueryAll {
             None => self.is,
         };
         Self { is, ..self }
+    }
+
+    /// This scan, marked as one whose interval a comparison of the same rule
+    /// proved, which filters each row. See the field of the same name.
+    pub(crate) fn ranged(self) -> Self {
+        Self {
+            ranged: true,
+            ..self
+        }
+    }
+
+    /// Whether this scan is marked as [`ranged`](Self::ranged).
+    pub(crate) fn is_ranged(&self) -> bool {
+        self.ranged
     }
 
     /// Return a copy with the `the`/`of` variable terms carrying
@@ -276,6 +297,7 @@ impl AttributeQueryAll {
             is,
             cause,
             source: self.source.clone(),
+            ranged: self.ranged,
         }
     }
 
@@ -613,6 +635,8 @@ impl TryFrom<&AttributeQueryAll> for ArtifactSelector<Constrained> {
                     }
                     if across {
                         selector = selector.map(ArtifactSelector::across_numbers);
+                    } else if from.ranged {
+                        selector = selector.map(ArtifactSelector::narrowing_numbers);
                     }
                 }
             }
@@ -622,6 +646,56 @@ impl TryFrom<&AttributeQueryAll> for ArtifactSelector<Constrained> {
             message: "At least one field must be constrained".to_string(),
         })
     }
+}
+
+/// Whether the selector of a scan bounds its value: `is` is a free variable
+/// whose kind carries an interval that the selector can state. Such a scan
+/// comes in value order, whatever else is true of it.
+pub(crate) fn selects_value_range(is: &Term<Any>) -> bool {
+    if !matches!(is, Term::Variable { .. }) {
+        return false;
+    }
+    let Some(kind) = is.kind() else {
+        return false;
+    };
+    let Some(interval) = kind
+        .refinement()
+        .and_then(|refinement| refinement.interval.as_ref())
+    else {
+        return false;
+    };
+    let Some((data_type, _)) = pushable_type(kind.primitive_part().required(), interval.value_type)
+    else {
+        return false;
+    };
+    [&interval.lower, &interval.upper]
+        .into_iter()
+        .flatten()
+        .any(|bound| adapt_bound(interval.value_type, &bound.encoded, data_type).is_some())
+}
+
+/// Whether a range of the stored number holds each row that a comparison over
+/// `is` keeps. The range applies to the stored number, and the comparison sees
+/// the number as the kind reads it, so the two must agree. They agree for a kind
+/// of one type other than a float, whose bound has a lens that reads each row the
+/// same way, and for a kind of every number type, which reads each as it is. They
+/// do not agree where a kind can round or narrow a number: `float:32` reads 0.1
+/// above 0.1000000001, `float:` reads the natural 2^53 + 1 as 2^53, and
+/// `natural:16` reads 5.5 as 5, though its bound crosses number types with no lens.
+pub(crate) fn pushes_interval(is: &Term<Any>) -> bool {
+    if !selects_value_range(is) {
+        return false;
+    }
+    let Some(kind) = is.kind() else {
+        return false;
+    };
+    let viewed = kind
+        .refinement()
+        .is_some_and(|refinement| !refinement.views.is_empty());
+    let primitive = kind.primitive_part().required();
+    !viewed
+        && primitive != Primitive::from(Type::Float)
+        && (primitive == Primitive::NUMERIC || single_comparable_type(primitive).is_some())
 }
 
 /// The type an interval bound is pushed as, if it can be, and whether it
@@ -1687,5 +1761,75 @@ mod tests {
             is.content_type().is_none(),
             "untyped `is` term should yield unknown content_type"
         );
+    }
+
+    #[dialog_common::test]
+    async fn it_keeps_a_scan_that_reads_a_value_range_out_of_a_merge_join() -> anyhow::Result<()> {
+        use crate::attribute::query::AttributeQuery;
+        use crate::planner::Planner;
+        use crate::{Cardinality, Environment, Premise, Proposition};
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let mut tx = branch.transaction();
+        for i in 0..200u64 {
+            let entity: Entity = format!("id:thing-{i:03}").parse()?;
+            tx = tx
+                .assert(the!("thing/a").of(entity.clone()).is(1000.0 - i as f64))
+                .assert(the!("thing/b").of(entity.clone()).is(i as f64));
+        }
+        tx.commit().publish().perform(&operator).await?;
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+        let kind = Kind::from(Type::Float)
+            .with_interval(&Value::Float(0.0), true, true)
+            .expect("a float takes a bound");
+        let scan = |the, name: &str| {
+            AttributeQuery::new(
+                Term::from(the),
+                Term::<Entity>::var("this"),
+                Term::var(name).with_kind(kind.clone()),
+                Term::blank(),
+                Some(Cardinality::Many),
+            )
+        };
+        let plan = Planner::from(vec![
+            Premise::Assert(Proposition::Attribute(Box::new(scan(the!("thing/a"), "a")))),
+            Premise::Assert(Proposition::Attribute(Box::new(scan(the!("thing/b"), "b")))),
+        ])
+        .plan(&Environment::new())?;
+        let rows = Selection::try_vec(plan.evaluate(Match::new().seed(), &source)).await?;
+        assert_eq!(rows.len(), 200, "an entity with both attributes is a row");
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_keeps_an_interval_with_no_comparison_as_the_filter_of_its_scan()
+    -> anyhow::Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        branch
+            .transaction()
+            .assert(the!("person/age").of(Entity::new()?).is(10u64))
+            .assert(the!("person/age").of(Entity::new()?).is(30u64))
+            .assert(the!("person/age").of(Entity::new()?).is(50u64))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.rekey_storage(0).perform(&operator).await?;
+        let kind = Kind::from(Type::UnsignedInt)
+            .with_interval(&Value::UnsignedInt(30), true, true)
+            .expect("numeric admits an interval");
+        let query = AttributeQueryAll::new(
+            Term::from(the!("person/age")),
+            Term::<Entity>::var("e"),
+            Term::var("v").with_kind(kind),
+            Term::var("cause"),
+        );
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+        let results = query.perform(&source).try_vec().await?;
+        assert_eq!(results.len(), 2, "10 is below the bound");
+        Ok(())
     }
 }

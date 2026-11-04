@@ -66,7 +66,7 @@ use dialog_artifacts::tree::selector_range;
 use dialog_artifacts::{
     Artifact, ArtifactSelector, Cause, Changes, DialogArtifactsError, Entity, EntityKey,
     Instruction, Key, KeyViewConstruct, Pick, Relation, SortKey, Standing, Statement, Update,
-    artifact_index_keys, sort_key,
+    artifact_index_keys, selector_admits_key, sort_key,
 };
 use dialog_capability::{Command, Provider};
 use dialog_common::{Blake3Hash, Holds};
@@ -600,8 +600,20 @@ impl Facts {
         {
             return Vec::new();
         }
-        self.map
-            .range(window.range(&self.manifest))
+        let range = window.range(&self.manifest);
+        // Bounds that cross hold no key, and a map refuses such a range.
+        if range.start() > range.end() {
+            return Vec::new();
+        }
+        let rows = self.map.range(range);
+        // A range of value bounds spans every attribute, since the value leads
+        // the key of the value index, so each entry takes the check that a scan
+        // of a tree gives it.
+        if window.selector.value_lower().is_none() && window.selector.value_upper().is_none() {
+            return rows.map(|(_, fact)| fact.clone()).collect();
+        }
+        let selector = window.selector.clone().for_manifest(&self.manifest);
+        rows.filter(|(key, _)| selector_admits_key(&selector, key.as_ref(), &self.manifest))
             .map(|(_, fact)| fact.clone())
             .collect()
     }

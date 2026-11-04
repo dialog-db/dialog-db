@@ -19,7 +19,7 @@ use crate::{
     artifacts::selector::{Constrained, ValueBound},
     decode_bytes_cow, decode_value,
     key::value_payload,
-    key::varkey::{KeyRef, ValuePayload, ValueRef},
+    key::varkey::{KeyRef, ValuePayload, ValueRef, parse_key_layout},
 };
 use crate::{NUMBER_BAND, encode_key_value_owned};
 use dialog_search_tree::Manifest;
@@ -65,6 +65,23 @@ fn truncated_order(stored: &[u8], probe: &[u8]) -> TruncatedOrder {
         // The stored bytes are a proper prefix of the probe.
         Ordering::Equal => TruncatedOrder::Undecided,
     }
+}
+
+/// Whether the key bytes of an index entry can match `selector`, as a scan of
+/// a tree checks each entry that its range holds. A range of the value index spans
+/// every attribute, since the value leads its key, so a store that reads such a range
+/// must check each entry too. An entry whose answer needs its whole value counts as a
+/// match, and so does a key that does not parse: the caller keeps the fact, and a
+/// comparison above it decides.
+pub fn selector_admits_key(
+    selector: &ArtifactSelector<Constrained>,
+    key: &[u8],
+    manifest: &Manifest,
+) -> bool {
+    let Some(layout) = parse_key_layout(key) else {
+        return true;
+    };
+    match_selector_and_key_ref(selector, &layout.view(key), manifest) != SelectorMatch::Excluded
 }
 
 /// Checks whether an already-parsed [`KeyRef`] matches a selector's

@@ -15,7 +15,7 @@
 //! can, without changing how any scan runs today.
 
 use crate::attribute::Relation;
-use crate::attribute::query::all::AttributeQueryAll;
+use crate::attribute::query::all::{AttributeQueryAll, selects_value_range};
 use crate::attribute::query::dynamic::DynamicAttributeQuery;
 use crate::types::{Any, Typed};
 use crate::{Entity, Term};
@@ -93,7 +93,12 @@ impl AttributeQueryAll {
     /// Returns [`SortOrder::None`] when the leading dimensions are all bound to
     /// constants (a point lookup carries no join-useful order).
     pub fn sort_order(&self) -> SortOrder {
-        sort_order_of(self.the(), self.of(), self.is())
+        sort_order_of(
+            self.the(),
+            self.of(),
+            self.is(),
+            selects_value_range(self.is()),
+        )
     }
 }
 
@@ -101,10 +106,17 @@ impl AttributeQueryAll {
 /// independent of cardinality: cardinality-one winner selection reads the same
 /// index in the same order as the cardinality-many scan, so both sort on the
 /// same variable. Shared by [`AttributeQueryAll::sort_order`] and
-/// [`DynamicAttributeQuery::sort_order`].
-pub(crate) fn sort_order_of(the: &Term<Relation>, of: &Term<Entity>, is: &Term<Any>) -> SortOrder {
+/// [`DynamicAttributeQuery::sort_order`]. `ranged` says whether the scan reads
+/// its value as a range of the value index.
+pub(crate) fn sort_order_of(
+    the: &Term<Relation>,
+    of: &Term<Entity>,
+    is: &Term<Any>,
+    ranged: bool,
+) -> SortOrder {
     let entity_bound = matches!(of, Term::Constant(_));
-    let value_bound = matches!(is, Term::Constant(_));
+    // A range on the value reads the value index as a constant does.
+    let value_bound = matches!(is, Term::Constant(_)) || ranged;
     let attribute_bound = matches!(the, Term::Constant(_));
 
     // The component sequence of the ordering the storage layer will pick, most
@@ -138,17 +150,25 @@ impl DynamicAttributeQuery {
     /// as a cardinality-many (`All`) scan and merely selects a winner per
     /// group, so its output is sorted on the same variable. This lets a merge
     /// join over a concept's attribute premises apply regardless of their
-    /// cardinality.
+    /// cardinality. The two differ for an interval on the value: a scan under
+    /// `all` always reads the range, and one under `last` reads it only when a
+    /// planner marked it as ranged.
     pub fn sort_order(&self) -> SortOrder {
-        sort_order_of(self.the(), self.of(), self.is())
+        let ranged = match self {
+            DynamicAttributeQuery::All(query) => selects_value_range(query.is()),
+            DynamicAttributeQuery::Only(query) => query.is_ranged(),
+        };
+        sort_order_of(self.the(), self.of(), self.is(), ranged)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::SortOrder;
+    use crate::artifact::Type as ValueType;
     use crate::attribute::Relation;
     use crate::attribute::query::all::AttributeQueryAll;
+    use crate::type_system::Type as Kind;
     use crate::types::{Any, Typed};
     use crate::{Entity, Term, Value};
 
@@ -224,5 +244,21 @@ mod tests {
         assert!(!SortOrder::On("x".to_string()).merges_with(&SortOrder::On("y".to_string())));
         assert!(!SortOrder::None.merges_with(&SortOrder::None));
         assert!(!SortOrder::On("x".to_string()).merges_with(&SortOrder::None));
+    }
+
+    /// A range on the value reads the value index, so the scan comes in value
+    /// order, whichever kind of scan it is. It cannot merge on the entity.
+    #[dialog_common::test]
+    fn it_sorts_a_ranged_scan_on_its_value() {
+        let kind = Kind::from(ValueType::UnsignedInt)
+            .with_interval(&Value::UnsignedInt(5), true, true)
+            .expect("a natural takes a bound");
+        let query = AttributeQueryAll::new(
+            constant::<Relation>(),
+            Term::<Entity>::var("this"),
+            Term::<Any>::typed_var("number", kind),
+            Term::blank(),
+        );
+        assert_eq!(query.sort_order(), SortOrder::On("number".into()));
     }
 }
