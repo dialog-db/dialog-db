@@ -16,6 +16,8 @@ says how to cut a release.
 
 ### `ConditionalSync` means `Sync`, not `Send + Sync`
 
+[#734](https://github.com/dialog-db/dialog-db/pull/734)
+
 `dialog_common::ConditionalSync` was `Send + Sync` on native targets, so
 a `ConditionalSync` bound quietly asked for `Send` as well, and a bound
 that needed only `Sync` could not say so. It is now `Sync`, matching its
