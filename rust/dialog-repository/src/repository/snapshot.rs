@@ -751,8 +751,15 @@ impl SnapshotExport {
                 // exactly like stored entries (a buffered retract
                 // references nothing of its own). The closure only
                 // collects: classification returns artifact errors,
-                // which do not belong in a tree-walk callback.
-                let mut entries: Vec<(Key, State<Datum>)> = Vec::new();
+                // which do not belong in a tree-walk callback. The
+                // buffer is sized from the node's own count first: grown
+                // entry by entry, its copies cost whatever the allocator's
+                // layout makes them, which varies run to run and showed
+                // in the walk's instruction count as noise.
+                let mut entries: Vec<(Key, State<Datum>)> = Vec::with_capacity(match node.body() {
+                    NodeBody::Segment(segment) => segment.len(),
+                    NodeBody::Index(index) => index.novelty_len(),
+                });
                 match node.body() {
                     NodeBody::Segment(segment) => {
                         segment.for_each_entry::<Key, _>(|key, value| {
