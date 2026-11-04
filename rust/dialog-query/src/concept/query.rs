@@ -17,6 +17,7 @@ pub use rules::{ConceptRules, Exact, Installed};
 use std::fmt;
 
 use crate::attribute::The;
+use crate::attribute::query::all::pushes_interval;
 use crate::concept::descriptor::{ConceptDescriptor, ConceptFieldDescriptor};
 use crate::corpus::{CorpusRelation, Type, Value};
 use crate::planner::{Disjunction, Plan};
@@ -496,13 +497,30 @@ impl ConceptQuery {
         // generic over the stream handed the next level a type that held
         // this level's, and the compiler unrolled the recursion forty
         // levels deep (a 50 KB type term) in a workload's binary.
-        self.conformed().evaluate_erased(Box::pin(selection), env)
+        self.evaluate_proved(selection, env, Environment::new())
+    }
+
+    /// [`evaluate_application`](Self::evaluate_application), as a step of a
+    /// rule whose comparisons with a constant filter the variables in `proved`.
+    /// See [`bounds`](Self::bounds).
+    pub(crate) fn evaluate_proved<'a, Env, M: Selection + 'a>(
+        self,
+        selection: M,
+        env: &'a Env,
+        proved: Environment,
+    ) -> impl Selection + 'a
+    where
+        Env: crate::Scope<'a>,
+    {
+        self.conformed()
+            .evaluate_erased(Box::pin(selection), env, proved)
     }
 
     fn evaluate_erased<'a, Env>(
         self,
         selection: Pin<Box<dyn Selection + 'a>>,
         env: &'a Env,
+        proved: Environment,
     ) -> impl Selection + 'a
     where
         Env: crate::Scope<'a>,
@@ -533,6 +551,7 @@ impl ConceptQuery {
                     rules,
                     Box::pin(stream::iter([Ok(first)]).chain(selection)),
                     env,
+                    proved,
                 );
                 let mut rows: Vec<(Vec<u8>, Match)> = Vec::new();
                 for await row in unsorted {
@@ -554,6 +573,7 @@ impl ConceptQuery {
                 rules,
                 Box::pin(stream::iter([Ok(first)]).chain(selection)),
                 env,
+                proved,
             ) {
                 yield row?;
             }
@@ -567,6 +587,7 @@ impl ConceptQuery {
         rules: ConceptRules,
         selection: Pin<Box<dyn Selection + 'a>>,
         env: &'a Env,
+        proved: Environment,
     ) -> impl Selection + 'a
     where
         Env: crate::Scope<'a>,
@@ -672,7 +693,20 @@ impl ConceptQuery {
             }
 
             let elect = app.election(&rules);
-            let plan = rules.plan(&app.terms, &first);
+            let bounds = if elect.is_none() && !widen {
+                app.bounds(&first, &proved)
+            } else {
+                Vec::new()
+            };
+            let plan = if bounds.is_empty() {
+                rules.plan(&app.terms, &first)
+            } else {
+                let mut ranged = Environment::new();
+                for (field, _) in &bounds {
+                    ranged.add(field.clone());
+                }
+                Arc::new(rules.plan_ranged(&app.terms, &first, &ranged).bounded(&bounds))
+            };
             let rows = stream::iter([Ok(first)]).chain(selection);
 
             if reduced.is_empty() {
@@ -1096,6 +1130,57 @@ impl ConceptQuery {
             return None;
         }
         Some(election)
+    }
+
+    /// The fields whose scans can take a bound that this call proved, with
+    /// the kind that carries it, given the first row of the call.
+    ///
+    /// The surrounding rule proved an interval about a variable, and states
+    /// it on the term it passes here. `proved` names the variables that a
+    /// comparison of that rule filters. An interval on any other term is a
+    /// caller's statement of a type, and no comparison would keep the answer
+    /// exact. A scan can read by that range when the range cannot change
+    /// which rows the concept gives within it:
+    ///
+    /// - A required field under `last` or `all`. A read under `last` checks
+    ///   the winner of the cell for each row it finds, and a read under
+    ///   `all` gives each claim. A pick that elects by value (`max`, `min`,
+    ///   `top`) reads every claim of a cell to choose one, so a range would
+    ///   change what it chooses.
+    /// - A field of one stored relation. A chain ranks several relations, and
+    ///   a collection reads a key as well.
+    /// - An optional field stays out, because a scan that finds nothing there
+    ///   yields an `Absent` row where a value does exist.
+    ///
+    /// A field that a rule derives has no scan to take the bound, and a kind
+    /// that rounds or narrows a number takes none
+    /// ([`pushes_interval`](crate::attribute::query::all::pushes_interval)).
+    /// The comparison still filters each row, as it does for every field here.
+    fn bounds(&self, first: &Match, proved: &Environment) -> Vec<(String, Kind)> {
+        let mut bounds = Vec::new();
+        for (name, field) in self.predicate.with().iter() {
+            let Some(term) = self.terms.get(name) else {
+                continue;
+            };
+            if first.contains(term)
+                || field.is_optional()
+                || !term.name().is_some_and(|name| proved.contains(name))
+                || !pushes_interval(term)
+            {
+                continue;
+            }
+            let descriptor = field.descriptor();
+            if !matches!(descriptor.pick(), Pick::Last | Pick::All)
+                || descriptor.is_chain()
+                || matches!(field.the(), The::Collection { .. })
+            {
+                continue;
+            }
+            if let Some(kind) = term.kind() {
+                bounds.push((name.to_string(), kind));
+            }
+        }
+        bounds
     }
 
     /// This query over the concept narrowed to the fields it binds:

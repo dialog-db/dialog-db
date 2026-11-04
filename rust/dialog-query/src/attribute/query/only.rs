@@ -15,6 +15,7 @@ use crate::{Entity, EvaluationError, Parameters, Schema, Term, try_stream};
 use dialog_capability::Provider;
 use dialog_corpus::history::Edition;
 use dialog_corpus::{Cause, DialogCorpusError, Fact, FactView, Select};
+use std::collections::HashSet;
 use std::fmt::Display;
 use std::fmt::{Formatter, Result as FmtResult};
 use std::pin::Pin;
@@ -112,6 +113,63 @@ where
     }
 }
 
+/// Winner verification for a scan of a range: the row of `candidate`'s cell
+/// when its winner is what `candidate` found.
+///
+/// A range finds claims by the stored number, and a kind reads a number
+/// through its lens, so the test is on what the kind reads: the winner as the
+/// kind reads it must be the value that the candidate bound. The winner goes
+/// on the row, as a read of the cell gives it, so two claims of one cell that
+/// the kind reads alike give one row with one citation. The lens of a query
+/// constant is not in play: `reads_as` reads a winner of 5.9 as the natural 5
+/// for a candidate that found a natural 5, and that candidate lost.
+fn challenge_range<'a, Env>(
+    env: &'a Env,
+    selector: AttributeQueryAll,
+    base: Match,
+    candidate: Match,
+) -> impl Selection + 'a
+where
+    Env: crate::Scope<'a>,
+{
+    try_stream! {
+        let claim = candidate.prove(selector.source())?;
+        let challengers =
+            Provider::<Select<'_>>::execute(env, challenged(selector.source(), &candidate)?)
+                .await?;
+        let mut winner: Option<FactView> = None;
+        for await each in challengers {
+            let challenger = each?;
+            winner = Some(match winner {
+                None => challenger,
+                Some(winner) => winner.elect(challenger)?,
+            });
+        }
+        let Some(winner) = winner else {
+            return;
+        };
+        let Some((winner, standing)) = materialize_winner(winner)? else {
+            return;
+        };
+        let Some(winner) = selector.admit(winner) else {
+            return;
+        };
+        if winner.is != *claim.is() {
+            return;
+        }
+        let cause_term = selector.cause();
+        if !cause_term.is_blank() {
+            let cause = Cause::try_from(candidate.lookup(&Term::from(cause_term))?.content()?)?;
+            if winner.cause.clone().unwrap_or(Cause([0; 32])) != cause {
+                return;
+            }
+        }
+        let mut row = base;
+        selector.merge(&mut row, winner, standing)?;
+        yield row;
+    }
+}
+
 /// Winner-selecting attribute query for `Cardinality::One`.
 ///
 /// Wraps an [`AttributeQueryAll`] and yields one value per
@@ -146,6 +204,18 @@ impl AttributeQueryOnly {
     /// Get the 'is' (value) parameter.
     pub fn is(&self) -> &Term<Any> {
         self.query.is()
+    }
+
+    /// See [`AttributeQueryAll::ranged`].
+    pub(crate) fn ranged(self) -> Self {
+        Self {
+            query: self.query.ranged(),
+        }
+    }
+
+    /// See [`AttributeQueryAll::is_ranged`].
+    pub(crate) fn is_ranged(&self) -> bool {
+        self.query.is_ranged()
     }
 
     /// Return a copy with the `is` term's type narrowed to `kind`.
@@ -211,9 +281,12 @@ impl AttributeQueryOnly {
     ///   value (AEV). Results are grouped by `(attribute, entity)` so we
     ///   pick the winner in a single pass.
     /// - **Challenge**: value known without entity ({is}, {the, is}, {of, is}
-    ///   without entity). Each candidate is verified by a secondary
-    ///   `(attribute, entity)` lookup because the scan is not grouped by
-    ///   entity or because blanking the value would widen the scan.
+    ///   without entity), or a range on the value with the entity free. Each
+    ///   candidate is verified by a secondary `(attribute, entity)` lookup
+    ///   because the scan is not grouped by entity or because blanking the
+    ///   value would widen the scan. A range cannot elect by itself: the
+    ///   winner of a cell can stand outside the range, so a claim inside it
+    ///   only counts if it is the winner.
     pub fn evaluate<'a, Env, M: Selection + 'a>(
         self,
         env: &'a Env,
@@ -238,7 +311,8 @@ impl AttributeQueryOnly {
             let entity_known = resolved.of().is_constant();
             let attribute_known = resolved.the().is_constant();
             let value_known = resolved.is().is_constant();
-            if entity_known || (attribute_known && !value_known) {
+            let ranged = resolved.is_ranged() && !value_known;
+            if entity_known || (attribute_known && !value_known && !ranged) {
                 let scan = AttributeQueryAll::lookup(
                     resolved.the().clone(),
                     resolved.of().clone(),
@@ -274,8 +348,9 @@ impl AttributeQueryOnly {
                 let entity_known = resolved.of().is_constant();
                 let attribute_known = resolved.the().is_constant();
                 let value_known = resolved.is().is_constant();
+                let ranged = resolved.is_ranged() && !value_known;
 
-                if entity_known || (attribute_known && !value_known) {
+                if entity_known || (attribute_known && !value_known && !ranged) {
                     // Sliding window path. A constant value admits the
                     // winner a reader of the constant's type observes as
                     // it (see `Value::reads_as`), as the scan's own exact
@@ -369,8 +444,28 @@ impl AttributeQueryOnly {
                     let candidates = Box::pin(pipelined(candidates, env, move |candidate| {
                         challenged(&source, candidate).ok()
                     }));
+                    // Each cell gives one row, and a range can find a cell twice.
+                    let mut answered: HashSet<(Relation, Entity)> = HashSet::new();
                     for await candidate in candidates {
                         let candidate = candidate?;
+                        if ranged {
+                            let claim = candidate.prove(selector.source())?;
+                            let cell = (claim.the().clone(), claim.of().clone());
+                            if answered.contains(&cell) {
+                                continue;
+                            }
+                            let verified = Box::pin(challenge_range(
+                                env,
+                                selector.clone(),
+                                base.clone(),
+                                candidate,
+                            ));
+                            for await row in verified {
+                                answered.insert(cell.clone());
+                                yield row?;
+                            }
+                            continue;
+                        }
                         let verified = Box::pin(challenge(env, selector.clone(), candidate));
                         for await v in verified {
                             yield v?;
@@ -1105,6 +1200,72 @@ mod tests {
             "Should use sliding window and yield one winner when entity is pre-bound"
         );
 
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_keeps_a_fact_with_no_cause_under_a_named_cause_and_a_range() -> anyhow::Result<()> {
+        use crate::attribute::query::AttributeQuery;
+        use crate::planner::Planner;
+        use crate::{Cardinality, Environment, Premise, Proposition};
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        assert_relation!(branch, &operator, the!("person/age"), Entity::new()?, 30u64);
+        let plan = Planner::from(vec![
+            Premise::Assert(Proposition::Attribute(Box::new(AttributeQuery::new(
+                Term::from(the!("person/age")),
+                Term::var("person"),
+                Term::var("age"),
+                Term::var("cause"),
+                Some(Cardinality::One),
+            )))),
+            Term::<Any>::var("age").at_least(Term::<Any>::Constant(Value::UnsignedInt(10))),
+        ])
+        .plan(&Environment::new())?;
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+        let rows = Selection::try_vec(plan.evaluate(Match::new().seed(), &source)).await?;
+        assert_eq!(rows.len(), 1);
+        Ok(())
+    }
+
+    /// A scan that states an interval of its own in its term, beside a comparison in
+    /// the same rule. The stated interval filters nothing by itself, so it must not
+    /// narrow the scan that the comparison proves a range for.
+    #[dialog_common::test]
+    async fn it_does_not_narrow_a_scan_by_an_interval_that_it_states() -> anyhow::Result<()> {
+        use crate::attribute::query::AttributeQuery;
+        use crate::corpus::Type as ValueType;
+        use crate::planner::Planner;
+        use crate::{Cardinality, Environment, Premise, Proposition};
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        assert_relation!(branch, &operator, the!("person/age"), Entity::new()?, 50u64);
+        assert_relation!(
+            branch,
+            &operator,
+            the!("person/age"),
+            Entity::new()?,
+            150u64
+        );
+        let kind = Kind::from(ValueType::UnsignedInt)
+            .with_interval(&Value::UnsignedInt(100), true, true)
+            .expect("a natural takes a bound");
+        let plan = Planner::from(vec![
+            Premise::Assert(Proposition::Attribute(Box::new(AttributeQuery::new(
+                Term::from(the!("person/age")),
+                Term::var("person"),
+                Term::<Any>::typed_var("age", kind),
+                Term::blank(),
+                Some(Cardinality::One),
+            )))),
+            Term::<Any>::var("age").at_least(Term::<Any>::Constant(Value::UnsignedInt(10))),
+        ])
+        .plan(&Environment::new())?;
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+        let rows = Selection::try_vec(plan.evaluate(Match::new().seed(), &source)).await?;
+        assert_eq!(rows.len(), 2);
         Ok(())
     }
 }

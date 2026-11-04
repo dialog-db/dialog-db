@@ -93,6 +93,22 @@ impl DynamicAttributeQuery {
         }
     }
 
+    /// See [`AttributeQueryAll::is_ranged`].
+    pub(crate) fn is_ranged(&self) -> bool {
+        match self {
+            DynamicAttributeQuery::All(query) => query.is_ranged(),
+            DynamicAttributeQuery::Only(query) => query.is_ranged(),
+        }
+    }
+
+    /// See [`AttributeQueryAll::ranged`].
+    pub(crate) fn ranged(self) -> Self {
+        match self {
+            DynamicAttributeQuery::All(q) => DynamicAttributeQuery::All(q.ranged()),
+            DynamicAttributeQuery::Only(q) => DynamicAttributeQuery::Only(q.ranged()),
+        }
+    }
+
     /// Return a copy with the `the`/`of` variable terms carrying
     /// the given kinds. See [`AttributeQueryAll::with_subject_kinds`].
     pub(crate) fn with_subject_kinds(self, the: Option<Kind>, of: Option<Kind>) -> Self {

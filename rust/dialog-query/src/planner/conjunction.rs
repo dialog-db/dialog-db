@@ -1,9 +1,12 @@
 use super::Plan;
 use crate::attribute::query::DynamicAttributeQuery;
+use crate::attribute::query::all::pushes_interval;
 use crate::concept::query::ConceptQuery;
 use crate::query::Application as _;
 use crate::selection::{Match, Selection};
-use crate::{Environment, SortOrder, multi_merge_join};
+use crate::type_system::Type as Kind;
+use crate::types::Any;
+use crate::{Environment, SortOrder, Term, multi_merge_join};
 use core::pin::Pin;
 use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
@@ -52,6 +55,36 @@ pub struct Conjunction {
 }
 
 impl Conjunction {
+    /// This plan with the kind of each named value narrowed on its scans:
+    /// `bounds` names a scan's value variable and the kind a caller proved
+    /// of it. A range reaches the scan through the kind, as in an attribute
+    /// premise. A scan whose kinds have no meet keeps its own, and the
+    /// comparison above still filters its rows.
+    pub fn bounded(&self, bounds: &[(String, Kind)]) -> Self {
+        let mut bounded = self.clone();
+        for step in &mut bounded.steps {
+            let Plan::Scan(_, query) = step else {
+                continue;
+            };
+            let Some(name) = query.is().name() else {
+                continue;
+            };
+            let Some((_, caller)) = bounds.iter().find(|(field, _)| field == name) else {
+                continue;
+            };
+            let narrowed = match query.is().kind() {
+                Some(own) => own.intersect(caller),
+                None => Some(caller.clone()),
+            };
+            if let Some(kind) = narrowed
+                && pushes_interval(&Term::<Any>::typed_var(name.to_string(), kind.clone()))
+            {
+                **query = (**query).clone().with_type(kind).ranged();
+            }
+        }
+        bounded
+    }
+
     /// Evaluate this conjunction by executing all steps in order.
     /// Each step feeds its output as input to the next, building up bindings.
     ///

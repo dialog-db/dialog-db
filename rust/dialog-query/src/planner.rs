@@ -8,8 +8,13 @@ pub use disjunction::*;
 pub(crate) use feasibility::categorize;
 pub use plan::*;
 
+use crate::attribute::query::AttributeQuery;
+use crate::attribute::query::all::pushes_interval;
+use crate::constraint::Constraint;
 use crate::error::{Infeasible, TypeError};
+use crate::proposition::Proposition;
 use crate::rule::types::TypeEnv;
+use crate::schema::RANGE_SCAN_COST;
 use crate::{Environment, Premise};
 use core::mem;
 use std::sync::Arc;
@@ -28,6 +33,13 @@ pub struct Planner {
     /// Rule-level inferred types, when the caller already ran
     /// analysis. `None` means the planner infers them itself.
     types: Option<Arc<TypeEnv>>,
+    /// Variables a caller narrows by a range the plan does not hold: a
+    /// scan of one of them is costed as a scan of that range, and
+    /// evaluation states the bounds on it.
+    ranged: Environment,
+    /// Variables that a comparison with a constant, among these premises,
+    /// filters. Set when the premises are narrowed.
+    proved: Environment,
 }
 
 impl Planner {
@@ -40,8 +52,18 @@ impl Planner {
         Planner {
             premises,
             types: Some(types),
+            ranged: Environment::new(),
+            proved: Environment::new(),
         }
     }
+
+    /// This planner, with `ranged` as the variables a caller narrows by a
+    /// range. See [`ranged`](Self::ranged).
+    pub fn with_ranged(mut self, ranged: Environment) -> Self {
+        self.ranged = ranged;
+        self
+    }
+
     /// Produce an ordered execution plan ([`Conjunction`]) for the given scope.
     ///
     /// Repeatedly selects the cheapest feasible premise until all
@@ -69,7 +91,10 @@ impl Planner {
                 let Ok(binds) = premise.feasible(&bound) else {
                     continue;
                 };
-                let cost = premise.estimate(&bound).unwrap_or(usize::MAX);
+                let cost = self
+                    .ranged_cost(premise, &bound)
+                    .or_else(|| premise.estimate(&bound))
+                    .unwrap_or(usize::MAX);
                 if best
                     .as_ref()
                     .is_none_or(|(best_cost, _, _)| cost < *best_cost)
@@ -94,6 +119,7 @@ impl Planner {
                     cost: step_cost,
                     binds,
                     env: step_env,
+                    proved: self.proved.clone(),
                 },
             ));
         }
@@ -111,6 +137,30 @@ impl Planner {
             binds,
             env,
         })
+    }
+
+    /// The cost of a scan whose value a caller narrows by a range, where
+    /// this is the scan that finds its entities. Once something binds the
+    /// entity, the scan is a lookup of one cell, as with no range.
+    fn ranged_cost(&self, premise: &Premise, bound: &Environment) -> Option<usize> {
+        let Premise::Assert(Proposition::Attribute(query)) = premise else {
+            return None;
+        };
+        (self.reads_range(query)
+            && (query.the().is_bound(bound) || query.the().is_ranged())
+            && !query.of().is_bound(bound)
+            && !query.is().is_bound(bound))
+        .then_some(RANGE_SCAN_COST)
+    }
+
+    /// Whether a scan's value is narrowed by a range: one that a caller states
+    /// at evaluation, or one that a comparison among these premises proved.
+    fn reads_range(&self, query: &AttributeQuery) -> bool {
+        query
+            .is()
+            .name()
+            .is_some_and(|name| self.ranged.contains(name))
+            || query.is_ranged()
     }
 
     /// Rewrite the planner's premises so each variable term carries
@@ -134,10 +184,28 @@ impl Planner {
                 }
             })?),
         };
+        let stated = stated_intervals(&self.premises);
         self.premises = self
             .premises
             .drain(..)
             .map(|premise| plan::apply_types(premise, &types))
+            .collect();
+        self.proved = proved_ranges(&self.premises);
+        for name in stated.iter() {
+            self.proved.remove(name);
+        }
+        let proved = self.proved.clone();
+        self.premises = self
+            .premises
+            .drain(..)
+            .map(|premise| match premise {
+                Premise::Assert(Proposition::Attribute(query))
+                    if takes_proved_range(&query, &proved) =>
+                {
+                    Premise::Assert(Proposition::Attribute(Box::new(query.ranged())))
+                }
+                premise => premise,
+            })
             .collect();
         Ok(())
     }
@@ -161,11 +229,72 @@ impl Planner {
     }
 }
 
+/// The variables that a comparison with a constant filters, among `premises`.
+/// A comparison under `unless` filters nothing of the sort, so it does not count.
+fn proved_ranges(premises: &[Premise]) -> Environment {
+    let mut proved = Environment::new();
+    for premise in premises {
+        let Premise::Assert(Proposition::Constraint(constraint)) = premise else {
+            continue;
+        };
+        let (of, with) = match constraint {
+            Constraint::LessThan(compare) => (&compare.of, &compare.with),
+            Constraint::AtMost(compare) => (&compare.of, &compare.with),
+            Constraint::GreaterThan(compare) => (&compare.of, &compare.with),
+            Constraint::AtLeast(compare) => (&compare.of, &compare.with),
+            _ => continue,
+        };
+        let variable = match (of.is_constant(), with.is_constant()) {
+            (false, true) => of.name(),
+            (true, false) => with.name(),
+            _ => None,
+        };
+        if let Some(name) = variable {
+            proved.add(name);
+        }
+    }
+    proved
+}
+
+/// The variables whose scan states an interval of its own in its term. That interval
+/// meets a comparison's in inference, and it filters nothing by itself, so a range
+/// built from the two would hold fewer rows than the comparison keeps.
+fn stated_intervals(premises: &[Premise]) -> Environment {
+    let mut stated = Environment::new();
+    for premise in premises {
+        if let Premise::Assert(Proposition::Attribute(query)) = premise
+            && let Some(name) = query.is().name()
+            && query
+                .is()
+                .kind()
+                .and_then(|kind| {
+                    kind.refinement()
+                        .map(|refinement| refinement.interval.is_some())
+                })
+                .unwrap_or(false)
+        {
+            stated.add(name);
+        }
+    }
+    stated
+}
+
+/// Whether an attribute premise can read the range of a proved variable: its
+/// attribute is known, so the selector keeps a constraint if a tree cannot use
+/// the bound, and a range of the stored number holds each row the comparison keeps.
+fn takes_proved_range(query: &AttributeQuery, proved: &Environment) -> bool {
+    query.is().name().is_some_and(|name| proved.contains(name))
+        && (query.the().is_constant() || query.the().is_ranged())
+        && pushes_interval(query.is())
+}
+
 impl From<Vec<Premise>> for Planner {
     fn from(premises: Vec<Premise>) -> Self {
         Planner {
             premises,
             types: None,
+            ranged: Environment::new(),
+            proved: Environment::new(),
         }
     }
 }

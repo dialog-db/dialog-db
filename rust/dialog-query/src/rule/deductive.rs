@@ -272,6 +272,15 @@ impl DeductiveRule {
             .expect("an analyzed rule is plannable by construction")
     }
 
+    /// [`plan`](Self::plan), for a caller that narrows the variables in
+    /// `ranged` by a range. See [`Planner::with_ranged`].
+    pub fn plan_ranged(&self, scope: &Environment, ranged: &Environment) -> Conjunction {
+        Planner::with_types(self.analysis.premises.clone(), self.analysis.types.clone())
+            .with_ranged(ranged.clone())
+            .plan(scope)
+            .expect("an analyzed rule is plannable by construction")
+    }
+
     /// Returns an iterator over the required operand names of this
     /// rule's conclusion.
     pub fn required_operands(&self) -> impl Iterator<Item = String> + '_ {

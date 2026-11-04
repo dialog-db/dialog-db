@@ -372,8 +372,21 @@ impl ConceptRules {
     /// adornment, so a repeated identical call on the *same*
     /// `ConceptRules` skips even the (cheap) re-assembly.
     pub fn plan(&self, terms: &Parameters, matched: &Match) -> Arc<Disjunction> {
+        self.plan_ranged(terms, matched, &Environment::new())
+    }
+
+    /// [`plan`](Self::plan), for a call that narrows the fields in `ranged`
+    /// by a range. Which fields those are is part of the key of the plan;
+    /// the bounds of the call are not, and the caller states them on the
+    /// plan with [`Disjunction::bounded`].
+    pub fn plan_ranged(
+        &self,
+        terms: &Parameters,
+        matched: &Match,
+        ranged: &Environment,
+    ) -> Arc<Disjunction> {
         let operands = self.implicit.conclusion().sorted_operands();
-        let adornment = Adornment::derive(&operands, terms, matched);
+        let adornment = Adornment::derive(&operands, terms, matched).ranged(&operands, ranged);
 
         if let Some(plan) = self.plans.read().unwrap().get(&adornment) {
             return plan.clone();
@@ -389,11 +402,11 @@ impl ConceptRules {
         // rules never join the disjunction: their folded rows are
         // computed separately (see [`Self::reducing`]).
         let implicit = if self.selecting {
-            self.implicit.plan(&scope)
+            self.implicit.plan_ranged(&scope, ranged)
         } else {
             self.implicit
                 .conclusion()
-                .implicit_plan(adornment, || self.implicit.plan(&scope))
+                .implicit_plan(adornment, || self.implicit.plan_ranged(&scope, ranged))
         };
         let plan: Disjunction = iter::once(implicit)
             .chain(
@@ -444,6 +457,7 @@ impl ConceptRules {
             cost,
             binds: binds.clone(),
             env: scope.clone(),
+            proved: Environment::new(),
         };
         let recall = Recall {
             rule: source.memo_key(),

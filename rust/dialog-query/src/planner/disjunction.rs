@@ -3,6 +3,7 @@ use core::pin::Pin;
 use crate::selection::Selection;
 use crate::stream::{fork_stream, stream_select};
 use crate::try_stream;
+use crate::type_system::Type as Kind;
 use futures_util::stream::empty;
 
 use super::Conjunction;
@@ -53,6 +54,18 @@ impl Disjunction {
             Self::Empty => Self::Solo(right),
             Self::Solo(left) => Self::Duet(left, right),
             _ => Self::Or(Box::new(self), right),
+        }
+    }
+
+    /// This disjunction with `bounds` stated on the scans of its first
+    /// alternative, a concept's stored facts. A rule of the concept derives
+    /// its rows another way, and the comparison above filters what it gives.
+    pub fn bounded(&self, bounds: &[(String, Kind)]) -> Self {
+        match self {
+            Self::Empty => Self::Empty,
+            Self::Solo(first) => Self::Solo(first.bounded(bounds)),
+            Self::Duet(first, second) => Self::Duet(first.bounded(bounds), second.clone()),
+            Self::Or(rest, last) => Self::Or(Box::new(rest.bounded(bounds)), last.clone()),
         }
     }
 
