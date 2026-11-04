@@ -30,6 +30,9 @@ pub struct Authority {
     profile: Did,
     operator: Signer,
     account: Option<Did>,
+    /// The profile's delegation to the operator, DAG-CBOR encoded, when
+    /// the operator is a session holding the profile's whole authority.
+    delegation: Option<Vec<u8>>,
     /// The operator's DID, derived once: rendering a key as a `did:key`
     /// base58-encodes it, and every query identifies its operator, while
     /// the signer never changes.
@@ -50,7 +53,16 @@ impl Authority {
             profile: profile.into(),
             operator,
             account: None,
+            delegation: None,
         }
+    }
+
+    /// Set the profile's delegation to the operator: the proof, recorded
+    /// alongside the revisions this authority mints, that the operator
+    /// acts for the profile.
+    pub fn with_delegation(mut self, delegation: Vec<u8>) -> Self {
+        self.delegation = Some(delegation);
+        self
     }
 
     /// Set the account DID.
@@ -93,6 +105,7 @@ impl Authority {
             })
             .attenuate(authority::Operator {
                 operator: self.operator_did(),
+                delegation: self.delegation.clone(),
             })
     }
 }

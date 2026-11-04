@@ -1560,6 +1560,57 @@ mod tests {
         }
 
         #[dialog_common::test]
+        async fn it_attests_the_profile_a_session_acts_for() -> anyhow::Result<()> {
+            // A session holding its profile's whole authority records
+            // that delegation once in the tree, so each of its records
+            // proves the profile as well as the session key.
+            use crate::schema;
+            use crate::schema::DidExt as _;
+
+            let (operator, profile) = test_session_with_peer().await;
+            let repo = test_repo(&operator, &profile).await;
+            let branch = repo.branch("main").open().perform(&operator).await?;
+
+            let mut heads = Vec::new();
+            for name in ["Alice", "Bob"] {
+                branch
+                    .transaction()
+                    .assert(the!("user/name").of(Entity::new()?).is(name.to_string()))
+                    .commit()
+                    .publish()
+                    .perform(&operator)
+                    .await?;
+                let branch = repo.branch("main").load().perform(&operator).await?;
+                heads.push(branch.revision().expect("a revision"));
+            }
+            let branch = repo.branch("main").load().perform(&operator).await?;
+
+            assert_ne!(operator.did(), profile.did());
+            let mut expected = vec![operator.did().this(), profile.did().this()];
+            expected.sort();
+            for head in heads {
+                let rows: Vec<schema::RevisionAttestation> = branch
+                    .query()
+                    .select(Query::<schema::RevisionAttestation> {
+                        this: head.entity().into(),
+                        attested: Term::var("attested"),
+                    })
+                    .perform(&operator)
+                    .try_vec()
+                    .await?;
+                let mut attested: Vec<_> = rows.into_iter().map(|row| row.attested.0).collect();
+                attested.sort();
+                attested.dedup();
+                assert_eq!(
+                    attested, expected,
+                    "each revision proves its session key and its profile"
+                );
+            }
+
+            Ok(())
+        }
+
+        #[dialog_common::test]
         async fn it_projects_the_revision_dag_edge() -> anyhow::Result<()> {
             // schema::RevisionParent derives the DAG edge from the same
             // signed record: one row per parent, none for genesis.

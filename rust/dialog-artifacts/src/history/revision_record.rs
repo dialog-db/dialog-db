@@ -1,4 +1,6 @@
 use dialog_capability::Did;
+use dialog_ucan_core::{Delegation, subject::Subject};
+use dialog_varsig::algorithm::eddsa::Ed25519Signature;
 use serde::{Deserialize, Serialize};
 
 use crate::Revision;
@@ -47,11 +49,11 @@ pub struct RevisionRecord {
     /// DID of the operator (session key) that minted the revision — the
     /// key whose signature binds this record
     pub issuer: String,
-    /// DID of the profile (long-lived key) the issuer *claims* authorized
-    /// it. Attribution metadata vouched for by the issuer's signature, not
-    /// an authorization proof: binding it cryptographically needs
-    /// delegation proofs plus a time-anchoring story (see
-    /// `notes/version-control.md`).
+    /// DID of the profile (long-lived key) the issuer acted for. On its
+    /// own this is only the issuer's claim; the profile's delegation to
+    /// the issuer, stored beside the record as a
+    /// [`DelegationRecord`](super::DelegationRecord), is
+    /// what proves it (see [`RevisionRecord::attests`]).
     pub authority: String,
     /// Parent revision versions — the revision DAG edge. Empty for
     /// genesis; two entries for a merge.
@@ -146,6 +148,47 @@ impl RevisionRecord {
         Ok(())
     }
 
+    /// Check that `delegation` binds the record's
+    /// [`authority`](Self::authority): issued by the authority, to the
+    /// issuer, for any subject and the root command, and signed by the
+    /// authority. When it does, the record proves the authority
+    /// responsible for its revision; its issuer it proves by its own
+    /// signature (see [`verify`](Self::verify)).
+    ///
+    /// Attribution, not authorization: the delegation's time bounds are
+    /// not checked, because a profile that delegated to the issuer stays
+    /// the one it acted for after the delegation lapses, while whether
+    /// the write was allowed is decided by whoever accepted it.
+    pub fn attests(&self, delegation: &[u8]) -> Result<(), DialogArtifactsError> {
+        let refused = |reason: &str| {
+            DialogArtifactsError::InvalidSignature(format!(
+                "Revision record delegation does not bind {}: {reason}",
+                self.authority
+            ))
+        };
+        let delegation: Delegation<Ed25519Signature> =
+            serde_ipld_dagcbor::from_slice(delegation)
+                .map_err(|error| refused(&format!("not an Ed25519 delegation ({error})")))?;
+        if delegation.issuer().to_string() != self.authority {
+            return Err(refused("issued by another principal"));
+        }
+        if delegation.audience().to_string() != self.issuer {
+            return Err(refused("issued to another principal"));
+        }
+        if *delegation.subject() != Subject::Any || !delegation.command().segments().is_empty() {
+            return Err(refused("narrower than the authority's whole authority"));
+        }
+        let payload = delegation
+            .signed_payload()
+            .map_err(|error| refused(&format!("unencodable ({error})")))?;
+        verify_issuer_signature(
+            &self.authority,
+            &payload,
+            &delegation.signature().to_bytes(),
+        )
+        .map_err(|error| refused(&format!("{error}")))
+    }
+
     /// The fact carrying this record: an [`Artifact`] on the revision
     /// entity under [`REVISION_ATTRIBUTE`], valued with the encoded record
     pub fn to_artifact(&self, version: &Version) -> Result<Artifact, DialogArtifactsError> {
@@ -189,7 +232,7 @@ impl RevisionRecord {
 
         Ok(RecordEntries {
             entries: vec![(entity_key, added.clone()), (attribute_key, added)],
-            spill: encoded.spill,
+            spills: encoded.spill.into_iter().collect(),
         })
     }
 
@@ -231,16 +274,26 @@ impl RevisionRecord {
 pub struct RecordEntries {
     /// The tree entries.
     pub entries: Vec<(Key, State<Datum>)>,
-    /// A spilled value's block: the reference its keys carry and the raw
-    /// value bytes stored under it. `None` when every value stays inline.
-    pub spill: Option<(dialog_storage::Blake3Hash, Vec<u8>)>,
+    /// The blocks of spilled values: the reference each one's keys carry
+    /// and the raw value bytes stored under it. Empty when every value
+    /// stays inline.
+    pub spills: Vec<(dialog_storage::Blake3Hash, Vec<u8>)>,
+}
+
+impl RecordEntries {
+    /// These entries followed by `other`'s, to be written together.
+    pub fn and(mut self, other: RecordEntries) -> Self {
+        self.entries.extend(other.entries);
+        self.spills.extend(other.spills);
+        self
+    }
 }
 
 impl From<Vec<(Key, State<Datum>)>> for RecordEntries {
     fn from(entries: Vec<(Key, State<Datum>)>) -> Self {
         Self {
             entries,
-            spill: None,
+            spills: Vec::new(),
         }
     }
 }

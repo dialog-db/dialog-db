@@ -23,6 +23,8 @@ dialog-effects = { workspace = true }
 dialog-storage = { workspace = true }
 dialog-search-tree = { workspace = true }
 dialog-number = { workspace = true }
+dialog-ucan-core = { workspace = true }
+dialog-varsig = { workspace = true }
 merkle-reference = { workspace = true }
 
 anyhow = { workspace = true, optional = true }
@@ -52,6 +54,7 @@ tokio = { workspace = true, features = ["sync", "macros", "io-util"] }
 url = { workspace = true, features = ["serde"] }
 
 [dev-dependencies]
+dialog-credentials = { workspace = true }
 dialog-storage = { workspace = true, features = ["helpers"] }
 dialog-common = { workspace = true, features = ["helpers"] }
 dialog-search-tree = { workspace = true, features = ["helpers"] }
