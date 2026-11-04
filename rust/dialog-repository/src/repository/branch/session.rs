@@ -3400,6 +3400,71 @@ mod rule_tests {
         Ok(())
     }
 
+    /// A numeric literal adapts to each row, so a rule that bounds a signed field by a
+    /// literal of no sign reads the rows below the bound, and they filter out. A read
+    /// must not refuse a stored number that the literal's own type cannot hold.
+    #[dialog_common::test]
+    async fn it_filters_a_signed_field_by_a_literal_of_no_sign() -> anyhow::Result<()> {
+        use dialog_query::rule::DeductiveRuleDescriptor;
+
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let mut transaction = branch.transaction();
+        for (name, key) in [
+            ("id:low", -1047i64),
+            ("id:one", 1),
+            ("id:five", 5),
+            ("id:nine", 9),
+        ] {
+            let this: Entity = name.parse()?;
+            transaction = transaction.assert(the!("live/key").of(this).is(key));
+        }
+        transaction.commit().publish().perform(&operator).await?;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        for (kind, bound, expected) in [
+            (
+                "SignedInteger",
+                serde_json::json!(3),
+                vec!["id:five", "id:nine"],
+            ),
+            (
+                "SignedInteger",
+                serde_json::json!(-3),
+                vec!["id:five", "id:nine", "id:one"],
+            ),
+            ("Float", serde_json::json!(3), vec!["id:five", "id:nine"]),
+        ] {
+            let descriptor = |the: &str| serde_json::json!({ "with": { "key": { "the": the, "as": kind, "cardinality": "one" } } });
+            let rule: DeductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
+                "deduce": descriptor("segment/key"),
+                "when": [
+                    {
+                        "assert": descriptor("live/key"),
+                        "where": { "this": { "?": { "name": "this" } }, "key": { "?": { "name": "key" } } },
+                    },
+                    { "assert": ">=", "where": { "of": { "?": { "name": "key" } }, "with": bound } },
+                ],
+            }))?;
+            let predicate: ConceptDescriptor = serde_json::from_value(descriptor("segment/key"))?;
+            let mut terms = Parameters::new();
+            terms.insert("this".into(), Term::var("this"));
+            terms.insert("key".into(), Term::var("key"));
+            let rows: Vec<ConceptConclusion> = branch
+                .query()
+                .with(rule.compile()?)
+                .select(ConceptQuery { predicate, terms })
+                .perform(&operator)
+                .try_vec()
+                .await?;
+            let mut found: Vec<String> = rows.iter().map(|row| row.entity().to_string()).collect();
+            found.sort();
+            assert_eq!(found, expected, "{kind} >= {bound}");
+        }
+        Ok(())
+    }
+
     // ----- (3) overlay rule resolves AFTER a prior query (head fixed) --
     // The regression for the bug we hit: a prior query of the concept
     // populates the discovery cache (empty) at the current head; an
