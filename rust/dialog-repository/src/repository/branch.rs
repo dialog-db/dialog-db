@@ -116,6 +116,9 @@ pub use upstream::*;
 // `dialog_common::test` macro emits a variant per mode, so gating the
 // module on the native feature alone compiled it out of the cross-target
 // run before the macro was ever reached.
+#[cfg(test)]
+mod segment_tests;
+
 #[cfg(all(
     test,
     any(feature = "integration-tests", feature = "web-integration-tests")

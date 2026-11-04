@@ -13,6 +13,7 @@ use crate::attribute::{AttributeDescriptor, Relation, The};
 pub use crate::concept::descriptor::ConceptDescriptor;
 use crate::concept::descriptor::ConceptFieldDescriptor;
 use crate::concept::query::ConceptQuery;
+use crate::constraint::{Constraint, Equality};
 use crate::corpus::Entity;
 use crate::error::TypeError;
 use crate::formula::attribute::AttributeParts;
@@ -774,21 +775,46 @@ impl DeductiveRule {
     /// Whether the body binds at most one row per `this`. Every premise
     /// it asserts reads a concept of an entity already determined (`this`,
     /// or a value an earlier such read bound) under a choosing pick for
-    /// every field, so each read yields one row; a negation adds none.
-    /// Anything else (a formula, an `all` read, a read keyed by another
-    /// variable) may yield several, and the body is not single-valued.
+    /// every field, so each read yields one row. A negation and a
+    /// comparison only remove rows. An equality with one side determined
+    /// adds none, and determines its other side. Anything else (a formula,
+    /// an `all` read, a read keyed by another variable, an equality with
+    /// neither side determined) may yield several, and the body is not
+    /// single-valued.
     pub fn single_valued(&self) -> bool {
         let mut determined: BTreeSet<&str> = BTreeSet::from(["this"]);
         let mut pending: Vec<&ConceptQuery> = Vec::new();
+        let mut equalities: Vec<&Equality> = Vec::new();
         for premise in self.analysis().premises() {
             match premise {
                 Premise::Assert(Proposition::Concept(query)) => pending.push(query),
+                Premise::Assert(Proposition::Constraint(constraint)) => match constraint {
+                    Constraint::Equality(equality) => equalities.push(equality),
+                    Constraint::LessThan(_)
+                    | Constraint::AtMost(_)
+                    | Constraint::GreaterThan(_)
+                    | Constraint::AtLeast(_) => {}
+                    Constraint::Coalesce(_) | Constraint::TypeOf(_) | Constraint::StartsWith(_) => {
+                        return false;
+                    }
+                },
                 Premise::Unless(_) => {}
                 _ => return false,
             }
         }
         loop {
-            let before = pending.len();
+            let before = pending.len() + equalities.len();
+            equalities.retain(|equality| {
+                let known = |term: &Term<Any>| {
+                    term.is_constant() || term.name().is_some_and(|name| determined.contains(name))
+                };
+                if !known(&equality.this) && !known(&equality.is) {
+                    return true;
+                }
+                determined.extend(equality.this.name());
+                determined.extend(equality.is.name());
+                false
+            });
             let mut index = 0;
             while index < pending.len() {
                 let query = pending[index];
@@ -817,10 +843,10 @@ impl DeductiveRule {
                 }
                 pending.swap_remove(index);
             }
-            if pending.is_empty() {
+            if pending.is_empty() && equalities.is_empty() {
                 return true;
             }
-            if pending.len() == before {
+            if pending.len() + equalities.len() == before {
                 return false;
             }
         }
@@ -2145,6 +2171,83 @@ mod tests {
                     "role": { "?": { "name": "role" } }
                 }
             }]
+        }));
+        assert!(!rule.single_valued());
+    }
+
+    /// A comparison only removes rows, and an equality with a constant adds
+    /// none, so a body with both still binds one row per entity.
+    #[dialog_common::test]
+    fn a_body_with_a_comparison_and_an_equality_is_single_valued() {
+        let rule = compiled(serde_json::json!({
+            "deduce": { "with": {
+                "channel": { "the": "segment/channel", "as": "entity:" },
+                "number": { "the": "segment/number", "as": "natural:" }
+            }},
+            "when": [
+                {
+                    "assert": { "with": {
+                        "channel": { "the": "message/channel", "as": "entity:" },
+                        "number": { "the": "message/number", "as": "natural:" }
+                    }},
+                    "where": {
+                        "this": { "?": { "name": "this" } },
+                        "channel": { "?": { "name": "channel" } },
+                        "number": { "?": { "name": "number" } }
+                    }
+                },
+                {
+                    "assert": "==",
+                    "where": { "this": { "?": { "name": "channel" } }, "is": { "entity:": "channel:0" } }
+                },
+                { "assert": ">=", "where": { "of": { "?": { "name": "number" } }, "with": 10 } },
+                { "assert": "<", "where": { "of": { "?": { "name": "number" } }, "with": 20 } }
+            ]
+        }));
+        assert!(rule.single_valued());
+    }
+
+    /// An equality can determine the entity that a later read is keyed by:
+    /// the read still yields one row.
+    #[dialog_common::test]
+    fn an_equality_can_determine_the_entity_of_a_read() {
+        let rule = compiled(serde_json::json!({
+            "deduce": { "with": { "title": { "the": "member/title", "as": "text:" } } },
+            "when": [
+                {
+                    "assert": { "with": { "group": { "the": "member/group", "as": "entity:" } } },
+                    "where": { "this": { "?": { "name": "this" } }, "group": { "?": { "name": "group" } } }
+                },
+                {
+                    "assert": "==",
+                    "where": { "this": { "?": { "name": "same" } }, "is": { "?": { "name": "group" } } }
+                },
+                {
+                    "assert": { "with": { "name": { "the": "group/name", "as": "text:" } } },
+                    "where": { "this": { "?": { "name": "same" } }, "name": { "?": { "name": "title" } } }
+                }
+            ]
+        }));
+        assert!(rule.single_valued());
+    }
+
+    /// An equality binds nothing new about how many rows the body has when
+    /// its known side comes from a read that can yield several: the body
+    /// stays not single-valued.
+    #[dialog_common::test]
+    fn an_equality_over_a_read_of_many_values_is_not_single_valued() {
+        let rule = compiled(serde_json::json!({
+            "deduce": { "with": { "tag": { "the": "item/label", "as": "text:" } } },
+            "when": [
+                {
+                    "assert": { "with": { "tag": { "the": "item/tag", "as": "text:", "pick": "all:" } } },
+                    "where": { "this": { "?": { "name": "this" } }, "tag": { "?": { "name": "seen" } } }
+                },
+                {
+                    "assert": "==",
+                    "where": { "this": { "?": { "name": "tag" } }, "is": { "?": { "name": "seen" } } }
+                }
+            ]
         }));
         assert!(!rule.single_valued());
     }
