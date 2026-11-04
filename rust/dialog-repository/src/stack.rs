@@ -3190,6 +3190,32 @@ impl StackQuery {
         self
     }
 
+    /// Whether a rule that concludes `head`, among the rules that this query
+    /// reads, joins a cycle of rules. A host that lets a query bring a rule can
+    /// so refuse one that would make the query recursive.
+    pub async fn joins_cycle<Env>(
+        &self,
+        head: &dialog_query::ConceptDescriptor,
+        env: &Env,
+    ) -> Result<bool, EvaluationError>
+    where
+        Env: StackEnv,
+    {
+        let operator = Identify
+            .perform(env)
+            .await
+            .map_err(|error| EvaluationError::Store(format!("identify: {error}")))?;
+        let mut layer = QueryLayer::new();
+        for source in &self.composite.sources {
+            layer = layer.join(QueryLayer::from(source.as_ref()));
+        }
+        let overlay = layer.with(self.changes.clone()).overlay(&operator);
+        QueryEnv::over(self.composite.clone(), overlay, env)
+            .with_layers(self.layers.clone())
+            .joins_cycle(head)
+            .await
+    }
+
     /// Stage a query application. Call `.perform(&env)` to execute.
     pub fn select<Q: Application>(&self, query: Q) -> StackSelect<Q> {
         StackSelect {
@@ -9702,6 +9728,98 @@ mod tests {
             counts(&reading, &visible),
             before,
             "neither live query evaluates for the hidden commit"
+        );
+        Ok(())
+    }
+
+    /// A rule that a query brings joins a cycle when it reads its own head, or
+    /// a concept that a rule of a layer concludes from its head. A rule that
+    /// only reads a recursive concept of a layer joins none.
+    #[dialog_common::test]
+    async fn it_finds_a_rule_of_a_query_that_joins_a_cycle() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let row: Entity = "row:1".parse()?;
+        let (stack, _, _) = scoped_stack(&operator, &shared, &row).await?;
+        let reading = |head: &str, read: &str| -> Result<dialog_query::DeductiveRule> {
+            Ok(serde_json::from_value(serde_json::json!({
+                "deduce": { "with": { "name": { "the": head, "as": "text:" } } },
+                "when": [{
+                    "assert": { "with": { "name": { "the": read, "as": "text:" } } },
+                    "where": {
+                        "this": { "?": { "name": "this" } },
+                        "name": { "?": { "name": "name" } }
+                    }
+                }]
+            }))?)
+        };
+        let head = |rule: &dialog_query::DeductiveRule| rule.conclusion().clone();
+
+        let plain = reading("query.row/name", "test.source/name")?;
+        assert!(
+            !stack
+                .query()
+                .with(plain.clone())
+                .joins_cycle(&head(&plain), &operator)
+                .await?
+        );
+        let itself = reading("query.row/name", "query.row/name")?;
+        assert!(
+            stack
+                .query()
+                .with(itself.clone())
+                .joins_cycle(&head(&itself), &operator)
+                .await?,
+            "a rule that reads its own head"
+        );
+
+        // A rule of the bottom closes a cycle through the rule of the query.
+        let closing = reading("space.shelf/name", "query.shelf/name")?;
+        let opening = reading("query.shelf/name", "space.shelf/name")?;
+        assert!(
+            !stack
+                .query()
+                .with(opening.clone())
+                .joins_cycle(&head(&opening), &operator)
+                .await?,
+            "no rule concludes what it reads yet"
+        );
+        shared
+            .transaction()
+            .assert(closing)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        stack.advance(&operator).await?;
+        assert!(
+            stack
+                .query()
+                .with(opening.clone())
+                .joins_cycle(&head(&opening), &operator)
+                .await?,
+            "the rule of the space closes the cycle"
+        );
+
+        // A recursive rule of the bottom, which the rule of the query only reads.
+        let recursive = reading("space.loop/name", "space.loop/name")?;
+        shared
+            .transaction()
+            .assert(recursive)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        stack.advance(&operator).await?;
+        let reader = reading("query.reader/name", "space.loop/name")?;
+        assert!(
+            !stack
+                .query()
+                .with(reader.clone())
+                .joins_cycle(&head(&reader), &operator)
+                .await?,
+            "reading a recursive concept joins no cycle"
         );
         Ok(())
     }

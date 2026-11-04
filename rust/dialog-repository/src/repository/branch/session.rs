@@ -318,6 +318,38 @@ impl<'a> QueryLayer<'a> {
         Ephemeral::holding(overlay)
     }
 
+    /// Whether a rule that concludes `head`, among the rules that this layer
+    /// reads, joins a cycle of rules: see
+    /// [`StackQuery::joins_cycle`](crate::StackQuery::joins_cycle).
+    pub async fn joins_cycle<Env>(
+        &self,
+        head: &ConceptDescriptor,
+        env: &Env,
+    ) -> Result<bool, EvaluationError>
+    where
+        Env: Provider<BlobRead>
+            + Provider<Get>
+            + Provider<Put>
+            + Provider<Resolve>
+            + Provider<Identify>
+            + Provider<Hydrate>
+            + Provider<Preload>
+            + Provider<Speculation>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + Holds
+            + ConditionalSync
+            + 'static,
+    {
+        let operator = Identify
+            .perform(env)
+            .await
+            .map_err(|error| EvaluationError::Store(format!("identify: {error}")))?;
+        let overlay = self.overlay(&operator);
+        QueryEnv::over(self.composite(), overlay, env)
+            .joins_cycle(head)
+            .await
+    }
+
     /// Stage a query application. Call `.perform(&operator)` to execute.
     pub fn select<Q: Application>(&self, query: Q) -> SelectQuery<'_, Q> {
         SelectQuery {
@@ -1294,6 +1326,26 @@ impl<'a> Provider<LoadBlock> for QueryEnv<'a> {
             }
         }
         Ok(None)
+    }
+}
+
+impl QueryEnv<'_> {
+    /// Whether a rule that concludes `head` joins a cycle of rules, over each
+    /// rule that this read takes: the attribute concept of a field of the head
+    /// reads itself, through this rule or through others. A rule that only reads
+    /// a recursive concept joins no cycle.
+    pub(crate) async fn joins_cycle(
+        &self,
+        head: &ConceptDescriptor,
+    ) -> Result<bool, EvaluationError> {
+        for (_, field) in head.with().iter() {
+            let concept = ConceptDescriptor::of_attribute(field);
+            let rules = Provider::<SelectRules>::execute(self, concept).await?;
+            if rules.recursion().is_some() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 }
 
