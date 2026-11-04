@@ -7,3 +7,10 @@ it out without asking.
 
 An idea that gets spiked should link its results here. An idea that lands
 becomes a note in `notes/`.
+
+## Spiked
+
+- [Single-file representation](single-file-format.md):
+  [results](single-file-format-spike.md). About 20× smaller than
+  file-per-block, but it still grows with commits, and reading a node
+  costs about 10× a file read.

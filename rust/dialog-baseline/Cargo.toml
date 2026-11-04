@@ -40,6 +40,11 @@ dialog-storage = { workspace = true, features = ["helpers"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 criterion = { version = "0.5", features = ["async_tokio"] }
+# The single-file census (`examples/single_file_census.rs`) serializes tree
+# values to measure them and models compressed and delta-encoded stores.
+blake3 = { workspace = true }
+rkyv = { workspace = true }
+zstd = "0.13"
 
 [[bench]]
 name = "sqlite_vs_dialog"

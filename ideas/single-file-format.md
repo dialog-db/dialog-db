@@ -1,5 +1,7 @@
 # Single-file representation
 
+Spiked: see [the results](single-file-format-spike.md).
+
 ## Idea
 
 A replica on native is a directory of files, one per block. That is simple
