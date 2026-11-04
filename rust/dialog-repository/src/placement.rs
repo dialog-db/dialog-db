@@ -25,8 +25,17 @@
 //! ```text
 //! <repository did>          dialog.attribute/default    memory:space    # the implicit scope
 //! attribute:ui/selected     dialog.attribute/scope      memory:session  # an override
+//! namespace:ui.state/       dialog.attribute/scope      memory:session  # a prefix
 //! attribute:cmd.rename/name dialog.attribute/transient  true            # lives one round
 //! ```
+//!
+//! A placement of a prefix ([`PrefixPlacement`]) covers each attribute whose
+//! name starts with the prefix, so it can place a namespace whose attributes
+//! no list can name in advance. The scope of an attribute comes from the
+//! origin of its placement first: one in the session store of the layer ranks
+//! above one that the layer holds or that a commit declares. Within one origin,
+//! an exact attribute ranks above a prefix, and a longer prefix above a
+//! shorter one. A prefix never covers the machinery under `dialog.`.
 //!
 //! The default names the scope an attribute with no placement belongs
 //! to, and it is the tree's name: the tree is where the declarations
@@ -95,6 +104,9 @@ pub(crate) fn transient_placement_attr() -> Relation {
 /// The URI scheme attribute entities are minted under.
 const ATTRIBUTE_SCHEME: &str = "attribute:";
 
+/// The URI scheme the entities of attribute prefixes are minted under.
+const NAMESPACE_SCHEME: &str = "namespace:";
+
 /// The entity that stands for an attribute in facts *about* the
 /// attribute: `attribute:<namespace>/<name>`.
 pub fn attribute_entity(attribute: &Relation) -> Entity {
@@ -111,6 +123,14 @@ fn entity_attribute(entity: &Entity) -> Option<Relation> {
         .strip_prefix(ATTRIBUTE_SCHEME)?
         .parse()
         .ok()
+}
+
+/// The entity that stands for a prefix of attributes in a placement of that
+/// prefix: `namespace:<prefix>`, such as `namespace:sapling.kernel/`.
+pub fn namespace_entity(prefix: &str) -> Result<Entity, DialogCorpusError> {
+    format!("{NAMESPACE_SCHEME}{prefix}")
+        .parse()
+        .map_err(|error| DialogCorpusError::InvalidEntity(format!("{error}")))
 }
 
 /// [`Statement`] declaring the scope an attribute's facts live in.
@@ -161,6 +181,59 @@ impl Statement for Placement {
             attribute_entity(&self.attribute),
             Value::Entity(self.scope),
         );
+    }
+}
+
+/// [`Statement`] declaring the scope of each attribute whose name starts with
+/// a prefix, such as `sapling.kernel/`. A placement of one exact attribute, and
+/// one of a longer prefix, rank above it within one origin (see the
+/// [module documentation](self)). A prefix never covers an attribute under
+/// `dialog.`.
+///
+/// ```no_run
+/// # use dialog_repository::{Branch, PrefixPlacement};
+/// # use dialog_repository::placement::Target;
+/// # async fn example(branch: &Branch) -> anyhow::Result<()> {
+/// let session: dialog_corpus::Entity = "memory:session".parse()?;
+/// branch.bind(session.clone(), Target::Session);
+/// let tx = branch
+///     .transaction()
+///     .assert(PrefixPlacement::new("ui.state/", session)?);
+/// # let _ = tx;
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrefixPlacement {
+    /// The entity of the prefix: see [`namespace_entity`].
+    pub namespace: Entity,
+    /// The scope the facts of the attributes under it live in.
+    pub scope: Entity,
+}
+
+impl PrefixPlacement {
+    /// Declare that the facts of each attribute under `prefix` live in
+    /// `scope`. Fails for a prefix that an entity cannot spell.
+    pub fn new(prefix: &str, scope: Entity) -> Result<Self, DialogCorpusError> {
+        Ok(Self {
+            namespace: namespace_entity(prefix)?,
+            scope,
+        })
+    }
+}
+
+impl Statement for PrefixPlacement {
+    fn assert(self, update: &mut impl Update) {
+        update.associate(
+            scope_attr(),
+            self.namespace,
+            Value::Entity(self.scope),
+            Pick::Last,
+        );
+    }
+
+    fn retract(self, update: &mut impl Update) {
+        update.dissociate(scope_attr(), self.namespace, Value::Entity(self.scope));
     }
 }
 
@@ -302,9 +375,83 @@ impl Bindings {
 /// footprint.
 #[derive(Debug, Default)]
 pub(crate) struct Declared {
-    attributes: HashMap<Relation, Entity>,
+    placed: Placed,
     default: Option<Entity>,
     transient: HashSet<Relation>,
+}
+
+/// The placements of one origin: the scope of each exact attribute, and of
+/// each prefix of attributes. A row carries its attribute as bytes, so both
+/// are keyed by name, and a read parses no attribute.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct Placed {
+    attributes: HashMap<String, Entity>,
+    prefixes: HashMap<String, Entity>,
+}
+
+impl Placed {
+    /// The scope that these placements give `attribute`: its exact placement,
+    /// or the placement of its longest prefix. A prefix never covers the
+    /// machinery under `dialog.`, which lives in the layer that holds it.
+    fn scope_of(&self, attribute: &str) -> Option<&Entity> {
+        if let Some(scope) = self.attributes.get(attribute) {
+            return Some(scope);
+        }
+        if attribute.starts_with("dialog.") {
+            return None;
+        }
+        self.prefixes
+            .iter()
+            .filter(|(prefix, _)| attribute.starts_with(prefix.as_str()))
+            .max_by_key(|(prefix, _)| prefix.len())
+            .map(|(_, scope)| scope)
+    }
+
+    /// Notes that the placement of `entity`, an attribute or a prefix, names
+    /// `scope`. An entity that is neither names nothing.
+    fn place(&mut self, entity: &Entity, scope: Entity) {
+        match placed_name(entity) {
+            Some(PlacedName::Attribute(attribute)) => {
+                self.attributes.insert(attribute, scope);
+            }
+            Some(PlacedName::Prefix(prefix)) => {
+                self.prefixes.insert(prefix, scope);
+            }
+            None => {}
+        }
+    }
+
+    /// Drops the placement of `entity`, when it names `scope`.
+    fn unplace(&mut self, entity: &Entity, scope: &Entity) {
+        match placed_name(entity) {
+            Some(PlacedName::Attribute(attribute))
+                if self.attributes.get(&attribute) == Some(scope) =>
+            {
+                self.attributes.remove(&attribute);
+            }
+            Some(PlacedName::Prefix(prefix)) if self.prefixes.get(&prefix) == Some(scope) => {
+                self.prefixes.remove(&prefix);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// What a placement names.
+enum PlacedName {
+    Attribute(String),
+    Prefix(String),
+}
+
+/// The attribute or the prefix that the entity of a placement stands for, if
+/// the entity is one. An empty prefix would cover each attribute of a layer,
+/// so it names nothing.
+fn placed_name(entity: &Entity) -> Option<PlacedName> {
+    let spelled = entity.to_string();
+    if let Some(prefix) = spelled.strip_prefix(NAMESPACE_SCHEME) {
+        return (!prefix.is_empty()).then(|| PlacedName::Prefix(prefix.to_owned()));
+    }
+    entity_attribute(entity).map(|attribute| PlacedName::Attribute(attribute.to_string()))
 }
 
 /// A shared handle to the committed declarations at a head.
@@ -315,9 +462,14 @@ pub(crate) type CommittedPlacements = Arc<Declared>;
 /// retractions) laid over it.
 #[derive(Debug, Default)]
 pub(crate) struct Placements {
+    /// What the session store of the layer declares: the first origin.
+    session: Placed,
+    /// What the layer holds, with the commit's own declarations and
+    /// retractions laid over it: the second origin.
+    held: Placed,
+    /// The slice at the head: the default and the transient set of the
+    /// layer, which the fields below lay the commit over.
     committed: CommittedPlacements,
-    declared: HashMap<Relation, Entity>,
-    retracted: HashMap<Relation, Entity>,
     default: Option<Entity>,
     default_retracted: Option<Entity>,
     transient: HashSet<Relation>,
@@ -345,20 +497,21 @@ impl Placements {
     ) -> Result<Self, CommitError> {
         let committed = committed_placements(source, env).await?;
         let mut placements = Placements {
+            held: committed.placed.clone(),
             committed,
             ..Placements::default()
         };
         // A declaration held in the layer's session store is this
         // process's own: a writer that knows where its facts belong
         // declares the attribute there and the declaration never reaches
-        // the tree or a peer. It outranks the committed one and yields
-        // to one the batch itself carries.
+        // the tree or a peer. It outranks each one that the layer holds,
+        // and each one that a batch carries, which the layer is about to
+        // hold: a writer of the tree cannot move an attribute of this
+        // process, however it spells the placement.
         let store = source.overlay();
         for claim in store.scan(&declarations_selector()) {
-            if let Some(attribute) = entity_attribute(&claim.of) {
-                let target = scope_value(attribute.as_str(), &claim.is)?;
-                placements.declared.insert(attribute, target);
-            }
+            let target = scope_value(&claim.of.to_string(), &claim.is)?;
+            placements.session.place(&claim.of, target);
         }
         // A default that the session store declares outranks the committed
         // one, as a placement there does: a writer of the tree cannot move
@@ -390,14 +543,14 @@ impl Placements {
                     _ => placements.transient.insert(placed),
                 };
             } else if *the == scope {
-                let Some(placed) = entity_attribute(entity) else {
+                if placed_name(entity).is_none() {
                     continue;
-                };
+                }
                 let (Change::Assert(value, _) | Change::Retract(value)) = change;
-                let target = scope_value(placed.as_str(), value)?;
+                let target = scope_value(&entity.to_string(), value)?;
                 match change {
-                    Change::Retract(_) => placements.retracted.insert(placed, target),
-                    _ => placements.declared.insert(placed, target),
+                    Change::Retract(_) => placements.held.unplace(entity, &target),
+                    _ => placements.held.place(entity, target),
                 };
             } else if *the == default {
                 let (Change::Assert(value, _) | Change::Retract(value)) = change;
@@ -442,13 +595,9 @@ impl Placements {
     /// The scope that a placement of `attribute` names, if one does: no
     /// default scope stands in.
     pub(crate) fn placement_of(&self, attribute: &Relation) -> Option<&Entity> {
-        if let Some(scope) = self.declared.get(attribute) {
-            return Some(scope);
-        }
-        match self.committed.attributes.get(attribute) {
-            Some(scope) if self.retracted.get(attribute) != Some(scope) => Some(scope),
-            _ => None,
-        }
+        self.session
+            .scope_of(attribute.as_str())
+            .or_else(|| self.held.scope_of(attribute.as_str()))
     }
 
     /// Split a settled batch by destination store: the instructions
@@ -528,9 +677,10 @@ impl Placements {
 /// the default scope: what a read guided by placement asks of each row it
 /// meets. A row carries its attribute as bytes, so the map is keyed by
 /// name and a read parses no attribute.
-#[derive(Debug, Default, Clone, PartialEq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct ScopeMap {
-    scopes: HashMap<String, Entity>,
+    session: Placed,
+    held: Placed,
     default: Option<Entity>,
 }
 
@@ -538,7 +688,16 @@ impl ScopeMap {
     /// The scope that `attribute` is placed on, if any placement names
     /// it.
     pub(crate) fn scope_of(&self, attribute: &str) -> Option<&Entity> {
-        self.scopes.get(attribute)
+        self.session
+            .scope_of(attribute)
+            .or_else(|| self.held.scope_of(attribute))
+    }
+
+    /// Whether the placement that decides the scope of `attribute` is one
+    /// that the bottom layer holds, and not one of its session store: a
+    /// choice of the writers of that layer.
+    pub(crate) fn held_by_bottom(&self, attribute: &str) -> bool {
+        self.session.scope_of(attribute).is_none() && self.held.scope_of(attribute).is_some()
     }
 
     /// The scope that an attribute with no placement belongs to, if one
@@ -551,18 +710,9 @@ impl ScopeMap {
 impl Placements {
     /// The placements in force, as a [`ScopeMap`].
     pub(crate) fn scopes(&self) -> ScopeMap {
-        let mut scopes: HashMap<String, Entity> = self
-            .committed
-            .attributes
-            .iter()
-            .filter(|(attribute, scope)| self.retracted.get(*attribute) != Some(*scope))
-            .map(|(attribute, scope)| (attribute.to_string(), scope.clone()))
-            .collect();
-        for (attribute, scope) in &self.declared {
-            scopes.insert(attribute.to_string(), scope.clone());
-        }
         ScopeMap {
-            scopes,
+            session: self.session.clone(),
+            held: self.held.clone(),
             default: self.default_scope().cloned(),
         }
     }
@@ -608,11 +758,11 @@ async fn committed_placements(
 
     let mut declared = Declared::default();
     for claim in committed(source, declarations_selector(), env).await? {
-        let Some(attribute) = entity_attribute(&claim.of) else {
+        if placed_name(&claim.of).is_none() {
             continue;
-        };
-        let scope = scope_value(attribute.as_str(), &claim.is)?;
-        declared.attributes.insert(attribute, scope);
+        }
+        let scope = scope_value(&claim.of.to_string(), &claim.is)?;
+        declared.placed.place(&claim.of, scope);
     }
     // One default per repository; a layer reads the one for its own
     // repository. Any other subject is ignored.

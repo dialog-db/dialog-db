@@ -1055,7 +1055,17 @@ impl<'a> Provider<Select<'a>> for QueryEnv<'a> {
         }
         let format = self.format().await?;
         let manifest = format.manifest.clone();
-        self.record_demand(&input, &manifest);
+        // Placement resolves inside the read: an attribute that no layer of
+        // a guided read can give stays out of the demand, so a write of it
+        // into a layer costs a subscription nothing. A move of its placement
+        // evaluates the subscription afresh in any case.
+        let hidden = match (self.guided().await?, input.attribute()) {
+            (Some((guide, scopes)), Some(attribute)) => !guide.reaches(&scopes, attribute.as_str()),
+            _ => false,
+        };
+        if !hidden {
+            self.record_demand(&input, &manifest);
+        }
         // One fact can reach the merge from more than one stream: a value
         // the line holds that the session overlay or a staged write holds
         // too. The merge keeps the first stream's row of such a fact, so
@@ -1442,6 +1452,15 @@ impl<'a> Provider<nodes::Write<CorpusNode>> for QueryEnv<'a> {
     }
 }
 
+/// Where a rule that a read found is held.
+#[derive(Debug, Clone, Copy)]
+enum LayerAt {
+    /// The tree line at this position, or its session store.
+    Line(usize),
+    /// The standalone ephemeral layer at this position.
+    Ephemeral(usize),
+}
+
 /// How rules are looked up: by an attribute they derive
 /// (`dialog.rule/derives`, keyed by the attribute's `on:` entity). A
 /// rule's `conclusion` fact is kept for tooling and is not read here:
@@ -1720,7 +1739,7 @@ impl Provider<SelectRules> for QueryEnv<'_> {
         // not see, and a write of plain facts leaves it. A query recording
         // what it reads reuses the set as well, and records the rule
         // reads that assembled it as its own.
-        let key = self.rule_key();
+        let key = self.rule_key().await?;
         let cache = self
             .sources
             .first()
@@ -1841,9 +1860,14 @@ static QUARANTINED: LazyLock<CorpusRelation> = LazyLock::new(quarantined_attr);
 
 impl<'a> QueryEnv<'a> {
     /// The rule facts of the layers this query reads rules from.
-    fn rule_key(&self) -> RuleKey {
+    async fn rule_key(&self) -> Result<RuleKey, EvaluationError> {
         let held = |(index, rules): (usize, Option<Blake3Hash>)| Some((index, rules?));
-        RuleKey {
+        let shape = self
+            .guided()
+            .await
+            .map_err(|error| EvaluationError::Store(format!("resolve the placements: {error}")))?
+            .map(|(guide, scopes)| guide.rule_shape(&scopes));
+        Ok(RuleKey {
             lines: self
                 .sources
                 .iter()
@@ -1865,7 +1889,8 @@ impl<'a> QueryEnv<'a> {
                 .enumerate()
                 .filter_map(held)
                 .collect(),
-        }
+            shape,
+        })
     }
 
     /// `dialog.rule/quarantined` rows: one per rule the program analysis
@@ -1904,7 +1929,7 @@ impl<'a> QueryEnv<'a> {
     /// key like an assembled rule set, and recorded as rule demand, so
     /// a subscription re-evaluates when a rule is installed or retracted.
     async fn quarantined(&self) -> Result<Vec<Quarantine>, EvaluationError> {
-        let key = self.rule_key();
+        let key = self.rule_key().await?;
         let cache = self
             .sources
             .first()
@@ -2057,12 +2082,40 @@ impl<'a> QueryEnv<'a> {
     ) -> Result<Vec<(DeductiveRule, Installed)>, EvaluationError> {
         let mut rules: Vec<(DeductiveRule, Installed)> = Vec::new();
         let manifest = &self.format().await?.manifest;
-        for source in &self.sources {
-            rules.extend(self.durable_rules(source, index, key).await?);
-            rules.extend(self.overlay_rules(source.overlay(), index, key, manifest)?);
+        let guided = self
+            .guided()
+            .await
+            .map_err(|error| EvaluationError::Store(format!("resolve the placements: {error}")))?;
+        // A rule that a layer holds reaches the read only when that layer
+        // may conclude its head. The rules of the query and of a transaction
+        // come from no layer.
+        let taken = |mut held: Vec<(DeductiveRule, Installed)>, line: LayerAt| {
+            if let Some((guide, scopes)) = &guided {
+                let layer = match line {
+                    LayerAt::Line(at) => guide.lines.get(at),
+                    LayerAt::Ephemeral(at) => guide.ephemerals.get(at),
+                };
+                if let Some(layer) = layer {
+                    held.retain(|(rule, _)| guide.takes_rule(layer, scopes, rule.conclusion()));
+                }
+            }
+            held
+        };
+        for (at, source) in self.sources.iter().enumerate() {
+            rules.extend(taken(
+                self.durable_rules(source, index, key).await?,
+                LayerAt::Line(at),
+            ));
+            rules.extend(taken(
+                self.overlay_rules(source.overlay(), index, key, manifest)?,
+                LayerAt::Line(at),
+            ));
         }
-        for ephemeral in &self.ephemerals {
-            rules.extend(self.overlay_rules(ephemeral, index, key, manifest)?);
+        for (at, ephemeral) in self.ephemerals.iter().enumerate() {
+            rules.extend(taken(
+                self.overlay_rules(ephemeral, index, key, manifest)?,
+                LayerAt::Ephemeral(at),
+            ));
         }
         rules.extend(self.overlay_rules(&self.overlay, index, key, manifest)?);
         for layer in &self.layers {
