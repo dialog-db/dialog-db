@@ -112,6 +112,9 @@ impl Routes {
     /// environment that holds nothing (a bare store) gives a registry of
     /// its own to every caller, so nothing registered on it is ever found:
     /// it hydrates from nowhere.
+    // A registration is `ConditionalSend`, which is nothing on wasm, where
+    // everything runs on one thread: the handle held there is never sent.
+    #[cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
     pub fn of<Env: Holds + ?Sized>(env: &Env) -> Self {
         env.held_or(key(), &|| Arc::new(Self::new()))
             .downcast_ref::<Self>()
@@ -120,6 +123,9 @@ impl Routes {
     }
 
     /// Have `env` hold these routes, in place of any it held.
+    // A registration is `ConditionalSend`, which is nothing on wasm, where
+    // everything runs on one thread: the handle held there is never sent.
+    #[cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
     pub fn hold<Env: Holds + ?Sized>(&self, env: &Env) {
         env.hold(key().to_string(), Arc::new(self.clone()));
     }
