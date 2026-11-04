@@ -73,12 +73,43 @@ What this changes for you:
   line's cache, and a select's scan no longer reads its root again
   after the probe. The `subscribe-repoll` perf scenario reads no block
   from the archive where it read 6, and runs 10.6% fewer instructions.
+- A poll after a commit that adds one note, with a subscription per
+  note of 200 (the new `subscribe-fanout` perf scenario), reads 0
+  blocks instead of 806 (32 MB). Every subscription diffs the same two
+  trees within its own demand, and the first to read a changed block
+  keeps it for the rest. In a browser over IndexedDB, which pays a
+  transaction per block read, a write from another device showed on a
+  200-note page in about 0.4 s instead of 2 to 3 s.
 
 Why: the cache was carried by trees and threaded through `*_with_cache`
 constructors, so every read path had to remember to use it, several did
 not, and two places copied the cache-then-store read by hand. Putting it
 on the store makes the cached read exist in one place and every read go
 through it.
+
+### A read finds its remote without deriving every upstream
+
+Branch `worker/confident-tesla-y27ghw` (pull request to follow).
+
+Every select, subscription poll and migration check asked the branch
+where a read held by reference falls back to, and the branch answered
+by building its full upstream list: deriving each upstream's sync
+target, a hash, and comparing every pair. It now takes the first route
+at a peer among the pulls and then the pushes, through
+`Tracking::first_remote_route`, so the answer is the same without that
+work. It was about 9% of a Tonk service worker's CPU while switching
+spaces.
+
+What this changes for you:
+
+- `Upstreams::fallback` is removed; `Branch::fallback` no longer builds
+  `upstreams()`.
+- A read's fallback is the one it was: the first upstream at a peer,
+  reachable or not, pulls before pushes, else the first synced route at
+  a peer.
+
+Why: the fallback is asked on every read, and the answer needs one
+route, not a hashed and deduplicated set of them.
 
 ### A request the access service never answers is given up on, and a read is sent again
 
