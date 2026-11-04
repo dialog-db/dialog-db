@@ -5432,8 +5432,11 @@ async fn it_downloads_delegation_blobs_concurrently(ucan: UcanS3Address) -> Resu
     }
     // Device links and space index rows: the ordinary facts that sit
     // beside the delegations on a real profile branch, so the download
-    // walks a tree of mixed content rather than one uniform region.
-    let rows: Vec<_> = (0..160)
+    // walks a tree of mixed content rather than one uniform region, and
+    // enough of them that the tree is many blocks, not a handful: the
+    // guard below on the blocks the download moves must not sit one
+    // block above what a small tree would give.
+    let rows: Vec<_> = (0..480)
         .map(|i| {
             Instruction::Assert(
                 Artifact {
@@ -5522,9 +5525,16 @@ async fn it_downloads_delegation_blobs_concurrently(ucan: UcanS3Address) -> Resu
         "the replica materialized without one remote fetch, so it was not \
          cold and this measured local reads"
     );
+    // What the download moved: the blocks it fetched from the remote.
+    // Local reads are not that measure any more. A block is read from
+    // the local store once, before it hydrates, and never again for the
+    // merge or the walk, so `reads` counts the tree's blocks and nothing
+    // else; on a tree of nine blocks it sat one above a floor of eight
+    // and wasm's scheduling put it on the other side.
     assert!(
-        reads > 8,
-        "the download must move a real tree to measure anything (got {reads})"
+        hydrations > 8,
+        "the download must move a real tree to measure anything (fetched \
+         {hydrations} blocks from the remote, read {reads} locally)"
     );
     assert!(
         blob_reads > 0,
