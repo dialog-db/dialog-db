@@ -32,10 +32,12 @@
 use std::collections::BTreeMap;
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use dialog_capability::Provider;
 use dialog_common::helpers::BenchData;
 use dialog_search_tree::helpers::{Traversable as _, TraversalOrder};
 use dialog_search_tree::{
-    Delta, Distribution, Hashed, MemoryBlocks, PersistentNode, PersistentTree, Rank,
+    Buffer, Delta, DialogSearchTreeError, Distribution, Hashed, LoadBlock, MemoryBlocks, NodeCache,
+    Nodes, PersistentNode, PersistentTree, Rank,
 };
 use futures_util::StreamExt;
 
@@ -114,7 +116,36 @@ impl<const M: u64> Distribution for Threshold<M> {
     }
 }
 
-type Storage = MemoryBlocks;
+/// The blocks a bench tree is built into, with the node cache its build
+/// kept the nodes it sealed in: reads find the tree as warm as the build
+/// left it, as a tree read through a store with a node cache does.
+#[derive(Clone, Default)]
+struct Storage {
+    blocks: MemoryBlocks,
+    cache: NodeCache<[u8; 16], Vec<u8>>,
+}
+
+impl std::ops::Deref for Storage {
+    type Target = MemoryBlocks;
+
+    fn deref(&self) -> &MemoryBlocks {
+        &self.blocks
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl Provider<LoadBlock> for Storage {
+    async fn execute(&self, load: LoadBlock) -> Result<Option<Buffer>, DialogSearchTreeError> {
+        self.blocks.execute(load).await
+    }
+}
+
+impl Nodes<[u8; 16], Vec<u8>> for Storage {
+    fn kept(&self) -> Option<&NodeCache<[u8; 16], Vec<u8>>> {
+        Some(&self.cache)
+    }
+}
 
 fn runtime() -> tokio::runtime::Runtime {
     tokio::runtime::Runtime::new().unwrap()
@@ -131,7 +162,7 @@ where
     let keys = data.random_buffers::<16>(size);
     let values = data.random_buffers::<32>(size);
 
-    let storage = MemoryBlocks::new();
+    let storage = Storage::default();
     let mut tree = PersistentTree::<[u8; 16], Vec<u8>, D>::empty();
     let mut delta = Delta::zero();
 
@@ -141,7 +172,7 @@ where
             .insert(*key, value.to_vec(), &storage)
             .await
             .unwrap()
-            .persist(&mut delta)
+            .persist(&mut delta, &storage)
             .unwrap();
         // Flush after each persist so the next edit can load the nodes this persist created.
         for (_, buffer) in delta.flush() {
@@ -158,7 +189,7 @@ async fn insert_all<D>(keys: &[[u8; 16]], values: &[Vec<u8>])
 where
     D: Distribution,
 {
-    let storage = MemoryBlocks::new();
+    let storage = Storage::default();
     let mut tree = PersistentTree::<[u8; 16], Vec<u8>, D>::empty();
     let mut delta = Delta::zero();
     for (key, value) in keys.iter().zip(values.iter()) {
@@ -167,7 +198,7 @@ where
             .insert(*key, value.clone(), &storage)
             .await
             .unwrap()
-            .persist(&mut delta)
+            .persist(&mut delta, &storage)
             .unwrap();
         // Flush after each persist so the next edit can load the nodes this persist created.
         for (_, buffer) in delta.flush() {

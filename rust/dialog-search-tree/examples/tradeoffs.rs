@@ -19,7 +19,9 @@ use std::time::Instant;
 
 use dialog_common::Blake3Hash;
 use dialog_search_tree::helpers::JournaledBlocks;
-use dialog_search_tree::{Buffer, Delta, NodeBody, PersistentNode, PersistentTree};
+use dialog_search_tree::{
+    Buffer, Cached, Delta, NodeBody, NodeCache, PersistentNode, PersistentTree,
+};
 
 const KEY_LENGTH: usize = 162;
 const ENTITIES: usize = 5_000;
@@ -149,7 +151,7 @@ fn workload() -> Workload {
     Workload { facts }
 }
 
-async fn flush(delta: &mut Delta<Blake3Hash, Buffer>, storage: &mut Storage) -> (usize, u64) {
+async fn flush(delta: &mut Delta<Blake3Hash, Buffer>, storage: &Storage) -> (usize, u64) {
     let mut nodes = 0usize;
     let mut bytes = 0u64;
     for (_, buffer) in delta.flush() {
@@ -224,8 +226,11 @@ fn main() {}
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let Workload { facts } = workload();
-    let mut storage = JournaledBlocks::new();
+    let storage = JournaledBlocks::new();
     storage.disable_journal();
+    // The edits read through one node cache, which keeps the nodes each
+    // batch seals for the next.
+    let warm = Cached::new(NodeCache::new(), &storage);
 
     println!("workload: {FACTS} facts (EAV keys, {KEY_LENGTH}B), batches of {BATCH}");
     println!();
@@ -239,10 +244,10 @@ async fn main() {
     for batch in facts.chunks(BATCH) {
         let mut edit = tree.edit();
         for (key, value) in batch {
-            edit = edit.insert(*key, value.clone(), &storage).await.unwrap();
+            edit = edit.insert(*key, value.clone(), &warm).await.unwrap();
         }
-        tree = edit.persist(&mut delta).unwrap();
-        let (nodes, bytes) = flush(&mut delta, &mut storage).await;
+        tree = edit.persist(&mut delta, &warm).unwrap();
+        let (nodes, bytes) = flush(&mut delta, &storage).await;
         written_nodes += nodes;
         written_bytes += bytes;
     }
@@ -290,12 +295,13 @@ async fn main() {
     // Point lookups on a cold tree (fresh cache), counting storage reads.
     let mut rng = Rng::new(7);
     let cold = Tree::from_hash(tree.root().clone());
+    let fresh = Cached::new(NodeCache::new(), &storage);
     storage.enable_journal();
     let reads_before = reads(&storage);
     let point = Instant::now();
     for _ in 0..POINT_LOOKUPS {
         let (key, expected) = &facts[rng.below(FACTS)];
-        let value = cold.get(key, &storage).await.unwrap();
+        let value = cold.get(key, &fresh).await.unwrap();
         assert_eq!(value.as_ref(), Some(expected));
     }
     let point_time = point.elapsed();
@@ -309,6 +315,7 @@ async fn main() {
 
     // Bounded range scans (~one entity's facts each) on a cold tree.
     let cold = Tree::from_hash(tree.root().clone());
+    let fresh = Cached::new(NodeCache::new(), &storage);
     let reads_before = reads(&storage);
     let scan = Instant::now();
     let mut scanned = 0usize;
@@ -319,7 +326,7 @@ async fn main() {
         let mut end = start;
         end[65..129].fill(0xFF);
         use futures_util::StreamExt;
-        let stream = cold.stream_range(start..=end, &storage);
+        let stream = cold.stream_range(start..=end, &fresh);
         futures_util::pin_mut!(stream);
         while let Some(entry) = stream.next().await {
             entry.unwrap();
@@ -338,21 +345,22 @@ async fn main() {
     let mut delta = Delta::zero();
     let modified = tree
         .edit()
-        .insert(*changed_key, b"modified value".to_vec(), &storage)
+        .insert(*changed_key, b"modified value".to_vec(), &warm)
         .await
         .unwrap()
-        .persist(&mut delta)
+        .persist(&mut delta, &warm)
         .unwrap();
-    flush(&mut delta, &mut storage).await;
+    flush(&mut delta, &storage).await;
 
     let old = Tree::from_hash(tree.root().clone());
     let new = Tree::from_hash(modified.root().clone());
+    let fresh = Cached::new(NodeCache::new(), &storage);
     let reads_before = reads(&storage);
     let diff = Instant::now();
     let mut changes = 0usize;
     {
         use futures_util::StreamExt;
-        let stream = old.differentiate(&new, &storage, &storage);
+        let stream = old.differentiate(&new, &fresh, &fresh);
         futures_util::pin_mut!(stream);
         while let Some(change) = stream.next().await {
             change.unwrap();
@@ -372,9 +380,9 @@ async fn main() {
     let mut edit = tree.edit();
     for _ in 0..DELETES {
         let (key, _) = &facts[rng.below(FACTS)];
-        edit = edit.delete(key, &storage).await.unwrap();
+        edit = edit.delete(key, &warm).await.unwrap();
     }
-    let _ = edit.persist(&mut delta).unwrap();
+    let _ = edit.persist(&mut delta, &warm).unwrap();
     println!(
         "deletes:    {DELETES} random deletes in one batch: {:>8.2?}",
         deletes.elapsed()

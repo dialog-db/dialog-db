@@ -514,7 +514,7 @@ mod tests {
             TransientNode::Segment(TransientSegment::new(entries, Vec::new())).persist(
                 &mut Delta::zero(),
                 &Manifest::default(),
-                &Nodes::new(),
+                None,
             )?,
         )
     }

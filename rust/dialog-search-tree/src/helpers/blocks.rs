@@ -93,6 +93,9 @@ impl JournaledBlocks {
     }
 }
 
+/// Keeps nothing, so every node read is a journaled load.
+impl<Key, Value> crate::Nodes<Key, Value> for JournaledBlocks {}
+
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Provider<LoadBlock> for JournaledBlocks {

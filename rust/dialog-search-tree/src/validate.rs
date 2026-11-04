@@ -49,7 +49,7 @@
 //! key …" at the causing edit. Cost is O(n) in entries plus one in-memory
 //! rebuild; no reference store, no second persist.
 
-use dialog_capability::Provider;
+use crate::Nodes;
 use dialog_common::{Blake3Hash, ConditionalSync};
 use rkyv::{
     Deserialize, Serialize,
@@ -62,8 +62,8 @@ use rkyv::{
 };
 
 use crate::{
-    Accessor, DialogSearchTreeError, Distribution, Key, LoadBlock, NodeBody, NoveltyEntry,
-    NoveltyOp, PersistentNode, PersistentTree, TransientTree, Value, into_owned,
+    Accessor, DialogSearchTreeError, Distribution, Key, NodeBody, NoveltyEntry, NoveltyOp,
+    PersistentNode, PersistentTree, TransientTree, Value, into_owned,
 };
 
 /// Renders a separator for a violation message: a bounded hex prefix, so
@@ -106,7 +106,7 @@ where
         storage: &Env,
     ) -> Result<Vec<String>, DialogSearchTreeError>
     where
-        Env: Provider<LoadBlock> + Clone + ConditionalSync,
+        Env: Nodes<K, V> + Clone,
     {
         // An unpersisted empty tree has no stored form to validate; it is
         // trivially canonical.
@@ -114,7 +114,7 @@ where
             return Ok(Vec::new());
         }
         let manifest = self.manifest(storage).await?;
-        let accessor: Accessor<'_, K, V, Env> = Accessor::new(Default::default(), storage);
+        let accessor: Accessor<'_, K, V, Env> = Accessor::new(storage);
 
         // The empty tree's node: canonical exactly when it is byte-identical
         // to the fixed zero-entry encoding for its manifest — under every
@@ -184,7 +184,7 @@ where
         }
 
         // The canonical constructor, over the same entries, in memory.
-        let expected = TransientTree::<K, V, D>::empty_with_manifest(Default::default(), manifest)
+        let expected = TransientTree::<K, V, D>::empty_with_manifest(manifest)
             .plant(entries, storage)
             .await?;
         let expected_levels = expected.level_separators()?;
@@ -229,9 +229,7 @@ mod tests {
     use anyhow::Result;
     use dialog_common::Blake3Hash;
 
-    use crate::{
-        Buffer, Delta, HitchhikerTree, Manifest, NodeCache, PersistentTree, TransientTree,
-    };
+    use crate::{Buffer, Delta, HitchhikerTree, Manifest, PersistentTree, TransientTree};
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
@@ -261,7 +259,7 @@ mod tests {
                 .edit()
                 .insert(key, vec![i as u8; (i % 60) as usize + 1], &storage)
                 .await?
-                .persist(&mut delta)?;
+                .persist(&mut delta, &storage)?;
             settle(&mut delta, &mut storage).await?;
 
             if i % 50 == 49 {
@@ -320,7 +318,7 @@ mod tests {
                 .edit()
                 .insert(key, vec![i as u8], &storage)
                 .await?
-                .persist(&mut delta)?;
+                .persist(&mut delta, &storage)?;
             settle(&mut delta, &mut storage).await?;
         }
         let mut buffered = HitchhikerTree::open(&tree);
@@ -329,9 +327,9 @@ mod tests {
             buffered = buffered.insert(key, vec![i as u8], &storage).await?;
         }
         let mut delta = Delta::zero();
-        let root = buffered.persist(&mut delta)?;
+        let root = buffered.persist(&mut delta, &storage)?;
         settle(&mut delta, &mut storage).await?;
-        let tree = Tree::from_hash_with_cache(root, Default::default());
+        let tree = Tree::from_hash(root);
 
         let divergences = tree.canonical_divergences(&storage).await?;
         assert!(
@@ -361,9 +359,8 @@ mod tests {
             Manifest::default(),
         ] {
             let mut delta = Delta::zero();
-            let emptied =
-                TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(NodeCache::new(), manifest)
-                    .persist(&mut delta)?;
+            let emptied = TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(manifest)
+                .persist(&mut delta, &storage)?;
             settle(&mut delta, &mut storage).await?;
             assert!(emptied.stored_root().is_some());
             assert_eq!(

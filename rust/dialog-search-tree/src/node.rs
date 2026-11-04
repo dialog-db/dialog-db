@@ -123,7 +123,7 @@ where
         self,
         delta: &mut Delta<Blake3Hash, Buffer>,
         manifest: &Manifest,
-        cache: &NodeCache<Key, Value>,
+        cache: Option<&NodeCache<Key, Value>>,
     ) -> Result<Link, DialogSearchTreeError> {
         match self {
             Node::Persistent(link) => Ok(link),

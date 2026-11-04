@@ -17,8 +17,8 @@
 //! is not reported at all -- a sparse walk yields a frontier, never a
 //! complete inventory of what is missing.
 
+use crate::Nodes;
 use async_stream::try_stream;
-use dialog_capability::Provider;
 use dialog_common::{Blake3Hash, ConditionalSync};
 use futures_core::Stream;
 use futures_util::stream::FuturesUnordered;
@@ -34,8 +34,7 @@ use rkyv::{
 use std::collections::VecDeque;
 
 use crate::{
-    DialogSearchTreeError, Distribution, Key, LoadBlock, NodeBody, PersistentNode, PersistentTree,
-    Value,
+    DialogSearchTreeError, Distribution, Key, NodeBody, PersistentNode, PersistentTree, Value,
 };
 
 /// What a gap-tolerant traversal found at one position in the tree.
@@ -74,7 +73,7 @@ where
         storage: &'a Env,
     ) -> impl Stream<Item = Result<Visit<Key, Value>, DialogSearchTreeError>> + 'a
     where
-        Env: Provider<LoadBlock> + ConditionalSync;
+        Env: Nodes<Key, Value>;
 
     /// [`traverse_available`](Self::traverse_available) restricted to
     /// `scope`: a child subtree whose key span cannot intersect any range
@@ -94,7 +93,7 @@ where
         scope: &'a [core::ops::RangeInclusive<Vec<u8>>],
     ) -> impl Stream<Item = Result<Visit<Key, Value>, DialogSearchTreeError>> + 'a
     where
-        Env: Provider<LoadBlock> + ConditionalSync;
+        Env: Nodes<Key, Value>;
 }
 
 impl<Key, Value, D> Traversable<Key, Value> for PersistentTree<Key, Value, D>
@@ -115,7 +114,7 @@ where
         storage: &'a Env,
     ) -> impl Stream<Item = Result<Visit<Key, Value>, DialogSearchTreeError>> + 'a
     where
-        Env: Provider<LoadBlock> + ConditionalSync,
+        Env: Nodes<Key, Value>,
     {
         traverse::<Key, Value, Env>(self.stored_root().cloned(), storage, None)
     }
@@ -126,7 +125,7 @@ where
         scope: &'a [core::ops::RangeInclusive<Vec<u8>>],
     ) -> impl Stream<Item = Result<Visit<Key, Value>, DialogSearchTreeError>> + 'a
     where
-        Env: Provider<LoadBlock> + ConditionalSync,
+        Env: Nodes<Key, Value>,
     {
         traverse::<Key, Value, Env>(self.stored_root().cloned(), storage, Some(scope))
     }
@@ -168,7 +167,7 @@ where
             Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
         + ConditionalSync,
-    Env: Provider<LoadBlock> + ConditionalSync,
+    Env: Nodes<Key, Value>,
 {
     use futures_util::StreamExt as _;
 
@@ -202,22 +201,22 @@ where
             loop {
                 while let Some(hash) = queue.pop_front() {
                     reads.push(async move {
-                        // `load` verifies loaded bytes against the hash
-                        // it was asked for, so `None` here is genuinely
-                        // "not stored" -- a corrupt block raises instead,
-                        // and still fails the walk.
-                        let bytes = LoadBlock::new(hash.clone()).perform(storage).await;
-                        (hash, bytes)
+                        // Read through the store, so a node it keeps is
+                        // answered from memory. A load verifies the bytes
+                        // against the hash it was asked for, so `None`
+                        // here is genuinely "not stored" -- a corrupt
+                        // block raises instead, and still fails the walk.
+                        let node = storage.load_node(&hash).await;
+                        (hash, node)
                     });
                 }
-                let Some((hash, bytes)) = reads.next().await else {
+                let Some((hash, node)) = reads.next().await else {
                     break;
                 };
-                let Some(bytes) = bytes? else {
+                let Some(node) = node? else {
                     yield Visit::Absent(hash);
                     continue;
                 };
-                let node: PersistentNode<Key, Value> = PersistentNode::try_from(bytes)?;
 
                 if let NodeBody::Index(index) = node.body() {
                     let links = index.links()?;
@@ -317,7 +316,7 @@ mod tests {
                     .edit()
                     .insert(key, vec![*tag; 512], storage)
                     .await?
-                    .persist(&mut delta)?;
+                    .persist(&mut delta, storage)?;
                 for (_, buffer) in delta.flush() {
                     storage.store(buffer);
                 }
@@ -343,7 +342,7 @@ mod tests {
                     .edit()
                     .insert(key, vec![*tag; 512], storage)
                     .await?
-                    .persist(&mut delta)?;
+                    .persist(&mut delta, storage)?;
                 for (_, buffer) in delta.flush() {
                     storage.store(buffer);
                 }
@@ -364,15 +363,14 @@ mod tests {
             frame_ceiling_factor: 0,
             ..crate::Manifest::default()
         };
-        let mut tree =
-            PersistentTree::<[u8; 4], Vec<u8>>::empty_with_manifest(manifest, Default::default());
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_with_manifest(manifest);
         let mut delta = Delta::zero();
         for i in keys {
             tree = tree
                 .edit()
                 .insert(i.to_be_bytes(), vec![i as u8], storage)
                 .await?
-                .persist(&mut delta)?;
+                .persist(&mut delta, storage)?;
             for (_, buffer) in delta.flush() {
                 storage.store(buffer);
             }
@@ -507,7 +505,7 @@ mod tests {
             hitchhiker = hitchhiker.insert(key, vec![0u8; 8], &storage).await?;
         }
         let mut delta = Delta::zero();
-        let root = hitchhiker.persist(&mut delta)?;
+        let root = hitchhiker.persist(&mut delta, &storage)?;
         for (_, buffer) in delta.flush() {
             storage.store(buffer);
         }
