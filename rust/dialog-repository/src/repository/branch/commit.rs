@@ -16,9 +16,11 @@ use dialog_artifacts::{Datum, DialogArtifactsError, Entity, Instruction, Key, NU
 use dialog_capability::{Did, Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::{ConditionalSend, ConditionalSync};
+use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify, OperatorExt};
 use dialog_effects::blob::Import as BlobImport;
+use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::Read as BlobRead;
 use dialog_effects::memory::{Current, Publish, Resolve};
 use futures_util::{Stream, StreamExt as _, stream};
@@ -221,7 +223,8 @@ where
             + Provider<Publish>
             + Provider<Identify>
             + Provider<Attest>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
@@ -249,7 +252,8 @@ where
             + Provider<Publish>
             + Provider<Identify>
             + Provider<Attest>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
@@ -410,7 +414,8 @@ where
             + Provider<Resolve>
             + Provider<Identify>
             + Provider<Attest>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
@@ -565,7 +570,8 @@ where
             + Provider<Resolve>
             + Provider<Identify>
             + Provider<Attest>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
@@ -576,16 +582,14 @@ where
 
         // If the line tracks a remote upstream, commits must be able
         // to read remote-only blocks on demand (pull only merges the
-        // tree metadata, not every block). `NetworkedIndex` falls back
-        // to the remote when a block is missing locally. A remote that
-        // fails to LOAD is not silently dropped: on a partial replica
-        // that store is the only place by-reference blocks can hydrate
-        // from, so the failure is carried into the fallback and surfaces
-        // — with its cause — on the first read that needed it, while a
-        // commit every block of which is local proceeds untouched.
-        let remote = source.fallback();
-        let store =
-            NetworkedIndex::erased(env, source.archive().index(), remote, source.node_cache());
+        // tree metadata, not every block): a block missing locally
+        // hydrates through the env from the routes the subject's branches
+        // registered. A remote that failed to LOAD is not silently
+        // dropped: on a partial replica it is the only place by-reference
+        // blocks can hydrate from, so the failure surfaces — with its
+        // cause — on the first read that needed it, while a commit every
+        // block of which is local proceeds untouched.
+        let store = NetworkedIndex::erased(env, source.archive().index(), source.node_cache());
 
         // Discover who we are up front: the revision is attributed to the
         // profile / operator, and the commit's `Version` — the identifier
@@ -1494,7 +1498,6 @@ mod history_tests {
         let store = NetworkedIndex::new(
             &operator,
             branch.archive().index(),
-            None,
             ArtifactNodeCache::new(),
         );
         let tree = Index::from_hash(NodeHash::from(*revision.tree.hash()));

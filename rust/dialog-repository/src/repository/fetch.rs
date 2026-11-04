@@ -30,7 +30,6 @@ use std::task::{Context, Poll};
 
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{ArtifactSelector, FetchBudget, Likelihood, PreloadQueue};
-use futures_util::future::{FutureExt as _, Shared};
 use futures_util::stream::FuturesUnordered;
 use futures_util::{Stream, StreamExt as _};
 
@@ -42,21 +41,12 @@ use dialog_search_tree::{DialogSearchTreeError, Traversable as _};
 use crate::repository::archive::networked::Reads;
 use crate::repository::branch::Erased;
 use crate::repository::source::Source;
-use crate::{Index, NetworkedIndex, RemoteFallback};
+use crate::{Index, NetworkedIndex, Routes};
 
 #[cfg(not(target_arch = "wasm32"))]
 type FetchFuture<'a> = Pin<Box<dyn Future<Output = Likelihood> + Send + 'a>>;
 #[cfg(target_arch = "wasm32")]
 type FetchFuture<'a> = Pin<Box<dyn Future<Output = Likelihood> + 'a>>;
-
-#[cfg(not(target_arch = "wasm32"))]
-type FallbackFuture<'a> = Pin<Box<dyn Future<Output = RemoteFallback> + Send + 'a>>;
-#[cfg(target_arch = "wasm32")]
-type FallbackFuture<'a> = Pin<Box<dyn Future<Output = RemoteFallback> + 'a>>;
-
-/// A source's remote fallback, loaded at most once per driver and
-/// shared by every job that warms the source.
-type SharedFallback<'a> = Shared<FallbackFuture<'a>>;
 
 /// A stream that also drives the env's [`PreloadQueue`]: polling it
 /// executes queued preload hints, borrowing `env` for exactly the
@@ -68,15 +58,14 @@ type SharedFallback<'a> = Shared<FallbackFuture<'a>>;
 /// read is local. Job errors surface as nothing (a preload that fails
 /// must stay invisible; the demand read owns the error).
 ///
-/// A source's remote fallback (a memory read of the remote's
-/// configuration) is loaded at most once per driver, on first need, and
-/// shared by every job: the remote a branch tracks does not change while
-/// one evaluation runs, and loading it per job put a store read in front
-/// of every warm-up.
+/// A source is warmed only while its misses hydrate from somewhere, as
+/// the env's routes say (see [`Routes`]): read once per driver, and asked
+/// per job.
 pub(crate) struct Driven<'a, S> {
     inner: S,
     queue: Arc<PreloadQueue>,
-    sources: Vec<(Source, SharedFallback<'a>)>,
+    sources: Vec<Source>,
+    routes: Routes,
     env: &'a Erased,
     budget: FetchBudget,
     likely_inflight: usize,
@@ -97,16 +86,8 @@ where
         env: &'a Erased,
         queue: Arc<PreloadQueue>,
     ) -> Self {
-        let sources = sources
-            .into_iter()
-            .map(|source| {
-                let loading = source.clone();
-                let fallback: FallbackFuture<'a> =
-                    Box::pin(async move { loading.as_ref().fallback() });
-                (source, fallback.shared())
-            })
-            .collect();
         Self {
+            routes: Routes::of(env),
             inner: stream,
             budget: queue.budget(),
             queue,
@@ -135,13 +116,14 @@ where
                 Likelihood::Maybe => self.maybe_inflight += 1,
             }
             let sources = self.sources.clone();
+            let routes = self.routes.clone();
             let env = self.env;
             let future = async move {
-                for (source, fallback) in sources {
+                for source in sources {
                     // Warming is advisory: an error ends this source's
                     // walk silently, and the demand read that actually
                     // needs the data owns the failure.
-                    let _ = warm_source(source, fallback, env, &selector, likelihood).await;
+                    let _ = warm_source(source, &routes, env, &selector, likelihood).await;
                 }
                 likelihood
             };
@@ -205,7 +187,7 @@ where
 /// superset at the edges is harmless.
 async fn warm_source(
     source: Source,
-    fallback: SharedFallback<'_>,
+    routes: &Routes,
     env: &Erased,
     selector: &ArtifactSelector<Constrained>,
     likelihood: Likelihood,
@@ -213,16 +195,15 @@ async fn warm_source(
     let Some(root) = source.as_ref().root() else {
         return Ok(());
     };
-    let remote = fallback.await;
     // Warming exists to fetch ahead of demand. With nowhere to fetch
     // from, every block is local already and a demand read finds it; a
     // walk here would only re-read, and re-hash, what is already there.
-    if matches!(remote, crate::RemoteFallback::None) {
+    if !routes.fetches(source.as_ref().subject().did()) {
         return Ok(());
     }
     let catalog = ArchiveScope::new(source.as_ref().subject()).index();
     let reads: &dyn Reads = env;
-    let storage = NetworkedIndex::new(reads, catalog, remote, source.as_ref().node_cache())
+    let storage = NetworkedIndex::new(reads, catalog, source.as_ref().node_cache())
         .with_priority(likelihood.into());
     let tree = Index::from_hash(NodeHash::from(root));
 
@@ -246,25 +227,24 @@ async fn warm_source(
 #[cfg(test)]
 mod tests {
     use anyhow::Result;
+    use dialog_effects::archive::ArchiveError;
+    use dialog_effects::archive::Load as ArchiveLoad;
     use dialog_peer::helpers::{test_session_with_peer, unique_name};
     use dialog_query::{AttributeQuery, Term, the};
 
     use super::*;
     use crate::RepositoryExt as _;
     use crate::helpers::{Counting, connect};
-    use crate::repository::source::SourceRef;
     use dialog_artifacts::tree::ArtifactTreeExt as _;
     use dialog_artifacts::{
         ArchiveDelta, Artifact, Entity, Instruction, Preload, PreloadRequest, Speculation, Value,
     };
-    use dialog_capability::{Capability, Command, Subject};
-    use dialog_effects::archive::ArchiveError;
+    use dialog_capability::{Capability, Subject};
     use dialog_search_tree::MemoryBlocks;
     use dialog_storage::DialogStorageError;
     use dialog_varsig::did;
     use futures_util::stream;
 
-    use crate::{Hydrate, HydrationRequest};
     use async_trait::async_trait;
     use dialog_artifacts::tree::ArtifactNodeCache;
     use dialog_capability::Provider;
@@ -289,9 +269,12 @@ mod tests {
 
     #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
     #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-    impl Provider<Hydrate> for Impostor {
-        async fn execute(&self, _: HydrationRequest) -> <Hydrate as Command>::Output {
-            Ok(None)
+    impl Provider<ArchiveLoad> for Impostor {
+        async fn execute(
+            &self,
+            _: ArchiveLoad,
+        ) -> Result<Option<dialog_common::Buffer>, ArchiveError> {
+            Ok(Some(dialog_common::Buffer::from(self.0.clone())))
         }
     }
 
@@ -335,7 +318,6 @@ mod tests {
         let through = NetworkedIndex::new(
             &archive,
             ArchiveScope::new(Subject::from(did!("key:zCacheThroughTest"))).catalog("index"),
-            None,
             cache.clone(),
         );
 
@@ -492,10 +474,10 @@ mod tests {
         Ok(())
     }
 
-    /// Every warm-up job needs the source's remote fallback. It is read
-    /// from the routes the branch holds, with no store read, and a driver
-    /// shares it with every job: four hints in flight add no memory reads
-    /// to the query.
+    /// Every warm-up job asks whether the source's misses hydrate from
+    /// somewhere. It is answered from the routes the branch registered on
+    /// the env, with no store read, and a driver reads them once for
+    /// every job: four hints in flight add no memory reads to the query.
     #[dialog_common::test]
     async fn it_loads_a_sources_remote_fallback_once_per_driver() -> Result<()> {
         let (operator, profile) = test_session_with_peer().await;
@@ -541,10 +523,13 @@ mod tests {
             )
         };
 
-        // The fallback is the branch's own routes: reading it reads no
+        // The routes are the branch's own tracking: asking them reads no
         // memory. What the query costs with nothing to warm:
         let before = env.count("memory::Resolve");
-        let _ = SourceRef::Branch(&branch).fallback();
+        assert!(
+            branch.routes().fetches(branch.of()),
+            "a branch tracking a remote hydrates from it"
+        );
         assert_eq!(env.count("memory::Resolve"), before);
         let before = env.count("memory::Resolve");
         branch

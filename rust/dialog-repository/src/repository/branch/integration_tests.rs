@@ -5,6 +5,10 @@
 
 #[cfg(target_arch = "wasm32")]
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+#[cfg(not(feature = "web-integration-tests"))]
+use dialog_effects::archive::Load as ArchiveLoad;
+#[cfg(not(feature = "web-integration-tests"))]
+use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::storage::Location;
 
 use dialog_effects::MethodExt as _;
@@ -2521,7 +2525,8 @@ delegate_provider!(
     dialog_effects::memory::Publish,
     dialog_effects::blob::Read,
     dialog_effects::blob::Import,
-    crate::Hydrate,
+    ArchiveLoad,
+    BlobLoad,
     Fork<RemoteSite, dialog_effects::archive::Get>,
     Fork<RemoteSite, dialog_effects::archive::Put>,
     Fork<RemoteSite, dialog_effects::memory::Resolve>,
@@ -2758,7 +2763,6 @@ async fn it_leaves_an_aborted_push_closure_complete(s3: S3Address) -> Result<()>
     let index = NetworkedIndex::new(
         &operator,
         branch.archive().index(),
-        None,
         ArtifactNodeCache::new(),
     );
     assert_remote_closure_complete(&operator, index, head, &origin).await?;
@@ -2877,7 +2881,6 @@ async fn it_leaves_an_aborted_bridge_push_closure_complete(s3: S3Address) -> Res
     let index = NetworkedIndex::new(
         &operator,
         bridge_branch.archive().index(),
-        Some(origin_a.clone()),
         ArtifactNodeCache::new(),
     );
     assert_remote_closure_complete(&operator, index, head, &origin_b).await?;
@@ -4380,7 +4383,7 @@ async fn raw_spill_references<C: dialog_varsig::Principal>(
     revision: &Revision,
 ) -> Result<(HashSet<NodeHash>, HashSet<NodeHash>)> {
     let catalog = ArchiveScope::new(repository.subject()).index();
-    let index = NetworkedIndex::new(env, catalog, None, ArtifactNodeCache::new());
+    let index = NetworkedIndex::new(env, catalog, ArtifactNodeCache::new());
     let storage = index;
     let tree = Index::from_hash(NodeHash::from(*revision.tree.hash()));
 
@@ -5266,7 +5269,6 @@ async fn it_downloads_serially_while_pushing_concurrently(ucan: UcanS3Address) -
     let depth_index = NetworkedIndex::new(
         &replica_operator,
         replica.archive().index(),
-        None,
         ArtifactNodeCache::new(),
     );
     let depth_storage = depth_index;

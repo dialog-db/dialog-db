@@ -1913,12 +1913,8 @@ mod tests {
                 .claims()
                 .select(ArtifactSelector::new().the("dialog.branch/name".parse()?));
             use dialog_artifacts::tree::ArtifactNodeCache;
-            let store = crate::NetworkedIndex::new(
-                &operator,
-                select.catalog(),
-                None,
-                ArtifactNodeCache::new(),
-            );
+            let store =
+                crate::NetworkedIndex::new(&operator, select.catalog(), ArtifactNodeCache::new());
             let stream = select.execute(store).await?;
             let leaked: Vec<_> = stream.collect::<Vec<_>>().await;
 
@@ -2200,7 +2196,6 @@ mod tests {
                 let store = crate::NetworkedIndex::new(
                     &operator,
                     select.catalog(),
-                    None,
                     ArtifactNodeCache::new(),
                 );
                 let branch_stream: ArtifactStream<'_> = Box::pin(select.execute(store).await?);

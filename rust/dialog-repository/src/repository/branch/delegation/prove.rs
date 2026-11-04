@@ -24,7 +24,9 @@ use dialog_artifacts::{Artifact, ArtifactSelector, Entity, Value};
 use dialog_capability::access::{AuthorizeError, Certificate as _, Proof as _, TimeRange};
 use dialog_capability::{ANY_SUBJECT, Did, Fork, Provider};
 use dialog_common::ConditionalSync;
+use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::{Get, Put};
+use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::{Import as BlobImport, Read as BlobRead};
 use dialog_effects::memory::Resolve;
 use dialog_ucan::{Scope, UcanCertificate, UcanDelegation, UcanProof};
@@ -94,7 +96,8 @@ impl IssuedBy<'_> {
             + Provider<Resolve>
             + Provider<BlobRead>
             + Provider<BlobImport>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + Provider<Fork<RemoteSite, Resolve>>
             + Provider<Fork<RemoteSite, BlobRead>>
             + ConditionalSync
@@ -129,7 +132,8 @@ impl IssuedTo<'_> {
             + Provider<Resolve>
             + Provider<BlobRead>
             + Provider<BlobImport>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + Provider<Fork<RemoteSite, Resolve>>
             + Provider<Fork<RemoteSite, BlobRead>>
             + ConditionalSync
@@ -165,7 +169,8 @@ impl Retained<'_> {
             + Provider<Resolve>
             + Provider<BlobRead>
             + Provider<BlobImport>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + Provider<Fork<RemoteSite, Resolve>>
             + Provider<Fork<RemoteSite, BlobRead>>
             + ConditionalSync
@@ -195,7 +200,8 @@ where
         + Provider<Resolve>
         + Provider<BlobRead>
         + Provider<BlobImport>
-        + Provider<crate::Hydrate>
+        + Provider<ArchiveLoad>
+        + Provider<BlobLoad>
         + Provider<Fork<RemoteSite, Resolve>>
         + Provider<Fork<RemoteSite, BlobRead>>
         + ConditionalSync
@@ -318,7 +324,8 @@ impl ProveDelegation<'_> {
             + Provider<Resolve>
             + Provider<BlobRead>
             + Provider<BlobImport>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + Provider<Fork<RemoteSite, Resolve>>
             + Provider<Fork<RemoteSite, BlobRead>>
             + ConditionalSync
@@ -535,7 +542,8 @@ impl ProveDelegation<'_> {
             + Provider<Resolve>
             + Provider<BlobRead>
             + Provider<BlobImport>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + Provider<Fork<RemoteSite, Resolve>>
             + Provider<Fork<RemoteSite, BlobRead>>
             + ConditionalSync

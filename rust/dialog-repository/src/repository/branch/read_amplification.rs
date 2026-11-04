@@ -378,8 +378,7 @@ async fn measure_shape(depth: usize) -> Result<()> {
     }
 
     let root = main.revision().expect("committed").tree;
-    let store =
-        crate::NetworkedIndex::new(&env, main.archive().index(), None, ArtifactNodeCache::new());
+    let store = crate::NetworkedIndex::new(&env, main.archive().index(), ArtifactNodeCache::new());
     let tree = crate::Index::from_hash(dialog_common::Blake3Hash::from(*root.hash()));
     let tree_store = store;
 
@@ -471,8 +470,7 @@ async fn measure_write_paths(depth: usize, batches: usize) -> Result<()> {
     }
 
     // Canonical: reshape per batch, exactly what the commit path does today.
-    let store =
-        crate::NetworkedIndex::new(&env, main.archive().index(), None, ArtifactNodeCache::new());
+    let store = crate::NetworkedIndex::new(&env, main.archive().index(), ArtifactNodeCache::new());
     let mut canonical = base.clone();
     let started = Instant::now();
     for i in 0..batches {
@@ -750,7 +748,7 @@ async fn measure_first_query(origins: usize) -> Result<()> {
     let cache = adopter.node_cache();
     let before = cache.bytes();
     reader.reset();
-    let store = crate::NetworkedIndex::new(&reader, adopter.archive().index(), None, cache.clone());
+    let store = crate::NetworkedIndex::new(&reader, adopter.archive().index(), cache.clone());
     crate::Index::from_hash(Blake3Hash::from(*head.tree.hash()))
         .manifest(&store)
         .await?;
@@ -1321,12 +1319,8 @@ async fn attribute_first_query(origins: usize) -> Result<()> {
         "the first block the query reads is the root"
     );
 
-    let store = crate::NetworkedIndex::new(
-        &reader,
-        adopter.archive().index(),
-        None,
-        ArtifactNodeCache::new(),
-    );
+    let store =
+        crate::NetworkedIndex::new(&reader, adopter.archive().index(), ArtifactNodeCache::new());
     for (at, (len, hash)) in reads.iter().enumerate() {
         match attribute_block(&store, hash).await? {
             Some(frame) => {
@@ -1398,8 +1392,7 @@ async fn attribute_crowd(origins: usize) -> Result<()> {
         .perform(&env)
         .await?;
 
-    let store =
-        crate::NetworkedIndex::new(&env, main.archive().index(), None, ArtifactNodeCache::new());
+    let store = crate::NetworkedIndex::new(&env, main.archive().index(), ArtifactNodeCache::new());
     let root_of =
         |branch: &crate::Branch| Blake3Hash::from(*branch.revision().expect("a head").tree.hash());
     let manifest = {

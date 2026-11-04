@@ -268,6 +268,12 @@ where
         self.cache.edition()
     }
 
+    /// The version of the cached edition, without cloning its content.
+    /// `None` if the cell has not been resolved or published yet.
+    pub fn version(&self) -> Option<memory::Version> {
+        self.cache.version()
+    }
+
     /// Reset the in-memory cache to a known edition, without hitting the
     /// backend. Used to restore cache state across sessions.
     pub fn reset(&self, edition: Edition<T>) {

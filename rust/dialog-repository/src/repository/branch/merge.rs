@@ -13,7 +13,9 @@
 //! racing itself on one branch mints the same edition twice, and the
 //! loser's version is already taken; that race is refused instead.
 
+use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::blob::Import as BlobImport;
+use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::Read as BlobRead;
 use std::collections::BTreeSet;
 use std::mem;
@@ -57,7 +59,8 @@ where
         + Provider<Publish>
         + Provider<Identify>
         + Provider<Attest>
-        + Provider<crate::Hydrate>
+        + Provider<ArchiveLoad>
+        + Provider<BlobLoad>
         + ConditionalSync
         + 'static,
 {
@@ -70,12 +73,7 @@ where
             // merge with, and adopting over a deletion is not ours to do.
             return Err(lost.into());
         };
-        let store = NetworkedIndex::erased(
-            env,
-            branch.archive().index(),
-            branch.fallback(),
-            branch.node_cache(),
-        );
+        let store = NetworkedIndex::erased(env, branch.archive().index(), branch.node_cache());
         let Some(context) = published_context(&theirs, &branch.contexts(), &store).await? else {
             // A head minted before heads carried their context: its
             // ancestry is not known without a walk, so it is not merged.
@@ -121,16 +119,12 @@ where
         + Provider<Resolve>
         + Provider<Identify>
         + Provider<Attest>
-        + Provider<crate::Hydrate>
+        + Provider<ArchiveLoad>
+        + Provider<BlobLoad>
         + ConditionalSync
         + 'static,
 {
-    let store = NetworkedIndex::erased(
-        env,
-        branch.archive().index(),
-        branch.fallback(),
-        branch.node_cache(),
-    );
+    let store = NetworkedIndex::erased(env, branch.archive().index(), branch.node_cache());
     let tree = |reference: &TreeReference| Index::from_hash(NodeHash::from(*reference.hash()));
     // No base means the commit's ancestry and the head's share nothing:
     // everything the commit holds is its change.

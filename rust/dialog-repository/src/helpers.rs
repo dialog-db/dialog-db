@@ -1,6 +1,12 @@
-use std::any::type_name;
+use dialog_effects::archive::ArchiveError;
+use dialog_effects::archive::Load as ArchiveLoad;
+use dialog_effects::blob::Load as BlobLoad;
+use std::any::{Any, type_name};
 use std::collections::BTreeMap;
+use std::fmt;
+use std::future::Future;
 use std::future::poll_fn;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::task::Poll;
 
@@ -83,7 +89,8 @@ use dialog_credentials::Credential;
 #[cfg(test)]
 use dialog_effects::archive::prelude::DEFAULT_CATALOG;
 #[cfg(test)]
-use dialog_effects::blob::{Import as BlobImport, Read as BlobRead};
+use dialog_effects::blob::Import as BlobImport;
+use dialog_effects::blob::Read as BlobRead;
 #[cfg(test)]
 use dialog_peer::{Mode, Peer, PeerSpace, Session};
 #[cfg(test)]
@@ -163,7 +170,8 @@ where
         + Provider<Attest>
         + Provider<Import>
         + Provider<Write>
-        + Provider<crate::Hydrate>
+        + Provider<ArchiveLoad>
+        + Provider<BlobLoad>
         + Provider<Fork<Network, Resolve>>
         + ConditionalSync
         + 'static,
@@ -244,12 +252,83 @@ use dialog_network::Network;
 /// flight together.
 ///
 /// Clones share the tally.
-#[derive(Debug, Clone)]
+///
+/// A load ([`archive::Load`](dialog_effects::archive::Load) or
+/// [`blob::Load`](dialog_effects::blob::Load)) is answered here, the way a
+/// peer answers it ([`load_or_hydrate`](crate::load_or_hydrate)), through
+/// this wrapper's own `Get` and `Hydrate`: so every block a load reads is
+/// tallied as the `Get` it is, and every miss that goes to a remote as the
+/// `Hydrate` it costs, exactly as when readers performed those themselves.
+#[derive(Clone)]
 pub struct Counting<P> {
     inner: P,
     counts: Arc<Mutex<BTreeMap<&'static str, u64>>>,
     reads: Arc<Mutex<InFlight>>,
     forks: Arc<Mutex<InFlight>>,
+    loads: Loads<P>,
+}
+
+impl<P: fmt::Debug> fmt::Debug for Counting<P> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Counting")
+            .field("inner", &self.inner)
+            .field("counts", &self.counts)
+            .finish_non_exhaustive()
+    }
+}
+
+/// A load's answer, boxed.
+#[cfg(not(target_arch = "wasm32"))]
+type LoadFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<Option<Buffer>, ArchiveError>> + Send + 'a>>;
+/// A load's answer, boxed (single-threaded wasm form).
+#[cfg(target_arch = "wasm32")]
+type LoadFuture<'a> = Pin<Box<dyn Future<Output = Result<Option<Buffer>, ArchiveError>> + 'a>>;
+
+/// How a [`Counting`] answers the two loads through itself, fixed when it
+/// is built, where the wrapped env's capabilities are known.
+struct Loads<P> {
+    block: for<'a> fn(&'a Counting<P>, ArchiveLoad) -> LoadFuture<'a>,
+    blob: for<'a> fn(&'a Counting<P>, BlobLoad) -> LoadFuture<'a>,
+}
+
+impl<P> Clone for Loads<P> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<P> Copy for Loads<P> {}
+
+/// The [`Hydrate`](crate::Hydrate) half of a counting env's capabilities:
+/// what [`Counting::new`] needs of the env it wraps to answer loads through
+/// itself.
+pub trait CountedLoads:
+    Provider<Get>
+    + Provider<BlobRead>
+    + Provider<crate::Hydrate>
+    + dialog_common::Holds
+    + ConditionalSync
+    + 'static
+{
+}
+
+impl<T> CountedLoads for T where
+    T: Provider<Get>
+        + Provider<BlobRead>
+        + Provider<crate::Hydrate>
+        + dialog_common::Holds
+        + ConditionalSync
+        + 'static
+{
+}
+
+fn load_block<P: CountedLoads>(env: &Counting<P>, load: ArchiveLoad) -> LoadFuture<'_> {
+    Box::pin(crate::load_or_hydrate(env, load))
+}
+
+fn load_blob<P: CountedLoads>(env: &Counting<P>, load: BlobLoad) -> LoadFuture<'_> {
+    Box::pin(crate::load_blob_or_hydrate(env, load))
 }
 
 impl<P: dialog_common::Holds> dialog_common::Holds for Counting<P> {
@@ -293,7 +372,7 @@ async fn yield_once() {
     .await
 }
 
-impl<P> Counting<P> {
+impl<P: CountedLoads> Counting<P> {
     /// Wrap `inner`, starting with an empty tally.
     pub fn new(inner: P) -> Self {
         Self {
@@ -301,9 +380,15 @@ impl<P> Counting<P> {
             counts: Arc::new(Mutex::new(BTreeMap::new())),
             reads: Arc::new(Mutex::new(InFlight::default())),
             forks: Arc::new(Mutex::new(InFlight::default())),
+            loads: Loads {
+                block: load_block::<P>,
+                blob: load_blob::<P>,
+            },
         }
     }
+}
 
+impl<P> Counting<P> {
     /// The greatest number of block reads ever in flight at once since
     /// the last [`reset`](Self::reset).
     ///
@@ -379,10 +464,32 @@ impl<P> Counting<P> {
 impl<C, P> Provider<C> for Counting<P>
 where
     C: Command + 'static,
-    C::Input: ConditionalSend,
+    C::Input: ConditionalSend + 'static,
+    C::Output: 'static,
     P: Provider<C> + ConditionalSync,
 {
     async fn execute(&self, input: C::Input) -> C::Output {
+        // A load is answered through this env's own reads (see the type's
+        // docs), and tallied by what it reads, not as itself.
+        let mut input = Some(input);
+        let slot = &mut input as &mut dyn Any;
+        let loaded = if let Some(load) = slot.downcast_mut::<Option<ArchiveLoad>>() {
+            let load = load.take().expect("the input is taken once");
+            Some((self.loads.block)(self, load).await)
+        } else if let Some(load) = slot.downcast_mut::<Option<BlobLoad>>() {
+            let load = load.take().expect("the input is taken once");
+            Some((self.loads.blob)(self, load).await)
+        } else {
+            None
+        };
+        if let Some(loaded) = loaded {
+            let mut output = Some(loaded);
+            return (&mut output as &mut dyn Any)
+                .downcast_mut::<Option<C::Output>>()
+                .and_then(Option::take)
+                .expect("a load answers with a load's output");
+        }
+        let input = input.expect("the input is taken only by a load");
         let name = type_name::<C>();
         *self.counts.lock().entry(name).or_insert(0) += 1;
 

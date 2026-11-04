@@ -5,6 +5,8 @@
 #[cfg(target_arch = "wasm32")]
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
+use dialog_effects::archive::Load as ArchiveLoad;
+use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::{BlobError, Read as BlobRead};
 use std::collections::BTreeSet;
 use std::iter;
@@ -33,7 +35,7 @@ use parking_lot::Mutex;
 
 use crate::helpers::{Counting, test_repo};
 use crate::repository::archive::local::read_all;
-use crate::{Branch, HeldCaches, Hydrate, LocalIndex, RemoteSite, Repository, Revision};
+use crate::{Branch, HeldCaches, LocalIndex, RemoteSite, Repository, Revision};
 
 /// The session every test commits and reads through.
 type Operator = Peer<VolatileSpace, Session>;
@@ -88,7 +90,8 @@ where
         + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
-        + Provider<Hydrate>
+        + Provider<ArchiveLoad>
+        + Provider<BlobLoad>
         + Provider<Fork<RemoteSite, Resolve>>
         + ConditionalSync
         + 'static,

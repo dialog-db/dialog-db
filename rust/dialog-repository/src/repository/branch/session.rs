@@ -1,3 +1,5 @@
+use dialog_effects::archive::Load as ArchiveLoad;
+use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::Read as BlobRead;
 use std::cell::Cell;
 use std::collections::HashSet;
@@ -52,7 +54,7 @@ use crate::rules::{
 use crate::schema::{
     Branch as BranchConcept, DidExt as _, Replica, Session, SessionBranch, session,
 };
-use crate::{Branch, Ephemeral, Hydrate, NetworkedIndex, RemoteSite, Snapshot, Staged};
+use crate::{Branch, Ephemeral, NetworkedIndex, RemoteSite, Snapshot, Staged};
 
 /// A composable query over one or more lines (branches, snapshots)
 /// plus an in-memory overlay.
@@ -351,7 +353,8 @@ impl<'a, Q: Application> SelectQuery<'a, Q> {
             + Provider<Put>
             + Provider<Resolve>
             + Provider<Identify>
-            + Provider<Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + Provider<Preload>
             + Provider<Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
@@ -403,7 +406,8 @@ pub(crate) trait Capabilities:
     + Provider<Get>
     + Provider<Put>
     + Provider<Resolve>
-    + Provider<Hydrate>
+    + Provider<ArchiveLoad>
+    + Provider<BlobLoad>
     + Provider<Preload>
     + Provider<Fork<RemoteSite, Resolve>>
     + Holds
@@ -417,7 +421,8 @@ impl<T> Capabilities for T where
         + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
-        + Provider<Hydrate>
+        + Provider<ArchiveLoad>
+        + Provider<BlobLoad>
         + Provider<Preload>
         + Provider<Fork<RemoteSite, Resolve>>
         + Holds
@@ -541,7 +546,12 @@ impl<'a> QueryEnv<'a> {
     /// its session overlay, and the per-query overlay as a transient
     /// layer), so the paths can never diverge on it.
     pub(crate) fn new(sources: Vec<Source>, overlay: Ephemeral, env: &'a Erased) -> Self {
-        let fetches = sources.iter().any(|source| source.as_ref().fetches());
+        // Warming ahead of demand has something to do only for a line whose
+        // misses hydrate from somewhere.
+        let routes = crate::Routes::of(env);
+        let fetches = sources
+            .iter()
+            .any(|source| routes.fetches(source.as_ref().subject().did()));
         Self {
             sources,
             overlay,
@@ -780,12 +790,11 @@ pub(crate) async fn select_from_source<'a>(
     input: ArtifactSelector<Constrained>,
 ) -> Result<ArtifactStream<'a>, DialogArtifactsError> {
     let select = crate::Select::from_source(source, input);
-    let remote = source.fallback();
     // Concurrent reads of one digest share fetch-and-hydrate through
-    // the env's own `Hydrate` flight (see `crate::Hydrate`), with
-    // every other evaluation in the process.
+    // the env's own `Load` (see `crate::load_or_hydrate`), with every
+    // other evaluation in the process.
     let reads: &dyn Reads = env;
-    let store = NetworkedIndex::new(reads, select.catalog(), remote, source.node_cache());
+    let store = NetworkedIndex::new(reads, select.catalog(), source.node_cache());
     Ok(select.execute_boxed(store).await?)
 }
 
@@ -999,11 +1008,9 @@ impl Provider<Estimate> for QueryEnv<'_> {
         let mut total: Option<u64> = None;
         for source in &self.sources {
             let select = crate::Select::from_source(source.as_ref(), input.clone());
-            let remote = source.as_ref().fallback();
             let store = NetworkedIndex::new(
                 self.env as &dyn Reads,
                 select.catalog(),
-                remote,
                 source.as_ref().node_cache(),
             );
             if let Some(estimate) = select.estimate(store).await? {
@@ -1056,7 +1063,6 @@ impl<'a> Provider<LoadBlob> for QueryEnv<'a> {
             let store = NetworkedIndex::new(
                 self.env as &dyn Reads,
                 source.archive().index(),
-                source.fallback(),
                 source.node_cache(),
             );
             if let Some(bytes) = store.load_blob(&hash).await? {
@@ -1086,11 +1092,9 @@ impl<'a> Provider<LoadBlock> for QueryEnv<'a> {
     async fn execute(&self, load: LoadBlock) -> Result<Option<Buffer>, DialogSearchTreeError> {
         for source in &self.sources {
             let source = source.as_ref();
-            let remote = source.fallback();
             let store = NetworkedIndex::new(
                 self.env as &dyn Reads,
                 source.archive().index(),
-                remote,
                 source.node_cache(),
             );
             let cache = source.node_cache();
@@ -2131,6 +2135,8 @@ impl Branch {
 /// satisfy.
 #[cfg(test)]
 mod rule_tests {
+    use dialog_effects::archive::Load as ArchiveLoad;
+    use dialog_effects::blob::Load as BlobLoad;
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
@@ -2187,7 +2193,8 @@ mod rule_tests {
             + dialog_capability::Provider<Put>
             + dialog_capability::Provider<Resolve>
             + dialog_capability::Provider<Identify>
-            + dialog_capability::Provider<crate::Hydrate>
+            + dialog_capability::Provider<ArchiveLoad>
+            + dialog_capability::Provider<BlobLoad>
             + dialog_capability::Provider<dialog_artifacts::Preload>
             + dialog_capability::Provider<dialog_artifacts::Speculation>
             + dialog_capability::Provider<Fork<RemoteSite, Resolve>>
@@ -2272,7 +2279,8 @@ mod rule_tests {
             + dialog_capability::Provider<Put>
             + dialog_capability::Provider<Resolve>
             + dialog_capability::Provider<Identify>
-            + dialog_capability::Provider<crate::Hydrate>
+            + dialog_capability::Provider<ArchiveLoad>
+            + dialog_capability::Provider<BlobLoad>
             + dialog_capability::Provider<dialog_artifacts::Preload>
             + dialog_capability::Provider<dialog_artifacts::Speculation>
             + dialog_capability::Provider<Fork<RemoteSite, Resolve>>
@@ -2352,7 +2360,8 @@ mod rule_tests {
             + dialog_capability::Provider<Put>
             + dialog_capability::Provider<Resolve>
             + dialog_capability::Provider<Identify>
-            + dialog_capability::Provider<crate::Hydrate>
+            + dialog_capability::Provider<ArchiveLoad>
+            + dialog_capability::Provider<BlobLoad>
             + dialog_capability::Provider<dialog_artifacts::Preload>
             + dialog_capability::Provider<dialog_artifacts::Speculation>
             + dialog_capability::Provider<Fork<RemoteSite, Resolve>>

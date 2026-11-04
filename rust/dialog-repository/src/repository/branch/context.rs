@@ -8,6 +8,10 @@
 //! map, so this resolves it once per head, from the branch's memo when it
 //! can, and remembers it there.
 
+#[cfg(test)]
+use dialog_effects::archive::Load as ArchiveLoad;
+#[cfg(test)]
+use dialog_effects::blob::Load as BlobLoad;
 use std::sync::Arc;
 
 use dialog_artifacts::history::{
@@ -21,9 +25,9 @@ use dialog_search_tree::Cache;
 use crate::{Index, Revision};
 
 #[cfg(test)]
-use crate::repository::source::SourceRef;
+use crate::NetworkedIndex;
 #[cfg(test)]
-use crate::{Hydrate, NetworkedIndex};
+use crate::repository::source::SourceRef;
 #[cfg(test)]
 use dialog_artifacts::history::context_of;
 #[cfg(test)]
@@ -279,7 +283,8 @@ where
         + Provider<ArchivePut>
         + Provider<BlobRead>
         + Provider<Resolve>
-        + Provider<Hydrate>
+        + Provider<ArchiveLoad>
+        + Provider<BlobLoad>
         + ConditionalSync
         + 'static,
 {
@@ -287,12 +292,7 @@ where
     let head = source
         .revision()
         .ok_or_else(|| DialogArtifactsError::InvalidKey("the line has no head".into()))?;
-    let store = NetworkedIndex::new(
-        env,
-        source.archive().index(),
-        source.fallback(),
-        source.node_cache(),
-    );
+    let store = NetworkedIndex::new(env, source.archive().index(), source.node_cache());
     full_context(&head, &source.contexts(), &store, &source.history(env)).await
 }
 
@@ -313,7 +313,8 @@ where
         + Provider<ArchivePut>
         + Provider<BlobRead>
         + Provider<Resolve>
-        + Provider<Hydrate>
+        + Provider<ArchiveLoad>
+        + Provider<BlobLoad>
         + ConditionalSync
         + 'static,
 {
@@ -325,12 +326,7 @@ where
         head.region && head.context.is_none(),
         "{what}: the head keeps its context in its tree's region"
     );
-    let store = NetworkedIndex::new(
-        env,
-        source.archive().index(),
-        source.fallback(),
-        source.node_cache(),
-    );
+    let store = NetworkedIndex::new(env, source.archive().index(), source.node_cache());
     let tree = Index::from_hash(NodeHash::from(*head.tree.hash()));
     let raw = context_in(&tree, &store).await?;
     let read = head.context_from_region(raw.clone())?;

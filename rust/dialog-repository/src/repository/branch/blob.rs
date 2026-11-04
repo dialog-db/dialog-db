@@ -42,7 +42,8 @@
 //! #         + Provider<BlobRead>
 //! #         + Provider<BlobWrite>
 //! #         + Provider<BlobImport>
-//! #         + Provider<dialog_repository::Hydrate>
+//! #         + Provider<dialog_effects::archive::Load>
+//! #         + Provider<dialog_effects::blob::Load>
 //! #         + Provider<Fork<RemoteSite, Resolve>>
 //! #         + Provider<Fork<RemoteSite, BlobRead>>
 //! #         + dialog_common::ConditionalSync
@@ -72,17 +73,17 @@ use crate::repository::archive::networked::Reads;
 use crate::repository::branch::asset::recorded_size;
 use crate::repository::remote::Step;
 use crate::repository::source::SourceRef;
-use crate::{
-    Branch, CommitError, Hydrate, Index, NetworkedIndex, RemoteFallback, RemoteSite, Snapshot,
-};
+use crate::{Branch, CommitError, Index, NetworkedIndex, RemoteFallback, RemoteSite, Snapshot};
 use dialog_artifacts::{Asset, BlobIndexExt as _, BlobRecord, Entity, Instruction};
 use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync};
 use dialog_effects::MethodExt as _;
+use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::prelude::ArchiveExt as _;
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify};
+use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::prelude::{ArchiveBlobExt as _, ReadBlobExt as _};
 use dialog_effects::blob::{
     BlobError, BlobReader, ByteRange, Import as BlobImport, Read as BlobRead, Write as BlobWrite,
@@ -239,8 +240,7 @@ where
     Env: Reads + 'static,
 {
     let source = source.into();
-    let remote = source.fallback();
-    NetworkedIndex::erased(env, source.archive().index(), remote, source.node_cache())
+    NetworkedIndex::erased(env, source.archive().index(), source.node_cache())
 }
 
 /// The size of the content the line's current tree vouches for under `hash`,
@@ -256,7 +256,8 @@ where
         + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
-        + Provider<crate::Hydrate>
+        + Provider<ArchiveLoad>
+        + Provider<BlobLoad>
         + ConditionalSync
         + 'static,
 {
@@ -280,7 +281,8 @@ where
         + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
-        + Provider<Hydrate>
+        + Provider<ArchiveLoad>
+        + Provider<BlobLoad>
         + ConditionalSync
         + 'static,
 {
@@ -307,7 +309,8 @@ impl BlobSize<'_> {
             + Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + ConditionalSync
             + 'static,
     {
@@ -339,7 +342,8 @@ impl ReadBlob<'_> {
             + Provider<BlobRead>
             + Provider<BlobImport>
             + Provider<Resolve>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + Provider<Fork<RemoteSite, BlobRead>>
             + ConditionalSync
             + 'static,
@@ -365,8 +369,13 @@ impl ReadBlob<'_> {
         };
 
         // Local miss. Hydrate from the upstream peer, if any (a snapshot
-        // has none: its reads are local).
-        let remote = match line.fallback() {
+        // has none: its reads are local). Asked only now, on the miss: a
+        // read the local blob store answers never works out the route.
+        let route = match line {
+            SourceRef::Branch(branch) => branch.fallback(),
+            SourceRef::Snapshot(_) => RemoteFallback::None,
+        };
+        let remote = match route {
             RemoteFallback::Remote(remote) => remote,
             RemoteFallback::None => return Err(BlobError::NotFound(miss_key).into()),
             RemoteFallback::Unavailable { remote, reason } => {
@@ -459,7 +468,8 @@ where
             + Provider<Publish>
             + Provider<Identify>
             + Provider<Attest>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
@@ -517,7 +527,8 @@ impl RetractBlob<'_> {
             + Provider<Publish>
             + Provider<Identify>
             + Provider<Attest>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,

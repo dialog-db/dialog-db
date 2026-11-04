@@ -120,7 +120,8 @@ where
         + Provider<SpaceCreate>
         + Provider<List>
         + PeersEnv
-        + Provider<dialog_repository::Hydrate>
+        + Provider<dialog_effects::archive::Load>
+        + Provider<dialog_effects::blob::Load>
         + Provider<dialog_artifacts::Preload>
         + Provider<dialog_artifacts::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>

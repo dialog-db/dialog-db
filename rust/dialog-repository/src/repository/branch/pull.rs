@@ -22,10 +22,10 @@ use super::context::{full_context, head_observes, held, own_count, published_con
 use super::fetch::fetch_one;
 use super::migrate::aligned;
 use super::resolve::resolve;
-use crate::RemoteFallback;
 use crate::ResolveEnv;
 use crate::repository::archive::networked::Reads;
 use crate::repository::archive::persist;
+use crate::repository::archive::routes;
 use crate::{
     Branch, Checkpoint, Index, NetworkedIndex, PublishError, PullError, Revision, TreeReference,
     Upstream, UpstreamBranch,
@@ -309,7 +309,10 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
         // upstream is at a peer, keep it so the merge can fall back to
         // the peer's archive for blocks that aren't local.
         let upstream_revision = fetch_one(branch, &upstream, confirm_upstream, env).await?;
-        let remote = upstream.fallback();
+        // The upstream may be one the branch does not track (a one-off
+        // pull): lend its route for the prepare, so a block of its tree
+        // the walk misses locally hydrates from the peer that holds it.
+        let _loan = routes::lend(branch.routes(), branch.of(), &upstream.fallback());
 
         // Upstream has never received a revision yet — nothing to
         // merge in, so the pull is a no-op.
@@ -361,12 +364,8 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
             let held = match (base_version, branch.revision()) {
                 (_, Some(local)) if Some(&local.tree) == base.as_ref() => true,
                 (Some(version), Some(local)) => {
-                    let store = NetworkedIndex::erased(
-                        env,
-                        branch.archive().index(),
-                        remote.clone(),
-                        branch.node_cache(),
-                    );
+                    let store =
+                        NetworkedIndex::erased(env, branch.archive().index(), branch.node_cache());
                     head_observes(
                         &local,
                         &version,
@@ -396,12 +395,11 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
             .as_ref()
             .map(|revision| revision.tree.clone());
 
-        // `NetworkedIndex` reads from the local archive first and,
-        // when the upstream is remote, falls back to the remote
-        // archive for blocks that haven't been replicated. With
-        // `remote: None` it degrades to a plain local index.
-        let store =
-            NetworkedIndex::erased(env, branch.archive().index(), remote, branch.node_cache());
+        // `NetworkedIndex` reads through the env, which answers from the
+        // local archive first and hydrates a block that hasn't been
+        // replicated from the upstream's peer (lent above), or from
+        // whatever the subject's branches track.
+        let store = NetworkedIndex::erased(env, branch.archive().index(), branch.node_cache());
 
         // The three trees: last-sync base, the upstream revision we're
         // merging in, and the local tree the merge integrates onto — an
@@ -1520,24 +1518,16 @@ impl PreparedPull<'_> {
         if branch.revision().map(|head| head.version()) == Some(merged.new_revision.version()) {
             return Ok(Vec::new());
         }
+        // The upstream's history may hold blocks only its peer has.
+        let _loan = routes::lend(branch.routes(), branch.of(), &merged.sync.fallback());
         let upstream = TreeHistory::from_root(
             merged.merges.tree.hash(),
-            NetworkedIndex::new(
-                env,
-                branch.archive().index(),
-                merged.sync.fallback(),
-                branch.node_cache(),
-            ),
+            NetworkedIndex::new(env, branch.archive().index(), branch.node_cache()),
         )
         .with_record_cache(branch.records());
         // What the branch holds is local, so its history reads nothing from
         // the network.
-        let local = NetworkedIndex::new(
-            env,
-            branch.archive().index(),
-            RemoteFallback::None,
-            branch.node_cache(),
-        );
+        let local = NetworkedIndex::new(env, branch.archive().index(), branch.node_cache());
         let known = match branch.revision() {
             Some(head) => TreeHistory::from_root(head.tree.hash(), local),
             None => TreeHistory::empty(local),
@@ -3933,7 +3923,7 @@ mod history_tests {
             head.context.is_none() && head.region,
             "a freshly minted head keeps its context in its tree's region"
         );
-        let store = NetworkedIndex::new(&operator, main.archive().index(), None, main.node_cache());
+        let store = NetworkedIndex::new(&operator, main.archive().index(), main.node_cache());
         let tree = Index::from_hash(Blake3Hash::from(*head.tree.hash()));
         let published = head.context_from_region(context_in(&tree, &store).await?)?;
         let history = main.history(&operator);

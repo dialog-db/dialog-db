@@ -7,7 +7,9 @@ use dialog_artifacts::{
 use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::ConditionalSync;
+use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::{Get, Put};
+use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::Read as BlobRead;
 use dialog_effects::memory::Resolve;
 use dialog_search_tree::{DialogSearchTreeError, Manifest};
@@ -64,7 +66,8 @@ where
         + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
-        + Provider<crate::Hydrate>
+        + Provider<ArchiveLoad>
+        + Provider<BlobLoad>
         + Provider<Fork<RemoteSite, Resolve>>
         + ConditionalSync
         + 'static,
@@ -73,11 +76,9 @@ where
         Some(root) => Index::from_hash(NodeHash::from(root)),
         None => Index::empty(),
     };
-    let remote = source.fallback();
     let store = NetworkedIndex::new(
         env,
         ArchiveScope::new(source.subject()).index(),
-        remote,
         source.node_cache(),
     );
     let storage = store;
@@ -119,19 +120,18 @@ impl Select<'_> {
             + Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
     {
-        // Load a remote if the line tracks one so the networked index
-        // can fall back to it for blocks missing locally. A failed load
-        // (e.g. no credentials) is carried into the fallback rather
-        // than swallowed: the local archive alone may still satisfy the
-        // query, but a read that misses fails with the load failure as
-        // its cause instead of a bare not-found.
-        let remote = self.source.fallback();
-        let store = NetworkedIndex::erased(env, self.catalog(), remote, self.source.node_cache());
+        // A block missing locally hydrates through the env, from the
+        // remotes the subject's open branches track. A remote that failed
+        // to load fails such a read with the load failure as its cause
+        // instead of a bare not-found, while what the local archive holds
+        // still reads.
+        let store = NetworkedIndex::erased(env, self.catalog(), self.source.node_cache());
         self.execute(store).await
     }
 
@@ -218,13 +218,13 @@ impl Select<'_> {
             + Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
     {
-        let remote = self.source.fallback();
-        let store = NetworkedIndex::erased(env, self.catalog(), remote, self.source.node_cache());
+        let store = NetworkedIndex::erased(env, self.catalog(), self.source.node_cache());
         self.estimate(store).await
     }
 
@@ -296,15 +296,13 @@ impl SelectOwned<'_> {
             + Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
     {
-        // The same remote fallback as `Select::perform`; see the comment
-        // there.
-        let remote = self.0.source.fallback();
-        let store = NetworkedIndex::erased(env, self.catalog(), remote, self.0.source.node_cache());
+        let store = NetworkedIndex::erased(env, self.catalog(), self.0.source.node_cache());
         self.execute(store).await
     }
 

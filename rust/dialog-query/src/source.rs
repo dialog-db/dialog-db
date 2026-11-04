@@ -139,7 +139,6 @@ pub(crate) mod test {
             let store = NetworkedIndex::new(
                 self.operator,
                 self.branch.archive().index(),
-                None,
                 ArtifactNodeCache::new(),
             );
             load.perform(&store).await
@@ -157,7 +156,6 @@ pub(crate) mod test {
             let store = NetworkedIndex::new(
                 self.operator,
                 self.branch.archive().index(),
-                None,
                 ArtifactNodeCache::new(),
             );
             load.perform(&store).await

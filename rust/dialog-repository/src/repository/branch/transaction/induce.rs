@@ -30,6 +30,8 @@
 //! keep hot-attribute fan-out flat, delta-restricted body evaluation,
 //! and the `retract!` head polarity.
 
+use dialog_effects::archive::Load as ArchiveLoad;
+use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::Read as BlobRead;
 use std::collections::{BTreeSet, HashMap};
 
@@ -81,7 +83,8 @@ where
         + Provider<Put>
         + Provider<Resolve>
         + Provider<Identify>
-        + Provider<crate::Hydrate>
+        + Provider<ArchiveLoad>
+        + Provider<BlobLoad>
         + Provider<dialog_artifacts::Preload>
         + Provider<dialog_artifacts::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
@@ -405,7 +408,8 @@ impl<'a> Dispatch<'a> {
             + Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
@@ -464,7 +468,8 @@ impl<'a> Dispatch<'a> {
             + Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
@@ -519,7 +524,8 @@ impl<'a> Dispatch<'a> {
             + Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
@@ -587,7 +593,8 @@ impl<'a> Dispatch<'a> {
             + Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
@@ -630,7 +637,8 @@ impl<'a> Dispatch<'a> {
             + Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
@@ -678,7 +686,8 @@ impl<'a> Dispatch<'a> {
             + Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
@@ -717,7 +726,8 @@ impl<'a> Dispatch<'a> {
             + Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
@@ -762,7 +772,8 @@ where
         + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
-        + Provider<crate::Hydrate>
+        + Provider<ArchiveLoad>
+        + Provider<BlobLoad>
         + Provider<dialog_artifacts::Preload>
         + Provider<dialog_artifacts::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
@@ -794,9 +805,7 @@ where
     // surfaces once. Reads go through the networked store exactly as a
     // select does: a pulled head's changed paths may reference
     // remote-only blocks.
-    let remote = source.fallback();
-    let store =
-        crate::NetworkedIndex::erased(env, branch.archive().index(), remote, branch.node_cache());
+    let store = crate::NetworkedIndex::erased(env, branch.archive().index(), branch.node_cache());
     let raw_store = store.clone();
     let storage = store;
     let previous = crate::Index::from_hash(NodeHash::from(*watermark.tree.hash()));
@@ -876,7 +885,8 @@ where
         + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
-        + Provider<crate::Hydrate>
+        + Provider<ArchiveLoad>
+        + Provider<BlobLoad>
         + Provider<dialog_artifacts::Preload>
         + Provider<dialog_artifacts::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
@@ -1178,6 +1188,8 @@ async fn is_novel<'a>(view: &QueryEnv<'a>, instruction: &Instruction) -> Result<
 
 #[cfg(test)]
 mod tests {
+    use dialog_effects::archive::Load as ArchiveLoad;
+    use dialog_effects::blob::Load as BlobLoad;
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
@@ -1204,7 +1216,8 @@ mod tests {
             + Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
@@ -3258,7 +3271,8 @@ mod tests {
             + Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>

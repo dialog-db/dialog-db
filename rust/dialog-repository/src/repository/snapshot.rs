@@ -48,6 +48,8 @@
 //! upstream as the walk proceeds, which is what makes the result complete.
 
 use core::ops::RangeInclusive;
+use dialog_effects::archive::Load as ArchiveLoad;
+use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::prelude::{ArchiveBlobExt as _, ReadBlobExt as _, WriteBlobExt as _};
 use std::collections::HashSet;
 
@@ -76,11 +78,12 @@ use parking_lot::RwLock;
 
 use dialog_varsig::Principal;
 
+use crate::repository::archive::routes;
 use crate::repository::remote::Step;
 use crate::repository::source::{Caches, SourceRef};
 use crate::{
     BlobArchive, Branch, ConnectedReplica, Ephemeral, Index, NetworkedIndex, PublishError,
-    RemoteFallback, RemoteSite, Repository, Revision, Select, SelectQuery, SnapshotError,
+    RemoteSite, Repository, Revision, Select, SelectQuery, SnapshotError,
 };
 use dialog_effects::MethodExt as _;
 
@@ -190,11 +193,6 @@ pub struct Snapshot {
     head: RwLock<Head>,
     caches: Caches,
     overlay: Ephemeral,
-    /// Where a read that misses a block locally fetches it from:
-    /// nowhere, for a snapshot a caller mints, which reads locally;
-    /// the branch's remote for a view the branch mints of its own
-    /// past ([`Branch::view`]).
-    fallback: RemoteFallback,
 }
 
 /// What a snapshot's commits move: the revision, and the line they are
@@ -241,16 +239,15 @@ impl Branch {
             }),
             caches: self.caches(),
             overlay: Ephemeral::default(),
-            fallback: RemoteFallback::None,
         })
     }
 
     /// This branch as it stood at `revision`, under `overlay` as its
     /// session line: what a subscription reads the state before a
     /// change from, with the pinned revision and the overlay rewound
-    /// to the pinned sequence. Shares the branch's caches and reads
-    /// through its remote, so a block the replica never fetched is
-    /// reached the way the branch would reach it.
+    /// to the pinned sequence. Shares the branch's caches, and reads
+    /// through the env as the branch does, so a block the replica never
+    /// fetched hydrates from where the branch's repository's blocks live.
     pub(crate) fn view(&self, revision: Revision, overlay: Ephemeral) -> Snapshot {
         Snapshot {
             subject: self.subject(),
@@ -260,7 +257,6 @@ impl Branch {
             }),
             caches: self.caches(),
             overlay,
-            fallback: self.fallback(),
         }
     }
 }
@@ -276,7 +272,6 @@ impl Snapshot {
             }),
             caches: Caches::new(),
             overlay: Ephemeral::default(),
-            fallback: RemoteFallback::None,
         }
     }
 
@@ -301,13 +296,7 @@ impl Snapshot {
             }),
             caches,
             overlay: Ephemeral::default(),
-            fallback: RemoteFallback::None,
         }
-    }
-
-    /// Where a read that misses a block locally fetches it from.
-    pub(crate) fn fallback(&self) -> RemoteFallback {
-        self.fallback.clone()
     }
 
     /// The revision this snapshot names.
@@ -427,7 +416,8 @@ impl Snapshot {
             + Provider<Get>
             + Provider<Put>
             + Provider<memory::Resolve>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + ConditionalSync
@@ -448,7 +438,8 @@ impl Snapshot {
             + Provider<Get>
             + Provider<Put>
             + Provider<memory::Resolve>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + ConditionalSync
@@ -486,7 +477,6 @@ impl Clone for Snapshot {
             }),
             caches: self.caches.clone(),
             overlay: self.overlay.clone(),
-            fallback: self.fallback.clone(),
         }
     }
 }
@@ -677,10 +667,12 @@ impl SnapshotExport {
             + Provider<Put>
             + Provider<BlobRead>
             + Provider<BlobImport>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, BlobRead>>
+            + dialog_common::Holds
             + ConditionalSync
             + 'static,
     {
@@ -703,7 +695,17 @@ impl SnapshotExport {
             // With an upstream a read-miss falls through to the remote and
             // is cached; without one the index is exactly what this store
             // holds.
-            let index = NetworkedIndex::erased(env, catalog, upstream, nodes);
+            // A download hydrates read-misses from its upstream, lent to
+            // the env for the walk; any other export reads exactly what
+            // this store holds.
+            let _loan = upstream.as_ref().map(|remote| {
+                routes::lend(
+                    &crate::Routes::of(env),
+                    &subject.did().clone(),
+                    &crate::RemoteFallback::Remote(remote.clone()),
+                )
+            });
+            let index = NetworkedIndex::erased(env, catalog, nodes).locally(upstream.is_none());
             let storage = index.clone();
             let tree = Index::from_hash(root);
 

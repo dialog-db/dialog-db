@@ -6,9 +6,11 @@ use dialog_capability::{Fork, Provider, Subject};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::{Buffer, ConditionalSync, Holds};
 use dialog_effects::MethodExt as _;
+use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::prelude::ArchiveExt as _;
 use dialog_effects::archive::prelude::{CatalogExt as _, GetBlockExt as _};
 use dialog_effects::archive::{Get, Put};
+use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::prelude::{ArchiveBlobExt as _, ReadBlobExt as _, WriteBlobExt as _};
 use dialog_effects::blob::{BlobError, BlobReader, Import as BlobImport, Read as BlobRead};
 use dialog_effects::memory::{Current, Publish, Resolve};
@@ -267,8 +269,7 @@ async fn holds<Env: ResolveEnv>(
         RemoteFallback::Unavailable { remote, .. } => Some(remote.clone()),
         RemoteFallback::None => None,
     };
-    let store =
-        NetworkedIndex::erased(env, branch.archive().index(), fallback, branch.node_cache());
+    let store = NetworkedIndex::erased(env, branch.archive().index(), branch.node_cache());
     let target = match upstream.target() {
         Target::Local(name) => format!("branch {name}"),
         Target::Remote(entity) => format!("upstream {entity}"),
@@ -875,7 +876,8 @@ where
         + Provider<Resolve>
         + Provider<BlobRead>
         + Provider<Fork<RemoteSite, Get>>
-        + Provider<crate::Hydrate>
+        + Provider<ArchiveLoad>
+        + Provider<BlobLoad>
         + Provider<Fork<RemoteSite, Put>>
         + Provider<Fork<RemoteSite, BlobImport>>
         + Provider<Fork<RemoteSite, BlobRead>>
@@ -1350,7 +1352,8 @@ where
         + Provider<Resolve>
         + Provider<BlobRead>
         + Provider<Fork<RemoteSite, Get>>
-        + Provider<crate::Hydrate>
+        + Provider<ArchiveLoad>
+        + Provider<BlobLoad>
         + Provider<Fork<RemoteSite, Put>>
         + Provider<Fork<RemoteSite, BlobRead>>
         + Provider<Fork<RemoteSite, BlobImport>>

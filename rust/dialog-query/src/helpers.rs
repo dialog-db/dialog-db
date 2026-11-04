@@ -34,9 +34,11 @@ use dialog_artifacts::{
 use dialog_capability::{Fork, Provider, Subject};
 use dialog_common::Buffer;
 use dialog_common::{ConditionalSync, Holds};
+use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify};
 use dialog_effects::blob::Import as BlobImport;
+use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::Read as BlobRead;
 use dialog_effects::blob::Size as BlobSize;
 use dialog_effects::memory::{List, Publish, Resolve};
@@ -465,7 +467,8 @@ where
         + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
-        + Provider<dialog_repository::Hydrate>
+        + Provider<ArchiveLoad>
+        + Provider<BlobLoad>
         + Provider<dialog_artifacts::Preload>
         + Provider<dialog_artifacts::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
@@ -477,12 +480,7 @@ where
         input: ArtifactSelector<Constrained>,
     ) -> Result<ArtifactStream<'a>, DialogArtifactsError> {
         let select = self.branch.claims().select(input);
-        let store = NetworkedIndex::new(
-            self.operator,
-            select.catalog(),
-            None,
-            ArtifactNodeCache::new(),
-        );
+        let store = NetworkedIndex::new(self.operator, select.catalog(), ArtifactNodeCache::new());
         let counting = CountingStore::new(store, self.journal.clone());
         let stream = select.execute(counting).await?;
         Ok(Box::pin(stream))
@@ -505,7 +503,8 @@ where
         + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
-        + Provider<dialog_repository::Hydrate>
+        + Provider<ArchiveLoad>
+        + Provider<BlobLoad>
         + Provider<dialog_artifacts::Preload>
         + Provider<dialog_artifacts::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
@@ -519,12 +518,7 @@ where
         // Route the estimate's root read through the same counting store as
         // the scans, so a bench sees the block it costs.
         let select = self.branch.claims().select(input);
-        let store = NetworkedIndex::new(
-            self.operator,
-            select.catalog(),
-            None,
-            ArtifactNodeCache::new(),
-        );
+        let store = NetworkedIndex::new(self.operator, select.catalog(), ArtifactNodeCache::new());
         let counting = CountingStore::new(store, self.journal.clone());
         select.estimate(counting).await
     }
@@ -550,7 +544,8 @@ where
     Env: Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
-        + Provider<dialog_repository::Hydrate>
+        + Provider<ArchiveLoad>
+        + Provider<BlobLoad>
         + Provider<dialog_artifacts::Preload>
         + Provider<dialog_artifacts::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
@@ -561,7 +556,6 @@ where
         let store = NetworkedIndex::new(
             self.operator,
             self.branch.archive().index(),
-            None,
             ArtifactNodeCache::new(),
         );
         let counting = CountingStore::new(store, self.journal.clone());
@@ -578,7 +572,8 @@ where
         + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
-        + Provider<dialog_repository::Hydrate>
+        + Provider<ArchiveLoad>
+        + Provider<BlobLoad>
         + Provider<dialog_artifacts::Preload>
         + Provider<dialog_artifacts::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
@@ -589,7 +584,6 @@ where
         let store = NetworkedIndex::new(
             self.operator,
             self.branch.archive().index(),
-            None,
             ArtifactNodeCache::new(),
         );
         let counting = CountingStore::new(store, self.journal.clone());
@@ -711,7 +705,8 @@ where
         + Provider<SpaceCreate>
         + Provider<List>
         + PeersEnv
-        + Provider<dialog_repository::Hydrate>
+        + Provider<ArchiveLoad>
+        + Provider<BlobLoad>
         + Provider<dialog_artifacts::Preload>
         + Provider<dialog_artifacts::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
@@ -782,12 +777,7 @@ where
             .claims()
             .select(ArtifactSelector::new().the(the))
             .to_owned();
-        let store = NetworkedIndex::new(
-            &self.operator,
-            select.catalog(),
-            None,
-            ArtifactNodeCache::new(),
-        );
+        let store = NetworkedIndex::new(&self.operator, select.catalog(), ArtifactNodeCache::new());
         let journal = ReadJournal::default();
         let counting = CountingStore::new(store, journal.clone());
 
@@ -1837,7 +1827,8 @@ mod test {
             + Provider<SpaceCreate>
             + Provider<List>
             + PeersEnv
-            + Provider<dialog_repository::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
@@ -1962,7 +1953,8 @@ mod test {
             + Provider<SpaceCreate>
             + Provider<List>
             + PeersEnv
-            + Provider<dialog_repository::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
@@ -2097,7 +2089,8 @@ mod test {
             + Provider<SpaceCreate>
             + Provider<List>
             + PeersEnv
-            + Provider<dialog_repository::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
@@ -2127,12 +2120,7 @@ mod test {
             .claims()
             .select(ArtifactSelector::new().the(the))
             .to_owned();
-        let store = NetworkedIndex::new(
-            env.operator(),
-            select.catalog(),
-            None,
-            ArtifactNodeCache::new(),
-        );
+        let store = NetworkedIndex::new(env.operator(), select.catalog(), ArtifactNodeCache::new());
         let stats = distribution::capture(&root, &store).await?;
         distribution::report(&format!("se-replay-{limit}"), &stats);
         Ok(())
@@ -2479,7 +2467,8 @@ where
         + Provider<SpaceCreate>
         + Provider<List>
         + PeersEnv
-        + Provider<dialog_repository::Hydrate>
+        + Provider<ArchiveLoad>
+        + Provider<BlobLoad>
         + Provider<dialog_artifacts::Preload>
         + Provider<dialog_artifacts::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>

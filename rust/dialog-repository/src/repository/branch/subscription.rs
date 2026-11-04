@@ -65,6 +65,8 @@
 //!
 //! [`AnalyzedRule::is_entity_local`]: dialog_query::rule::analyzer::AnalyzedRule::is_entity_local
 
+use dialog_effects::archive::Load as ArchiveLoad;
+use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::Read as BlobRead;
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
@@ -717,7 +719,8 @@ where
             + Provider<Put>
             + Provider<Resolve>
             + Provider<Identify>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
@@ -831,7 +834,8 @@ where
             + Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
@@ -848,19 +852,15 @@ where
             return Ok(Touched::Nothing);
         }
 
-        // Load the remote if the branch tracks one, exactly as a select does:
-        // a pull replicates tree nodes along changed paths but never spilled
-        // value blocks, so the first poll after a pull that lands a spilled
-        // fact inside the cover must be able to read the block through the
-        // remote. A failed load (e.g. no credentials) is carried into the
-        // fallback rather than swallowed: the local archive alone may
-        // still satisfy the poll, and a read that misses fails with the
-        // load failure as its cause instead of a bare not-found.
-        let remote = self.branch.fallback();
+        // Read exactly as a select does: a pull replicates tree nodes
+        // along changed paths but never spilled value blocks, so the first
+        // poll after a pull that lands a spilled fact inside the cover must
+        // be able to hydrate the block through the env from the remote the
+        // branch tracks. A remote that failed to load fails only a read
+        // that misses, with the load failure as its cause.
         let store = NetworkedIndex::erased(
             env,
             ArchiveScope::new(self.branch.subject()).index(),
-            remote,
             self.branch.node_cache(),
         );
         // Keep the raw backend to fetch spilled value blocks by reference.
@@ -976,7 +976,8 @@ where
             + Provider<Put>
             + Provider<Resolve>
             + Provider<Identify>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
@@ -1184,7 +1185,8 @@ where
             + Provider<Put>
             + Provider<Resolve>
             + Provider<Identify>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
@@ -1240,7 +1242,8 @@ where
             + Provider<Put>
             + Provider<Resolve>
             + Provider<Identify>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
@@ -1283,6 +1286,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    use dialog_effects::archive::Load as ArchiveLoad;
+    use dialog_effects::blob::Load as BlobLoad;
 
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
@@ -1378,7 +1383,8 @@ mod tests {
             + Provider<Put>
             + Provider<Resolve>
             + Provider<Identify>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
@@ -5346,7 +5352,8 @@ mod tests {
     impl Fault for Get {}
     impl Fault for Put {}
     impl Fault for Resolve {}
-    impl Fault for crate::Hydrate {}
+    impl Fault for ArchiveLoad {}
+    impl Fault for BlobLoad {}
     impl Fault for dialog_artifacts::Preload {}
     impl Fault for dialog_artifacts::Speculation {}
     impl Fault for Fork<RemoteSite, Resolve> {}

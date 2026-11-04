@@ -12,5 +12,9 @@ pub use local::*;
 pub mod networked;
 pub use networked::*;
 
+/// Where a subject's blocks hydrate from, as its open branches register.
+pub mod routes;
+pub use routes::{Routes, Routing};
+
 mod persist;
 pub(crate) use persist::persist;

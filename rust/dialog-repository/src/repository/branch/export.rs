@@ -5,8 +5,10 @@ use dialog_artifacts::{
 use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::ConditionalSync;
+use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::prelude::ArchiveScope;
 use dialog_effects::archive::{Get, Put};
+use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::Read as BlobRead;
 use dialog_effects::memory::Resolve;
 use futures_util::TryStreamExt;
@@ -33,7 +35,8 @@ impl<E: Exporter> Export<'_, E> {
             + Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
@@ -41,10 +44,8 @@ impl<E: Exporter> Export<'_, E> {
         let branch = self.branch;
         let mut exporter = self.exporter;
 
-        let remote = branch.fallback();
-
         let catalog = ArchiveScope::new(branch.subject()).index();
-        let store = NetworkedIndex::erased(env, catalog, remote, branch.node_cache());
+        let store = NetworkedIndex::erased(env, catalog, branch.node_cache());
 
         let tree = match branch.revision() {
             Some(revision) => Index::from_hash(NodeHash::from(*revision.tree.hash())),

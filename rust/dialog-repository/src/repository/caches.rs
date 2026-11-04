@@ -146,6 +146,9 @@ pub struct HeldCaches {
     /// this set, by branch. Not a cache: untouched by `release` and
     /// `clear`, and gone with its last handle.
     writers: Arc<Writers>,
+    /// Where the repositories' blocks hydrate from, as their open branches
+    /// registered. Not a cache: untouched by `release` and `clear`.
+    routes: crate::Routes,
 }
 
 impl fmt::Debug for HeldCaches {
@@ -185,17 +188,21 @@ impl HeldCaches {
             shared: Arc::default(),
             repositories: Arc::default(),
             writers: Arc::default(),
+            routes: crate::Routes::new(),
         }
     }
 
     /// The caches `env` holds, made with the default budget if it holds
     /// none yet.
-    pub fn of<Env: Holds>(env: &Env) -> Self {
+    pub fn of<Env: Holds + ?Sized>(env: &Env) -> Self {
         // Queries may have run through `env` before anything was opened,
         // with a formula cache of their own: these caches take that one.
         let formulas = FormulaCache::of(env);
+        let routes = crate::Routes::of(env);
         env.held_or(&held_key::<Self>(HELD), &|| {
-            Arc::new(Self::with_formulas(NODE_CACHE_BUDGET, formulas.clone()))
+            let mut caches = Self::with_formulas(NODE_CACHE_BUDGET, formulas.clone());
+            caches.routes = routes.clone();
+            Arc::new(caches)
         })
         .downcast_ref::<Self>()
         .cloned()
@@ -211,6 +218,13 @@ impl HeldCaches {
     pub fn hold<Env: Holds>(&self, env: &Env) {
         env.hold(held_key::<Self>(HELD), Arc::new(self.clone()));
         self.formulas.hold(env);
+        self.routes.hold(env);
+    }
+
+    /// Where the repositories opened through an environment holding these
+    /// caches hydrate their blocks from (see [`Routes`](crate::Routes)).
+    pub fn routes(&self) -> crate::Routes {
+        self.routes.clone()
     }
 
     /// The outputs of cached formulas these caches remember.
@@ -342,6 +356,8 @@ impl HeldCaches {
 
 #[cfg(test)]
 mod tests {
+    use dialog_effects::archive::Load as ArchiveLoad;
+    use dialog_effects::blob::Load as BlobLoad;
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
@@ -415,7 +431,8 @@ mod tests {
         Publish,
         BlobRead,
         BlobImport,
-        crate::Hydrate,
+        ArchiveLoad,
+        BlobLoad,
         Fork<RemoteSite, Resolve>,
     );
 

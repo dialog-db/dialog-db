@@ -15,9 +15,11 @@ use dialog_artifacts::tree::{ArtifactNodeCache, SpillCache, spill_cache};
 use dialog_artifacts::{Changes, DialogArtifactsError, Entity, SpineSlot, Statement as _};
 use dialog_capability::{Capability, Provider, Subject};
 use dialog_common::ConditionalSync;
+use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::prelude::ArchiveScope;
 use dialog_effects::archive::{Get as ArchiveGet, Put as ArchivePut};
 use dialog_effects::authority::{Operator, OperatorExt as _};
+use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::Read as BlobRead;
 use dialog_effects::memory::Resolve;
 use dialog_query::concept::query::PlanCache;
@@ -28,7 +30,7 @@ use std::sync::Arc;
 use crate::repository::branch::LayerMetadataMemo;
 use crate::rules::{RuleCache, SharedRuleCache};
 use crate::schema::Replica;
-use crate::{Branch, Ephemeral, NetworkedIndex, RemoteFallback, Revision, Snapshot};
+use crate::{Branch, Ephemeral, NetworkedIndex, Revision, Snapshot};
 
 /// An owned line to read from: a branch or a snapshot. Query
 /// environments hold these so the only lifetime they carry is the
@@ -128,30 +130,6 @@ impl<'a> SourceRef<'a> {
     /// no commits yet, which has no tree at all.
     pub(crate) fn root(self) -> Option<Blake3Hash> {
         self.revision().map(|revision| *revision.tree.hash())
-    }
-
-    /// Whether a read of this line can fetch what it lacks: whether it
-    /// has a remote to fall back to (see [`Self::fallback`]). Without one
-    /// every block it reads is local already, and warming ahead of
-    /// demand has nothing to do.
-    pub(crate) fn fetches(self) -> bool {
-        !matches!(self.fallback(), RemoteFallback::None)
-    }
-
-    /// The remote block reads fall back to on a local miss: the first
-    /// peer among a branch's upstreams, as last resolved (a branch that
-    /// tracks a peer must hydrate blocks it holds by reference); none for
-    /// a snapshot a caller mints, the branch's for a view of its past.
-    ///
-    /// An upstream whose peer could not be resolved is carried as
-    /// [`RemoteFallback::Unavailable`] rather than dropped: reads the
-    /// local archive serves still succeed, and a local miss surfaces why
-    /// the peer is unreachable instead of a bare not-found.
-    pub(crate) fn fallback(self) -> RemoteFallback {
-        match self {
-            SourceRef::Branch(branch) => branch.fallback(),
-            SourceRef::Snapshot(snapshot) => snapshot.fallback(),
-        }
     }
 
     /// The shared node cache this line's stores keep tree nodes in: what a
@@ -260,9 +238,9 @@ impl<'a> SourceRef<'a> {
     /// records live in the same tree as the data, so this reads the
     /// history region of the revision's tree.
     ///
-    /// A read that misses locally falls back to the line's tracked
-    /// remote exactly as a fact read does (see [`fallback`](Self::fallback)),
-    /// so a replica that materialized only the operational regions
+    /// A read that misses locally hydrates through the env from the
+    /// remotes the repository's open branches track, exactly as a fact
+    /// read does (see [`Routes`](crate::Routes)), so a replica that materialized only the operational regions
     /// hydrates the history it turns out to need instead of failing with
     /// `IncompleteHistory`. A line tracking no remote reads purely
     /// locally, so an offline replica behaves as it always did.
@@ -272,12 +250,12 @@ impl<'a> SourceRef<'a> {
             + Provider<ArchiveGet>
             + Provider<ArchivePut>
             + Provider<Resolve>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + ConditionalSync
             + 'static,
     {
-        let remote = self.fallback();
-        let store = NetworkedIndex::new(env, self.archive().index(), remote, self.node_cache());
+        let store = NetworkedIndex::new(env, self.archive().index(), self.node_cache());
         let history = match self.root() {
             Some(root) => TreeHistory::from_root(&root, store),
             // No revision, no tree, no records.
@@ -298,7 +276,8 @@ impl<'a> SourceRef<'a> {
             + Provider<ArchiveGet>
             + Provider<ArchivePut>
             + Provider<Resolve>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + ConditionalSync
             + 'static,
     {

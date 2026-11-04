@@ -1,7 +1,9 @@
 use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
 use dialog_effects::Rejection;
+use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::{Get as ArchiveGet, Put as ArchivePut};
+use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::Read as BlobRead;
 use dialog_effects::memory::{Publish, Resolve};
 
@@ -62,7 +64,8 @@ impl Reset<'_> {
             + Provider<ArchiveGet>
             + Provider<ArchivePut>
             + Provider<Resolve>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + ConditionalSync
             + 'static,
     {
@@ -124,17 +127,13 @@ where
         + Provider<ArchiveGet>
         + Provider<ArchivePut>
         + Provider<Resolve>
-        + Provider<crate::Hydrate>
+        + Provider<ArchiveLoad>
+        + Provider<BlobLoad>
         + ConditionalSync
         + 'static,
 {
     let version = head.version();
-    let store = NetworkedIndex::erased(
-        env,
-        branch.archive().index(),
-        branch.fallback(),
-        branch.node_cache(),
-    );
+    let store = NetworkedIndex::erased(env, branch.archive().index(), branch.node_cache());
     let unreadable = |error: dialog_artifacts::DialogArtifactsError| {
         PublishError::Storage(format!(
             "could not tell whether the revision holds branch {}'s head: {error}",

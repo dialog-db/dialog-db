@@ -47,7 +47,8 @@
 //! #         + Provider<BlobWrite>
 //! #         + Provider<BlobImport>
 //! #         + Provider<BlobRead>
-//! #         + Provider<dialog_repository::Hydrate>
+//! #         + Provider<dialog_effects::archive::Load>
+//! #         + Provider<dialog_effects::blob::Load>
 //! #         + Provider<Fork<RemoteSite, Resolve>>
 //! #         + dialog_common::ConditionalSync
 //! #         + 'static,
@@ -76,9 +77,11 @@ use dialog_capability::access::{Certificate as _, Delegation as _};
 use dialog_capability::{ANY_SUBJECT, Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::ConditionalSync;
+use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify};
 use dialog_effects::blob::Import as BlobImport;
+use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::Read as BlobRead;
 use dialog_effects::blob::Write as BlobWrite;
 use dialog_effects::memory::{Publish, Resolve};
@@ -236,7 +239,8 @@ impl RetainDelegation<'_> {
             + Provider<Identify>
             + Provider<Attest>
             + Provider<BlobWrite>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
@@ -333,7 +337,8 @@ impl RetractDelegation<'_> {
             + Provider<Identify>
             + Provider<Attest>
             + Provider<BlobWrite>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,

@@ -771,12 +771,7 @@ async fn it_answers_observes_after_a_takeover_at_zero_reads() -> Result<()> {
         .clone()
         .expect("the joiner adopted a head")
         .version();
-    let store = NetworkedIndex::new(
-        &device,
-        joiner.archive().index(),
-        joiner.fallback(),
-        ArtifactNodeCache::new(),
-    );
+    let store = NetworkedIndex::new(&device, joiner.archive().index(), ArtifactNodeCache::new());
     device.reset();
     let seen = head_observes(
         &ours,
