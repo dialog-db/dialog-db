@@ -26,11 +26,22 @@
 //! holds them. The placements that guide a read are those of the bottom,
 //! the lowest layer, which is the first that the top links when it links
 //! layers side by side.
+//!
+//! A rule is a fact of the layer that holds it, and a read takes it only
+//! when that layer may conclude its head ([`Guide::takes_rule`]). The layer
+//! may conclude an attribute that it would be read from, and one that a
+//! placement it holds itself sends to another layer of the stack: the
+//! writers of the layer chose that. So a placement in the session store of
+//! the bottom keeps a rule that concludes its namespace out of each layer
+//! but the one under its scope. A rule that a query or a commit brings comes
+//! from that query or that commit, and no layer holds it, so this does not
+//! apply to it.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use dialog_corpus::Entity;
+use dialog_query::concept::descriptor::ConceptDescriptor;
 use parking_lot::Mutex;
 
 use crate::placement::{Bindings, ScopeMap, Target};
@@ -154,12 +165,77 @@ impl Guide {
     /// Whether a read takes a row of `attribute` from `layer`, under the
     /// placements `scopes`. A row it does not take is reported.
     pub(crate) fn admits(&self, layer: &GuidedLayer, scopes: &ScopeMap, attribute: &str) -> bool {
+        let (admitted, scope) = self.verdict(layer, scopes, attribute);
+        if !admitted {
+            self.divergences.report(attribute, &layer.address, scope);
+        }
+        admitted
+    }
+
+    /// Whether a read can take a row of `attribute` from some layer of the
+    /// stack. A read of an attribute that no layer can give reads nothing, so
+    /// a write of it into a layer changes no answer.
+    pub(crate) fn reaches(&self, scopes: &ScopeMap, attribute: &str) -> bool {
+        self.lines
+            .iter()
+            .chain(&self.ephemerals)
+            .any(|layer| self.verdict(layer, scopes, attribute).0)
+    }
+
+    /// Whether a read takes from `layer` a rule that concludes `head`: the
+    /// layer may conclude each attribute of the head. A rule whose head spans
+    /// scopes so reaches a read only from a layer that may conclude each one.
+    /// A rule stays in a layer that may not conclude it, and it reaches no
+    /// query and fires in no commit.
+    pub(crate) fn takes_rule(
+        &self,
+        layer: &GuidedLayer,
+        scopes: &ScopeMap,
+        head: &ConceptDescriptor,
+    ) -> bool {
+        head.with().iter().all(|(_, field)| {
+            let attribute = field.descriptor().the().to_string();
+            self.verdict(layer, scopes, &attribute).0
+                || (layer.bottom
+                    && scopes.held_by_bottom(&attribute)
+                    && scopes
+                        .scope_of(&attribute)
+                        .is_some_and(|scope| self.bound.contains(scope)))
+        })
+    }
+
+    /// The layers and the placements that decide which rules a read takes, as
+    /// a value that two reads can compare.
+    pub(crate) fn rule_shape(&self, scopes: &ScopeMap) -> RuleShape {
+        let layer = |layer: &GuidedLayer| {
+            let mut bound: Vec<String> = layer.scopes.iter().map(ToString::to_string).collect();
+            bound.sort();
+            (layer.bottom, bound)
+        };
+        let mut bound: Vec<String> = self.bound.iter().map(ToString::to_string).collect();
+        bound.sort();
+        RuleShape {
+            scopes: scopes.clone(),
+            lines: self.lines.iter().map(layer).collect(),
+            ephemerals: self.ephemerals.iter().map(layer).collect(),
+            bound,
+        }
+    }
+
+    /// Whether `layer` gives a row of `attribute`, with the scope that the
+    /// attribute belongs to.
+    fn verdict<'a>(
+        &self,
+        layer: &GuidedLayer,
+        scopes: &'a ScopeMap,
+        attribute: &str,
+    ) -> (bool, Option<&'a Entity>) {
         if attribute.starts_with("dialog.") {
-            return true;
+            return (true, None);
         }
         // The placement of the attribute decides first, so that a default
         // scope never overrides it.
-        let (admitted, scope) = match (scopes.scope_of(attribute), scopes.default()) {
+        match (scopes.scope_of(attribute), scopes.default()) {
             (Some(scope), _) if self.bound.contains(scope) => {
                 (layer.scopes.contains(scope), Some(scope))
             }
@@ -179,11 +255,18 @@ impl Guide {
             (None, Some(default)) => (layer.bottom, Some(default)),
             // No placement and no default: the stack reads the attribute
             // from every layer, as it reads an unguided composite.
-            (None, None) => return true,
-        };
-        if !admitted {
-            self.divergences.report(attribute, &layer.address, scope);
+            (None, None) => (true, None),
         }
-        admitted
     }
+}
+
+/// What the rules that a guided read takes depend on, besides the rule facts
+/// of its layers: the placements, and the scopes of each layer. A rule set
+/// assembled under one shape does not answer a read under another.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RuleShape {
+    scopes: ScopeMap,
+    lines: Vec<(bool, Vec<String>)>,
+    ephemerals: Vec<(bool, Vec<String>)>,
+    bound: Vec<String>,
 }

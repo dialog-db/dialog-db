@@ -55,13 +55,14 @@ use dialog_query::rule::statement::Reach;
 use dialog_query::{Any, Binding, Environment, InductiveRule, Match, Term};
 use futures_util::{StreamExt as _, TryStreamExt};
 
-use crate::placement::Placements;
+use crate::placement::{Placements, ScopeMap};
 use crate::repository::archive::erased;
 use crate::repository::branch::session::{Composite, QueryEnv};
 use crate::repository::source::View;
 use crate::rules::{
     TriggerFootprint, hydrate, hydrate_inductive, on_attr, reads_attr, source_attr, transient_attr,
 };
+use crate::stack::{Guide, GuidedLayer};
 use crate::{CommitError, Ephemeral, RemoteSite, Revision, RuleCache, Staged};
 
 /// Round bound for the induction loop: a cascade still emitting
@@ -186,7 +187,7 @@ where
     // the overlay slice are never head-cached; they are re-scanned
     // each round (cheap, in-memory) so rules installed by this very
     // commit — or by a rule during induction — fire.
-    let dispatch = Dispatch::resolve(view, env).await?;
+    let dispatch = Dispatch::resolve(view, placements, env).await?;
 
     // The identity is resolved once: it only feeds the schema-metadata
     // overlay of the round view, which does not change across rounds.
@@ -328,7 +329,11 @@ where
                 candidates.extend(dispatch.triggers(&on, &overlay, env).await?);
             }
         }
-        candidates.extend(installed.iter().cloned());
+        for entity in &installed {
+            if dispatch.installs(entity, &overlay, env).await? {
+                candidates.insert(entity.clone());
+            }
+        }
 
         // Attributes only reachable through the deductive closure: a
         // candidate premised on one changed *derivedly*, which a base
@@ -475,15 +480,17 @@ struct TreeSlice<'a> {
 
 /// The committed side of trigger dispatch for one induction run: a
 /// slice per tree line of the view, bottom first, and every standalone
-/// ephemeral layer, scanned fresh. A rule fires from whichever line of
-/// the view holds it; where its conclusion lands is placement's
-/// business, not dispatch's. Only the dispatching line's watermark
-/// feeds the lag, so a rule on an upper layer fires on what this
-/// commit changes and on the bottom's catch-up, not on what entered
-/// its own layer outside the stack.
+/// ephemeral layer, scanned fresh. A rule fires from a line of the view
+/// that holds it and that may conclude its head (see
+/// [`Guide::takes_rule`]); a rule of the commit itself comes from no
+/// line. Only the dispatching line's watermark feeds the lag, so a rule
+/// on an upper layer fires on what this commit changes and on the
+/// bottom's catch-up, not on what entered its own layer outside the stack.
 struct Dispatch<'a> {
     trees: Vec<TreeSlice<'a>>,
     memories: Vec<&'a Ephemeral>,
+    /// What guides the view, when a stack does.
+    guided: Option<(Arc<Guide>, ScopeMap)>,
 }
 
 /// The transaction overlay's trigger slice, re-scanned each round:
@@ -671,7 +678,11 @@ impl<'a> TreeSlice<'a> {
 impl<'a> Dispatch<'a> {
     /// Resolve the committed trigger structures of every line in
     /// `view`, once per induction.
-    async fn resolve<Env>(view: &'a Composite, env: &Env) -> Result<Dispatch<'a>, CommitError>
+    async fn resolve<Env>(
+        view: &'a Composite,
+        placements: &Placements,
+        env: &Env,
+    ) -> Result<Dispatch<'a>, CommitError>
     where
         Env: Provider<BlobRead>
             + Provider<Get>
@@ -696,7 +707,112 @@ impl<'a> Dispatch<'a> {
         Ok(Dispatch {
             trees,
             memories: view.ephemerals.iter().collect(),
+            guided: view
+                .guide
+                .as_ref()
+                .map(|guide| (guide.clone(), placements.scopes())),
         })
+    }
+
+    /// Of the rule entities `held` in `layer`, those that fire: the layer
+    /// may conclude the head of each one. A rule with no body stays, and
+    /// [`load`](Self::load) passes over it as it does any other.
+    async fn firing<Env>(
+        &self,
+        held: Vec<Entity>,
+        layer: Option<&GuidedLayer>,
+        overlay: &OverlayTriggers,
+        env: &Env,
+    ) -> Result<Vec<Entity>, CommitError>
+    where
+        Env: Provider<BlobRead>
+            + Provider<Get>
+            + Provider<Put>
+            + Provider<Resolve>
+            + Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + Provider<BlobLoad>
+            + Holds
+            + Provider<dialog_corpus::Preload>
+            + Provider<dialog_corpus::Speculation>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + ConditionalSync
+            + 'static,
+    {
+        let (Some((guide, scopes)), Some(layer)) = (&self.guided, layer) else {
+            return Ok(held);
+        };
+        let mut firing = Vec::with_capacity(held.len());
+        for entity in held {
+            let taken = match self.load(&entity, overlay, env).await? {
+                Some(rule) => guide.takes_rule(layer, scopes, rule.conclusion()),
+                None => true,
+            };
+            if taken {
+                firing.push(entity);
+            }
+        }
+        Ok(firing)
+    }
+
+    /// Whether the rule `entity` that this round installs fires: a rule that
+    /// the commit brings does, and one that entered a layer does when that
+    /// layer may conclude its head.
+    async fn installs<Env>(
+        &self,
+        entity: &Entity,
+        overlay: &OverlayTriggers,
+        env: &Env,
+    ) -> Result<bool, CommitError>
+    where
+        Env: Provider<BlobRead>
+            + Provider<Get>
+            + Provider<Put>
+            + Provider<Resolve>
+            + Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + Provider<BlobLoad>
+            + Holds
+            + Provider<dialog_corpus::Preload>
+            + Provider<dialog_corpus::Speculation>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + ConditionalSync
+            + 'static,
+    {
+        let Some((guide, _)) = &self.guided else {
+            return Ok(true);
+        };
+        if overlay.sources.contains_key(entity) {
+            return Ok(true);
+        }
+        let sources = Selector::new().the(source_attr()).of(entity.clone());
+        for (at, slice) in self.trees.iter().enumerate() {
+            if !committed(&slice.source, sources.clone(), env)
+                .await?
+                .is_empty()
+                && !self
+                    .firing(vec![entity.clone()], guide.lines.get(at), overlay, env)
+                    .await?
+                    .is_empty()
+            {
+                return Ok(true);
+            }
+        }
+        for (at, memory) in self.memories.iter().enumerate() {
+            if !memory.scan(&sources).is_empty()
+                && !self
+                    .firing(vec![entity.clone()], guide.ephemerals.get(at), overlay, env)
+                    .await?
+                    .is_empty()
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// The cache hydrated bodies are recorded in: the bottom tree
@@ -747,21 +863,31 @@ impl<'a> Dispatch<'a> {
             + 'static,
     {
         let mut entities: Vec<Entity> = Vec::new();
-        for slice in &self.trees {
-            entities.extend(
-                slice
-                    .watchers(
-                        on,
-                        &slice.footprint.on,
-                        on_attr(),
-                        |cache, on, head| cache.triggers(on, head),
-                        |cache, on, head, entities| cache.record_triggers(on, head, entities),
-                        env,
-                    )
-                    .await?,
-            );
+        let guide = self.guided.as_ref().map(|(guide, _)| guide);
+        for (at, slice) in self.trees.iter().enumerate() {
+            let held = slice
+                .watchers(
+                    on,
+                    &slice.footprint.on,
+                    on_attr(),
+                    |cache, on, head| cache.triggers(on, head),
+                    |cache, on, head, entities| cache.record_triggers(on, head, entities),
+                    env,
+                )
+                .await?;
+            let layer = guide.and_then(|guide| guide.lines.get(at));
+            entities.extend(self.firing(held, layer, overlay, env).await?);
         }
-        entities.extend(self.remembered(on, on_attr()));
+        let selector = Selector::new().the(on_attr()).is(Value::Entity(on.clone()));
+        for (at, memory) in self.memories.iter().enumerate() {
+            let held = memory
+                .scan(&selector)
+                .into_iter()
+                .map(|claim| claim.of)
+                .collect();
+            let layer = guide.and_then(|guide| guide.ephemerals.get(at));
+            entities.extend(self.firing(held, layer, overlay, env).await?);
+        }
         if let Some(staged) = overlay.on.get(on) {
             entities.extend(staged.iter().cloned());
         }

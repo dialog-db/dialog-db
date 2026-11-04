@@ -53,7 +53,10 @@ pub use rules::{RuleCache, Transient};
 
 /// Attribute placement: which layer an attribute's facts live in.
 pub mod placement;
-pub use placement::{Bindings, DefaultScope, Placement, TransientAttribute, attribute_entity};
+pub use placement::{
+    Bindings, DefaultScope, Placement, PrefixPlacement, TransientAttribute, attribute_entity,
+    namespace_entity,
+};
 
 pub mod stack;
 pub use stack::{

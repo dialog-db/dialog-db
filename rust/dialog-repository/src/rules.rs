@@ -77,6 +77,7 @@ use dialog_search_tree::{Cache, Manifest};
 use parking_lot::RwLock;
 
 use crate::placement::CommittedPlacements;
+use crate::stack::RuleShape;
 use crate::{Revision, schema};
 use dialog_common::Blake3Hash;
 
@@ -500,6 +501,8 @@ pub(crate) struct RuleKey {
     pub(crate) overlays: Vec<(usize, Blake3Hash)>,
     /// Each staged layer that holds rule facts, likewise.
     pub(crate) staged: Vec<(usize, Blake3Hash)>,
+    /// What decides which rules a guided read takes from its layers.
+    pub(crate) shape: Option<RuleShape>,
 }
 
 #[derive(Debug, Default)]
