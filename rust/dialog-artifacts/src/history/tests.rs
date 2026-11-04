@@ -969,6 +969,9 @@ async fn it_fetches_spilled_history_values_concurrently() -> Result<()> {
         }
     }
 
+    /// Keeps nothing, so every node read is a gauged read.
+    impl<K, V> dialog_search_tree::Nodes<K, V> for Gauge {}
+
     #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
     #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
     impl Provider<LoadBlock> for Gauge {
@@ -1706,12 +1709,12 @@ async fn it_unions_contended_claim_versions_in_either_direction() -> Result<()> 
         .edit()
         .integrate(stream::iter(from_b.into_iter().map(Ok)), &storage)
         .await?
-        .persist(delta.blocks())?;
+        .persist(delta.blocks(), &storage)?;
     b = b
         .edit()
         .integrate(stream::iter(from_a.into_iter().map(Ok)), &storage)
         .await?
-        .persist(delta.blocks())?;
+        .persist(delta.blocks(), &storage)?;
     delta.flush_into(&store);
 
     assert_eq!(
@@ -2091,8 +2094,7 @@ async fn it_reads_a_spilled_revision_record_back() -> Result<()> {
         panic!("a record larger than inline_n spills");
     };
 
-    let mut tree: ArtifactTree =
-        PersistentTree::empty_with_manifest(small.clone(), dialog_search_tree::NodeCache::new());
+    let mut tree: ArtifactTree = PersistentTree::empty_with_manifest(small.clone());
     let mut delta = ArchiveDelta::zero();
     tree.record(&store, &mut delta, entries).await?;
     delta.flush_into(&store);
@@ -2103,8 +2105,7 @@ async fn it_reads_a_spilled_revision_record_back() -> Result<()> {
 
     let storage = store.clone();
     let observed = Arc::new(Mutex::new(BTreeSet::new()));
-    let empty: ArtifactTree =
-        PersistentTree::empty_with_manifest(small, dialog_search_tree::NodeCache::new());
+    let empty: ArtifactTree = PersistentTree::empty_with_manifest(small);
     let changes = observe_revisions(
         empty.differentiate(&tree, &storage, &storage),
         observed.clone(),

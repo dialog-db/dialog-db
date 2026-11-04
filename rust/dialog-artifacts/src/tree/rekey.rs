@@ -22,7 +22,7 @@ use futures_util::TryStreamExt as _;
 use crate::artifacts::decode_value;
 use crate::key::varkey::{ValuePayload, build_key, parse_key};
 use crate::merge::full_scope;
-use crate::tree::{ArtifactNodeCache, ArtifactTree, ArtifactTreeExt as _};
+use crate::tree::{ArtifactTree, ArtifactTreeExt as _};
 use crate::{
     ArchiveDelta, ArchiveReader, BLOB_KEY_TAG, CONTEXT_KEY_TAG, DialogArtifactsError, Key,
     ValueDataType, encode_key_value_owned,
@@ -70,20 +70,19 @@ pub fn rekey(key: &[u8], value_encoding: u32) -> Result<Key, DialogArtifactsErro
 /// `source`, rewritten under `manifest`: every entry re-keyed by
 /// [`rekey`] for the manifest's `value_encoding`, inserted into an empty
 /// tree created under `manifest`. The new tree's nodes land in `delta`;
-/// the caller persists them. `cache` is the node cache the result reads
-/// through.
+/// the caller persists them. Every read goes through `store`, which keeps
+/// the nodes the new tree seals if it keeps any.
 pub async fn rekey_tree<S>(
     source: &ArtifactTree,
     store: &S,
     delta: &mut ArchiveDelta,
     manifest: Manifest,
-    cache: ArtifactNodeCache,
 ) -> Result<ArtifactTree, DialogArtifactsError>
 where
     S: ArchiveReader + Clone,
 {
     let value_encoding = manifest.value_encoding;
-    let mut target = ArtifactTree::empty_with_manifest(manifest, cache);
+    let mut target = ArtifactTree::empty_with_manifest(manifest);
     let [range] = full_scope();
     let stream = source.stream_range_handles(range, store);
     tokio::pin!(stream);
@@ -108,7 +107,7 @@ mod tests {
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-    use dialog_search_tree::{Manifest, MemoryBlocks, NodeCache, PersistentTree};
+    use dialog_search_tree::{Manifest, MemoryBlocks, PersistentTree};
     use futures_util::{TryStreamExt as _, stream};
 
     use super::rekey_tree;
@@ -154,8 +153,7 @@ mod tests {
         store: &MemoryBlocks,
         instructions: Vec<Instruction>,
     ) -> anyhow::Result<ArtifactTree> {
-        let mut tree: ArtifactTree =
-            PersistentTree::empty_with_manifest(Manifest::default(), NodeCache::new());
+        let mut tree: ArtifactTree = PersistentTree::empty_with_manifest(Manifest::default());
         let mut delta = ArchiveDelta::zero();
         tree.apply(store, &mut delta, stream::iter(instructions))
             .await?;
@@ -197,7 +195,7 @@ mod tests {
             ..tree.manifest(store).await?
         };
         let mut delta = ArchiveDelta::zero();
-        let rewritten = rekey_tree(tree, store, &mut delta, manifest, NodeCache::new()).await?;
+        let rewritten = rekey_tree(tree, store, &mut delta, manifest).await?;
         delta.flush_into(store);
         Ok(rewritten)
     }
@@ -261,7 +259,7 @@ mod tests {
             .edit()
             .insert(key, state, &store)
             .await?
-            .persist(delta.blocks())?;
+            .persist(delta.blocks(), &store)?;
         delta.flush_into(&store);
 
         let upgraded = rekeyed(&legacy, &store, NUMBER_BAND).await?;
