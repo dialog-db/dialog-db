@@ -95,7 +95,7 @@ where
         &self,
         load: archive::Load,
     ) -> Result<Option<dialog_common::Buffer>, archive::ArchiveError> {
-        crate::provider::load::load_block(&self.router, load).await
+        crate::provider::load::load_block(&self.router, &load).await
     }
 }
 
@@ -111,7 +111,7 @@ where
         &self,
         load: blob::Load,
     ) -> Result<Option<dialog_common::Buffer>, archive::ArchiveError> {
-        crate::provider::load::load_spill(&self.router, load).await
+        crate::provider::load::load_spill(&self.router, &load).await
     }
 }
 

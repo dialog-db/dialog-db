@@ -51,6 +51,38 @@ struct Registered {
     memo: Mutex<Option<Memo>>,
 }
 
+impl Registered {
+    /// `answer` of the routes as the tracking cell now has them, worked out
+    /// again only when the cell or the connections moved since.
+    fn with_routes<R>(&self, answer: impl FnOnce(&[HydrationRoute]) -> R) -> R {
+        let connections = self
+            .answers
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .len();
+        let mut memo = self
+            .memo
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let current = matches!(
+            memo.as_ref(),
+            Some((at, count, _)) if *count == connections && self.tracking.is_at(at.as_ref())
+        );
+        if !current {
+            let tracked = self.tracking.content().unwrap_or_default();
+            let routes: Vec<HydrationRoute> = fallbacks_of(&tracked, &self.host, &self.answers)
+                .iter()
+                .filter_map(route_of)
+                .collect();
+            *memo = Some((self.tracking.version(), connections, routes));
+        }
+        match memo.as_ref() {
+            Some((_, _, routes)) => answer(routes),
+            None => answer(&[]),
+        }
+    }
+}
+
 impl Routing for Registered {
     fn subject(&self) -> &Did {
         &self.subject
@@ -61,28 +93,15 @@ impl Routing for Registered {
     }
 
     fn routes(&self) -> Vec<HydrationRoute> {
-        let version = self.tracking.version();
-        let connections = self
-            .answers
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .len();
-        let mut memo = self
-            .memo
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        match memo.as_ref() {
-            Some((at, count, routes)) if *at == version && *count == connections => routes.clone(),
-            _ => {
-                let tracked = self.tracking.content().unwrap_or_default();
-                let routes: Vec<HydrationRoute> = fallbacks_of(&tracked, &self.host, &self.answers)
-                    .iter()
-                    .filter_map(route_of)
-                    .collect();
-                *memo = Some((version, connections, routes.clone()));
-                routes
-            }
-        }
+        self.with_routes(<[HydrationRoute]>::to_vec)
+    }
+
+    fn fetches(&self) -> bool {
+        self.with_routes(|routes| {
+            routes
+                .iter()
+                .any(|route| matches!(route, HydrationRoute::Remote { .. }))
+        })
     }
 }
 

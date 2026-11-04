@@ -14,7 +14,7 @@
 
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use dialog_capability::Did;
 use dialog_common::{ConditionalSend, ConditionalSync, Holds, held_key};
@@ -44,6 +44,9 @@ pub enum Route {
 
 /// Something that knows where a subject's blocks live: what a registry
 /// asks, on a local miss, for its subject's routes.
+///
+/// The registry asks while it holds its own lock, so an implementation
+/// must not reach back into the registry.
 pub trait Routing: ConditionalSend + ConditionalSync {
     /// The subject whose blocks it routes.
     fn subject(&self) -> &Did;
@@ -52,6 +55,12 @@ pub trait Routing: ConditionalSend + ConditionalSync {
     fn is_open(&self) -> bool;
     /// Its routes, in the order to try them.
     fn routes(&self) -> Vec<Route>;
+    /// Whether any of its routes is a remote to fetch from.
+    fn fetches(&self) -> bool {
+        self.routes()
+            .iter()
+            .any(|route| matches!(route, Route::Remote { .. }))
+    }
 }
 
 #[derive(Default)]
@@ -84,6 +93,12 @@ impl fmt::Debug for Routes {
 /// The key an environment holds its routes under.
 const HELD: &str = "dialog.routes";
 
+/// The key [`HELD`] names, made once: routes are looked up on every query.
+fn key() -> &'static str {
+    static KEY: OnceLock<String> = OnceLock::new();
+    KEY.get_or_init(|| held_key::<Routes>(HELD))
+}
+
 /// Counts the routes lent, so each loan removes its own.
 static LOANS: AtomicU64 = AtomicU64::new(0);
 
@@ -98,7 +113,7 @@ impl Routes {
     /// its own to every caller, so nothing registered on it is ever found:
     /// it hydrates from nowhere.
     pub fn of<Env: Holds + ?Sized>(env: &Env) -> Self {
-        env.held_or(&held_key::<Self>(HELD), &|| Arc::new(Self::new()))
+        env.held_or(key(), &|| Arc::new(Self::new()))
             .downcast_ref::<Self>()
             .cloned()
             .unwrap_or_default()
@@ -106,7 +121,7 @@ impl Routes {
 
     /// Have `env` hold these routes, in place of any it held.
     pub fn hold<Env: Holds + ?Sized>(&self, env: &Env) {
-        env.hold(held_key::<Self>(HELD), Arc::new(self.clone()));
+        env.hold(key().to_string(), Arc::new(self.clone()));
     }
 
     fn lock(&self) -> MutexGuard<'_, Registry> {
@@ -176,9 +191,15 @@ impl Routes {
     /// from. Without one every block a read of it finds is local already,
     /// and warming ahead of demand has nothing to do.
     pub fn fetches(&self, subject: &Did) -> bool {
-        self.to(subject)
+        let remote = |route: &Route| matches!(route, Route::Remote { .. });
+        let registry = self.lock();
+        registry
+            .lent
             .iter()
-            .any(|route| matches!(route, Route::Remote { .. }))
+            .any(|(_, lent, route)| lent == subject && remote(route))
+            || registry.routing.iter().any(|(_, routing)| {
+                routing.subject() == subject && routing.is_open() && routing.fetches()
+            })
     }
 }
 

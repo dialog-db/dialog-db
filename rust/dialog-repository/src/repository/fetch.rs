@@ -65,7 +65,8 @@ pub(crate) struct Driven<'a, S> {
     inner: S,
     queue: Arc<PreloadQueue>,
     sources: Vec<Source>,
-    routes: Routes,
+    /// The env's routes, read when the first job starts.
+    routes: Option<Routes>,
     env: &'a Erased,
     budget: FetchBudget,
     likely_inflight: usize,
@@ -87,7 +88,7 @@ where
         queue: Arc<PreloadQueue>,
     ) -> Self {
         Self {
-            routes: Routes::of(env),
+            routes: None,
             inner: stream,
             budget: queue.budget(),
             queue,
@@ -116,7 +117,10 @@ where
                 Likelihood::Maybe => self.maybe_inflight += 1,
             }
             let sources = self.sources.clone();
-            let routes = self.routes.clone();
+            let routes = self
+                .routes
+                .get_or_insert_with(|| Routes::of(self.env))
+                .clone();
             let env = self.env;
             let future = async move {
                 for source in sources {

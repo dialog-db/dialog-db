@@ -24,13 +24,10 @@ pub use dialog_network::{Hydrate, HydrationLane, HydrationRequest, HydrationSche
 use super::local::{LocalIndex, archive_error, read_all};
 use super::routes::{HydrationRoute, Routes};
 use crate::ConnectedReplica;
-use dialog_capability::Subject;
 use dialog_common::Holds;
 use dialog_effects::MethodExt as _;
 use dialog_effects::archive::Load;
 use dialog_effects::archive::prelude::CatalogScope;
-use dialog_effects::archive::prelude::{ArchiveScope, GetExt as _};
-use dialog_effects::blob::prelude::BlobReadExt as _;
 use dialog_storage::provider::load::{load_block, load_spill};
 
 /// The remote half of a [`NetworkedIndex`]: what a local read miss means.
@@ -205,7 +202,7 @@ where
         if self.locally {
             return self.local.load(hash).await;
         }
-        Load::new(self.local.catalog().get(hash.clone()))
+        Load::new(self.local.catalog().clone(), hash.clone())
             .with_priority(self.priority)
             .perform(self.local.env())
             .await
@@ -224,7 +221,7 @@ where
         if self.locally {
             return self.local.load_blob(hash).await;
         }
-        BlobLoad::new(self.local.catalog().archive().blob().read(hash.clone()))
+        BlobLoad::new(self.local.catalog().archive(), hash.clone())
             .with_priority(self.priority)
             .perform(self.local.env())
             .await
@@ -246,15 +243,14 @@ pub async fn load_or_hydrate<Env>(env: &Env, load: Load) -> Result<Option<Buffer
 where
     Env: Provider<Get> + Provider<Hydrate> + Holds + ConditionalSync + ?Sized,
 {
-    let digest = load.capability.digest().clone();
-    let catalog = CatalogScope::new(
-        Subject::from(load.capability.subject().clone()),
-        load.capability.catalog(),
-    );
-    let priority = load.priority;
-    if let Some(block) = load_block(env, load).await? {
+    if let Some(block) = load_block(env, &load).await? {
         return Ok(Some(block));
     }
+    let Load {
+        catalog,
+        digest,
+        priority,
+    } = load;
     hydrate_through(env, catalog, digest, HydrationLane::Block, priority).await
 }
 
@@ -269,13 +265,15 @@ pub async fn load_blob_or_hydrate<Env>(
 where
     Env: Provider<Get> + Provider<BlobRead> + Provider<Hydrate> + Holds + ConditionalSync + ?Sized,
 {
-    let digest = load.capability.digest().clone();
-    let catalog = ArchiveScope::new(Subject::from(load.capability.subject().clone())).index();
-    let priority = load.priority;
-    if let Some(blob) = load_spill(env, load).await? {
+    if let Some(blob) = load_spill(env, &load).await? {
         return Ok(Some(blob));
     }
-    hydrate_through(env, catalog, digest, HydrationLane::Blob, priority).await
+    let BlobLoad {
+        archive,
+        digest,
+        priority,
+    } = load;
+    hydrate_through(env, archive.index(), digest, HydrationLane::Blob, priority).await
 }
 
 /// Fetch `hash` through `env`'s [`Hydrate`] into `lane`'s local store,
@@ -484,8 +482,8 @@ where
         + ConditionalSync
         + 'static,
 {
-    let local = BlobLoad::new(catalog.archive().blob().read(digest.clone()));
-    if let Some(blob) = load_spill(env, local).await? {
+    let local = BlobLoad::new(catalog.archive(), digest.clone());
+    if let Some(blob) = load_spill(env, &local).await? {
         return Ok(Some(Arc::new(blob.into_vec())));
     }
 
@@ -757,7 +755,9 @@ mod tests {
         let get = || index.get(block.blake3_hash().clone());
         assert_eq!(get().perform(&env).await?, None, "the replica lacks it");
 
-        let loaded = Load::new(get()).perform(&env).await?;
+        let loaded = Load::new(index.clone(), block.blake3_hash().clone())
+            .perform(&env)
+            .await?;
 
         assert_eq!(loaded, Some(block.clone()), "the load hydrates it");
         assert_eq!(
@@ -789,7 +789,9 @@ mod tests {
             "and wrote nothing locally on the way"
         );
         assert_eq!(
-            Load::new(get()).perform(&env).await?,
+            Load::new(index.clone(), block.blake3_hash().clone())
+                .perform(&env)
+                .await?,
             Some(block),
             "the remote does hold it, so only the get declined to fetch"
         );
@@ -805,7 +807,7 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let absent = Buffer::from(&b"never stored"[..]).blake3_hash().clone();
-        let loaded = Load::new(branch.archive().index().get(absent))
+        let loaded = Load::new(branch.archive().index(), absent)
             .perform(&operator)
             .await?;
 
@@ -851,7 +853,7 @@ mod tests {
         let held = Buffer::from(b"locally held block".to_vec());
         index.put(held.clone()).perform(&operator).await?;
         assert_eq!(
-            Load::new(index.get(held.blake3_hash().clone()))
+            Load::new(index.clone(), held.blake3_hash().clone())
                 .perform(&operator)
                 .await?,
             Some(held),
@@ -861,7 +863,7 @@ mod tests {
         // A miss is the read that needed the remote: it fails naming the
         // remote and why it is unavailable, and writes nothing.
         let absent = Buffer::from(&b"never stored"[..]).blake3_hash().clone();
-        let error = Load::new(index.get(absent.clone()))
+        let error = Load::new(index.clone(), absent.clone())
             .perform(&operator)
             .await
             .expect_err("a miss with an unavailable tracked remote must fail loudly");
@@ -893,7 +895,7 @@ mod tests {
         let block = Buffer::from(b"local".to_vec());
         Provider::<Put>::execute(&operator, index.put(block.clone())).await?;
         assert_eq!(
-            Load::new(index.get(block.blake3_hash().clone()))
+            Load::new(index.clone(), block.blake3_hash().clone())
                 .perform(&operator)
                 .await?,
             Some(block)

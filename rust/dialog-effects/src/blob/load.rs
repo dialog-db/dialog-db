@@ -2,13 +2,14 @@
 //! reach it.
 
 use dialog_capability::{Capability, Command, Provider};
-use dialog_common::{Buffer, ConditionalSync, Priority};
+use dialog_common::{Blake3Hash, Buffer, ConditionalSync, Priority};
 
 use super::Read;
 use crate::archive::ArchiveError;
+use crate::archive::prelude::ArchiveScope;
 
-/// Command: the whole blob a [`Read`] capability names, from the local
-/// store, or else from wherever the environment knows the subject's blobs
+/// Command: the whole blob a [`Read`] of `digest` in `archive` names (see
+/// [`capability`](Self::capability)), from the local store, or else from wherever the environment knows the subject's blobs
 /// live, written back into the local blob store before it is returned.
 ///
 /// The blob counterpart of [`archive::Load`](crate::archive::Load), and a
@@ -18,24 +19,32 @@ use crate::archive::ArchiveError;
 /// A value spilled before values moved to the blob store is a block in the
 /// subject's [default catalog](crate::archive::prelude::DEFAULT_CATALOG),
 /// so a provider that finds no blob looks there before it looks anywhere
-/// else, and fails as the archive fails. The capability's range is not
-/// read: a load is of the whole value.
+/// else, and fails as the archive fails. A load is of the whole value.
 #[derive(Debug, Clone)]
 pub struct Load {
-    /// The blob to read.
-    pub capability: Capability<Read>,
+    /// The archive whose blob store holds the value.
+    pub archive: ArchiveScope,
+    /// The value's digest.
+    pub digest: Blake3Hash,
     /// How a hydration this read causes ranks against the site's other
     /// reads. Never reaches the wire.
     pub priority: Priority,
 }
 
 impl Load {
-    /// Load the blob `capability` names, as a read someone is waiting on.
-    pub fn new(capability: Capability<Read>) -> Self {
+    /// Load the blob `digest` names in `archive`, as a read someone is
+    /// waiting on.
+    pub fn new(archive: ArchiveScope, digest: impl Into<Blake3Hash>) -> Self {
         Self {
-            capability,
+            archive,
+            digest: digest.into(),
             priority: Priority::Demand,
         }
+    }
+
+    /// The local read of this blob: what a store performs to answer.
+    pub fn capability(&self) -> Capability<Read> {
+        self.archive.blob().read(self.digest.clone())
     }
 
     /// Rank a hydration this read causes as `priority`.
@@ -56,10 +65,4 @@ impl Load {
 impl Command for Load {
     type Input = Self;
     type Output = Result<Option<Buffer>, ArchiveError>;
-}
-
-impl From<Capability<Read>> for Load {
-    fn from(capability: Capability<Read>) -> Self {
-        Self::new(capability)
-    }
 }

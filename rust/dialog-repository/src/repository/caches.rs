@@ -197,9 +197,17 @@ impl HeldCaches {
     pub fn of<Env: Holds + ?Sized>(env: &Env) -> Self {
         // Queries may have run through `env` before anything was opened,
         // with a formula cache of their own: these caches take that one.
+        let key = held_key::<Self>(HELD);
+        if let Some(caches) = env
+            .held(&key)
+            .and_then(|held| held.downcast_ref::<Self>().cloned())
+        {
+            return caches;
+        }
         let formulas = FormulaCache::of(env);
+        // So are routes branches registered before any caches were held.
         let routes = crate::Routes::of(env);
-        env.held_or(&held_key::<Self>(HELD), &|| {
+        env.held_or(&key, &|| {
             let mut caches = Self::with_formulas(NODE_CACHE_BUDGET, formulas.clone());
             caches.routes = routes.clone();
             Arc::new(caches)

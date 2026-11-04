@@ -32,6 +32,7 @@ use dialog_query::{Claim, DeductiveRule, Negation, Premise, Proposition};
 use dialog_search_tree::{DialogSearchTreeError, LoadBlock, Manifest, PersistentNode};
 use futures_util::future::try_join_all;
 use futures_util::{TryStreamExt as _, stream};
+use std::sync::OnceLock;
 use std::sync::{Arc, LazyLock, Mutex};
 use tokio::sync::OnceCell;
 
@@ -469,9 +470,10 @@ pub(crate) struct QueryEnv<'a> {
     /// table instead of computing a throwaway one.
     fixpoint: Option<(Entity, Continuation)>,
     /// Whether any line can fetch what it lacks (see
-    /// [`SourceRef::fetches`](crate::repository::source::SourceRef)):
-    /// preload hints are refused when none can.
-    fetches: bool,
+    /// [`Routes::fetches`](crate::Routes::fetches)): preload hints are
+    /// refused when none can. Asked of the env's routes on the first hint,
+    /// and shared by clones.
+    fetches: Arc<OnceLock<bool>>,
     /// The per-query memo rule heads share their source body's rows
     /// through.
     memo: Memo,
@@ -546,12 +548,6 @@ impl<'a> QueryEnv<'a> {
     /// its session overlay, and the per-query overlay as a transient
     /// layer), so the paths can never diverge on it.
     pub(crate) fn new(sources: Vec<Source>, overlay: Ephemeral, env: &'a Erased) -> Self {
-        // Warming ahead of demand has something to do only for a line whose
-        // misses hydrate from somewhere.
-        let routes = crate::Routes::of(env);
-        let fetches = sources
-            .iter()
-            .any(|source| routes.fetches(source.as_ref().subject().did()));
         Self {
             sources,
             overlay,
@@ -560,7 +556,7 @@ impl<'a> QueryEnv<'a> {
             demand: None,
             reads: Arc::new(Mutex::new(Vec::new())),
             fixpoint: None,
-            fetches,
+            fetches: Arc::default(),
             memo: Memo::default(),
             env,
         }
@@ -766,7 +762,7 @@ impl Clone for QueryEnv<'_> {
             demand: self.demand.clone(),
             reads: self.reads.clone(),
             fixpoint: self.fixpoint.clone(),
-            fetches: self.fetches,
+            fetches: self.fetches.clone(),
             memo: Memo::default(),
             env: self.env,
         }
@@ -1039,7 +1035,15 @@ impl Provider<Estimate> for QueryEnv<'_> {
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl Provider<Preload> for QueryEnv<'_> {
     async fn execute(&self, input: PreloadRequest) -> bool {
-        if !self.fetches {
+        // Warming ahead of demand has something to do only for a line whose
+        // misses hydrate from somewhere.
+        let fetches = *self.fetches.get_or_init(|| {
+            let routes = crate::Routes::of(self.env);
+            self.sources
+                .iter()
+                .any(|source| routes.fetches(source.as_ref().subject().did()))
+        });
+        if !fetches {
             return false;
         }
         Provider::<Preload>::execute(self.env, input).await

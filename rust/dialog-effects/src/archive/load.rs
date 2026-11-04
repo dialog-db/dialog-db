@@ -1,11 +1,13 @@
 //! The [`Load`] command: read a block wherever the environment can reach it.
 
 use dialog_capability::{Capability, Command, Provider};
-use dialog_common::{Buffer, ConditionalSync, Priority};
+use dialog_common::{Blake3Hash, Buffer, ConditionalSync, Priority};
 
+use super::prelude::CatalogScope;
 use super::{ArchiveError, Get};
 
-/// Command: the block a [`Get`] capability names, from the local archive,
+/// Command: the block a [`Get`] of `digest` in `catalog` names (see
+/// [`capability`](Self::capability)), from the local archive,
 /// or else from wherever the environment knows the subject's blocks live,
 /// written back into the local archive before it is returned.
 ///
@@ -22,22 +24,36 @@ use super::{ArchiveError, Get};
 ///
 /// The bytes are returned as the store holds them: a reader that needs
 /// them to be the block asked for checks them against the digest.
+///
+/// It names the catalog and the digest rather than carrying the `Get`
+/// built from them: a store answering it builds that capability once to
+/// read, and a provider that hydrates a miss reads where to from the
+/// catalog without unpicking the capability.
 #[derive(Debug, Clone)]
 pub struct Load {
-    /// The block to read.
-    pub capability: Capability<Get>,
+    /// The catalog the block lives in.
+    pub catalog: CatalogScope,
+    /// The block's digest.
+    pub digest: Blake3Hash,
     /// How a hydration this read causes ranks against the site's other
     /// reads. Never reaches the wire.
     pub priority: Priority,
 }
 
 impl Load {
-    /// Load the block `capability` names, as a read someone is waiting on.
-    pub fn new(capability: Capability<Get>) -> Self {
+    /// Load the block `digest` names in `catalog`, as a read someone is
+    /// waiting on.
+    pub fn new(catalog: CatalogScope, digest: impl Into<Blake3Hash>) -> Self {
         Self {
-            capability,
+            catalog,
+            digest: digest.into(),
             priority: Priority::Demand,
         }
+    }
+
+    /// The local read of this block: what a store performs to answer.
+    pub fn capability(&self) -> Capability<Get> {
+        self.catalog.get(self.digest.clone())
     }
 
     /// Rank a hydration this read causes as `priority`.
@@ -58,10 +74,4 @@ impl Load {
 impl Command for Load {
     type Input = Self;
     type Output = Result<Option<Buffer>, ArchiveError>;
-}
-
-impl From<Capability<Get>> for Load {
-    fn from(capability: Capability<Get>) -> Self {
-        Self::new(capability)
-    }
 }

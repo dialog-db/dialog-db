@@ -268,6 +268,12 @@ where
         self.cache.edition()
     }
 
+    /// Whether the cached edition is at `version` (`None`: nothing cached),
+    /// asked without cloning either.
+    pub fn is_at(&self, version: Option<&memory::Version>) -> bool {
+        self.cache.state.read().as_ref().map(|o| &o.edition.version) == version
+    }
+
     /// The version of the cached edition, without cloning its content.
     /// `None` if the cell has not been resolved or published yet.
     pub fn version(&self) -> Option<memory::Version> {
