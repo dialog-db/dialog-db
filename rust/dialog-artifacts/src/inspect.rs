@@ -1,8 +1,8 @@
-//! Tree-node inspection: pure decoders over node blocks the tree's
-//! [`LoadBlock`] command fetches.
+//! Tree-node inspection: pure decoders over node blocks an
+//! [`archive::Load`](dialog_effects::archive::Load) fetches.
 //!
 //! Together these back the query engine's tree procedures (`tree/node`,
-//! `tree/span`, `tree/key`, `tree/manifest`): [`LoadBlock`] fetches a raw
+//! `tree/span`, `tree/key`, `tree/manifest`): a `Load` fetches a raw
 //! node block by content hash through the evaluation environment, and
 //! the `inspect_*` functions project the node's *logical model* out of
 //! the fetched bytes without touching storage:
@@ -18,11 +18,11 @@
 //!
 //! # Why this is sound under differential subscriptions
 //!
-//! [`LoadBlock`] is *idempotent*: a node block is content-addressed, so the
+//! A `Load` of a node is *idempotent*: a node block is content-addressed, so the
 //! bytes behind a hash — and therefore every row projected from them —
 //! can never change. A different tree is a different hash. This includes
 //! buffered novelty: a node's hash covers the ops riding on it. Rows
-//! derived through `LoadBlock` are permanent; they can become unnecessary,
+//! derived through a `Load` are permanent; they can become unnecessary,
 //! never wrong, so no invalidation machinery is required for them. The
 //! only mutable fact in the domain is "what is the current root?", which
 //! reaches queries as an ordinary tracked fact (`dialog.branch/tree`),
@@ -30,8 +30,6 @@
 //! cached here?"): that answer changes without a commit, is *not*
 //! idempotent, and must not be served through this module.
 
-#[cfg(doc)]
-use dialog_search_tree::LoadBlock;
 use dialog_search_tree::{Buffer, Distribution, Geometric, Hashed, Manifest, PersistentNode, Rank};
 use dialog_storage::Blake3Hash;
 use rkyv::deserialize;
@@ -44,7 +42,7 @@ use crate::{
     KeyView, State, VALUE_KEY_TAG, Value, ValueKey, decode_value,
 };
 
-/// The raw content hash a [`LoadBlock`] resolves: the same 32 bytes a
+/// The raw content hash a node's `Load` resolves: the same 32 bytes a
 /// revision's tree reference and an index span's child hash carry.
 pub type NodeReference = Blake3Hash;
 

@@ -8,6 +8,7 @@ use dialog_capability::{Capability, Provider, Subject, did};
 use dialog_common::{Blake3Hash, Buffer, Held, Holdings, Holds};
 use dialog_effects::archive::prelude::{ArchiveScope, CatalogScope};
 use dialog_effects::archive::{ArchiveError, Get, Load};
+use dialog_effects::blob;
 use dialog_storage::provider::Volatile;
 use futures_util::FutureExt as _;
 use parking_lot::Mutex;
@@ -127,6 +128,16 @@ impl Provider<Get> for Blocks {
     }
 }
 
+/// A spilled value is read from the volatile store's blobs, else from the
+/// catalog's blocks, where these keep a value written as a block.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl Provider<blob::Load> for Blocks {
+    async fn execute(&self, load: blob::Load) -> Result<Option<Buffer>, ArchiveError> {
+        load.perform(&self.store).await
+    }
+}
+
 /// `env`, holding handles of its own: the node cache a tree read through
 /// it finds ([`NodeCache::of`]) is made on the first read and kept, so a
 /// node is checked once and read from memory after that, and a persist
@@ -214,6 +225,17 @@ where
 {
     async fn execute(&self, get: Capability<Get>) -> Result<Option<Vec<u8>>, ArchiveError> {
         self.env.execute(get).await
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<Env> Provider<blob::Load> for Holding<'_, Env>
+where
+    Env: Provider<blob::Load> + dialog_common::ConditionalSync + ?Sized,
+{
+    async fn execute(&self, load: blob::Load) -> Result<Option<Buffer>, ArchiveError> {
+        self.env.execute(load).await
     }
 }
 

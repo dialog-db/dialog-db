@@ -8,7 +8,8 @@
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-use dialog_search_tree::{Manifest, MemoryBlocks, PersistentTree};
+use dialog_search_tree::helpers::test_catalog;
+use dialog_search_tree::{Manifest, PersistentTree, helpers::Blocks};
 use futures_util::{TryStreamExt as _, stream};
 
 use super::rekey::rekey_tree;
@@ -39,13 +40,13 @@ fn float(f: f64) -> Value {
 async fn tree(
     value_encoding: u32,
     instructions: Vec<Instruction>,
-) -> anyhow::Result<(ArtifactTree, MemoryBlocks)> {
-    let store = MemoryBlocks::new();
+) -> anyhow::Result<(ArtifactTree, Blocks)> {
+    let store = Blocks::new();
     let manifest = Manifest {
         value_encoding,
         ..Manifest::default()
     };
-    let mut tree: ArtifactTree = PersistentTree::empty_with_manifest(manifest);
+    let mut tree: ArtifactTree = PersistentTree::empty_with_manifest(test_catalog(), manifest);
     let mut delta = ArchiveDelta::zero();
     tree.apply(&store, &mut delta, stream::iter(instructions))
         .await?;
@@ -79,7 +80,7 @@ fn sizes(values: &[Value]) -> anyhow::Result<Vec<Instruction>> {
 /// bounded on the value walks the value ordering, so that is key order.
 async fn scan(
     tree: &ArtifactTree,
-    store: &MemoryBlocks,
+    store: &Blocks,
     selector: ArtifactSelector<Constrained>,
 ) -> anyhow::Result<Vec<Value>> {
     let rows: Vec<Artifact> = tree
@@ -709,7 +710,7 @@ fn every_type_items() -> anyhow::Result<Vec<Instruction>> {
 /// `tree`, rewritten under `value_encoding`.
 async fn rekeyed(
     tree: &ArtifactTree,
-    store: &MemoryBlocks,
+    store: &Blocks,
     value_encoding: u32,
 ) -> anyhow::Result<ArtifactTree> {
     let manifest = Manifest {
@@ -724,7 +725,7 @@ async fn rekeyed(
 
 /// The band keys of every size in `tree`, sorted: the numbers it holds, by
 /// the identity the band gives them.
-async fn band_keys(tree: &ArtifactTree, store: &MemoryBlocks) -> anyhow::Result<Vec<Vec<u8>>> {
+async fn band_keys(tree: &ArtifactTree, store: &Blocks) -> anyhow::Result<Vec<Vec<u8>>> {
     let mut keys: Vec<Vec<u8>> = scan(tree, store, the_size())
         .await?
         .iter()

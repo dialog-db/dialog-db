@@ -571,6 +571,19 @@ impl Provider<Get> for ObservingBlocks {
     }
 }
 
+/// A spilled value read is observed like a block read: these keep a value
+/// as a block of their catalog.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl Provider<dialog_effects::blob::Load> for ObservingBlocks {
+    async fn execute(
+        &self,
+        load: dialog_effects::blob::Load,
+    ) -> Result<Option<dialog_common::Buffer>, dialog_effects::archive::ArchiveError> {
+        Ok(self.observe(load.digest).await)
+    }
+}
+
 /// A distribution that reads ranks directly from keys.
 ///
 /// Spec keys are encoded as `[base, 0x00, leaf_rank, seam_rank, padding]`,

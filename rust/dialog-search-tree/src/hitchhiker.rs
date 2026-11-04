@@ -310,6 +310,11 @@ where
         }
     }
 
+    /// The catalog this tree's blocks live in.
+    pub fn catalog(&self) -> &CatalogScope {
+        &self.catalog
+    }
+
     /// Replaces the format [`Manifest`] this session writes under while the
     /// tree is empty. A stored root's manifest takes precedence on first
     /// load: edits always run under the format the nodes already carry.
