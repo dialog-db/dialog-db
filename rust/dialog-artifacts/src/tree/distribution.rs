@@ -12,9 +12,8 @@
 //! stored node carries beyond its canonical form is the byte cost of the
 //! buffered ops riding on it.
 
-use dialog_capability::Provider;
-use dialog_common::{Blake3Hash as NodeHash, ConditionalSync};
-use dialog_search_tree::LoadBlock;
+use crate::tree::ArtifactNodes;
+use dialog_common::Blake3Hash as NodeHash;
 use std::env;
 
 use dialog_search_tree::{Manifest, PersistentNode, PersistentNodeBody};
@@ -77,7 +76,8 @@ pub struct NodeStat {
 /// all-zero root earlier versions stored for an empty tree, or the root an
 /// empty tree derives from its format before its first persist
 /// ([`ArtifactTree::empty`](super::ArtifactTree::empty)), which no archive
-/// holds yet. Nodes load through `env` as [`LoadBlock`]s, verified against
+/// holds yet. Nodes load through `env` ([`Nodes::load_node`]), so a node
+/// the store keeps is read from memory and every other is verified against
 /// the hash asked for; spilled values and history records outside the tree
 /// are never touched.
 pub async fn capture<Env>(
@@ -85,7 +85,7 @@ pub async fn capture<Env>(
     env: &Env,
 ) -> Result<Vec<NodeStat>, DialogArtifactsError>
 where
-    Env: Provider<LoadBlock> + ConditionalSync,
+    Env: ArtifactNodes,
 {
     let mut stats: Vec<(usize, NodeStat)> = Vec::new();
     if root == dialog_common::NULL_BLAKE3_HASH.as_bytes() {
@@ -93,10 +93,7 @@ where
     }
     let unpersisted_empty = super::ArtifactTree::empty_root(&Manifest::default())?;
     if root == unpersisted_empty.as_bytes()
-        && LoadBlock::new(NodeHash::from(*root))
-            .perform(env)
-            .await?
-            .is_none()
+        && env.load_node(&NodeHash::from(*root)).await?.is_none()
     {
         return Ok(Vec::new());
     }
@@ -106,14 +103,13 @@ where
     while !frontier.is_empty() {
         let mut next = Vec::new();
         for hash in &frontier {
-            let bytes = LoadBlock::new(NodeHash::from(*hash))
-                .perform(env)
+            let node: PersistentNode<Key, State<Datum>> = env
+                .load_node(&NodeHash::from(*hash))
                 .await?
                 .ok_or_else(|| {
                     DialogArtifactsError::Tree(format!("tree node missing at depth {depth}"))
                 })?;
-            let size = bytes.as_ref().len();
-            let node = PersistentNode::<Key, State<Datum>>::try_from(bytes)?;
+            let size = node.buffer().as_ref().len();
             let stat = if let Ok(index) = node.as_index() {
                 let bound = node.manifest()?.max_separator as usize;
                 let mut forced_links = 0usize;

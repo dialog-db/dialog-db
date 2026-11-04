@@ -30,25 +30,19 @@ use std::task::{Context, Poll};
 
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{ArtifactSelector, FetchBudget, Likelihood, PreloadQueue};
-use dialog_capability::Provider;
-use dialog_common::ConditionalSync;
-use dialog_effects::archive::Get;
 use futures_util::future::{FutureExt as _, Shared};
 use futures_util::stream::FuturesUnordered;
 use futures_util::{Stream, StreamExt as _};
 
-use async_trait::async_trait;
-use dialog_artifacts::tree::{ArtifactNodeCache, selector_range};
+use dialog_artifacts::tree::selector_range;
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_effects::archive::prelude::ArchiveScope;
-use dialog_search_tree::{
-    Buffer, DialogSearchTreeError, LoadBlock, PersistentNode, Traversable as _,
-};
+use dialog_search_tree::{DialogSearchTreeError, Traversable as _};
 
 use crate::repository::archive::networked::Reads;
 use crate::repository::branch::Erased;
 use crate::repository::source::Source;
-use crate::{Hydrate, Index, NetworkedIndex, RemoteFallback};
+use crate::{Index, NetworkedIndex, RemoteFallback};
 
 #[cfg(not(target_arch = "wasm32"))]
 type FetchFuture<'a> = Pin<Box<dyn Future<Output = Likelihood> + Send + 'a>>;
@@ -201,9 +195,9 @@ where
 /// parsing and spilled-value fetches for rows nobody read and fetched
 /// leaf by leaf.
 ///
-/// Reads go through the line's shared node cache (so a later demand read
-/// is free) and the networked index (so every fetched block hydrates the
-/// local archive); in-flight hydrations are shared by the env's own
+/// Reads go through the networked index, which keeps what it reads in the
+/// line's shared node cache (so a later demand read is free) and hydrates
+/// the local archive with every fetched block; in-flight hydrations are shared by the env's own
 /// [`Hydrate`] scheduler with every concurrent reader anywhere in the
 /// process, and ranked at the hint's likelihood there, so warming never
 /// takes a site's slot from a demand read. The scope is the selector's exact key range; a subtree the
@@ -228,13 +222,9 @@ async fn warm_source(
     }
     let catalog = ArchiveScope::new(source.as_ref().subject()).index();
     let reads: &dyn Reads = env;
-    let store = NetworkedIndex::new(reads, catalog, remote).with_priority(likelihood.into());
-    let store = CacheThrough {
-        cache: source.as_ref().node_cache(),
-        store,
-    };
-    let storage = store;
-    let tree = Index::from_hash_with_cache(NodeHash::from(root), source.as_ref().node_cache());
+    let storage = NetworkedIndex::new(reads, catalog, remote, source.as_ref().node_cache())
+        .with_priority(likelihood.into());
+    let tree = Index::from_hash(NodeHash::from(root));
 
     let manifest = tree.manifest(&storage).await?;
     let range = selector_range(selector, &manifest);
@@ -251,51 +241,6 @@ async fn warm_source(
         }
     }
     Ok(())
-}
-
-/// The node cache in front of a hydrating store, as a [`LoadBlock`] provider:
-/// the traversal's reads hit the line's shared cache first (a job whose
-/// spine a peer already warmed re-reads nothing), and every miss that
-/// checks as a node lands in it, so the demand read that follows a warm is
-/// served from memory without checking the node again.
-struct CacheThrough<'a, Env: ?Sized> {
-    cache: ArtifactNodeCache,
-    store: NetworkedIndex<'a, Env>,
-}
-
-impl<Env: ?Sized> Clone for CacheThrough<'_, Env> {
-    fn clone(&self) -> Self {
-        Self {
-            cache: self.cache.clone(),
-            store: self.store.clone(),
-        }
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Env> Provider<LoadBlock> for CacheThrough<'_, Env>
-where
-    Env: ?Sized + Provider<Get> + Provider<Hydrate> + ConditionalSync,
-{
-    async fn execute(
-        &self,
-        LoadBlock { hash }: LoadBlock,
-    ) -> Result<Option<Buffer>, DialogSearchTreeError> {
-        if let Some(node) = self.cache.get_cached(&hash) {
-            return Ok(Some(node.buffer().clone()));
-        }
-        let block = LoadBlock::new(hash.clone()).perform(&self.store).await?;
-        // Bytes that do not check as a node stay out of the cache; the
-        // traversal reading them reports the failure.
-        if let Some(node) = block
-            .as_ref()
-            .and_then(|block| PersistentNode::try_from(block.clone()).ok())
-        {
-            self.cache.insert(hash, node);
-        }
-        Ok(block)
-    }
 }
 
 #[cfg(test)]
@@ -319,8 +264,13 @@ mod tests {
     use dialog_varsig::did;
     use futures_util::stream;
 
-    use crate::HydrationRequest;
+    use crate::{Hydrate, HydrationRequest};
+    use async_trait::async_trait;
+    use dialog_artifacts::tree::ArtifactNodeCache;
+    use dialog_capability::Provider;
+    use dialog_effects::archive::Get;
     use dialog_query::query::Output as _;
+    use dialog_search_tree::Nodes as _;
 
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
@@ -382,16 +332,14 @@ mod tests {
                 .into_vec(),
         );
         let cache = ArtifactNodeCache::new();
-        let through = CacheThrough {
-            cache: cache.clone(),
-            store: NetworkedIndex::new(
-                &archive,
-                ArchiveScope::new(Subject::from(did!("key:zCacheThroughTest"))).catalog("index"),
-                None,
-            ),
-        };
+        let through = NetworkedIndex::new(
+            &archive,
+            ArchiveScope::new(Subject::from(did!("key:zCacheThroughTest"))).catalog("index"),
+            None,
+            cache.clone(),
+        );
 
-        let loaded = LoadBlock::new(asked.clone()).perform(&through).await;
+        let loaded = through.load_node(&asked).await;
 
         assert!(
             matches!(

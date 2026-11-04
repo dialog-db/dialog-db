@@ -11,13 +11,13 @@
 //! between two tree versions, so push can ship them alongside the novel nodes.
 
 use crate::ArchiveReader;
+use crate::tree::ArtifactNodes;
 use std::collections::HashSet;
 use std::str::from_utf8;
 
 use async_stream::try_stream;
-use dialog_capability::Provider;
-use dialog_common::{ConditionalSend, ConditionalSync};
-use dialog_search_tree::{Change, LoadBlock, TreeDifference};
+use dialog_common::ConditionalSend;
+use dialog_search_tree::{Change, TreeDifference};
 use dialog_storage::Blake3Hash;
 use futures_util::Stream;
 
@@ -174,7 +174,7 @@ pub fn shipment_refs<'a, Env>(
     difference: &'a TreeDifference<'a, Key, State<Datum>, Env>,
 ) -> impl Stream<Item = Result<ShipmentRef, DialogArtifactsError>> + 'a + ConditionalSend
 where
-    Env: Provider<LoadBlock> + ConditionalSync,
+    Env: ArtifactNodes,
 {
     try_stream! {
         let changes = difference.changes();

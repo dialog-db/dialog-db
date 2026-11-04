@@ -143,7 +143,7 @@ async fn it_edits_trees_written_in_the_legacy_layout() -> anyhow::Result<()> {
                         .insert(key.to_be_bytes(), key.to_be_bytes().to_vec(), &storage)
                         .await?;
                 }
-                edit.persist(&mut delta)?
+                edit.persist(&mut delta, &storage)?
             } else {
                 let mut edit = tree.edit();
                 for key in added {
@@ -151,7 +151,7 @@ async fn it_edits_trees_written_in_the_legacy_layout() -> anyhow::Result<()> {
                         .insert(key.to_be_bytes(), key.to_be_bytes().to_vec(), &storage)
                         .await?;
                 }
-                edit.persist(&mut delta)?.root().clone()
+                edit.persist(&mut delta, &storage)?.root().clone()
             };
             for (_hash, buffer) in delta.flush() {
                 assert_eq!(

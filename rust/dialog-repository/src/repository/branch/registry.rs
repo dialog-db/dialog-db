@@ -603,7 +603,9 @@ mod tests {
                 .the("dialog.replica/active-branch".parse()?)
                 .of(replica.this.clone()),
         );
-        let store = crate::NetworkedIndex::new(&operator, select.catalog(), None);
+        use dialog_artifacts::tree::ArtifactNodeCache;
+        let store =
+            crate::NetworkedIndex::new(&operator, select.catalog(), None, ArtifactNodeCache::new());
         let rows: Vec<_> = select.execute(store).await?.collect::<Vec<_>>().await;
 
         assert_eq!(rows.len(), 1, "one active branch recorded: {}", rows.len());

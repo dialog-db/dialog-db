@@ -14,6 +14,103 @@ says how to cut a release.
 
 ## Unreleased
 
+### A tree reads every node through its store, which keeps what it checked
+
+[#730](https://github.com/dialog-db/dialog-db/pull/730)
+
+A search tree no longer carries a node cache. The store a tree reads
+through implements the new `dialog_search_tree::Nodes` trait: `kept()`
+names the node cache it holds, if any, and `load_node()` answers a read
+from that cache, else from the store's blocks, checking the node once and
+keeping it. Every tree read goes there: point lookups, scans, traversals,
+differences, edits loading the nodes they rewrite, and persists, which
+keep the nodes they seal in the same cache. A new read path therefore
+cannot bypass the cache, as the difference, `traverse_available`, push's
+subtree forwarding, diagnose and `canonical_divergences` did. In the
+repository the cache is the line's: `LocalIndex` holds the handle and
+`NetworkedIndex` forwards it.
+
+What this changes for you:
+
+- Every tree method that took `Env: Provider<LoadBlock>` takes
+  `Env: Nodes<Key, Value>`. A block store that keeps nothing implements
+  it in one line (`impl<K, V> Nodes<K, V> for MyStore {}`), as
+  `MemoryBlocks`, `ObservingBlocks` and `JournaledBlocks` do; wrap one in
+  `Cached::new(cache, &store)` to keep the nodes read through it.
+- `PersistentTree::node_cache`, `PersistentTree::empty_with_cache` and
+  `PersistentTree::from_hash_with_cache` are removed: use `empty()` and
+  `from_hash(root)`, and give the store the cache.
+  `PersistentTree::empty_with_manifest` takes only the manifest.
+- `TransientTree::new(root)`, `TransientTree::with_manifest(root,
+  manifest)` and `TransientTree::empty_with_manifest(manifest)` drop
+  their cache argument.
+- `TransientTree::persist(delta, store)`, `HitchhikerTree::persist(delta,
+  store)` and `HitchhikerTree::persist_mut(delta, store)` take the store
+  whose cache keeps the sealed nodes. `TransientNode::persist`,
+  `TransientNode::persist_mut` and `Node::into_link` take
+  `Option<&NodeCache>`.
+- `Accessor::new(env)` takes only the store.
+- A difference's `MissingBlocks::Deny` side reads through the store's
+  cache. A `MissingBlocks::Boundary` side reads the store's blocks
+  directly, so absence is the store's own word.
+- A store that keeps nothing skips the range scan's sibling read-ahead
+  and an integration's open-ahead pass, which would only read each node
+  twice.
+- `dialog_artifacts::ArchiveReader` requires `ArtifactNodes`
+  (`Nodes<Key, State<Datum>>`). `DeltaOverlay` keeps what its
+  environment keeps.
+- `TreeHistory::from_root_with_cache` and `TreeHistory::empty_with_cache`
+  are removed: use `TreeHistory::from_root(root, store)` and the new
+  `TreeHistory::empty(store)`. `rekey_tree` drops its cache argument.
+  `distribution::capture` reads through the store.
+- `LocalIndex::new(env, catalog, nodes)` and `NetworkedIndex::new(env,
+  index, remote, nodes)` take the node cache the index keeps.
+- `Select::execute(store)` probes the root and scans through the store,
+  so a store passed in should keep a node cache for repeated selects to
+  be answered from memory.
+- Reads that went around the cache now hit it: a subscription poll's
+  difference, a snapshot export's walk and a preload walk read the
+  line's cache, and a select's scan no longer reads its root again
+  after the probe. The `subscribe-repoll` perf scenario reads no block
+  from the archive where it read 6, and runs 10.6% fewer instructions.
+- A poll after a commit that adds one note, with a subscription per
+  note of 200 (the new `subscribe-fanout` perf scenario), reads 0
+  blocks instead of 806 (32 MB). Every subscription diffs the same two
+  trees within its own demand, and the first to read a changed block
+  keeps it for the rest. In a browser over IndexedDB, which pays a
+  transaction per block read, a write from another device showed on a
+  200-note page in about 0.4 s instead of 2 to 3 s.
+
+Why: the cache was carried by trees and threaded through `*_with_cache`
+constructors, so every read path had to remember to use it, several did
+not, and two places copied the cache-then-store read by hand. Putting it
+on the store makes the cached read exist in one place and every read go
+through it.
+
+### A read finds its remote without deriving every upstream
+
+[#730](https://github.com/dialog-db/dialog-db/pull/730)
+
+Every select, subscription poll and migration check asked the branch
+where a read held by reference falls back to, and the branch answered
+by building its full upstream list: deriving each upstream's sync
+target, a hash, and comparing every pair. It now takes the first route
+at a peer among the pulls and then the pushes, through
+`Tracking::first_remote_route`, so the answer is the same without that
+work. It was about 9% of a Tonk service worker's CPU while switching
+spaces.
+
+What this changes for you:
+
+- `Upstreams::fallback` is removed; `Branch::fallback` no longer builds
+  `upstreams()`.
+- A read's fallback is the one it was: the first upstream at a peer,
+  reachable or not, pulls before pushes, else the first synced route at
+  a peer.
+
+Why: the fallback is asked on every read, and the answer needs one
+route, not a hashed and deduplicated set of them.
+
 ### A request the access service never answers is given up on, and a read is sent again
 
 [#727](https://github.com/dialog-db/dialog-db/pull/727)
@@ -1590,6 +1687,10 @@ thread multiplies whatever it holds by the size of the thread pool.
 
 ### Compatibility and migration
 
+- Nothing stored or synced changes for the node cache moving to the
+  store: trees, nodes and their hashes are the same bytes, nothing is
+  rewritten on upgrade, and an older release reads everything this one
+  writes. Only how often a node is read from the archive changes.
 - Nothing stored changes for the difference that prunes shared
   subtrees: no stored data is rewritten, trees are laid out as before,
   and an older release reads everything this one writes. Only how many

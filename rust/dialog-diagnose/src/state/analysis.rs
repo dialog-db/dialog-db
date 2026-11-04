@@ -3,7 +3,7 @@
 use std::{collections::VecDeque, sync::mpsc::Sender};
 
 use dialog_artifacts::{Datum, DialogArtifactsError, Index, Key, State};
-use dialog_search_tree::{Accessor, NodeBody, NodeCache, PersistentNode};
+use dialog_search_tree::{Accessor, NodeBody, PersistentNode};
 
 use super::store::WorkerMessage;
 use crate::Blocks;
@@ -67,7 +67,7 @@ impl ArtifactsTreeAnalysis {
         let tx = self.tx.clone();
 
         tokio::spawn(async move {
-            let accessor = Accessor::new(NodeCache::new(), &storage);
+            let accessor = Accessor::new(&storage);
 
             let mut stats = ArtifactsTreeStats::default();
             let mut levels = VecDeque::from([vec![root]]);

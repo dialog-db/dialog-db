@@ -1,6 +1,6 @@
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use dialog_common::helpers::BenchData;
-use dialog_search_tree::{Delta, MemoryBlocks, PersistentTree};
+use dialog_search_tree::{Cached, Delta, MemoryBlocks, NodeCache, PersistentTree};
 use futures_util::StreamExt;
 
 const BENCH_SEED: u64 = 42;
@@ -18,8 +18,11 @@ fn bench_range_query(c: &mut Criterion) {
 
     const TREE_SIZE: usize = 10100;
     let runtime = tokio::runtime::Runtime::new().unwrap();
-    let (tree, storage) = runtime.block_on(async {
-        let storage = MemoryBlocks::new();
+    // The nodes the build seals are kept, as a tree read through a store
+    // with a node cache finds them.
+    let blocks = MemoryBlocks::new();
+    let storage = Cached::new(NodeCache::new(), &blocks);
+    let tree = runtime.block_on(async {
         let mut tree = PersistentTree::<[u8; 16], Vec<u8>>::empty();
         let mut delta = Delta::zero();
 
@@ -32,7 +35,7 @@ fn bench_range_query(c: &mut Criterion) {
                 .insert(*key, value.to_vec(), &storage)
                 .await
                 .unwrap()
-                .persist(&mut delta)
+                .persist(&mut delta, &storage)
                 .unwrap();
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, buffer) in delta.flush() {
@@ -40,7 +43,7 @@ fn bench_range_query(c: &mut Criterion) {
             }
         }
 
-        (tree, storage)
+        tree
     });
 
     for range_size in [10usize, 100, 1000, 10000] {

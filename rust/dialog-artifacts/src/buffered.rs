@@ -36,12 +36,11 @@
 //! leaf paths, and the diff exchanges fewer blocks); bulk-load paths
 //! canonicalize once, explicitly, at the end of the import.
 
+use crate::tree::ArtifactNodes;
 use crate::{ArchiveDelta, ArchiveReader, DeltaOverlay};
 use async_trait::async_trait;
-use dialog_capability::Provider;
+use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::ConditionalSend;
-use dialog_common::{Blake3Hash as NodeHash, ConditionalSync};
-use dialog_search_tree::LoadBlock;
 use dialog_search_tree::{
     Buffer, DialogSearchTreeError, Entry, HitchhikerTree, Manifest, TransientTree,
 };
@@ -51,7 +50,7 @@ use std::ops::RangeInclusive;
 use std::sync::{Arc, Mutex, Weak};
 
 use crate::history::{RecordEntries, Version};
-use crate::tree::{ArtifactNodeCache, ArtifactTree, Stamp, WriteScope, write_instructions};
+use crate::tree::{ArtifactTree, Stamp, WriteScope, write_instructions};
 use crate::{Datum, DialogArtifactsError, Instruction, Key, State};
 
 /// The buffered counterpart of [`ArtifactTree`].
@@ -82,7 +81,7 @@ pub trait ArtifactWriter: Sized {
         storage: &S,
     ) -> Result<Self, DialogSearchTreeError>
     where
-        S: Provider<LoadBlock> + ConditionalSync;
+        S: ArtifactNodes;
 
     /// Insert (or overwrite) a batch of entries, one write at a time.
     ///
@@ -99,7 +98,7 @@ pub trait ArtifactWriter: Sized {
         storage: &S,
     ) -> Result<Self, DialogSearchTreeError>
     where
-        S: Provider<LoadBlock> + ConditionalSync,
+        S: ArtifactNodes,
         Self: ConditionalSend,
     {
         for (key, value) in entries {
@@ -111,7 +110,7 @@ pub trait ArtifactWriter: Sized {
     /// Remove `key`, if present.
     async fn erase<S>(self, key: &Key, storage: &S) -> Result<Self, DialogSearchTreeError>
     where
-        S: Provider<LoadBlock> + ConditionalSync;
+        S: ArtifactNodes;
 
     /// Read the value at `key`, seeing this batch's own pending writes.
     async fn read<S>(
@@ -120,7 +119,7 @@ pub trait ArtifactWriter: Sized {
         storage: &S,
     ) -> Result<Option<State<Datum>>, DialogSearchTreeError>
     where
-        S: Provider<LoadBlock> + ConditionalSync;
+        S: ArtifactNodes;
 
     /// Scan `range` in key order, seeing this batch's own pending writes.
     ///
@@ -134,7 +133,7 @@ pub trait ArtifactWriter: Sized {
         storage: &'a S,
     ) -> impl Stream<Item = Result<Entry<Key, State<Datum>>, DialogSearchTreeError>> + 'a
     where
-        S: Provider<LoadBlock> + ConditionalSync;
+        S: ArtifactNodes;
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -147,14 +146,14 @@ impl ArtifactWriter for TransientTree<Key, State<Datum>> {
         storage: &S,
     ) -> Result<Self, DialogSearchTreeError>
     where
-        S: Provider<LoadBlock> + ConditionalSync,
+        S: ArtifactNodes,
     {
         self.insert(key, value, storage).await
     }
 
     async fn erase<S>(self, key: &Key, storage: &S) -> Result<Self, DialogSearchTreeError>
     where
-        S: Provider<LoadBlock> + ConditionalSync,
+        S: ArtifactNodes,
     {
         self.delete(key, storage).await
     }
@@ -165,7 +164,7 @@ impl ArtifactWriter for TransientTree<Key, State<Datum>> {
         storage: &S,
     ) -> Result<Option<State<Datum>>, DialogSearchTreeError>
     where
-        S: Provider<LoadBlock> + ConditionalSync,
+        S: ArtifactNodes,
     {
         self.get(key, storage).await
     }
@@ -176,7 +175,7 @@ impl ArtifactWriter for TransientTree<Key, State<Datum>> {
         storage: &'a S,
     ) -> impl Stream<Item = Result<Entry<Key, State<Datum>>, DialogSearchTreeError>> + 'a
     where
-        S: Provider<LoadBlock> + ConditionalSync,
+        S: ArtifactNodes,
     {
         self.stream_range(range, storage)
     }
@@ -198,14 +197,14 @@ impl ArtifactWriter for BufferedArtifactTree {
         storage: &S,
     ) -> Result<Self, DialogSearchTreeError>
     where
-        S: Provider<LoadBlock> + ConditionalSync,
+        S: ArtifactNodes,
     {
         self.insert_deferred(key, value, storage).await
     }
 
     async fn erase<S>(self, key: &Key, storage: &S) -> Result<Self, DialogSearchTreeError>
     where
-        S: Provider<LoadBlock> + ConditionalSync,
+        S: ArtifactNodes,
     {
         self.delete_deferred(key.clone(), storage).await
     }
@@ -216,7 +215,7 @@ impl ArtifactWriter for BufferedArtifactTree {
         storage: &S,
     ) -> Result<Option<State<Datum>>, DialogSearchTreeError>
     where
-        S: Provider<LoadBlock> + ConditionalSync,
+        S: ArtifactNodes,
     {
         self.get(key, storage).await
     }
@@ -227,7 +226,7 @@ impl ArtifactWriter for BufferedArtifactTree {
         storage: &'a S,
     ) -> impl Stream<Item = Result<Entry<Key, State<Datum>>, DialogSearchTreeError>> + 'a
     where
-        S: Provider<LoadBlock> + ConditionalSync,
+        S: ArtifactNodes,
     {
         self.stream_range(range, storage)
     }
@@ -257,7 +256,6 @@ impl ArtifactWriter for BufferedArtifactTree {
 /// seal.
 pub struct BufferedBatch {
     tree: BufferedArtifactTree,
-    cache: ArtifactNodeCache,
     manifest: Manifest,
     changed: bool,
     slot: Option<SpineSlot>,
@@ -515,7 +513,6 @@ impl BufferedBatch {
         .await?;
         Ok(Self {
             tree: buffered,
-            cache: tree.node_cache(),
             manifest,
             changed,
             slot,
@@ -674,16 +671,16 @@ impl BufferedBatch {
             // commit appends to it instead of re-opening the frame from
             // bytes.
             let mut tree = self.tree.settle(&storage).await?;
-            let root = tree.persist_mut(delta)?;
+            let root = tree.persist_mut(delta, &storage)?;
             slot.put(root.clone(), tree);
-            ArtifactTree::from_hash_with_cache(root, self.cache)
+            ArtifactTree::from_hash(root)
         } else {
             // Settle the batch's deferred writes, then serialize the spine
             // with its buffers intact and seal the resulting root: the hash
             // covers the buffered ops, so this is a complete identity for
             // the tree's content.
-            let root = self.tree.settle(&storage).await?.persist(delta)?;
-            ArtifactTree::from_hash_with_cache(root, self.cache)
+            let root = self.tree.settle(&storage).await?.persist(delta, &storage)?;
+            ArtifactTree::from_hash(root)
         })
     }
 }

@@ -35,7 +35,8 @@ use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use dialog_common::helpers::BenchData;
 use dialog_search_tree::helpers::{Traversable as _, TraversalOrder};
 use dialog_search_tree::{
-    Delta, Distribution, Hashed, MemoryBlocks, PersistentNode, PersistentTree, Rank,
+    Cached, Delta, Distribution, Hashed, MemoryBlocks, NodeCache, PersistentNode, PersistentTree,
+    Rank,
 };
 use futures_util::StreamExt;
 
@@ -114,16 +115,21 @@ impl<const M: u64> Distribution for Threshold<M> {
     }
 }
 
-type Storage = MemoryBlocks;
+/// The blocks a bench tree is built into, read through the node cache its
+/// build kept the nodes it sealed in: reads find the tree as warm as the
+/// build left it, as a tree read through a store with a node cache does.
+type Storage<'a> = Cached<'a, [u8; 16], Vec<u8>, MemoryBlocks>;
 
 fn runtime() -> tokio::runtime::Runtime {
     tokio::runtime::Runtime::new().unwrap()
 }
 
-/// Builds and persists a tree of `size` random entries under distribution `D`.
+/// Builds and persists a tree of `size` random entries under distribution
+/// `D` into `storage`.
 async fn build_tree<D>(
     size: usize,
-) -> (PersistentTree<[u8; 16], Vec<u8>, D>, Storage, Vec<[u8; 16]>)
+    storage: &Storage<'_>,
+) -> (PersistentTree<[u8; 16], Vec<u8>, D>, Vec<[u8; 16]>)
 where
     D: Distribution,
 {
@@ -131,17 +137,16 @@ where
     let keys = data.random_buffers::<16>(size);
     let values = data.random_buffers::<32>(size);
 
-    let storage = MemoryBlocks::new();
     let mut tree = PersistentTree::<[u8; 16], Vec<u8>, D>::empty();
     let mut delta = Delta::zero();
 
     for (key, value) in keys.iter().zip(values.iter()) {
         tree = tree
             .edit()
-            .insert(*key, value.to_vec(), &storage)
+            .insert(*key, value.to_vec(), storage)
             .await
             .unwrap()
-            .persist(&mut delta)
+            .persist(&mut delta, storage)
             .unwrap();
         // Flush after each persist so the next edit can load the nodes this persist created.
         for (_, buffer) in delta.flush() {
@@ -149,7 +154,7 @@ where
         }
     }
 
-    (tree, storage, keys)
+    (tree, keys)
 }
 
 /// Inserts every entry into a fresh tree. This is the routine timed by the
@@ -158,7 +163,8 @@ async fn insert_all<D>(keys: &[[u8; 16]], values: &[Vec<u8>])
 where
     D: Distribution,
 {
-    let storage = MemoryBlocks::new();
+    let blocks = MemoryBlocks::new();
+    let storage = Cached::new(NodeCache::new(), &blocks);
     let mut tree = PersistentTree::<[u8; 16], Vec<u8>, D>::empty();
     let mut delta = Delta::zero();
     for (key, value) in keys.iter().zip(values.iter()) {
@@ -167,7 +173,7 @@ where
             .insert(*key, value.clone(), &storage)
             .await
             .unwrap()
-            .persist(&mut delta)
+            .persist(&mut delta, &storage)
             .unwrap();
         // Flush after each persist so the next edit can load the nodes this persist created.
         for (_, buffer) in delta.flush() {
@@ -228,9 +234,13 @@ const LOOKUPS_PER_SAMPLE: usize = 256;
 fn bench_get<const M: u64>(c: &mut Criterion) {
     let mut group = c.benchmark_group(group_name("get", M));
     for size in SIZES {
-        let (old_tree, old_storage, old_keys) = runtime().block_on(build_tree::<BitBatch<M>>(size));
-        let (new_tree, new_storage, new_keys) =
-            runtime().block_on(build_tree::<Threshold<M>>(size));
+        let (old_blocks, new_blocks) = (MemoryBlocks::new(), MemoryBlocks::new());
+        let old_storage = Cached::new(NodeCache::new(), &old_blocks);
+        let new_storage = Cached::new(NodeCache::new(), &new_blocks);
+        let (old_tree, old_keys) =
+            runtime().block_on(build_tree::<BitBatch<M>>(size, &old_storage));
+        let (new_tree, new_keys) =
+            runtime().block_on(build_tree::<Threshold<M>>(size, &new_storage));
 
         let probe = LOOKUPS_PER_SAMPLE.min(size);
 
@@ -258,8 +268,11 @@ fn bench_range<const M: u64>(c: &mut Criterion) {
     let mut group = c.benchmark_group(group_name("range_scan", M));
     group.sample_size(20);
     for size in SIZES {
-        let (old_tree, old_storage, _) = runtime().block_on(build_tree::<BitBatch<M>>(size));
-        let (new_tree, new_storage, _) = runtime().block_on(build_tree::<Threshold<M>>(size));
+        let (old_blocks, new_blocks) = (MemoryBlocks::new(), MemoryBlocks::new());
+        let old_storage = Cached::new(NodeCache::new(), &old_blocks);
+        let new_storage = Cached::new(NodeCache::new(), &new_blocks);
+        let (old_tree, _) = runtime().block_on(build_tree::<BitBatch<M>>(size, &old_storage));
+        let (new_tree, _) = runtime().block_on(build_tree::<Threshold<M>>(size, &new_storage));
 
         group.bench_with_input(BenchmarkId::new(BIT_BATCH, size), &size, |b, _| {
             b.to_async(runtime()).iter(|| async {
@@ -301,7 +314,7 @@ struct Shape {
 
 /// Walks the persisted tree to recover its height, node counts, per-level
 /// fan-out and total persisted byte size.
-async fn shape_of<D>(tree: &PersistentTree<[u8; 16], Vec<u8>, D>, storage: &Storage) -> Shape
+async fn shape_of<D>(tree: &PersistentTree<[u8; 16], Vec<u8>, D>, storage: &Storage<'_>) -> Shape
 where
     D: Distribution,
 {
@@ -417,11 +430,15 @@ fn bench_shape<const M: u64>(c: &mut Criterion) {
         "\n=== tree shape @ branch factor m={M} (level 0 = leaves; fanout = avg children/entries) ==="
     );
     for size in SIZES {
-        let (old_tree, old_storage, _) = rt.block_on(build_tree::<BitBatch<M>>(size));
+        let old_blocks = MemoryBlocks::new();
+        let old_storage = Cached::new(NodeCache::new(), &old_blocks);
+        let (old_tree, _) = rt.block_on(build_tree::<BitBatch<M>>(size, &old_storage));
         let old_shape = rt.block_on(shape_of(&old_tree, &old_storage));
         print_shape_row("bit-batch", M, size, &old_shape);
 
-        let (new_tree, new_storage, _) = rt.block_on(build_tree::<Threshold<M>>(size));
+        let new_blocks = MemoryBlocks::new();
+        let new_storage = Cached::new(NodeCache::new(), &new_blocks);
+        let (new_tree, _) = rt.block_on(build_tree::<Threshold<M>>(size, &new_storage));
         let new_shape = rt.block_on(shape_of(&new_tree, &new_storage));
         print_shape_row("threshold", M, size, &new_shape);
     }

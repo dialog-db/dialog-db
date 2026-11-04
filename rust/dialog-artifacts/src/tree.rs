@@ -30,7 +30,7 @@ use async_stream::try_stream;
 use async_trait::async_trait;
 use dialog_capability::Provider;
 use dialog_common::{Blake3Hash as NodeHash, ConditionalSend, ConditionalSync};
-use dialog_search_tree::{Buffer, Manifest, NodeCache, PersistentTree, Value as TreeValue};
+use dialog_search_tree::{Buffer, Manifest, NodeCache, Nodes, PersistentTree, Value as TreeValue};
 use dialog_storage::Blake3Hash;
 use futures_util::{Stream, StreamExt};
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -66,6 +66,12 @@ pub type ArtifactTree = PersistentTree<Key, State<Datum>>;
 /// The node cache an [`ArtifactTree`] reads through: nodes by content hash,
 /// already checked.
 pub type ArtifactNodeCache = NodeCache<Key, State<Datum>>;
+
+/// A store an [`ArtifactTree`] reads its nodes through (see [`Nodes`]):
+/// whatever node cache it keeps answers every read of the tree.
+pub trait ArtifactNodes: Nodes<Key, State<Datum>> {}
+
+impl<S> ArtifactNodes for S where S: Nodes<Key, State<Datum>> {}
 
 // Deletion is no longer resolved at the slot: it travels as a history
 // record and is applied to the active indexes by the observed-remove
@@ -760,7 +766,7 @@ impl ArtifactTreeExt for ArtifactTree {
         .await?;
         // Seal the whole batch with a single bottom-up persist into the
         // caller's delta.
-        *self = transient.persist(delta.blocks())?;
+        *self = transient.persist(delta.blocks(), store)?;
         Ok(changed)
     }
 
@@ -877,7 +883,7 @@ impl ArtifactTreeExt for ArtifactTree {
             }
             transient
         };
-        *self = transient.persist(delta.blocks())?;
+        *self = transient.persist(delta.blocks(), store)?;
         Ok(())
     }
 

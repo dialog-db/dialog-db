@@ -30,6 +30,7 @@
 //! # }
 //! ```
 
+use crate::Nodes;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     fmt::Debug,
@@ -150,7 +151,7 @@ where
         storage: &'a Env,
     ) -> impl Stream<Item = Result<PersistentNode<Key, Value>, DialogSearchTreeError>> + 'a
     where
-        Env: Provider<LoadBlock> + ConditionalSync;
+        Env: Nodes<Key, Value>;
 }
 
 impl<Key, Value, D> Traversable<Key, Value> for PersistentTree<Key, Value, D>
@@ -172,7 +173,7 @@ where
         storage: &'a Env,
     ) -> impl Stream<Item = Result<PersistentNode<Key, Value>, DialogSearchTreeError>> + 'a
     where
-        Env: Provider<LoadBlock> + ConditionalSync,
+        Env: Nodes<Key, Value>,
     {
         let root = self.stored_root().cloned();
 
@@ -200,7 +201,7 @@ where
     }
 }
 
-/// Reads a node from storage by hash.
+/// Reads a node through the store by hash.
 async fn load_node<Key, Value, Env>(
     storage: &Env,
     hash: &Blake3Hash,
@@ -211,15 +212,12 @@ where
     Value::Archived: for<'b> CheckBytes<
             Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>,
-    Env: Provider<LoadBlock> + ConditionalSync,
+    Env: Nodes<Key, Value>,
 {
-    let buffer = LoadBlock::new(hash.clone())
-        .perform(storage)
+    storage
+        .load_node(hash)
         .await?
-        .ok_or_else(|| {
-            DialogSearchTreeError::Node(format!("Block not found in storage: {hash}"))
-        })?;
-    PersistentNode::try_from(buffer)
+        .ok_or_else(|| DialogSearchTreeError::Node(format!("Block not found in storage: {hash}")))
 }
 
 /// A stream of tree nodes.
@@ -499,6 +497,9 @@ impl ObservingBlocks {
         self.blocks.get(hash)
     }
 }
+
+/// Keeps nothing, so every node read is an observed block read.
+impl<Key, Value> crate::Nodes<Key, Value> for ObservingBlocks {}
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
@@ -865,19 +866,13 @@ impl TreeDescriptor {
             let leaf_rank = if leaf_boundaries.contains(key) { 2 } else { 1 };
             let seam_rank = seam_ranks.get(key).copied().unwrap_or(1);
             let edit = match tree.stored_root() {
-                Some(root) => crate::TransientTree::with_manifest(
-                    root.clone(),
-                    tree.node_cache(),
-                    manifest.clone(),
-                ),
-                None => {
-                    crate::TransientTree::empty_with_manifest(tree.node_cache(), manifest.clone())
-                }
+                Some(root) => crate::TransientTree::with_manifest(root.clone(), manifest.clone()),
+                None => crate::TransientTree::empty_with_manifest(manifest.clone()),
             };
             tree = edit
                 .insert(encode_key(key, leaf_rank, seam_rank), key.clone(), &storage)
                 .await?
-                .persist(&mut delta)?;
+                .persist(&mut delta, &storage)?;
 
             // Flush after each persist so the next edit (and the differentials
             // that read afterwards) can load the nodes this persist created: a
@@ -897,7 +892,7 @@ impl TreeDescriptor {
         }
 
         // Reload the tree from its hash so the root is freshly loaded during
-        // differentials (the build tree's node cache is dropped with it), and
+        // differentials, and
         // re-enable journaling to track root and differential reads.
         let tree = TestTree::from_hash(root);
         storage.enable_journal();

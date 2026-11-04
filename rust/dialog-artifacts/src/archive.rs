@@ -8,10 +8,11 @@
 //! writes in an [`ArchiveDelta`] that keeps the two lanes apart, and its
 //! commit writes each lane where that lane belongs.
 
+use crate::tree::ArtifactNodes;
 use async_trait::async_trait;
 use dialog_capability::{Command, Provider};
 use dialog_common::{Blake3Hash, Buffer, ConditionalSync};
-use dialog_search_tree::{Delta, DialogSearchTreeError, MemoryBlocks};
+use dialog_search_tree::{Delta, DialogSearchTreeError, MemoryBlocks, NodeCache, Nodes};
 
 pub use dialog_search_tree::LoadBlock;
 
@@ -60,10 +61,12 @@ impl Command for LoadBlob {
 
 /// An environment an artifact tree can be read from: it loads nodes and
 /// spilled values.
-pub trait ArchiveReader: Provider<LoadBlock> + Provider<LoadBlob> + ConditionalSync {}
+///
+/// Its nodes come through [`Nodes`], so whatever node cache the environment
+/// keeps answers every tree read made through it.
+pub trait ArchiveReader: ArtifactNodes + Provider<LoadBlob> + ConditionalSync {}
 
-impl<Env> ArchiveReader for Env where Env: Provider<LoadBlock> + Provider<LoadBlob> + ConditionalSync
-{}
+impl<Env> ArchiveReader for Env where Env: ArtifactNodes + Provider<LoadBlob> + ConditionalSync {}
 
 /// What a batch of edits stages for its commit: the tree nodes it persisted
 /// (blocks) and the spilled values it wrote (blobs), each under its content
@@ -181,6 +184,18 @@ where
             return Ok(Some(block));
         }
         load.perform(self.env).await
+    }
+}
+
+/// The overlay keeps what its environment keeps: a node read through it is
+/// answered from the environment's node cache first, then from the staged
+/// blocks, then from the environment's own.
+impl<K, V, Env> Nodes<K, V> for DeltaOverlay<'_, Env>
+where
+    Env: Nodes<K, V>,
+{
+    fn kept(&self) -> Option<&NodeCache<K, V>> {
+        self.env.kept()
     }
 }
 

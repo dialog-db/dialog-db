@@ -9,8 +9,8 @@
     "retracted": 10
   },
   "counters": {
-    "archive.get": 6,
-    "archive.get.bytes": 296764,
+    "archive.get": 0,
+    "archive.get.bytes": 0,
     "archive.put": 1,
     "archive.put.bytes": 12492,
     "span.apply_batch_reusing": 1,
@@ -23,5 +23,5 @@
     "span.settle": 1,
     "span.write_instructions": 1
   },
-  "instructions": 15121822
+  "instructions": 13629734
 }

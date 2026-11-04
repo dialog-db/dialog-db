@@ -370,7 +370,7 @@ mod tests {
     ) -> Result<(), DialogArtifactsError> {
         let mut delta = ArchiveDelta::zero();
         let transient = tree.edit().insert(key, state, store).await?;
-        *tree = transient.persist(delta.blocks())?;
+        *tree = transient.persist(delta.blocks(), store)?;
         delta.flush_into(store);
         Ok(())
     }

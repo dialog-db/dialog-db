@@ -10,6 +10,7 @@
 //! commit path. The branch handle is opened once and held across commits —
 //! the realistic application shape, which also keeps the branch-owned record
 //! and node caches warm the way a running app would.
+use dialog_artifacts::tree::ArtifactNodeCache;
 use dialog_effects::blob::Import as BlobImport;
 use dialog_effects::blob::Size as BlobSize;
 use std::str::FromStr;
@@ -206,9 +207,14 @@ where
         }
     }
 
-    /// Loads the branch's tree nodes and spilled values from its archive.
+    /// Loads the branch's tree nodes and spilled values from its archive,
+    /// keeping the nodes read through it in a cache of its own.
     pub fn index(&self) -> LocalIndex<'_, Env> {
-        LocalIndex::new(&self.operator, self.branch.archive().index())
+        LocalIndex::new(
+            &self.operator,
+            self.branch.archive().index(),
+            ArtifactNodeCache::new(),
+        )
     }
 
     /// Every fact matching `selector`, materialized.
