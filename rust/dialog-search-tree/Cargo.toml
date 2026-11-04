@@ -19,6 +19,7 @@ web-integration-tests = []
 tracing = { workspace = true }
 dialog-capability = { workspace = true }
 dialog-common = { workspace = true }
+dialog-effects = { workspace = true }
 dialog-macros = { workspace = true }
 dialog-storage = { workspace = true }
 anyhow = { workspace = true }
@@ -44,6 +45,9 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync", "macros", "rt"] }
 
 [dev-dependencies]
+# The integration tests, benches and examples read their trees through the
+# test archive in `helpers`.
+dialog-search-tree = { path = ".", features = ["helpers"] }
 dialog-common = { workspace = true, features = ["helpers"] }
 dialog-storage = { workspace = true, features = ["helpers"] }
 futures-util = { workspace = true }

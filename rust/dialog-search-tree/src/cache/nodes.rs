@@ -3,7 +3,8 @@
 
 use std::sync::Arc;
 
-use dialog_common::Blake3Hash;
+use dialog_capability::Did;
+use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync, Holds, held_key};
 use hashbrown::HashTable;
 use parking_lot::Mutex;
 
@@ -20,6 +21,10 @@ const SHARDS: usize = 16;
 /// A cache smaller than this is not split: a part of it would hold too
 /// little to keep a node.
 const SHARDED_FROM: usize = 16 * 1024 * 1024;
+
+/// The name an environment holds its node cache under (see
+/// [`NodeCache::of`]).
+const HELD: &str = "dialog.nodes";
 
 /// No slot.
 const NIL: u32 = u32::MAX;
@@ -320,6 +325,61 @@ impl<Key, Value> NodeCache<Key, Value> {
             }),
             scope: Scope::default(),
         }
+    }
+
+    /// The node cache `env` holds, read through the scope of `subject`, the
+    /// subject whose catalog the nodes live in. The cache a tree's reads
+    /// over `env` are answered from and its persists keep their nodes in.
+    ///
+    /// An environment that holds handles and holds no cache yet is given
+    /// one with the default budget ([`NODE_CACHE_BUDGET`]), so every later
+    /// read over it finds the same one. An environment that holds nothing
+    /// (a bare store) has no cache: `None`, and every read through it goes
+    /// to its blocks.
+    ///
+    /// ```no_run
+    /// # use dialog_capability::did;
+    /// # use dialog_common::Holdings;
+    /// # use dialog_search_tree::NodeCache;
+    /// let env = Holdings::default();
+    /// let subject = did!("key:z6MkTree");
+    ///
+    /// // 32 MiB of nodes for everything read over `env`.
+    /// NodeCache::<[u8; 4], Vec<u8>>::with_budget(32 * 1024 * 1024).hold(&env);
+    /// let cache = NodeCache::<[u8; 4], Vec<u8>>::of(&env, &subject).unwrap();
+    /// assert_eq!(cache.budget(), 32 * 1024 * 1024);
+    /// ```
+    pub fn of<Env>(env: &Env, subject: &Did) -> Option<Self>
+    where
+        Env: Holds + ?Sized,
+        Key: ConditionalSend + ConditionalSync + 'static,
+        Value: ConditionalSend + ConditionalSync + 'static,
+    {
+        let key = held_key::<Self>(HELD);
+        let held = match env.held(&key) {
+            Some(held) => held,
+            None => {
+                let made = env.held_or(&key, &|| std::sync::Arc::new(Self::new()));
+                // An environment that keeps nothing hands back what it was
+                // given and forgets it: a cache per read would cost a read
+                // ahead its landing place, so it gets none.
+                env.held(&key)?;
+                made
+            }
+        };
+        held.downcast_ref::<Self>()
+            .map(|cache| cache.scoped(Scope::named(subject.as_str().as_bytes())))
+    }
+
+    /// Have `env` hold this cache, in place of any it held: what trees read
+    /// over `env` from here on is kept here.
+    pub fn hold<Env>(&self, env: &Env)
+    where
+        Env: Holds + ?Sized,
+        Key: ConditionalSend + ConditionalSync + 'static,
+        Value: ConditionalSend + ConditionalSync + 'static,
+    {
+        env.hold(held_key::<Self>(HELD), std::sync::Arc::new(self.clone()));
     }
 
     /// A handle on the same cache for `scope`: it sees the nodes `scope`

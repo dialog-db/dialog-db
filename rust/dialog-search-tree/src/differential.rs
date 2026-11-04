@@ -21,7 +21,7 @@
 //! - [`TreeDifference::novel_nodes`]: the target-tree nodes absent from the
 //!   source tree (used to upload exactly the missing blocks to a remote).
 
-use crate::Nodes;
+use crate::reads::*;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
@@ -38,8 +38,9 @@ use rkyv::{
 };
 
 use crate::{
-    DialogSearchTreeError, Distribution, Entry, Key, Link, LoadBlock, NodeBody, NoveltyEntry,
-    NoveltyOp, PersistentNode, PersistentTree, Separator, Value, into_owned, resolve_pending,
+    Accessor, Buffer, DialogSearchTreeError, Distribution, Entry, Key, Link, NodeBody,
+    NoveltyEntry, NoveltyOp, PersistentNode, PersistentTree, Separator, Value, checked, into_owned,
+    resolve_pending,
 };
 
 /// How many frontier blocks a comparison pass fetches concurrently in the
@@ -51,7 +52,7 @@ const LOAD_CONCURRENCY: usize = 16;
 /// failure both come back as `None`; the comparison read that actually
 /// needs the block owns the error and the [`MissingBlocks`] policy.
 async fn preload_block<Key, Value, Env>(
-    storage: &Env,
+    storage: &Accessor<'_, Key, Value, Env>,
     missing: MissingBlocks,
     is_target: bool,
     offset: usize,
@@ -63,11 +64,16 @@ where
     Value::Archived: for<'a> CheckBytes<
         Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
     >,
-    Env: Nodes<Key, Value>,
+    Env: Provider<Load> + Provider<Get> + Holds + ConditionalSync,
 {
     let node = read_node(storage, &hash, missing).await.ok().flatten();
     (is_target, offset, node)
 }
+
+/// A block the loading sweep is about to read: which side it is for, its
+/// frontier slot, the reads of that side, and its hash.
+type PendingRead<'r, 'a, Key, Value, Env> =
+    (bool, usize, &'r Accessor<'a, Key, Value, Env>, Blake3Hash);
 
 /// A slot of the child-level batch in [`SparseTree::stream`]'s descent:
 /// `None` until the fetch for that position completes, then the fetch's
@@ -80,7 +86,7 @@ type FetchedChild<Key, Value> =
 /// [`preload_block`] this is not speculative — every child of a visited
 /// index is consumed — so errors are returned for the descent to own.
 async fn fetch_block<Key, Value, Env>(
-    storage: &Env,
+    storage: &Accessor<'_, Key, Value, Env>,
     missing: MissingBlocks,
     at: usize,
     hash: Blake3Hash,
@@ -94,7 +100,7 @@ where
     Value::Archived: for<'a> CheckBytes<
         Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
     >,
-    Env: Nodes<Key, Value>,
+    Env: Provider<Load> + Provider<Get> + Holds + ConditionalSync,
 {
     (at, read_node(storage, &hash, missing).await)
 }
@@ -102,17 +108,21 @@ where
 /// Reads the node stored under `hash` for a comparison side whose absent
 /// blocks mean `missing`; `None` when the block is absent.
 ///
-/// A [`Deny`](MissingBlocks::Deny) side reads through the store, so what the
-/// store keeps answers the read from memory.
+/// A [`Deny`](MissingBlocks::Deny) side reads as every tree read does
+/// ([`Accessor::load_node`]): from the node cache the environment holds,
+/// else through [`Load`], which hydrates a local miss from wherever the
+/// environment knows the subject's blocks live.
 ///
-/// A [`Boundary`](MissingBlocks::Boundary) side asks the store's blocks
-/// directly, past anything it keeps in memory. That is the one read in this
-/// crate that bypasses the store's cache, on purpose: under that policy
-/// absence is the answer the walk is asking for (where local knowledge
-/// ends), so it must be the store's own word on whether it holds the block,
-/// not whether a node with that hash happens to be in memory.
+/// A [`Boundary`](MissingBlocks::Boundary) side performs [`Get`] on the
+/// environment instead, past its node cache and past any hydration. That is
+/// the one node read in this crate that neither consults the cache nor
+/// loads, on purpose: under that policy absence is the answer the walk is
+/// asking for (where local knowledge ends), so it must be the local
+/// archive's own word on whether it holds the block, not whether a node
+/// with that hash happens to be in memory, and never a block fetched from
+/// a remote to answer the question.
 async fn read_node<Key, Value, Env>(
-    storage: &Env,
+    storage: &Accessor<'_, Key, Value, Env>,
     hash: &Blake3Hash,
     missing: MissingBlocks,
 ) -> Result<Option<PersistentNode<Key, Value>>, DialogSearchTreeError>
@@ -122,15 +132,22 @@ where
     Value::Archived: for<'a> CheckBytes<
         Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
     >,
-    Env: Nodes<Key, Value>,
+    Env: Provider<Load> + Provider<Get> + Holds + ConditionalSync,
 {
     match missing {
         MissingBlocks::Deny => storage.load_node(hash).await,
-        MissingBlocks::Boundary => LoadBlock::new(hash.clone())
-            .perform(storage)
-            .await?
-            .map(PersistentNode::try_from)
-            .transpose(),
+        MissingBlocks::Boundary => {
+            let block = storage
+                .catalog()
+                .get(hash.clone())
+                .perform(storage.env())
+                .await
+                .map_err(|error| DialogSearchTreeError::Storage(error.into()))?
+                .map(Buffer::from);
+            checked(block, hash)?
+                .map(PersistentNode::try_from)
+                .transpose()
+        }
     }
 }
 
@@ -156,18 +173,19 @@ where
 ///   side only when absence implies the counterparty holds the block —
 ///   the caller owns that judgement (see `dialog-repository`'s push).
 ///
-/// A `Deny` side reads its nodes through its store's [`Nodes::load_node`],
-/// so the nodes the store keeps answer from memory. A `Boundary` side reads
-/// its store's blocks directly, past what the store keeps: the walk is
-/// asking whether the store holds each block, and only the blocks can say.
+/// A `Deny` side reads its nodes as every tree read does, so the nodes the
+/// environment's cache holds answer from memory and a miss loads (and may
+/// hydrate). A `Boundary` side performs [`Get`], past the cache and past
+/// hydration: the walk is asking whether the local archive holds each
+/// block, and only the archive can say.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum MissingBlocks {
     /// A missing block fails the walk (the historical behavior).
     #[default]
     Deny,
     /// A missing block bounds the walk: settle, don't descend, don't
-    /// report novel. Reads bypass the store's node cache, so presence is
-    /// the store's own word.
+    /// report novel. Reads perform [`Get`], past the node cache and any
+    /// hydration, so presence is the local archive's own word.
     Boundary,
 }
 
@@ -473,9 +491,9 @@ impl DryRun<'_> {
 struct SparseTree<'a, Key, Value, Env>
 where
     Key: self::Key,
-    Env: Nodes<Key, Value>,
+    Env: Provider<Load> + Provider<Get> + Holds + ConditionalSync,
 {
-    storage: &'a Env,
+    storage: Accessor<'a, Key, Value, Env>,
     nodes: Vec<SparseTreeNode<Key, Value>>,
     expanded: Vec<PersistentNode<Key, Value>>,
     /// Every hash that ever entered this side's frontier, including nodes
@@ -514,7 +532,7 @@ where
     Value::Archived: for<'b> CheckBytes<
             Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>,
-    Env: Nodes<Key, Value>,
+    Env: Provider<Load> + Provider<Get> + Holds + ConditionalSync,
 {
     /// The frontier slots still held by reference, with their hashes: the
     /// blocks a later pass reads unless pruning settles them first.
@@ -588,7 +606,7 @@ where
 
     /// Reads a node from storage by hash.
     async fn load(
-        storage: &Env,
+        storage: &Accessor<'a, Key, Value, Env>,
         hash: &Blake3Hash,
         missing: MissingBlocks,
     ) -> Result<PersistentNode<Key, Value>, DialogSearchTreeError> {
@@ -602,7 +620,7 @@ where
     /// Reads a node from storage by hash; `None` when the block is absent.
     /// See [`read_node`] for how `missing` decides where the read goes.
     async fn try_load(
-        storage: &Env,
+        storage: &Accessor<'a, Key, Value, Env>,
         hash: &Blake3Hash,
         missing: MissingBlocks,
     ) -> Result<Option<PersistentNode<Key, Value>>, DialogSearchTreeError> {
@@ -619,12 +637,12 @@ where
     /// walk while the other side's matching subtrees still prune.
     async fn from_root(
         root: Option<&Blake3Hash>,
-        storage: &'a Env,
+        storage: Accessor<'a, Key, Value, Env>,
         missing: MissingBlocks,
     ) -> Result<SparseTree<'a, Key, Value, Env>, DialogSearchTreeError> {
         if let Some(root) = root
             && missing == MissingBlocks::Boundary
-            && Self::try_load(storage, root, missing).await?.is_none()
+            && Self::try_load(&storage, root, missing).await?.is_none()
         {
             return Ok(SparseTree {
                 storage,
@@ -643,7 +661,7 @@ where
             });
         }
         let nodes = if let Some(root) = root {
-            let node: PersistentNode<Key, Value> = Self::load(storage, root, missing).await?;
+            let node: PersistentNode<Key, Value> = Self::load(&storage, root, missing).await?;
             // A root's frontier bound must be the separator the SAME subtree
             // would carry as a link child on the other side, or equal
             // subtrees at different heights never line up. That propagated
@@ -715,7 +733,7 @@ where
                 // A block planning fetched ahead is read from there, once.
                 let found = match self.prefetched.remove(&link.node) {
                     Some(found) => found,
-                    None => Self::try_load(self.storage, &link.node, self.missing).await?,
+                    None => Self::try_load(&self.storage, &link.node, self.missing).await?,
                 };
                 match found {
                     Some(node) => node,
@@ -1596,7 +1614,7 @@ where
                     }
                     SparseTreeNode::Ref(link) | SparseTreeNode::Pending { link, .. } => {
                         let pending = pending_ops(sparse_node).to_vec();
-                        match Self::try_load(self.storage, &link.node, self.missing).await? {
+                        match Self::try_load(&self.storage, &link.node, self.missing).await? {
                             Some(node) => (node, pending),
                             // Absent and absence bounds the walk: the stored
                             // entries are held by reference (not this side's
@@ -1666,7 +1684,7 @@ where
                                         let Some((at, hash)) = queue.next() else {
                                             break;
                                         };
-                                        reads.push(fetch_block(self.storage, self.missing, at, hash));
+                                        reads.push(fetch_block(&self.storage, self.missing, at, hash));
                                     }
                                     match reads.next().await {
                                         Some((at, result)) => fetched[at] = Some(result),
@@ -2068,7 +2086,7 @@ where
 pub struct TreeDifference<'a, Key, Value, Env>
 where
     Key: self::Key,
-    Env: Nodes<Key, Value>,
+    Env: Provider<Load> + Provider<Get> + Holds + ConditionalSync,
 {
     source: SparseTree<'a, Key, Value, Env>,
     target: SparseTree<'a, Key, Value, Env>,
@@ -2092,7 +2110,7 @@ where
             Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
         + ConditionalSync,
-    Env: Nodes<Key, Value>,
+    Env: Provider<Load> + Provider<Get> + Holds + ConditionalSync,
 {
     /// Computes the difference between two trees.
     ///
@@ -2239,6 +2257,8 @@ where
         D: Distribution,
     {
         let planned = reads == Reads::Planned;
+        let source_storage = Accessor::new(source_storage, source_tree.catalog());
+        let target_storage = Accessor::new(target_storage, target_tree.catalog());
         // Identical trees (including two empty trees) share their root
         // hash; nothing needs to be read at all.
         if source_tree.root() == target_tree.root() {
@@ -2272,8 +2292,16 @@ where
             SparseTree<'a, Key, Value, Env>,
             SparseTree<'a, Key, Value, Env>,
         ) = futures_util::future::try_join(
-            SparseTree::from_root(source_tree.stored_root(), source_storage, missing.source),
-            SparseTree::from_root(target_tree.stored_root(), target_storage, missing.target),
+            SparseTree::from_root(
+                source_tree.stored_root(),
+                source_storage.clone(),
+                missing.source,
+            ),
+            SparseTree::from_root(
+                target_tree.stored_root(),
+                target_storage.clone(),
+                missing.target,
+            ),
         )
         .await?;
 
@@ -2349,9 +2377,9 @@ where
                             .enumerate()
                             .map(|(at, (is_target, hash))| {
                                 let (storage, missing) = if is_target {
-                                    (target_storage, missing.target)
+                                    (&target_storage, missing.target)
                                 } else {
-                                    (source_storage, missing.source)
+                                    (&source_storage, missing.source)
                                 };
                                 (at, is_target, storage, missing, hash)
                             });
@@ -2429,15 +2457,15 @@ where
             // `expand_at`'s own read keeps owning the error and the
             // `MissingBlocks` policy; the `attempted` set keeps a block
             // that stayed a reference from being refetched every pass.
-            let mut pending: Vec<(bool, usize, &Env, Blake3Hash)> = Vec::new();
+            let mut pending: Vec<PendingRead<'_, '_, Key, Value, Env>> = Vec::new();
             if reads == Reads::Eager {
                 for (is_target, offset, storage, hash) in source
                     .unloaded()
-                    .map(|(offset, hash)| (false, offset, source_storage, hash))
+                    .map(|(offset, hash)| (false, offset, &source_storage, hash))
                     .chain(
                         target
                             .unloaded()
-                            .map(|(offset, hash)| (true, offset, target_storage, hash)),
+                            .map(|(offset, hash)| (true, offset, &target_storage, hash)),
                     )
                 {
                     if attempted.insert(hash.clone()) {
@@ -2759,7 +2787,7 @@ where
                     SparseTreeNode::Loaded { node, .. } => node.clone(),
                     SparseTreeNode::Ref(link) | SparseTreeNode::Pending { link, .. } => {
                         match SparseTree::<Key, Value, Env>::try_load(
-                            self.target.storage,
+                            &self.target.storage,
                             &link.node,
                             self.target.missing,
                         )
@@ -2806,14 +2834,16 @@ mod tests {
     use futures_util::stream::iter;
 
     use super::{Change, TreeDifference};
+    use crate::helpers::Blocks;
     use crate::helpers::{
-        JournaledBlocks, TestStorage, Traversable as _, TraversalOrder, TreeNodes as _,
+        JournaledBlocks, NodeStream as _, TestStorage, Traversable as _, TraversalOrder,
     };
+    use crate::reads::*;
     use crate::{
-        Buffer, Delta, Entry, Link, LoadBlock, Manifest, NoveltyEntry, NoveltyOp,
-        PersistentNodeBody, PersistentTree, Scale, tree_spec,
+        Buffer, Delta, Entry, Link, Manifest, NoveltyEntry, NoveltyOp, PersistentNodeBody,
+        PersistentTree, Scale, tree_spec,
     };
-    use crate::{MemoryBlocks, Traversable as _, Visit};
+    use crate::{Traversable as _, Visit};
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
@@ -2822,7 +2852,7 @@ mod tests {
     /// differentiation only loads blocks on differing paths.
     #[derive(Clone)]
     struct CountingBackend {
-        inner: MemoryBlocks,
+        inner: Blocks,
         reads: Arc<AtomicUsize>,
         /// The hash of every read, in order.
         journal: Arc<std::sync::Mutex<Vec<Blake3Hash>>>,
@@ -2831,7 +2861,7 @@ mod tests {
     impl CountingBackend {
         fn new() -> Self {
             Self {
-                inner: MemoryBlocks::new(),
+                inner: Blocks::new(),
                 reads: Arc::new(AtomicUsize::new(0)),
                 journal: Arc::default(),
             }
@@ -2862,22 +2892,48 @@ mod tests {
         }
     }
 
-    /// Keeps nothing, so every node read is a counted block read.
-    impl<Key, Value> crate::Nodes<Key, Value> for CountingBackend {}
-
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-    impl Provider<LoadBlock> for CountingBackend {
-        async fn execute(
-            &self,
-            load: LoadBlock,
-        ) -> Result<Option<Buffer>, crate::DialogSearchTreeError> {
+    impl CountingBackend {
+        fn count(&self, hash: &Blake3Hash) {
             self.reads.fetch_add(1, AtomicOrdering::Relaxed);
             self.journal
                 .lock()
                 .expect("journal lock")
-                .push(load.hash.clone());
+                .push(hash.clone());
+        }
+    }
+
+    /// Holds nothing, so every node read is a counted block read.
+    impl dialog_common::Holds for CountingBackend {
+        fn held(&self, _key: &str) -> Option<dialog_common::Held> {
+            None
+        }
+
+        fn hold(&self, _key: String, _handle: dialog_common::Held) {}
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    impl Provider<Load> for CountingBackend {
+        async fn execute(
+            &self,
+            load: Load,
+        ) -> Result<Option<Buffer>, dialog_effects::archive::ArchiveError> {
+            self.count(&load.digest);
             load.perform(&self.inner).await
+        }
+    }
+
+    /// A [`Get`] is a read of the block too, and counts as one.
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    impl Provider<Get> for CountingBackend {
+        async fn execute(
+            &self,
+            get: dialog_capability::Capability<Get>,
+        ) -> Result<Option<Vec<u8>>, dialog_effects::archive::ArchiveError> {
+            use dialog_effects::archive::prelude::GetExt as _;
+            self.count(get.digest());
+            get.perform(&self.inner).await
         }
     }
 
@@ -2887,7 +2943,7 @@ mod tests {
         keys: impl IntoIterator<Item = (u32, Vec<u8>)>,
         storage: &mut CountingBackend,
     ) -> Result<TestTree> {
-        let mut tree = TestTree::empty();
+        let mut tree = TestTree::empty_in(crate::helpers::test_catalog());
         let mut delta = Delta::zero();
         for (key, value) in keys {
             tree = tree
@@ -2912,12 +2968,19 @@ mod tests {
         manifest: Manifest,
         storage: &mut CountingBackend,
     ) -> Result<TestTree> {
-        let mut tree = TestTree::empty();
+        let mut tree = TestTree::empty_in(crate::helpers::test_catalog());
         let mut delta = Delta::zero();
         for (key, value) in keys {
             let edit = match tree.stored_root() {
-                Some(root) => crate::TransientTree::with_manifest(root.clone(), manifest.clone()),
-                None => crate::TransientTree::empty_with_manifest(manifest.clone()),
+                Some(root) => crate::TransientTree::with_manifest(
+                    crate::helpers::test_catalog(),
+                    root.clone(),
+                    manifest.clone(),
+                ),
+                None => crate::TransientTree::empty_with_manifest(
+                    crate::helpers::test_catalog(),
+                    manifest.clone(),
+                ),
             };
             tree = edit
                 .insert(key.to_le_bytes(), value, storage)
@@ -3087,8 +3150,10 @@ mod tests {
             ..Manifest::default()
         };
 
-        let mut edit =
-            crate::TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(custom.clone());
+        let mut edit = crate::TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(
+            crate::helpers::test_catalog(),
+            custom.clone(),
+        );
         for k in 0..30u32 {
             edit = edit
                 .insert(k.to_le_bytes(), vec![k as u8], &storage)
@@ -3099,8 +3164,11 @@ mod tests {
         flush(&mut delta, &mut storage).await?;
 
         let mut delta = Delta::zero();
-        let emptied = crate::TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(custom)
-            .persist(&mut delta, &storage)?;
+        let emptied = crate::TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(
+            crate::helpers::test_catalog(),
+            custom,
+        )
+        .persist(&mut delta, &storage)?;
         flush(&mut delta, &mut storage).await?;
 
         let adds = collect_changes(&emptied, &populated, &storage).await?;
@@ -3164,7 +3232,7 @@ mod tests {
         for (_, buffer) in delta.flush() {
             storage.store(buffer);
         }
-        Ok(TestTree::seal(root))
+        Ok(TestTree::seal(crate::helpers::test_catalog(), root))
     }
 
     /// Applies `ops` to a buffered tree over `base` and canonicalizes it, so the
@@ -3543,7 +3611,7 @@ mod tests {
 
         #[derive(Clone)]
         struct GaugeBackend {
-            inner: MemoryBlocks,
+            inner: Blocks,
             in_flight: Arc<AtomicUsize>,
             max_in_flight: Arc<AtomicUsize>,
         }
@@ -3554,16 +3622,22 @@ mod tests {
             }
         }
 
-        /// Keeps nothing, so every node read is a counted block read.
-        impl<Key, Value> crate::Nodes<Key, Value> for GaugeBackend {}
+        /// Holds nothing, so every node read is a gauged block read.
+        impl dialog_common::Holds for GaugeBackend {
+            fn held(&self, _key: &str) -> Option<dialog_common::Held> {
+                None
+            }
+
+            fn hold(&self, _key: String, _handle: dialog_common::Held) {}
+        }
 
         #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
         #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-        impl Provider<LoadBlock> for GaugeBackend {
+        impl Provider<Load> for GaugeBackend {
             async fn execute(
                 &self,
-                load: LoadBlock,
-            ) -> Result<Option<Buffer>, crate::DialogSearchTreeError> {
+                load: Load,
+            ) -> Result<Option<Buffer>, dialog_effects::archive::ArchiveError> {
                 let now = self.in_flight.fetch_add(1, AtomicOrdering::Relaxed) + 1;
                 self.max_in_flight.fetch_max(now, AtomicOrdering::Relaxed);
                 YieldOnce(false).await;
@@ -3573,15 +3647,31 @@ mod tests {
             }
         }
 
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        impl Provider<Get> for GaugeBackend {
+            async fn execute(
+                &self,
+                get: dialog_capability::Capability<Get>,
+            ) -> Result<Option<Vec<u8>>, dialog_effects::archive::ArchiveError> {
+                let now = self.in_flight.fetch_add(1, AtomicOrdering::Relaxed) + 1;
+                self.max_in_flight.fetch_max(now, AtomicOrdering::Relaxed);
+                YieldOnce(false).await;
+                let result = get.perform(&self.inner).await;
+                self.in_flight.fetch_sub(1, AtomicOrdering::Relaxed);
+                result
+            }
+        }
+
         let in_flight = Arc::new(AtomicUsize::new(0));
         let max_in_flight = Arc::new(AtomicUsize::new(0));
         let storage = GaugeBackend {
-            inner: MemoryBlocks::new(),
+            inner: Blocks::new(),
             in_flight: in_flight.clone(),
             max_in_flight: max_in_flight.clone(),
         };
 
-        let mut tree = TestTree::empty();
+        let mut tree = TestTree::empty_in(crate::helpers::test_catalog());
         let mut delta = Delta::zero();
         for key in 0..2000u32 {
             tree = tree
@@ -3745,8 +3835,13 @@ mod tests {
         // A "remote" that already has the base tree.
         let remote = CountingBackend::new();
         {
-            let difference =
-                TreeDifference::compute(&TestTree::empty(), &base, &storage, &storage).await?;
+            let difference = TreeDifference::compute(
+                &TestTree::empty_in(crate::helpers::test_catalog()),
+                &base,
+                &storage,
+                &storage,
+            )
+            .await?;
             let nodes = difference.novel_nodes();
             futures_util::pin_mut!(nodes);
             while let Some(node) = nodes.next().await {
@@ -3768,7 +3863,7 @@ mod tests {
         assert!(uploaded > 0, "extension must produce novel nodes");
 
         // The remote can now read the full extended tree.
-        let restored = TestTree::from_hash(extended.root().clone());
+        let restored = TestTree::at(crate::helpers::test_catalog(), extended.root().clone());
         for (key, value) in (0..1020u32).map(|i| (i, vec![i as u8])) {
             assert_eq!(
                 restored.get(&key.to_le_bytes(), &remote).await?,
@@ -3777,6 +3872,131 @@ mod tests {
             );
         }
 
+        Ok(())
+    }
+
+    /// A replica that holds only what it minted, over an environment that
+    /// hydrates a local miss from an origin holding everything.
+    struct Hydrating {
+        local: Blocks,
+        origin: Blocks,
+        hydrated: Arc<AtomicUsize>,
+    }
+
+    impl dialog_common::Holds for Hydrating {
+        fn held(&self, _key: &str) -> Option<dialog_common::Held> {
+            None
+        }
+
+        fn hold(&self, _key: String, _handle: dialog_common::Held) {}
+    }
+
+    /// A load reads the local blocks, else fetches from the origin.
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    impl Provider<Load> for Hydrating {
+        async fn execute(
+            &self,
+            load: Load,
+        ) -> Result<Option<Buffer>, dialog_effects::archive::ArchiveError> {
+            if let Some(block) = self.local.get(&load.digest) {
+                return Ok(Some(block));
+            }
+            let fetched = self.origin.get(&load.digest);
+            if fetched.is_some() {
+                self.hydrated.fetch_add(1, AtomicOrdering::Relaxed);
+            }
+            Ok(fetched)
+        }
+    }
+
+    /// A get reads the local blocks and nothing else.
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    impl Provider<Get> for Hydrating {
+        async fn execute(
+            &self,
+            get: dialog_capability::Capability<Get>,
+        ) -> Result<Option<Vec<u8>>, dialog_effects::archive::ArchiveError> {
+            get.perform(&self.local).await
+        }
+    }
+
+    /// A [`MissingBlocks::Boundary`] side asks whether the local archive
+    /// holds each block, so it performs `Get` and never `Load`: over an
+    /// environment that would hydrate every miss, the walk still stops at
+    /// what the replica holds and reports exactly what it minted, and not
+    /// one block is fetched to answer it. The same walk under the default
+    /// policy loads, and so hydrates the blocks it needs.
+    #[dialog_common::test]
+    async fn it_never_hydrates_a_boundary_read() -> Result<()> {
+        use super::{MissingBlocks, MissingPolicy};
+
+        let mut origin = CountingBackend::new();
+        let entries: Vec<(u32, Vec<u8>)> = (0..1000u32).map(|i| (i, vec![i as u8])).collect();
+        let base = build(entries, &mut origin).await?;
+        let mut extended = base.clone();
+        let mut delta = Delta::zero();
+        for i in 1000..1020u32 {
+            extended = extended
+                .edit()
+                .insert(i.to_le_bytes(), vec![i as u8], &origin)
+                .await?
+                .persist(&mut delta, &origin)?;
+            for (_, buffer) in delta.flush() {
+                origin.store(buffer);
+            }
+        }
+
+        let device = Hydrating {
+            local: Blocks::new(),
+            origin: origin.inner.clone(),
+            hydrated: Arc::new(AtomicUsize::new(0)),
+        };
+        let mut minted: HashSet<Blake3Hash> = HashSet::new();
+        {
+            let difference = TreeDifference::compute(&base, &extended, &origin, &origin).await?;
+            let nodes = difference.novel_nodes();
+            futures_util::pin_mut!(nodes);
+            while let Some(node) = nodes.next().await {
+                let node = node?;
+                minted.insert(node.hash().clone());
+                device.local.store(node.buffer().clone());
+            }
+        }
+
+        let difference = TreeDifference::compute_with(
+            &base,
+            &extended,
+            &device,
+            &device,
+            MissingPolicy {
+                source: MissingBlocks::Boundary,
+                target: MissingBlocks::Boundary,
+            },
+        )
+        .await?;
+        let nodes = difference.novel_nodes();
+        futures_util::pin_mut!(nodes);
+        let mut reported: HashSet<Blake3Hash> = HashSet::new();
+        while let Some(node) = nodes.next().await {
+            reported.insert(node?.hash().clone());
+        }
+        assert_eq!(
+            reported, minted,
+            "bounded novelty is what the replica holds"
+        );
+        assert_eq!(
+            device.hydrated.load(AtomicOrdering::Relaxed),
+            0,
+            "a boundary read never hydrates"
+        );
+
+        TreeDifference::compute(&base, &extended, &device, &device).await?;
+        assert!(
+            device.hydrated.load(AtomicOrdering::Relaxed) > 0,
+            "the default policy loads, and a load hydrates"
+        );
         Ok(())
     }
 
@@ -3858,8 +4078,13 @@ mod tests {
         // the whole extended tree — the same-remote push contract.
         let peer = CountingBackend::new();
         {
-            let difference =
-                TreeDifference::compute(&TestTree::empty(), &base, &origin, &origin).await?;
+            let difference = TreeDifference::compute(
+                &TestTree::empty_in(crate::helpers::test_catalog()),
+                &base,
+                &origin,
+                &origin,
+            )
+            .await?;
             let nodes = difference.novel_nodes();
             futures_util::pin_mut!(nodes);
             while let Some(node) = nodes.next().await {
@@ -3871,7 +4096,7 @@ mod tests {
             let block = device.get(hash).expect("reported node is held");
             peer.store(block);
         }
-        let restored = TestTree::from_hash(extended.root().clone());
+        let restored = TestTree::at(crate::helpers::test_catalog(), extended.root().clone());
         for (key, value) in (0..1020u32).map(|i| (i, vec![i as u8])) {
             assert_eq!(
                 restored.get(&key.to_le_bytes(), &peer).await?,
@@ -3883,13 +4108,13 @@ mod tests {
         Ok(())
     }
 
-    fn journaled_storage(backend: &MemoryBlocks) -> TestStorage {
+    fn journaled_storage(backend: &Blocks) -> TestStorage {
         JournaledBlocks::over(backend.clone())
     }
 
     #[dialog_common::test]
     async fn test_diff_shared_left_subtree() -> Result<()> {
-        let backend = MemoryBlocks::new();
+        let backend = Blocks::new();
         let storage_a = journaled_storage(&backend);
         let storage_b = journaled_storage(&backend);
 
@@ -3925,7 +4150,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn test_diff_fully_disjoint_trees() -> Result<()> {
-        let backend = MemoryBlocks::new();
+        let backend = Blocks::new();
         let storage = journaled_storage(&backend);
 
         // Scenario: Trees have completely different key ranges - NO shared segments
@@ -3959,7 +4184,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn test_diff_subset_superset() -> Result<()> {
-        let backend = MemoryBlocks::new();
+        let backend = Blocks::new();
         let storage_a = journaled_storage(&backend);
         let storage_b = journaled_storage(&backend);
 
@@ -3995,7 +4220,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn test_diff_single_key_change() -> Result<()> {
-        let backend = MemoryBlocks::new();
+        let backend = Blocks::new();
         let storage_a = journaled_storage(&backend);
         let storage_b = journaled_storage(&backend);
 
@@ -4033,7 +4258,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn test_diff_different_heights() -> Result<()> {
-        let backend = MemoryBlocks::new();
+        let backend = Blocks::new();
         let storage_a = journaled_storage(&backend);
         let storage_b = journaled_storage(&backend);
 
@@ -4069,7 +4294,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn test_diff_different_heights_reverse() -> Result<()> {
-        let backend = MemoryBlocks::new();
+        let backend = Blocks::new();
         let storage_a = journaled_storage(&backend);
         let storage_b = journaled_storage(&backend);
 
@@ -4111,7 +4336,7 @@ mod tests {
     // incomplete store, the second a damaged one.
     #[dialog_common::test]
     async fn it_reports_absent_nodes_instead_of_failing() -> Result<()> {
-        let backend = MemoryBlocks::new();
+        let backend = Blocks::new();
         let storage = journaled_storage(&backend);
         let spec = tree_spec![
             [     ..e]
@@ -4141,7 +4366,7 @@ mod tests {
         // root is unreachable, so the walk reports exactly that and stops:
         // everything below an absent node is unreachable by definition, and
         // a gap-tolerant walk does not pretend otherwise.
-        let empty = MemoryBlocks::new();
+        let empty = Blocks::new();
         let elsewhere = journaled_storage(&empty);
         let visits: Vec<_> = spec.tree().traverse_available(&elsewhere).collect().await;
         assert_eq!(visits.len(), 1, "an unreachable root ends the walk");
@@ -4164,7 +4389,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_returns_all_target_nodes_when_source_is_empty() -> Result<()> {
         // When source is empty, all target nodes are novel
-        let backend = MemoryBlocks::new();
+        let backend = Blocks::new();
         let storage_source = journaled_storage(&backend);
         let storage_target = journaled_storage(&backend);
 
@@ -4210,7 +4435,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_returns_no_nodes_when_target_is_empty() -> Result<()> {
         // When target is empty, no nodes are novel
-        let backend = MemoryBlocks::new();
+        let backend = Blocks::new();
         let storage_source = journaled_storage(&backend);
         let storage_target = journaled_storage(&backend);
 
@@ -4249,7 +4474,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_returns_no_nodes_when_both_trees_are_empty() -> Result<()> {
-        let backend = MemoryBlocks::new();
+        let backend = Blocks::new();
         let storage_source = journaled_storage(&backend);
         let storage_target = journaled_storage(&backend);
 
@@ -4281,7 +4506,7 @@ mod tests {
         // root lazily, so not even the roots are read (the probabilistic search tree's
         // eager root load marked these as reads; the search tree improves
         // on that with a zero-read fast path).
-        let backend = MemoryBlocks::new();
+        let backend = Blocks::new();
         let storage_source = journaled_storage(&backend);
         let storage_target = journaled_storage(&backend);
 
@@ -4327,7 +4552,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_excludes_shared_subtrees_from_novel_nodes() -> Result<()> {
         // When trees share a subtree (same hash), that subtree is NOT novel
-        let backend = MemoryBlocks::new();
+        let backend = Blocks::new();
         let storage_source = journaled_storage(&backend);
         let storage_target = journaled_storage(&backend);
 
@@ -4396,7 +4621,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_handles_trees_with_different_heights() -> Result<()> {
         // Target taller than source
-        let backend = MemoryBlocks::new();
+        let backend = Blocks::new();
         let storage_source = journaled_storage(&backend);
         let storage_target = journaled_storage(&backend);
 
@@ -4472,7 +4697,7 @@ mod tests {
         //
         // IMPORTANT: Both trees must share the same backend so that identical
         // content produces identical hashes (content-addressed storage).
-        let backend = MemoryBlocks::new();
+        let backend = Blocks::new();
         let storage_source = journaled_storage(&backend);
         let storage_target = journaled_storage(&backend);
 
@@ -4525,7 +4750,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_returns_all_target_nodes_for_disjoint_trees() -> Result<()> {
         // Trees with completely different content - all target nodes are novel
-        let backend = MemoryBlocks::new();
+        let backend = Blocks::new();
         let storage_source = journaled_storage(&backend);
         let storage_target = journaled_storage(&backend);
 
@@ -4583,7 +4808,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_returns_unique_novel_nodes() -> Result<()> {
         // Verify that novel_nodes() never returns duplicates
-        let backend = MemoryBlocks::new();
+        let backend = Blocks::new();
         let storage_source = journaled_storage(&backend);
         let storage_target = journaled_storage(&backend);
 
@@ -4631,7 +4856,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_returns_novel_nodes_for_different_segments() -> Result<()> {
         // Simplest case: single segment trees with different content
-        let backend = MemoryBlocks::new();
+        let backend = Blocks::new();
         let storage_source = journaled_storage(&backend);
         let storage_target = journaled_storage(&backend);
 
@@ -4670,7 +4895,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_prunes_shared_deep_subtrees() -> Result<()> {
         // 3-level trees where the left subtree is shared but right differs
-        let backend = MemoryBlocks::new();
+        let backend = Blocks::new();
         let storage_source = journaled_storage(&backend);
         let storage_target = journaled_storage(&backend);
 
@@ -4840,7 +5065,7 @@ mod tests {
     async fn test_differentiate_empty_to_populated() -> Result<()> {
         let mut storage = CountingBackend::new();
         let tree1 = build([(1, vec![10]), (2, vec![20])], &mut storage).await?;
-        let tree2 = TestTree::empty();
+        let tree2 = TestTree::empty_in(crate::helpers::test_catalog());
 
         let changes = collect_changes(&tree2, &tree1, &storage).await?;
 
@@ -4860,7 +5085,7 @@ mod tests {
     #[dialog_common::test]
     async fn test_differentiate_populated_to_empty() -> Result<()> {
         let mut storage = CountingBackend::new();
-        let tree1 = TestTree::empty();
+        let tree1 = TestTree::empty_in(crate::helpers::test_catalog());
         let tree2 = build([(1, vec![10]), (2, vec![20])], &mut storage).await?;
 
         let changes = collect_changes(&tree2, &tree1, &storage).await?;
@@ -4911,8 +5136,8 @@ mod tests {
     #[dialog_common::test]
     async fn test_differentiate_both_empty() -> Result<()> {
         let storage = CountingBackend::new();
-        let tree1 = TestTree::empty();
-        let tree2 = TestTree::empty();
+        let tree1 = TestTree::empty_in(crate::helpers::test_catalog());
+        let tree2 = TestTree::empty_in(crate::helpers::test_catalog());
 
         let changes = collect_changes(&tree2, &tree1, &storage).await?;
         assert_eq!(changes.len(), 0, "Both empty trees should have no changes");
@@ -5200,7 +5425,7 @@ mod tests {
 
         // Both replicas exchange their changes (relative to an empty tree,
         // so each side ships its full state as adds).
-        let empty_tree = TestTree::empty();
+        let empty_tree = TestTree::empty_in(crate::helpers::test_catalog());
         let changes_a = collect_changes(&empty_tree, &tree_a, &storage).await?;
         let changes_b = collect_changes(&empty_tree, &tree_b, &storage).await?;
 
@@ -5243,7 +5468,7 @@ mod tests {
     async fn test_roundtrip_empty_to_populated() -> Result<()> {
         let mut storage = CountingBackend::new();
         let target = build([(1, vec![10]), (2, vec![20]), (3, vec![30])], &mut storage).await?;
-        let mut start = TestTree::empty();
+        let mut start = TestTree::empty_in(crate::helpers::test_catalog());
 
         let changes = collect_changes(&start, &target, &storage).await?;
         let mut delta = Delta::zero();
@@ -5267,7 +5492,7 @@ mod tests {
     #[dialog_common::test]
     async fn test_roundtrip_populated_to_empty() -> Result<()> {
         let mut storage = CountingBackend::new();
-        let target = TestTree::empty();
+        let target = TestTree::empty_in(crate::helpers::test_catalog());
         let mut start = build([(1, vec![10]), (2, vec![20]), (3, vec![30])], &mut storage).await?;
 
         let changes = collect_changes(&start, &target, &storage).await?;
@@ -5392,7 +5617,7 @@ mod tests {
         for (_, buffer) in delta.flush() {
             storage.store(buffer);
         }
-        Ok(TestTree::seal(root))
+        Ok(TestTree::seal(crate::helpers::test_catalog(), root))
     }
 
     /// A fact buffered at the root must sync without descending the tree.
@@ -5558,7 +5783,7 @@ mod tests {
                 [if i % 2 == 0 { 1 } else { 5 }, b[1], b[2], b[3]]
             })
             .collect();
-        let mut base = TestTree::empty();
+        let mut base = TestTree::empty_in(crate::helpers::test_catalog());
         let mut delta = Delta::zero();
         for key in &base_keys {
             base = base
@@ -5582,7 +5807,7 @@ mod tests {
         for (_, buffer) in delta.flush() {
             storage.store(buffer);
         }
-        let next = TestTree::from_hash(root);
+        let next = TestTree::at(crate::helpers::test_catalog(), root);
 
         for (tag, key) in [(1u8, in_tag_1), (5u8, in_tag_5)] {
             let scope = [[tag, 0, 0, 0]..=[tag, 0xFF, 0xFF, 0xFF]];
@@ -5685,7 +5910,7 @@ mod tests {
                 [0x10, b[1], b[2], b[3]]
             })
             .collect();
-        let mut base = TestTree::empty();
+        let mut base = TestTree::empty_in(crate::helpers::test_catalog());
         let mut delta = Delta::zero();
         for key in &base_keys {
             base = base
@@ -5711,7 +5936,7 @@ mod tests {
             for (_, buffer) in delta.flush() {
                 storage.store(buffer);
             }
-            TestTree::from_hash(root)
+            TestTree::at(crate::helpers::test_catalog(), root)
         };
 
         // Scope covering only the beyond-the-bound region.
@@ -5819,7 +6044,7 @@ mod tests {
                 tree.canonicalize(storage, &mut delta).await?
             } else {
                 let root = tree.persist(&mut delta, storage)?;
-                TestTree::seal(root)
+                TestTree::seal(crate::helpers::test_catalog(), root)
             };
             settle(&mut delta, storage).await?;
             Ok(result)
@@ -5901,7 +6126,7 @@ mod tests {
         keys: impl IntoIterator<Item = ([u8; 4], Vec<u8>)>,
         storage: &mut CountingBackend,
     ) -> Result<TestTree> {
-        let mut tree = TestTree::empty();
+        let mut tree = TestTree::empty_in(crate::helpers::test_catalog());
         let mut delta = Delta::zero();
         for (key, value) in keys {
             tree = tree
@@ -5935,7 +6160,7 @@ mod tests {
         for (_, buffer) in delta.flush() {
             storage.store(buffer);
         }
-        Ok(TestTree::seal(root))
+        Ok(TestTree::seal(crate::helpers::test_catalog(), root))
     }
 
     async fn canonical_bytes(
@@ -6425,8 +6650,13 @@ mod tests {
             // A "remote" seeded with the whole base tree.
             let remote = CountingBackend::new();
             {
-                let difference =
-                    TreeDifference::compute(&TestTree::empty(), &base, &storage, &storage).await?;
+                let difference = TreeDifference::compute(
+                    &TestTree::empty_in(crate::helpers::test_catalog()),
+                    &base,
+                    &storage,
+                    &storage,
+                )
+                .await?;
                 let stream = difference.novel_nodes();
                 futures_util::pin_mut!(stream);
                 while let Some(node) = stream.next().await {
@@ -6456,7 +6686,7 @@ mod tests {
                     .try_collect::<Vec<_>>()
                     .await?
             };
-            let restored = TestTree::from_hash(target.root().clone());
+            let restored = TestTree::at(crate::helpers::test_catalog(), target.root().clone());
             let actual: Vec<([u8; 4], Vec<u8>)> = {
                 let stream = restored.stream(&remote);
                 futures_util::pin_mut!(stream);
@@ -6507,7 +6737,7 @@ mod tests {
         let root = Buffer::from(root.as_bytes()?);
         let hash = root.blake3_hash().clone();
         storage.store(root);
-        Ok(TestTree::from_hash(hash))
+        Ok(TestTree::at(crate::helpers::test_catalog(), hash))
     }
 
     fn assert_op(key: [u8; 4], value: Vec<u8>) -> NoveltyEntry<Vec<u8>> {
@@ -7603,7 +7833,7 @@ mod tests {
             while let Some(node) = nodes.next().await {
                 remote.store(node?.buffer().clone());
             }
-            let restored = TestTree::from_hash(target.root().clone());
+            let restored = TestTree::at(crate::helpers::test_catalog(), target.root().clone());
             for (at, value) in &target_values {
                 assert_eq!(
                     &restored.get(at, &remote).await?,
@@ -7716,7 +7946,10 @@ mod tests {
         };
         let base: TestTree;
         {
-            let mut edit = crate::TransientTree::empty_with_manifest(manifest.clone());
+            let mut edit = crate::TransientTree::empty_with_manifest(
+                crate::helpers::test_catalog(),
+                manifest.clone(),
+            );
             for i in 0..120_000u32 {
                 edit = edit
                     .insert(i.to_le_bytes(), vec![(i % 251) as u8], &storage)
