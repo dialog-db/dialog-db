@@ -14,6 +14,38 @@ says how to cut a release.
 
 ## Unreleased
 
+### A request the access service never answers is given up on, and a read is sent again
+
+[#727](https://github.com/dialog-db/dialog-db/pull/727)
+
+An invocation `dialog-remote-ucan` sends as an HTTP request (every one
+when the service names no socket, a block read or write, or the fallback
+when the socket does not connect) waited for its answer with no bound.
+One sent on a pooled connection the network had silently dropped, as a
+NAT or a mobile network does a quiet one, was never answered and never
+failed. It now waits as long as an invocation over the socket waits
+(`Liveness::answer`, 30 s by default), plus the time its payload takes
+to upload at 16 KiB/s, and is then aborted and answered as unavailable.
+
+What this changes for you:
+
+- A memory operation sent this way that the service does not begin
+  answering in time fails with `Rejection::Unavailable`, as one over a
+  silent socket already did; a blob read or write fails with a transport
+  error. Either may be tried again with an invocation of its own.
+- `UcanSite::with_liveness` now bounds these requests too.
+- A block or blob read the service has not begun answering after 3 s
+  is sent again, up to seven copies (one more than the connections a
+  browser keeps to one host), and the first answer is taken. A
+  read that met connections the network forgot is answered in seconds
+  rather than failing after 30 s each. The copies carry one invocation,
+  so a service may see it presented more than once; the refusal of a
+  copy as replayed is not taken for the read's answer.
+
+Why: in tonk, a sync whose request was lost this way held the sync of
+every space behind it, so after a few minutes idle on a NATed network,
+changes from another device stopped arriving until the page reloaded.
+
 ### A rule's conclusion under `last` succeeds the claim its body read
 
 Fixes [#724](https://github.com/dialog-db/dialog-db/issues/724)

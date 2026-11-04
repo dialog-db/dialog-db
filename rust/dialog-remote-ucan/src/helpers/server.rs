@@ -67,9 +67,10 @@ struct ServerState {
     faulted: std::sync::atomic::AtomicUsize,
 }
 
-/// A failure the service's socket plays out, so a test can see what a
-/// client does when its connection fails the ways real ones do. The
-/// service's endpoint answers requests as always.
+/// A failure the service plays out, so a test can see what a client does
+/// when its connection fails the ways real ones do. Each fails the socket
+/// but [`Fault::Unanswered`], which fails the endpoint, and the other
+/// answers as always.
 #[derive(Debug, Clone, Default)]
 pub enum Fault {
     /// Nothing fails.
@@ -100,9 +101,40 @@ pub enum Fault {
         /// How many publishes are lost.
         times: usize,
     },
+    /// `times` requests to the endpoint, beginning with the one numbered
+    /// `from` (the first is 0), are read and never answered, their
+    /// connection held open: requests sent on pooled connections the
+    /// network forgot, as a NAT does quiet ones.
+    Unanswered {
+        /// How many requests are answered before the first that is not.
+        from: usize,
+        /// How many requests go unanswered.
+        times: usize,
+    },
+    /// `times` requests to the endpoint, beginning with the one numbered
+    /// `from`, are carried out at once and answered `by` later: a service
+    /// that is slow, not gone.
+    Slow {
+        /// How many requests are answered at once before the first that
+        /// is slow.
+        from: usize,
+        /// How many requests are slow.
+        times: usize,
+        /// How long each waits for its answer.
+        by: std::time::Duration,
+    },
 }
 
 impl ServerState {
+    /// Whether the request to the endpoint arriving now is one of the
+    /// `times` beginning with the one numbered `from`.
+    fn numbered(&self, from: usize, times: usize) -> bool {
+        let request = self
+            .faulted
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        (from..from + times).contains(&request)
+    }
+
     /// Whether the fault is played out once more.
     fn fault_again(&self, times: usize) -> bool {
         self.faulted
@@ -600,6 +632,25 @@ async fn handle(
     if req.method() == Method::OPTIONS {
         return Ok(respond(StatusCode::NO_CONTENT).body(body("")).unwrap());
     }
+    match state.fault {
+        Fault::Unanswered { from, times } if state.numbered(from, times) => {
+            return std::future::pending().await;
+        }
+        Fault::Slow { from, times, by } if state.numbered(from, times) => {
+            let response = serve(req, state).await;
+            tokio::time::sleep(by).await;
+            return response;
+        }
+        _ => {}
+    }
+    serve(req, state).await
+}
+
+/// Answer a request to the endpoint.
+async fn serve(
+    req: Request<Incoming>,
+    state: Arc<ServerState>,
+) -> Result<Response<Body>, Infallible> {
     if req.method() != Method::POST {
         return Ok(respond(StatusCode::METHOD_NOT_ALLOWED)
             .body(body("Method not allowed"))
