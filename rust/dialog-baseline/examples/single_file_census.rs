@@ -38,16 +38,32 @@
 //! commits is visible as well as the size. After the last checkpoint the
 //! census times reading every live node back under each model.
 //!
+//! It reads its blocks from one of two places:
+//!
+//! - **a replay** (`<commits> [checkpoints]`): the first `commits`
+//!   Stack Exchange commits, through an in-memory branch, with the commit
+//!   that wrote each block known exactly.
+//! - **an archive directory** (`archive <directory> [checkpoints]`): a
+//!   real replica's file-per-block store, every file under the directory.
+//!   The commit order is reconstructed from the files (see [`scan`]), so
+//!   point it at a replica that wrote its own history. `disk <commits>`
+//!   writes a replay to disk for checking this mode against the replay.
+//!
+//! Checkpoints count commits; they default to every quarter.
+//!
 //! ```sh
 //! DIALOG_SE_CSV=path/to/retro-facts.csv cargo run --release -p dialog-baseline \
 //!   --example single_file_census -- 4096 512,1024,2048,4096
+//! cargo run --release -p dialog-baseline --example single_file_census -- \
+//!   archive path/to/replica/archive
 //! ```
 
 use std::collections::{HashMap, HashSet};
 use std::io::Write as _;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use dialog_artifacts::{
     ATTRIBUTE_KEY_TAG, BLOB_KEY_TAG, Datum, ENTITY_KEY_TAG, Key, State, VALUE_KEY_TAG,
@@ -83,7 +99,7 @@ const FORM_OPAQUE: u8 = 0xFE;
 /// One distinct block the archive was asked to store.
 struct Written {
     hash: Blake3Hash,
-    bytes: Vec<u8>,
+    bytes: Buffer,
     commit: usize,
 }
 
@@ -97,12 +113,13 @@ struct Recorder {
 
 impl Meter for Recorder {
     fn wrote(&self, block: &[u8]) {
-        let hash = Buffer::from(block.to_vec()).blake3_hash().clone();
+        let bytes = Buffer::from(block.to_vec());
+        let hash = bytes.blake3_hash().clone();
         let mut blocks = self.blocks.lock().expect("recorder lock");
         if blocks.0.insert(hash.clone()) {
             blocks.1.push(Written {
                 hash,
-                bytes: block.to_vec(),
+                bytes,
                 commit: self.commit.load(Ordering::Relaxed),
             });
         }
@@ -539,13 +556,23 @@ struct Totals {
     token_index: usize,
     frames: usize,
     frames_zstd: usize,
+    /// Blocks that are not tree nodes, which every model stores as they
+    /// are.
+    other_blocks: usize,
+    other_bytes: usize,
 }
 
 impl Totals {
     /// The idea's file with frames that weigh `frames`: the tokens and
     /// their dictionary, the frames, and the get-by-hash index.
     fn tokenized(&self, frames: usize) -> usize {
-        self.tokens + self.token_index + frames + self.blocks * FRAME_INDEX
+        let nodes = self.blocks - self.other_blocks;
+        self.tokens
+            + self.token_index
+            + frames
+            + nodes * FRAME_INDEX
+            + self.other_bytes
+            + self.other_blocks * HASH_INDEX
     }
 }
 
@@ -645,20 +672,29 @@ fn row(
     ))
 }
 
-fn main() -> anyhow::Result<()> {
-    let count: usize = std::env::args()
-        .nth(1)
-        .and_then(|raw| raw.parse().ok())
-        .unwrap_or(2048);
-    let mut checkpoints: Vec<usize> = std::env::args()
-        .nth(2)
-        .map(|raw| raw.split(',').filter_map(|n| n.parse().ok()).collect())
-        .unwrap_or_else(|| vec![count]);
-    checkpoints.retain(|&point| point <= count);
-    if checkpoints.last() != Some(&count) {
-        checkpoints.push(count);
-    }
+/// The blocks a census measures, in the order a single-file writer would
+/// append them, with the root of every commit and every block that parses
+/// as a tree node.
+struct Source {
+    blocks: Vec<Written>,
+    roots: Vec<Blake3Hash>,
+    nodes: HashMap<Blake3Hash, TreeNode>,
+}
 
+fn parse_nodes<'a>(blocks: impl IntoIterator<Item = &'a Written>) -> HashMap<Blake3Hash, TreeNode> {
+    blocks
+        .into_iter()
+        .filter_map(|block| {
+            TreeNode::try_from(block.bytes.clone())
+                .ok()
+                .map(|node| (block.hash.clone(), node))
+        })
+        .collect()
+}
+
+/// Replays the first `count` Stack Exchange commits through an in-memory
+/// branch, recording every block its archive is asked to store.
+fn replay(count: usize) -> anyhow::Result<Source> {
     let log = SeLog::load(count)?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -687,15 +723,212 @@ fn main() -> anyhow::Result<()> {
         log.fact_count(),
         started.elapsed().as_secs_f64()
     );
-
     let written = std::mem::take(&mut recorder.blocks.lock().expect("recorder lock").1);
-    let mut nodes: HashMap<Blake3Hash, TreeNode> = HashMap::new();
-    for block in &written {
-        let node = TreeNode::try_from(Buffer::from(block.bytes.clone()))
-            .map_err(|error| anyhow::anyhow!("block {} is not a tree node: {error}", block.hash))?;
-        nodes.insert(block.hash.clone(), node);
+    let nodes = parse_nodes(&written);
+    if let Some(block) = written
+        .iter()
+        .find(|block| !nodes.contains_key(&block.hash))
+    {
+        anyhow::bail!("block {} is not a tree node", block.hash);
     }
     let blocks = children_first(written, &nodes)?;
+    Ok(Source {
+        blocks,
+        roots,
+        nodes,
+    })
+}
+
+/// Replays the first `count` Stack Exchange commits into a file-per-block
+/// repository on disk and prints where it is, so the `archive` mode can be
+/// checked against the replay it came from.
+fn write_disk(count: usize) -> anyhow::Result<()> {
+    let log = SeLog::load(count)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async {
+        let repo = DialogRepo::temp().await?;
+        repo.replay_se(&log).await?;
+        anyhow::Ok(())
+    })?;
+    println!("{}", dialog_storage::temp_storage_base().display());
+    Ok(())
+}
+
+/// Every regular file under `directory`, with its modification time.
+fn files(directory: &Path) -> anyhow::Result<Vec<(PathBuf, SystemTime)>> {
+    let mut out = Vec::new();
+    let mut pending = vec![directory.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(&directory)? {
+            let entry = entry?;
+            let kind = entry.file_type()?;
+            if kind.is_dir() {
+                pending.push(entry.path());
+            } else if kind.is_file() {
+                out.push((entry.path(), entry.metadata()?.modified()?));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Reads a file-per-block archive directory as it stands: every block the
+/// replica ever stored. Nothing records which commit wrote a block, so the
+/// order is reconstructed. A commit's root is a tree node no other node
+/// links to, and roots are taken in the order their files were written;
+/// each root's nodes are appended children first, the first time any root
+/// reaches them. Blocks that are not tree nodes (and anything else under
+/// the directory) are kept as they are, after the commit their file
+/// follows. A replica that pulled its history in from a peer wrote those
+/// files when it pulled, not when they were committed, so its order is
+/// only as good as its file times.
+fn scan(directory: &Path) -> anyhow::Result<Source> {
+    let started = Instant::now();
+    let mut seen: HashSet<Blake3Hash> = HashSet::new();
+    let mut read: Vec<(Written, SystemTime)> = Vec::new();
+    for (path, modified) in files(directory)? {
+        let bytes = Buffer::from(std::fs::read(&path)?);
+        let hash = bytes.blake3_hash().clone();
+        if seen.insert(hash.clone()) {
+            read.push((
+                Written {
+                    hash,
+                    bytes,
+                    commit: 0,
+                },
+                modified,
+            ));
+        }
+    }
+    let nodes = parse_nodes(read.iter().map(|(block, _)| block));
+
+    let mut linked: HashSet<Blake3Hash> = HashSet::new();
+    for node in nodes.values() {
+        if let NodeBody::Index(index) = node.body() {
+            for at in 0..index.len() {
+                linked.insert(index.hash_at(at)?.clone());
+            }
+        }
+    }
+    let modified: HashMap<Blake3Hash, SystemTime> = read
+        .iter()
+        .map(|(block, time)| (block.hash.clone(), *time))
+        .collect();
+    let mut roots: Vec<Blake3Hash> = nodes
+        .keys()
+        .filter(|hash| !linked.contains(*hash))
+        .cloned()
+        .collect();
+    roots.sort_by(|a, b| {
+        modified[a]
+            .cmp(&modified[b])
+            .then_with(|| a.as_bytes().cmp(b.as_bytes()))
+    });
+    let root_times: Vec<SystemTime> = roots.iter().map(|root| modified[root]).collect();
+
+    // The commit each block belongs to: for a node, the first root that
+    // reaches it; for anything else, the last root written before it.
+    let mut commit_of: HashMap<Blake3Hash, (usize, usize)> = HashMap::new();
+    let mut sequence = 0usize;
+    for (at, root) in roots.iter().enumerate() {
+        let mut stack = vec![(root.clone(), false)];
+        while let Some((hash, expanded)) = stack.pop() {
+            if commit_of.contains_key(&hash) {
+                continue;
+            }
+            if expanded {
+                commit_of.insert(hash, (at + 1, sequence));
+                sequence += 1;
+                continue;
+            }
+            stack.push((hash.clone(), true));
+            if let Some(NodeBody::Index(index)) = nodes.get(&hash).map(TreeNode::body) {
+                for child in 0..index.len() {
+                    stack.push((index.hash_at(child)?.clone(), false));
+                }
+            }
+        }
+    }
+    let mut blocks: Vec<(usize, usize, Written)> = read
+        .into_iter()
+        .map(|(mut block, time)| {
+            let (commit, order) = commit_of.get(&block.hash).copied().unwrap_or_else(|| {
+                let commit = root_times.partition_point(|root| *root <= time).max(1);
+                (commit, usize::MAX)
+            });
+            block.commit = commit;
+            (commit, order, block)
+        })
+        .collect();
+    blocks.sort_by_key(|(commit, order, _)| (*commit, *order));
+    let blocks: Vec<Written> = blocks.into_iter().map(|(_, _, block)| block).collect();
+    eprintln!(
+        "scanned {}: {} blocks, {} tree nodes, {} roots, in {:.1}s",
+        directory.display(),
+        blocks.len(),
+        nodes.len(),
+        roots.len(),
+        started.elapsed().as_secs_f64()
+    );
+    Ok(Source {
+        blocks,
+        roots,
+        nodes,
+    })
+}
+
+/// Parses `raw` as a comma-separated list of commit counts, kept within
+/// `count` and ending at it.
+fn checkpoints(raw: Option<String>, count: usize) -> Vec<usize> {
+    let mut points: Vec<usize> = match raw {
+        Some(raw) => raw.split(',').filter_map(|n| n.parse().ok()).collect(),
+        None => (1..=4).map(|quarter| count * quarter / 4).collect(),
+    };
+    points.retain(|&point| point > 0 && point <= count);
+    points.dedup();
+    if points.last() != Some(&count) {
+        points.push(count);
+    }
+    points
+}
+
+fn main() -> anyhow::Result<()> {
+    let mut args = std::env::args().skip(1);
+    let first = args.next().unwrap_or_else(|| "2048".into());
+    let (source, points) = match first.as_str() {
+        "archive" => {
+            let directory = args
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("usage: archive <directory> [checkpoints]"))?;
+            let source = scan(Path::new(&directory))?;
+            let count = source.roots.len();
+            (source, checkpoints(args.next(), count))
+        }
+        "disk" => {
+            let count = args.next().and_then(|raw| raw.parse().ok()).unwrap_or(2048);
+            return write_disk(count);
+        }
+        _ => {
+            let count: usize = first.parse()?;
+            let source = replay(count)?;
+            let count = source.roots.len();
+            (source, checkpoints(args.next(), count))
+        }
+    };
+    measure(source, &points)
+}
+
+/// Runs every model over `source`, reporting at each of `checkpoints`,
+/// then checks every frame realizes to its block and times reads.
+fn measure(source: Source, checkpoints: &[usize]) -> anyhow::Result<()> {
+    let Source {
+        blocks,
+        roots,
+        nodes,
+    } = source;
+    anyhow::ensure!(!roots.is_empty(), "no tree roots to measure");
     let position: HashMap<Blake3Hash, usize> = blocks
         .iter()
         .enumerate()
@@ -756,31 +989,30 @@ fn main() -> anyhow::Result<()> {
         let Some(block) = block else {
             break;
         };
-        let len = block.bytes.len();
+        let bytes = block.bytes.as_ref();
+        let len = bytes.len();
         totals.blocks += 1;
         totals.content += len;
         totals.fs_allocated += len.div_ceil(FS_BLOCK).max(1) * FS_BLOCK;
         totals.log += len + HASH_INDEX;
-        stream.write_all(&block.bytes)?;
-        let alone = zstd_alone(&block.bytes)?;
+        stream.write_all(bytes)?;
+        let alone = zstd_alone(bytes)?;
         totals.log_zstd += alone.len() + HASH_INDEX;
         let base = predecessor.get(&block.hash);
-        let base_block =
-            base.map(|previous| (previous, blocks[position[previous]].bytes.as_slice()));
+        let base_block = base.map(|previous| (previous, blocks[position[previous]].bytes.as_ref()));
         for store in &mut log_deltas {
-            store.put(&block.hash, &block.bytes, &alone, base_block)?;
+            store.put(&block.hash, bytes, &alone, base_block)?;
         }
         log_zstd.insert(block.hash.clone(), alone);
 
+        let Some(node) = nodes.get(&block.hash) else {
+            totals.other_blocks += 1;
+            totals.other_bytes += len;
+            continue;
+        };
         let before_count = tokens.count();
         let before_bytes = tokens.region.len();
-        let encoded = frame(
-            &block.hash,
-            &nodes[&block.hash],
-            &mut tokens,
-            &frames.by_hash,
-            &mut share,
-        )?;
+        let encoded = frame(&block.hash, node, &mut tokens, &frames.by_hash, &mut share)?;
         totals.tokens += tokens.region.len() - before_bytes;
         totals.token_index += (tokens.count() - before_count) * TOKEN_INDEX;
         totals.frames += encoded.len();
@@ -795,13 +1027,15 @@ fn main() -> anyhow::Result<()> {
     }
 
     eprintln!(
-        "\nblocks: {} index ({} MiB) -> frames {} MiB; {} segment ({} MiB) -> frames {} MiB",
+        "\nblocks: {} index ({} MiB) -> frames {} MiB; {} segment ({} MiB) -> frames {} MiB; {} other ({} MiB) kept as they are",
         share.index_frames,
         mib(share.index_blocks),
         mib(share.index_bytes),
         share.segment_frames,
         mib(share.segment_blocks),
         mib(share.segment_bytes),
+        totals.other_blocks,
+        mib(totals.other_bytes),
     );
     eprintln!(
         "entries: {} buffered ops in index frames, {} leaf entries in segment frames",
@@ -818,21 +1052,26 @@ fn main() -> anyhow::Result<()> {
         );
     }
 
-    // Every frame realizes to the block it stands for, byte for byte.
-    let manifest = nodes[&blocks[0].hash].manifest()?;
+    // Every frame realizes to the block it stands for, byte for byte,
+    // under the manifest of the tree the node belongs to.
     let realized = Instant::now();
-    for (at, block) in blocks.iter().enumerate() {
-        let bytes = realize(&frames.frames[at], &tokens, &frames, &manifest)?;
+    for block in &blocks {
+        let Some(node) = nodes.get(&block.hash) else {
+            continue;
+        };
+        let frame = frames.of(&block.hash).expect("every node has a frame");
+        let bytes = realize(frame, &tokens, &frames, &node.manifest()?)?;
         anyhow::ensure!(
-            bytes == block.bytes,
-            "frame {at} realized to {} bytes that differ from its {}-byte block",
+            bytes.as_slice() == block.bytes.as_ref(),
+            "the frame of {} realized to {} bytes that differ from its {}-byte block",
+            block.hash,
             bytes.len(),
-            block.bytes.len()
+            block.bytes.as_ref().len()
         );
     }
     eprintln!(
         "\nrealize: all {} frames rebuild their block byte for byte ({:.1}s)",
-        blocks.len(),
+        frames.frames.len(),
         realized.elapsed().as_secs_f64()
     );
 
@@ -845,7 +1084,6 @@ fn main() -> anyhow::Result<()> {
         &log_deltas,
         &tokens,
         &frames,
-        &manifest,
     )
 }
 
@@ -880,7 +1118,7 @@ fn children_first(
                     continue;
                 }
                 stack.push((hash.clone(), true));
-                if let NodeBody::Index(index) = nodes[&hash].body() {
+                if let Some(NodeBody::Index(index)) = nodes.get(&hash).map(TreeNode::body) {
                     for at in 0..index.len() {
                         stack.push((index.hash_at(at)?.clone(), false));
                     }
@@ -903,14 +1141,13 @@ fn read_costs(
     log_deltas: &[DeltaStore],
     tokens: &Tokens,
     frames: &Frames,
-    manifest: &Manifest,
 ) -> anyhow::Result<()> {
     let (reached, live_bytes, _) = live(root, nodes)?;
     let directory = tempfile::tempdir()?;
     for hash in &reached {
         std::fs::write(
             directory.path().join(hash.to_string()),
-            &blocks[position[hash]].bytes,
+            blocks[position[hash]].bytes.as_ref(),
         )?;
     }
     let capacity = 1 << 24;
@@ -958,11 +1195,18 @@ fn read_costs(
         timed(&label, &|hash| store.get(hash, capacity))?;
     }
     let frame = |hash: &Blake3Hash| frames.of(hash).expect("every live node has a frame");
+    let manifests: HashMap<&Blake3Hash, Manifest> = reached
+        .iter()
+        .map(|hash| Ok((hash, nodes[hash].manifest()?)))
+        .collect::<anyhow::Result<_>>()?;
     timed("tokens: realize", &|hash| {
-        realize(frame(hash), tokens, frames, manifest)
+        realize(frame(hash), tokens, frames, &manifests[hash])
     })?;
     timed("tokens: realize + blake3", &|hash| {
-        verify(hash, realize(frame(hash), tokens, frames, manifest)?)
+        verify(
+            hash,
+            realize(frame(hash), tokens, frames, &manifests[hash])?,
+        )
     })?;
     Ok(())
 }

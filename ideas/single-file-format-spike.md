@@ -162,13 +162,33 @@ commits and would sit in memory.
   bytes without a new provider and cut every encoding above with them.
   `node_size_sweep` and `live_census` are the starting points.
 
+## Running it on a real replica
+
+The census also reads a replica's file-per-block archive directly, every
+block it ever stored:
+
+```sh
+cargo run --release -p dialog-baseline --example single_file_census -- \
+  archive path/to/replica/archive
+```
+
+Nothing records which commit wrote a block, so the order is rebuilt: a
+commit's root is a tree node no other node links to, roots go in order of
+their file times, and each root's new nodes are appended children first.
+Checked against the replay: a 1024-commit replay written to disk
+(`single_file_census disk 1024`) scans as exactly 1024 roots, and every
+model agrees with the in-memory replay within run-to-run noise (fs 160.4
+vs 160.3 MiB, tokens+frames 9.1 vs 9.0 MiB). A replica that pulled its
+history from a peer wrote those files when it pulled, so its order, and
+with it the delta models, is only as good as its file times.
+
 ## Not done
 
 - **tonk-team, or a replica like the 2 GB one.** The doc asks for it
   first. This session could read tonk-team only as facts at its head
-  through the Tonk MCP, with no blocks and no history; replicating it
-  needs `tonk join` with a tool connection link and a history-aware
-  export. Deferred.
+  through the Tonk MCP, with no blocks and no history, and could not
+  reach the replica on disk. The `archive` mode above is the way to
+  measure it where it lives.
 - A provider, the perf gate, crash recovery, BAO verification, memory
   cells. None of them is worth building until the frame representation
   is settled, because each one depends on it.
