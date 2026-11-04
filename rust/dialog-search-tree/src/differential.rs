@@ -1069,7 +1069,7 @@ where
     fn settle_shared_segments(
         source: &mut Self,
         target: &mut Self,
-        scope: Option<&[core::ops::RangeInclusive<Key>]>,
+        scope: Option<&Scope<'_>>,
     ) -> Result<(), DialogSearchTreeError> {
         let (mut ours, mut theirs) = (0, 0);
         while ours < source.nodes.len() && theirs < target.nodes.len() {
@@ -1365,7 +1365,7 @@ where
     /// per-side, so the entry walk may surface spurious out-of-scope
     /// changes where only one side dropped a shared region;
     /// [`TreeDifference::changes_within`] filters those.
-    fn retain_scope(&mut self, scope: &[core::ops::RangeInclusive<Key>]) {
+    fn retain_scope(&mut self, scope: &Scope<'_>) {
         let uppers: Vec<Option<Vec<u8>>> = (0..self.nodes.len())
             .map(|at| {
                 self.nodes
@@ -1377,16 +1377,7 @@ where
         let mut dropped = None;
         for (node, upper) in self.nodes.drain(..).zip(uppers) {
             let lower = node.lower_bound();
-            let intersects = scope.iter().any(|range| {
-                // [lower, upper) ∩ [start, end] is non-empty iff
-                // lower <= end and upper > start (with upper = +∞
-                // for the last node).
-                lower <= range.end().as_ref()
-                    && match &upper {
-                        Some(upper) => upper.as_slice() > range.start().as_ref(),
-                        None => true,
-                    }
-            });
+            let intersects = scope.intersects(lower, upper.as_deref());
             // A node's bound describes its *stored* content only, deliberately:
             // the bound is also the node's routing key and the input to its
             // rank, so a pending op must not move it (see
@@ -1404,11 +1395,7 @@ where
             // expansion routes the parent's ops down into exactly the children
             // that cover them, so anything pending for this subtree is already
             // attached as routed ops.
-            let in_scope = |key: &[u8]| {
-                scope
-                    .iter()
-                    .any(|range| key >= range.start().as_ref() && key <= range.end().as_ref())
-            };
+            let in_scope = |key: &[u8]| scope.contains(key);
             let pending_in_scope = pending_ops(&node)
                 .iter()
                 .any(|entry| in_scope(entry.key.as_slice()));
@@ -1923,7 +1910,7 @@ type SettledPair<Key, Value> = (SparseTreeNode<Key, Value>, SparseTreeNode<Key, 
 fn settle_shared_segment<Key, Value>(
     ours: &SparseTreeNode<Key, Value>,
     theirs: &SparseTreeNode<Key, Value>,
-    scope: Option<&[core::ops::RangeInclusive<Key>]>,
+    scope: Option<&Scope<'_>>,
 ) -> Result<Option<SettledPair<Key, Value>>, DialogSearchTreeError>
 where
     Key: self::Key,
@@ -1968,13 +1955,7 @@ where
         .iter()
         .chain(&theirs_ops)
         .map(|(key, _)| key.as_slice())
-        .filter(|key| {
-            scope.is_none_or(|scope| {
-                scope
-                    .iter()
-                    .any(|range| *key >= range.start().as_ref() && *key <= range.end().as_ref())
-            })
-        })
+        .filter(|key| scope.is_none_or(|scope| scope.contains(key)))
         .collect();
     keys.sort_unstable();
     keys.dedup();
@@ -2307,6 +2288,8 @@ where
         )
         .await?;
 
+        let scope = scope.map(Scope::new);
+
         // Iteratively prune shared nodes and expand differing ones until a
         // fixed point: only differing leaf segments (and unique-range
         // subtrees) remain.
@@ -2317,7 +2300,7 @@ where
         // after expanding diverging pairs without walking at all.
         let mut walked: Vec<u8> = Vec::new();
         loop {
-            if let Some(scope) = scope {
+            if let Some(scope) = &scope {
                 source.retain_scope(scope);
                 target.retain_scope(scope);
             }
@@ -2600,7 +2583,7 @@ where
             }
         }
 
-        SparseTree::settle_shared_segments(&mut source, &mut target, scope)?;
+        SparseTree::settle_shared_segments(&mut source, &mut target, scope.as_ref())?;
 
         Ok(TreeDifference { source, target })
     }
@@ -2617,6 +2600,7 @@ where
         scope: &'a [core::ops::RangeInclusive<Key>],
     ) -> impl Differential<Key, Value> + 'a {
         let changes = self.changes();
+        let scope = Scope::new(scope);
         try_stream! {
             futures_util::pin_mut!(changes);
             for await change in changes {
@@ -2625,7 +2609,7 @@ where
                     Change::Add(entry) => &entry.key,
                     Change::Remove(entry) => &entry.key,
                 };
-                if scope.iter().any(|range| range.contains(key)) {
+                if scope.contains(key.as_ref()) {
                     yield change;
                 }
             }
@@ -2810,6 +2794,95 @@ where
                     }
                 };
                 yield node;
+            }
+        }
+    }
+}
+
+/// The ranges of a scoped difference, sorted and merged. A frontier node and each
+/// key of its buffer ask about every range, and a live query's cover can hold tens of
+/// thousands, so each question takes a binary search.
+struct Scope<'a> {
+    /// `(start, end)`, both inclusive, in order, and with no two that overlap.
+    ranges: Vec<(&'a [u8], &'a [u8])>,
+}
+
+impl<'a> Scope<'a> {
+    fn new<Key: AsRef<[u8]>>(ranges: &'a [core::ops::RangeInclusive<Key>]) -> Self {
+        let mut sorted: Vec<(&'a [u8], &'a [u8])> = ranges
+            .iter()
+            .map(|range| (range.start().as_ref(), range.end().as_ref()))
+            .filter(|(start, end)| start <= end)
+            .collect();
+        sorted.sort_unstable();
+        let mut merged: Vec<(&'a [u8], &'a [u8])> = Vec::with_capacity(sorted.len());
+        for (start, end) in sorted {
+            match merged.last_mut() {
+                Some(last) if start <= last.1 => last.1 = last.1.max(end),
+                _ => merged.push((start, end)),
+            }
+        }
+        Self { ranges: merged }
+    }
+
+    /// The first range that ends at or above `key`. Merged ranges end in order, so it
+    /// is also the range with the least start among those.
+    fn first_ending_at_or_above(&self, key: &[u8]) -> Option<&(&'a [u8], &'a [u8])> {
+        let at = self.ranges.partition_point(|(_, end)| *end < key);
+        self.ranges.get(at)
+    }
+
+    /// Whether a range holds `key`.
+    fn contains(&self, key: &[u8]) -> bool {
+        self.first_ending_at_or_above(key)
+            .is_some_and(|(start, _)| *start <= key)
+    }
+
+    /// Whether a range meets `[lower, upper)`, with no `upper` for no bound above:
+    /// `lower <= end` and `upper > start`.
+    fn intersects(&self, lower: &[u8], upper: Option<&[u8]>) -> bool {
+        self.first_ending_at_or_above(lower)
+            .is_some_and(|(start, _)| upper.is_none_or(|upper| upper > *start))
+    }
+}
+
+#[cfg(test)]
+mod scope_tests {
+    use super::Scope;
+
+    /// A binary search over merged ranges answers as a look at each range does, for
+    /// ranges that overlap, touch, repeat, or hold one key.
+    #[dialog_common::test]
+    fn it_answers_as_a_scan_of_each_range_does() {
+        let mut state = 20_261_104u32;
+        let mut random = move |bound: u32| {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            ((u64::from(state) * u64::from(bound)) >> 32) as u8
+        };
+        for _ in 0..400 {
+            let ranges: Vec<core::ops::RangeInclusive<[u8; 1]>> = (0..random(9))
+                .map(|_| {
+                    let start = random(60);
+                    [start]..=[start + random(12)]
+                })
+                .collect();
+            let scope = Scope::new(&ranges);
+            for key in 0u8..80 {
+                let scan = ranges.iter().any(|range| range.contains(&[key]));
+                assert_eq!(scope.contains(&[key]), scan, "{ranges:?} at {key}");
+                for upper in [None, Some(key + 1), Some(key + 9)] {
+                    let scan = ranges.iter().any(|range| {
+                        [key].as_slice() <= range.end().as_slice()
+                            && upper
+                                .is_none_or(|upper| [upper].as_slice() > range.start().as_slice())
+                    });
+                    let upper = upper.map(|upper| [upper]);
+                    assert_eq!(
+                        scope.intersects(&[key], upper.as_ref().map(|upper| upper.as_slice())),
+                        scan,
+                        "{ranges:?} at {key} to {upper:?}"
+                    );
+                }
             }
         }
     }
