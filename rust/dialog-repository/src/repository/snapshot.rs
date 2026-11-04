@@ -685,6 +685,7 @@ impl SnapshotExport {
             + 'static,
     {
         let catalog = self.snapshot.index();
+        let nodes = self.snapshot.caches().nodes.clone();
         let subject = self.snapshot.subject.clone();
         let upstream = match &self.reach {
             Reach::Download(remote) => Some(remote.clone()),
@@ -702,7 +703,7 @@ impl SnapshotExport {
             // With an upstream a read-miss falls through to the remote and
             // is cached; without one the index is exactly what this store
             // holds.
-            let index = NetworkedIndex::erased(env, catalog, upstream);
+            let index = NetworkedIndex::erased(env, catalog, upstream, nodes);
             let storage = index.clone();
             let tree = Index::from_hash(root);
 

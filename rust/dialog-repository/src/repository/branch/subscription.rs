@@ -861,17 +861,16 @@ where
             env,
             ArchiveScope::new(self.branch.subject()).index(),
             remote,
+            self.branch.node_cache(),
         );
         // Keep the raw backend to fetch spilled value blocks by reference.
         let raw_store = store.clone();
         let storage = store;
         let index_at = |hash: Option<Blake3Hash>| match hash {
-            Some(hash) => {
-                Index::from_hash_with_cache(NodeHash::from(hash), self.branch.node_cache())
-            }
+            Some(hash) => Index::from_hash(NodeHash::from(hash)),
             // An unborn side of the diff has no tree; the differential
             // runs against the empty index.
-            None => Index::empty_with_cache(self.branch.node_cache()),
+            None => Index::empty(),
         };
         let previous = index_at(pinned);
         let next = index_at(target);

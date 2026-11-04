@@ -26,6 +26,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use dialog_artifacts::selector::Constrained;
+use dialog_artifacts::tree::ArtifactNodeCache;
 use dialog_artifacts::{
     Artifact, ArtifactSelector, ArtifactStream, DialogArtifactsError, Instruction, LoadBlob,
     Relation as ArtifactsRelation, Select, Value,
@@ -49,7 +50,7 @@ use dialog_repository::{
     Branch, HeldCaches, NetworkedIndex, PeersEnv, RemoteSite, Repository, RepositoryExt as _,
 };
 use dialog_search_tree::audit as tree_audit;
-use dialog_search_tree::{DialogSearchTreeError, LoadBlock};
+use dialog_search_tree::{DialogSearchTreeError, LoadBlock, NodeCache, Nodes};
 use dialog_storage::Blake3Hash;
 use dialog_storage::dup_audit;
 use dialog_storage::provider::storage::{Storage, VolatileSpace};
@@ -387,6 +388,17 @@ where
     }
 }
 
+/// Tree nodes are read through whatever node cache the backend keeps: a
+/// node it answers from memory is not a read, so it is not counted.
+impl<Key, Value, Backend> Nodes<Key, Value> for CountingStore<Backend>
+where
+    Backend: Nodes<Key, Value>,
+{
+    fn kept(&self) -> Option<&NodeCache<Key, Value>> {
+        self.backend.kept()
+    }
+}
+
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<Backend> Provider<LoadBlob> for CountingStore<Backend>
@@ -465,7 +477,12 @@ where
         input: ArtifactSelector<Constrained>,
     ) -> Result<ArtifactStream<'a>, DialogArtifactsError> {
         let select = self.branch.claims().select(input);
-        let store = NetworkedIndex::new(self.operator, select.catalog(), None);
+        let store = NetworkedIndex::new(
+            self.operator,
+            select.catalog(),
+            None,
+            ArtifactNodeCache::new(),
+        );
         let counting = CountingStore::new(store, self.journal.clone());
         let stream = select.execute(counting).await?;
         Ok(Box::pin(stream))
@@ -502,7 +519,12 @@ where
         // Route the estimate's root read through the same counting store as
         // the scans, so a bench sees the block it costs.
         let select = self.branch.claims().select(input);
-        let store = NetworkedIndex::new(self.operator, select.catalog(), None);
+        let store = NetworkedIndex::new(
+            self.operator,
+            select.catalog(),
+            None,
+            ArtifactNodeCache::new(),
+        );
         let counting = CountingStore::new(store, self.journal.clone());
         select.estimate(counting).await
     }
@@ -536,7 +558,12 @@ where
         + 'static,
 {
     async fn execute(&self, load: LoadBlock) -> Result<Option<Buffer>, DialogSearchTreeError> {
-        let store = NetworkedIndex::new(self.operator, self.branch.archive().index(), None);
+        let store = NetworkedIndex::new(
+            self.operator,
+            self.branch.archive().index(),
+            None,
+            ArtifactNodeCache::new(),
+        );
         let counting = CountingStore::new(store, self.journal.clone());
         load.perform(&counting).await
     }
@@ -559,7 +586,12 @@ where
         + 'static,
 {
     async fn execute(&self, load: LoadBlob) -> Result<Option<Buffer>, DialogArtifactsError> {
-        let store = NetworkedIndex::new(self.operator, self.branch.archive().index(), None);
+        let store = NetworkedIndex::new(
+            self.operator,
+            self.branch.archive().index(),
+            None,
+            ArtifactNodeCache::new(),
+        );
         let counting = CountingStore::new(store, self.journal.clone());
         load.perform(&counting).await
     }
@@ -750,7 +782,12 @@ where
             .claims()
             .select(ArtifactSelector::new().the(the))
             .to_owned();
-        let store = NetworkedIndex::new(&self.operator, select.catalog(), None);
+        let store = NetworkedIndex::new(
+            &self.operator,
+            select.catalog(),
+            None,
+            ArtifactNodeCache::new(),
+        );
         let journal = ReadJournal::default();
         let counting = CountingStore::new(store, journal.clone());
 
@@ -2090,7 +2127,12 @@ mod test {
             .claims()
             .select(ArtifactSelector::new().the(the))
             .to_owned();
-        let store = NetworkedIndex::new(env.operator(), select.catalog(), None);
+        let store = NetworkedIndex::new(
+            env.operator(),
+            select.catalog(),
+            None,
+            ArtifactNodeCache::new(),
+        );
         let stats = distribution::capture(&root, &store).await?;
         distribution::report(&format!("se-replay-{limit}"), &stats);
         Ok(())

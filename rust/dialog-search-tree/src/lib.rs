@@ -26,11 +26,13 @@
 //!    in-memory delta buffer. Reads will check the delta before accessing
 //!    storage.
 //!
-//! 2. **Node Cache**: Nodes retrieved from storage are cached in memory to
-//!    avoid redundant storage operations. The cache is shared across tree
-//!    versions.
+//! 2. **Node Cache**: the store a tree reads through ([`Nodes`]) may keep
+//!    the nodes it has checked in a [`NodeCache`], so a node is checked once
+//!    and read from memory after that, by every tree and every version read
+//!    through that store. The tree itself holds no nodes; [`Cached`] gives a
+//!    store with no cache of its own one.
 //!
-//! 3. **Environment**: nodes the cache does not hold are loaded by their
+//! 3. **Environment**: nodes the store does not keep are loaded by their
 //!    [`Blake3Hash`](dialog_common::Blake3Hash) through the [`LoadBlock`] command the caller's environment
 //!    provides. Where the bytes come from is the environment's concern; the
 //!    tree checks each loaded block against the hash it asked for.

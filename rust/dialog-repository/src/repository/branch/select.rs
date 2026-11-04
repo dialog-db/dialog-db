@@ -10,7 +10,7 @@ use dialog_common::ConditionalSync;
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::blob::Read as BlobRead;
 use dialog_effects::memory::Resolve;
-use dialog_search_tree::{DialogSearchTreeError, LoadBlock, Manifest, PersistentNode};
+use dialog_search_tree::{DialogSearchTreeError, Manifest};
 use dialog_storage::Blake3Hash;
 use futures_util::Stream;
 
@@ -69,13 +69,17 @@ where
         + ConditionalSync
         + 'static,
 {
-    let node_cache = source.node_cache();
     let tree = match source.root() {
-        Some(root) => Index::from_hash_with_cache(NodeHash::from(root), node_cache),
-        None => Index::empty_with_cache(node_cache),
+        Some(root) => Index::from_hash(NodeHash::from(root)),
+        None => Index::empty(),
     };
     let remote = source.fallback();
-    let store = NetworkedIndex::new(env, ArchiveScope::new(source.subject()).index(), remote);
+    let store = NetworkedIndex::new(
+        env,
+        ArchiveScope::new(source.subject()).index(),
+        remote,
+        source.node_cache(),
+    );
     let storage = store;
     Ok(tree.manifest(&storage).await?)
 }
@@ -127,7 +131,7 @@ impl Select<'_> {
         // query, but a read that misses fails with the load failure as
         // its cause instead of a bare not-found.
         let remote = self.source.fallback();
-        let store = NetworkedIndex::erased(env, self.catalog(), remote);
+        let store = NetworkedIndex::erased(env, self.catalog(), remote, self.source.node_cache());
         self.execute(store).await
     }
 
@@ -139,40 +143,28 @@ impl Select<'_> {
         // Tree hydration is lazy (nodes load on demand during the scan),
         // but unreachable branches should fail here rather than midway
         // through the stream, so probe the root block eagerly. Through a
-        // `NetworkedIndex` this also replicates and caches the root
-        // locally, so the scan's own root read stays local.
+        // `NetworkedIndex` this also replicates the root locally.
         //
-        // Route the probe through the shared node cache, not a raw
-        // `store.get`: the root is the single most-reused block, and a
-        // multi-premise query re-selects the same branch once per outer
-        // binding. A raw probe would re-fetch the root from the backend on
-        // every one of those selects (defeating the cache); `get_or_fetch`
-        // makes the first select warm the cache and the rest hit it, while
-        // still fetching (and, through `NetworkedIndex`, replicating) on a
-        // genuine miss and failing fast when the root is truly absent.
-        let node_cache = self.source.node_cache();
+        // The probe reads through the store like every tree read: the root
+        // is the single most-reused block, and a multi-premise query
+        // re-selects the same branch once per outer binding, so the first
+        // select keeps it in the store's node cache and the rest (and the
+        // scan's own root read) are answered from there, while a genuine
+        // miss still fetches and a truly absent root fails fast.
         Ok(match self.tree_hash() {
             Some(tree_hash) => {
-                node_cache
-                    .get_or_fetch(&NodeHash::from(tree_hash), async |hash| {
-                        LoadBlock::new(hash.clone())
-                            .perform(store)
-                            .await?
-                            .map(PersistentNode::try_from)
-                            .transpose()
-                    })
-                    .await?
-                    .ok_or_else(|| {
-                        DialogSearchTreeError::Node(format!(
-                            "Block not found in storage: {}",
-                            tree_hash.to_base58(),
-                        ))
-                    })?;
-                Index::from_hash_with_cache(NodeHash::from(tree_hash), node_cache)
+                let root = NodeHash::from(tree_hash);
+                store.load_node(&root).await?.ok_or_else(|| {
+                    DialogSearchTreeError::Node(format!(
+                        "Block not found in storage: {}",
+                        tree_hash.to_base58(),
+                    ))
+                })?;
+                Index::from_hash(root)
             }
             // No revision means no tree to probe or scan: the select runs
             // over the empty index and yields nothing.
-            None => Index::empty_with_cache(node_cache),
+            None => Index::empty(),
         })
     }
 
@@ -232,7 +224,7 @@ impl Select<'_> {
             + 'static,
     {
         let remote = self.source.fallback();
-        let store = NetworkedIndex::erased(env, self.catalog(), remote);
+        let store = NetworkedIndex::erased(env, self.catalog(), remote, self.source.node_cache());
         self.estimate(store).await
     }
 
@@ -253,7 +245,7 @@ impl Select<'_> {
         let Some(tree_hash) = self.tree_hash() else {
             return Ok(None);
         };
-        let tree = Index::from_hash_with_cache(NodeHash::from(tree_hash), self.source.node_cache());
+        let tree = Index::from_hash(NodeHash::from(tree_hash));
         tree.estimate(store, self.selector).await
     }
 
@@ -312,7 +304,7 @@ impl SelectOwned<'_> {
         // The same remote fallback as `Select::perform`; see the comment
         // there.
         let remote = self.0.source.fallback();
-        let store = NetworkedIndex::erased(env, self.catalog(), remote);
+        let store = NetworkedIndex::erased(env, self.catalog(), remote, self.0.source.node_cache());
         self.execute(store).await
     }
 

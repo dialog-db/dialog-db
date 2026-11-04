@@ -129,7 +129,12 @@ where
         + 'static,
 {
     let version = head.version();
-    let store = NetworkedIndex::erased(env, branch.archive().index(), branch.fallback());
+    let store = NetworkedIndex::erased(
+        env,
+        branch.archive().index(),
+        branch.fallback(),
+        branch.node_cache(),
+    );
     let unreadable = |error: dialog_artifacts::DialogArtifactsError| {
         PublishError::Storage(format!(
             "could not tell whether the revision holds branch {}'s head: {error}",
@@ -142,7 +147,6 @@ where
         &branch.contexts(),
         &branch.records(),
         &store,
-        &branch.node_cache(),
     )
     .await
     .map_err(unreadable)?
@@ -150,15 +154,9 @@ where
         return Ok(seen);
     }
     let history = branch.history(env);
-    let context = full_context(
-        revision,
-        &branch.contexts(),
-        &store,
-        &branch.node_cache(),
-        &history,
-    )
-    .await
-    .map_err(unreadable)?;
+    let context = full_context(revision, &branch.contexts(), &store, &history)
+        .await
+        .map_err(unreadable)?;
     Ok(context.observes(&version))
 }
 

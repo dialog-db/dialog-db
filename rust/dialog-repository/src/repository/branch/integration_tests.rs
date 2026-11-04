@@ -21,6 +21,7 @@ use crate::{
 };
 use anyhow::{Context as _, Result};
 use dialog_artifacts::Asset;
+use dialog_artifacts::tree::ArtifactNodeCache;
 use dialog_artifacts::{
     Artifact, ArtifactSelector, Datum, ENTITY_KEY_TAG, HISTORY_KEY_TAG, Instruction, Key, State,
     Value,
@@ -2754,7 +2755,12 @@ async fn it_leaves_an_aborted_push_closure_complete(s3: S3Address) -> Result<()>
         .perform(&operator)
         .await?;
     let head = NodeHash::from(*branch.revision().expect("committed").tree.hash());
-    let index = NetworkedIndex::new(&operator, branch.archive().index(), None);
+    let index = NetworkedIndex::new(
+        &operator,
+        branch.archive().index(),
+        None,
+        ArtifactNodeCache::new(),
+    );
     assert_remote_closure_complete(&operator, index, head, &origin).await?;
 
     Ok(())
@@ -2872,6 +2878,7 @@ async fn it_leaves_an_aborted_bridge_push_closure_complete(s3: S3Address) -> Res
         &operator,
         bridge_branch.archive().index(),
         Some(origin_a.clone()),
+        ArtifactNodeCache::new(),
     );
     assert_remote_closure_complete(&operator, index, head, &origin_b).await?;
 
@@ -4373,7 +4380,7 @@ async fn raw_spill_references<C: dialog_varsig::Principal>(
     revision: &Revision,
 ) -> Result<(HashSet<NodeHash>, HashSet<NodeHash>)> {
     let catalog = ArchiveScope::new(repository.subject()).index();
-    let index = NetworkedIndex::new(env, catalog, None);
+    let index = NetworkedIndex::new(env, catalog, None, ArtifactNodeCache::new());
     let storage = index;
     let tree = Index::from_hash(NodeHash::from(*revision.tree.hash()));
 
@@ -5256,7 +5263,12 @@ async fn it_downloads_serially_while_pushing_concurrently(ucan: UcanS3Address) -
     // root-to-leaf and each level's read names the next, so depth bounds
     // how many fetches CANNOT overlap however wide the fan-out is.
     let head = NodeHash::from(*replica.revision().expect("pulled").tree.hash());
-    let depth_index = NetworkedIndex::new(&replica_operator, replica.archive().index(), None);
+    let depth_index = NetworkedIndex::new(
+        &replica_operator,
+        replica.archive().index(),
+        None,
+        ArtifactNodeCache::new(),
+    );
     let depth_storage = depth_index;
     let mut depth = 0usize;
     let mut at = Some(head);

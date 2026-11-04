@@ -70,10 +70,13 @@ where
             // merge with, and adopting over a deletion is not ours to do.
             return Err(lost.into());
         };
-        let store = NetworkedIndex::erased(env, branch.archive().index(), branch.fallback());
-        let Some(context) =
-            published_context(&theirs, &branch.contexts(), &store, &branch.node_cache()).await?
-        else {
+        let store = NetworkedIndex::erased(
+            env,
+            branch.archive().index(),
+            branch.fallback(),
+            branch.node_cache(),
+        );
+        let Some(context) = published_context(&theirs, &branch.contexts(), &store).await? else {
             // A head minted before heads carried their context: its
             // ancestry is not known without a walk, so it is not merged.
             return Err(lost.into());
@@ -122,15 +125,18 @@ where
         + ConditionalSync
         + 'static,
 {
-    let store = NetworkedIndex::erased(env, branch.archive().index(), branch.fallback());
-    let tree = |reference: &TreeReference| {
-        Index::from_hash_with_cache(NodeHash::from(*reference.hash()), branch.node_cache())
-    };
+    let store = NetworkedIndex::erased(
+        env,
+        branch.archive().index(),
+        branch.fallback(),
+        branch.node_cache(),
+    );
+    let tree = |reference: &TreeReference| Index::from_hash(NodeHash::from(*reference.hash()));
     // No base means the commit's ancestry and the head's share nothing:
     // everything the commit holds is its change.
     let base_tree = match base {
         Some(base) => tree(&base.tree),
-        None => Index::empty_with_cache(branch.node_cache()),
+        None => Index::empty(),
     };
     let mine_tree = tree(&mine.tree);
     let mut merged = tree(&theirs.tree);
@@ -175,7 +181,7 @@ where
             .integrate(futures_util::StreamExt::chain(history, data), &tree_store),
     )
     .await?
-    .persist(delta.blocks())?;
+    .persist(delta.blocks(), &tree_store)?;
 
     // The merged tree started as theirs, so its context region is what
     // theirs held.
@@ -215,13 +221,7 @@ where
     revision.publish_region(own_count(&revision, &merged_context));
     revision.signature = Attest::new(revision.payload()).perform(env).await?;
 
-    persist(
-        &branch.archive().index(),
-        &branch.node_cache(),
-        &mut delta,
-        env,
-    )
-    .await?;
+    persist(store.local(), &mut delta, env).await?;
     Ok((revision, merged_context))
 }
 
