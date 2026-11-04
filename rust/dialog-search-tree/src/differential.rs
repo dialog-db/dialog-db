@@ -940,9 +940,6 @@ where
             }
         }
 
-        let ours_ops = ours_index.all_novelty::<Key>()?;
-        let theirs_ops = theirs_index.all_novelty::<Key>()?;
-
         // Emitting a change for a buffered op needs to know whether the key
         // already exists below: absent means `Add`, present means `Remove(old)`
         // then `Add(new)`, and only the leaf knows the old value. A `Link`
@@ -971,6 +968,11 @@ where
         if lowest.is_empty() {
             return Ok(None);
         }
+        // Decoded only past the separator checks: a root's leftmost
+        // separator is always empty, so at a root the decode would answer a
+        // question already settled.
+        let ours_ops = ours_index.all_novelty::<Key>()?;
+        let theirs_ops = theirs_index.all_novelty::<Key>()?;
         let settleable = |ops: &[NoveltyEntry<Value>]| {
             ops.iter().all(|entry| {
                 matches!(entry.op, NoveltyOp::Assert(_)) && entry.key.as_slice() < lowest.as_slice()
@@ -1020,6 +1022,60 @@ where
             ours_only,
             theirs_only,
         }))
+    }
+
+    /// Settles every pair of loaded segments the comparison left with the
+    /// same stored block on both sides, keeping only the keys their routed
+    /// ops touch.
+    ///
+    /// `prune` keeps such a pair because the ops an ancestor routed to it
+    /// differ, and the walk loads both in place. Their stored entries are
+    /// the same bytes, so an entry no op on either side covers reads the
+    /// same on both and cancels in [`TreeDifference::changes`]. Streaming
+    /// the pair would decode every one of those entries on both sides only
+    /// to drop them: a commit buffered at the root routes its ops to whole
+    /// leaves, so every scoped difference over that commit paid for every
+    /// entry of each leaf its ops landed in. Settling resolves each key
+    /// an op covers on both sides instead, its winning op where the side
+    /// has one and the stored entry where it does not, and keeps the keys
+    /// whose two resolutions differ. The entry walk then yields exactly
+    /// the changes it would have yielded from the two whole leaves.
+    ///
+    /// A scoped difference resolves only the covered keys inside its
+    /// scope: a change outside it is spillover that
+    /// [`TreeDifference::changes_within`] drops, so a pair whose ops all
+    /// fall outside settles without reading the leaf at all.
+    ///
+    /// Reads nothing: both segments are already loaded. The settled
+    /// entries keep their lower bounds, so the frontiers stay sorted, and
+    /// [`TreeDifference::novel_nodes`] skips them as it skipped the shared
+    /// blocks they replace.
+    fn settle_shared_segments(
+        source: &mut Self,
+        target: &mut Self,
+        scope: Option<&[core::ops::RangeInclusive<Key>]>,
+    ) -> Result<(), DialogSearchTreeError> {
+        let (mut ours, mut theirs) = (0, 0);
+        while ours < source.nodes.len() && theirs < target.nodes.len() {
+            match source.nodes[ours]
+                .lower_bound()
+                .cmp(target.nodes[theirs].lower_bound())
+            {
+                Ordering::Less => ours += 1,
+                Ordering::Greater => theirs += 1,
+                Ordering::Equal => {
+                    if let Some((settled_ours, settled_theirs)) =
+                        settle_shared_segment(&source.nodes[ours], &target.nodes[theirs], scope)?
+                    {
+                        source.nodes[ours] = settled_ours;
+                        target.nodes[theirs] = settled_theirs;
+                    }
+                    ours += 1;
+                    theirs += 1;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Whether the walk peels this side's node at `at` before the other
@@ -1843,6 +1899,130 @@ where
     }
 }
 
+/// A frontier pair settled by [`settle_shared_segment`]: ours, then theirs.
+type SettledPair<Key, Value> = (SparseTreeNode<Key, Value>, SparseTreeNode<Key, Value>);
+
+/// The pair [`SparseTree::settle_shared_segments`] settles a frontier pair
+/// to, or `None` when the two are not the same loaded segment.
+fn settle_shared_segment<Key, Value>(
+    ours: &SparseTreeNode<Key, Value>,
+    theirs: &SparseTreeNode<Key, Value>,
+    scope: Option<&[core::ops::RangeInclusive<Key>]>,
+) -> Result<Option<SettledPair<Key, Value>>, DialogSearchTreeError>
+where
+    Key: self::Key,
+    Value: self::Value + PartialEq,
+    Value::Archived: for<'b> CheckBytes<
+            Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
+        > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>,
+{
+    let (
+        SparseTreeNode::Loaded {
+            node,
+            lower_bound: ours_bound,
+            pending: ours_pending,
+        },
+        SparseTreeNode::Loaded {
+            node: other,
+            lower_bound: theirs_bound,
+            pending: theirs_pending,
+        },
+    ) = (ours, theirs)
+    else {
+        return Ok(None);
+    };
+    if node.hash() != other.hash() {
+        return Ok(None);
+    }
+    let NodeBody::Segment(segment) = node.body() else {
+        return Ok(None);
+    };
+
+    let ours_ops = winning_ops(ours_pending);
+    let theirs_ops = winning_ops(theirs_pending);
+    fn op_at<'o, Value>(
+        ops: &'o [(Vec<u8>, NoveltyOp<Value>)],
+        key: &[u8],
+    ) -> Option<&'o NoveltyOp<Value>> {
+        ops.binary_search_by(|(candidate, _)| candidate.as_slice().cmp(key))
+            .ok()
+            .map(|at| &ops[at].1)
+    }
+    let mut keys: Vec<&[u8]> = ours_ops
+        .iter()
+        .chain(&theirs_ops)
+        .map(|(key, _)| key.as_slice())
+        .filter(|key| {
+            scope.is_none_or(|scope| {
+                scope
+                    .iter()
+                    .any(|range| *key >= range.start().as_ref() && *key <= range.end().as_ref())
+            })
+        })
+        .collect();
+    keys.sort_unstable();
+    keys.dedup();
+
+    // The stored value under each covered key, read in one pass over the
+    // segment's keys that stops past the last of them. A value is decoded
+    // only when a side has no op of its own to answer with.
+    let mut stored: Vec<Option<Value>> = vec![None; keys.len()];
+    let mut probe = 0;
+    let mut entries = segment.keys::<Key>()?;
+    while probe < keys.len() {
+        let Some((at, key)) = entries.next_key()? else {
+            break;
+        };
+        while probe < keys.len() && keys[probe] < key {
+            probe += 1;
+        }
+        if probe < keys.len() && keys[probe] == key {
+            if op_at(&ours_ops, key).is_none() || op_at(&theirs_ops, key).is_none() {
+                stored[probe] = Some(into_owned(segment.value_at(at)?)?);
+            }
+            probe += 1;
+        }
+    }
+
+    let resolve = |op: Option<&NoveltyOp<Value>>, stored: &Option<Value>| match op {
+        Some(NoveltyOp::Assert(value)) => Some(value.clone()),
+        Some(NoveltyOp::Retract) => None,
+        None => stored.clone(),
+    };
+    let mut ours_settled = Vec::new();
+    let mut theirs_settled = Vec::new();
+    for (key, stored) in keys.iter().zip(&stored) {
+        let ours_value = resolve(op_at(&ours_ops, key), stored);
+        let theirs_value = resolve(op_at(&theirs_ops, key), stored);
+        if ours_value == theirs_value {
+            continue;
+        }
+        if let Some(value) = ours_value {
+            ours_settled.push(NoveltyEntry {
+                key: key.to_vec(),
+                op: NoveltyOp::Assert(value),
+            });
+        }
+        if let Some(value) = theirs_value {
+            theirs_settled.push(NoveltyEntry {
+                key: key.to_vec(),
+                op: NoveltyOp::Assert(value),
+            });
+        }
+    }
+
+    Ok(Some((
+        SparseTreeNode::Settled {
+            lower_bound: ours_bound.clone(),
+            ops: ours_settled,
+        },
+        SparseTreeNode::Settled {
+            lower_bound: theirs_bound.clone(),
+            ops: theirs_settled,
+        },
+    )))
+}
+
 /// Reduces the ops collected along a root-to-leaf path to the winning op per
 /// key, sorted by key.
 ///
@@ -2389,6 +2569,8 @@ where
                 break;
             }
         }
+
+        SparseTree::settle_shared_segments(&mut source, &mut target, scope)?;
 
         Ok(TreeDifference { source, target })
     }
@@ -6507,6 +6689,139 @@ mod tests {
         assert!(
             novel <= height,
             "only the extended root is new, with whatever of the path the walk opened: {novel} novel nodes"
+        );
+        Ok(())
+    }
+
+    /// Two sides holding the same stored leaf, differing only in the ops
+    /// routed to it, settle to the keys those ops cover: the entry walk
+    /// decodes nothing else of the leaf, and yields exactly the changes a
+    /// difference of the canonicalized trees yields, in the same order.
+    /// Before, the walk streamed every stored entry of the leaf on both
+    /// sides, so a scoped difference paid for the whole leaf its ops landed
+    /// in, whatever its scope.
+    #[dialog_common::test]
+    async fn it_settles_a_shared_leaf_to_the_keys_its_ops_cover() -> Result<()> {
+        let mut storage = CountingBackend::new();
+        let manifest = Manifest {
+            max_segment: 512,
+            frame_ceiling_factor: 0,
+            ..Manifest::default()
+        };
+        let base = build_with_manifest(
+            (0..2_000u32).map(|i| (i, vec![i as u8])),
+            manifest,
+            &mut storage,
+        )
+        .await?;
+
+        // Keys are little-endian, so `10 + 256 * n` sort next to each other
+        // and land in one leaf; past 2,000 they are absent from the base.
+        let key = |n: u32| 10 + 256 * n;
+        let source_ops = vec![
+            // An op both sides hold cancels.
+            (true, key(0), vec![7]),
+            // The same key asserted with different values.
+            (true, key(1), vec![1]),
+            // A stored key retracted on one side only.
+            (false, key(2), vec![]),
+            // A stored key overwritten on one side only.
+            (true, key(4), vec![5]),
+            // An absent key retracted: nothing to report.
+            (false, key(10), vec![]),
+        ];
+        let target_ops = vec![
+            (true, key(0), vec![7]),
+            (true, key(1), vec![2]),
+            (false, key(3), vec![]),
+            // An absent key inserted.
+            (true, key(9), vec![3]),
+        ];
+        let source = buffered(&base, &source_ops, 1_000_000, &mut storage).await?;
+        let target = buffered(&base, &target_ops, 1_000_000, &mut storage).await?;
+        let source_canonical = canonicalized(&base, &source_ops, 1, &mut storage).await?;
+        let target_canonical = canonicalized(&base, &target_ops, 1, &mut storage).await?;
+
+        let flat = |changes: Vec<Change<[u8; 4], Vec<u8>>>| {
+            changes
+                .into_iter()
+                .map(|change| match change {
+                    Change::Add(entry) => (true, entry.key, entry.value),
+                    Change::Remove(entry) => (false, entry.key, entry.value),
+                })
+                .collect::<Vec<_>>()
+        };
+        let settled = flat(collect_changes(&source, &target, &storage).await?);
+        let canonical =
+            flat(collect_changes(&source_canonical, &target_canonical, &storage).await?);
+        let bytes = |n: u32| key(n).to_le_bytes();
+        assert_eq!(
+            settled,
+            vec![
+                (false, bytes(1), vec![1]),
+                (true, bytes(1), vec![2]),
+                (true, bytes(2), vec![key(2) as u8]),
+                (false, bytes(3), vec![key(3) as u8]),
+                (false, bytes(4), vec![5]),
+                (true, bytes(4), vec![key(4) as u8]),
+                (true, bytes(9), vec![3]),
+            ],
+            "each covered key resolves to its winning op or its stored entry"
+        );
+        assert_eq!(
+            settled, canonical,
+            "settling changes nothing a difference reports"
+        );
+
+        // Scoped, only the covered keys inside the scope resolve. A scope
+        // inside the leaf that covers no op's key reports nothing.
+        for (scope, expected) in [
+            (
+                vec![bytes(1)..=bytes(1)],
+                vec![(false, bytes(1), vec![1]), (true, bytes(1), vec![2])],
+            ),
+            (vec![bytes(5)..=bytes(8)], vec![]),
+        ] {
+            let scoped = flat(collect_scoped_changes(&source, &target, &scope, &storage).await?);
+            let canonical = flat(
+                collect_scoped_changes(&source_canonical, &target_canonical, &scope, &storage)
+                    .await?,
+            );
+            assert_eq!(scoped, expected, "scope {scope:?}");
+            assert_eq!(scoped, canonical, "scope {scope:?}");
+        }
+
+        let difference = TreeDifference::compute(&source, &target, &storage, &storage).await?;
+        let loaded_segment = |node: &super::SparseTreeNode<[u8; 4], Vec<u8>>| match node {
+            super::SparseTreeNode::Loaded { node, .. }
+                if matches!(node.body(), crate::NodeBody::Segment(_)) =>
+            {
+                Some(node.hash().clone())
+            }
+            _ => None,
+        };
+        let theirs: HashSet<Blake3Hash> = difference
+            .target
+            .nodes
+            .iter()
+            .filter_map(loaded_segment)
+            .collect();
+        assert!(
+            difference
+                .source
+                .nodes
+                .iter()
+                .filter_map(loaded_segment)
+                .all(|hash| !theirs.contains(&hash)),
+            "no leaf both sides share is left for the entry walk to stream"
+        );
+        assert!(
+            difference
+                .target
+                .nodes
+                .iter()
+                .any(|node| matches!(node, super::SparseTreeNode::Settled { .. })),
+            "the shared leaf the ops landed in is settled"
         );
         Ok(())
     }
