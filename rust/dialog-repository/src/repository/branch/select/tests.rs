@@ -16,26 +16,27 @@ use std::sync::Arc;
 use anyhow::Result;
 use async_trait::async_trait;
 use dialog_artifacts::selector::Constrained;
-use dialog_artifacts::tree::ArtifactNodeCache;
 use dialog_artifacts::{
     Artifact, ArtifactSelector, Changes, DialogArtifactsError, Entity, Exporter, Instruction,
-    LoadBlob, NameShape, Relation, Symbol, Update as _, Value, encode_value_owned,
+    NameShape, Relation, Symbol, Update as _, Value, encode_value_owned,
 };
 use dialog_capability::{Fork, Provider};
-use dialog_common::{Blake3Hash, Buffer, ConditionalSync};
+use dialog_common::{Blake3Hash, ConditionalSync};
 use dialog_credentials::Credential;
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::memory::Resolve;
 use dialog_peer::helpers::{generate_data, test_session_with_peer};
 use dialog_peer::{Peer, Session};
-use dialog_search_tree::{DialogSearchTreeError, LoadBlock, Manifest};
+use dialog_search_tree::helpers::Blocks;
+use dialog_search_tree::{Manifest, Traversable as _, Visit};
 use dialog_storage::provider::storage::VolatileSpace;
 use futures_util::{StreamExt as _, TryStreamExt as _, stream};
 use parking_lot::Mutex;
 
 use crate::helpers::{Counting, test_repo};
-use crate::repository::archive::local::read_all;
-use crate::{Branch, HeldCaches, LocalIndex, RemoteSite, Repository, Revision};
+use dialog_storage::provider::load::read_all;
+
+use crate::{Branch, HeldCaches, RemoteSite, Repository, Revision};
 
 /// The session every test commits and reads through.
 type Operator = Peer<VolatileSpace, Session>;
@@ -93,6 +94,7 @@ where
         + Provider<ArchiveLoad>
         + Provider<BlobLoad>
         + Provider<Fork<RemoteSite, Resolve>>
+        + dialog_common::Holds
         + ConditionalSync
         + 'static,
 {
@@ -155,8 +157,11 @@ async fn spilled_block(
     operator: &Operator,
 ) -> Result<Option<Vec<u8>>> {
     let reference = Blake3Hash::from(value.to_reference());
-    let block = LocalIndex::new(operator, branch.archive().index(), branch.node_cache())
-        .load(&reference)
+    let block = branch
+        .archive()
+        .index()
+        .get(reference.clone())
+        .perform(operator)
         .await?;
     assert!(
         block.is_none(),
@@ -182,42 +187,22 @@ fn inline_n() -> usize {
     Manifest::default().inline_n as usize
 }
 
-/// Serves a line's tree nodes from the local archive but withholds every
-/// spilled value, as an archive that lost a spilled block would.
-struct WithoutSpills<'a>(LocalIndex<'a, Operator>);
-
-impl Clone for WithoutSpills<'_> {
-    fn clone(&self) -> Self {
-        Self(self.0.clone())
+/// A store holding `branch`'s tree nodes and none of its spilled values,
+/// as an archive that lost a spilled block would: every node the branch's
+/// tree reaches, copied out of the local archive into a volatile store
+/// under the same catalog, and no blob.
+async fn without_spills(branch: &Branch, operator: &Operator) -> Result<Blocks> {
+    let blocks = Blocks::in_catalog(branch.archive().index());
+    let tree = crate::repository::source::SourceRef::from(branch).tree();
+    let visits = tree.traverse_available(operator);
+    let mut visits = pin!(visits);
+    while let Some(visit) = visits.next().await {
+        match visit? {
+            Visit::Present(node) => blocks.store(node.buffer().clone()),
+            Visit::Absent(hash) => anyhow::bail!("the branch's node {hash} is not local"),
+        }
     }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<LoadBlock> for WithoutSpills<'_> {
-    async fn execute(&self, load: LoadBlock) -> Result<Option<Buffer>, DialogSearchTreeError> {
-        load.perform(&self.0).await
-    }
-}
-
-/// Tree nodes are read through the local index's node cache.
-impl
-    dialog_search_tree::Nodes<
-        dialog_artifacts::Key,
-        dialog_artifacts::State<dialog_artifacts::Datum>,
-    > for WithoutSpills<'_>
-{
-    fn kept(&self) -> Option<&ArtifactNodeCache> {
-        self.0.kept()
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<LoadBlob> for WithoutSpills<'_> {
-    async fn execute(&self, _: LoadBlob) -> Result<Option<Buffer>, DialogArtifactsError> {
-        Ok(None)
-    }
+    Ok(blocks)
 }
 
 /// An [`Exporter`] that keeps every exported row in memory.
@@ -1762,11 +1747,7 @@ async fn it_errors_when_a_spilled_block_is_missing() -> Result<()> {
         .claims()
         .select(ArtifactSelector::new().the("doc/body".parse()?))
         .to_owned()
-        .execute(WithoutSpills(LocalIndex::new(
-            &operator,
-            cold.archive().index(),
-            cold.node_cache(),
-        )))
+        .execute(&without_spills(&cold, &operator).await?)
         .await?
         .collect()
         .await;

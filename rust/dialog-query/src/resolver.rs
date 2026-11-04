@@ -12,7 +12,8 @@
 //!   recorded per scanned range. A range can also be enumerated, so
 //!   an unconstrained scan is expensive but defined.
 //! - A **resolver** selects by content address over the immutable block
-//!   universe ([`LoadBlock`](dialog_search_tree::LoadBlock)). A hash
+//!   universe ([`Load`](dialog_effects::archive::Load) of a digest
+//!   [`anywhere`] the scope reads). A hash
 //!   resolves to the same bytes forever, so a resolver's rows are a pure
 //!   function of its bound inputs — no fact demand exists to record
 //!   (see `dialog_artifacts::inspect` for the full soundness
@@ -51,7 +52,10 @@ use std::fmt::{self, Display};
 use std::sync::LazyLock;
 
 use base58::{FromBase58, ToBase58};
-use dialog_artifacts::{DialogArtifactsError, LoadBlob, LoadBlock, inspect};
+use dialog_artifacts::{DialogArtifactsError, inspect};
+use dialog_capability::Subject;
+use dialog_effects::archive::prelude::ArchiveScope;
+use dialog_effects::{archive, blob};
 use serde::{Deserialize, Serialize};
 
 use crate::artifact::Type as ValueType;
@@ -63,6 +67,27 @@ use crate::term::Term;
 use crate::type_system::Type as Kind;
 use crate::types::Any;
 use crate::{Environment, Parameters, Schema, Scope, Value, try_stream};
+
+/// The archive a resolver reads a content address from: the wildcard
+/// subject's, meaning any archive the scope reads.
+///
+/// A content address names the same bytes in every archive, so a
+/// resolver asks for the block itself and leaves where it lives to the
+/// environment: a query over several lines answers from each line's
+/// catalog in turn (the first that holds the block wins), and an
+/// environment over one archive answers from that one.
+///
+/// ```no_run
+/// # use dialog_effects::archive::Load;
+/// # use dialog_query::resolver::anywhere;
+/// # let digest = dialog_common::Blake3Hash::hash(b"a node");
+/// let load = Load::new(anywhere().index(), digest);
+/// # use dialog_capability::Subject;
+/// assert!(Subject::from(load.catalog.subject().clone()).is_any());
+/// ```
+pub fn anywhere() -> ArchiveScope {
+    ArchiveScope::new(Subject::any())
+}
 
 /// Base cost of a resolver step: one content-addressed block fetch
 /// plus decode, scheduled after cheap in-memory premises but ahead of
@@ -813,7 +838,8 @@ impl ResolverQuery {
     /// Evaluate this resolver over the incoming selection.
     ///
     /// Per input row: resolve the node reference, perform the
-    /// idempotent [`LoadBlock`] command through the environment, decode the
+    /// idempotent [`Load`](archive::Load) command through the environment
+    /// for a block [`anywhere`] it reads, decode the
     /// block, and project one output row per result — a segment asked
     /// for spans, an index asked for keys, an absent block, or a
     /// resolvable reference whose block is not a tree node at all
@@ -839,10 +865,11 @@ impl ResolverQuery {
                 // A spilled value lives in the blob store, apart from the
                 // tree's nodes, so `tree/value` reads through that lane.
                 let loaded = match &resolver {
-                    ResolverQuery::TreeValue(_) => {
-                        LoadBlob::new(reference.into()).perform(env).await?
-                    }
-                    _ => LoadBlock::new(reference.into())
+                    ResolverQuery::TreeValue(_) => blob::Load::new(anywhere(), reference)
+                        .perform(env)
+                        .await
+                        .map_err(DialogArtifactsError::from)?,
+                    _ => archive::Load::new(anywhere().index(), reference)
                         .perform(env)
                         .await
                         .map_err(DialogArtifactsError::from)?,

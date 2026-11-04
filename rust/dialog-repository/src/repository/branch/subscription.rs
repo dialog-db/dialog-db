@@ -100,8 +100,9 @@ use futures_util::stream;
 use futures_util::{StreamExt as _, TryStreamExt as _};
 
 use super::session::{QueryEnv, QueryLayer};
+use crate::repository::archive::erased;
 use crate::repository::source::Source;
-use crate::{Branch, Ephemeral, Index, NetworkedIndex, RemoteSite, Revision};
+use crate::{Branch, Ephemeral, Index, RemoteSite, Revision};
 
 /// How many touched entities a maintained poll re-derives at once.
 /// Measured on the catch-up soak's hundred-entity poll (#646): a
@@ -839,6 +840,7 @@ where
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
+            + dialog_common::Holds
             + ConditionalSync
             + 'static,
     {
@@ -858,19 +860,17 @@ where
         // be able to hydrate the block through the env from the remote the
         // branch tracks. A remote that failed to load fails only a read
         // that misses, with the load failure as its cause.
-        let store = NetworkedIndex::erased(
-            env,
-            ArchiveScope::new(self.branch.subject()).index(),
-            self.branch.node_cache(),
-        );
+        let archive = ArchiveScope::new(self.branch.subject());
+        let catalog = archive.index();
+        let store = erased(env);
         // Keep the raw backend to fetch spilled value blocks by reference.
-        let raw_store = store.clone();
+        let raw_store = store;
         let storage = store;
         let index_at = |hash: Option<Blake3Hash>| match hash {
-            Some(hash) => Index::from_hash(NodeHash::from(hash)),
+            Some(hash) => Index::at(catalog.clone(), NodeHash::from(hash)),
             // An unborn side of the diff has no tree; the differential
             // runs against the empty index.
-            None => Index::empty(),
+            None => Index::empty_in(catalog.clone()),
         };
         let previous = index_at(pinned);
         let next = index_at(target);
@@ -902,7 +902,7 @@ where
             // at the same key.
             let arriving = matches!(&change, Change::Add(_));
             if let State::Added(datum) = &entry.value {
-                let spilled = fetch_spilled(&raw_store, &entry.key)
+                let spilled = fetch_spilled(&raw_store, &archive, &entry.key)
                     .await
                     .map_err(|error| EvaluationError::Store(format!("spilled fetch: {error:?}")))?;
                 let fact = Artifact::from_key_datum_with_value(&entry.key, datum, spilled)

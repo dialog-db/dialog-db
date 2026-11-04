@@ -48,6 +48,21 @@ pub trait Holds {
     }
 }
 
+/// A borrowed environment holds what the environment holds.
+impl<T: Holds + ?Sized> Holds for &T {
+    fn held(&self, key: &str) -> Option<Held> {
+        (**self).held(key)
+    }
+
+    fn hold(&self, key: String, handle: Held) {
+        (**self).hold(key, handle)
+    }
+
+    fn held_or(&self, key: &str, make: &dyn Fn() -> Held) -> Held {
+        (**self).held_or(key, make)
+    }
+}
+
 /// The key code that holds a `T` under `name` holds it under.
 ///
 /// The key names `T` by its type id, so two builds of one crate in a

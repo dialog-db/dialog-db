@@ -20,6 +20,9 @@ use crate::archive::prelude::ArchiveScope;
 /// subject's [default catalog](crate::archive::prelude::DEFAULT_CATALOG),
 /// so a provider that finds no blob looks there before it looks anywhere
 /// else, and fails as the archive fails. A load is of the whole value.
+///
+/// A load made [`local`](Self::locally) reads only the local store and
+/// never hydrates.
 #[derive(Debug, Clone)]
 pub struct Load {
     /// The archive whose blob store holds the value.
@@ -29,6 +32,9 @@ pub struct Load {
     /// How a hydration this read causes ranks against the site's other
     /// reads. Never reaches the wire.
     pub priority: Priority,
+    /// Whether the read sees only what the local store holds (see
+    /// [`locally`](Self::locally)).
+    pub local: bool,
 }
 
 impl Load {
@@ -39,6 +45,7 @@ impl Load {
             archive,
             digest: digest.into(),
             priority: Priority::Demand,
+            local: false,
         }
     }
 
@@ -50,6 +57,14 @@ impl Load {
     /// Rank a hydration this read causes as `priority`.
     pub fn with_priority(mut self, priority: Priority) -> Self {
         self.priority = priority;
+        self
+    }
+
+    /// Read only what the local store holds: every provider answers this
+    /// load from the local blob store (and the block catalog, for a value
+    /// spilled before values moved to blobs), and a miss is `None`.
+    pub fn locally(mut self) -> Self {
+        self.local = true;
         self
     }
 

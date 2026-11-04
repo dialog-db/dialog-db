@@ -42,6 +42,7 @@ where
         + Provider<dialog_artifacts::Preload>
         + Provider<dialog_artifacts::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
+        + dialog_common::Holds
         + ConditionalSync
         + 'static,
 {
@@ -74,6 +75,7 @@ where
         + Provider<dialog_artifacts::Preload>
         + Provider<dialog_artifacts::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
+        + dialog_common::Holds
         + ConditionalSync
         + 'static,
 {

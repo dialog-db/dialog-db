@@ -40,6 +40,7 @@ impl<I: Importer + Unpin + ConditionalSend> Import<'_, I> {
             + Provider<ArchiveLoad>
             + Provider<BlobLoad>
             + Provider<Fork<RemoteSite, Resolve>>
+            + dialog_common::Holds
             + ConditionalSync
             + 'static,
     {

@@ -42,7 +42,7 @@ use super::{
     DELEGATION_AUDIENCE, DELEGATION_COMMAND, DELEGATION_EXPIRATION, DELEGATION_ISSUER,
     DELEGATION_NOT_BEFORE, DELEGATION_SUBJECT, Delegations,
 };
-use crate::repository::branch::blob::index_store;
+use crate::repository::archive::erased;
 use crate::{Blob, Branch, RemoteSite, Select};
 
 /// Maximum chain depth, matching
@@ -100,6 +100,7 @@ impl IssuedBy<'_> {
             + Provider<BlobLoad>
             + Provider<Fork<RemoteSite, Resolve>>
             + Provider<Fork<RemoteSite, BlobRead>>
+            + dialog_common::Holds
             + ConditionalSync
             + 'static,
     {
@@ -136,6 +137,7 @@ impl IssuedTo<'_> {
             + Provider<BlobLoad>
             + Provider<Fork<RemoteSite, Resolve>>
             + Provider<Fork<RemoteSite, BlobRead>>
+            + dialog_common::Holds
             + ConditionalSync
             + 'static,
     {
@@ -173,6 +175,7 @@ impl Retained<'_> {
             + Provider<BlobLoad>
             + Provider<Fork<RemoteSite, Resolve>>
             + Provider<Fork<RemoteSite, BlobRead>>
+            + dialog_common::Holds
             + ConditionalSync
             + 'static,
     {
@@ -204,13 +207,14 @@ where
         + Provider<BlobLoad>
         + Provider<Fork<RemoteSite, Resolve>>
         + Provider<Fork<RemoteSite, BlobRead>>
+        + dialog_common::Holds
         + ConditionalSync
         + 'static,
 {
     if branch.revision().is_none() {
         return Ok(Vec::new());
     }
-    let store = index_store(branch, env).await;
+    let store = erased(env);
     let attribute = attribute
         .parse()
         .map_err(|error| malformed("delegation attribute", error))?;
@@ -328,6 +332,7 @@ impl ProveDelegation<'_> {
             + Provider<BlobLoad>
             + Provider<Fork<RemoteSite, Resolve>>
             + Provider<Fork<RemoteSite, BlobRead>>
+            + dialog_common::Holds
             + ConditionalSync
             + 'static,
     {
@@ -344,7 +349,7 @@ impl ProveDelegation<'_> {
             return Ok(UcanProof::new(access.clone()));
         }
 
-        let store = index_store(branch, env).await;
+        let store = erased(env);
 
         let mut queue: Vec<Hop> = vec![Hop {
             audience: self.principal.clone(),
@@ -366,7 +371,7 @@ impl ProveDelegation<'_> {
                     .the(DELEGATION_AUDIENCE.parse().expect("valid attribute"))
                     .is(Value::String(hop.audience.to_string())),
             )
-            .execute(store.clone())
+            .execute(store)
             .await
             .map_err(|error| malformed("candidate scan failed", error))?;
             futures_util::pin_mut!(candidates);
@@ -452,7 +457,11 @@ impl ProveDelegation<'_> {
         subject: &Did,
     ) -> Result<Option<Candidate>, AuthorizeError>
     where
-        S: dialog_artifacts::ArchiveReader + Clone,
+        S: Provider<ArchiveLoad>
+            + Provider<BlobLoad>
+            + dialog_common::Holds
+            + ConditionalSync
+            + Clone,
     {
         let facts = Select::new(branch, ArtifactSelector::new().of(entity.clone()))
             .execute(store.clone())
@@ -546,6 +555,7 @@ impl ProveDelegation<'_> {
             + Provider<BlobLoad>
             + Provider<Fork<RemoteSite, Resolve>>
             + Provider<Fork<RemoteSite, BlobRead>>
+            + dialog_common::Holds
             + ConditionalSync
             + 'static,
     {

@@ -3,11 +3,14 @@
 use std::sync::mpsc::Sender;
 
 use dialog_artifacts::{Datum, DialogArtifactsError, Key, State};
-use dialog_search_tree::{Entry, Key as TreeKey, NodeBody, Nodes as _, PersistentNode, into_owned};
+use dialog_effects::archive::prelude::CatalogScope;
+use dialog_search_tree::{Entry, Key as TreeKey, NodeBody, PersistentNode, into_owned, load_node};
 use dialog_storage::Blake3Hash;
 
 use super::store::WorkerMessage;
-use crate::Blocks;
+use std::sync::Arc;
+
+use crate::DiagnoseSession;
 
 /// Represents a node in the probabilistic search tree hierarchy.
 ///
@@ -36,8 +39,10 @@ pub enum TreeNode {
 /// This worker loads individual tree nodes on-demand as the UI navigates
 /// the probabilistic search tree structure.
 pub struct ArtifactsHierarchy {
-    /// Where the tree's blocks load from
-    storage: Blocks,
+    /// The session the tree's blocks load through
+    storage: Arc<DiagnoseSession>,
+    /// The catalog the tree's nodes live in
+    catalog: CatalogScope,
     /// Channel sender for worker messages
     tx: Sender<WorkerMessage>,
 }
@@ -49,8 +54,16 @@ impl ArtifactsHierarchy {
     ///
     /// * `tree` - The probabilistic search tree index to load nodes from
     /// * `tx` - Channel sender for worker messages
-    pub fn new(storage: Blocks, tx: Sender<WorkerMessage>) -> Self {
-        Self { storage, tx }
+    pub fn new(
+        storage: Arc<DiagnoseSession>,
+        catalog: CatalogScope,
+        tx: Sender<WorkerMessage>,
+    ) -> Self {
+        Self {
+            storage,
+            catalog,
+            tx,
+        }
     }
 
     /// Looks up a tree node by its hash, loading it in the background.
@@ -63,12 +76,13 @@ impl ArtifactsHierarchy {
     /// * `hash` - The hash of the node to look up
     pub fn lookup_node(&self, hash: &Blake3Hash) {
         let storage = self.storage.clone();
+        let catalog = self.catalog.clone();
         let tx = self.tx.clone();
         let hash = hash.to_owned();
 
         tokio::spawn(async move {
             let Some(block): Option<PersistentNode<Key, State<Datum>>> =
-                storage.load_node(&hash.into()).await?
+                load_node(storage.as_ref(), &catalog, &hash.into()).await?
             else {
                 // TODO: This should be an error condition
                 return Ok(());

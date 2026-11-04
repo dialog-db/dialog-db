@@ -2257,8 +2257,8 @@ where
         D: Distribution,
     {
         let planned = reads == Reads::Planned;
-        let source_storage = Accessor::new(source_storage, source_tree.catalog());
-        let target_storage = Accessor::new(target_storage, target_tree.catalog());
+        let source_storage = source_tree.accessor(source_storage);
+        let target_storage = target_tree.accessor(target_storage);
         // Identical trees (including two empty trees) share their root
         // hash; nothing needs to be read at all.
         if source_tree.root() == target_tree.root() {

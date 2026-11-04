@@ -173,6 +173,7 @@ where
         + Provider<ArchiveLoad>
         + Provider<BlobLoad>
         + Provider<Fork<Network, Resolve>>
+        + dialog_common::Holds
         + ConditionalSync
         + 'static,
 {

@@ -50,6 +50,7 @@
 //! #         + Provider<dialog_effects::archive::Load>
 //! #         + Provider<dialog_effects::blob::Load>
 //! #         + Provider<Fork<RemoteSite, Resolve>>
+//! #         + dialog_common::Holds
 //! #         + dialog_common::ConditionalSync
 //! #         + 'static,
 //! # {
@@ -65,8 +66,8 @@
 mod prove;
 pub use prove::*;
 
+use crate::repository::archive::erased;
 use crate::repository::branch::asset::recorded_size;
-use crate::repository::branch::blob::index_store;
 use crate::repository::source::SourceRef;
 use crate::{Branch, CommitError, Index, RemoteSite};
 use dialog_artifacts::{
@@ -242,14 +243,18 @@ impl RetainDelegation<'_> {
             + Provider<ArchiveLoad>
             + Provider<BlobLoad>
             + Provider<Fork<RemoteSite, Resolve>>
+            + dialog_common::Holds
             + ConditionalSync
             + 'static,
     {
         let branch = self.branch;
-        let store = index_store(branch, env).await;
-        let tree = branch
-            .revision()
-            .map(|revision| Index::from_hash(NodeHash::from(*revision.tree.hash())));
+        let store = erased(env);
+        let tree = branch.revision().map(|revision| {
+            Index::at(
+                branch.archive().index(),
+                NodeHash::from(*revision.tree.hash()),
+            )
+        });
 
         let mut instructions = Vec::new();
         let mut retained = Vec::new();
@@ -340,6 +345,7 @@ impl RetractDelegation<'_> {
             + Provider<ArchiveLoad>
             + Provider<BlobLoad>
             + Provider<Fork<RemoteSite, Resolve>>
+            + dialog_common::Holds
             + ConditionalSync
             + 'static,
     {
@@ -347,8 +353,11 @@ impl RetractDelegation<'_> {
         let Some(revision) = branch.revision() else {
             return Ok(Vec::new());
         };
-        let store = index_store(branch, env).await;
-        let tree = Index::from_hash(NodeHash::from(*revision.tree.hash()));
+        let store = erased(env);
+        let tree = Index::at(
+            branch.archive().index(),
+            NodeHash::from(*revision.tree.hash()),
+        );
 
         let mut instructions = Vec::new();
         let mut entries = Vec::new();

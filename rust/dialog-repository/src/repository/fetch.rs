@@ -38,10 +38,10 @@ use dialog_common::Blake3Hash as NodeHash;
 use dialog_effects::archive::prelude::ArchiveScope;
 use dialog_search_tree::{DialogSearchTreeError, Traversable as _};
 
-use crate::repository::archive::networked::Reads;
+use crate::repository::archive::TreeEnv;
 use crate::repository::branch::Erased;
 use crate::repository::source::Source;
-use crate::{Index, NetworkedIndex, Routes};
+use crate::{Index, Routes};
 
 #[cfg(not(target_arch = "wasm32"))]
 type FetchFuture<'a> = Pin<Box<dyn Future<Output = Likelihood> + Send + 'a>>;
@@ -53,8 +53,8 @@ type FetchFuture<'a> = Pin<Box<dyn Future<Output = Likelihood> + 'a>>;
 /// stream's lifetime.
 ///
 /// Each job replicates its selector against every source in `sources`:
-/// every block the walk touches lands in the line's node cache and,
-/// through the networked index, the local archive — so the later demand
+/// every block the walk touches lands in the node cache the env holds and,
+/// through the env's hydrating load, the local archive — so the later demand
 /// read is local. Job errors surface as nothing (a preload that fails
 /// must stay invisible; the demand read owns the error).
 ///
@@ -181,9 +181,9 @@ where
 /// parsing and spilled-value fetches for rows nobody read and fetched
 /// leaf by leaf.
 ///
-/// Reads go through the networked index, which keeps what it reads in the
-/// line's shared node cache (so a later demand read is free) and hydrates
-/// the local archive with every fetched block; in-flight hydrations are shared by the env's own
+/// Reads load through the env, which keeps what they read in the node
+/// cache it holds (so a later demand read is free) and hydrates the local
+/// archive with every fetched block; in-flight hydrations are shared by the env's own
 /// [`Hydrate`] scheduler with every concurrent reader anywhere in the
 /// process, and ranked at the hint's likelihood there, so warming never
 /// takes a site's slot from a demand read. The scope is the selector's exact key range; a subtree the
@@ -206,10 +206,9 @@ async fn warm_source(
         return Ok(());
     }
     let catalog = ArchiveScope::new(source.as_ref().subject()).index();
-    let reads: &dyn Reads = env;
-    let storage = NetworkedIndex::new(reads, catalog, source.as_ref().node_cache())
-        .with_priority(likelihood.into());
-    let tree = Index::from_hash(NodeHash::from(root));
+    let storage: &dyn TreeEnv = env;
+    // Every load the walk performs is ranked at the hint's likelihood.
+    let tree = Index::at(catalog, NodeHash::from(root)).ranked(likelihood.into());
 
     let manifest = tree.manifest(&storage).await?;
     let range = selector_range(selector, &manifest);
@@ -241,10 +240,11 @@ mod tests {
     use crate::helpers::{Counting, connect};
     use dialog_artifacts::tree::ArtifactTreeExt as _;
     use dialog_artifacts::{
-        ArchiveDelta, Artifact, Entity, Instruction, Preload, PreloadRequest, Speculation, Value,
+        ArchiveDelta, Artifact, Datum, Entity, Instruction, Key, Preload, PreloadRequest,
+        Speculation, State, Value,
     };
     use dialog_capability::{Capability, Subject};
-    use dialog_search_tree::MemoryBlocks;
+    use dialog_search_tree::helpers::Blocks;
     use dialog_storage::DialogStorageError;
     use dialog_varsig::did;
     use futures_util::stream;
@@ -252,16 +252,31 @@ mod tests {
     use async_trait::async_trait;
     use dialog_artifacts::tree::ArtifactNodeCache;
     use dialog_capability::Provider;
+    use dialog_common::{Held, Holdings, Holds};
     use dialog_effects::archive::Get;
     use dialog_query::query::Output as _;
-    use dialog_search_tree::Nodes as _;
 
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     /// An archive that answers every read with the same block, whatever
-    /// was asked for, and holds nothing to hydrate.
-    struct Impostor(Vec<u8>);
+    /// was asked for, and holds nothing to hydrate; it holds the line's
+    /// node cache.
+    struct Impostor(Vec<u8>, Holdings);
+
+    impl Holds for Impostor {
+        fn held(&self, key: &str) -> Option<Held> {
+            self.1.held(key)
+        }
+
+        fn hold(&self, key: String, handle: Held) {
+            self.1.hold(key, handle)
+        }
+
+        fn held_or(&self, key: &str, make: &dyn Fn() -> Held) -> Held {
+            self.1.held_or(key, make)
+        }
+    }
 
     #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
     #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -283,8 +298,8 @@ mod tests {
     }
 
     /// Persists a one-fact tree into `blocks` and returns its root.
-    async fn persist(blocks: &MemoryBlocks, name: &str) -> Result<NodeHash> {
-        let mut tree = Index::empty();
+    async fn persist(blocks: &Blocks, name: &str) -> Result<NodeHash> {
+        let mut tree = Index::empty_in(blocks.catalog().clone());
         let mut delta = ArchiveDelta::zero();
         tree.apply(
             blocks,
@@ -309,7 +324,9 @@ mod tests {
     /// that hash cannot be served the wrong node from memory.
     #[dialog_common::test]
     async fn it_keeps_a_node_that_is_not_the_one_asked_for_out_of_the_cache() -> Result<()> {
-        let blocks = MemoryBlocks::new();
+        let catalog =
+            ArchiveScope::new(Subject::from(did!("key:zCacheThroughTest"))).catalog("index");
+        let blocks = Blocks::in_catalog(catalog.clone());
         let asked = persist(&blocks, "Alice").await?;
         let other = persist(&blocks, "Bob").await?;
         let archive = Impostor(
@@ -317,15 +334,13 @@ mod tests {
                 .get(&other)
                 .expect("the other tree's root is stored")
                 .into_vec(),
+            Holdings::default(),
         );
         let cache = ArtifactNodeCache::new();
-        let through = NetworkedIndex::new(
-            &archive,
-            ArchiveScope::new(Subject::from(did!("key:zCacheThroughTest"))).catalog("index"),
-            cache.clone(),
-        );
+        cache.hold(&archive);
 
-        let loaded = through.load_node(&asked).await;
+        let loaded: Result<Option<dialog_search_tree::PersistentNode<Key, State<Datum>>>, _> =
+            dialog_search_tree::load_node(&archive, &catalog, &asked).await;
 
         assert!(
             matches!(
@@ -336,8 +351,10 @@ mod tests {
             ),
             "a node that does not hash to the one asked for must be refused, got {loaded:?}"
         );
+        let held = ArtifactNodeCache::of(&archive, catalog.subject())
+            .expect("the archive holds the line's node cache");
         assert!(
-            cache.get_cached(&asked).is_none(),
+            held.get_cached(&asked).is_none(),
             "the impostor must not be cached under the hash asked for"
         );
         Ok(())

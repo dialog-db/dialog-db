@@ -205,18 +205,29 @@ impl HeldCaches {
             return caches;
         }
         let formulas = FormulaCache::of(env);
-        // So are routes branches registered before any caches were held.
+        // So are routes branches registered before any caches were held,
+        // and the nodes trees read through `env` kept before then.
         let routes = crate::Routes::of(env);
-        env.held_or(&key, &|| {
-            let mut caches = Self::with_formulas(NODE_CACHE_BUDGET, formulas.clone());
-            caches.routes = routes.clone();
-            Arc::new(caches)
-        })
-        .downcast_ref::<Self>()
-        .cloned()
-        // Only if something else is held under the key: caches of the
-        // caller's own, which reuse nothing and break nothing.
-        .unwrap_or_default()
+        let nodes = ArtifactNodeCache::held_by(env);
+        let caches = env
+            .held_or(&key, &|| {
+                let mut caches = Self::with_formulas(NODE_CACHE_BUDGET, formulas.clone());
+                caches.routes = routes.clone();
+                if let Some(nodes) = &nodes {
+                    caches.nodes = nodes.clone();
+                }
+                Arc::new(caches)
+            })
+            .downcast_ref::<Self>()
+            .cloned()
+            // Only if something else is held under the key: caches of the
+            // caller's own, which reuse nothing and break nothing.
+            .unwrap_or_default();
+        // A tree reads the node cache `env` holds (`NodeCache::of`): it is
+        // this one, so a node a branch's read kept answers every tree read
+        // through `env`, and the budget, release and clear here govern it.
+        caches.nodes.hold(env);
+        caches
     }
 
     /// Have `env` hold these caches, in place of any it held.
@@ -225,6 +236,7 @@ impl HeldCaches {
     /// opened from here on uses these.
     pub fn hold<Env: Holds>(&self, env: &Env) {
         env.hold(held_key::<Self>(HELD), Arc::new(self.clone()));
+        self.nodes.hold(env);
         self.formulas.hold(env);
         self.routes.hold(env);
     }

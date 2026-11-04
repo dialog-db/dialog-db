@@ -371,6 +371,20 @@ impl<Key, Value> NodeCache<Key, Value> {
             .map(|cache| cache.scoped(Scope::named(subject.as_str().as_bytes())))
     }
 
+    /// The node cache `env` holds, if it holds one, without making one: the
+    /// handle an owner of `env`'s caches adopts rather than holding a second
+    /// cache beside it.
+    pub fn held_by<Env>(env: &Env) -> Option<Self>
+    where
+        Env: Holds + ?Sized,
+        Key: ConditionalSend + ConditionalSync + 'static,
+        Value: ConditionalSend + ConditionalSync + 'static,
+    {
+        env.held(&held_key::<Self>(HELD))?
+            .downcast_ref::<Self>()
+            .cloned()
+    }
+
     /// Have `env` hold this cache, in place of any it held: what trees read
     /// over `env` from here on is kept here.
     pub fn hold<Env>(&self, env: &Env)

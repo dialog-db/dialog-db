@@ -1,6 +1,6 @@
 use dialog_artifacts::history::Version;
 use dialog_artifacts::{
-    Datum, Key as ArtifactKey, LoadBlob, ShipmentRef, State, shipment_ref, shipment_refs,
+    Datum, Key as ArtifactKey, ShipmentRef, State, shipment_ref, shipment_refs,
 };
 use dialog_capability::{Fork, Provider, Subject};
 use dialog_common::Blake3Hash as NodeHash;
@@ -14,10 +14,11 @@ use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::prelude::{ArchiveBlobExt as _, ReadBlobExt as _, WriteBlobExt as _};
 use dialog_effects::blob::{BlobError, BlobReader, Import as BlobImport, Read as BlobRead};
 use dialog_effects::memory::{Current, Publish, Resolve};
-use dialog_search_tree::Nodes as _;
 use dialog_search_tree::{
-    MissingBlocks, MissingPolicy, NodeBody, NoveltyOp, PersistentNode, TreeDifference, into_owned,
+    Accessor, MissingBlocks, MissingPolicy, NodeBody, NoveltyOp, PersistentNode, Reading,
+    TreeDifference, into_owned,
 };
+use dialog_storage::provider::load::{load_spill, read_all};
 use futures_util::{StreamExt as _, TryStreamExt as _, stream};
 use std::collections::HashSet;
 
@@ -26,13 +27,12 @@ use super::resolve::resolve;
 use super::upstream::Target;
 use crate::RemoteFallback;
 use crate::ResolveEnv;
-use crate::repository::archive::local::read_all;
-use crate::repository::archive::networked::fill_import;
+use crate::repository::archive::{erased, fill_import};
 use crate::repository::remote::Step;
 use crate::{
-    Branch, ConnectedReplica, Index, LocalIndex, NetworkedIndex, PublishError,
-    PublishRemoteBranchError, PushError, RemoteEdition, RemoteSite, RepositoryMemoryExt, Revision,
-    TreeReference, Upstream, UpstreamBranch,
+    Branch, ConnectedReplica, Index, PublishError, PublishRemoteBranchError, PushError,
+    RemoteEdition, RemoteSite, RepositoryMemoryExt, Revision, TreeReference, Upstream,
+    UpstreamBranch,
 };
 use futures_util::future::join_all;
 
@@ -269,20 +269,29 @@ async fn holds<Env: ResolveEnv>(
         RemoteFallback::Unavailable { remote, .. } => Some(remote.clone()),
         RemoteFallback::None => None,
     };
-    let store = NetworkedIndex::erased(env, branch.archive().index(), branch.node_cache());
+    let store = erased(env);
+    let catalog = branch.archive().index();
     let target = match upstream.target() {
         Target::Local(name) => format!("branch {name}"),
         Target::Remote(entity) => format!("upstream {entity}"),
     };
     let observes = async |version: &Version| -> Result<bool, PushError> {
         let answer = async {
-            if let Some(seen) =
-                head_observes(head, version, &branch.contexts(), &branch.records(), &store).await?
+            if let Some(seen) = head_observes(
+                head,
+                version,
+                &branch.contexts(),
+                &branch.records(),
+                &catalog,
+                &store,
+            )
+            .await?
             {
                 return Ok(seen);
             }
             let history = branch.history(env);
-            let context = full_context(head, &branch.contexts(), &store, &history).await?;
+            let context =
+                full_context(head, &branch.contexts(), &catalog, &store, &history).await?;
             Ok::<_, dialog_artifacts::DialogArtifactsError>(context.observes(version))
         };
         answer.await.map_err(|error| match &serving {
@@ -486,14 +495,17 @@ where
                         target: MissingBlocks::Boundary,
                     };
 
+                    // Both sides are boundaries, so the difference reads
+                    // the local archive's own word on every node (`Get`)
+                    // and never hydrates: absence is what it asks about.
                     let index = branch.archive().index();
-                    let store = LocalIndex::new(env, index.clone(), branch.node_cache());
                     let base_tree = match &base {
-                        Some(base) => Index::from_hash(NodeHash::from(*base.hash())),
-                        None => Index::empty(),
+                        Some(base) => Index::at(index.clone(), NodeHash::from(*base.hash())),
+                        None => Index::empty_in(index.clone()),
                     };
-                    let current_tree = Index::from_hash(NodeHash::from(*revision.tree.hash()));
-                    let tree_store = store;
+                    let current_tree =
+                        Index::at(index.clone(), NodeHash::from(*revision.tree.hash()));
+                    let tree_store = erased(env);
                     let difference = TreeDifference::compute_with(
                         &base_tree,
                         &current_tree,
@@ -557,19 +569,8 @@ where
                     // the sign-in path this loop awaited each shipment in turn
                     // and measured as the single largest cost of the push (one
                     // round trip per spilled value, one after another).
-                    let blob_store = LocalIndex::new(env, index.clone(), branch.node_cache());
                     let shipments = shipment_refs(&difference)
-                        .map(|shipment| {
-                            ship(
-                                shipment,
-                                branch,
-                                remote,
-                                &blob_store,
-                                &sources,
-                                sole_remote,
-                                env,
-                            )
-                        })
+                        .map(|shipment| ship(shipment, branch, remote, &sources, sole_remote, env))
                         .buffer_unordered(SHIPMENT_CONCURRENCY)
                         .try_collect::<()>();
                     // Boxed like the node upload below: the stream carries the
@@ -865,7 +866,6 @@ async fn ship<Env>(
     shipment: Result<ShipmentRef, dialog_artifacts::DialogArtifactsError>,
     branch: &Branch,
     remote: &ConnectedReplica,
-    blob_store: &LocalIndex<'_, Env>,
     sources: &[ConnectedReplica],
     sole_remote: bool,
     env: &Env,
@@ -964,7 +964,11 @@ where
         // -> remote blob import, verified against that reference.
         ShipmentRef::SpilledValue(reference) => {
             let digest = NodeHash::from(reference);
-            let bytes = match LoadBlob::new(digest.clone()).perform(blob_store).await? {
+            // What this replica holds of it, locally only: a value held by
+            // reference is not this replica's to ship, so it must not be
+            // fetched to find out.
+            let local = BlobLoad::new(branch.archive(), digest.clone());
+            let bytes = match load_spill(env, &local).await? {
                 Some(bytes) => bytes,
                 // Held by reference: not this replica's to ship. Sole
                 // remote -> the target has it by attribution; otherwise
@@ -1070,8 +1074,7 @@ where
         + 'static,
 {
     if let LocalCopy::Unprobed = local
-        && let Some(bytes) = LocalIndex::new(env, branch.archive().index(), branch.node_cache())
-            .load_blob(digest)
+        && let Some(bytes) = load_spill(env, &BlobLoad::new(branch.archive(), digest.clone()))
             .await
             .map_err(|error| dialog_search_tree::DialogSearchTreeError::Storage(error.into()))?
     {
@@ -1200,10 +1203,22 @@ async fn node_from_anywhere<Env>(
     env: &Env,
 ) -> Result<Option<PersistentNode<ArtifactKey, State<Datum>>>, PushError>
 where
-    Env:
-        Provider<Get> + Provider<Put> + Provider<Fork<RemoteSite, Get>> + ConditionalSync + 'static,
+    Env: Provider<Get>
+        + Provider<Put>
+        + Provider<ArchiveLoad>
+        + Provider<Fork<RemoteSite, Get>>
+        + Holds
+        + ConditionalSync
+        + 'static,
 {
-    let local = LocalIndex::new(env, branch.archive().index(), branch.node_cache());
+    // The local read is local only: the node cache, then the archive's
+    // own `Get` (a local load). A node this replica holds by reference
+    // must not be hydrated to answer, since what is forwarded is streamed
+    // through and the local archive keeps none of it.
+    let local = Accessor::new(env, &branch.archive().index()).reading(Reading {
+        local: true,
+        ..Reading::default()
+    });
     if let Some(node) = local.load_node(hash).await? {
         return Ok(Some(node));
     }
@@ -1357,6 +1372,7 @@ where
         + Provider<Fork<RemoteSite, Put>>
         + Provider<Fork<RemoteSite, BlobRead>>
         + Provider<Fork<RemoteSite, BlobImport>>
+        + dialog_common::Holds
         + ConditionalSync
         + 'static,
 {

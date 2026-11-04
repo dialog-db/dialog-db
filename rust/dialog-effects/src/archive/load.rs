@@ -20,7 +20,10 @@ use super::{ArchiveError, Get};
 /// on another's behalf: it is never forked to a remote, and a remote's own
 /// hydration is no answer to it.
 ///
-/// A read that must see only what the local archive holds performs `Get`.
+/// A read that must see only what the local archive holds performs `Get`,
+/// or, where it reads through code that loads (a tree's walk, say), a load
+/// made [`local`](Self::locally): every provider answers that one exactly
+/// as `Get`, so it never hydrates.
 ///
 /// The bytes are returned as the store holds them: a reader that needs
 /// them to be the block asked for checks them against the digest.
@@ -38,6 +41,9 @@ pub struct Load {
     /// How a hydration this read causes ranks against the site's other
     /// reads. Never reaches the wire.
     pub priority: Priority,
+    /// Whether the read sees only what the local archive holds (see
+    /// [`locally`](Self::locally)).
+    pub local: bool,
 }
 
 impl Load {
@@ -48,6 +54,7 @@ impl Load {
             catalog,
             digest: digest.into(),
             priority: Priority::Demand,
+            local: false,
         }
     }
 
@@ -59,6 +66,15 @@ impl Load {
     /// Rank a hydration this read causes as `priority`.
     pub fn with_priority(mut self, priority: Priority) -> Self {
         self.priority = priority;
+        self
+    }
+
+    /// Read only what the local archive holds: every provider answers this
+    /// load as the [`Get`] it names, and a miss is `None` wherever the
+    /// subject's blocks live besides. For a reader whose answer is what
+    /// this replica holds, such as an export that does not download.
+    pub fn locally(mut self) -> Self {
+        self.local = true;
         self
     }
 

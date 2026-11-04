@@ -51,6 +51,7 @@ use dialog_query::rule::statement::Reach;
 use dialog_query::{Any, Binding, Environment, InductiveRule, Match, Term};
 use futures_util::{StreamExt as _, TryStreamExt};
 
+use crate::repository::archive::erased;
 use crate::repository::branch::QueryLayer;
 use crate::repository::branch::session::QueryEnv;
 use crate::repository::source::SourceRef;
@@ -413,6 +414,7 @@ impl<'a> Dispatch<'a> {
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
+            + dialog_common::Holds
             + ConditionalSync
             + 'static,
     {
@@ -473,6 +475,7 @@ impl<'a> Dispatch<'a> {
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
+            + dialog_common::Holds
             + ConditionalSync
             + 'static,
     {
@@ -529,6 +532,7 @@ impl<'a> Dispatch<'a> {
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
+            + dialog_common::Holds
             + ConditionalSync
             + 'static,
     {
@@ -598,6 +602,7 @@ impl<'a> Dispatch<'a> {
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
+            + dialog_common::Holds
             + ConditionalSync
             + 'static,
     {
@@ -642,6 +647,7 @@ impl<'a> Dispatch<'a> {
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
+            + dialog_common::Holds
             + ConditionalSync
             + 'static,
     {
@@ -691,6 +697,7 @@ impl<'a> Dispatch<'a> {
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
+            + dialog_common::Holds
             + ConditionalSync
             + 'static,
     {
@@ -731,6 +738,7 @@ impl<'a> Dispatch<'a> {
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
+            + dialog_common::Holds
             + ConditionalSync
             + 'static,
     {
@@ -777,6 +785,7 @@ where
         + Provider<dialog_artifacts::Preload>
         + Provider<dialog_artifacts::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
+        + dialog_common::Holds
         + ConditionalSync
         + 'static,
 {
@@ -802,14 +811,14 @@ where
     }
 
     // Walk the tree diff over the EAV region only — each changed fact
-    // surfaces once. Reads go through the networked store exactly as a
-    // select does: a pulled head's changed paths may reference
-    // remote-only blocks.
-    let store = crate::NetworkedIndex::erased(env, branch.archive().index(), branch.node_cache());
-    let raw_store = store.clone();
+    // surfaces once. Reads load through the env exactly as a select's do:
+    // a pulled head's changed paths may reference remote-only blocks.
+    let archive = branch.archive();
+    let store = erased(env);
+    let raw_store = store;
     let storage = store;
-    let previous = crate::Index::from_hash(NodeHash::from(*watermark.tree.hash()));
-    let next = crate::Index::from_hash(NodeHash::from(*head.tree.hash()));
+    let previous = crate::Index::at(archive.index(), NodeHash::from(*watermark.tree.hash()));
+    let next = crate::Index::at(archive.index(), NodeHash::from(*head.tree.hash()));
 
     let scope = vec![
         <EntityKey<Key> as KeyViewConstruct>::min().into_key()
@@ -832,7 +841,7 @@ where
         let State::Added(datum) = &entry.value else {
             continue;
         };
-        let spilled = fetch_spilled(&raw_store, &entry.key)
+        let spilled = fetch_spilled(&raw_store, &archive, &entry.key)
             .await
             .map_err(|error| CommitError::Induction(format!("watermark spilled: {error:?}")))?;
         let fact = Artifact::from_key_datum_with_value(&entry.key, datum, spilled)
@@ -890,6 +899,7 @@ where
         + Provider<dialog_artifacts::Preload>
         + Provider<dialog_artifacts::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
+        + dialog_common::Holds
         + ConditionalSync
         + 'static,
 {
@@ -1221,6 +1231,7 @@ mod tests {
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
+            + dialog_common::Holds
             + ConditionalSync
             + 'static,
     {
@@ -3276,6 +3287,7 @@ mod tests {
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
+            + dialog_common::Holds
             + ConditionalSync
             + 'static,
     {

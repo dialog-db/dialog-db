@@ -1,5 +1,5 @@
 use dialog_capability::Provider;
-use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync, Holds};
+use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync, Holds, Priority};
 use dialog_effects::archive::Load;
 use dialog_effects::archive::prelude::CatalogScope;
 use dialog_storage::DialogStorageError;
@@ -49,6 +49,40 @@ where
     Accessor::new(env, catalog).load_node(hash).await
 }
 
+/// How a tree's reads load the nodes its environment's cache does not hold.
+///
+/// A read is a [`Load`] someone is waiting on unless told otherwise: a walk
+/// that warms ahead of demand ranks the hydrations it causes lower
+/// ([`priority`](Self::priority)), and a reader whose answer is what the
+/// local archive holds makes every load local ([`local`](Self::local)).
+/// Either way the read is the tree's own, performed on the environment;
+/// see [`PersistentTree::ranked`](crate::PersistentTree::ranked) and
+/// [`PersistentTree::locally`](crate::PersistentTree::locally).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Reading {
+    /// How a hydration a read causes ranks against the site's other reads.
+    pub priority: Priority,
+    /// Whether a read sees only what the local archive holds.
+    pub local: bool,
+}
+
+impl Default for Reading {
+    fn default() -> Self {
+        Self {
+            priority: Priority::Demand,
+            local: false,
+        }
+    }
+}
+
+impl Reading {
+    /// The load of the block `hash` names in `catalog`, read this way.
+    fn load(&self, catalog: &CatalogScope, hash: &Blake3Hash) -> Load {
+        let load = Load::new(catalog.clone(), hash.clone()).with_priority(self.priority);
+        if self.local { load.locally() } else { load }
+    }
+}
+
 /// The node stored under `hash` in `catalog`, loaded through `env` and
 /// checked: the one place a tree performs [`Load`] for a node.
 ///
@@ -61,6 +95,7 @@ async fn fetch_node<Key, Value, Env>(
     env: &Env,
     catalog: &CatalogScope,
     hash: &Blake3Hash,
+    reading: Reading,
 ) -> Result<Option<PersistentNode<Key, Value>>, DialogSearchTreeError>
 where
     Key: self::Key,
@@ -70,7 +105,8 @@ where
     >,
     Env: Provider<Load> + ConditionalSync + ?Sized,
 {
-    let block = Load::new(catalog.clone(), hash.clone())
+    let block = reading
+        .load(catalog, hash)
         .perform(env)
         .await
         .map_err(|error| DialogSearchTreeError::Storage(error.into()))?;
@@ -114,6 +150,7 @@ pub struct Accessor<'a, Key, Value, Env: ?Sized> {
     env: &'a Env,
     catalog: CatalogScope,
     cache: Option<NodeCache<Key, Value>>,
+    reading: Reading,
 }
 
 impl<Key, Value, Env: ?Sized> Clone for Accessor<'_, Key, Value, Env> {
@@ -122,6 +159,7 @@ impl<Key, Value, Env: ?Sized> Clone for Accessor<'_, Key, Value, Env> {
             env: self.env,
             catalog: self.catalog.clone(),
             cache: self.cache.clone(),
+            reading: self.reading,
         }
     }
 }
@@ -139,7 +177,14 @@ where
             env,
             catalog: catalog.clone(),
             cache: NodeCache::of(env, catalog.subject()),
+            reading: Reading::default(),
         }
+    }
+
+    /// These reads, loading what the cache does not hold as `reading` says.
+    pub fn reading(mut self, reading: Reading) -> Self {
+        self.reading = reading;
+        self
     }
 }
 
@@ -180,7 +225,8 @@ where
         &self,
         hash: &Blake3Hash,
     ) -> Result<Option<PersistentNode<Key, Value>>, DialogSearchTreeError> {
-        let fetch = async |hash: &Blake3Hash| fetch_node(self.env, &self.catalog, hash).await;
+        let fetch =
+            async |hash: &Blake3Hash| fetch_node(self.env, &self.catalog, hash, self.reading).await;
         match &self.cache {
             Some(cache) => cache.get_or_fetch(hash, fetch).await,
             None => fetch(hash).await,
@@ -417,6 +463,91 @@ mod tests {
             "another subject does not see the node"
         );
         assert_eq!(mine.len(), theirs.len(), "the two scopes share one cache");
+        Ok(())
+    }
+
+    /// Keeps how each load it answers was asked: its priority and whether
+    /// it was local.
+    struct Asked {
+        blocks: crate::helpers::Blocks,
+        loads: std::sync::Mutex<Vec<(dialog_common::Priority, bool)>>,
+    }
+
+    impl dialog_common::Holds for Asked {
+        fn held(&self, _key: &str) -> Option<dialog_common::Held> {
+            None
+        }
+
+        fn hold(&self, _key: String, _handle: dialog_common::Held) {}
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl dialog_capability::Provider<dialog_effects::archive::Load> for Asked {
+        async fn execute(
+            &self,
+            load: dialog_effects::archive::Load,
+        ) -> Result<Option<Buffer>, dialog_effects::archive::ArchiveError> {
+            self.loads.lock().unwrap().push((load.priority, load.local));
+            load.perform(&self.blocks).await
+        }
+    }
+
+    /// A tree's reading reaches every load it performs: a tree reads as a
+    /// demand read that may hydrate, one ranked lower carries its priority
+    /// to the env, and one made local asks for the local archive alone.
+    #[dialog_common::test]
+    async fn it_loads_as_the_tree_reads() -> Result<()> {
+        use dialog_common::Priority;
+
+        let blocks = crate::helpers::Blocks::new();
+        let mut delta = Delta::zero();
+        let tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_catalog())
+            .edit()
+            .insert(1u32.to_be_bytes(), vec![1], &blocks)
+            .await?
+            .persist(&mut delta, &blocks)?;
+        blocks.flush(&mut delta);
+        let env = Asked {
+            blocks,
+            loads: std::sync::Mutex::new(Vec::new()),
+        };
+        let key = 1u32.to_be_bytes();
+        // How every load of one read was asked, emptying the record.
+        let asked = || -> Vec<(Priority, bool)> {
+            let mut loads = env.loads.lock().unwrap();
+            let mut asked = loads.clone();
+            loads.clear();
+            asked.dedup();
+            asked
+        };
+
+        assert_eq!(tree.get(&key, &env).await?, Some(vec![1]));
+        assert_eq!(
+            asked(),
+            [(Priority::Demand, false)],
+            "a demand read by default"
+        );
+
+        let ranked = tree.clone().ranked(Priority::Maybe);
+        assert_eq!(ranked.get(&key, &env).await?, Some(vec![1]));
+        assert_eq!(
+            asked(),
+            [(Priority::Maybe, false)],
+            "ranked at its priority"
+        );
+
+        let local = tree.clone().locally();
+        assert_eq!(local.get(&key, &env).await?, Some(vec![1]));
+        assert_eq!(asked(), [(Priority::Demand, true)], "local loads only");
+
+        let moved = local.with_root(tree.root().clone());
+        assert_eq!(moved.get(&key, &env).await?, Some(vec![1]));
+        assert_eq!(
+            asked(),
+            [(Priority::Demand, true)],
+            "a tree moved to another root reads as it did"
+        );
         Ok(())
     }
 }

@@ -3,7 +3,7 @@ pub use transient::*;
 
 use std::{marker::PhantomData, ops::RangeBounds};
 
-use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync};
+use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync, Priority};
 use dialog_effects::archive::prelude::CatalogScope;
 use futures_core::Stream;
 use rkyv::{
@@ -19,8 +19,8 @@ use rkyv::{
 use crate::reads::*;
 use crate::{
     Accessor, DialogSearchTreeError, Differential, Distribution, Entry, Geometric, Key, Manifest,
-    PersistentNode, Prefetch, SearchOptions, SearchResult, TreeDifference, TreeWalker, Value,
-    into_owned,
+    PersistentNode, Prefetch, Reading, SearchOptions, SearchResult, TreeDifference, TreeWalker,
+    Value, into_owned,
 };
 
 /// A node on a range estimate's edge path, with the range's bound on each
@@ -64,6 +64,7 @@ where
 
     catalog: CatalogScope,
     root: TreeRoot,
+    reading: Reading,
 }
 
 /// A [`PersistentTree`]'s root: either a durable node, or the empty tree
@@ -112,6 +113,7 @@ where
             distribution: PhantomData,
             catalog: self.catalog.clone(),
             root: self.root.clone(),
+            reading: self.reading,
         }
     }
 }
@@ -195,6 +197,7 @@ where
             distribution: PhantomData,
             catalog,
             root: TreeRoot::Empty { manifest, hash },
+            reading: Reading::default(),
         }
     }
 
@@ -230,9 +233,46 @@ where
         Self::seal(catalog, root)
     }
 
-    /// The tree rooted at `root` in this tree's catalog.
+    /// The tree rooted at `root` in this tree's catalog, read as this one
+    /// is (see [`reading`](Self::reading)).
     pub fn with_root(&self, root: Blake3Hash) -> Self {
-        Self::at(self.catalog.clone(), root)
+        let mut tree = Self::at(self.catalog.clone(), root);
+        tree.reading = self.reading;
+        tree
+    }
+
+    /// How this tree's reads load the nodes the environment's cache does not
+    /// hold: a [`Load`] someone is waiting on, unless the tree was
+    /// [`ranked`](Self::ranked) or made [`local`](Self::locally).
+    pub fn reading(&self) -> Reading {
+        self.reading
+    }
+
+    /// This tree, its reads ranking a hydration they cause as `priority`: a
+    /// walk that warms what a later read may need reads at its hint's
+    /// likelihood, so it never takes a site's slot from a read someone is
+    /// waiting on.
+    pub fn ranked(mut self, priority: Priority) -> Self {
+        self.reading.priority = priority;
+        self
+    }
+
+    /// This tree, its reads seeing only what the local archive holds: every
+    /// load it performs is [local](Load::locally), so a node the replica
+    /// lacks reads as absent wherever else the subject's blocks live. For a
+    /// reader whose answer is what this replica holds, such as an export
+    /// that does not download.
+    pub fn locally(mut self) -> Self {
+        self.reading.local = true;
+        self
+    }
+
+    /// The reads of one operation on this tree, through `storage`.
+    pub(crate) fn accessor<'a, Env>(&self, storage: &'a Env) -> Accessor<'a, Key, Value, Env>
+    where
+        Env: Holds + ?Sized,
+    {
+        Accessor::new(storage, &self.catalog).reading(self.reading)
     }
 
     /// Retrieves the value associated with `key` from the tree.
@@ -332,7 +372,7 @@ where
         let Some(root) = self.stored_root() else {
             return Ok(None);
         };
-        let accessor = Accessor::new(storage, &self.catalog);
+        let accessor = self.accessor(storage);
         // Each pending node is bounded on the sides the range cuts through
         // it: `None` on a side means the range runs past that side, so the
         // node's whole extent on it counts.
@@ -396,7 +436,7 @@ where
         Env: Provider<Load> + Holds + ConditionalSync,
         R: RangeBounds<Key> + ConditionalSend,
     {
-        let accessor = Accessor::new(storage, &self.catalog);
+        let accessor = self.accessor(storage);
 
         TreeWalker::new(self.stored_root().cloned()).stream(range, accessor)
     }
@@ -416,7 +456,7 @@ where
         Env: Provider<Load> + Holds + ConditionalSync,
         R: RangeBounds<Key> + ConditionalSend,
     {
-        let accessor = Accessor::new(storage, &self.catalog);
+        let accessor = self.accessor(storage);
 
         TreeWalker::<Key, Value>::new(self.stored_root().cloned()).stream_handles(range, accessor)
     }
@@ -526,6 +566,7 @@ where
             distribution: PhantomData,
             catalog,
             root: TreeRoot::Node(root),
+            reading: Reading::default(),
         }
     }
 
@@ -546,7 +587,7 @@ where
                 // The root is read through the node cache, so a cache that
                 // holds the root answers without a load or a check; the
                 // header itself is a handful of bytes to read.
-                let accessor = Accessor::new(storage, &self.catalog);
+                let accessor = self.accessor(storage);
                 let node: PersistentNode<Key, Value> = accessor.get_node(hash).await?;
                 Ok(node.manifest()?)
             }
@@ -599,7 +640,7 @@ where
     where
         Env: Provider<Load> + Holds + ConditionalSync,
     {
-        let accessor = Accessor::new(storage, &self.catalog);
+        let accessor = self.accessor(storage);
 
         TreeWalker::new(self.stored_root().cloned())
             .search(key, accessor, options)

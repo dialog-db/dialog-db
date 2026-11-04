@@ -1,3 +1,11 @@
+//! How a read the local archive misses hydrates: from the routes the
+//! subject's open branches registered (see [`Routes`](crate::Routes)),
+//! through the environment's shared [`Hydrate`].
+//!
+//! A peer answers [`Load`] and [`BlobLoad`] with [`load_or_hydrate`] and
+//! [`load_blob_or_hydrate`], so every reader that loads through it, a
+//! tree reading a node above all, hydrates the same way.
+
 use dialog_effects::archive::prelude::CatalogExt as _;
 use dialog_effects::archive::prelude::GetBlockExt as _;
 use dialog_effects::blob::Load as BlobLoad;
@@ -5,32 +13,27 @@ use dialog_effects::blob::prelude::{ArchiveBlobExt as _, ReadBlobExt as _};
 use std::sync::Arc;
 
 use crate::RemoteSite;
-use async_trait::async_trait;
-use dialog_artifacts::tree::ArtifactNodeCache;
-use dialog_artifacts::{Datum, DialogArtifactsError, Key, LoadBlob, State};
 use dialog_capability::Fork;
 use dialog_capability::Provider;
 use dialog_common::{Blake3Hash, Buffer, ConditionalSync, Priority};
 use dialog_effects::archive::prelude::ArchiveExt;
 use dialog_effects::archive::{ArchiveError, Get, Put};
 use dialog_effects::blob::{BlobError, BlobWriter, Import as BlobImport, Read as BlobRead};
-use dialog_search_tree::{DialogSearchTreeError, LoadBlock, Nodes};
 use std::fmt::Display;
 
 use dialog_capability::Did;
 use dialog_network::NetworkAddress;
 pub use dialog_network::{Hydrate, HydrationLane, HydrationRequest, HydrationScheduler};
 
-use super::local::{LocalIndex, archive_error, read_all};
 use super::routes::{HydrationRoute, Routes};
 use crate::ConnectedReplica;
 use dialog_common::Holds;
 use dialog_effects::MethodExt as _;
 use dialog_effects::archive::Load;
 use dialog_effects::archive::prelude::CatalogScope;
-use dialog_storage::provider::load::{load_block, load_spill};
+use dialog_storage::provider::load::{archive_error, load_block, load_spill, read_all};
 
-/// The remote half of a [`NetworkedIndex`]: what a local read miss means.
+/// Where a branch's local read miss hydrates from: what a miss means.
 ///
 /// On a partial replica a locally absent block is routine — by-reference
 /// regions hydrate on demand through the tracked remote. That makes the
@@ -92,142 +95,6 @@ impl From<ConnectedReplica> for RemoteFallback {
     }
 }
 
-/// Content-addressed index that reads through the environment's loads.
-///
-/// Reads [`Load`] and [`BlobLoad`] on the environment it borrows, which
-/// answers from the local archive and, on a miss, hydrates from the routes
-/// the subject's open branches registered (see [`Routes`](crate::Routes)).
-/// It never writes: a commit writes what its batch staged.
-pub struct NetworkedIndex<'a, Env: ?Sized> {
-    local: LocalIndex<'a, Env>,
-    priority: Priority,
-    /// Whether reads see only the local archive (see
-    /// [`locally`](Self::locally)).
-    locally: bool,
-}
-
-impl<Env: ?Sized> Clone for NetworkedIndex<'_, Env> {
-    fn clone(&self) -> Self {
-        Self {
-            local: self.local.clone(),
-            priority: self.priority,
-            locally: self.locally,
-        }
-    }
-}
-
-impl<'a, Env: ?Sized> NetworkedIndex<'a, Env> {
-    /// Create a networked index over `index`. Tree nodes read through it
-    /// are kept in `nodes` (see [`LocalIndex::new`]).
-    pub fn new(env: &'a Env, index: CatalogScope, nodes: ArtifactNodeCache) -> Self {
-        Self {
-            local: LocalIndex::new(env, index, nodes),
-            priority: Priority::Demand,
-            locally: false,
-        }
-    }
-
-    /// Read only what the local archive holds: every read performs `Get`
-    /// and never hydrates. For a reader whose answer is what this replica
-    /// holds, such as an export that does not download.
-    pub fn locally(mut self, locally: bool) -> Self {
-        self.locally = locally;
-        self
-    }
-
-    /// Rank the hydrations this index's reads cause as `priority` at the
-    /// remote site.
-    ///
-    /// An index is [`Priority::Demand`] unless told otherwise: its reads
-    /// are what some evaluation is blocked on. A speculative walker (the
-    /// preload queue's jobs) reads through an index ranked at its hint's
-    /// likelihood, so its warming never goes before a demand read of
-    /// the same site.
-    pub fn with_priority(mut self, priority: Priority) -> Self {
-        self.priority = priority;
-        self
-    }
-
-    /// The local index this reads first, and writes through.
-    pub(crate) fn local(&self) -> &LocalIndex<'a, Env> {
-        &self.local
-    }
-}
-
-/// What a [`NetworkedIndex`] reads through, as one trait object.
-///
-/// The tree code a read or a commit runs is generic over its store, and
-/// the store names the environment it reads through. An index built over
-/// each concrete environment therefore copies that tree code once per
-/// environment type, in every crate that names one: a peer's storage and
-/// mode, and each wrapper an embedder puts around it. Built over this
-/// object instead, the copies collapse into one.
-///
-/// The index's own impls do not ask `Env: 'static`, and must not. The
-/// object's lifetime is a region, which rustc erases when it checks that
-/// a future holding the index is `Send` for every lifetime it borrows;
-/// an outlives bound on it then cannot be shown, and every provider that
-/// commits stops being `Send` (rust-lang/rust#100013).
-pub(crate) trait Reads:
-    Provider<Get> + Provider<BlobRead> + Provider<Load> + Provider<BlobLoad> + ConditionalSync
-{
-}
-
-impl<T> Reads for T where
-    T: Provider<Get> + Provider<BlobRead> + Provider<Load> + Provider<BlobLoad> + ConditionalSync
-{
-}
-
-impl<'a> NetworkedIndex<'a, dyn Reads> {
-    /// [`NetworkedIndex::new`], reading through `env` as a [`Reads`]
-    /// object, so every environment shares one copy of the tree code
-    /// that reads through the index.
-    pub(crate) fn erased<Env>(env: &'a Env, index: CatalogScope, nodes: ArtifactNodeCache) -> Self
-    where
-        Env: Reads + 'static,
-    {
-        Self::new(env, index, nodes)
-    }
-}
-
-impl<Env> NetworkedIndex<'_, Env>
-where
-    Env: ?Sized + Provider<Get> + Provider<Load> + ConditionalSync,
-{
-    /// The block stored under `hash`: the local archive's copy, or else the
-    /// one the environment hydrates from where the subject's blocks live.
-    /// Unverified; readers outside the crate load through [`LoadBlock`] or
-    /// [`LoadBlob`], which check it.
-    pub(crate) async fn load(&self, hash: &Blake3Hash) -> Result<Option<Buffer>, ArchiveError> {
-        if self.locally {
-            return self.local.load(hash).await;
-        }
-        Load::new(self.local.catalog().clone(), hash.clone())
-            .with_priority(self.priority)
-            .perform(self.local.env())
-            .await
-    }
-}
-
-impl<Env> NetworkedIndex<'_, Env>
-where
-    Env: ?Sized + Provider<Get> + Provider<BlobRead> + Provider<BlobLoad> + ConditionalSync,
-{
-    /// The spilled value stored under `hash`: the local copy (blob store,
-    /// then the block catalog for values spilled before they moved to
-    /// blobs), or else the one the environment hydrates from where the
-    /// subject's blobs live.
-    pub async fn load_blob(&self, hash: &Blake3Hash) -> Result<Option<Buffer>, ArchiveError> {
-        if self.locally {
-            return self.local.load_blob(hash).await;
-        }
-        BlobLoad::new(self.local.catalog().archive(), hash.clone())
-            .with_priority(self.priority)
-            .perform(self.local.env())
-            .await
-    }
-}
-
 /// The block `load` names: from `env`'s local archive, or else hydrated
 /// through `env`'s [`Hydrate`] from the routes registered for its subject
 /// (see [`Routes`](crate::Routes)), and written back locally first.
@@ -238,7 +105,8 @@ where
 /// registered for the subject, a local miss is an ordinary `None`. A route
 /// whose remote could not be loaded fails the miss naming it: silently
 /// returning `None` would surface downstream as a bare "Block not found"
-/// that reads like data loss instead of what it is.
+/// that reads like data loss instead of what it is. A
+/// [local](Load::locally) load is answered from the local archive alone.
 pub async fn load_or_hydrate<Env>(env: &Env, load: Load) -> Result<Option<Buffer>, ArchiveError>
 where
     Env: Provider<Get> + Provider<Hydrate> + Holds + ConditionalSync + ?Sized,
@@ -250,7 +118,12 @@ where
         catalog,
         digest,
         priority,
+        local,
     } = load;
+    // A local load asks for what the archive holds and nothing more.
+    if local {
+        return Ok(None);
+    }
     hydrate_through(env, catalog, digest, HydrationLane::Block, priority).await
 }
 
@@ -272,7 +145,11 @@ where
         archive,
         digest,
         priority,
+        local,
     } = load;
+    if local {
+        return Ok(None);
+    }
     hydrate_through(env, archive.index(), digest, HydrationLane::Blob, priority).await
 }
 
@@ -335,52 +212,6 @@ where
         )));
     }
     Ok(None)
-}
-
-/// Tree nodes load from the local archive, falling back to the tracked
-/// remote.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Env> Provider<LoadBlock> for NetworkedIndex<'_, Env>
-where
-    Env: ?Sized + Provider<Get> + Provider<Load> + ConditionalSync,
-{
-    async fn execute(
-        &self,
-        LoadBlock { hash }: LoadBlock,
-    ) -> Result<Option<Buffer>, DialogSearchTreeError> {
-        self.load(&hash)
-            .await
-            .map_err(|error| DialogSearchTreeError::Storage(error.into()))
-    }
-}
-
-/// Tree nodes are read through the node cache the local index holds, then
-/// the local archive, then the tracked remote.
-impl<Env> Nodes<Key, State<Datum>> for NetworkedIndex<'_, Env>
-where
-    Env: ?Sized + Provider<Get> + Provider<Load> + ConditionalSync,
-{
-    fn kept(&self) -> Option<&ArtifactNodeCache> {
-        Some(self.local.nodes())
-    }
-}
-
-/// Spilled values load from the local blob store (falling back to the
-/// block catalog for values spilled before they moved to blobs), and
-/// hydrate from the tracked remote's blob store.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Env> Provider<LoadBlob> for NetworkedIndex<'_, Env>
-where
-    Env: ?Sized + Provider<Get> + Provider<BlobRead> + Provider<BlobLoad> + ConditionalSync,
-{
-    async fn execute(
-        &self,
-        LoadBlob { hash }: LoadBlob,
-    ) -> Result<Option<Buffer>, DialogArtifactsError> {
-        Ok(self.load_blob(&hash).await?)
-    }
 }
 
 /// Fetch one block from the tracked remote and write it back into the
@@ -544,7 +375,7 @@ pub(crate) async fn write_blob<Env>(
     bytes: &[u8],
 ) -> Result<(), BlobError>
 where
-    Env: Provider<BlobImport> + ConditionalSync + 'static,
+    Env: Provider<BlobImport> + ConditionalSync + ?Sized + 'static,
 {
     let sink = catalog
         .archive()
@@ -599,8 +430,10 @@ mod tests {
     use dialog_storage::resource::Resource as _;
     use parking_lot::Mutex;
 
-    use super::{Hydrate, HydrationRequest, NetworkedIndex, RemoteFallback};
-    use crate::{Branch, Repository, Resolved, Route, SiteAddress, Tracking};
+    use super::{Hydrate, HydrationRequest, RemoteFallback};
+    use crate::{Branch, Index, Repository, Resolved, Route, SiteAddress, Tracking};
+    use dialog_effects::blob::Load as BlobLoad;
+    use dialog_search_tree::DialogSearchTreeError;
 
     /// An env that answers every hydration with "not found" and keeps the
     /// priority each request carried, answering a load the way a peer
@@ -658,11 +491,11 @@ mod tests {
         }
     }
 
-    /// The priority an index is built with reaches the env's hydration
-    /// request, which is where the scheduler reads it: an index is a
-    /// demand reader unless told otherwise, and a speculative walker's
-    /// index carries its hint's likelihood so its warming never takes a
-    /// site's slot from a read someone is waiting on.
+    /// The priority a read is made at reaches the env's hydration request,
+    /// which is where the scheduler reads it: a load is a demand read
+    /// unless told otherwise, and a tree ranked for a speculative walk
+    /// carries its hint's likelihood to every load it performs, so its
+    /// warming never takes a site's slot from a read someone is waiting on.
     #[dialog_common::test]
     async fn it_ranks_its_hydrations_at_its_priority() -> Result<()> {
         let (operator, profile) = test_session_with_peer().await;
@@ -684,16 +517,23 @@ mod tests {
         };
 
         let absent = Buffer::from(&b"never stored"[..]).blake3_hash().clone();
-        let demand = NetworkedIndex::new(&env, branch.archive().index(), branch.node_cache());
-        assert_eq!(demand.load(&absent).await?, None);
-        let speculative = NetworkedIndex::new(&env, branch.archive().index(), branch.node_cache())
-            .with_priority(Priority::Maybe);
-        assert_eq!(speculative.load(&absent).await?, None);
+        let demand = Load::new(branch.archive().index(), absent.clone())
+            .perform(&env)
+            .await?;
+        assert_eq!(demand, None);
+        let speculative = Index::at(branch.archive().index(), absent.clone())
+            .ranked(Priority::Maybe)
+            .manifest(&env)
+            .await;
+        assert!(
+            matches!(speculative, Err(DialogSearchTreeError::Node(_))),
+            "the root is nowhere, so the read fails as a missing node: {speculative:?}"
+        );
 
         assert_eq!(
             env.priorities.lock().clone(),
             [Priority::Demand, Priority::Maybe],
-            "each index hydrates at its own priority, demand by default"
+            "each read hydrates at its own priority, demand by default"
         );
         Ok(())
     }
@@ -794,6 +634,37 @@ mod tests {
                 .await?,
             Some(block),
             "the remote does hold it, so only the get declined to fetch"
+        );
+        Ok(())
+    }
+
+    /// A load made local reads only the local archive, whatever the
+    /// branches of its subject track, for both lanes: what only the remote
+    /// holds reads as absent, nothing is written locally by asking, and the
+    /// same load not made local does fetch it.
+    #[dialog_common::test]
+    async fn it_never_hydrates_a_local_load() -> Result<()> {
+        let Tracked {
+            env, branch, site, ..
+        } = tracked().await?;
+        let block = Buffer::from(b"a block a local load must not fetch".to_vec());
+        let index = branch.archive().index();
+        index.put(block.clone()).perform(&site).await?;
+        let digest = block.blake3_hash().clone();
+        let load = || Load::new(index.clone(), digest.clone());
+        let spill = || BlobLoad::new(index.archive(), digest.clone());
+
+        assert_eq!(load().locally().perform(&env).await?, None);
+        assert_eq!(spill().locally().perform(&env).await?, None);
+        assert_eq!(
+            index.get(digest.clone()).perform(&env).await?,
+            None,
+            "a local load writes nothing on the way"
+        );
+        assert_eq!(
+            load().perform(&env).await?,
+            Some(block),
+            "the remote does hold it, so only the local load declined to fetch"
         );
         Ok(())
     }

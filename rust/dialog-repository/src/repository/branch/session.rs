@@ -7,15 +7,16 @@ use std::iter::once;
 
 use dialog_artifacts::history::Edition;
 use dialog_artifacts::selector::Constrained;
+use dialog_artifacts::tree::ArtifactNodeCache;
 use dialog_artifacts::{
     Artifact, ArtifactSelector, ArtifactStream, ArtifactView, Changes, DialogArtifactsError,
     Entity, Estimate, Likelihood, Preload, PreloadRequest, Select, SortKey, Speculation, Statement,
     sort_key,
 };
-use dialog_artifacts::{LoadBlob, Relation as ArtifactsRelation, Standing, Value};
-use dialog_capability::{Capability, Fork, Provider};
+use dialog_artifacts::{Relation as ArtifactsRelation, Standing, Value};
+use dialog_capability::{Capability, Fork, Provider, Subject};
 use dialog_common::{Blake3Hash, Buffer, ConditionalSync, Held, Holds};
-use dialog_effects::archive::{Get, Put};
+use dialog_effects::archive::{ArchiveError, Get, Put};
 use dialog_effects::authority::{Identify, Operator, OperatorExt as _};
 use dialog_effects::memory::Resolve;
 use dialog_query::attribute::AttributeDescriptor;
@@ -29,7 +30,7 @@ use dialog_query::rule::statement::on_entity;
 use dialog_query::session::{ProgramAnalysis, Quarantine};
 use dialog_query::source::SelectRules;
 use dialog_query::{Claim, DeductiveRule, Negation, Premise, Proposition};
-use dialog_search_tree::{DialogSearchTreeError, LoadBlock, Manifest, PersistentNode};
+use dialog_search_tree::{Manifest, PersistentNode};
 use futures_util::future::try_join_all;
 use futures_util::{TryStreamExt as _, stream};
 use std::sync::OnceLock;
@@ -39,7 +40,7 @@ use tokio::sync::OnceCell;
 use crate::CommitError;
 use crate::REGISTRY;
 use crate::layer::{Hidden, MergeKeys, filter_hidden, merge_grouped};
-use crate::repository::archive::networked::Reads;
+use crate::repository::archive::TreeEnv;
 use crate::repository::branch::select::line_manifest;
 use crate::repository::ephemeral::Window;
 use crate::repository::fetch::Driven;
@@ -55,7 +56,7 @@ use crate::rules::{
 use crate::schema::{
     Branch as BranchConcept, DidExt as _, Replica, Session, SessionBranch, session,
 };
-use crate::{Branch, Ephemeral, NetworkedIndex, RemoteSite, Snapshot, Staged};
+use crate::{Branch, Ephemeral, RemoteSite, Snapshot, Staged};
 
 /// A composable query over one or more lines (branches, snapshots)
 /// plus an in-memory overlay.
@@ -402,7 +403,7 @@ impl<'a, Q: Application> SelectQuery<'a, Q> {
 /// settles successions reaches the evaluator from every crate that
 /// commits; erased, those names and copies collapse.
 pub(crate) trait Capabilities:
-    Reads
+    TreeEnv
     + Provider<BlobRead>
     + Provider<Get>
     + Provider<Put>
@@ -417,7 +418,7 @@ pub(crate) trait Capabilities:
 }
 
 impl<T> Capabilities for T where
-    T: Reads
+    T: TreeEnv
         + Provider<BlobRead>
         + Provider<Get>
         + Provider<Put>
@@ -789,9 +790,8 @@ pub(crate) async fn select_from_source<'a>(
     // Concurrent reads of one digest share fetch-and-hydrate through
     // the env's own `Load` (see `crate::load_or_hydrate`), with every
     // other evaluation in the process.
-    let reads: &dyn Reads = env;
-    let store = NetworkedIndex::new(reads, select.catalog(), source.node_cache());
-    Ok(select.execute_boxed(store).await?)
+    let reads: &dyn TreeEnv = env;
+    Ok(select.execute_boxed(reads).await?)
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
@@ -1004,12 +1004,7 @@ impl Provider<Estimate> for QueryEnv<'_> {
         let mut total: Option<u64> = None;
         for source in &self.sources {
             let select = crate::Select::from_source(source.as_ref(), input.clone());
-            let store = NetworkedIndex::new(
-                self.env as &dyn Reads,
-                select.catalog(),
-                source.as_ref().node_cache(),
-            );
-            if let Some(estimate) = select.estimate(store).await? {
+            if let Some(estimate) = select.estimate(self.env as &dyn TreeEnv).await? {
                 total = Some(total.unwrap_or(0).saturating_add(estimate));
             }
         }
@@ -1050,26 +1045,32 @@ impl Provider<Preload> for QueryEnv<'_> {
     }
 }
 
+/// Whether `load` asks for a block anywhere the query reads (the
+/// resolver's wildcard archive, see [`dialog_query::resolver::anywhere`])
+/// rather than in one catalog.
+fn anywhere(subject: &dialog_capability::Did) -> bool {
+    Subject::from(subject.clone()).is_any()
+}
+
 // The spilled-value load behind `tree/value`: the same line-by-line
 // walk as `Load`, reading each line's spill lane (its blob store, then
 // the block catalog for values spilled before they moved to blobs,
-// with the remote fallback a fact scan uses). Spilled values are not
-// nodes, so the node cache is not consulted.
+// hydrating as a fact scan does). Spilled values are not nodes, so the
+// node cache is not consulted. A load of one archive's value is that
+// archive's, read through the env.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<'a> Provider<LoadBlob> for QueryEnv<'a> {
-    async fn execute(
-        &self,
-        LoadBlob { hash }: LoadBlob,
-    ) -> Result<Option<Buffer>, DialogArtifactsError> {
+impl<'a> Provider<BlobLoad> for QueryEnv<'a> {
+    async fn execute(&self, load: BlobLoad) -> Result<Option<Buffer>, ArchiveError> {
+        if !anywhere(load.archive.subject()) {
+            return load.perform(self.env).await;
+        }
         for source in &self.sources {
-            let source = source.as_ref();
-            let store = NetworkedIndex::new(
-                self.env as &dyn Reads,
-                source.archive().index(),
-                source.node_cache(),
-            );
-            if let Some(bytes) = store.load_blob(&hash).await? {
+            let line = BlobLoad {
+                archive: source.as_ref().archive(),
+                ..load.clone()
+            };
+            if let Some(bytes) = line.perform(self.env).await? {
                 return Ok(Some(bytes));
             }
         }
@@ -1078,38 +1079,48 @@ impl<'a> Provider<LoadBlob> for QueryEnv<'a> {
 }
 
 // The idempotent block-load behind resolver premises (`tree/node` &
-// co). No demand is recorded: the block behind a hash is
-// content-addressed and can never change, so no tree diff could ever
-// invalidate a row derived from it — the soundness argument lives in
-// `dialog_artifacts::inspect`. Reads go through each line's archive
-// catalog capability with the same remote fallback a fact scan uses;
-// the first line that has the block wins (content addressing makes
-// them interchangeable), and a block absent everywhere contributes
-// nothing. Reads go through the line's shared node cache (the same
-// one the eager root probe in `select.rs` and `Subscription::touched`
-// use): a resolver join re-resolves the same reference once per outer
-// row, and a raw backend get would re-fetch that identical immutable
-// block every time.
+// co), which ask for a block anywhere the query reads. No demand is
+// recorded: the block behind a hash is content-addressed and can never
+// change, so no tree diff could ever invalidate a row derived from it —
+// the soundness argument lives in `dialog_artifacts::inspect`. Each
+// line's catalog is tried in turn, through the env's load (so a miss
+// hydrates as a fact scan's does); the first line that has the block
+// wins (content addressing makes them interchangeable), and a block
+// absent everywhere contributes nothing. Reads go through the node cache
+// the env holds for each line's repository (the same one the eager root
+// probe in `select.rs` and `Subscription::touched` use): a resolver join
+// re-resolves the same reference once per outer row, and a raw backend
+// get would re-fetch that identical immutable block every time. A load
+// of one catalog's block is that catalog's, read through the env.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<'a> Provider<LoadBlock> for QueryEnv<'a> {
-    async fn execute(&self, load: LoadBlock) -> Result<Option<Buffer>, DialogSearchTreeError> {
+impl<'a> Provider<ArchiveLoad> for QueryEnv<'a> {
+    async fn execute(&self, load: ArchiveLoad) -> Result<Option<Buffer>, ArchiveError> {
+        if !anywhere(load.catalog.subject()) {
+            return load.perform(self.env).await;
+        }
         for source in &self.sources {
             let source = source.as_ref();
-            let store = NetworkedIndex::new(
-                self.env as &dyn Reads,
-                source.archive().index(),
-                source.node_cache(),
-            );
-            let cache = source.node_cache();
-            if let Some(node) = cache.get_cached(&load.hash) {
+            let cache = ArtifactNodeCache::of(self.env, source.subject().did());
+            if let Some(node) = cache
+                .as_ref()
+                .and_then(|cache| cache.get_cached(&load.digest))
+            {
                 return Ok(Some(node.buffer().clone()));
             }
-            if let Some(block) = load.clone().perform(&store).await? {
-                // A block that checks as a node joins the cache; any other
-                // block is returned as it is, for the caller to read.
-                if let Ok(node) = PersistentNode::try_from(block.clone()) {
-                    cache.insert(load.hash.clone(), node);
+            let line = ArchiveLoad {
+                catalog: source.catalog(),
+                ..load.clone()
+            };
+            if let Some(block) = line.perform(self.env).await? {
+                // A block that is the one asked for and checks as a node
+                // joins the cache; any other block is returned as it is,
+                // for the caller to read.
+                if let Some(cache) = &cache
+                    && block.blake3_hash() == &load.digest
+                    && let Ok(node) = PersistentNode::try_from(block.clone())
+                {
+                    cache.insert(load.digest.clone(), node);
                 }
                 return Ok(Some(block));
             }

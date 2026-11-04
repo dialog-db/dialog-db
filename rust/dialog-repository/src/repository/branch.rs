@@ -6,11 +6,9 @@ use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::{ConditionalSync, Holds};
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::blob::Load as BlobLoad;
-use dialog_effects::blob::Read as BlobRead;
 use dialog_effects::memory;
 use dialog_query::concept::query::PlanCache;
 
-use crate::NetworkedIndex;
 use crate::repository::source::{Caches, SourceRef};
 use dialog_artifacts::Changes;
 use dialog_artifacts::DialogArtifactsError;
@@ -22,7 +20,6 @@ use dialog_artifacts::history::{
 use dialog_artifacts::tree::{ArtifactNodeCache, SpillCache};
 use dialog_artifacts::{Exporter, Importer};
 use dialog_capability::{Capability, Did, Subject};
-use dialog_effects::archive::{Get as ArchiveGet, Put as ArchivePut};
 use dialog_effects::authority::{Operator, OperatorExt as _};
 use dialog_query::query::Application;
 use futures_util::lock::{Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard};
@@ -681,20 +678,13 @@ impl Branch {
     ///
     /// History records live in the same tree as the data, so this reads the
     /// history region of the current revision's tree. A read that misses
-    /// locally hydrates from the branch's tracked remote exactly as a fact
-    /// read does, so a replica that materialized only the operational
-    /// regions fetches the history it turns out to need. A branch tracking
-    /// no remote reads purely locally.
-    pub fn history<'a, Env>(&self, env: &'a Env) -> TreeHistory<NetworkedIndex<'a, Env>>
+    /// locally hydrates through the env exactly as a fact read does, so a
+    /// replica that materialized only the operational regions fetches the
+    /// history it turns out to need. A repository none of whose open
+    /// branches tracks a remote reads purely locally.
+    pub fn history<'a, Env>(&self, env: &'a Env) -> TreeHistory<&'a Env>
     where
-        Env: Provider<BlobRead>
-            + Provider<ArchiveGet>
-            + Provider<ArchivePut>
-            + Provider<memory::Resolve>
-            + Provider<ArchiveLoad>
-            + Provider<BlobLoad>
-            + ConditionalSync
-            + 'static,
+        Env: Provider<ArchiveLoad> + Provider<BlobLoad> + Holds + ConditionalSync + ?Sized,
     {
         SourceRef::from(self).history(env)
     }
@@ -711,14 +701,7 @@ impl Branch {
         limit: usize,
     ) -> Result<Vec<(Version, RevisionRecord)>, DialogArtifactsError>
     where
-        Env: Provider<BlobRead>
-            + Provider<ArchiveGet>
-            + Provider<ArchivePut>
-            + Provider<memory::Resolve>
-            + Provider<ArchiveLoad>
-            + Provider<BlobLoad>
-            + ConditionalSync
-            + 'static,
+        Env: Provider<ArchiveLoad> + Provider<BlobLoad> + Holds + ConditionalSync + ?Sized,
     {
         SourceRef::from(self).log(env, limit).await
     }
@@ -740,7 +723,9 @@ impl Branch {
         SelectQuery::new(self, query)
     }
 
-    /// A shared handle to this branch's node cache, for seeding a read tree.
+    /// A shared handle to this branch's node cache: the one every tree read
+    /// through the environment it was opened with keeps its nodes in.
+    #[cfg(test)]
     pub(crate) fn node_cache(&self) -> ArtifactNodeCache {
         self.node_cache.clone()
     }

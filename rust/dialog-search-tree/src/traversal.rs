@@ -20,7 +20,6 @@
 use crate::reads::*;
 use async_stream::try_stream;
 use dialog_common::{Blake3Hash, ConditionalSync};
-use dialog_effects::archive::prelude::CatalogScope;
 use futures_core::Stream;
 use futures_util::stream::FuturesUnordered;
 use rkyv::{
@@ -117,7 +116,7 @@ where
     where
         Env: Provider<Load> + Holds + ConditionalSync,
     {
-        traverse::<Key, Value, Env>(self.stored_root().cloned(), self.catalog(), storage, None)
+        traverse::<Key, Value, Env>(self.stored_root().cloned(), self.accessor(storage), None)
     }
 
     fn traverse_available_within<'a, Env>(
@@ -130,8 +129,7 @@ where
     {
         traverse::<Key, Value, Env>(
             self.stored_root().cloned(),
-            self.catalog(),
-            storage,
+            self.accessor(storage),
             Some(scope),
         )
     }
@@ -163,8 +161,7 @@ fn span_intersects(
 /// every child.
 fn traverse<'a, Key, Value, Env>(
     root: Option<Blake3Hash>,
-    catalog: &CatalogScope,
-    storage: &'a Env,
+    accessor: crate::Accessor<'a, Key, Value, Env>,
     scope: Option<&'a [core::ops::RangeInclusive<Vec<u8>>]>,
 ) -> impl Stream<Item = Result<Visit<Key, Value>, DialogSearchTreeError>> + 'a
 where
@@ -178,7 +175,6 @@ where
 {
     use futures_util::StreamExt as _;
 
-    let accessor = crate::Accessor::<Key, Value, Env>::new(storage, catalog);
     try_stream! {
         if let Some(root) = root {
             // A continuation queue rather than levels: the root goes out,
