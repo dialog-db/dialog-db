@@ -17,7 +17,7 @@ use dialog_effects::archive::prelude::{ImportExt as _, PutExt as _};
 use dialog_effects::archive::{ArchiveError, Get, Import, Put};
 
 /// Observes the archive blocks an operator moves.
-pub trait Meter: ConditionalSync {
+pub trait Meter: ConditionalSend + ConditionalSync {
     /// A block was written.
     fn wrote(&self, block: &[u8]);
     /// A block was read.

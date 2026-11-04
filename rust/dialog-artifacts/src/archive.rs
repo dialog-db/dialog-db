@@ -11,7 +11,7 @@
 use crate::tree::ArtifactNodes;
 use async_trait::async_trait;
 use dialog_capability::{Command, Provider};
-use dialog_common::{Blake3Hash, Buffer, ConditionalSync};
+use dialog_common::{Blake3Hash, Buffer, ConditionalSend, ConditionalSync};
 use dialog_search_tree::{Delta, DialogSearchTreeError, MemoryBlocks, NodeCache, Nodes};
 
 pub use dialog_search_tree::LoadBlock;
@@ -64,7 +64,10 @@ impl Command for LoadBlob {
 ///
 /// Its nodes come through [`Nodes`], so whatever node cache the environment
 /// keeps answers every tree read made through it.
-pub trait ArchiveReader: ArtifactNodes + Provider<LoadBlob> + ConditionalSync {}
+pub trait ArchiveReader:
+    ArtifactNodes + Provider<LoadBlob> + ConditionalSend + ConditionalSync
+{
+}
 
 impl<Env> ArchiveReader for Env where Env: ArtifactNodes + Provider<LoadBlob> + ConditionalSync {}
 

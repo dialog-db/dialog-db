@@ -34,7 +34,7 @@ use crate::{DialogSearchTreeError, Key, LoadBlock, NodeCache, PersistentNode, Va
 /// let store = Cached::<[u8; 4], Vec<u8>, _>::new(NodeCache::new(), &blocks);
 /// assert!(store.kept().is_some());
 /// ```
-pub trait Nodes<Key, Value>: Provider<LoadBlock> + ConditionalSync {
+pub trait Nodes<Key, Value>: Provider<LoadBlock> + ConditionalSend + ConditionalSync {
     /// The nodes this store keeps in memory, if it keeps any.
     fn kept(&self) -> Option<&NodeCache<Key, Value>> {
         None
