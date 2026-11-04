@@ -489,6 +489,7 @@ where
         &staged,
         &mut changes,
         transients,
+        Changes::new(),
         Vec::new(),
         &mut witness,
         env,
