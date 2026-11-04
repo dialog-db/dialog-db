@@ -92,7 +92,7 @@ impl Prepared for Fanout {
     fn measure<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = Result<Outcome>> + 'a>> {
         Box::pin(async move {
             self.env
-                .commit(assert_all(note_facts(self.size), Pick::Last))
+                .commit(assert_all(added_note(self.size), Pick::Last))
                 .await?;
             let mut changed = 0u64;
             for subscription in &mut self.subscriptions {
@@ -120,6 +120,16 @@ fn note_facts(index: usize) -> [Artifact; 2] {
                 "Body of note {index}, long enough to be a real payload."
             )),
         ),
+    ]
+}
+
+/// The two facts of a note written elsewhere, as the measured commits add
+/// it: short, so the commit's cost is the note and not its text.
+fn added_note(index: usize) -> [Artifact; 2] {
+    let this = entity("note", index);
+    [
+        fact(&this, "note/title", text("new")),
+        fact(&this, "note/body", text("written elsewhere")),
     ]
 }
 
@@ -218,7 +228,7 @@ pub async fn pulled(size: usize) -> Result<Box<dyn Prepared>> {
     // which the device's session shares. Forget them all, then read the
     // device's own tree once more, so that tree is warm and the commit's
     // blocks are the cold ones, as a write from another device is.
-    env.commit(assert_all(note_facts(size), Pick::Last)).await?;
+    env.commit(assert_all(added_note(size), Pick::Last)).await?;
     env.forget();
     adopter
         .select(query(&note(), &["title", "body"], None))
