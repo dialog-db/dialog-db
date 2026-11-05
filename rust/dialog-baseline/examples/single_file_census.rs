@@ -1210,7 +1210,241 @@ fn main() -> anyhow::Result<()> {
             (source, checkpoints(args.next(), count))
         }
     };
+    if let Ok(directory) = std::env::var("DIALOG_CENSUS_FILE") {
+        return file_archive(&source, Path::new(&directory));
+    }
     measure(source, &points)
+}
+
+fn kib(bytes: u64) -> String {
+    format!("{:.1} MiB", bytes as f64 / (1024.0 * 1024.0))
+}
+
+/// Writes `source` into the single-file archive as it is built, one append
+/// per commit, and reports what the file holds against the blocks it came
+/// from: once with every block, to learn which nodes rebuild exactly, then
+/// again with only those (and the blocks that are not tree nodes), so the
+/// tokens of nodes kept whole do not count. Then estimates an index kept in
+/// the file as a search tree of its own.
+fn file_archive(source: &Source, directory: &Path) -> anyhow::Result<()> {
+    use dialog_archive_file::FileArchive;
+    const CATALOG: &str = "index";
+    std::fs::create_dir_all(directory)?;
+    let commits = |blocks: &mut dyn Iterator<Item = &Written>| {
+        let mut grouped: Vec<Vec<Buffer>> = Vec::new();
+        let mut last = None;
+        for block in blocks {
+            if last != Some(block.commit) {
+                grouped.push(Vec::new());
+                last = Some(block.commit);
+            }
+            grouped
+                .last_mut()
+                .expect("a group")
+                .push(block.bytes.clone());
+        }
+        grouped
+    };
+
+    let everything = directory.join("everything.dialog");
+    std::fs::remove_file(&everything).ok();
+    let first = FileArchive::open(&everything)?;
+    for group in commits(&mut source.blocks.iter()) {
+        first.append(CATALOG, &group)?;
+    }
+    let modern: HashSet<Blake3Hash> = source
+        .blocks
+        .iter()
+        .filter(|block| first.is_frame(CATALOG, &block.hash))
+        .map(|block| block.hash.clone())
+        .collect();
+
+    let (mut modern_bytes, mut legacy_bytes, mut other_bytes) = (0u64, 0u64, 0u64);
+    let (mut modern_count, mut legacy_count, mut other_count) = (0, 0, 0);
+    for block in &source.blocks {
+        let len = block.bytes.as_ref().len() as u64;
+        if modern.contains(&block.hash) {
+            modern_bytes += len;
+            modern_count += 1;
+        } else if source.nodes.contains_key(&block.hash) {
+            legacy_bytes += len;
+            legacy_count += 1;
+        } else {
+            other_bytes += len;
+            other_count += 1;
+        }
+    }
+    println!("source, a file per block:");
+    println!(
+        "  {modern_count} tree nodes that rebuild exactly: {}",
+        kib(modern_bytes)
+    );
+    println!(
+        "  {legacy_count} tree nodes in the old layout (left out below): {}",
+        kib(legacy_bytes)
+    );
+    println!(
+        "  {other_count} blocks that are not tree nodes: {}",
+        kib(other_bytes)
+    );
+
+    let clean = directory.join("modern.dialog");
+    std::fs::remove_file(&clean).ok();
+    let archive = FileArchive::open(&clean)?;
+    let kept: Vec<&Written> = source
+        .blocks
+        .iter()
+        .filter(|block| modern.contains(&block.hash) || !source.nodes.contains_key(&block.hash))
+        .collect();
+    for group in commits(&mut kept.iter().copied()) {
+        archive.append(CATALOG, &group)?;
+    }
+    let stats = archive.stats();
+    let records = stats.file_bytes - stats.frame_bytes - stats.token_bytes - stats.block_bytes;
+    println!("the same blocks in one file: {}", kib(stats.file_bytes));
+    println!(
+        "  {} frames: {} ({} against another)",
+        stats.frames,
+        kib(stats.frame_bytes),
+        stats.frames_against
+    );
+    println!("  {} tokens: {}", stats.tokens, kib(stats.token_bytes));
+    println!(
+        "  {} blocks kept whole: {}",
+        stats.blocks,
+        kib(stats.block_bytes)
+    );
+    println!(
+        "  record headers, padding, footers and checkpoints: {}",
+        kib(records)
+    );
+    println!(
+        "  index held in memory: {} (estimate from the index's tables)",
+        kib(stats.index_memory as u64)
+    );
+
+    index_tree_estimate(&kept, source)?;
+    Ok(())
+}
+
+/// Estimates an index kept in the file as a search tree keyed by block hash:
+/// each leaf holds rows of (the block's hash, as a token; where the block
+/// is), cut by the same content-defined rule the tree uses (an entry ends a
+/// leaf when its hash says so, here 1 in `fanout`), and each commit
+/// rewrites the leaves its new blocks land in, and the root, as frames
+/// against their previous versions, whole every 32.
+fn index_tree_estimate(blocks: &[&Written], source: &Source) -> anyhow::Result<()> {
+    const CHAIN: usize = 32;
+    // A frame's header with the hash it is known by as a token reference:
+    // the record header (9), catalog (6), hash token (3), kind, base (3),
+    // manifest, lineage (about 8).
+    const HEADER: u64 = 9 + 6 + 3 + 1 + 3 + 1 + 8;
+    // A row: the hash token's id and the block's place, each a zigzag delta
+    // against the row before; in hash order both are effectively random.
+    let width = |value: u64| (64 - value.leading_zeros() as u64).max(1).div_ceil(7);
+    let n = blocks.len() as u64;
+    let row = width(n << 1)
+        + width(
+            source
+                .blocks
+                .iter()
+                .map(|b| b.bytes.as_ref().len() as u64)
+                .sum::<u64>()
+                / 8,
+        );
+    // A copy op: its length and where it starts.
+    const COPY: u64 = 3;
+    for fanout in [64u64, 128, 256] {
+        let ends_leaf = |hash: &Blake3Hash| {
+            u16::from_le_bytes([hash.as_bytes()[30], hash.as_bytes()[31]]) as u64 % fanout == 0
+        };
+        let mut index: std::collections::BTreeSet<[u8; 32]> = std::collections::BTreeSet::new();
+        // Each leaf's versions since its last whole frame, by its first key.
+        let mut depth: HashMap<[u8; 32], usize> = HashMap::new();
+        let (mut leaf_bytes, mut root_bytes, mut leaf_frames, mut root_frames) =
+            (0u64, 0u64, 0u64, 0u64);
+        let mut root_depth = 0usize;
+        let mut commit = None;
+        let mut fresh: Vec<[u8; 32]> = Vec::new();
+        let mut flush = |index: &mut std::collections::BTreeSet<[u8; 32]>,
+                         fresh: &mut Vec<[u8; 32]>| {
+            if fresh.is_empty() {
+                return;
+            }
+            for hash in fresh.iter() {
+                index.insert(*hash);
+            }
+            // The leaves, as runs of the sorted hashes.
+            let mut leaves: Vec<(Vec<[u8; 32]>, bool)> = vec![(Vec::new(), false)];
+            let new: HashSet<[u8; 32]> = fresh.iter().copied().collect();
+            for hash in index.iter() {
+                let leaf = leaves.last_mut().expect("a leaf");
+                leaf.0.push(*hash);
+                leaf.1 |= new.contains(hash);
+                if ends_leaf(&Blake3Hash::from(*hash)) {
+                    leaves.push((Vec::new(), false));
+                }
+            }
+            leaves.retain(|leaf| !leaf.0.is_empty());
+            let mut changed_links = 0u64;
+            for (rows, changed) in &leaves {
+                if !changed {
+                    continue;
+                }
+                changed_links += 1;
+                leaf_frames += 1;
+                let first = rows[0];
+                let versions = depth.entry(first).or_insert(CHAIN);
+                let added = rows.iter().filter(|hash| new.contains(*hash)).count() as u64;
+                if *versions + 1 >= CHAIN {
+                    leaf_bytes += HEADER + rows.len() as u64 * row;
+                    *versions = 0;
+                } else {
+                    // Copy runs around each new row, the new rows themselves.
+                    leaf_bytes += HEADER + (added + 1) * COPY + added * row;
+                    *versions += 1;
+                }
+            }
+            root_frames += 1;
+            let links = leaves.len() as u64;
+            if root_depth + 1 >= CHAIN || root_frames == 1 {
+                root_bytes += HEADER + links * (row + 1);
+                root_depth = 0;
+            } else {
+                root_bytes += HEADER + (changed_links + 1) * COPY + changed_links * (row + 1);
+                root_depth += 1;
+            }
+            fresh.clear();
+        };
+        for block in blocks {
+            if commit != Some(block.commit) {
+                flush(&mut index, &mut fresh);
+                commit = Some(block.commit);
+            }
+            fresh.push(*block.hash.as_bytes());
+        }
+        flush(&mut index, &mut fresh);
+        let leaves = index
+            .iter()
+            .filter(|hash| ends_leaf(&Blake3Hash::from(**hash)))
+            .count()
+            + 1;
+        println!(
+            "index as a search tree, a leaf every {fanout} hashes ({leaves} leaves, {n} entries, \
+             rows of {row} bytes): {} in {leaf_frames} leaf frames, {} in {root_frames} root frames",
+            kib(leaf_bytes),
+            kib(root_bytes)
+        );
+    }
+    // The hashes as tokens: 32 bytes, a length and a padding byte, and
+    // padding to 16 if hash tokens keep the alignment datums need.
+    println!(
+        "hashes as tokens: {} blocks × 34 bytes = {} unaligned, × 48 = {} aligned to 16",
+        n,
+        kib(n * 34),
+        kib(n * 48)
+    );
+    Ok(())
 }
 
 /// Runs every model over `source`, reporting at each of `checkpoints`,

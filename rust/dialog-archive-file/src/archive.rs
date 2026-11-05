@@ -808,6 +808,20 @@ impl FileArchive {
             .sum()
     }
 
+    /// Whether the archive keeps the block `hash` names in `catalog` as a
+    /// frame (rather than whole, or not at all).
+    pub fn is_frame(&self, catalog: &str, hash: &Blake3Hash) -> bool {
+        matches!(
+            self.inner
+                .state
+                .read()
+                .blocks
+                .get(catalog)
+                .and_then(|blocks| blocks.get(hash)),
+            Some(Place::Node(_))
+        )
+    }
+
     /// Every block the archive holds, by catalog and hash.
     pub fn hashes(&self) -> Vec<(String, Blake3Hash)> {
         let state = self.inner.state.read();
