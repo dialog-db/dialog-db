@@ -13,6 +13,7 @@ use dialog_query::ConceptDescriptor;
 use crate::env::{Env, assert_all, concept, entity, fact, text};
 
 mod commit;
+mod export;
 mod number;
 mod read;
 mod replica;
@@ -285,6 +286,30 @@ pub fn catalog() -> Vec<Spec> {
             volatile: false,
             cross_cpu_pct: 0.0,
             prepare: |size| Box::pin(subscribe::fanout(size)),
+        },
+        Spec {
+            name: "subscribe-pulled",
+            size: 200,
+            about: "a device's pull of a note another device committed, then the poll of its subscription per note and one to the list",
+            volatile: false,
+            cross_cpu_pct: 0.0,
+            prepare: |size| Box::pin(subscribe::pulled(size)),
+        },
+        Spec {
+            name: "read-sibling",
+            size: 2000,
+            about: "two hundred single-entity reads through a second branch of the repository at the same head: the nodes one branch read answer another's",
+            volatile: false,
+            cross_cpu_pct: 0.0,
+            prepare: |size| Box::pin(read::sibling(size)),
+        },
+        Spec {
+            name: "export-walk",
+            size: 2000,
+            about: "one snapshot export streaming every block of a tree the branch's own commit left warm",
+            volatile: false,
+            cross_cpu_pct: 0.0,
+            prepare: |size| Box::pin(export::walk(size)),
         },
     ]
 }
