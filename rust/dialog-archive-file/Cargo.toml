@@ -25,6 +25,7 @@ hashbrown = { workspace = true }
 memmap2 = { workspace = true }
 parking_lot = { workspace = true }
 rkyv = { workspace = true }
+zerocopy = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 anyhow = { workspace = true }

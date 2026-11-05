@@ -21,6 +21,8 @@ use crate::node::{TreeNode, realize, rows_of, tree_node};
 use crate::rows::{Reader, Rows, get_rows, invalid, put_rows, put_varint};
 use crate::tokens::Tokens;
 
+mod served;
+
 /// The files this process has open, so a second open of one shares it.
 static OPEN: LazyLock<Mutex<HashMap<PathBuf, Weak<Inner>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -264,6 +266,10 @@ struct Timings {
     write: AtomicU64,
     decode: AtomicU64,
     realize: AtomicU64,
+    /// Nodes served to trees in place, and the time spent finding where
+    /// their parts are.
+    served: AtomicU64,
+    serve: AtomicU64,
 }
 
 impl Timings {
@@ -283,6 +289,8 @@ struct Inner {
     options: Options,
     state: RwLock<State>,
     rows: Mutex<RowsCache>,
+    /// Each manifest token, decoded, for the nodes served to trees.
+    manifests: Mutex<HashMap<u32, Arc<Manifest>>>,
     writer: Mutex<Writer>,
 }
 
@@ -324,6 +332,10 @@ pub struct Stats {
     pub decode: Duration,
     /// Time reads spent realizing rows into blocks.
     pub realize: Duration,
+    /// Nodes served to trees in place ([`NodeSource`](dialog_search_tree::NodeSource)).
+    pub served: u64,
+    /// Time spent serving them: finding where each part of each row is.
+    pub serve: Duration,
 }
 
 /// A dialog archive kept in one append-only file.
@@ -681,7 +693,7 @@ fn recover(file: &File) -> io::Result<(State, Writer)> {
         writer.end = record.end();
     }
     catch_up(file, &mut state, &mut writer)?;
-    state.tokens.map(file)?;
+    state.tokens.map(file, writer.end)?;
     Ok((state, writer))
 }
 
@@ -771,6 +783,7 @@ impl FileArchive {
             file,
             path,
             rows: Mutex::new(RowsCache::new(options.rows_cached)),
+            manifests: Mutex::new(HashMap::new()),
             options,
             state: RwLock::new(state),
             writer: Mutex::new(writer),
@@ -844,6 +857,8 @@ impl FileArchive {
             write: Timings::get(&self.inner.timings.write),
             decode: Timings::get(&self.inner.timings.decode),
             realize: Timings::get(&self.inner.timings.realize),
+            served: self.inner.timings.served.load(Ordering::Relaxed),
+            serve: Timings::get(&self.inner.timings.serve),
             rows_memory: self
                 .inner
                 .rows
@@ -927,7 +942,7 @@ impl FileArchive {
         }
         let mut state = self.inner.state.write();
         follow(&self.inner.file, &mut state, &mut writer, len, true)?;
-        state.tokens.map(&self.inner.file)
+        state.tokens.map(&self.inner.file, writer.end)
     }
 
     /// The block a node's rows stand for.
@@ -991,7 +1006,7 @@ impl FileArchive {
             // This process's turn: read what others appended since its
             // last, then append after it.
             catch_up(file, &mut state, &mut writer)?;
-            state.tokens.map(file)?;
+            state.tokens.map(file, writer.end)?;
             let end = writer.end;
             self.write(&mut writer, &mut state, catalog, blocks)
                 .inspect_err(|_| {
@@ -1108,7 +1123,7 @@ impl FileArchive {
         let mut bytes = Vec::new();
         let mut token_record = None;
         if state.tokens.pending() > 0 {
-            let (body, places) = state.tokens.take_pending();
+            let (body, places) = state.tokens.take_pending(writer.end + HEADER);
             token_record = Some((writer.end + HEADER, places));
             put_record(&mut bytes, Kind::Tokens, &body)?;
         }
@@ -1139,7 +1154,6 @@ impl FileArchive {
         Timings::add(&self.inner.timings.write, started);
         if let Some((body_offset, places)) = token_record {
             state.tokens.settle(body_offset, &places);
-            state.tokens.map(&self.inner.file)?;
         }
         writer.end += bytes.len() as u64;
         writer.since += bytes.len() as u64;
@@ -1160,6 +1174,7 @@ impl FileArchive {
         put_record(&mut tail, Kind::Footer, &writer.checkpoint.to_le_bytes())?;
         write_at(&self.inner.file, writer.end, &tail)?;
         writer.end += tail.len() as u64;
+        state.tokens.map(&self.inner.file, writer.end)?;
         Ok(())
     }
 

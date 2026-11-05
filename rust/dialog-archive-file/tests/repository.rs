@@ -5,6 +5,7 @@
 
 use std::path::Path;
 use std::str::FromStr;
+use std::sync::Arc;
 
 use dialog_archive_file::{FILE_NAME, FileArchive, Options};
 use dialog_artifacts::{
@@ -276,5 +277,185 @@ async fn it_takes_turns_with_another_process() -> anyhow::Result<()> {
         let block = reopened.get(catalog, hash)?.expect("a block either copied");
         assert_eq!(&Blake3Hash::hash(&block), hash, "{catalog}");
     }
+    Ok(())
+}
+
+/// Reads `node` both ways, from its block and as the archive serves it, and
+/// checks every answer the tree reads a node for agrees.
+fn compare(archive: &FileArchive, catalog: &str, hash: &Blake3Hash) -> anyhow::Result<bool> {
+    use dialog_artifacts::{Datum, Key, State};
+    use dialog_search_tree::{NodeBody, NodeSource, PersistentNode, into_owned};
+    type TreeNode = PersistentNode<Key, State<Datum>>;
+
+    let block = Buffer::from(archive.get(catalog, hash)?.expect("a block it lists"));
+    let Ok(stored) = TreeNode::try_from(block.clone()) else {
+        return Ok(false);
+    };
+    let scope = dialog_effects::archive::prelude::ArchiveScope::new(Subject::from(
+        "did:test:served".parse::<dialog_capability::Did>()?,
+    ))
+    .catalog(catalog);
+    let Some(rows) = archive.node(&scope, hash) else {
+        return Ok(false);
+    };
+    let served = TreeNode::from_rows(rows).expect("rows of State<Datum>");
+    assert!(served.is_rows());
+    assert_eq!(served.hash(), stored.hash());
+    assert_eq!(served.manifest()?, stored.manifest()?);
+    assert_eq!(served.scale(), stored.scale());
+    assert_eq!(served.upper_bound()?, stored.upper_bound()?);
+    match (stored.body(), served.body()) {
+        (NodeBody::Segment(stored), NodeBody::Segment(served)) => {
+            assert_eq!(served.len(), stored.len());
+            let (mut ours, mut theirs) = (stored.keys::<Key>()?, served.keys::<Key>()?);
+            while let Some((at, key)) = ours.next_key()? {
+                let (other, served_key) = theirs.next_key()?.expect("as many keys");
+                assert_eq!((at, key), (other, served_key));
+                let (a, b): (State<Datum>, State<Datum>) = (
+                    into_owned(stored.value_at(at)?)?,
+                    into_owned(served.value_at(at)?)?,
+                );
+                assert_eq!(a, b);
+                assert_eq!(served.find::<Key>(key)?, Some(at));
+                let mut past = key.to_vec();
+                past.push(0);
+                assert_eq!(
+                    served.find::<Key>(&past)?,
+                    stored.find::<Key>(&past)?,
+                    "a key between entries"
+                );
+            }
+            assert!(theirs.next_key()?.is_none());
+            assert_eq!(served.first_key::<Key>()?, stored.first_key::<Key>()?);
+            assert_eq!(served.last_key::<Key>()?, stored.last_key::<Key>()?);
+        }
+        (NodeBody::Index(stored), NodeBody::Index(served)) => {
+            assert_eq!(served.len(), stored.len());
+            for at in 0..stored.len() {
+                assert_eq!(served.separator(at)?, stored.separator(at)?);
+                assert_eq!(served.hash_at(at)?, stored.hash_at(at)?);
+                assert_eq!(served.scale_at(at)?, stored.scale_at(at)?);
+            }
+            assert_eq!(served.novelty_len(), stored.novelty_len());
+            for at in 0..stored.len() {
+                let separator = stored.separator(at)?;
+                let mut probes = vec![separator.clone(), vec![]];
+                let mut past = separator.clone();
+                past.push(0xFF);
+                probes.push(past);
+                if let Some(last) = separator.last() {
+                    let mut before = separator.clone();
+                    *before.last_mut().expect("a byte") = last.saturating_sub(1);
+                    probes.push(before);
+                }
+                for probe in &probes {
+                    assert_eq!(served.route(probe)?, stored.route(probe)?);
+                    for upper in &probes {
+                        assert_eq!(
+                            served.children_spanning(probe, upper)?,
+                            stored.children_spanning(probe, upper)?
+                        );
+                    }
+                    for bound in [
+                        std::ops::Bound::Included(probe.as_slice()),
+                        std::ops::Bound::Excluded(probe.as_slice()),
+                    ] {
+                        assert_eq!(
+                            served.children_within(bound)?,
+                            stored.children_within(bound)?
+                        );
+                    }
+                }
+                let (ours, theirs) = (stored.buffer_for(at), served.buffer_for(at));
+                assert_eq!(ours.is_some(), theirs.is_some());
+                if let (Some(ours), Some(theirs)) = (ours, theirs) {
+                    assert_eq!(theirs.child(), ours.child());
+                    assert_eq!(theirs.count(), ours.count());
+                    let entries = ours.entries::<Key>()?;
+                    assert_eq!(theirs.entries::<Key>()?, entries);
+                    for (op, entry) in entries.iter().enumerate() {
+                        assert_eq!(theirs.is_assert(op), ours.is_assert(op));
+                        assert_eq!(
+                            theirs.resolve::<Key>(&entry.key)?,
+                            ours.resolve::<Key>(&entry.key)?
+                        );
+                    }
+                }
+            }
+            assert_eq!(served.all_novelty::<Key>()?, stored.all_novelty::<Key>()?);
+        }
+        _ => panic!("a node served as another kind"),
+    }
+    // Its bytes, built on asking, are the very block.
+    assert_eq!(served.buffer()?.as_ref(), block.as_ref());
+    Ok(true)
+}
+
+/// Every node the archive keeps as a frame reads the same served in place
+/// as it does from its block, accessor by accessor.
+#[tokio::test]
+async fn it_serves_every_node_as_its_block_reads() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let at = Directory::At(directory.path().to_string_lossy().into_owned());
+    let name = unique_name("repo");
+    commit_facts(&at, &unique_name("peer"), &name).await?;
+    let archive = FileArchive::open(directory.path().join(&name).join(FILE_NAME))?;
+    let mut served = 0;
+    for (catalog, hash) in sorted_blocks(&archive) {
+        served += compare(&archive, &catalog, &hash)? as usize;
+    }
+    assert_eq!(served, archive.stats().frames, "every frame is served");
+    Ok(())
+}
+
+/// The same, over an archive file named by `DIALOG_ARCHIVE_SERVED`: run by
+/// hand over a large replica.
+#[test]
+#[ignore = "compares every node of a file named by DIALOG_ARCHIVE_SERVED"]
+fn it_serves_every_node_of_a_file_as_its_block_reads() -> anyhow::Result<()> {
+    let Ok(path) = std::env::var("DIALOG_ARCHIVE_SERVED") else {
+        return Ok(());
+    };
+    let archive = FileArchive::open(path)?;
+    let mut served = 0;
+    for (catalog, hash) in sorted_blocks(&archive) {
+        served += compare(&archive, &catalog, &hash)? as usize;
+    }
+    println!("{served} nodes compared");
+    assert_eq!(served, archive.stats().frames);
+    Ok(())
+}
+
+/// A repository whose environment holds the archive as its node source
+/// reads its tree from the frames in place, and selects what it committed.
+#[tokio::test]
+async fn it_selects_through_nodes_served_in_place() -> anyhow::Result<()> {
+    use dialog_search_tree::NodeSource;
+    let directory = tempfile::tempdir()?;
+    let at = Directory::At(directory.path().to_string_lossy().into_owned());
+    let (peer, name) = (unique_name("peer"), unique_name("repo"));
+    commit_facts(&at, &peer, &name).await?;
+
+    let (operator, branch) = open!(at, peer, name);
+    let archive = FileArchive::open(directory.path().join(&name).join(FILE_NAME))?;
+    let before = archive.stats().served;
+    <dyn NodeSource>::serve(&operator, branch.subject().did(), Arc::new(archive.clone()));
+    let rows: Vec<Artifact> = branch
+        .claims()
+        .select(ArtifactSelector::new().the(Relation::from_str("person/name")?))
+        .to_owned()
+        .perform(&operator)
+        .await?
+        .try_collect()
+        .await?;
+    assert_eq!(rows.len(), 100);
+    assert!(
+        rows.iter()
+            .any(|row| row.is == Value::String("person 4.2".into()))
+    );
+    assert!(
+        archive.stats().served > before,
+        "the tree read nodes the archive served in place"
+    );
     Ok(())
 }

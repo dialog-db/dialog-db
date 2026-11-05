@@ -635,7 +635,14 @@ where
                     let NodeBody::Segment(segment) = node.body() else {
                         unreachable!("segment checked above")
                     };
-                    let mut keys = segment.keys::<Key>()?;
+                    // Over rows the leaf is entered at the range's start;
+                    // a block's columnar keys stream from the first.
+                    let mut keys = match &start_bytes {
+                        Bound::Included(bound) | Bound::Excluded(bound) => {
+                            segment.keys_from::<Key>(bound)?
+                        }
+                        Bound::Unbounded => segment.keys::<Key>()?,
+                    };
                     while let Some((at, key)) = keys.next_key()? {
                         // Buffered inserts sorting before this entry.
                         while let Some((buffered_key, _)) = buffered.peek() {

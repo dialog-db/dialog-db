@@ -37,7 +37,8 @@ pub enum KeyCursor<'a> {
         rows: &'a dyn NodeRows,
         /// The positions left to read.
         positions: Range<usize>,
-        /// The first position, which the cursor reports as 0.
+        /// What the cursor takes off each position it reports: a buffer's
+        /// first operation is its position 0.
         start: usize,
         /// Whether the positions are buffered operations' rather than
         /// entries'.
@@ -48,10 +49,12 @@ pub enum KeyCursor<'a> {
 }
 
 impl<'a> KeyCursor<'a> {
-    fn rows(rows: &'a dyn NodeRows, positions: Range<usize>, ops: bool) -> Self {
+    /// A cursor over `positions` of `rows`, reporting each position less
+    /// `start`.
+    fn rows(rows: &'a dyn NodeRows, positions: Range<usize>, start: usize, ops: bool) -> Self {
         KeyCursor::Rows {
             rows,
-            start: positions.start,
+            start,
             positions,
             ops,
             scratch: Vec::new(),
@@ -438,7 +441,9 @@ impl<'a, Value: rkyv::Archive> BufferView<'a, Value> {
     pub fn keys<Key: self::Key>(&self) -> Result<KeyCursor<'a>, DialogSearchTreeError> {
         match self {
             BufferView::Archived(buffer) => Ok(KeyCursor::Columnar(buffer.keys::<Key>()?)),
-            BufferView::Rows { rows, ops, .. } => Ok(KeyCursor::rows(*rows, ops.clone(), true)),
+            BufferView::Rows { rows, ops, .. } => {
+                Ok(KeyCursor::rows(*rows, ops.clone(), ops.start, true))
+            }
         }
     }
 
@@ -598,7 +603,26 @@ impl<'a, Value: self::Value> SegmentView<'a, Value> {
     pub fn keys<Key: self::Key>(&self) -> Result<KeyCursor<'a>, DialogSearchTreeError> {
         match self {
             SegmentView::Archived(segment) => Ok(KeyCursor::Columnar(segment.keys::<Key>()?)),
-            SegmentView::Rows(rows) => Ok(KeyCursor::rows(*rows, 0..rows.len(), false)),
+            SegmentView::Rows(rows) => Ok(KeyCursor::rows(*rows, 0..rows.len(), 0, false)),
+        }
+    }
+
+    /// A streaming decoder over this segment's keys from the first at or
+    /// above `probe`, in entry order, reporting each key's position in the
+    /// segment. Over rows the cursor enters the segment by a binary search
+    /// in place; over a block's columnar keys, which stream only from the
+    /// start, it starts at the first entry, and the caller skips what sorts
+    /// below `probe`.
+    pub fn keys_from<Key: self::Key>(
+        &self,
+        probe: &[u8],
+    ) -> Result<KeyCursor<'a>, DialogSearchTreeError> {
+        match self {
+            SegmentView::Archived(_) => self.keys::<Key>(),
+            SegmentView::Rows(rows) => {
+                let start = self.lower_bound(probe).unwrap_or(0);
+                Ok(KeyCursor::rows(*rows, start..rows.len(), 0, false))
+            }
         }
     }
 

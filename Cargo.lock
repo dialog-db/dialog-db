@@ -1303,6 +1303,7 @@ dependencies = [
  "rkyv",
  "tempfile",
  "tokio",
+ "zerocopy",
 ]
 
 [[package]]

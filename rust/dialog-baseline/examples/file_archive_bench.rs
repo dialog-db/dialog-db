@@ -5,21 +5,31 @@
 //!
 //! - `fs`: a file per block (the `fs` provider);
 //! - `file/whole`: one append-only file, every block whole;
-//! - `file/frames`: one append-only file, tree nodes as frames over tokens.
+//! - `file/frames`: one append-only file, tree nodes as frames over tokens,
+//!   each read rebuilding the node's block;
+//! - `file/served`: the same file, with the environment holding it as its
+//!   node source, so the tree reads frames in place through the file's
+//!   mapping and builds no block.
 //!
 //! For each it reports the commit time, the bytes the blocks take on disk,
 //! then, after dropping every handle and reopening from disk (an empty node
 //! cache), a cold pass of reads and the same pass again warm: a scan of
 //! every fact of every attribute the log writes, and point reads of single
-//! entities. The OS page cache is warm for every store alike.
+//! entities. The OS page cache is warm for every store alike. It also
+//! reports the heap each reopened repository holds once it has read: its
+//! node cache above all, whose nodes are blocks for `fs` and rows into the
+//! mapping for `file/served`.
 //!
 //! Run it with `DIALOG_SE_CSV=path/to/retro-facts.csv
 //! DIALOG_BENCH_COMMITS=4096 cargo run --release -p dialog-baseline
 //! --example file_archive_bench`.
 
+use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::str::FromStr as _;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::time::{Duration, Instant};
 
 use dialog_archive_file::{FILE_NAME, FileArchive, Options};
@@ -29,9 +39,33 @@ use dialog_capability::Subject;
 use dialog_effects::storage::{Directory, Location};
 use dialog_peer::helpers::{Seed, open_peer_as, test_owned};
 use dialog_repository::RepositoryExt as _;
+use dialog_search_tree::NodeSource;
 use dialog_storage::provider::storage::NativeSpace;
 use dialog_storage::provider::{FileSystem, Space, Storage};
 use futures_util::TryStreamExt as _;
+
+/// Counts the bytes allocated and not yet freed.
+struct Counting;
+
+static ALLOCATED: AtomicU64 = AtomicU64::new(0);
+
+// SAFETY: forwards to the system allocator, only counting.
+unsafe impl GlobalAlloc for Counting {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        ALLOCATED.fetch_add(layout.size() as u64, Relaxed);
+        // SAFETY: the caller upholds `alloc`'s contract.
+        unsafe { System.alloc(layout) }
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        ALLOCATED.fetch_sub(layout.size() as u64, Relaxed);
+        // SAFETY: the caller upholds `dealloc`'s contract.
+        unsafe { System.dealloc(ptr, layout) }
+    }
+}
+
+#[global_allocator]
+static COUNTING: Counting = Counting;
 
 type FileArchiveSpace = Space<FileArchive, FileSystem, FileSystem, FileSystem, FileSystem>;
 
@@ -50,6 +84,15 @@ struct Run {
     facts: usize,
     cold_points: Duration,
     warm_points: Duration,
+    /// Heap opening the repository took: the archive's index among it.
+    open_heap: u64,
+    /// Heap the scans left held, beyond the open: the node cache, mostly.
+    scan_heap: u64,
+    /// The same for the point reads.
+    points_heap: u64,
+    /// The nodes the node cache held after the scans, and what it charged
+    /// for them.
+    cached: (usize, u64),
     detail: String,
 }
 
@@ -149,8 +192,19 @@ macro_rules! reads {
     }};
 }
 
+/// Makes the environment hand tree reads to the archive file, read in place,
+/// when `$serve` says so.
+macro_rules! serve {
+    ($serve:expr, $directory:expr, $operator:expr, $branch:expr) => {{
+        if $serve {
+            let archive = FileArchive::open($directory.join("repo").join(FILE_NAME))?;
+            <dyn NodeSource>::serve(&$operator, $branch.subject().did(), Arc::new(archive));
+        }
+    }};
+}
+
 macro_rules! run {
-    ($space:ty, $name:expr, $directory:expr, $commits:expr, $attributes:expr, $entities:expr, $before:expr, $after:expr) => {{
+    ($space:ty, $name:expr, $directory:expr, $commits:expr, $attributes:expr, $entities:expr, $before:expr, $after:expr, $serve:expr) => {{
         let at = Directory::At($directory.to_string_lossy().into_owned());
         let mut run = Run {
             name: $name,
@@ -160,6 +214,7 @@ macro_rules! run {
         {
             let _entropy = Seed::new(733).entropy();
             let (operator, branch) = open!($space, at, "peer", "repo", true);
+            serve!($serve, $directory, operator, branch);
             let started = Instant::now();
             for commit in $commits {
                 branch
@@ -186,14 +241,29 @@ macro_rules! run {
         run.detail = $after(&held);
         drop(held);
         {
+            let before = ALLOCATED.load(Relaxed);
             let (operator, branch) = open!($space, at, "peer", "repo", false);
+            serve!($serve, $directory, operator, branch);
+            let opened = ALLOCATED.load(Relaxed);
+            run.open_heap = opened.saturating_sub(before);
             (run.cold_scan, _, run.facts) = reads!(operator, branch, $attributes, &[] as &[String]);
             (run.warm_scan, _, _) = reads!(operator, branch, $attributes, &[] as &[String]);
+            run.scan_heap = ALLOCATED.load(Relaxed).saturating_sub(opened);
+            if let Some(cache) = dialog_search_tree::NodeCache::<
+                dialog_artifacts::Key,
+                dialog_artifacts::State<dialog_artifacts::Datum>,
+            >::of(&operator, branch.subject().did())
+            {
+                run.cached = (cache.len(), cache.bytes() as u64);
+            }
         }
         {
             let (operator, branch) = open!($space, at, "peer", "repo", false);
+            serve!($serve, $directory, operator, branch);
+            let opened = ALLOCATED.load(Relaxed);
             (_, run.cold_points, _) = reads!(operator, branch, &[] as &[String], $entities);
             (_, run.warm_points, _) = reads!(operator, branch, &[] as &[String], $entities);
+            run.points_heap = ALLOCATED.load(Relaxed).saturating_sub(opened);
         }
         run
     }};
@@ -280,7 +350,7 @@ async fn main() -> anyhow::Result<()> {
     let mut runs = Vec::new();
     // `DIALOG_BENCH_STORES=fs,file/frames` runs only those.
     let stores = std::env::var("DIALOG_BENCH_STORES")
-        .unwrap_or_else(|_| "fs,file/whole,file/frames".to_string());
+        .unwrap_or_else(|_| "fs,file/whole,file/frames,file/served".to_string());
     for which in stores.split(',') {
         let temporary = tempfile::tempdir()?;
         let directory = temporary.path().to_path_buf();
@@ -293,7 +363,8 @@ async fn main() -> anyhow::Result<()> {
                 &attributes,
                 &entities,
                 nothing,
-                describe
+                describe,
+                false
             ),
             "file/whole" => run!(
                 FileArchiveSpace,
@@ -306,9 +377,10 @@ async fn main() -> anyhow::Result<()> {
                     frames: false,
                     ..Options::default()
                 }),
-                describe
+                describe,
+                false
             ),
-            _ => run!(
+            "file/frames" => run!(
                 FileArchiveSpace,
                 "file/frames",
                 directory,
@@ -316,12 +388,26 @@ async fn main() -> anyhow::Result<()> {
                 &attributes,
                 &entities,
                 hold(Options::default()),
-                describe
+                describe,
+                false
+            ),
+            _ => run!(
+                FileArchiveSpace,
+                "file/served",
+                directory,
+                &log.transactions,
+                &attributes,
+                &entities,
+                hold(Options::default()),
+                describe,
+                true
             ),
         };
         println!(
             "{:<12} commit {:>9} ({:.2} ms/commit)  disk {:>10} (allocated {:>10}, {} files)  \
-             cold scan {:>8}  warm scan {:>8}  ({} facts)  cold points {:>8}  warm points {:>8}",
+             cold scan {:>8}  warm scan {:>8}  ({} facts)  cold points {:>8}  warm points {:>8}  \
+             heap: open {:>9}, held by scans {:>9}, by points {:>9}; \
+             node cache after scans: {} nodes, charged {}",
             run.name,
             ms(run.commit),
             run.commit.as_secs_f64() * 1000.0 / commits.len() as f64,
@@ -333,6 +419,11 @@ async fn main() -> anyhow::Result<()> {
             run.facts,
             ms(run.cold_points),
             ms(run.warm_points),
+            mib(run.open_heap),
+            mib(run.scan_heap),
+            mib(run.points_heap),
+            run.cached.0,
+            mib(run.cached.1),
         );
         println!("{:<12} root {}", "", run.root);
         if !run.detail.is_empty() {
