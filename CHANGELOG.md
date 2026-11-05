@@ -14,10 +14,12 @@ says how to cut a release.
 
 ## Unreleased
 
+## 0.4.0 (2026-11-05)
+
 
 ### A pull or a push that meets another revision under its own head's version is refused
 
-Fixing [#705](https://github.com/dialog-db/dialog-db/issues/705)
+[#707](https://github.com/dialog-db/dialog-db/pull/707), fixing [#705](https://github.com/dialog-db/dialog-db/issues/705)
 
 Two replicas writing with one key on one branch share an origin, since
 an origin derives from the branch and the issuer. When both build on the
@@ -121,6 +123,8 @@ Why: the memo speaks for heads that landed, and a context remembered
 before the publish speaks for one that may never land.
 
 ### Distinct members inserted between the same neighbours get distinct positions
+
+[#729](https://github.com/dialog-db/dialog-db/pull/729)
 
 A position's fractional tail comes from a bias derived from the member's
 identity. The bias was the first six base62 digits of the identity bytes,
@@ -398,7 +402,7 @@ changes from another device stopped arriving until the page reloaded.
 
 ### A rule's conclusion under `last` succeeds the claim its body read
 
-Fixes [#724](https://github.com/dialog-db/dialog-db/issues/724)
+[#725](https://github.com/dialog-db/dialog-db/pull/725), fixing [#724](https://github.com/dialog-db/dialog-db/issues/724)
 
 A deductive rule that reads a cell and derives another value for it,
 `x/status(e) := "todo" :- x/status(e) = "triage"`, rewrites the cell,
@@ -444,7 +448,7 @@ failing, which an open rule set has to guarantee under every merge.
 
 ### A subscription learns of the readable change to a single-valued cell, not only the moved row
 
-Following [#710](https://github.com/dialog-db/dialog-db/pull/710) and
+[#716](https://github.com/dialog-db/dialog-db/pull/716), following [#710](https://github.com/dialog-db/dialog-db/pull/710) and
 [#714](https://github.com/dialog-db/dialog-db/pull/714)
 
 A poll told incremental maintenance which rows moved. What a rule reads
@@ -607,7 +611,7 @@ the walk read as it went, not because its reads depended on each other.
 
 ### A reset moves a branch forward only
 
-Fixing [#682](https://github.com/dialog-db/dialog-db/issues/682)
+[#686](https://github.com/dialog-db/dialog-db/pull/686), fixing [#682](https://github.com/dialog-db/dialog-db/issues/682)
 
 `Branch::reset` now refuses a revision that does not hold the branch's
 head, and the head does not move. A reset back to an older head, or onto
@@ -1982,10 +1986,10 @@ thread multiplies whatever it holds by the size of the thread pool.
 - A head minted by a build of this release from before heads carried
   their count ends in a lone `0x02` marker. No release or pre-release
   tag carries such a build (none contains #625's commit), so these heads
-  exist only where an untagged build of `main` ran, and the `0x02` shape
-  can be retired before the release. Until then it still verifies and
-  pulls, nothing is rewritten, and a reader derives its count from its
-  region.
+  exist only where an untagged build of `main` ran. This release still
+  verifies and pulls them, nothing is rewritten, and a reader derives
+  the count from the head's region; a later release may stop accepting
+  the shape.
   A commit on such a head of another origin reads the head's region for
   the count, as those builds did, and the head it mints carries one.
 - `UcanAddress` encodes an optional `socket`, left out when absent, so an address without one keeps its bytes. An older replica reads an address that names a socket and drops the socket, reaching the peer over requests.
