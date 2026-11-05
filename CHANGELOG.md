@@ -30,7 +30,8 @@ holder's lock could also both remove it and both take it.
 The lock is still a file, `{cell}.lock`, now holding `{pid} {token}`: the
 holder's process and a random token naming that one hold. A lock file is
 held unless proven otherwise, so one that is empty or does not read as
-`pid token` is held and never deleted. A writer writes its content to a
+`pid token` is held and never deleted; the one exception is a bare PID,
+the previous release's lock file, read as that PID with token `0`. A writer writes its content to a
 temporary file first and hard-links it into place, which fails if a lock
 file is there, so a lock file never exists without its content; on a
 filesystem without hard links it creates the file and writes it after,
@@ -52,9 +53,9 @@ What this changes for you:
   PID namespace. If the crashed writer's PID has been given to another
   process, its lock looks held until the lock file is deleted by hand;
   so does a crashed writer's lock on a filesystem without hard links.
-- A lock file that is empty or does not read as `pid token` is held,
-  whoever wrote it, and has to be deleted by hand if no writer is
-  running.
+- A lock file that is empty or does not read as `pid token` (or as a
+  bare PID) is held, whoever wrote it, and has to be deleted by hand if
+  no writer is running.
 - Lock files are removed on release, by the writer that holds them
   only: a writer whose lock file now names another holder leaves it.
 - Cells whose names differ only in extension (`a.x`, `a.y`) get a lock
@@ -2002,14 +2003,16 @@ thread multiplies whatever it holds by the size of the thread pool.
 
 - Nothing stored or synced changes for the file store's lock; only the
   lock files beside its cells do. A lock file the previous release left
-  behind holds a bare PID, which this release reads as held: if its
-  writer crashed holding it, delete it by hand. A writer on the previous
-  release and one on this release do not exclude each other while both
-  write one store during an upgrade, since the older one deletes a lock
-  file it cannot read as a PID as stale, and this release's is
-  `pid token` (and for a cell whose name has an extension, the two
-  releases lock different files). Stop writers on the previous release before starting ones
-  on this release.
+  behind holds a bare PID, which this release reads as a holder: one
+  left by a writer that crashed is recovered like any other, and one
+  whose writer is still running is held. Only a writer on the previous
+  release that is still running excludes nothing: it and a writer on
+  this release do not exclude each other while both write one store
+  during an upgrade, since the older one deletes a lock file it cannot
+  read as a PID as stale, and this release's is `pid token` (and for a
+  cell whose name has an extension, the two releases lock different
+  files). Stop writers on the previous release before starting ones on
+  this release.
 - Nothing stored or synced changes for the refusal of a rival head of
   one version (#705): nothing is rewritten on upgrade, and heads, trees
   and the wire format are as before, so an older release reads all this

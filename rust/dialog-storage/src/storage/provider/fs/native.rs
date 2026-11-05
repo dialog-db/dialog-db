@@ -575,13 +575,17 @@ const CLAIM_ATTEMPTS: usize = 2;
 ///
 /// - **A lock file is held unless proven otherwise.** One that is empty or
 ///   does not read as `pid token` is held, and is never deleted: it may be a
-///   writer that has created it and not yet written it.
+///   writer that has created it and not yet written it. The one exception is
+///   a bare decimal `pid`, the lock file the previous release wrote, which
+///   reads as `pid 0`: held while that process runs, recovered like any
+///   other once it is gone.
 /// - **A claim never shows an empty lock file.** The content is written to a
 ///   temporary file `{lock}.{pid}.{token}.tmp` first and hard-linked to the
 ///   lock path, which fails atomically if a lock file is there. Where hard
 ///   links are not supported, the lock file is created with `create_new` and
 ///   written after; by the first rule, a writer that arrives in between is
-///   refused.
+///   refused. (A half-written `pid token` there can read as a bare PID, but
+///   recovering it needs a hard link, which such a filesystem refuses.)
 /// - **A lock whose holder is gone is recovered by one writer.** A writer that
 ///   reads `pid token` naming a process that is not running links the lock
 ///   file to `{lock}.stale.{token}`, a name only one writer can create. It
@@ -769,10 +773,13 @@ fn recover(path: &Path, content: &[u8], token: u64) -> Result<(), FileSystemErro
     })
 }
 
-/// Read a lock file's content as `"{pid} {token}"`, both decimal. A PID no
-/// process can have (zero, or past `i32::MAX`) does not read.
+/// Read a lock file's content as `"{pid} {token}"`, both decimal, or as a
+/// bare decimal `"{pid}"`, the lock file the previous release (`pidlock`)
+/// wrote, which reads as token `0`. A PID no process can have (zero, or past
+/// `i32::MAX`) does not read.
 fn parse_holder(content: &[u8]) -> Option<(u32, u64)> {
-    let (pid, token) = std::str::from_utf8(content).ok()?.split_once(' ')?;
+    let text = std::str::from_utf8(content).ok()?;
+    let (pid, token) = text.split_once(' ').unwrap_or((text, "0"));
     let decimal = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
     if !decimal(pid) || !decimal(token) {
         return None;
@@ -984,12 +991,13 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_holds_a_lock_whose_file_does_not_read_as_pid_and_token() -> anyhow::Result<()> {
-        // A bare PID, as the previous release's lock wrote, a half-written
-        // claim, and garbage are all held, whatever process they name.
+        // A half-written claim, a PID with anything but a token after it,
+        // and garbage are all held, whatever process they name.
         let dir = tempfile::tempdir()?;
         let lock_path = dir.path().join("cell.lock");
         for content in [
-            GONE_PID.to_string(),
+            format!("{GONE_PID}\n"),
+            format!(" {GONE_PID}"),
             format!("{GONE_PID} "),
             format!("{GONE_PID} x"),
             format!("{GONE_PID} 7\n"),
@@ -1006,6 +1014,40 @@ mod tests {
             );
             assert_eq!(std::fs::read(&lock_path)?, content.as_bytes());
         }
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_recovers_a_bare_pid_lock_whose_holder_is_gone() -> anyhow::Result<()> {
+        // The previous release's lock file is a bare PID. One left by a
+        // writer that crashed is recovered, through `{lock}.stale.0`.
+        let dir = tempfile::tempdir()?;
+        let lock_path = dir.path().join("cell.lock");
+        std::fs::write(&lock_path, GONE_PID.to_string())?;
+        let _guard = LockGuard::acquire(lock_path.clone())?;
+        let content = std::fs::read(&lock_path)?;
+        assert_eq!(
+            parse_holder(&content).map(|(pid, _)| pid),
+            Some(std::process::id())
+        );
+        assert_eq!(names(dir.path())?, ["cell.lock"]);
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_refuses_a_bare_pid_lock_naming_a_running_process() -> anyhow::Result<()> {
+        // A previous release's lock file naming a running process (this
+        // one, written by hand) is held and left alone.
+        let dir = tempfile::tempdir()?;
+        let lock_path = dir.path().join("cell.lock");
+        let content = std::process::id().to_string();
+        std::fs::write(&lock_path, &content)?;
+        assert!(matches!(
+            LockGuard::acquire(lock_path.clone()),
+            Err(FileSystemError::Lock(_))
+        ));
+        assert_eq!(std::fs::read_to_string(&lock_path)?, content);
+        assert_eq!(names(dir.path())?, ["cell.lock"]);
         Ok(())
     }
 

@@ -885,9 +885,9 @@ mod tests {
         let cell_handle = provider.memory()?.resolve("local")?.cell("test")?;
         let cell_path: std::path::PathBuf = cell_handle.try_into()?;
         let lock_path = super::super::native::lock_path(&cell_path);
-        // The lock file of a writer that crashed holding it: `pid token`,
-        // naming a PID no process has
-        std::fs::write(&lock_path, b"999999999 7")?;
+        // The lock file of a writer on the previous release that crashed
+        // holding it: a bare PID, one no process has
+        std::fs::write(&lock_path, b"999999999")?;
         assert!(lock_path.exists(), "stale lock file should exist");
 
         // Publish should succeed: a gone holder's lock is recovered
