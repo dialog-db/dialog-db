@@ -25,13 +25,25 @@
 //!   a fingerprint and an offset (16 bytes) per frame, and the token
 //!   dictionary a fingerprint and an offset (12 bytes) per distinct token.
 //!   These are real bytes: every frame is decoded back and re-encoded with
-//!   the tree's own encoder, and the census fails unless the result is the
-//!   original block, byte for byte.
+//!   the tree's own encoder, and the census counts how many come out as
+//!   the original block, byte for byte. A block an older encoder wrote may
+//!   not: the frame rebuilds it with today's.
 //! - **tokens+zstd frames**, **tokens+delta frames/K**: the idea with each
 //!   frame compressed alone, or against the frame it supersedes.
 //! - **stream**: the whole log through one zstd stream with long-distance
 //!   matching. No random access; a floor for what any encoding of these
 //!   bytes can reach.
+//! - **columnar/K**: the idea with our own encoding instead of zstd. A
+//!   frame is rows of dense token ids (and child frame positions) written
+//!   column by column as zigzag-delta varints. Against the frame it
+//!   supersedes, a section is written as runs copied from the
+//!   predecessor's rows and literal rows, with a whole frame every `K`
+//!   versions. Writes are timed (encode and append, next to a file per
+//!   block and a plain append), and reads are timed both as decoding the
+//!   rows and as realizing the block from them.
+//!
+//! zstd models stay as references for how much redundancy there is; they
+//! say nothing about what our own encoding costs to write or read.
 //!
 //! Every model is reported cumulatively at checkpoints, next to the live
 //! tree (the nodes reachable from that commit's root), so the growth with
@@ -46,7 +58,9 @@
 //! - **an archive directory** (`archive <directory> [checkpoints]`): a
 //!   real replica's file-per-block store, every file under the directory.
 //!   The commit order is reconstructed from the files (see [`scan`]), so
-//!   point it at a replica that wrote its own history. `disk <commits>`
+//!   point it at a replica that wrote its own history, or set
+//!   `DIALOG_CENSUS_ORDER=history` to order roots by the history records
+//!   under them (for blocks fetched from a remote). `disk <commits>`
 //!   writes a replay to disk for checking this mode against the replay.
 //!
 //! Checkpoints count commits; they default to every quarter.
@@ -164,7 +178,10 @@ fn get_varint(bytes: &[u8], at: &mut usize) -> usize {
 /// by its offset.
 #[derive(Default)]
 struct Tokens {
-    offsets: HashMap<Vec<u8>, u32>,
+    /// Each distinct token's offset in the region and its dense id.
+    offsets: HashMap<Vec<u8>, (u32, u32)>,
+    /// Region offset by dense id.
+    starts: Vec<u32>,
     region: Vec<u8>,
     /// Distinct tokens and their bytes, per kind.
     by_kind: HashMap<&'static str, (usize, usize)>,
@@ -175,17 +192,35 @@ struct Tokens {
 impl Tokens {
     fn intern(&mut self, kind: &'static str, token: &[u8]) -> u32 {
         *self.references.entry(kind).or_default() += 1;
-        if let Some(offset) = self.offsets.get(token) {
-            return *offset;
+        self.add(kind, token).0
+    }
+
+    /// The token's offset and dense id, adding it at the end of the region
+    /// when it is new. Unlike [`Tokens::intern`] it does not count a
+    /// reference, so a second model over the same tokens leaves the counts
+    /// alone.
+    fn add(&mut self, kind: &'static str, token: &[u8]) -> (u32, u32) {
+        if let Some(found) = self.offsets.get(token) {
+            return *found;
         }
         let offset = self.region.len() as u32;
+        let id = self.starts.len() as u32;
         put_varint(&mut self.region, token.len());
         self.region.extend_from_slice(token);
         let share = self.by_kind.entry(kind).or_default();
         share.0 += 1;
         share.1 += self.region.len() - offset as usize;
-        self.offsets.insert(token.to_vec(), offset);
-        offset
+        self.offsets.insert(token.to_vec(), (offset, id));
+        self.starts.push(offset);
+        (offset, id)
+    }
+
+    fn id(&mut self, kind: &'static str, token: &[u8]) -> u32 {
+        self.add(kind, token).1
+    }
+
+    fn by_id(&self, id: u32) -> &[u8] {
+        self.get(self.starts[id as usize])
     }
 
     fn get(&self, offset: u32) -> &[u8] {
@@ -645,6 +680,7 @@ struct Checkpoint<'a> {
     totals: &'a Totals,
     log_deltas: &'a [DeltaStore],
     frame_deltas: &'a [DeltaStore],
+    columns: &'a [ColumnStore],
     stream: usize,
 }
 
@@ -657,9 +693,14 @@ fn header() -> String {
             .join(",")
     };
     format!(
-        "commits,live_nodes,live_mib,live_entries,blocks,fs_mib,fs_alloc_mib,log_mib,log_zstd_mib,{},tokens_mib,frames_mib,tokenized_mib,tokenized_zstd_mib,{},stream_mib",
+        "commits,live_nodes,live_mib,live_entries,blocks,fs_mib,fs_alloc_mib,log_mib,log_zstd_mib,{},tokens_mib,frames_mib,tokenized_mib,tokenized_zstd_mib,{},stream_mib,{}",
         deltas("log_delta"),
         deltas("tokenized_delta"),
+        COLUMN_INTERVALS
+            .iter()
+            .map(|k| format!("columnar{k}_mib"))
+            .collect::<Vec<_>>()
+            .join(","),
     )
 }
 
@@ -679,7 +720,7 @@ fn row(
             .join(",")
     };
     Ok(format!(
-        "{},{},{},{live_entries},{},{},{},{},{},{},{},{},{},{},{},{}",
+        "{},{},{},{live_entries},{},{},{},{},{},{},{},{},{},{},{},{},{}",
         at.commit,
         reached.len(),
         mib(live_bytes),
@@ -695,6 +736,11 @@ fn row(
         mib(totals.tokenized(totals.frames_zstd)),
         deltas(at.frame_deltas, &|bytes| totals.tokenized(bytes)),
         mib(at.stream),
+        at.columns
+            .iter()
+            .map(|store| mib(totals.tokenized(store.bytes)))
+            .collect::<Vec<_>>()
+            .join(","),
     ))
 }
 
@@ -850,7 +896,7 @@ fn scan(directory: &Path) -> anyhow::Result<Source> {
             }
         }
     }
-    let modified: HashMap<Blake3Hash, SystemTime> = read
+    let mut modified: HashMap<Blake3Hash, SystemTime> = read
         .iter()
         .map(|(block, time)| (block.hash.clone(), *time))
         .collect();
@@ -864,6 +910,31 @@ fn scan(directory: &Path) -> anyhow::Result<Source> {
             .cmp(&modified[b])
             .then_with(|| a.as_bytes().cmp(b.as_bytes()))
     });
+    // Blocks fetched from a remote carry the time they were fetched, not
+    // written. The history region only grows, so the number of history
+    // records under a root orders the roots instead.
+    if std::env::var("DIALOG_CENSUS_ORDER").as_deref() == Ok("history") {
+        let counts = history_counts(&roots, &nodes)?;
+        roots.sort_by(|a, b| {
+            counts[a]
+                .cmp(&counts[b])
+                .then_with(|| a.as_bytes().cmp(b.as_bytes()))
+        });
+        let mut ordered = HashMap::new();
+        let start = SystemTime::UNIX_EPOCH;
+        for (at, root) in roots.iter().enumerate() {
+            ordered.insert(root.clone(), start + Duration::from_secs(at as u64 + 1));
+        }
+        // Blocks that are not tree nodes go after the last root.
+        let end = start + Duration::from_secs(roots.len() as u64 + 1);
+        for (block, time) in read.iter_mut() {
+            if !nodes.contains_key(&block.hash) {
+                *time = end;
+            }
+        }
+        modified = ordered;
+        eprintln!("ordered {} roots by their history records", roots.len());
+    }
     let root_times: Vec<SystemTime> = roots.iter().map(|root| modified[root]).collect();
 
     // The commit each block belongs to: for a node, the first root that
@@ -915,6 +986,59 @@ fn scan(directory: &Path) -> anyhow::Result<Source> {
         roots,
         nodes,
     })
+}
+
+/// The history records under each root: the leaf entries and buffered
+/// assertions whose key is in the history region, counted once per node.
+fn history_counts(
+    roots: &[Blake3Hash],
+    nodes: &HashMap<Blake3Hash, TreeNode>,
+) -> anyhow::Result<HashMap<Blake3Hash, usize>> {
+    use dialog_artifacts::HISTORY_KEY_TAG;
+    let mut counts: HashMap<Blake3Hash, usize> = HashMap::new();
+    for root in roots {
+        let mut stack = vec![(root.clone(), false)];
+        while let Some((hash, expanded)) = stack.pop() {
+            if counts.contains_key(&hash) {
+                continue;
+            }
+            let Some(node) = nodes.get(&hash) else {
+                counts.insert(hash, 0);
+                continue;
+            };
+            match node.body() {
+                NodeBody::Segment(segment) => {
+                    let mut count = 0;
+                    let mut keys = segment.keys::<Key>()?;
+                    while let Some((_, key)) = keys.next_key()? {
+                        count += (key.first() == Some(&HISTORY_KEY_TAG)) as usize;
+                    }
+                    counts.insert(hash, count);
+                }
+                NodeBody::Index(index) if expanded => {
+                    let mut count = 0;
+                    for at in 0..index.len() {
+                        count += counts[index.hash_at(at)?];
+                    }
+                    for buffer in index.novelty.iter() {
+                        for item in buffer.entries::<Key>()? {
+                            count += (matches!(item.op, NoveltyOp::Assert(_))
+                                && item.key.first() == Some(&HISTORY_KEY_TAG))
+                                as usize;
+                        }
+                    }
+                    counts.insert(hash, count);
+                }
+                NodeBody::Index(index) => {
+                    stack.push((hash.clone(), true));
+                    for at in 0..index.len() {
+                        stack.push((index.hash_at(at)?.clone(), false));
+                    }
+                }
+            }
+        }
+    }
+    Ok(counts)
 }
 
 /// A replica's file-per-block store, read as an archive the artifact tree
@@ -1148,6 +1272,21 @@ fn measure(source: Source, checkpoints: &[usize]) -> anyhow::Result<()> {
     let mut log_deltas: Vec<DeltaStore> = INTERVALS.iter().map(|&k| DeltaStore::new(k)).collect();
     let mut frame_deltas: Vec<DeltaStore> = INTERVALS.iter().map(|&k| DeltaStore::new(k)).collect();
     let mut log_zstd: HashMap<Blake3Hash, Vec<u8>> = HashMap::new();
+    // What writing costs: a file per block, every block appended to one
+    // file, and each columnar store's encode and append. None of them
+    // syncs, so these are the costs up to the page cache.
+    let written = tempfile::tempdir()?;
+    let per_block = written.path().join("fs");
+    std::fs::create_dir(&per_block)?;
+    let mut log_file = std::fs::File::create(written.path().join("log"))?;
+    let (mut fs_write, mut log_append) = (Duration::ZERO, Duration::ZERO);
+    let mut columns: Vec<ColumnStore> = COLUMN_INTERVALS
+        .iter()
+        .map(|&k| ColumnStore::new(k, written.path()))
+        .collect::<anyhow::Result<_>>()?;
+    let mut positions: HashMap<Blake3Hash, u32> = HashMap::new();
+    let mut all_rows: Vec<Rows> = Vec::new();
+    let mut rows_time = Duration::ZERO;
 
     println!("{}", header());
     let mut next = 0usize;
@@ -1160,6 +1299,7 @@ fn measure(source: Source, checkpoints: &[usize]) -> anyhow::Result<()> {
                 totals: &totals,
                 log_deltas: &log_deltas,
                 frame_deltas: &frame_deltas,
+                columns: &columns,
                 stream: stream.get_ref().len(),
             };
             println!("{}", row(&at, &roots, &nodes)?);
@@ -1174,6 +1314,12 @@ fn measure(source: Source, checkpoints: &[usize]) -> anyhow::Result<()> {
         totals.content += len;
         totals.fs_allocated += len.div_ceil(FS_BLOCK).max(1) * FS_BLOCK;
         totals.log += len + HASH_INDEX;
+        let started = Instant::now();
+        std::fs::write(per_block.join(block.hash.to_string()), bytes)?;
+        fs_write += started.elapsed();
+        let started = Instant::now();
+        log_file.write_all(bytes)?;
+        log_append += started.elapsed();
         stream.write_all(bytes)?;
         let alone = zstd_alone(bytes)?;
         totals.log_zstd += alone.len() + HASH_INDEX;
@@ -1192,6 +1338,17 @@ fn measure(source: Source, checkpoints: &[usize]) -> anyhow::Result<()> {
         let before_count = tokens.count();
         let before_bytes = tokens.region.len();
         let encoded = frame(&block.hash, node, &mut tokens, &frames.by_hash, &mut share)?;
+        let started = Instant::now();
+        let rows = rows_of(node, &mut tokens, &positions)?;
+        rows_time += started.elapsed();
+        let base_rows = base
+            .and_then(|previous| positions.get(previous))
+            .map(|&position| (position, &all_rows[position as usize]));
+        for store in &mut columns {
+            store.put(&block.hash, &rows, base_rows)?;
+        }
+        positions.insert(block.hash.clone(), all_rows.len() as u32);
+        all_rows.push(rows);
         totals.tokens += tokens.region.len() - before_bytes;
         totals.token_index += (tokens.count() - before_count) * TOKEN_INDEX;
         totals.frames += encoded.len();
@@ -1231,6 +1388,62 @@ fn measure(source: Source, checkpoints: &[usize]) -> anyhow::Result<()> {
         );
     }
 
+    let nodes_written = all_rows.len().max(1) as f64;
+    let per = |elapsed: Duration, count: f64| elapsed.as_secs_f64() * 1e6 / count;
+    let blocks_written = blocks.len().max(1) as f64;
+    eprintln!("\nwrites, mean us per block (no fsync):");
+    eprintln!(
+        "  {:<36} {:>8.1}",
+        "fs: file per block",
+        per(fs_write, blocks_written)
+    );
+    eprintln!(
+        "  {:<36} {:>8.1}",
+        "log: append the block",
+        per(log_append, blocks_written)
+    );
+    eprintln!(
+        "  {:<36} {:>8.1}",
+        "columnar: split into rows (shared)",
+        per(rows_time, nodes_written)
+    );
+    for store in &columns {
+        eprintln!(
+            "  {:<36} {:>8.1}   ({} of {} frames against a predecessor, {} MiB of frames)",
+            format!("columnar/{}: encode + append", store.interval),
+            per(store.encode + store.append, nodes_written),
+            store.against,
+            store.frames.len(),
+            mib(store.bytes),
+        );
+    }
+    drop(all_rows);
+
+    // Every columnar frame realizes to its block too. Blocks an older
+    // encoder wrote may not, since a frame rebuilds with today's.
+    let mut differ: Vec<Blake3Hash> = Vec::new();
+    for store in &columns {
+        let started = Instant::now();
+        for block in &blocks {
+            let Some(node) = nodes.get(&block.hash) else {
+                continue;
+            };
+            let rows = store.rows(positions[&block.hash]);
+            let bytes = realize_rows(&rows, &tokens, store, &node.manifest()?)?;
+            if bytes.as_slice() != block.bytes.as_ref() {
+                differ.push(block.hash.clone());
+            }
+        }
+        eprintln!(
+            "realize: {} of {} columnar/{} frames rebuild their block byte for byte ({:.1}s)",
+            positions.len() - differ.len(),
+            positions.len(),
+            store.interval,
+            started.elapsed().as_secs_f64()
+        );
+        differ.clear();
+    }
+
     // Every frame realizes to the block it stands for, byte for byte,
     // under the manifest of the tree the node belongs to.
     let realized = Instant::now();
@@ -1240,19 +1453,57 @@ fn measure(source: Source, checkpoints: &[usize]) -> anyhow::Result<()> {
         };
         let frame = frames.of(&block.hash).expect("every node has a frame");
         let bytes = realize(frame, &tokens, &frames, &node.manifest()?)?;
-        anyhow::ensure!(
-            bytes.as_slice() == block.bytes.as_ref(),
-            "the frame of {} realized to {} bytes that differ from its {}-byte block",
-            block.hash,
-            bytes.len(),
-            block.bytes.as_ref().len()
-        );
+        if bytes.as_slice() != block.bytes.as_ref() {
+            differ.push(block.hash.clone());
+        }
     }
     eprintln!(
-        "\nrealize: all {} frames rebuild their block byte for byte ({:.1}s)",
+        "\nrealize: {} of {} frames rebuild their block byte for byte ({:.1}s)",
+        frames.frames.len() - differ.len(),
         frames.frames.len(),
         realized.elapsed().as_secs_f64()
     );
+    if !differ.is_empty() {
+        let bytes: usize = differ
+            .iter()
+            .map(|hash| nodes[hash].buffer().as_ref().len())
+            .sum();
+        let commits: Vec<usize> = differ
+            .iter()
+            .map(|hash| blocks[position[hash]].commit)
+            .collect();
+        eprintln!(
+            "  the {} that differ hold {} MiB as blocks, written in commits {}..={}",
+            differ.len(),
+            mib(bytes),
+            commits.iter().min().unwrap_or(&0),
+            commits.iter().max().unwrap_or(&0),
+        );
+    }
+    let mut sizes: Vec<(usize, usize, &str)> = differ
+        .iter()
+        .take(8)
+        .map(|hash| {
+            let node = &nodes[hash];
+            let kind = match node.body() {
+                NodeBody::Index(_) => "index",
+                NodeBody::Segment(_) => "segment",
+            };
+            let realized = realize(
+                frames.of(hash).expect("a frame"),
+                &tokens,
+                &frames,
+                &node.manifest().expect("a manifest"),
+            )
+            .map(|bytes| bytes.len())
+            .unwrap_or(0);
+            (node.buffer().as_ref().len(), realized, kind)
+        })
+        .collect();
+    sizes.sort();
+    if !sizes.is_empty() {
+        eprintln!("  differing (block bytes, realized bytes, kind): {sizes:?}");
+    }
 
     read_costs(
         &roots[roots.len() - 1],
@@ -1263,6 +1514,8 @@ fn measure(source: Source, checkpoints: &[usize]) -> anyhow::Result<()> {
         &log_deltas,
         &tokens,
         &frames,
+        &columns,
+        &positions,
     )
 }
 
@@ -1320,6 +1573,8 @@ fn read_costs(
     log_deltas: &[DeltaStore],
     tokens: &Tokens,
     frames: &Frames,
+    columns: &[ColumnStore],
+    positions: &HashMap<Blake3Hash, u32>,
 ) -> anyhow::Result<()> {
     let (reached, live_bytes, _) = live(root, nodes)?;
     let directory = tempfile::tempdir()?;
@@ -1387,5 +1642,544 @@ fn read_costs(
             realize(frame(hash), tokens, frames, &manifests[hash])?,
         )
     })?;
+    for store in columns {
+        let label = |what: &str| format!("columnar/{}: {what}", store.interval);
+        // Decoding the rows is what a reader that worked on rows would pay;
+        // the count is checked, not the bytes, so pass the node's size.
+        timed(&label("decode rows"), &|hash| {
+            let rows = store.rows(positions[hash]);
+            anyhow::ensure!(!rows.sections.is_empty());
+            Ok(vec![0; nodes[hash].buffer().as_ref().len()])
+        })?;
+        timed(&label("realize"), &|hash| {
+            realize_rows(
+                &store.rows(positions[hash]),
+                tokens,
+                store,
+                &manifests[hash],
+            )
+        })?;
+        timed(&label("realize + blake3"), &|hash| {
+            verify(
+                hash,
+                realize_rows(
+                    &store.rows(positions[hash]),
+                    tokens,
+                    store,
+                    &manifests[hash],
+                )?,
+            )
+        })?;
+    }
     Ok(())
+}
+
+/// One row of a columnar frame section: the ids an entry, a link or a
+/// buffer is made of. Which fields mean what depends on the [`Section`].
+type Row = [u32; 5];
+
+/// A field with no value: a retraction's datum, a link to a child the file
+/// does not hold.
+const NONE: u32 = u32::MAX;
+
+/// The sections a columnar frame is made of. A segment frame has one
+/// (`Entries`); an index frame has three (`Links`, `Buffers`, `Ops`).
+#[derive(Clone, Copy)]
+enum Section {
+    /// `[form, slot0, slot1, slot2, datum]`: a leaf entry.
+    Entries,
+    /// `[separator, child frame or NONE, scale, child hash token or NONE, 0]`.
+    Links,
+    /// `[child index, ops in the buffer, 0, 0, 0]`.
+    Buffers,
+    /// `[form, slot0, slot1, slot2, datum or NONE for a retraction]`.
+    Ops,
+}
+
+const SEGMENT_SECTIONS: [Section; 1] = [Section::Entries];
+const INDEX_SECTIONS: [Section; 3] = [Section::Links, Section::Buffers, Section::Ops];
+
+fn sections_of(kind: u8) -> &'static [Section] {
+    if kind == 1 {
+        &INDEX_SECTIONS
+    } else {
+        &SEGMENT_SECTIONS
+    }
+}
+
+/// A node as columnar rows: its kind and its sections' rows.
+#[derive(Clone)]
+struct Rows {
+    kind: u8,
+    sections: Vec<Vec<Row>>,
+}
+
+fn put_zigzag(out: &mut Vec<u8>, value: i64) {
+    put_varint(out, ((value << 1) ^ (value >> 63)) as usize);
+}
+
+fn get_zigzag(bytes: &[u8], at: &mut usize) -> i64 {
+    let raw = get_varint(bytes, at) as u64;
+    ((raw >> 1) as i64) ^ -((raw & 1) as i64)
+}
+
+/// The row of one entry's key and datum, by token id.
+fn entry_row(tokens: &mut Tokens, key: &[u8], datum: Option<&State<Datum>>) -> anyhow::Result<Row> {
+    let (form, parts) = key_tokens(key);
+    let mut row = [form as u32, 0, 0, 0, NONE];
+    for (slot, (kind, token)) in parts.iter().enumerate() {
+        row[1 + slot] = tokens.id(kind, token);
+    }
+    if let Some(datum) = datum {
+        row[4] = tokens.id("datum", &datum_bytes(datum)?);
+    }
+    Ok(row)
+}
+
+/// Splits `node` into columnar rows. Child links point at the children's
+/// frames by their position in the file.
+fn rows_of(
+    node: &TreeNode,
+    tokens: &mut Tokens,
+    positions: &HashMap<Blake3Hash, u32>,
+) -> anyhow::Result<Rows> {
+    match node.body() {
+        NodeBody::Segment(segment) => {
+            let mut entries = Vec::with_capacity(segment.len());
+            let mut keys = segment.keys::<Key>()?;
+            while let Some((at, key)) = keys.next_key()? {
+                let value: State<Datum> = into_owned(segment.value_at(at)?)?;
+                entries.push(entry_row(tokens, key, Some(&value))?);
+            }
+            Ok(Rows {
+                kind: 0,
+                sections: vec![entries],
+            })
+        }
+        NodeBody::Index(index) => {
+            let mut links = Vec::with_capacity(index.len());
+            for at in 0..index.len() {
+                let separator = tokens.id("separator", &index.separator(at)?);
+                let child = index.hash_at(at)?;
+                let (frame, absent) = match positions.get(child) {
+                    Some(position) => (*position, NONE),
+                    None => (NONE, tokens.id("absent", child.as_bytes())),
+                };
+                links.push([
+                    separator,
+                    frame,
+                    index.scale_at(at)?.as_u8() as u32,
+                    absent,
+                    0,
+                ]);
+            }
+            let (mut buffers, mut ops) = (Vec::new(), Vec::new());
+            for buffer in index.novelty.iter() {
+                let entries = buffer.entries::<Key>()?;
+                buffers.push([buffer.child.to_native(), entries.len() as u32, 0, 0, 0]);
+                for item in &entries {
+                    let datum = match &item.op {
+                        NoveltyOp::Assert(value) => Some(value),
+                        NoveltyOp::Retract => None,
+                    };
+                    ops.push(entry_row(tokens, &item.key, datum)?);
+                }
+            }
+            Ok(Rows {
+                kind: 1,
+                sections: vec![links, buffers, ops],
+            })
+        }
+    }
+}
+
+/// Writes rows column by column. Ids are zigzag deltas against the same
+/// column's previous row, so a sorted or repeating column (the entity of
+/// an EAV segment, the attribute of an AEV one) costs a byte a row.
+fn put_columns(out: &mut Vec<u8>, section: Section, rows: &[&Row]) {
+    let delta = |out: &mut Vec<u8>, field: usize, when: &dyn Fn(&Row) -> bool| {
+        let mut previous = 0i64;
+        for row in rows.iter().filter(|row| when(row)) {
+            put_zigzag(out, row[field] as i64 - previous);
+            previous = row[field] as i64;
+        }
+    };
+    match section {
+        Section::Entries | Section::Ops => {
+            for row in rows {
+                out.push(row[0] as u8);
+            }
+            for slot in 0..3 {
+                delta(out, 1 + slot, &|row| slots_of(row[0] as u8) > slot);
+            }
+            if matches!(section, Section::Ops) {
+                for row in rows {
+                    out.push((row[4] != NONE) as u8);
+                }
+            }
+            delta(out, 4, &|row| row[4] != NONE);
+        }
+        Section::Links => {
+            delta(out, 0, &|_| true);
+            // The scale, with the top bit marking a child the file does
+            // not hold, ahead of the columns that depend on it.
+            for row in rows {
+                out.push(row[2] as u8 | (((row[1] == NONE) as u8) << 7));
+            }
+            delta(out, 1, &|row| row[1] != NONE);
+            delta(out, 3, &|row| row[1] == NONE);
+        }
+        Section::Buffers => {
+            for row in rows {
+                put_varint(out, row[0] as usize);
+                put_varint(out, row[1] as usize);
+            }
+        }
+    }
+}
+
+/// Reads `count` rows written by [`put_columns`].
+fn get_columns(bytes: &[u8], at: &mut usize, section: Section, count: usize) -> Vec<Row> {
+    let mut rows = vec![[0u32; 5]; count];
+    let delta = |rows: &mut [Row], at: &mut usize, field: usize, when: &dyn Fn(&Row) -> bool| {
+        let mut previous = 0i64;
+        for row in rows.iter_mut() {
+            if when(row) {
+                previous += get_zigzag(bytes, at);
+                row[field] = previous as u32;
+            }
+        }
+    };
+    match section {
+        Section::Entries | Section::Ops => {
+            for row in rows.iter_mut() {
+                row[0] = bytes[*at] as u32;
+                *at += 1;
+            }
+            for slot in 0..3 {
+                delta(&mut rows, at, 1 + slot, &|row| {
+                    slots_of(row[0] as u8) > slot
+                });
+            }
+            if matches!(section, Section::Ops) {
+                for row in rows.iter_mut() {
+                    // Mark retractions; asserted datums are read next.
+                    row[4] = if bytes[*at] == 1 { 0 } else { NONE };
+                    *at += 1;
+                }
+            }
+            delta(&mut rows, at, 4, &|row| row[4] != NONE);
+        }
+        Section::Links => {
+            delta(&mut rows, at, 0, &|_| true);
+            for row in rows.iter_mut() {
+                let flag = bytes[*at];
+                *at += 1;
+                row[2] = (flag & 0x7F) as u32;
+                row[1] = if flag >> 7 == 1 { NONE } else { 0 };
+            }
+            delta(&mut rows, at, 1, &|row| row[1] != NONE);
+            delta(&mut rows, at, 3, &|row| row[1] == NONE);
+        }
+        Section::Buffers => {
+            for row in rows.iter_mut() {
+                row[0] = get_varint(bytes, at) as u32;
+                row[1] = get_varint(bytes, at) as u32;
+            }
+        }
+    }
+    rows
+}
+
+/// One step of a section written against the rows of the version it
+/// supersedes: copy a run of the predecessor's rows, or take the next rows
+/// from the frame's own columns.
+enum Op {
+    Copy { from: usize, len: usize },
+    Literal(usize),
+}
+
+/// The ops that rebuild `rows` from `base`: runs of rows the predecessor
+/// already has are copied, the rest are literals. Rows are sorted by key
+/// in both, so a rewrite that changes one entry is two copies around one
+/// literal.
+fn diff(rows: &[Row], base: &[Row]) -> Vec<Op> {
+    let at: HashMap<&Row, usize> = base.iter().enumerate().map(|(i, row)| (row, i)).collect();
+    let mut ops = Vec::new();
+    let mut i = 0;
+    let mut expected = 0;
+    while i < rows.len() {
+        let start = if base.get(expected) == Some(&rows[i]) {
+            Some(expected)
+        } else {
+            at.get(&rows[i]).copied()
+        };
+        match start {
+            Some(from) => {
+                let mut len = 1;
+                while i + len < rows.len()
+                    && from + len < base.len()
+                    && rows[i + len] == base[from + len]
+                {
+                    len += 1;
+                }
+                ops.push(Op::Copy { from, len });
+                expected = from + len;
+                i += len;
+            }
+            None => {
+                match ops.last_mut() {
+                    Some(Op::Literal(n)) => *n += 1,
+                    _ => ops.push(Op::Literal(1)),
+                }
+                i += 1;
+            }
+        }
+    }
+    ops
+}
+
+/// Writes one section: its row count, then, against a predecessor, the
+/// ops, then the literal rows as columns.
+fn put_section(out: &mut Vec<u8>, section: Section, rows: &[Row], base: Option<&[Row]>) {
+    put_varint(out, rows.len());
+    let Some(base) = base else {
+        put_columns(out, section, &rows.iter().collect::<Vec<_>>());
+        return;
+    };
+    let ops = diff(rows, base);
+    put_varint(out, ops.len());
+    let mut literals = Vec::new();
+    let (mut i, mut expected) = (0usize, 0i64);
+    for op in &ops {
+        match op {
+            Op::Copy { from, len } => {
+                put_varint(out, len << 1 | 1);
+                put_zigzag(out, *from as i64 - expected);
+                expected = (*from + *len) as i64;
+                i += len;
+            }
+            Op::Literal(n) => {
+                put_varint(out, n << 1);
+                literals.extend(&rows[i..i + n]);
+                i += n;
+            }
+        }
+    }
+    put_columns(out, section, &literals);
+}
+
+fn get_section(bytes: &[u8], at: &mut usize, section: Section, base: Option<&[Row]>) -> Vec<Row> {
+    let count = get_varint(bytes, at);
+    let Some(base) = base else {
+        return get_columns(bytes, at, section, count);
+    };
+    let steps = get_varint(bytes, at);
+    let mut ops = Vec::with_capacity(steps);
+    let (mut literal, mut expected) = (0usize, 0i64);
+    for _ in 0..steps {
+        let head = get_varint(bytes, at);
+        if head & 1 == 1 {
+            let from = (expected + get_zigzag(bytes, at)) as usize;
+            let len = head >> 1;
+            expected = (from + len) as i64;
+            ops.push(Op::Copy { from, len });
+        } else {
+            literal += head >> 1;
+            ops.push(Op::Literal(head >> 1));
+        }
+    }
+    let literals = get_columns(bytes, at, section, literal);
+    let mut rows = Vec::with_capacity(count);
+    let mut next = 0;
+    for op in ops {
+        match op {
+            Op::Copy { from, len } => rows.extend_from_slice(&base[from..from + len]),
+            Op::Literal(n) => {
+                rows.extend_from_slice(&literals[next..next + n]);
+                next += n;
+            }
+        }
+    }
+    rows
+}
+
+/// A frame: its hash, its kind, the frame it is written against (0 for
+/// none, else its position plus one), then its sections.
+fn encode_rows(hash: &Blake3Hash, rows: &Rows, base: Option<(u32, &Rows)>) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(hash.as_bytes());
+    out.push(rows.kind);
+    put_varint(
+        &mut out,
+        base.map_or(0, |(position, _)| position as usize + 1),
+    );
+    for (i, section) in sections_of(rows.kind).iter().enumerate() {
+        let against = base.map(|(_, base)| base.sections[i].as_slice());
+        put_section(&mut out, *section, &rows.sections[i], against);
+    }
+    out
+}
+
+fn decode_rows(frame: &[u8], base: Option<&Rows>) -> Rows {
+    let mut at = 32;
+    let kind = frame[at];
+    at += 1;
+    get_varint(frame, &mut at);
+    let sections = sections_of(kind)
+        .iter()
+        .enumerate()
+        .map(|(i, section)| {
+            let against = base.map(|base| base.sections[i].as_slice());
+            get_section(frame, &mut at, *section, against)
+        })
+        .collect();
+    Rows { kind, sections }
+}
+
+/// Keyframe intervals for the columnar model: 1 writes every frame whole.
+const COLUMN_INTERVALS: [usize; 3] = [1, 8, 32];
+
+/// The columnar model at one keyframe interval: its frames in file order,
+/// what each is written against, and what writing them cost.
+struct ColumnStore {
+    interval: usize,
+    frames: Vec<Vec<u8>>,
+    depth: Vec<usize>,
+    base: Vec<Option<u32>>,
+    bytes: usize,
+    against: usize,
+    encode: Duration,
+    append: Duration,
+    file: std::fs::File,
+}
+
+impl ColumnStore {
+    fn new(interval: usize, directory: &Path) -> anyhow::Result<Self> {
+        Ok(Self {
+            interval,
+            frames: Vec::new(),
+            depth: Vec::new(),
+            base: Vec::new(),
+            bytes: 0,
+            against: 0,
+            encode: Duration::ZERO,
+            append: Duration::ZERO,
+            file: std::fs::File::create(directory.join(format!("columnar-{interval}")))?,
+        })
+    }
+
+    /// Encodes `rows` against `base` when that keeps the chain within the
+    /// interval, and appends the frame to the file.
+    fn put(
+        &mut self,
+        hash: &Blake3Hash,
+        rows: &Rows,
+        base: Option<(u32, &Rows)>,
+    ) -> anyhow::Result<()> {
+        let started = Instant::now();
+        let base = base.filter(|(position, base)| {
+            base.kind == rows.kind && self.depth[*position as usize] + 1 < self.interval
+        });
+        let frame = encode_rows(hash, rows, base);
+        self.encode += started.elapsed();
+        let started = Instant::now();
+        self.file.write_all(&frame)?;
+        self.append += started.elapsed();
+        self.depth
+            .push(base.map_or(0, |(position, _)| self.depth[position as usize] + 1));
+        self.base.push(base.map(|(position, _)| position));
+        self.against += base.is_some() as usize;
+        self.bytes += frame.len();
+        self.frames.push(frame);
+        Ok(())
+    }
+
+    /// The rows of the frame at `position`, decoded through its chain.
+    fn rows(&self, position: u32) -> Rows {
+        let mut chain = vec![position];
+        while let Some(base) = self.base[chain[chain.len() - 1] as usize] {
+            chain.push(base);
+        }
+        let mut rows: Option<Rows> = None;
+        for link in chain.into_iter().rev() {
+            rows = Some(decode_rows(&self.frames[link as usize], rows.as_ref()));
+        }
+        rows.expect("a chain has at least the frame itself")
+    }
+}
+
+fn entry_of(row: &Row, tokens: &Tokens) -> anyhow::Result<(Vec<u8>, Option<State<Datum>>)> {
+    let form = row[0] as u8;
+    let parts: Vec<&[u8]> = (0..slots_of(form))
+        .map(|slot| tokens.by_id(row[1 + slot]))
+        .collect();
+    let datum = match row[4] {
+        NONE => None,
+        id => Some(datum_from(tokens.by_id(id))?),
+    };
+    Ok((key_from_tokens(form, &parts), datum))
+}
+
+/// Realizes the block a node's rows stand for, with the tree's own encoder.
+fn realize_rows(
+    rows: &Rows,
+    tokens: &Tokens,
+    store: &ColumnStore,
+    manifest: &Manifest,
+) -> anyhow::Result<Vec<u8>> {
+    let body = if rows.kind == 1 {
+        let [links, buffers, ops] = rows.sections.as_slice() else {
+            anyhow::bail!("an index frame has three sections");
+        };
+        let links = links
+            .iter()
+            .map(|row| {
+                let child = match row[1] {
+                    NONE => tokens.by_id(row[3]),
+                    frame => &store.frames[frame as usize][..32],
+                };
+                Ok(Link {
+                    separator: Separator::from(tokens.by_id(row[0]).to_vec()),
+                    node: Blake3Hash::from(<[u8; 32]>::try_from(child)?),
+                    scale: Scale::from_u8(row[2] as u8),
+                })
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let mut novelty = Vec::with_capacity(buffers.len());
+        let mut next = 0;
+        for buffer in buffers {
+            let len = buffer[1] as usize;
+            let entries = ops[next..next + len]
+                .iter()
+                .map(|row| {
+                    let (key, datum) = entry_of(row, tokens)?;
+                    let op = match datum {
+                        Some(value) => NoveltyOp::Assert(value),
+                        None => NoveltyOp::Retract,
+                    };
+                    Ok(NoveltyEntry { key, op })
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            next += len;
+            novelty.push(NoveltyBuffer::from_entries::<Key>(buffer[0], entries)?);
+        }
+        PersistentNodeBody::index_from_buffers(links, novelty, manifest.clone())?
+    } else {
+        let entries = rows.sections[0]
+            .iter()
+            .map(|row| {
+                let (key, datum) = entry_of(row, tokens)?;
+                Ok(Entry {
+                    key: <Key as TreeKey>::try_from_bytes(&key)?,
+                    value: datum.expect("a segment entry has a value"),
+                })
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        PersistentNodeBody::from_segment(
+            PersistentSegment::from_entries::<Key>(entries)?,
+            manifest.clone(),
+        )
+    };
+    Ok(body.as_bytes()?.to_vec())
 }

@@ -11,6 +11,8 @@ becomes a note in `notes/`.
 ## Spiked
 
 - [Single-file representation](single-file-format.md):
-  [results](single-file-format-spike.md). About 20× smaller than
-  file-per-block on Stack Exchange and 12× on tonk-team, but it still
-  grows with commits, and reading a node costs 5–10× a file read.
+  [results](single-file-format-spike.md). Columnar frames written
+  against their predecessor are 87× smaller than file-per-block on Stack
+  Exchange and 22× on tonk-team's pushed history, and grow with the live
+  tree. Decoding a node's rows costs about a file read; rebuilding the
+  block costs 10× more, and blocks an older encoder wrote do not rebuild.

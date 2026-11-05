@@ -6,29 +6,147 @@ exists. It does not build the provider, so it has no perf gate numbers.
 
 ## Verdict
 
-**Size: yes, barely on tonk. Growth: no. Reads: a real cost.** A
-tokenized file comes out about 20× smaller than file-per-block on the
-Stack Exchange replay and 11.6× on tonk-team's history, which clears the
-order-of-magnitude bar, the second only just. But the frames, not the tokens,
-are 80% of that file, and they grow with commits the way the directory
-does. The 20× is a constant factor on the same growth curve, not a curve
-that follows the live facts. What follows the live facts is not copying
-a node forward at all: delta-coding each frame against the version it
-supersedes. The doc treats that as a second tier. On this data it is
-where most of the win is.
+**With our own encoding: size yes, growth yes, reads only if the tree reads
+rows.** Two encodings were measured. The idea as written (a frame of 4-byte
+token offsets per node) is about 20× smaller than file-per-block but still
+copies every rewritten node forward, so it grows with commits. A columnar
+frame written against the version it supersedes (runs copied from the
+predecessor's rows, the rest as zigzag-delta varint columns, a whole frame
+every 32 versions) removes that copy: on Stack Exchange it is 87× smaller
+than file-per-block and grows with the live tree, and on tonk-team's pushed
+history it is 22× smaller.
+
+Reading is where it stops being free. Decoding a node's rows costs 5–27 µs,
+about a file read (15 µs, 24 µs with blake3). Rebuilding the block from
+them with the tree's encoder costs 150–225 µs, and that is the tree's
+encoder, not the format. So the format reads fast only if the tree can work
+on rows, keeping blocks for sync and verification.
+
+And it cannot rebuild old blocks: 36% of the nodes in tonk-team's pushed
+history were written by an older encoder that today's does not reproduce.
 
 Against the success bars:
 
-| bar | result |
-|---|---|
-| ≥ 10× smaller than file-per-block | **met**: 19× at 2048 commits, 20× at 4096; 11.6× on tonk-team |
-| grows with live facts, not commits | **not met**: 2.76× for 2× commits; the live tree grew 2.14× and the directory 2.84× |
-| get by hash still works and verifies | **met in the model**: all 14,779 frames realize to their original block byte for byte, so their hashes match |
-| reads near the block store | **not met as built**: realizing a node costs 100–125 µs, against 11 µs to read its file (24 µs with blake3) |
-| perf gate within tolerance | **not measured**: there is no provider yet |
-| crash leaves the last commit intact | **not measured** |
+| bar | offsets (the idea as written) | columnar/32 (our encoding) |
+|---|---|---|
+| ≥ 10× smaller than file-per-block | **met on SE** (20×); 9.9× on tonk-team's history, just under | **met**: 87× on SE, 22× on tonk-team's history |
+| grows with live facts, not commits | **not met**: 2.76× for 2× commits on SE, live tree 2.14× | **met on SE**: 2.27× for 2× commits, live tree 2.14× |
+| get by hash still works and verifies | **met for blocks today's encoder wrote**; 3,145 of 8,768 tonk-team nodes (180 MiB) realize to different bytes | same |
+| reads near the block store | **not met**: realizing costs 130–175 µs, against 14 µs to read a file | **met for rows** (5–27 µs), **not met for blocks** (150–225 µs) |
+| writes | not timed | encode + append 10–30 µs per node; splitting a node into rows 200 µs; a file per block 290–460 µs, all without fsync |
+| perf gate within tolerance | **not measured**: there is no provider yet | same |
+| crash leaves the last commit intact | **not measured** | same |
 
-## tonk-team
+zstd models stay in the tables as a reference for how much redundancy there
+is. They say nothing about what our own encoding costs, and our encoding
+matches or beats them: 13.4 MiB against 13.9 for zstd-delta frames on SE,
+25.4 against 25.2 on tonk-team.
+
+## Our own encoding: columnar frames written against their predecessor
+
+A frame is a node's rows: per leaf entry its form, the token ids of its
+entity, attribute and value, and the id of its datum; per index link its
+separator id, the child frame's position in the file and its scale;
+per buffered op the same as an entry, with no datum for a retraction.
+Token ids are dense, in order of first appearance. Rows are written column
+by column, each id as a zigzag delta against the same column's previous
+row, so a sorted or repeating column costs about a byte a row.
+
+Against the frame it supersedes (same depth, same left separator), each
+section is written as ops: copy a run of the predecessor's rows, or take
+the next rows from this frame's columns. A rewrite that changes one entry
+of a segment is two copies around one literal row. Every `K`th version is
+written whole so a read decodes at most `K` frames. `K = 1` is the columnar
+packing alone.
+
+Stack Exchange, 4096 commits, MiB on disk, cumulative:
+
+| commits | live tree | fs | offsets (idea) | zstd-delta frames/32 | **columnar/1** | **columnar/8** | **columnar/32** |
+|---|---|---|---|---|---|---|---|
+| 512 | 2.3 | 53.5 | 3.5 | 1.4 | 2.1 | 1.4 | **1.4** |
+| 1024 | 4.8 | 160.4 | 9.2 | 3.0 | 5.2 | 3.2 | **2.9** |
+| 2048 | 9.2 | 418.7 | 21.7 | 6.1 | 12.0 | 6.5 | **5.9** |
+| 3072 | 14.2 | 762.1 | 39.2 | 9.7 | 21.4 | 10.5 | **9.3** |
+| 4096 | 19.7 | 1160.7 | 59.1 | 13.9 | 32.5 | 15.2 | **13.4** |
+
+At 4096 commits the 13.4 MiB is 10.6 MiB of tokens and dictionary, 2.5 MiB
+of frames and 0.2 MiB of frame index. The frames that were 48 MiB as
+offsets are 2.5 MiB: 14,159 of 15,031 are written against a predecessor.
+What is left is the tokens, which track the live facts. Per commit between
+2048 and 4096: 3.7 KB, against 5.2 KB of live tree growth.
+
+Reads, mean µs per live node at 4096 commits (371 nodes, 19.7 MiB, warm,
+noisy to about ±20%):
+
+| | decode rows | realize the block | realize + blake3 |
+|---|---|---|---|
+| fs file read | | 14.7 | 23.7 |
+| offsets (idea) | | 173 | 183 |
+| columnar/1 | 5.3 | 178 | 188 |
+| columnar/8 | 14.0 | 205 | 237 |
+| columnar/32 | 27.0 | 225 | 262 |
+
+Decoding rows is the format's own cost: a copy chain of up to `K` frames,
+each a few µs. Realizing is the tree's encoder building an 80 KB node from
+those rows, the same in every model. A reader that wants rows (a scan, a
+lookup inside a node) pays a file read or less. A reader that wants the
+block (sync, get by hash) pays the encoder.
+
+Writes, mean µs per node, no fsync anywhere:
+
+| | µs |
+|---|---|
+| fs: a file per block | 457 |
+| log: append the block | 271 |
+| split a node into rows (shared by every K) | 210 |
+| columnar/1: encode + append | 29.8 |
+| columnar/8: encode + append | 15.0 |
+| columnar/32: encode + append | 10.4 |
+
+Splitting into rows is measured from the block, which a writer would not
+start from: the tree has the entries in hand. Most of it is serializing
+each datum and looking its bytes up in the token dictionary, which a writer
+pays either way. The fs and log timings are page-cache writes, and they
+vary several-fold between runs (290 and 37 µs on the tonk-team run); they
+show order of magnitude, not a gate.
+
+## tonk-team's pushed history
+
+The R2 archive behind tonk-team holds 9,070 blocks, 568.5 MiB: 8,768 tree
+nodes under 770 roots, and 302 other blocks. `fetch_blocks` in tonk
+fetched all of them through a joined agent. Their file times are fetch
+times, so the roots are ordered by the number of history records under
+each (the history region only grows; `DIALOG_CENSUS_ORDER=history`). The
+302 other blocks land after the last root, so the last row includes their
+8.9 MiB.
+
+| commits | live tree | fs | offsets (idea) | zstd-delta frames/32 | **columnar/1** | **columnar/8** | **columnar/32** | stream |
+|---|---|---|---|---|---|---|---|---|
+| 192 | 9.9 | 80.7 | 9.6 | 4.9 | 6.5 | 5.0 | **4.9** | 1.7 |
+| 385 | 18.3 | 221.2 | 23.1 | 10.3 | 14.9 | 10.8 | **10.5** | 4.2 |
+| 577 | 24.0 | 367.4 | 34.9 | 14.0 | 21.9 | 14.9 | **14.3** | 6.2 |
+| 770 | 27.9 | 568.5 | 57.3 | 25.2 | 37.6 | 26.5 | **25.4** | 10.8 |
+
+- **Size.** 22× smaller than fs. Of the 25.4 MiB, the tokens are 13.8 MiB,
+  and 9.5 MiB of those are opaque history and coverage keys referenced
+  3.7 times each; frames are 2.5 MiB; the other blocks 8.9 MiB. The
+  history keys are now the largest part, and splitting them into
+  components is the next lever.
+- **Reads.** Decoding rows 5.0–14.2 µs, against 13.6 µs for a file read;
+  realizing 150–165 µs.
+- **Old blocks do not round-trip.** 3,145 of the 8,768 nodes, holding 180
+  MiB, realize to bytes that differ from their block: segments 40 bytes
+  shorter, index nodes 16. They are one era, roots 31 to 356 of 770; the
+  head tree's 685 nodes all round-trip. A block an older encoder wrote
+  carries something today's no longer writes, so a frame rebuilt with
+  today's encoder has a different hash. A single-file format has to keep
+  those blocks verbatim (here that is 180 MiB, most of the saving) or keep
+  every encoder it ever shipped and record which one a frame needs.
+- **The 2 GB.** R2 holds 568.5 MiB for this space, and some blocks in a
+  local replica are not on R2 at all (4 of 8 sampled). The 2 GB replica is
+  a device's, and it holds blocks that never reached R2.
+
+## tonk-team, replayed
 
 The same census on tonk-team, rebuilt from its head tree's history region
 (see "Running it on a real replica" below) and replayed through today's
@@ -93,13 +211,16 @@ bytes:
   points at its children's frames by offset and carries its own hash.
   The total includes the token dictionary (12 bytes per token) and the
   get-by-hash index (16 bytes per frame). Every frame is decoded and
-  re-encoded with the tree's own encoder, and the run fails unless it
-  matches the block it stands for.
+  re-encoded with the tree's own encoder, and the census counts how many
+  match the block they stand for.
 - **tokens + zstd frames / delta frames/K**: the idea with frames
   compressed alone, or against the frame they supersede.
 - **stream**: the whole log through one long-window zstd stream. There
   is no random access, so this is a reference, not a design. Its 128 MiB
   window stops it being a true floor past about 2000 commits.
+- **columnar/K**: our own encoding, described above. Every columnar frame
+  is decoded through its copy chain and realized like the offset frames,
+  and the census counts how many rebuild their block byte for byte.
 
 ```sh
 DIALOG_SE_CSV=retro-facts.csv cargo run --release -p dialog-baseline \
@@ -197,9 +318,8 @@ commits and would sit in memory.
 - If old revisions must stay cheap, the format has to share structure
   between versions of a node, HyperDB style, not only tokens. On this
   data that is the difference between 15.7 and about 1 KB of frames per
-  commit. A frame that refers to its predecessor's runs of entries,
-  rather than a zstd delta, would get most of it with a bounded number
-  of hops. It is the obvious next model to try.
+  commit. The columnar model above does it: a frame copies its
+  predecessor's runs of rows, and frames fall from 48 to 2.5 MiB.
 - The store can only compress what the tree insists on writing. At 381
   KB written per 2.4-fact commit, the cheapest question may be on the
   tree's side: smaller leaves, or keeping more in the buffers, cut fs
@@ -250,9 +370,15 @@ Checked the same way: the 1024-commit replay on disk rebuilds as exactly
 
 ## Not done
 
-- **The 2 GB replica itself.** tonk-team's history is measured above,
-  replayed through today's code. The replica that reached 2 GB held
-  blocks written by older code, and only that device has them.
+- **The 2 GB replica itself.** tonk-team's pushed history is measured
+  above, and its replay through today's code. The replica that reached
+  2 GB holds blocks that never reached R2, and only that device has them.
+- **A tree that reads rows.** The reads above say the format is only as
+  fast as a file read if the tree works on decoded rows rather than
+  realized blocks. Whether the tree can, and what it would keep as blocks
+  (for sync and get by hash), is the design question this spike leaves.
+- **Split history keys.** On tonk-team they are the largest part of the
+  file.
 - A provider, the perf gate, crash recovery, BAO verification, memory
   cells. None of them is worth building until the frame representation
   is settled, because each one depends on it.
