@@ -325,7 +325,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_keeps_a_node_that_is_not_the_one_asked_for_out_of_the_cache() -> Result<()> {
         let catalog =
-            ArchiveScope::new(Subject::from(did!("key:zCacheThroughTest"))).catalog("index");
+            ArchiveScope::new(Subject::from(did!("key:zImpostorArchiveTest"))).catalog("index");
         let blocks = Blocks::in_catalog(catalog.clone());
         let asked = persist(&blocks, "Alice").await?;
         let other = persist(&blocks, "Bob").await?;
