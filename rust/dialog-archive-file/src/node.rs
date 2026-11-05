@@ -290,6 +290,8 @@ mod profile {
             Duration::ZERO,
         );
         let (mut entries, mut nodes, mut realizing) = (0usize, 0usize, Duration::ZERO);
+        let mut splitting = Duration::ZERO;
+        let mut whole = Duration::ZERO;
         let mut tokens = Tokens::default();
         for block in &blocks {
             let started = Instant::now();
@@ -301,18 +303,28 @@ mod profile {
             if let NodeBody::Segment(segment) = node.body() {
                 let started = Instant::now();
                 let mut cursor = segment.keys::<Key>()?;
-                let mut all = Vec::new();
+                let mut decoded = Vec::new();
                 while let Some((at, key)) = cursor.next_key()? {
-                    let (_, parts, count) = key_tokens(key);
-                    all.push((
-                        at,
-                        parts[..count]
-                            .iter()
-                            .map(|part| part.to_vec())
-                            .collect::<Vec<_>>(),
-                    ));
+                    decoded.push((at, key.to_vec()));
                 }
                 keys += started.elapsed();
+                let started = Instant::now();
+                let mut all = Vec::with_capacity(decoded.len());
+                for (at, key) in &decoded {
+                    let (_, parts, count) = key_tokens(key);
+                    all.push((*at, parts[..count].len()));
+                }
+                splitting += started.elapsed();
+                let all: Vec<(usize, Vec<Vec<u8>>)> = decoded
+                    .iter()
+                    .map(|(at, key)| {
+                        let (_, parts, count) = key_tokens(key);
+                        (
+                            *at,
+                            parts[..count].iter().map(|part| part.to_vec()).collect(),
+                        )
+                    })
+                    .collect();
                 for (at, parts) in all {
                     entries += 1;
                     let started = Instant::now();
@@ -329,7 +341,9 @@ mod profile {
                     intern += started.elapsed();
                 }
             }
+            let started = Instant::now();
             let rows = rows_of(&node, &mut tokens, |_| None)?;
+            whole += started.elapsed();
             let manifest = node.manifest()?;
             let started = Instant::now();
             realize(&rows, &tokens, &manifest, |_| None)?;
@@ -337,13 +351,16 @@ mod profile {
         }
         let per = |d: Duration| d.as_secs_f64() * 1e6 / nodes as f64;
         println!(
-            "{nodes} nodes, {entries} segment entries; per node µs: parse {:.0}, keys {:.0}, \
-             values owned {:.0}, values archived {:.0}, intern {:.0}, realize {:.0}",
+            "{nodes} nodes, {entries} segment entries; per node µs: parse {:.0}, decode keys {:.0}, \
+             split keys {:.0}, values owned {:.0}, values archived {:.0}, intern {:.0}, \
+             rows_of (warm tokens) {:.0}, realize {:.0}",
             per(parse),
             per(keys),
+            per(splitting),
             per(owned),
             per(archived),
             per(intern),
+            per(whole),
             per(realizing)
         );
         Ok(())

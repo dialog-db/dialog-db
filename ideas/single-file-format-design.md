@@ -266,16 +266,17 @@ What it says:
   tokens are the data.
 - **Writing a frame costs about 600 µs a node**, 2.3 ms a commit, which is
   the whole gap from the whole-block file:
-  - about 340 µs splits the node into rows. Per node, on the kept file:
-    101 µs decoding keys, 73 µs looking up tokens, 45 µs re-archiving each
-    datum, 7 µs validating the block;
-  - about 260 µs verifies, mostly rebuilding the block (176 µs);
+  - about 340 µs splits the node into rows. Per node, on the kept file
+    (136 entries a node on average): 74 µs looking up tokens, 47 µs
+    re-archiving each datum, 36 µs decoding keys, 12 µs splitting them, 8
+    µs taking each value out of the block, 7 µs validating the block;
+  - about 260 µs verifies, mostly rebuilding the block (166 µs);
   - the file write itself drops from 0.5 s (whole) to 0.1 s.
-  Splitting keys without allocating changed nothing measurable. The cost
-  is re-deriving what the tree had in hand when it encoded the node. The
-  fix is the one this design names under Writes: the store receives the
-  entries a node was encoded from. That removes the decode and, for nodes
-  this process encoded, the rebuild that checks them.
+  No one step dominates: the cost is about 4 µs an entry, paid for every
+  entry of every node written, though a commit changes a handful. Handing
+  the store the decoded keys would save 36 µs of the 600. What would pay is
+  not re-processing the entries a node shares with the one it supersedes,
+  and that needs the tree to say which entries those are.
 - **A cold read pays rebuilding** (about 140–180 µs a node), so cold point
   reads are 2× slower than `fs`, and warm reads are the same: the node
   cache above the archive holds rebuilt nodes. Step 4 is what removes that
