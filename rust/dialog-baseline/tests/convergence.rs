@@ -38,15 +38,18 @@ fn txn_count() -> usize {
 }
 
 /// The tree a staged batch's tip names.
-fn tree_of(batch: &TransactionBatch) -> ArtifactTree {
-    ArtifactTree::from_hash(NodeHash::from(*batch.revision().tree.hash()))
+fn tree_of(repo: &VolatileRepo, batch: &TransactionBatch) -> ArtifactTree {
+    ArtifactTree::at(
+        repo.catalog(),
+        NodeHash::from(*batch.revision().tree.hash()),
+    )
 }
 
 /// Asserts the stored tree is shaped exactly as the canonical constructor
 /// shapes its entry set, localizing any break to a node before a root
 /// comparison reports it as an opaque hash difference.
 async fn assert_canonical(repo: &VolatileRepo, tree: &ArtifactTree, what: &str) -> Result<()> {
-    let divergences = tree.canonical_divergences(&repo.index()).await?;
+    let divergences = tree.canonical_divergences(repo.operator()).await?;
     assert_eq!(
         divergences,
         Vec::<String>::new(),
@@ -68,8 +71,8 @@ async fn it_converges_across_canonicalization_points() -> Result<()> {
     let last = repo.stage_se(&log, usize::MAX).await?;
     assert_eq!(every.version(), last.version());
 
-    assert_canonical(&repo, &tree_of(&every), "canonicalized every link").await?;
-    assert_canonical(&repo, &tree_of(&last), "canonicalized the last link").await?;
+    assert_canonical(&repo, &tree_of(&repo, &every), "canonicalized every link").await?;
+    assert_canonical(&repo, &tree_of(&repo, &last), "canonicalized the last link").await?;
     assert_eq!(
         every.revision().tree,
         last.revision().tree,
@@ -140,7 +143,7 @@ async fn it_reaches_a_canonical_fixpoint() -> Result<()> {
     let log = SeLog::synthetic(40);
     let repo = DialogRepo::volatile().await?;
     let batch = repo.stage_se(&log, usize::MAX).await?;
-    assert_canonical(&repo, &tree_of(&batch), "first canonicalize").await?;
+    assert_canonical(&repo, &tree_of(&repo, &batch), "first canonicalize").await?;
     let first = batch.revision().tree;
 
     let again = batch

@@ -263,8 +263,11 @@ async fn it_converges_across_canonicalization_points_with_supersession_and_spill
             );
         }
 
-        let tree = ArtifactTree::from_hash(NodeHash::from(*reference.revision().tree.hash()));
-        let divergences = tree.canonical_divergences(&repo.index()).await?;
+        let tree = ArtifactTree::at(
+            repo.catalog(),
+            NodeHash::from(*reference.revision().tree.hash()),
+        );
+        let divergences = tree.canonical_divergences(repo.operator()).await?;
         assert_eq!(
             divergences,
             Vec::<String>::new(),

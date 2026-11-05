@@ -250,7 +250,7 @@ fn main() {}
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let facts = workload();
     let storage = JournaledBlocks::new();
-    let mut tree = Tree::empty();
+    let mut tree = Tree::empty_in(dialog_search_tree::helpers::test_catalog());
     let mut delta = Delta::zero();
 
     for chunk in facts.chunks(BATCH) {

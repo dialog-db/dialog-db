@@ -1,6 +1,7 @@
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use dialog_common::helpers::BenchData;
-use dialog_search_tree::{Cached, Delta, MemoryBlocks, NodeCache, PersistentTree};
+use dialog_search_tree::helpers::Blocks;
+use dialog_search_tree::{Delta, PersistentTree};
 
 const BENCH_SEED: u64 = 42;
 
@@ -16,10 +17,12 @@ fn bench_get(c: &mut Criterion) {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         // The nodes the build seals are kept, as a tree read through a
         // store with a node cache finds them.
-        let blocks = MemoryBlocks::new();
-        let storage = Cached::new(NodeCache::new(), &blocks);
+        let blocks = Blocks::new();
+        let storage = dialog_search_tree::helpers::Holding::new(&blocks);
         let (tree, keys) = runtime.block_on(async {
-            let mut tree = PersistentTree::<[u8; 16], Vec<u8>>::empty();
+            let mut tree = PersistentTree::<[u8; 16], Vec<u8>>::empty_in(
+                dialog_search_tree::helpers::test_catalog(),
+            );
             let mut delta = Delta::zero();
 
             for (key, value) in keys.iter().zip(values.iter()) {

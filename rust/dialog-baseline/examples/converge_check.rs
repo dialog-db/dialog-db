@@ -29,22 +29,26 @@ use dialog_baseline::repo::{DialogRepo, VolatileRepo};
 use dialog_baseline::se::{SeLog, se_instructions};
 use dialog_capability::Provider;
 use dialog_common::{Blake3Hash, ConditionalSync};
+use dialog_effects::archive::Load;
+use dialog_effects::archive::prelude::CatalogScope;
 use dialog_repository::TransactionBatch;
-use dialog_search_tree::{
-    Buffer as TreeBuffer, Distribution as _, LoadBlock, NodeBody, Value as _,
-};
+use dialog_search_tree::{Buffer as TreeBuffer, Distribution as _, NodeBody, Value as _};
 
 /// Walks the tree under `root` and returns every stored-leaf invariant
 /// violation: a non-final leaf whose terminal coin is unfunded, or an
 /// interior entry whose coin cuts. The canonical-edit machinery must keep
 /// stored leaves free of both at every step.
-async fn leaf_violations<Env>(env: &Env, root: Blake3Hash) -> anyhow::Result<Vec<String>>
+async fn leaf_violations<Env>(
+    env: &Env,
+    catalog: &CatalogScope,
+    root: Blake3Hash,
+) -> anyhow::Result<Vec<String>>
 where
-    Env: Provider<LoadBlock> + ConditionalSync,
+    Env: Provider<Load> + ConditionalSync,
 {
     let mut ordered: Vec<(Vec<u8>, bool, bool)> = Vec::new();
     let mut forced_links = 0usize;
-    walk(env, root, |visit| {
+    walk(env, catalog, root, |visit| {
         let manifest = visit.node.manifest()?;
         match visit.node.body() {
             NodeBody::Index(index) => {
@@ -116,7 +120,7 @@ async fn stage(repo: &VolatileRepo, log: &SeLog, every: usize) -> anyhow::Result
         let link = repo.stage_link(tip, changes, canonicalize).await?;
         if scan {
             let root = Blake3Hash::from(*link.revision().tree.hash());
-            let violations = leaf_violations(&repo.index(), root).await?;
+            let violations = leaf_violations(repo.operator(), &repo.catalog(), root).await?;
             if violations != last_violations {
                 println!("  SCAN every={every} txn={at}: {violations:?}");
                 last_violations = violations;
@@ -141,7 +145,7 @@ async fn arm(
     let diff = std::env::var("DIALOG_CONVERGE_DIFF").is_ok();
     let mut keyroll: Vec<u8> = Vec::new();
     let mut entries = 0usize;
-    walk(&repo.index(), root.clone(), |visit| {
+    walk(repo.operator(), &repo.catalog(), root.clone(), |visit| {
         let NodeBody::Segment(segment) = visit.node.body() else {
             return Ok(());
         };

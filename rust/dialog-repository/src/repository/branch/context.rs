@@ -14,8 +14,13 @@ use dialog_artifacts::history::{
     Context, ContextCache, Held, History, RevisionRecord, Version, Watermark, context_in,
     region_entry, region_writes,
 };
-use dialog_artifacts::{ArchiveReader, Datum, DialogArtifactsError, Key, State, context_entry};
+use dialog_artifacts::{Datum, DialogArtifactsError, Key, State, context_entry};
+use dialog_capability::Provider;
 use dialog_common::Blake3Hash as NodeHash;
+use dialog_common::{ConditionalSync, Holds};
+use dialog_effects::archive::Load as ArchiveLoad;
+use dialog_effects::archive::prelude::CatalogScope;
+use dialog_effects::blob::Load as BlobLoad;
 use dialog_search_tree::Cache;
 
 use crate::{Index, Revision};
@@ -23,37 +28,27 @@ use crate::{Index, Revision};
 #[cfg(test)]
 use crate::repository::source::SourceRef;
 #[cfg(test)]
-use crate::{Hydrate, NetworkedIndex};
-#[cfg(test)]
 use dialog_artifacts::history::context_of;
-#[cfg(test)]
-use dialog_capability::Provider;
-#[cfg(test)]
-use dialog_common::ConditionalSync;
-#[cfg(test)]
-use dialog_effects::archive::{Get as ArchiveGet, Put as ArchivePut};
-#[cfg(test)]
-use dialog_effects::blob::Read as BlobRead;
-#[cfg(test)]
-use dialog_effects::memory::Resolve;
 
 /// The full context `head` publishes, or `None` for a head minted before
 /// heads carried one.
 ///
 /// Answered from `contexts` when remembered. A head carrying its whole
 /// context inline (one minted before the region) is taken as it is, at no
-/// read. Otherwise the head's tree's context region is read through
-/// `store` (its root plus the few leaves the clustered region occupies)
+/// read. Otherwise the head's tree (a root in `catalog`) has its context
+/// region read through `store` (its root plus the few leaves the clustered
+/// region occupies)
 /// and the head's own entry derived from its edition
 /// ([`Revision::context_from_region`]), which refuses a region no head
 /// minted. Whatever is resolved is remembered under the head's version.
 pub(crate) async fn published_context<S>(
     head: &Revision,
     contexts: &ContextCache,
+    catalog: &CatalogScope,
     store: &S,
 ) -> Result<Option<Arc<Context>>, DialogArtifactsError>
 where
-    S: ArchiveReader + Clone,
+    S: Provider<ArchiveLoad> + Provider<BlobLoad> + Holds + ConditionalSync + Clone,
 {
     let version = head.version();
     if let Some(context) = contexts.cached(&version).await {
@@ -63,7 +58,7 @@ where
         Some(context) => Arc::new(context.clone()),
         None if !head.region => return Ok(None),
         None => {
-            let tree = Index::from_hash(NodeHash::from(*head.tree.hash()));
+            let tree = Index::at(catalog.clone(), NodeHash::from(*head.tree.hash()));
             Arc::new(head.context_from_region(context_in(&tree, store).await?)?)
         }
     };
@@ -116,10 +111,11 @@ pub(crate) async fn head_observes<S>(
     version: &Version,
     contexts: &ContextCache,
     records: &Cache<Version, RevisionRecord>,
+    catalog: &CatalogScope,
     store: &S,
 ) -> Result<Option<bool>, DialogArtifactsError>
 where
-    S: ArchiveReader + Clone,
+    S: Provider<ArchiveLoad> + Provider<BlobLoad> + Holds + ConditionalSync + Clone,
 {
     if let Some(context) = contexts.cached(&head.version()).await {
         return Ok(Some(context.observes(version)));
@@ -139,7 +135,7 @@ where
     {
         return Ok(Some(true));
     }
-    let tree = Index::from_hash(NodeHash::from(*head.tree.hash()));
+    let tree = Index::at(catalog.clone(), NodeHash::from(*head.tree.hash()));
     Ok(Some(
         region_entry(&tree, &version.origin, store)
             .await?
@@ -153,14 +149,15 @@ where
 pub(crate) async fn full_context<S, H>(
     head: &Revision,
     contexts: &ContextCache,
+    catalog: &CatalogScope,
     store: &S,
     history: &H,
 ) -> Result<Arc<Context>, DialogArtifactsError>
 where
-    S: ArchiveReader + Clone,
+    S: Provider<ArchiveLoad> + Provider<BlobLoad> + Holds + ConditionalSync + Clone,
     H: History,
 {
-    match published_context(head, contexts, store).await? {
+    match published_context(head, contexts, catalog, store).await? {
         Some(context) => Ok(context),
         None => contexts.context_of(&head.version(), history).await,
     }
@@ -214,11 +211,12 @@ pub(crate) async fn successor<S, H>(
     parent: Option<&Revision>,
     version: Version,
     contexts: &ContextCache,
+    catalog: &CatalogScope,
     store: &S,
     history: impl FnOnce() -> H,
 ) -> Result<Successor, DialogArtifactsError>
 where
-    S: ArchiveReader + Clone,
+    S: Provider<ArchiveLoad> + Provider<BlobLoad> + Holds + ConditionalSync + Clone,
     H: History,
 {
     let Some(parent) = parent else {
@@ -242,7 +240,7 @@ where
                 context: None,
             });
         }
-        let tree = Index::from_hash(NodeHash::from(*parent.tree.hash()));
+        let tree = Index::at(catalog.clone(), NodeHash::from(*parent.tree.hash()));
         let held = region_entry(&tree, &version.origin, store).await?;
         let ours = Watermark {
             edition: version.edition,
@@ -260,7 +258,7 @@ where
     }
     let before = match remembered {
         Some(context) => context,
-        None => full_context(parent, contexts, store, &history()).await?,
+        None => full_context(parent, contexts, catalog, store, &history()).await?,
     };
     let mut context = Context::clone(&before);
     context.record(version);
@@ -300,25 +298,20 @@ pub(crate) async fn head_context<'a, Env>(
     env: &Env,
 ) -> Result<Arc<Context>, DialogArtifactsError>
 where
-    Env: Provider<ArchiveGet>
-        + Provider<ArchivePut>
-        + Provider<BlobRead>
-        + Provider<Resolve>
-        + Provider<Hydrate>
-        + ConditionalSync
-        + 'static,
+    Env: Provider<ArchiveLoad> + Provider<BlobLoad> + Holds + ConditionalSync,
 {
     let source = source.into();
     let head = source
         .revision()
         .ok_or_else(|| DialogArtifactsError::InvalidKey("the line has no head".into()))?;
-    let store = NetworkedIndex::new(
-        env,
-        source.archive().index(),
-        source.fallback(),
-        source.node_cache(),
-    );
-    full_context(&head, &source.contexts(), &store, &source.history(env)).await
+    full_context(
+        &head,
+        &source.contexts(),
+        &source.catalog(),
+        &env,
+        &source.history(env),
+    )
+    .await
 }
 
 /// Check what `source`'s head keeps in its tree's context region, as a
@@ -334,13 +327,7 @@ pub(crate) async fn region_agrees<'a, Env>(
     what: &str,
 ) -> Result<(Context, Context), DialogArtifactsError>
 where
-    Env: Provider<ArchiveGet>
-        + Provider<ArchivePut>
-        + Provider<BlobRead>
-        + Provider<Resolve>
-        + Provider<Hydrate>
-        + ConditionalSync
-        + 'static,
+    Env: Provider<ArchiveLoad> + Provider<BlobLoad> + Holds + ConditionalSync,
 {
     let source = source.into();
     let head = source
@@ -350,14 +337,7 @@ where
         head.region && head.context.is_none(),
         "{what}: the head keeps its context in its tree's region"
     );
-    let store = NetworkedIndex::new(
-        env,
-        source.archive().index(),
-        source.fallback(),
-        source.node_cache(),
-    );
-    let tree = Index::from_hash(NodeHash::from(*head.tree.hash()));
-    let raw = context_in(&tree, &store).await?;
+    let raw = context_in(&source.tree(), &env).await?;
     let read = head.context_from_region(raw.clone())?;
     let walked = context_of(&head.version(), &source.history(env)).await?;
     assert_eq!(
