@@ -27,7 +27,7 @@ use dialog_artifacts::{Artifact, ArtifactSelector, Entity, Instruction, Relation
 use dialog_baseline::se::{SeLog, se_instructions};
 use dialog_capability::Subject;
 use dialog_effects::storage::{Directory, Location};
-use dialog_peer::helpers::{open_peer, test_owned};
+use dialog_peer::helpers::{Seed, open_peer_as, test_owned};
 use dialog_repository::RepositoryExt as _;
 use dialog_storage::provider::storage::NativeSpace;
 use dialog_storage::provider::{FileSystem, Space, Storage};
@@ -39,6 +39,8 @@ type FileArchiveSpace = Space<FileArchive, FileSystem, FileSystem, FileSystem, F
 #[derive(Default)]
 struct Run {
     name: &'static str,
+    /// The tree the last commit left, which every store must agree on.
+    root: String,
     commit: Duration,
     disk: u64,
     allocated: u64,
@@ -71,20 +73,46 @@ fn disk_usage(path: &Path) -> std::io::Result<(u64, u64, usize)> {
 }
 
 macro_rules! open {
-    ($space:ty, $at:expr, $peer:expr, $name:expr) => {{
+    ($space:ty, $at:expr, $peer:expr, $name:expr, $create:expr) => {{
         let storage = test_owned(Storage::<$space>::new()).await;
-        let profile = open_peer(storage, Location::new($at.clone(), $peer.to_string())).await?;
+        // Every identity the run mints comes from one seed, the same for
+        // every store: a replica's keys and its line's identifier are part
+        // of what it writes (a revision's record is keyed by its branch
+        // and issuer), so fresh ones would write a differently shaped
+        // tree, and the stores would not be doing the same work.
+        let seed = Seed::new(733);
+        let profile = open_peer_as(
+            storage,
+            Location::new($at.clone(), $peer.to_string()),
+            seed.credential("profile").await?,
+        )
+        .await?;
         let operator = profile
             .session(b"file-archive-bench")
             .space(profile.state())
             .allow(Subject::any())
             .await?;
-        let repository = profile
-            .space($name.to_string())
-            .open()
-            .perform(&operator)
-            .await?;
-        let branch = repository.branch("main").open().perform(&operator).await?;
+        let space = profile.space($name.to_string());
+        let branch = if $create {
+            space
+                .create()
+                .with_credential(seed.signer("space").await?)
+                .perform(&operator)
+                .await?
+                .branch("main")
+                .open()
+                .perform(&operator)
+                .await?
+        } else {
+            space
+                .open()
+                .perform(&operator)
+                .await?
+                .branch("main")
+                .open()
+                .perform(&operator)
+                .await?
+        };
         (operator, branch)
     }};
 }
@@ -130,7 +158,8 @@ macro_rules! run {
         };
         let held = $before(&$directory)?;
         {
-            let (operator, branch) = open!($space, at, "peer", "repo");
+            let _entropy = Seed::new(733).entropy();
+            let (operator, branch) = open!($space, at, "peer", "repo", true);
             let started = Instant::now();
             for commit in $commits {
                 branch
@@ -142,6 +171,10 @@ macro_rules! run {
                     .await?;
             }
             run.commit = started.elapsed();
+            run.root = branch
+                .revision()
+                .map(|revision| dialog_common::Blake3Hash::from(*revision.tree.hash()).to_string())
+                .unwrap_or_default();
         }
         let blocks = $directory.join("repo");
         let blocks = if blocks.join(FILE_NAME).exists() {
@@ -153,12 +186,12 @@ macro_rules! run {
         run.detail = $after(&held);
         drop(held);
         {
-            let (operator, branch) = open!($space, at, "peer", "repo");
+            let (operator, branch) = open!($space, at, "peer", "repo", false);
             (run.cold_scan, _, run.facts) = reads!(operator, branch, $attributes, &[] as &[String]);
             (run.warm_scan, _, _) = reads!(operator, branch, $attributes, &[] as &[String]);
         }
         {
-            let (operator, branch) = open!($space, at, "peer", "repo");
+            let (operator, branch) = open!($space, at, "peer", "repo", false);
             (_, run.cold_points, _) = reads!(operator, branch, &[] as &[String], $entities);
             (_, run.warm_points, _) = reads!(operator, branch, &[] as &[String], $entities);
         }
@@ -301,10 +334,18 @@ async fn main() -> anyhow::Result<()> {
             ms(run.cold_points),
             ms(run.warm_points),
         );
+        println!("{:<12} root {}", "", run.root);
         if !run.detail.is_empty() {
             println!("{:<12} {}", "", run.detail);
         }
         let file = directory.join("repo").join(FILE_NAME);
+        // `DIALOG_BENCH_KEEP=dir` keeps each store's file there.
+        if file.exists()
+            && let Ok(keep) = std::env::var("DIALOG_BENCH_KEEP")
+        {
+            std::fs::create_dir_all(&keep)?;
+            std::fs::copy(&file, Path::new(&keep).join(which.replace('/', "-")))?;
+        }
         if file.exists() {
             // A reader's open, from the checkpoint and the records after it.
             let started = Instant::now();
@@ -315,6 +356,17 @@ async fn main() -> anyhow::Result<()> {
                 "",
                 ms(opened),
                 mib(reader.stats().index_memory as u64)
+            );
+        }
+        if let Some(first) = runs.first() {
+            let first: &Run = first;
+            anyhow::ensure!(
+                run.root == first.root,
+                "{} ended on {}, {} on {}: the stores did not do the same work",
+                first.name,
+                first.root,
+                run.name,
+                run.root
             );
         }
         runs.push(run);

@@ -37,25 +37,34 @@ pub(crate) fn tree_node(block: &Buffer) -> Option<TreeNode> {
 
 /// Splits a key into its form and the tokens its slots point at: the
 /// entity, the attribute and the value (its type byte and payload together,
-/// so a value is one token in every ordering). A key of any other layout,
-/// or one that does not split, is one opaque token.
-fn key_tokens(key: &[u8]) -> (u8, Vec<Vec<u8>>) {
+/// so a value is one token in every ordering), each a slice of the key. A
+/// key of any other layout, or one that does not split, is one opaque
+/// token. Returns the form, the tokens and how many there are.
+fn key_tokens(key: &[u8]) -> (u8, [&[u8]; 3], usize) {
+    let opaque = (FORM_OPAQUE, [key, &[][..], &[][..]], 1);
     let layout = <Key as TreeKey>::layout_of(key).unwrap_or(u8::MAX);
-    let mut parts = Vec::new();
+    let mut parts = Vec::with_capacity(5);
     if <Key as TreeKey>::components_of(key, layout, &mut parts).is_err() {
-        return (FORM_OPAQUE, vec![key.to_vec()]);
+        return opaque;
     }
-    let joined = |a: &[u8], b: &[u8]| [a, b].concat();
-    match (layout, parts.as_slice()) {
+    // The bytes of `key` from the start of `first` to the end of `last`,
+    // which components lay side by side.
+    let span = |first: &[u8], last: &[u8]| -> Option<&[u8]> {
+        let base = key.as_ptr() as usize;
+        let start = (first.as_ptr() as usize).checked_sub(base)?;
+        let end = (last.as_ptr() as usize).checked_sub(base)? + last.len();
+        key.get(start..end)
+    };
+    let split = match (layout, parts.as_slice()) {
         (ENTITY_KEY_TAG, [_, entity, attribute, kind, payload])
         | (ATTRIBUTE_KEY_TAG, [_, attribute, entity, kind, payload])
-        | (VALUE_KEY_TAG, [_, kind, payload, attribute, entity]) => (
-            layout,
-            vec![entity.to_vec(), attribute.to_vec(), joined(kind, payload)],
-        ),
-        (BLOB_KEY_TAG, [_, hash]) => (BLOB_KEY_TAG, vec![hash.to_vec()]),
-        _ => (FORM_OPAQUE, vec![key.to_vec()]),
-    }
+        | (VALUE_KEY_TAG, [_, kind, payload, attribute, entity]) => {
+            span(kind, payload).map(|value| (layout, [*entity, *attribute, value], 3))
+        }
+        (BLOB_KEY_TAG, [_, hash]) => Some((BLOB_KEY_TAG, [*hash, &[][..], &[][..]], 1)),
+        _ => None,
+    };
+    split.unwrap_or(opaque)
 }
 
 /// Rebuilds a key from its form and tokens: the inverse of [`key_tokens`].
@@ -78,9 +87,9 @@ fn key_from_tokens(form: u8, tokens: &[&[u8]]) -> io::Result<Vec<u8>> {
 
 /// The row of one entry's key and datum, by token id.
 fn entry_row(tokens: &mut Tokens, key: &[u8], datum: Option<&State<Datum>>) -> io::Result<Row> {
-    let (form, parts) = key_tokens(key);
+    let (form, parts, count) = key_tokens(key);
     let mut row = [form as u32, 0, 0, 0, NONE];
-    for (slot, token) in parts.iter().enumerate() {
+    for (slot, token) in parts[..count].iter().enumerate() {
         row[1 + slot] = tokens.intern(token);
     }
     if let Some(datum) = datum {
@@ -253,4 +262,90 @@ pub(crate) fn realize(
         )
     };
     Ok(body.as_bytes().map_err(tree_error)?.to_vec())
+}
+
+#[cfg(test)]
+mod profile {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    /// Times each part of splitting every node of the archive file at
+    /// `DIALOG_ARCHIVE_PROFILE` into rows. Run by hand.
+    #[test]
+    #[ignore = "profiles a file named by DIALOG_ARCHIVE_PROFILE"]
+    fn split_costs() -> anyhow::Result<()> {
+        let Ok(path) = std::env::var("DIALOG_ARCHIVE_PROFILE") else {
+            return Ok(());
+        };
+        let archive = crate::FileArchive::open(&path)?;
+        let mut blocks = Vec::new();
+        for (catalog, hash) in archive.hashes() {
+            blocks.push(Buffer::from(archive.get(&catalog, &hash)?.expect("listed")));
+        }
+        let (mut parse, mut keys, mut owned, mut archived, mut intern) = (
+            Duration::ZERO,
+            Duration::ZERO,
+            Duration::ZERO,
+            Duration::ZERO,
+            Duration::ZERO,
+        );
+        let (mut entries, mut nodes, mut realizing) = (0usize, 0usize, Duration::ZERO);
+        let mut tokens = Tokens::default();
+        for block in &blocks {
+            let started = Instant::now();
+            let Some(node) = tree_node(block) else {
+                continue;
+            };
+            parse += started.elapsed();
+            nodes += 1;
+            if let NodeBody::Segment(segment) = node.body() {
+                let started = Instant::now();
+                let mut cursor = segment.keys::<Key>()?;
+                let mut all = Vec::new();
+                while let Some((at, key)) = cursor.next_key()? {
+                    let (_, parts, count) = key_tokens(key);
+                    all.push((
+                        at,
+                        parts[..count]
+                            .iter()
+                            .map(|part| part.to_vec())
+                            .collect::<Vec<_>>(),
+                    ));
+                }
+                keys += started.elapsed();
+                for (at, parts) in all {
+                    entries += 1;
+                    let started = Instant::now();
+                    let value: State<Datum> = into_owned(segment.value_at(at)?)?;
+                    owned += started.elapsed();
+                    let started = Instant::now();
+                    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&value)?;
+                    archived += started.elapsed();
+                    let started = Instant::now();
+                    for part in &parts {
+                        tokens.intern(part);
+                    }
+                    tokens.intern(&bytes);
+                    intern += started.elapsed();
+                }
+            }
+            let rows = rows_of(&node, &mut tokens, |_| None)?;
+            let manifest = node.manifest()?;
+            let started = Instant::now();
+            realize(&rows, &tokens, &manifest, |_| None)?;
+            realizing += started.elapsed();
+        }
+        let per = |d: Duration| d.as_secs_f64() * 1e6 / nodes as f64;
+        println!(
+            "{nodes} nodes, {entries} segment entries; per node µs: parse {:.0}, keys {:.0}, \
+             values owned {:.0}, values archived {:.0}, intern {:.0}, realize {:.0}",
+            per(parse),
+            per(keys),
+            per(owned),
+            per(archived),
+            per(intern),
+            per(realizing)
+        );
+        Ok(())
+    }
 }

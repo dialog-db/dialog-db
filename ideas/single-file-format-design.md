@@ -235,46 +235,58 @@ in a footer is read from the start and its torn tail is dropped. (Built:
 `examples/file_archive_bench.rs` in dialog-baseline replays the Stack
 Exchange log through a repository, one branch commit per transaction, into
 three spaces that differ only in their archive. Then it reopens each and
-reads, cold (an empty node cache, a warm OS page cache) and warm. These
-numbers are for 4096 commits (9,915 facts) on a shared container.
-Repository-level times moved by up to 50% between identical runs (the
-whole-block commit was 6.8 ms in one run and 10.2 in the next). Read them
-as rough, and the archive's own timers as firmer.
+reads, cold (an empty node cache, a warm OS page cache) and warm.
+
+Every identity the run mints is derived from one seed: the profile and
+space keys, and the line's identifier. These end up in the tree (a
+revision's record is keyed by its branch and issuer), so with fresh keys
+the same replay wrote 11,780 to 14,916 blocks from run to run. Seeded,
+every store writes the same 14,900 blocks and ends on the same root, and
+the bench refuses to report stores that disagree.
+
+4096 commits, 9,915 facts:
 
 | | `fs` | file, whole | file, frames |
 |---|---|---|---|
-| on disk | 1185 MiB, 14,916 files | 1218 MiB | **13.2 MiB** |
-| commit | 5.7–6.7 ms | 6.8–10.2 ms | 9.0–9.1 ms |
-| cold scan, 8 attributes | 29–35 ms | 27–35 ms | 34–39 ms |
-| cold point reads, 256 | 12–14 ms | 7–8 ms | 17–23 ms |
-| warm scan / points | 15–21 / 2–3 ms | 14–23 / 2 ms | 13–14 / 3 ms |
+| on disk | 1147 MiB, 14,900 files | 1173 MiB | **13.2 MiB** |
+| commit | 5.8 ms | 6.5 ms | 7.2–8.9 ms |
+| cold scan, 8 attributes | 39 ms | 30 ms | 36–47 ms |
+| cold point reads, 256 | 10 ms | 7 ms | 18–25 ms |
+| warm scan / points | 22 / 2 ms | 21 / 2 ms | 12–19 / 2–3 ms |
 | archive index in memory | — | 0.8 MiB | 4.0–4.1 MiB, tokens mapped |
+| reopen | — | 8 ms | 30 ms |
+
+Repository-level times still move 10–25% between identical runs on a
+shared container. The archive's own timers are firmer.
 
 What it says:
 
-- **Size holds up through a real repository**: 90× smaller than the `fs`
-  archive. 14,738 frames take 2.7 MiB and 33k tokens 10.2 MiB, so the
+- **Size holds up through a real repository**: 87× smaller than the `fs`
+  archive. 14,900 frames take 2.7 MiB and 33k tokens 10.2 MiB, so the
   tokens are the data.
-- **Writing a frame costs about 630 µs a node**: 330 µs to read the block
-  as a node and split it into rows (a datum is deserialized and
-  re-archived to become a token), and 300 µs to verify, mostly realizing.
-  That is about 2.3 ms a commit. The file write itself drops from 5.3 s
-  (whole) to 0.1 s.
-- **A cold read pays realizing** (about 140 µs a node), so cold point
-  reads are 1.5–3× slower than `fs` and warm reads are the same: the node
-  cache above the archive holds realized nodes. Step 4 is what removes
-  that cost, and the census bounds what it can buy: decoding rows costs
-  about what reading a block file does, so cold reads reach parity with
-  `fs`, not better. What step 4 buys beyond that is memory: a cached node
-  over shared tokens instead of its block plus its decoded keys.
+- **Writing a frame costs about 600 µs a node**, 2.3 ms a commit, which is
+  the whole gap from the whole-block file:
+  - about 340 µs splits the node into rows. Per node, on the kept file:
+    101 µs decoding keys, 73 µs looking up tokens, 45 µs re-archiving each
+    datum, 7 µs validating the block;
+  - about 260 µs verifies, mostly rebuilding the block (176 µs);
+  - the file write itself drops from 0.5 s (whole) to 0.1 s.
+  Splitting keys without allocating changed nothing measurable. The cost
+  is re-deriving what the tree had in hand when it encoded the node. The
+  fix is the one this design names under Writes: the store receives the
+  entries a node was encoded from. That removes the decode and, for nodes
+  this process encoded, the rebuild that checks them.
+- **A cold read pays rebuilding** (about 140–180 µs a node), so cold point
+  reads are 2× slower than `fs`, and warm reads are the same: the node
+  cache above the archive holds rebuilt nodes. Step 4 is what removes that
+  cost, and the census bounds what it can buy: decoding rows costs about
+  what reading a block file does, so cold reads reach parity with `fs`,
+  not better. What step 4 buys beyond that is memory: a cached node over
+  shared tokens instead of its block plus its decoded keys.
 - **Tokens are read through a mapping of the file.** Holding them in
   memory made the index 23.4 MiB, mostly the 10.2 MiB of token bytes plus
   growth slack, so it would not scale past memory. Mapped, the index is
   where each token, node and block sits: 4.0 MiB for a reader, which opens
-  from a checkpoint in 26 ms without reading a token. The table that finds
-  a token by its bytes is built by a writer, on its first write. The
-  pages a read touches belong to the OS page cache, which can drop them.
-- **The same replay writes a different number of blocks from run to run**
-  (11,780 to 14,916 in the `fs` archive, 14,738 to 15,193 in the file), so
-  part of the commit-time spread is the repository doing different work,
-  not the archive. Why it differs is open.
+  from a checkpoint without reading a token. The table that finds a token
+  by its bytes is built by a writer, on its first write. The pages a read
+  touches belong to the OS page cache, which can drop them.
