@@ -388,10 +388,10 @@ fn frame(
                 }
                 out.push(index.scale_at(at)?.as_u8());
             }
-            out.extend_from_slice(&(index.novelty.len() as u32).to_le_bytes());
-            for buffer in index.novelty.iter() {
+            out.extend_from_slice(&(index.buffers().count() as u32).to_le_bytes());
+            for buffer in index.buffers() {
                 let entries = buffer.entries::<Key>()?;
-                out.extend_from_slice(&buffer.child.to_native().to_le_bytes());
+                out.extend_from_slice(&buffer.child().to_le_bytes());
                 out.extend_from_slice(&(entries.len() as u32).to_le_bytes());
                 for item in &entries {
                     share.novelty_entries += 1;
@@ -409,7 +409,11 @@ fn frame(
             }
             share.index_frames += 1;
             share.index_bytes += out.len();
-            share.index_blocks += node.buffer().as_ref().len();
+            share.index_blocks += node
+                .buffer()
+                .expect("a node read from its block")
+                .as_ref()
+                .len();
         }
         NodeBody::Segment(segment) => {
             out.push(0);
@@ -422,7 +426,11 @@ fn frame(
             }
             share.segment_frames += 1;
             share.segment_bytes += out.len();
-            share.segment_blocks += node.buffer().as_ref().len();
+            share.segment_blocks += node
+                .buffer()
+                .expect("a node read from its block")
+                .as_ref()
+                .len();
         }
     }
     Ok(out)
@@ -660,7 +668,11 @@ fn live(
         let Some(node) = nodes.get(&hash) else {
             continue;
         };
-        bytes += node.buffer().as_ref().len();
+        bytes += node
+            .buffer()
+            .expect("a node read from its block")
+            .as_ref()
+            .len();
         match node.body() {
             NodeBody::Index(index) => {
                 for at in 0..index.len() {
@@ -1034,7 +1046,7 @@ fn history_counts(
                     for at in 0..index.len() {
                         count += counts[index.hash_at(at)?];
                     }
-                    for buffer in index.novelty.iter() {
+                    for buffer in index.buffers() {
                         for item in buffer.entries::<Key>()? {
                             count += (matches!(item.op, NoveltyOp::Assert(_))
                                 && item.key.first() == Some(&HISTORY_KEY_TAG))
@@ -1495,7 +1507,13 @@ fn measure(source: Source, checkpoints: &[usize]) -> anyhow::Result<()> {
     if !differ.is_empty() {
         let bytes: usize = differ
             .iter()
-            .map(|hash| nodes[hash].buffer().as_ref().len())
+            .map(|hash| {
+                nodes[hash]
+                    .buffer()
+                    .expect("a node read from its block")
+                    .as_ref()
+                    .len()
+            })
             .sum();
         let commits: Vec<usize> = differ
             .iter()
@@ -1539,7 +1557,14 @@ fn measure(source: Source, checkpoints: &[usize]) -> anyhow::Result<()> {
             )
             .map(|bytes| bytes.len())
             .unwrap_or(0);
-            (node.buffer().as_ref().len(), realized, kind)
+            (
+                node.buffer()
+                    .expect("a node read from its block")
+                    .as_ref()
+                    .len(),
+                realized,
+                kind,
+            )
         })
         .collect();
     sizes.sort();
@@ -1732,7 +1757,15 @@ fn read_costs(
                 let node = TreeNode::try_from(Buffer::from(bytes))?;
                 validate += started.elapsed();
                 anyhow::ensure!(
-                    node.buffer().as_ref().len() == nodes[*hash].buffer().as_ref().len()
+                    node.buffer()
+                        .expect("a node read from its block")
+                        .as_ref()
+                        .len()
+                        == nodes[*hash]
+                            .buffer()
+                            .expect("a node read from its block")
+                            .as_ref()
+                            .len()
                 );
             }
         }
@@ -1754,7 +1787,14 @@ fn read_costs(
         timed(&label("decode rows"), &|hash| {
             let rows = store.rows(positions[hash]);
             anyhow::ensure!(!rows.sections.is_empty());
-            Ok(vec![0; nodes[hash].buffer().as_ref().len()])
+            Ok(vec![
+                0;
+                nodes[hash]
+                    .buffer()
+                    .expect("a node read from its block")
+                    .as_ref()
+                    .len()
+            ])
         })?;
         timed(&label("realize"), &|hash| {
             realize_rows(
@@ -1879,9 +1919,9 @@ fn rows_of(
                 ]);
             }
             let (mut buffers, mut ops) = (Vec::new(), Vec::new());
-            for buffer in index.novelty.iter() {
+            for buffer in index.buffers() {
                 let entries = buffer.entries::<Key>()?;
-                buffers.push([buffer.child.to_native(), entries.len() as u32, 0, 0, 0]);
+                buffers.push([buffer.child(), entries.len() as u32, 0, 0, 0]);
                 for item in &entries {
                     let datum = match &item.op {
                         NoveltyOp::Assert(value) => Some(value),

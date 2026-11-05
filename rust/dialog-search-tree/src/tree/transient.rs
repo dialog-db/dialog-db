@@ -4035,7 +4035,7 @@ where
     let body =
         PersistentNodeBody::from_index(PersistentIndex::from_links(Vec::new()), manifest.clone());
     let node = PersistentNode::try_from(&body)?;
-    delta.add(node.hash().clone(), node.buffer().clone());
+    delta.add(node.hash().clone(), node.buffer()?.clone());
     Ok(node)
 }
 

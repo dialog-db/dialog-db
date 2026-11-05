@@ -258,7 +258,7 @@ where
         let mut asserts = 0usize;
         while let Some((entry_at, key)) = keys.next_key()? {
             let slot = asserts;
-            if buffer.polarity.get(entry_at).copied() == Some(1) {
+            if buffer.is_assert(entry_at) {
                 asserts += 1;
             }
             // Keys stream in sorted order: everything past the end bound

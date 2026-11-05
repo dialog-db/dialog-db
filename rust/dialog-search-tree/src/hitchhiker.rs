@@ -1489,7 +1489,7 @@ where
         let links = match node.body() {
             NodeBody::Segment(_) => return Ok(false),
             NodeBody::Index(index) => {
-                if !index.novelty.is_empty() {
+                if index.novelty_len() != 0 {
                     return Ok(true);
                 }
                 index.links()?

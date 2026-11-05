@@ -1423,7 +1423,7 @@ where
                     ))
                     .into());
                 };
-                let bytes = node.buffer().as_ref().to_vec();
+                let bytes = node.buffer()?.as_ref().to_vec();
 
                 // The entries this node carries (stored in a segment,
                 // buffered in an index) may name blob bytes and spilled

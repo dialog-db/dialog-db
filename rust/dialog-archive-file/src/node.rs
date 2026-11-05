@@ -159,9 +159,9 @@ pub(crate) fn rows_of(
                 links.push([separator, id, scale, absent, 0]);
             }
             let (mut buffers, mut ops) = (Vec::new(), Vec::new());
-            for buffer in index.novelty.iter() {
+            for buffer in index.buffers() {
                 let entries = buffer.entries::<Key>().map_err(tree_error)?;
-                buffers.push([buffer.child.to_native(), entries.len() as u32, 0, 0, 0]);
+                buffers.push([buffer.child(), entries.len() as u32, 0, 0, 0]);
                 for item in &entries {
                     let datum = match &item.op {
                         NoveltyOp::Assert(value) => Some(value),

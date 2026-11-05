@@ -11,7 +11,7 @@ use rkyv::{
 use std::ops::Bound;
 
 use crate::{
-    ArchivedIndex, Buffer, Delta, DialogSearchTreeError, Distribution, Entry, Hashed, Key,
+    Buffer, BufferView, Delta, DialogSearchTreeError, Distribution, Entry, Hashed, IndexView, Key,
     LazyHash, Link, Manifest, Node, NodeBody, NodeCache, NoveltyBuffer, NoveltyEntry, NoveltyOp,
     PersistentNode, PersistentNodeBody, Rank, SegmentEntry, Separator, Value, distribution::cap,
     into_owned, resolve_pending,
@@ -1162,12 +1162,19 @@ where
     /// reconstruction, and no per-entry allocation. A buffer is decoded only
     /// if and when a write touches its link; an untouched buffer flows back
     /// into the next persist byte-identical, never re-encoded.
-    pub(crate) fn open(index: &ArchivedIndex<Value>) -> Result<Self, DialogSearchTreeError> {
+    ///
+    /// A node read from rows has no stored encoding to carry: each buffer is
+    /// encoded from its operations, which is the encoding it was stored
+    /// with, since the store kept the node only once its rows rebuilt the
+    /// block exactly.
+    pub(crate) fn open<K: self::Key>(
+        index: IndexView<'_, Value>,
+    ) -> Result<Self, DialogSearchTreeError> {
         let mut links: Vec<LinkNovelty<Value>> = Vec::new();
         let mut total = 0usize;
         let mut previous: Option<usize> = None;
-        for buffer in index.novelty.iter() {
-            let child = buffer.child.to_native() as usize;
+        for buffer in index.buffers() {
+            let child = buffer.child() as usize;
             // Strictly ascending child order and in-range children, the same
             // validation the flat decode performed; a violation marks the
             // node corrupt.
@@ -1178,8 +1185,15 @@ where
             }
             previous = Some(child);
             total += buffer.checked_count()?;
-            let sealed: NoveltyBuffer<Value> = rkyv::deserialize::<_, rkyv::rancor::Error>(buffer)
-                .map_err(|error| DialogSearchTreeError::Access(format!("{error}")))?;
+            let sealed: NoveltyBuffer<Value> = match &buffer {
+                BufferView::Archived(buffer) => {
+                    rkyv::deserialize::<_, rkyv::rancor::Error>(*buffer)
+                        .map_err(|error| DialogSearchTreeError::Access(format!("{error}")))?
+                }
+                BufferView::Rows { child, .. } => {
+                    NoveltyBuffer::from_entries::<K>(*child, buffer.entries::<K>()?)?
+                }
+            };
             if links.len() <= child {
                 links.resize_with(child + 1, LinkNovelty::empty);
             }
@@ -1509,7 +1523,7 @@ where
         // sealed (its encoded bytes bulk-copied, nothing decoded) until a
         // write touches its link, so an untouched buffer costs no decode here
         // and no re-encode at the next persist.
-        let novelty = Novelty::open(index)?;
+        let novelty = Novelty::open::<Key>(index)?;
         Ok(TransientIndex { children, novelty })
     }
 }
@@ -1635,11 +1649,11 @@ where
         };
 
         let node = PersistentNode::try_from(&body)?;
-        crate::distribution::audit::node(node.buffer().as_ref().len());
+        crate::distribution::audit::node(node.buffer()?.as_ref().len());
         if let Some(kind) = audit_kind {
             dialog_storage::dup_audit::note_seal(node.hash().as_bytes(), kind);
         }
-        delta.add(node.hash().clone(), node.buffer().clone());
+        delta.add(node.hash().clone(), node.buffer()?.clone());
         Self::keep(cache, &node, hashes);
         Ok(node)
     }
@@ -1723,11 +1737,11 @@ where
         };
 
         let node = PersistentNode::try_from(&body)?;
-        crate::distribution::audit::node(node.buffer().as_ref().len());
+        crate::distribution::audit::node(node.buffer()?.as_ref().len());
         if let Some(kind) = audit_kind {
             dialog_storage::dup_audit::note_seal(node.hash().as_bytes(), kind);
         }
-        delta.add(node.hash().clone(), node.buffer().clone());
+        delta.add(node.hash().clone(), node.buffer()?.clone());
         Self::keep(cache, &node, hashes);
         Ok(node)
     }

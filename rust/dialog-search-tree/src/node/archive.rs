@@ -1193,7 +1193,7 @@ mod tests {
         let segment = segment_node(&[key("a")])?;
         assert_eq!(segment.layout_version(), TAGGED_LAYOUT);
         assert_eq!(
-            &segment.buffer().as_ref()[..16],
+            &segment.buffer()?.as_ref()[..16],
             &[
                 2,
                 0,
@@ -1217,7 +1217,7 @@ mod tests {
         let index = index_node(&[b"", b"m"])?;
         assert_eq!(index.layout_version(), TAGGED_LAYOUT);
         assert_eq!(
-            &index.buffer().as_ref()[..6],
+            &index.buffer()?.as_ref()[..6],
             &[2, 1, 3, 0x05, 1, NUMBER_BAND as u8]
         );
 
@@ -1229,10 +1229,10 @@ mod tests {
         let body = PersistentNodeBody::segment_from_entries(entries, manifest.clone())?;
         let node = TestNode::try_from(&body)?;
         assert_eq!(
-            &node.buffer().as_ref()[..16],
+            &node.buffer()?.as_ref()[..16],
             &[2, 0, 3, 0x02, 1, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
         );
-        let read = TestNode::try_from(node.buffer().clone())?;
+        let read = TestNode::try_from(node.buffer()?.clone())?;
         assert_eq!(read.layout_version(), TAGGED_LAYOUT);
         assert_eq!(read.manifest()?, manifest);
         Ok(())
@@ -1242,7 +1242,7 @@ mod tests {
     /// by one carrying `fields`, which must fit before the 16-byte boundary.
     fn with_fields(fields: &[u8]) -> Result<crate::Buffer> {
         let node = segment_node(&[key("a")])?;
-        let mut bytes = node.buffer().as_ref().to_vec();
+        let mut bytes = node.buffer()?.as_ref().to_vec();
         let mut prelude = vec![2, 0, fields.len() as u8];
         prelude.extend_from_slice(fields);
         assert!(prelude.len() <= 16);
@@ -1267,7 +1267,7 @@ mod tests {
         let rewritten = TestNode::try_from(&PersistentNodeBody::segment_from_entries(
             entries, manifest,
         )?)?;
-        assert_eq!(&rewritten.buffer().as_ref()[..6], &[2, 0, 3, 0x40, 1, 7]);
+        assert_eq!(&rewritten.buffer()?.as_ref()[..6], &[2, 0, 3, 0x40, 1, 7]);
 
         assert!(TestNode::try_from(with_fields(&[0x41, 1, 7])?).is_err());
         Ok(())
@@ -1278,7 +1278,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_refuses_a_malformed_prelude() -> Result<()> {
         let node = segment_node(&[key("a")])?;
-        let mut bytes = node.buffer().as_ref().to_vec();
+        let mut bytes = node.buffer()?.as_ref().to_vec();
         bytes[15] = 1;
         assert!(TestNode::try_from(crate::Buffer::from(bytes)).is_err());
 

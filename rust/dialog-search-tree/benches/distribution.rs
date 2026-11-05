@@ -331,7 +331,11 @@ where
         let node = node.unwrap();
         total_nodes += 1;
         if seen.insert(node.hash().clone()) {
-            total_bytes += node.buffer().as_ref().len();
+            total_bytes += node
+                .buffer()
+                .expect("a node read from its block")
+                .as_ref()
+                .len();
         }
         match node.as_index() {
             Ok(_) => index_nodes += 1,

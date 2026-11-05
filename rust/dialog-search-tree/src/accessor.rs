@@ -9,7 +9,7 @@ use rkyv::{
     validation::{Validator, archive::ArchiveValidator, shared::SharedValidator},
 };
 
-use crate::{DialogSearchTreeError, Key, NodeCache, PersistentNode, Value};
+use crate::{DialogSearchTreeError, Key, NodeCache, NodeSource, PersistentNode, Value};
 
 /// The node stored under `hash` in `catalog`, read through `env`: from the
 /// node cache `env` holds when it holds the node, else loaded and checked,
@@ -47,6 +47,26 @@ where
     Env: Provider<Load> + Holds + ConditionalSync + ?Sized,
 {
     Accessor::new(env, catalog).load_node(hash).await
+}
+
+/// The node `hash` names, from the store's rows when `source` keeps it that
+/// way: read in place, with no block built, no hash computed and nothing
+/// validated again (the store vouches for its rows). `None` when there is
+/// no source, the source does not have the node as rows, or its rows hold
+/// values of another type than this tree's.
+fn from_source<Key, Value>(
+    source: Option<&std::sync::Arc<dyn NodeSource>>,
+    catalog: &CatalogScope,
+    hash: &Blake3Hash,
+) -> Option<PersistentNode<Key, Value>>
+where
+    Key: self::Key,
+    Value: self::Value,
+    Value::Archived: for<'b> CheckBytes<
+        Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
+    >,
+{
+    PersistentNode::from_rows(source?.node(catalog, hash)?)
 }
 
 /// How a tree's reads load the nodes its environment's cache does not hold.
@@ -150,6 +170,9 @@ pub struct Accessor<'a, Key, Value, Env: ?Sized> {
     env: &'a Env,
     catalog: CatalogScope,
     cache: Option<NodeCache<Key, Value>>,
+    /// The store that hands over nodes as rows, if the environment holds
+    /// one for the catalog's subject: asked before a block is loaded.
+    source: Option<std::sync::Arc<dyn NodeSource>>,
     reading: Reading,
 }
 
@@ -159,6 +182,7 @@ impl<Key, Value, Env: ?Sized> Clone for Accessor<'_, Key, Value, Env> {
             env: self.env,
             catalog: self.catalog.clone(),
             cache: self.cache.clone(),
+            source: self.source.clone(),
             reading: self.reading,
         }
     }
@@ -177,6 +201,7 @@ where
             env,
             catalog: catalog.clone(),
             cache: NodeCache::of(env, catalog.subject()),
+            source: <dyn NodeSource>::of(env, catalog.subject()),
             reading: Reading::default(),
         }
     }
@@ -225,8 +250,12 @@ where
         &self,
         hash: &Blake3Hash,
     ) -> Result<Option<PersistentNode<Key, Value>>, DialogSearchTreeError> {
-        let fetch =
-            async |hash: &Blake3Hash| fetch_node(self.env, &self.catalog, hash, self.reading).await;
+        let fetch = async |hash: &Blake3Hash| {
+            if let Some(node) = from_source(self.source.as_ref(), &self.catalog, hash) {
+                return Ok(Some(node));
+            }
+            fetch_node(self.env, &self.catalog, hash, self.reading).await
+        };
         match &self.cache {
             Some(cache) => cache.get_or_fetch(hash, fetch).await,
             None => fetch(hash).await,

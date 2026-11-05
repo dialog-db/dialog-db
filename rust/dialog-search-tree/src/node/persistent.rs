@@ -17,6 +17,8 @@ use crate::{
     hashed::HashColumn,
     node::codec::{common_prefix, encode_keys},
     node::columnar::{ColumnData, StreamingLeaf, column_slices, encode_column_values},
+    node::rows::{NodeRows, RowsKind},
+    node::view::{IndexView, SegmentView},
 };
 use std::borrow::Borrow;
 use std::cmp::Ordering;
@@ -164,15 +166,26 @@ struct Prelude {
 /// archive of the node's kind, so [`body`](Self::body) is infallible and costs
 /// a pointer cast rather than a bytecheck pass per access.
 ///
+/// A node can also be read from the rows a store keeps it in
+/// ([`from_rows`](Self::from_rows)), rather than its block: its keys, values
+/// and children are then read where the store keeps them, and its bytes are
+/// built only when asked for ([`buffer`](Self::buffer)). The store vouches
+/// for its rows ([`NodeRows`] is an unsafe trait), so such a node is not
+/// validated again either.
+///
 /// The key and value types are markers only, so a node is `Send` and `Sync`
 /// exactly when its buffer is, whatever the types it is read as. That lets
 /// a [`NodeCache`](crate::NodeCache) share checked nodes across threads.
-#[derive(Debug)]
 pub struct PersistentNode<Key, Value> {
     key: PhantomData<fn() -> Key>,
     value: PhantomData<fn() -> Value>,
 
+    /// The node's bytes. Empty for a node read from rows, whose bytes are
+    /// built only when asked for ([`buffer`](Self::buffer)).
     buffer: Buffer,
+    /// The rows a store keeps the node in, when the node was read from them
+    /// rather than from its block.
+    rows: Option<Arc<RowsBacking>>,
     /// Where the node's archived index or segment sits in its bytes, found
     /// once when the node is built: its byte offset, with [`INDEX_BIT`] set
     /// for an index and [`LEGACY_BIT`] for a node in the legacy layout (both
@@ -180,6 +193,30 @@ pub struct PersistentNode<Key, Value> {
     /// a node keeps beside its bytes, and it makes [`body`](Self::body) an
     /// addition and a bit test.
     root: usize,
+}
+
+/// A node read from the rows a store keeps it in: the rows, what the node
+/// derives from them, and its block once something asked for it.
+struct RowsBacking {
+    rows: Arc<dyn NodeRows>,
+    derived: Arc<Derived>,
+    block: OnceLock<Buffer>,
+}
+
+impl<Key, Value> std::fmt::Debug for PersistentNode<Key, Value> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.rows {
+            Some(rows) => f
+                .debug_struct("PersistentNode")
+                .field("rows", rows.rows.hash())
+                .finish(),
+            None => f
+                .debug_struct("PersistentNode")
+                .field("buffer", &self.buffer)
+                .field("root", &self.root)
+                .finish(),
+        }
+    }
 }
 
 /// [`PersistentNode::root`]'s bit for an index.
@@ -198,39 +235,57 @@ const _: () = {
 /// that rkyv returned from validating them (or that points into bytes just
 /// serialized), so it lies within `bytes`, at an offset aligned to 4.
 #[inline(always)]
-fn root_of<Value: self::Value>(bytes: &[u8], body: NodeBody<'_, Value>, legacy: bool) -> usize {
+fn root_of<Value: self::Value>(bytes: &[u8], body: Archived<'_, Value>, legacy: bool) -> usize {
     let (at, index) = match body {
-        NodeBody::Index(index) => (std::ptr::from_ref(index).addr(), INDEX_BIT),
-        NodeBody::Segment(segment) => (std::ptr::from_ref(segment).addr(), 0),
+        Archived::Index(index) => (std::ptr::from_ref(index).addr(), INDEX_BIT),
+        Archived::Segment(segment) => (std::ptr::from_ref(segment).addr(), 0),
     };
     let offset = at - bytes.as_ptr().addr();
     debug_assert_eq!(offset & ROOT_BITS, 0);
     offset | index | if legacy { LEGACY_BIT } else { 0 }
 }
 
-/// A node's body: the archived index or segment it holds, borrowed from its
-/// bytes.
+/// The archived index or segment in a node's bytes.
+enum Archived<'a, Value: self::Value> {
+    Index(&'a ArchivedIndex<Value>),
+    Segment(&'a ArchivedSegment<Value>),
+}
+
+/// A node's body: its index or segment, read from its block or from the
+/// rows a store keeps it in.
 pub enum NodeBody<'a, Value>
 where
     Value: self::Value,
 {
     /// An index node containing links to child nodes.
-    Index(&'a ArchivedIndex<Value>),
+    Index(IndexView<'a, Value>),
     /// A leaf segment containing key-value entries.
-    Segment(&'a ArchivedSegment<Value>),
+    Segment(SegmentView<'a, Value>),
 }
 
 impl<Key, Value> PersistentNode<Key, Value> {
-    /// The length of this node's stored bytes: what a cache charges for
-    /// holding it.
+    /// What holding this node costs: its bytes, or for a node read from
+    /// rows, what the rows take beyond the store (and its block, once
+    /// built). What a cache charges for holding it.
     pub(crate) fn size(&self) -> usize {
-        self.buffer.as_ref().len()
+        match &self.rows {
+            Some(rows) => {
+                rows.rows.footprint() + rows.block.get().map_or(0, |block| block.as_ref().len())
+            }
+            None => self.buffer.as_ref().len(),
+        }
+    }
+
+    /// Whether this node was read from rows rather than its block.
+    pub fn is_rows(&self) -> bool {
+        self.rows.is_some()
     }
 
     /// The length of this node's prelude, before the archived body: 0 for
-    /// a legacy node, whose whole buffer is the body.
+    /// a legacy node, whose whole buffer is the body, and for a node read
+    /// from rows.
     pub(crate) fn prelude_len(&self) -> usize {
-        if self.root & LEGACY_BIT != 0 {
+        if self.rows.is_some() || self.root & LEGACY_BIT != 0 {
             0
         } else {
             tagged_prelude(self.buffer.as_ref()).map_or(0, |prelude| prelude.len as usize)
@@ -245,6 +300,7 @@ impl<Key, Value> Clone for PersistentNode<Key, Value> {
             key: PhantomData,
             value: PhantomData,
             buffer: self.buffer.clone(),
+            rows: self.rows.clone(),
             root: self.root,
         }
     }
@@ -260,12 +316,48 @@ where
 {
     /// Returns the content hash of this node.
     pub fn hash(&self) -> &Blake3Hash {
-        self.buffer.blake3_hash()
+        match &self.rows {
+            Some(rows) => rows.rows.hash(),
+            None => self.buffer.blake3_hash(),
+        }
     }
 
-    /// Returns the underlying buffer containing serialized node data.
-    pub fn buffer(&self) -> &Buffer {
-        &self.buffer
+    /// Returns the node's serialized bytes. A node read from rows builds its
+    /// block the first time it is asked, and keeps it.
+    pub fn buffer(&self) -> Result<&Buffer, DialogSearchTreeError> {
+        let Some(rows) = &self.rows else {
+            return Ok(&self.buffer);
+        };
+        if let Some(block) = rows.block.get() {
+            return Ok(block);
+        }
+        let block = rows.rows.block()?;
+        if block.blake3_hash() != rows.rows.hash() {
+            return Err(DialogSearchTreeError::Encoding(
+                "Rows built a block other than the one they stand for".to_string(),
+            ));
+        }
+        Ok(rows.block.get_or_init(|| block))
+    }
+
+    /// Builds a node from the rows a store keeps it in, if they hold values
+    /// of this tree's `Value`; `None` otherwise, and the node is read from
+    /// its block instead.
+    pub fn from_rows(rows: Arc<dyn NodeRows>) -> Option<Self> {
+        if rows.values() != std::any::TypeId::of::<Value>() {
+            return None;
+        }
+        Some(Self {
+            key: PhantomData,
+            value: PhantomData,
+            buffer: Buffer::from(Vec::new()),
+            rows: Some(Arc::new(RowsBacking {
+                rows,
+                derived: Arc::default(),
+                block: OnceLock::new(),
+            })),
+            root: 0,
+        })
     }
 
     /// Converts this node into a [`Link`] referencing it, carrying the
@@ -277,7 +369,7 @@ where
     pub fn to_link(&self, separator: impl Into<Separator>) -> Link {
         Link {
             separator: separator.into(),
-            node: self.buffer.blake3_hash().clone(),
+            node: self.hash().clone(),
             scale: self.scale(),
         }
     }
@@ -294,8 +386,8 @@ where
     /// double-count once they flush.
     pub fn scale(&self) -> Scale {
         match self.body() {
-            NodeBody::Index(index) => Scale::total(index.scales.iter().map(Scale::from)),
-            NodeBody::Segment(segment) => Scale::of(segment.count.to_native() as u64),
+            NodeBody::Index(index) => Scale::total(index.scales()),
+            NodeBody::Segment(segment) => Scale::of(segment.count() as u64),
         }
     }
 
@@ -317,6 +409,13 @@ where
     /// [`TryFrom`] conversions are the only ways to build a node, and neither
     /// can admit an invalid archive, so no per-access validation runs.
     pub fn body(&self) -> NodeBody<'_, Value> {
+        if let Some(rows) = &self.rows {
+            let rows: &dyn NodeRows = rows.rows.as_ref();
+            return match rows.kind() {
+                RowsKind::Index => NodeBody::Index(IndexView::Rows(rows)),
+                RowsKind::Segment => NodeBody::Segment(SegmentView::Rows(rows)),
+            };
+        }
         // SAFETY: `root` is the offset of an archived index (with `INDEX_BIT`)
         // or segment in this node's bytes, taken from a reference into them:
         // either one rkyv returned after its full validation of the node
@@ -329,9 +428,9 @@ where
         unsafe {
             let at = self.buffer.as_ref().as_ptr().add(self.root & !ROOT_BITS);
             if self.root & INDEX_BIT != 0 {
-                NodeBody::Index(&*at.cast::<ArchivedIndex<Value>>())
+                NodeBody::Index(IndexView::Archived(&*at.cast::<ArchivedIndex<Value>>()))
             } else {
-                NodeBody::Segment(&*at.cast::<ArchivedSegment<Value>>())
+                NodeBody::Segment(SegmentView::Archived(&*at.cast::<ArchivedSegment<Value>>()))
             }
         }
     }
@@ -351,7 +450,7 @@ where
     /// The node's layout version: [`TAGGED_LAYOUT`], or [`LEGACY_LAYOUT`] for
     /// a node written before the tagged layout.
     pub fn layout_version(&self) -> u64 {
-        if self.root & LEGACY_BIT != 0 {
+        if self.rows.is_none() && self.root & LEGACY_BIT != 0 {
             LEGACY_LAYOUT
         } else {
             TAGGED_LAYOUT
@@ -371,7 +470,9 @@ where
     /// repeat touches reuse one decode memoized on the node's [`Buffer`] instead
     /// of re-decoding the leaf once per select.
     pub fn should_memoize_keys(&self) -> bool {
-        self.buffer.should_memoize()
+        // Rows are read in place: a key compares part by part, so there is
+        // nothing to decode and keep.
+        self.rows.is_none() && self.buffer.should_memoize()
     }
 
     /// This segment's keys as a memoized flat-arena decode, shared via `Arc`.
@@ -392,6 +493,9 @@ where
     /// What this node has derived from its bytes so far, kept on its
     /// [`Buffer`] so every holder of the node shares it.
     fn derived(&self) -> Arc<Derived> {
+        if let Some(rows) = &self.rows {
+            return rows.derived.clone();
+        }
         self.buffer
             .memoize_decode(|| Ok::<_, std::convert::Infallible>(Derived::default()))
             .ok()
@@ -438,7 +542,10 @@ where
     /// This piece's summary for the forced-run quiet check, if one was kept
     /// under `manifest`'s knobs ([`summarize`](Self::summarize)).
     pub(crate) fn summary(&self, manifest: &Manifest) -> Option<Arc<PieceSummary>> {
-        let derived = self.buffer.memoized::<Derived>()?;
+        let derived = match &self.rows {
+            Some(rows) => rows.derived.clone(),
+            None => self.buffer.memoized::<Derived>()?,
+        };
         let (knobs, summary) = derived.summary.get()?;
         (*knobs == Knobs::from(manifest)).then(|| summary.clone())
     }
@@ -487,6 +594,9 @@ where
     /// parameter, separator bound, value inline-vs-spill threshold) without a
     /// side channel: any node hash is a complete, self-describing tree root.
     pub fn manifest(&self) -> Result<Manifest, DialogSearchTreeError> {
+        if let Some(rows) = &self.rows {
+            return Ok(rows.rows.manifest().clone());
+        }
         if self.root & LEGACY_BIT != 0 {
             // SAFETY: checked just above that this is a legacy node.
             let header = match unsafe { self.legacy() } {
@@ -523,7 +633,7 @@ where
 
     /// Interprets this node as an index node, returning an error if it's a
     /// segment.
-    pub fn as_index(&self) -> Result<&ArchivedIndex<Value>, DialogSearchTreeError> {
+    pub fn as_index(&self) -> Result<IndexView<'_, Value>, DialogSearchTreeError> {
         match self.body() {
             NodeBody::Index(index) => Ok(index),
             NodeBody::Segment(_) => Err(DialogSearchTreeError::Access(
@@ -534,7 +644,7 @@ where
 
     /// Interprets this node as a segment node, returning an error if it's an
     /// index.
-    pub fn as_segment(&self) -> Result<&ArchivedSegment<Value>, DialogSearchTreeError> {
+    pub fn as_segment(&self) -> Result<SegmentView<'_, Value>, DialogSearchTreeError> {
         match self.body() {
             NodeBody::Segment(segment) => Ok(segment),
             NodeBody::Index(_) => Err(DialogSearchTreeError::Access(
@@ -572,6 +682,7 @@ where
                 value: PhantomData,
                 root: checked,
                 buffer,
+                rows: None,
             });
         }
         Self::from_other(buffer, checked & !OTHER_PRELUDE)
@@ -618,6 +729,7 @@ where
                         value: PhantomData,
                         root,
                         buffer,
+                        rows: None,
                     });
                 }
                 Err(error) => refused = Some(error),
@@ -648,8 +760,8 @@ where
                 }
             };
         let body = match legacy {
-            ArchivedLegacyNodeBody::Index(legacy) => NodeBody::Index(legacy.index()),
-            ArchivedLegacyNodeBody::Segment(legacy) => NodeBody::Segment(legacy.segment()),
+            ArchivedLegacyNodeBody::Index(legacy) => Archived::Index(legacy.index()),
+            ArchivedLegacyNodeBody::Segment(legacy) => Archived::Segment(legacy.segment()),
         };
         let root = root_of(bytes, body, true);
         Ok(Self {
@@ -657,6 +769,7 @@ where
             value: PhantomData,
             root,
             buffer,
+            rows: None,
         })
     }
 }
@@ -956,9 +1069,9 @@ where
         let archived = unsafe {
             match &body.node {
                 NodeKind::Index(_) => {
-                    NodeBody::Index(rkyv::access_unchecked::<ArchivedIndex<Value>>(&bytes[at..]))
+                    Archived::Index(rkyv::access_unchecked::<ArchivedIndex<Value>>(&bytes[at..]))
                 }
-                NodeKind::Segment(_) => NodeBody::Segment(rkyv::access_unchecked::<
+                NodeKind::Segment(_) => Archived::Segment(rkyv::access_unchecked::<
                     ArchivedSegment<Value>,
                 >(&bytes[at..])),
             }
@@ -966,6 +1079,7 @@ where
         let root = root_of(&bytes, archived, false);
         Ok(Self {
             buffer: Buffer::from(bytes),
+            rows: None,
             key: PhantomData,
             value: PhantomData,
             root,
