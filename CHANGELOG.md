@@ -14,6 +14,38 @@ says how to cut a release.
 
 ## Unreleased
 
+### The subscriptions on a branch share one walk of a head move
+
+When a branch's head moves, each subscription on it learns whether
+anything inside its cover changed by walking the difference between the
+tree it last read and the new one. Every subscription walked that
+difference on its own, decoding the same changed leaves again, so a page
+of a few hundred views paid a few hundred walks per commit or pull. The
+branch now keeps the last difference its subscriptions walked. The first
+subscription to poll across a head move walks its own cover as before;
+the second walks the whole difference once and leaves it on the branch;
+every later one keeps the changes inside its cover from it, which are
+exactly the changes its own walk would have found.
+
+What this changes for you:
+
+- Polling many subscriptions after a commit costs far less. In
+  `subscribe-fanout` (201 subscriptions, one commit) the polls go from
+  203.0 M instructions to 8.7 M. In a browser, the 406 subscriptions a
+  page of 135 concept views opens refresh after a commit in 17 ms instead
+  of 0.6 to 1 s.
+- A branch with a single subscription pays what it did: `subscribe-repoll`
+  is unchanged.
+- A difference of more than 4096 changes, such as a large pull, is not
+  kept: each subscription walks it within its own cover, as before. So is
+  one whose whole walk cannot read a node, which a walk within a cover may
+  not need.
+- Deltas and retained results are as before. Nothing stored or synced
+  changes.
+
+Why: the walk was nearly all of a poll that found nothing to do, and the
+subscriptions on one branch poll across the same pair of trees.
+
 ### A tree reads every node through its store, which keeps what it checked
 
 [#730](https://github.com/dialog-db/dialog-db/pull/730)

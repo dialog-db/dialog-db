@@ -73,6 +73,7 @@ impl OpenBranch {
             rewrite_cache: caches.rewrites,
             spine: caches.spine,
             identity_cache: Arc::new(Mutex::new(None)),
+            differences: Arc::default(),
             metadata_cache: Arc::new(Mutex::new(None)),
             layer_metadata_cache: caches.metadata,
             overlay: Ephemeral::default(),

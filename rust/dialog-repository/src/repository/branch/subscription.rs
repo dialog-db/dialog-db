@@ -77,7 +77,8 @@ use crate::repository::fetch::Driven;
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::tree::{fetch_spilled, selector_range};
 use dialog_artifacts::{
-    Artifact, ArtifactSelector, AttributeKey, Entity, EntityKey, Key, Speculation, State, ValueKey,
+    Artifact, ArtifactSelector, AttributeKey, Datum, Entity, EntityKey, Key, Speculation, State,
+    ValueKey,
 };
 use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
@@ -645,6 +646,124 @@ type EvaluationFuture<'a, T> =
 #[cfg(target_arch = "wasm32")]
 type EvaluationFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, EvaluationError>> + 'a>>;
 
+/// The most changes a branch keeps from one tree difference for its
+/// subscriptions to share. A commit or a typical pull changes far fewer
+/// keys. A difference past it is walked by each subscription within its
+/// own cover instead, as it would be without the memo, so a large pull
+/// is never held in memory whole.
+const SHARED_DIFFERENCE_LIMIT: usize = 4096;
+
+/// A branch's last tree difference, shared by every clone of the branch.
+///
+/// Every subscription on a branch is pinned at the head it last
+/// evaluated, and a head move reaches all of them at once: they poll
+/// across the same pair of trees. Each walking that difference within
+/// its own cover decodes the same changed leaves again, and on a page
+/// of a few hundred views that walk was nearly all of the poll.
+///
+/// The whole difference costs more than one walk within a cover, so it
+/// is walked only once a second subscription polls across the same pair:
+/// the first walks its own cover and leaves the pair [`Walked::Once`];
+/// the second walks the whole difference and leaves it here; every later
+/// one keeps the changes inside its cover, which are exactly the changes
+/// a walk within that cover yields. A branch with one subscription pays
+/// what it did without the memo.
+pub(crate) type Differences = Arc<Mutex<Option<Arc<Difference>>>>;
+
+/// What a branch's subscriptions walked between two of its trees.
+#[derive(Debug)]
+pub(crate) struct Difference {
+    from: Option<Blake3Hash>,
+    to: Option<Blake3Hash>,
+    walked: Walked,
+}
+
+/// How far the walk between two trees has gone for sharing.
+#[derive(Debug)]
+enum Walked {
+    /// One subscription walked within its own cover.
+    Once,
+    /// The whole difference.
+    Whole(Vec<Change<Key, State<Datum>>>),
+    /// The whole difference did not fit under
+    /// [`SHARED_DIFFERENCE_LIMIT`], or a node it reached could not be
+    /// read: each subscription walks within its own cover.
+    Unsharable,
+}
+
+/// The changes a subscription's gate reads: the branch's shared
+/// difference, or the subscription's own walk within its cover.
+enum Changed {
+    Shared(Arc<Difference>),
+    Scoped(Vec<Change<Key, State<Datum>>>),
+}
+
+impl Changed {
+    /// The changes inside `demand`'s cover.
+    fn within<'a>(
+        &'a self,
+        demand: &'a Demand,
+    ) -> impl Iterator<Item = &'a Change<Key, State<Datum>>> + 'a {
+        let (changes, filter) = match self {
+            Changed::Shared(difference) => match &difference.walked {
+                Walked::Whole(changes) => (changes.as_slice(), true),
+                Walked::Once | Walked::Unsharable => (&[][..], true),
+            },
+            // A walk within the cover yields only changes inside it.
+            Changed::Scoped(changes) => (changes.as_slice(), false),
+        };
+        changes
+            .iter()
+            .filter(move |change| !filter || demand.covers(change_key(change)))
+    }
+}
+
+fn change_key(change: &Change<Key, State<Datum>>) -> &Key {
+    match change {
+        Change::Add(entry) | Change::Remove(entry) => &entry.key,
+    }
+}
+
+impl Difference {
+    /// Walk every change from `previous` to `next`, kept whole only when
+    /// the walk finished within [`SHARED_DIFFERENCE_LIMIT`].
+    ///
+    /// The whole difference reaches nodes outside any one subscription's
+    /// cover. A walk that fails to read one keeps nothing rather than
+    /// failing the poll: each subscription then walks within its own
+    /// cover, which may not need that node at all.
+    async fn between<Store>(
+        previous: &Index,
+        next: &Index,
+        from: Option<Blake3Hash>,
+        to: Option<Blake3Hash>,
+        storage: &Store,
+    ) -> Self
+    where
+        Store: dialog_search_tree::Nodes<Key, State<Datum>>,
+    {
+        let mut walk = Box::pin(previous.differentiate(next, storage, storage));
+        let mut changes = Vec::new();
+        let complete = loop {
+            match walk.try_next().await {
+                Ok(Some(_)) if changes.len() == SHARED_DIFFERENCE_LIMIT => break false,
+                Ok(Some(change)) => changes.push(change),
+                Ok(None) => break true,
+                Err(_) => break false,
+            }
+        };
+        Self {
+            from,
+            to,
+            walked: if complete {
+                Walked::Whole(changes)
+            } else {
+                Walked::Unsharable
+            },
+        }
+    }
+}
+
 /// The index root a revision pins — `None` for an unborn branch,
 /// which has no tree at all.
 fn tree_hash(revision: &Option<Revision>) -> Option<Blake3Hash> {
@@ -875,20 +994,44 @@ where
         let previous = index_at(pinned);
         let next = index_at(target);
 
-        let changes = previous.differentiate_within(&next, &scope, &storage, &storage);
-        let mut changes = Box::pin(changes);
+        let difference = match self.shared_difference(pinned, target) {
+            Some(difference) if matches!(difference.walked, Walked::Once) => {
+                let difference =
+                    Arc::new(Difference::between(&previous, &next, pinned, target, &storage).await);
+                self.share(Arc::clone(&difference));
+                difference
+            }
+            Some(difference) => difference,
+            None => {
+                let difference = Arc::new(Difference {
+                    from: pinned,
+                    to: target,
+                    walked: Walked::Once,
+                });
+                self.share(Arc::clone(&difference));
+                difference
+            }
+        };
+        let changed = if matches!(difference.walked, Walked::Whole(_)) {
+            Changed::Shared(difference)
+        } else {
+            Changed::Scoped(
+                Box::pin(previous.differentiate_within(&next, &scope, &storage, &storage))
+                    .try_collect()
+                    .await
+                    .map_err(|error| {
+                        EvaluationError::Store(format!("subscription diff: {error}"))
+                    })?,
+            )
+        };
         let mut subjects = BTreeSet::new();
         let mut asserted = Vec::new();
         let mut retracted = Vec::new();
         // A fact change surfaces once per index order; dedup on the
         // datum triple, per direction.
         let mut seen = BTreeSet::new();
-        while let Some(change) = changes
-            .try_next()
-            .await
-            .map_err(|error| EvaluationError::Store(format!("subscription diff: {error}")))?
-        {
-            let entry = match &change {
+        for change in changed.within(&self.demand) {
+            let entry = match change {
                 Change::Add(entry) => entry,
                 Change::Remove(entry) => entry,
             };
@@ -900,7 +1043,7 @@ where
             // Tombstone-valued entries carry no datum: their effect
             // (if any) surfaces as the paired datum-bearing change
             // at the same key.
-            let arriving = matches!(&change, Change::Add(_));
+            let arriving = matches!(change, Change::Add(_));
             if let State::Added(datum) = &entry.value {
                 let spilled = fetch_spilled(&raw_store, &entry.key)
                     .await
@@ -935,6 +1078,31 @@ where
                 retracted,
             })
         }
+    }
+
+    /// Leave `difference` as the branch's last.
+    fn share(&self, difference: Arc<Difference>) {
+        *self
+            .branch
+            .differences()
+            .lock()
+            .expect("difference memo lock") = Some(difference);
+    }
+
+    /// The branch's shared difference from `from` to `to`, when the last
+    /// subscription to walk one walked this pair.
+    fn shared_difference(
+        &self,
+        from: Option<Blake3Hash>,
+        to: Option<Blake3Hash>,
+    ) -> Option<Arc<Difference>> {
+        self.branch
+            .differences()
+            .lock()
+            .expect("difference memo lock")
+            .as_ref()
+            .filter(|difference| difference.from == from && difference.to == to)
+            .cloned()
     }
 
     /// Classify what the session overlay changed since the pinned
@@ -1466,6 +1634,112 @@ mod tests {
                 (claim.of.clone(), name)
             })
             .collect()
+    }
+
+    /// The subscriptions on one branch that poll across the same head
+    /// move share one walk of the trees between them, and each still
+    /// learns exactly its own change: the display of the renamed person
+    /// and the list of everyone hear of it, the other displays do not.
+    #[dialog_common::test]
+    async fn it_shares_one_walk_of_a_head_move_between_subscriptions() -> anyhow::Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let people = (0..6)
+            .map(|_| Entity::new())
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut transaction = branch.transaction();
+        for (index, person) in people.iter().enumerate() {
+            transaction = transaction.assert(
+                the!("person/name")
+                    .of(person.clone())
+                    .is(format!("person {index}")),
+            );
+        }
+        transaction.commit().publish().perform(&operator).await?;
+
+        let display = |person: &Entity| {
+            AttributeQuery::from(
+                Term::<Relation>::from(the!("person/name"))
+                    .of(Term::from(person.clone()))
+                    .is(Term::<String>::var("v")),
+            )
+        };
+        let mut list = branch.subscribe(names_query());
+        let mut displays = people
+            .iter()
+            .map(|person| branch.subscribe(display(person)))
+            .collect::<Vec<_>>();
+        list.poll(&operator).await?;
+        for subscription in &mut displays {
+            subscription.poll(&operator).await?;
+        }
+
+        let renamed = people[2].clone();
+        branch
+            .transaction()
+            .assert(
+                the!("person/name")
+                    .of(renamed.clone())
+                    .is("renamed".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let mut heard = Vec::new();
+        for (index, subscription) in displays.iter_mut().enumerate() {
+            if subscription.poll(&operator).await?.is_some() {
+                heard.push(index);
+            }
+            let fresh = branch
+                .select(display(&people[index]))
+                .perform(&operator)
+                .try_vec()
+                .await?;
+            let (mut maintained, mut expected) = (names(subscription.results()), names(&fresh));
+            maintained.sort();
+            expected.sort();
+            assert_eq!(
+                maintained, expected,
+                "display {index} holds a fresh evaluation"
+            );
+        }
+        assert_eq!(
+            heard,
+            vec![2],
+            "only the renamed person's display hears of it"
+        );
+        assert!(
+            matches!(
+                branch
+                    .differences()
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .map(|d| &d.walked),
+                Some(super::Walked::Whole(_))
+            ),
+            "the second subscription across the head move leaves the whole difference"
+        );
+
+        let delta = list
+            .poll(&operator)
+            .await?
+            .expect("the list hears of the rename");
+        assert!(names(&delta.asserted).contains(&(renamed, "renamed".to_string())));
+        let fresh = branch
+            .select(names_query())
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        let (mut maintained, mut expected) = (names(list.results()), names(&fresh));
+        maintained.sort();
+        expected.sort();
+        assert_eq!(maintained, expected, "the list holds a fresh evaluation");
+        Ok(())
     }
 
     /// The branch's session overlay participates in subscription

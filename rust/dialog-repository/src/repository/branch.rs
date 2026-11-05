@@ -224,6 +224,11 @@ pub struct Branch {
     /// (profile, issuer) pair so a branch handle driven under a different
     /// authority re-derives rather than serving a stale identity.
     identity_cache: Arc<Mutex<Option<CommitIdentity>>>,
+    /// The last tree difference a subscription on this branch computed,
+    /// shared by every clone, so the subscriptions that poll across the
+    /// same head move walk the trees once between them rather than once
+    /// each. See [`Differences`](subscription::Differences).
+    differences: subscription::Differences,
     /// Memo of the schema metadata every query folds into its overlay.
     /// Deriving it hashes and base58-renders the replica, branch, and
     /// revision entities, and it is asked for on every query, yet it only
@@ -668,6 +673,12 @@ impl Branch {
     /// Query with an application. Shortcut for `branch.query().select(query)`.
     pub fn select<Q: Application>(&self, query: Q) -> SelectQuery<'_, Q> {
         SelectQuery::new(self, query)
+    }
+
+    /// The memo of this branch's last tree difference, shared by its
+    /// subscriptions.
+    pub(crate) fn differences(&self) -> &subscription::Differences {
+        &self.differences
     }
 
     /// A shared handle to this branch's node cache, for seeding a read tree.
