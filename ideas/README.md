@@ -12,5 +12,5 @@ becomes a note in `notes/`.
 
 - [Single-file representation](single-file-format.md):
   [results](single-file-format-spike.md). About 20× smaller than
-  file-per-block, but it still grows with commits, and reading a node
-  costs about 10× a file read.
+  file-per-block on Stack Exchange and 12× on tonk-team, but it still
+  grows with commits, and reading a node costs 5–10× a file read.

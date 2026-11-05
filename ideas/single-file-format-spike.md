@@ -6,9 +6,10 @@ exists. It does not build the provider, so it has no perf gate numbers.
 
 ## Verdict
 
-**Size: yes. Growth: no. Reads: a real cost.** A tokenized file comes
-out about 20× smaller than file-per-block on the Stack Exchange replay,
-which clears the order-of-magnitude bar. But the frames, not the tokens,
+**Size: yes, barely on tonk. Growth: no. Reads: a real cost.** A
+tokenized file comes out about 20× smaller than file-per-block on the
+Stack Exchange replay and 11.6× on tonk-team's history, which clears the
+order-of-magnitude bar, the second only just. But the frames, not the tokens,
 are 80% of that file, and they grow with commits the way the directory
 does. The 20× is a constant factor on the same growth curve, not a curve
 that follows the live facts. What follows the live facts is not copying
@@ -20,12 +21,55 @@ Against the success bars:
 
 | bar | result |
 |---|---|
-| ≥ 10× smaller than file-per-block | **met**: 19× at 2048 commits, 20× at 4096 |
+| ≥ 10× smaller than file-per-block | **met**: 19× at 2048 commits, 20× at 4096; 11.6× on tonk-team |
 | grows with live facts, not commits | **not met**: 2.76× for 2× commits; the live tree grew 2.14× and the directory 2.84× |
 | get by hash still works and verifies | **met in the model**: all 14,779 frames realize to their original block byte for byte, so their hashes match |
 | reads near the block store | **not met as built**: realizing a node costs 100–125 µs, against 11 µs to read its file (24 µs with blake3) |
 | perf gate within tolerance | **not measured**: there is no provider yet |
 | crash leaves the last commit intact | **not measured** |
+
+## tonk-team
+
+The same census on tonk-team, rebuilt from its head tree's history region
+(see "Running it on a real replica" below) and replayed through today's
+code: 1457 revisions from 108 origins, 44,362 claims. The replayed live
+tree is 24.7 MiB; the real head on disk is 30 MB, so the reconstruction is
+close. Its 653 MB of blobs (uploads and spilled values) stay outside every
+model, as they do in both stores.
+
+MiB on disk, cumulative:
+
+| commits | live tree | fs | log+zstd | log+delta/32 | **tokens+frames** | tokens + zstd frames | tokens + delta frames/32 | stream |
+|---|---|---|---|---|---|---|---|---|
+| 364 | 9.6 | 88.4 | 18.8 | 4.4 | **9.6** | 5.5 | 4.0 | 1.5 |
+| 728 | 18.4 | 221.5 | 46.0 | 10.4 | **23.4** | 13.8 | 9.8 | 3.6 |
+| 1092 | 20.4 | 316.7 | 65.2 | 13.0 | **30.2** | 17.2 | 11.3 | 4.6 |
+| 1457 | 24.7 | 493.3 | 104.1 | 18.4 | **42.6** | 23.3 | 13.8 | 6.9 |
+
+Per commit over the second half, in KB: fs 373, tokens+frames 27 (frames
+21.6), tokens + delta frames/32 5.6, live tree growth 8.9.
+
+- **Size: only just met.** 11.6× smaller than fs, against 20× on Stack
+  Exchange. Of its 11.5 MiB of tokens, 7.7 MiB are opaque keys referenced
+  about 3 times each: the history and coverage regions, whose keys are
+  unique per record and which the idea's tokenizer treats as one token.
+  tonk writes a lot of history per fact; a tokenizer that split those keys
+  (origin, edition, entity, attribute, value) would share more of them.
+- **Growth: not met, same as Stack Exchange.** Doubling the commits from
+  728 to 1457 grew the live tree 1.34× and the tokens 1.34×, but the
+  frames 2.09× and fs 2.23×.
+- **Where the bytes come from:** segments again, 436 of 493 MiB (88%).
+- **Reads:** realizing a node costs 75–89 µs, against 9 µs to read its
+  file (16 µs with blake3).
+- **Per commit, today's code writes about 340 KB** on this history, not
+  the 2 MB the idea cites for the 2 GB replica. Either that replica's
+  commits were larger, or the tree has improved since it was written. It
+  is worth knowing which before using 2 GB as the case for the format.
+
+Caveats: 108 writers' revisions replay as one line in edition order, not
+as the merges they were; 6,653 claims in the reserved `dialog.` namespace
+(delegations and the like, which dialog writes itself) replay under a
+namespace of the same length.
 
 ## How it was measured
 
@@ -201,11 +245,9 @@ Checked the same way: the 1024-commit replay on disk rebuilds as exactly
 
 ## Not done
 
-- **tonk-team, or a replica like the 2 GB one.** The doc asks for it
-  first. This session could read tonk-team only as facts at its head
-  through the Tonk MCP, with no blocks and no history, and could not
-  reach the replica on disk. The `archive` mode above is the way to
-  measure it where it lives.
+- **The 2 GB replica itself.** tonk-team's history is measured above,
+  replayed through today's code. The replica that reached 2 GB held
+  blocks written by older code, and only that device has them.
 - A provider, the perf gate, crash recovery, BAO verification, memory
   cells. None of them is worth building until the frame representation
   is settled, because each one depends on it.

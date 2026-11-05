@@ -61,6 +61,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::str::FromStr as _;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
@@ -70,7 +71,7 @@ use dialog_artifacts::history::{Edition, Record};
 use dialog_artifacts::tree::{ArtifactTree, fetch_spilled};
 use dialog_artifacts::{
     ATTRIBUTE_KEY_TAG, Artifact, BLOB_KEY_TAG, Datum, DialogArtifactsError, ENTITY_KEY_TAG,
-    Instruction, Key, LoadBlob, Pick, State, VALUE_KEY_TAG, history_region_range,
+    Instruction, Key, LoadBlob, Pick, Relation, State, VALUE_KEY_TAG, history_region_range,
 };
 use dialog_baseline::metered::Meter;
 use dialog_baseline::nodes::TreeNode;
@@ -964,6 +965,7 @@ fn history(directory: &Path) -> anyhow::Result<Vec<Vec<Instruction>>> {
         .build()?;
     let mut revisions: BTreeMap<(Edition, [u8; 32]), Vec<Instruction>> = BTreeMap::new();
     let mut stand_ins = 0usize;
+    let mut reserved = 0usize;
     runtime.block_on(async {
         let tree = ArtifactTree::from_hash(head.clone());
         let (from, to) = history_region_range();
@@ -987,8 +989,19 @@ fn history(directory: &Path) -> anyhow::Result<Vec<Vec<Instruction>>> {
             let assertion = record.is_assertion();
             let claim = record.claim().clone();
             let superseding = !claim.cause.versions().is_empty();
+            // Facts dialog writes for itself (delegations, revision
+            // records) sit in the reserved `dialog.` namespace, which an
+            // instruction may not write: they replay under a namespace of
+            // the same length, so their keys keep their size and place.
+            let the = match claim.the.as_str().strip_prefix("dialog.") {
+                Some(rest) => {
+                    reserved += 1;
+                    Relation::from_str(&format!("dialox.{rest}"))?
+                }
+                None => claim.the,
+            };
             let artifact = Artifact {
-                the: claim.the,
+                the,
                 of: claim.of,
                 is: claim.is,
                 cause: None,
@@ -1007,7 +1020,7 @@ fn history(directory: &Path) -> anyhow::Result<Vec<Vec<Instruction>>> {
     })?;
     let origins: HashSet<[u8; 32]> = revisions.keys().map(|(_, origin)| *origin).collect();
     eprintln!(
-        "history of {}: head {head}, {} revisions from {} origins, {} claims, {stand_ins} spilled values stood in for",
+        "history of {}: head {head}, {} revisions from {} origins, {} claims ({reserved} in the reserved namespace), {stand_ins} spilled values stood in for",
         directory.display(),
         revisions.len(),
         origins.len(),
