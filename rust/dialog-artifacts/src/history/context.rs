@@ -83,6 +83,23 @@ impl ContextCache {
         Self::default()
     }
 
+    /// A fresh cache remembering up to `capacity` contexts.
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            contexts: Cache::with_capacity(capacity),
+        }
+    }
+
+    /// How many contexts the cache remembers now.
+    pub fn len(&self) -> usize {
+        self.contexts.len()
+    }
+
+    /// Whether the cache remembers nothing.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     /// The context of `head`: answered from memory when possible,
     /// otherwise derived by the O(ancestry) [`context_of`] walk and
     /// remembered.
