@@ -336,6 +336,51 @@ commits and would sit in memory.
   bytes without a new provider and cut every encoding above with them.
   `node_size_sweep` and `live_census` are the starting points.
 
+## Memory while querying
+
+`rust/dialog-baseline/examples/memory_census.rs` reads a replica's head
+through the paths a query uses (`scan`, `scan_owned`) under a counting
+allocator: every fact once through the attribute index, then every fact
+materialized. tonk-team's head (20,247 facts) and the 4096-commit Stack
+Exchange replay written to disk (12,294 facts):
+
+| | tonk-team | SE |
+|---|---|---|
+| node cache: blocks it holds | 5.6 MiB (135 nodes) | 6.4 MiB (124 nodes) |
+| node cache: what the nodes derive, uncounted by its budget | 5.6 MiB | 7.5 MiB |
+| result of every fact | 25.7 MiB, 1,331 B a row | 18.7 MiB, 1,593 B a row |
+| · of which entity, attribute and value bytes | 11.8 MiB | 5.3 MiB |
+| the same result as shared tokens and rows of ids | 10.6 MiB (2.4× less) | 5.1 MiB (3.6× less) |
+
+Per row of the result:
+
+| | tonk-team | SE |
+|---|---|---|
+| attribute | 137 B, for about 20 B of name | 128 B |
+| entity | 157 B, for about 45 B of URI | 130 B |
+| value | 666 B, for about 540 B of payload | 631 B |
+| cause | 53 B | 43 B |
+| the row itself | 96 B | 96 B |
+
+- **The duplication is in decoding, not storage.** Every decoded row gets
+  its own `Arc` for its attribute and its entity, though tonk-team has 549
+  distinct attributes (37 rows each) and SE 9 (1,366 rows each). An
+  attribute costs a row about 130 bytes where an id would cost 4.
+- **Values are mostly distinct** on both datasets (2.1 and 1.6 rows per
+  value) and are most of the bytes, so sharing values saves less than
+  sharing entities and attributes.
+- **A warm node costs about twice its block.** Nodes memoize their decoded
+  keys, key hashes and summary, which the cache does not charge to its
+  budget. The decoded keys repeat entity, attribute and value bytes for
+  every entry, in each of the three indexes.
+
+What the format changes and what it does not: tokens with ids make
+interning free (an id indexes a table of shared values), and a node's
+decoded keys could be rows of ids into the token region instead of key
+bytes. But neither needs the file. An interner on the decode path, keyed by
+the entity's and attribute's key bytes, removes most of the per-row
+overhead today, with any archive.
+
 ## Running it on a real replica
 
 The census also reads a replica's file-per-block archive directly, every
