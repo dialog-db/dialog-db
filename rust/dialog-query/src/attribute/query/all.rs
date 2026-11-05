@@ -169,10 +169,7 @@ impl AttributeQueryAll {
         version: Option<(Edition, [u8; 32])>,
     ) -> Result<(), EvaluationError> {
         let claim = Claim::from(artifact);
-        let standing = Standing {
-            version,
-            cause: claim.cause().clone(),
-        };
+        let standing = Standing::new(version, claim.cause().clone());
         candidate.reserve(4);
         if let Some(name) = self.the.shared_name() {
             candidate.bind_variable(name, self.the.binding_kind(), Value::from(claim.the()))?;

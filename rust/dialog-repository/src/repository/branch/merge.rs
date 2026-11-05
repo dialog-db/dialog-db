@@ -13,7 +13,9 @@
 //! racing itself on one branch mints the same edition twice, and the
 //! loser's version is already taken; that race is refused instead.
 
+use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::blob::Import as BlobImport;
+use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::Read as BlobRead;
 use std::collections::BTreeSet;
 use std::mem;
@@ -31,8 +33,9 @@ use dialog_effects::authority::{Attest, Identify, OperatorExt as _};
 use dialog_effects::memory::{Publish, Resolve};
 
 use super::context::{held, own_count, published_context};
+use crate::repository::archive::erased;
 use crate::repository::archive::persist;
-use crate::{Branch, CommitError, Index, NetworkedIndex, PublishError, Revision, TreeReference};
+use crate::{Branch, CommitError, Index, PublishError, Revision, TreeReference};
 
 /// How many times merging tries to publish its merge before giving
 /// up: the merge itself can lose to yet another writer.
@@ -57,7 +60,9 @@ where
         + Provider<Publish>
         + Provider<Identify>
         + Provider<Attest>
-        + Provider<crate::Hydrate>
+        + Provider<ArchiveLoad>
+        + Provider<BlobLoad>
+        + dialog_common::Holds
         + ConditionalSync
         + 'static,
 {
@@ -70,9 +75,10 @@ where
             // merge with, and adopting over a deletion is not ours to do.
             return Err(lost.into());
         };
-        let store = NetworkedIndex::erased(env, branch.archive().index(), branch.fallback());
+        let store = erased(env);
+        let catalog = branch.archive().index();
         let Some(context) =
-            published_context(&theirs, &branch.contexts(), &store, &branch.node_cache()).await?
+            published_context(&theirs, &branch.contexts(), &catalog, &store).await?
         else {
             // A head minted before heads carried their context: its
             // ancestry is not known without a walk, so it is not merged.
@@ -118,19 +124,21 @@ where
         + Provider<Resolve>
         + Provider<Identify>
         + Provider<Attest>
-        + Provider<crate::Hydrate>
+        + Provider<ArchiveLoad>
+        + Provider<BlobLoad>
+        + dialog_common::Holds
         + ConditionalSync
         + 'static,
 {
-    let store = NetworkedIndex::erased(env, branch.archive().index(), branch.fallback());
-    let tree = |reference: &TreeReference| {
-        Index::from_hash_with_cache(NodeHash::from(*reference.hash()), branch.node_cache())
-    };
+    let store = erased(env);
+    let catalog = branch.archive().index();
+    let tree =
+        |reference: &TreeReference| Index::at(catalog.clone(), NodeHash::from(*reference.hash()));
     // No base means the commit's ancestry and the head's share nothing:
     // everything the commit holds is its change.
     let base_tree = match base {
         Some(base) => tree(&base.tree),
-        None => Index::empty_with_cache(branch.node_cache()),
+        None => Index::empty_in(catalog.clone()),
     };
     let mine_tree = tree(&mine.tree);
     let mut merged = tree(&theirs.tree);
@@ -138,8 +146,8 @@ where
     // What this commit changed since its base, history first so its
     // supersession records retire the claims they cover before its data
     // lands, screened against the winner as a pull screens an upstream.
-    let tree_store = store.clone();
-    let screen_store = store.clone();
+    let tree_store = store;
+    let screen_store = store;
     let history_scope = merge::history_scope();
     let data_scope = merge::data_scope();
     let history = merge::screen_history(
@@ -164,7 +172,8 @@ where
                 dialog_search_tree::Prefetch::Eager,
             ),
             observed.clone(),
-            store.clone(),
+            store,
+            branch.archive(),
         ),
         context.clone(),
     );
@@ -175,7 +184,7 @@ where
             .integrate(futures_util::StreamExt::chain(history, data), &tree_store),
     )
     .await?
-    .persist(delta.blocks())?;
+    .persist(delta.blocks(), &tree_store)?;
 
     // The merged tree started as theirs, so its context region is what
     // theirs held.
@@ -202,7 +211,7 @@ where
         Vec::new(),
     );
     record.signature = Attest::new(record.payload()?).perform(env).await?;
-    let manifest = merged.format_manifest(store.clone(), &delta).await?;
+    let manifest = merged.format_manifest(store, &delta).await?;
     merged_context.record(revision.version());
     let mut entries = record.entries(&manifest)?;
     entries.entries.extend(region_writes(
@@ -215,13 +224,7 @@ where
     revision.publish_region(own_count(&revision, &merged_context));
     revision.signature = Attest::new(revision.payload()).perform(env).await?;
 
-    persist(
-        &branch.archive().index(),
-        &branch.node_cache(),
-        &mut delta,
-        env,
-    )
-    .await?;
+    persist(&catalog, &mut delta, env).await?;
     Ok((revision, merged_context))
 }
 

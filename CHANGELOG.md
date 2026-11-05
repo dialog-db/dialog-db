@@ -14,6 +14,453 @@ says how to cut a release.
 
 ## Unreleased
 
+### Distinct members inserted between the same neighbours get distinct positions
+
+A position's fractional tail comes from a bias derived from the member's
+identity. The bias was the first six base62 digits of the identity bytes,
+and base62 is a big-endian re-encoding, so those digits depend only on the
+identity's leading bytes and its length. Every `did:key:z6Mk…` entity
+shares both, so every one of them got the same bias (`13lS7E`, or
+`FvVVmY` one character shorter). The bias is now taken from the identity's
+BLAKE3 digest.
+
+What this changes for you:
+
+- `Bias::derive` returns a different bias for the same identity, so
+  `dialog_artifacts::position::insert` and the `dialog/position` formula
+  derive different positions than before for the same member and
+  neighbours. Derivation is still deterministic: every replica on this
+  release derives the same position for the same insert.
+- Two different members inserted into the same slot used to derive the
+  same position, so a relation that keeps one member per position kept
+  only one of them. They now land apart.
+
+Why: the bias exists so distinct members disperse while the same member
+converges. Read off the identity's head it converged for everything, so
+concurrent inserts into one slot collided instead of interleaving.
+
+### A tree reads its catalog's blocks through `Load` on the env, and the env hydrates
+
+[#735](https://github.com/dialog-db/dialog-db/pull/735), after
+[#730](https://github.com/dialog-db/dialog-db/pull/730); argued in
+[notes/tree-reads-as-effects.md](./notes/tree-reads-as-effects.md).
+
+A search tree is now a root under a catalog, and it reads a node by
+performing the new `dialog_effects::archive::Load` command on the
+environment it is given: the block its `Get` names, from the local
+archive, or else hydrated from where the environment knows the subject's
+blocks live. A spilled value is read the same way through
+`dialog_effects::blob::Load`. The environment holds the checked-node
+cache (`NodeCache::of(env, subject)`) and the hydration routes
+(`dialog_network::Routes`, which a branch registers when it opens), so a
+peer answers every tree read the same way, sharing in-flight hydrations
+through its `Hydrate` scheduler. The store wrappers that bridged the old
+subject-less `LoadBlock` to the env are gone. `Get` is unchanged and
+never hydrates.
+
+What this changes for you:
+
+- `LoadBlock`, `LoadBlob`, `ArchiveReader`, `Nodes`, `Cached`,
+  `ArtifactNodes` and `MemoryBlocks` are removed. A tree reads through any
+  `Env: Provider<archive::Load> + Holds + ConditionalSync` (plus
+  `Provider<blob::Load>` for artifact trees, and `Provider<archive::Get>`
+  where a difference is computed). A test store is
+  `dialog_search_tree::helpers::Blocks`, a `Volatile` under a test
+  catalog.
+- `dialog_repository::LocalIndex` and `NetworkedIndex` are removed: read
+  through the env itself (`tree.get(key, &env)`, `select.execute(&env)`).
+  `NetworkedIndex::with_priority(p)` is `tree.ranked(p)`; a tree that
+  must read only what the replica holds is `tree.locally()` (or
+  `Load::locally()` for a single read). `load_or_hydrate`,
+  `load_blob_or_hydrate`, `hydrate` and `RemoteFallback` stay where they
+  were exported.
+- `PersistentTree::empty()` and `PersistentTree::from_hash(root)` are
+  `PersistentTree::empty_in(catalog)` and `PersistentTree::at(catalog,
+  root)`; `empty_with_manifest`, `TransientTree::new`,
+  `TransientTree::with_manifest`, `TransientTree::empty_with_manifest`,
+  `TransientTree::stitch`, `HitchhikerTree::empty`, `TreeHistory::from_root`,
+  `TreeHistory::empty` and `distribution::capture` take the catalog, and
+  `Accessor::new(env, catalog)` does too. `PersistentTree::catalog()`,
+  `with_root`, `reading()`, `ranked(priority)` and `locally()` are new;
+  `NodeCache::of`, `NodeCache::hold` and `NodeCache::held_by` find and
+  place the cache an env holds.
+- `fetch_spilled`, `fetch_spilled_cached`, `fetch_spilled_reference` and
+  `merge::observe_revisions` take the archive the value lives in; a
+  spilled value is read by `load_spill`.
+- `Branch::history`, `Snapshot::history`, `Branch::log`, `Snapshot::log`,
+  `Select::perform` and `Select::estimate_perform` ask less of the env
+  (the two loads and `Holds`), and the commands that read trees ask
+  `Holds` of it. Every peer and session already holds.
+- `HeldCaches` holds its node cache where trees find it, so the budget,
+  `release` and `clear` govern every tree read through the env, and an
+  env given its own `HeldCaches` before anything opens keeps nodes under
+  that budget.
+- A borrowed environment is an environment: `&T` provides every command
+  `T` provides (`dialog_capability::Provider`) and holds what `T` holds
+  (`dialog_common::Holds`).
+- A resolver premise (`tree/node`, `tree/span`, `tree/key`, `tree/value`)
+  loads the block it names against the wildcard subject's archive
+  (`dialog_query::resolver::anywhere`), and `Scope` asks for the two
+  loads instead of `LoadBlock` and `LoadBlob`. A query over several lines
+  answers from each line's catalog in turn.
+- Any read of a repository one of whose open branches tracks a remote
+  can hydrate a block it lacks, a snapshot's and a transaction's staged
+  view included, and a branch can hydrate a block only a sibling's remote
+  holds. A miss tries every remote the subject's open branches track, in
+  the order they were opened and each in its tracking order, where before
+  only the reading branch's first remote was asked; a miss no reachable
+  remote answers fails naming the first remote that could not be reached,
+  rather than reading as absent. With no remote tracked a read is local,
+  as before. An export that does not download reads only what the replica
+  holds.
+- A push's novelty walk, its subtree forwarding and its spilled-value
+  shipping read only the local archive, by `Get`, and never hydrate.
+
+Why: the tree's read was a command with no subject, so every reader
+needed a wrapper that knew the catalog, another that knew where to
+hydrate from (worked out per read by `Branch::fallback`, which was about
+9% of a worker's CPU), and the node cache was plumbed through them. Read
+as a capability on the env, there is one way to get a node, which goes
+through the cache and the env's hydration, and nothing to wrap.
+
+### A difference reads a leaf both sides share only at the keys its buffered ops touch
+
+[#736](https://github.com/dialog-db/dialog-db/pull/736)
+
+When two trees hold the same leaf and differ only in the ops a buffer
+above routes to it, the comparison now resolves just the keys those
+ops cover: each side's winning op, or the stored entry where that side
+has none. Before, the entry walk streamed every stored entry of the
+leaf on both sides and dropped the ones that matched. A commit buffered
+at the root routes each op to a whole leaf, so every subscription poll
+over the commit decoded every entry of each leaf the commit's ops
+landed in, whatever its scope. A scoped difference now resolves only
+the covered keys inside its scope, so a poll whose scope the commit
+missed reads nothing of those leaves. The buffered fast path also
+checks the leftmost separator before decoding any buffer, since a
+root's is always empty and the decode could never be used.
+
+What this changes for you:
+
+- A subscription poll after a commit costs in proportion to the ops
+  the commit buffered, not to the size of the leaves they land in.
+  `subscribe-fanout` and `subscribe-pulled` (201 polls after a one-note
+  commit) go from about 203M to about 39M instructions, and
+  `subscribe-repoll` from 14.2M to 12.6M.
+- A poll's cost no longer depends on where a written value sorts. A
+  note body sorting into a leaf that every note subscription's
+  rule-discovery scope crosses used to cost each of the 201 polls about
+  370k more instructions than one sorting elsewhere.
+- `differentiate`, `differentiate_within`, `changes` and
+  `changes_within` report the same changes. `TreeDifference::changes`
+  on a difference built by `compute_within` no longer yields
+  out-of-scope spillover from such a leaf; `changes_within` already
+  filtered it.
+
+Why: the stored entries of a shared leaf are the same bytes on both
+sides, so only a key an op covers can differ, and decoding the rest
+was work every subscriber repeated for every commit.
+
+### A tree reads every node through its store, which keeps what it checked
+
+[#730](https://github.com/dialog-db/dialog-db/pull/730)
+
+A search tree no longer carries a node cache. The store a tree reads
+through implements the new `dialog_search_tree::Nodes` trait: `kept()`
+names the node cache it holds, if any, and `load_node()` answers a read
+from that cache, else from the store's blocks, checking the node once and
+keeping it. Every tree read goes there: point lookups, scans, traversals,
+differences, edits loading the nodes they rewrite, and persists, which
+keep the nodes they seal in the same cache. A new read path therefore
+cannot bypass the cache, as the difference, `traverse_available`, push's
+subtree forwarding, diagnose and `canonical_divergences` did. In the
+repository the cache is the line's: `LocalIndex` holds the handle and
+`NetworkedIndex` forwards it.
+
+What this changes for you:
+
+- Every tree method that took `Env: Provider<LoadBlock>` takes
+  `Env: Nodes<Key, Value>`. A block store that keeps nothing implements
+  it in one line (`impl<K, V> Nodes<K, V> for MyStore {}`), as
+  `MemoryBlocks`, `ObservingBlocks` and `JournaledBlocks` do; wrap one in
+  `Cached::new(cache, &store)` to keep the nodes read through it.
+- `PersistentTree::node_cache`, `PersistentTree::empty_with_cache` and
+  `PersistentTree::from_hash_with_cache` are removed: use `empty()` and
+  `from_hash(root)`, and give the store the cache.
+  `PersistentTree::empty_with_manifest` takes only the manifest.
+- `TransientTree::new(root)`, `TransientTree::with_manifest(root,
+  manifest)` and `TransientTree::empty_with_manifest(manifest)` drop
+  their cache argument.
+- `TransientTree::persist(delta, store)`, `HitchhikerTree::persist(delta,
+  store)` and `HitchhikerTree::persist_mut(delta, store)` take the store
+  whose cache keeps the sealed nodes. `TransientNode::persist`,
+  `TransientNode::persist_mut` and `Node::into_link` take
+  `Option<&NodeCache>`.
+- `Accessor::new(env)` takes only the store.
+- A difference's `MissingBlocks::Deny` side reads through the store's
+  cache. A `MissingBlocks::Boundary` side reads the store's blocks
+  directly, so absence is the store's own word.
+- A store that keeps nothing skips the range scan's sibling read-ahead
+  and an integration's open-ahead pass, which would only read each node
+  twice.
+- `dialog_artifacts::ArchiveReader` requires `ArtifactNodes`
+  (`Nodes<Key, State<Datum>>`). `DeltaOverlay` keeps what its
+  environment keeps.
+- `TreeHistory::from_root_with_cache` and `TreeHistory::empty_with_cache`
+  are removed: use `TreeHistory::from_root(root, store)` and the new
+  `TreeHistory::empty(store)`. `rekey_tree` drops its cache argument.
+  `distribution::capture` reads through the store.
+- `LocalIndex::new(env, catalog, nodes)` and `NetworkedIndex::new(env,
+  index, remote, nodes)` take the node cache the index keeps.
+- `Select::execute(store)` probes the root and scans through the store,
+  so a store passed in should keep a node cache for repeated selects to
+  be answered from memory.
+- Reads that went around the cache now hit it: a subscription poll's
+  difference, a snapshot export's walk and a preload walk read the
+  line's cache, and a select's scan no longer reads its root again
+  after the probe. The `subscribe-repoll` perf scenario reads no block
+  from the archive where it read 6, and runs 10.6% fewer instructions.
+- A poll after a commit that adds one note, with a subscription per
+  note of 200 (the new `subscribe-fanout` perf scenario), reads 0
+  blocks instead of 806 (32 MB). Every subscription diffs the same two
+  trees within its own demand, and the first to read a changed block
+  keeps it for the rest. In a browser over IndexedDB, which pays a
+  transaction per block read, a write from another device showed on a
+  200-note page in about 0.4 s instead of 2 to 3 s.
+
+Why: the cache was carried by trees and threaded through `*_with_cache`
+constructors, so every read path had to remember to use it, several did
+not, and two places copied the cache-then-store read by hand. Putting it
+on the store makes the cached read exist in one place and every read go
+through it.
+
+### A read finds its remote without deriving every upstream
+
+[#730](https://github.com/dialog-db/dialog-db/pull/730)
+
+Every select, subscription poll and migration check asked the branch
+where a read held by reference falls back to, and the branch answered
+by building its full upstream list: deriving each upstream's sync
+target, a hash, and comparing every pair. It now takes the first route
+at a peer among the pulls and then the pushes, through
+`Tracking::first_remote_route`, so the answer is the same without that
+work. It was about 9% of a Tonk service worker's CPU while switching
+spaces.
+
+What this changes for you:
+
+- `Upstreams::fallback` is removed; `Branch::fallback` no longer builds
+  `upstreams()`.
+- A read's fallback is the one it was: the first upstream at a peer,
+  reachable or not, pulls before pushes, else the first synced route at
+  a peer.
+
+Why: the fallback is asked on every read, and the answer needs one
+route, not a hashed and deduplicated set of them.
+
+### A request the access service never answers is given up on, and a read is sent again
+
+[#727](https://github.com/dialog-db/dialog-db/pull/727)
+
+An invocation `dialog-remote-ucan` sends as an HTTP request (every one
+when the service names no socket, a block read or write, or the fallback
+when the socket does not connect) waited for its answer with no bound.
+One sent on a pooled connection the network had silently dropped, as a
+NAT or a mobile network does a quiet one, was never answered and never
+failed. It now waits as long as an invocation over the socket waits
+(`Liveness::answer`, 30 s by default), plus the time its payload takes
+to upload at 16 KiB/s, and is then aborted and answered as unavailable.
+
+What this changes for you:
+
+- A memory operation sent this way that the service does not begin
+  answering in time fails with `Rejection::Unavailable`, as one over a
+  silent socket already did; a blob read or write fails with a transport
+  error. Either may be tried again with an invocation of its own.
+- `UcanSite::with_liveness` now bounds these requests too.
+- A block or blob read the service has not begun answering after 3 s
+  is sent again, up to seven copies (one more than the connections a
+  browser keeps to one host), and the first answer is taken. A
+  read that met connections the network forgot is answered in seconds
+  rather than failing after 30 s each. The copies carry one invocation,
+  so a service may see it presented more than once; the refusal of a
+  copy as replayed is not taken for the read's answer.
+
+Why: in tonk, a sync whose request was lost this way held the sync of
+every space behind it, so after a few minutes idle on a NATed network,
+changes from another device stopped arriving until the page reloaded.
+
+### A rule's conclusion under `last` succeeds the claim its body read
+
+Fixes [#724](https://github.com/dialog-db/dialog-db/issues/724)
+
+A deductive rule that reads a cell and derives another value for it,
+`x/status(e) := "todo" :- x/status(e) = "triage"`, rewrites the cell,
+the way a write does. Its conclusion stood as the newest fact its body
+consumed, which for such a rule is the very claim it rewrites, so the
+two tied on standing and a `last` read fell to value order: `"triage"`
+won over `"todo"`, and the reverse rewrite only appeared to work because
+`"triage"` sorts after `"todo"`. Inside its component the rule still
+reads the cell as a set, and its conclusion now remembers the values of
+the cell it displaced. When the component is derived, each cell's
+candidates are ranked by those successions, a rewrite after what it
+read and a rewrite of a rewrite one further, and the pick elects over
+the ranks: by version, then cause, then rank, then value. A conclusion
+of the value it read displaces nothing, so a rule deriving a relation
+from itself still settles; one whose body does not read the cell
+stands as before, as the newest fact it consumed.
+
+What this changes for you:
+
+- A `last` read of a cell some rule rewrites returns the rule's value,
+  whatever the values' order. Two rules rewriting one claim elect by
+  which one read newer facts, as concurrent writes do, and a later
+  write to the cell still wins. `all` is unchanged and keeps both.
+- A chain of rewrites reads its last link.
+- Rewrites that read each other back, `"triage"` to `"todo"` beside
+  `"todo"` to `"triage"`, form a cycle no rank orders. Its members
+  share one rank and are elected among as concurrent candidates, by
+  version then value, so a merge that closes such a cycle leaves every
+  query answerable. Before, the same pair also fell to value order,
+  but so did every rewrite.
+- `dialog_artifacts::Standing` carries a `succession`, zero for every
+  claim, and `Standing::new` builds a claim's standing. Code building a
+  `Standing` by its fields names the new one. Nothing stored or synced
+  changes: a rank is computed when a component is read.
+
+Why: a succession orders a cell's candidates by what each saw, and a
+conclusion that read a claim and replaced its value saw it. Letting
+value order decide made the result of a rewrite depend on the spelling
+of its values and on unrelated facts its body happened to read. Ranking
+at the exit rather than inside the fixpoint keeps the component
+positive and finite, so a cycle of rewrites converges instead of
+failing, which an open rule set has to guarantee under every merge.
+
+### A subscription learns of the readable change to a single-valued cell, not only the moved row
+
+Following [#710](https://github.com/dialog-db/dialog-db/pull/710) and
+[#714](https://github.com/dialog-db/dialog-db/pull/714)
+
+A poll told incremental maintenance which rows moved. What a rule reads
+of a single-valued attribute is the one claim its pick elects from the
+cell, and a cell can hold several: a session value over a committed one,
+or two committed claims after concurrent writers merged. A row moving
+then changes which claim is read without that claim moving: a session
+value outvoting a committed one reported only the session value arriving,
+and retracting a cell's winner reported only the winner going, not the
+claim beneath it coming back. A rule reading the cell from the entity it
+derives was unaffected, since that entity is re-derived whole; a
+recursive rule, or one reading another entity's cell by its value, kept
+a stale row. For every touched cell of an attribute some reachable rule
+reads as single-valued, when any reachable rule joins across entities or
+recurs, the poll now counts every claim the cell holds as asserted and
+every claim it held before as retracted, so the delta-join and the
+fixpoint learn of the readable change.
+
+What this changes for you:
+
+- A subscription over a recursive rule, a rule two concept layers deep,
+  or a rule reading another entity's single-valued attribute no longer
+  keeps a stale row when a session write outvotes a committed value or a
+  retraction uncovers an older one. Its results match a fresh evaluation.
+- Such a poll reads each touched single-valued cell once more. A
+  subscription whose rules are all entity-local pays nothing new.
+- `dialog_query::concept::query::affected::elected_attributes` and
+  `Elected` are new: the attributes a concept's reachable rules read as
+  single-valued.
+
+Why: the invariant that a maintained result equals a fresh evaluation
+holds only if maintenance learns of every change a reader can see, and
+election makes a cell's readable value a function of all its claims.
+
+### A subscription's view of the state before a change is exact over a cleared or committed-over overlay
+
+Following [#710](https://github.com/dialog-db/dialog-db/pull/710)
+
+A subscription maintained incrementally reads the state before a change
+from its pinned revision under the session overlay rewound to the pinned
+sequence. The rewind undid each instant's readable moves, and a session
+line holds a fact in two independent ways, stored in it and hidden
+beneath it by a tombstone, so one fact can be both at once: asserted over
+its own tombstone. The readable moves do not say which of the two an
+instant changed. A commit retracting such a fact takes the stored copy
+out and leaves the tombstone, which the rewind undid by lifting the
+tombstone instead; clearing the overlay lists the fact as removed and
+un-hidden at once, which the rewind took for no move. Either left the
+view before the change short of a fact, and a subscription could keep a
+row a fresh evaluation no longer returned. An instant now records how
+the line held each fact it moved, and the rewind restores exactly that.
+
+What this changes for you:
+
+- A subscription over a non-local rule no longer keeps a stale row after
+  an overlay clear, or a commit retracting a fact the overlay had
+  re-asserted over its own tombstone. Its results match a fresh
+  evaluation again.
+- `Instant` carries `found`: how the overlay held each fact the instant
+  moved, before it did, as a `Hold` (stored, hidden).
+
+Why: the rewind inverted a log that did not determine what it changed.
+Recording what each instant found makes the inverse exact for any move,
+instead of assuming one representation per fact.
+
+### A subscription retracts a row whose supporting facts go together
+
+[#710](https://github.com/dialog-db/dialog-db/pull/710), fixing
+[#708](https://github.com/dialog-db/dialog-db/issues/708)
+
+A concept subscription maintained incrementally finds the rows a change
+can affect by binding each changed fact into the premise it matches and
+joining the rule's remaining premises sideways. It joined them against
+the state after the change, so a row two retracted facts had supported,
+each under a different premise of a non-local rule, was found through
+neither: bound into its premise, each was joined against a state the
+other had already left. The row stayed in the subscription's results,
+with an empty delta, while a fresh evaluation had none. The join now
+runs against the state the derivation it looks for holds in: the state
+before the change for a fact that stopped being readable, the state
+after it for one that became readable, and the other way round under a
+negated premise, where the mirror image (two facts asserted together
+under two `unless` premises) was missed the same way. The state before
+a change is the subscription's pinned revision under the session
+overlay rewound to the pinned sequence, so a change through the overlay
+is covered too. An optional premise is read again on each side for the
+changed fact's subject, since the row through its old binding and the
+row through its new one both change; before, a row that came to exist
+because an optional value went absent, or stopped existing because one
+arrived, was missed the same way.
+
+What this changes for you:
+
+- `dialog_query::concept::query::affected::affected_entities` takes the
+  asserted and retracted facts separately, the environment of the state
+  after the change, and a function yielding the state before it, in
+  place of one list of facts and one environment.
+
+- A poll after a commit or an overlay instant that retracts more than
+  one fact supporting the same row, or asserts more than one under
+  negated premises, now moves that row, through the maintenance path,
+  where it used to keep it with an empty delta. `Subscription::results`
+  matches a fresh evaluation again.
+- A subscription whose rule has one premise that does not bind the
+  head, such as a department's salaries derived from each member's,
+  is now maintained per head instead of recomputed on every poll: the
+  join keeps the premise the change was bound into, so it reaches the
+  head through it. An election the subscription reads under (`max`,
+  `last`) is per entity, so re-deriving the entity takes it again.
+- A concept subscription first polled before the branch's first commit
+  has no revision to read the state before a change from, so a poll of
+  it that needs that state (a retraction, or an assertion under a
+  negation, through the session overlay) recomputes instead of
+  maintaining, until the branch has a revision. Its results are the
+  same.
+
+Why: a derivation a change touches holds on exactly one side of the
+change, and its other premises hold only there. Joining every change
+against the new state is exact for one changed fact, since every other
+premise reads the same facts on both sides, and silently incomplete for
+two.
+
 ### A difference fetches the blocks it reads a batch at a time
 
 [#690](https://github.com/dialog-db/dialog-db/pull/690), part of [#646](https://github.com/dialog-db/dialog-db/issues/646)
@@ -431,6 +878,14 @@ has a tree to canonicalize even when the link itself wrote nothing.
 
 #### Compatibility and migration
 
+- Nothing stored or synced changes for trees reading through `Load`:
+  blocks, nodes, spilled values and their hashes are the same bytes,
+  `Get`'s wire shape is unchanged, nothing is rewritten on upgrade, and an
+  older release reads everything this one writes. `Load` is a local
+  command and never crosses the wire; what changes is which reads may
+  hydrate a block the replica lacks (any read of a repository an open
+  branch of which tracks a remote), and that a hydrated block is written
+  back locally as before. Nothing for an embedder to run.
 - A reset that moves a branch forward only changes nothing stored or
   synced, and rewrites nothing. Heads an earlier release forked by a
   takeover and a commit keep their fork; nothing finds or repairs it.
@@ -1387,6 +1842,16 @@ thread multiplies whatever it holds by the size of the thread pool.
 
 ### Compatibility and migration
 
+- Positions already stored keep their bytes and their order: nothing is
+  rewritten, and both releases read every position the other writes. Only
+  newly derived positions differ. An older replica and this one derive
+  different positions for the same insert, so the same insert made on both
+  no longer converges to one entry; each still lands between the
+  neighbours it named.
+- Nothing stored or synced changes for the node cache moving to the
+  store: trees, nodes and their hashes are the same bytes, nothing is
+  rewritten on upgrade, and an older release reads everything this one
+  writes. Only how often a node is read from the archive changes.
 - Nothing stored changes for the difference that prunes shared
   subtrees: no stored data is rewritten, trees are laid out as before,
   and an older release reads everything this one writes. Only how many

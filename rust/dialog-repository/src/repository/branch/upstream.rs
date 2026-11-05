@@ -191,16 +191,6 @@ impl Upstreams {
             self.0.push(upstream);
         }
     }
-
-    /// Where reads held by reference fall back to: the first upstream
-    /// at a peer, reachable or not.
-    pub(crate) fn fallback(&self) -> RemoteFallback {
-        self.0
-            .iter()
-            .map(Upstream::fallback)
-            .find(|fallback| !matches!(fallback, RemoteFallback::None))
-            .unwrap_or(RemoteFallback::None)
-    }
 }
 
 impl FromIterator<Upstream> for Upstreams {
@@ -370,6 +360,17 @@ impl Tracking {
             .iter()
             .map(|synced| synced.route.upstream(host, Some(synced.tree.clone())))
             .collect()
+    }
+
+    /// The first route at a peer, reachable or not, among the pulls and
+    /// then the pushes: where reads held by reference fall back to.
+    pub(crate) fn first_remote_route(&self) -> Option<&Route> {
+        let resolved = self.resolved.as_ref()?;
+        resolved
+            .pulls
+            .iter()
+            .chain(resolved.pushes.iter())
+            .find(|route| !matches!(route, Route::Local { .. }))
     }
 
     /// The upstreams pulled from, each with its sync state.
@@ -582,6 +583,48 @@ mod tests {
     use super::{Bases, Target, Tracking, Upstream};
     use crate::TreeReference;
     use dialog_artifacts::history::{Edition, Origin, Version};
+
+    /// Reads fall back to the first route at a peer among the pulls and
+    /// then the pushes, an unreachable one included; local routes and an
+    /// unresolved record have none.
+    #[dialog_common::test]
+    fn it_finds_the_first_route_at_a_peer() -> anyhow::Result<()> {
+        use super::{Resolved, Route};
+        let local = |branch: &str| Route::Local {
+            branch: branch.into(),
+        };
+        let unreachable = |reason: &str| -> anyhow::Result<Route> {
+            Ok(Route::Unreachable {
+                target: dialog_artifacts::Entity::new()?,
+                reason: reason.into(),
+            })
+        };
+        let tracking = |pulls, pushes| Tracking {
+            resolved: Some(Resolved {
+                at: None,
+                pulls,
+                pushes,
+            }),
+            synced: vec![],
+        };
+
+        assert_eq!(Tracking::default().first_remote_route(), None);
+        assert_eq!(
+            tracking(vec![local("main")], vec![local("develop")]).first_remote_route(),
+            None
+        );
+        let pushed = unreachable("pushed")?;
+        assert_eq!(
+            tracking(vec![local("main")], vec![pushed.clone()]).first_remote_route(),
+            Some(&pushed)
+        );
+        let pulled = unreachable("pulled")?;
+        assert_eq!(
+            tracking(vec![local("main"), pulled.clone()], vec![pushed]).first_remote_route(),
+            Some(&pulled)
+        );
+        Ok(())
+    }
 
     /// The sync record keeps one tree per upstream, replacing it in
     /// place, and answers no tree for an upstream never synced.

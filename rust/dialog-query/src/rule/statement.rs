@@ -7,8 +7,10 @@
 //! erases them — install and uninstall are ordinary writes, no dedicated
 //! API. The kind decides the fact shape:
 //!
-//! - deductive: the `conclusion` discovery index, the `source` body,
-//!   and the `reads` reverse index over the body's attributes;
+//! - deductive: the `derives` head index resolution finds the rule by,
+//!   one entry per attribute its conclusion carries, the `conclusion`
+//!   concept it was written against, the `source` body, and the `reads`
+//!   reverse index over the body's attributes;
 //! - inductive: the shared `source` body, the `induces` head index,
 //!   and the `on` trigger index commit-time dispatch probes by touched
 //!   attribute.
@@ -246,10 +248,12 @@ pub fn head_entities(concept: &crate::ConceptDescriptor) -> BTreeSet<Entity> {
 }
 
 /// Asserting a [`DeductiveRule`] installs it as `dialog.rule/*` facts:
-/// the `conclusion` discovery index, the `source` body, and the `reads`
-/// reverse index over the body's attributes that lets commit-time
-/// dispatch close its trigger footprint over derivation. Retracting the
-/// same rule erases those facts, uninstalling it.
+/// the `derives` head index over the conclusion's attributes, which
+/// resolution looks the rule up by, the `conclusion` concept it was
+/// written against, the `source` body, and the `reads` reverse index
+/// over the body's attributes that lets commit-time dispatch close its
+/// trigger footprint over derivation. Retracting the same rule erases
+/// those facts, uninstalling it.
 ///
 /// ```no_run
 /// # use dialog_query::DeductiveRule;

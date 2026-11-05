@@ -42,9 +42,11 @@
 //! #         + Provider<BlobRead>
 //! #         + Provider<BlobWrite>
 //! #         + Provider<BlobImport>
-//! #         + Provider<dialog_repository::Hydrate>
+//! #         + Provider<dialog_effects::archive::Load>
+//! #         + Provider<dialog_effects::blob::Load>
 //! #         + Provider<Fork<RemoteSite, Resolve>>
 //! #         + Provider<Fork<RemoteSite, BlobRead>>
+//! #         + dialog_common::Holds
 //! #         + dialog_common::ConditionalSync
 //! #         + 'static,
 //! # {
@@ -68,21 +70,21 @@
 //! # }
 //! ```
 
-use crate::repository::archive::networked::Reads;
+use crate::repository::archive::erased;
 use crate::repository::branch::asset::recorded_size;
 use crate::repository::remote::Step;
 use crate::repository::source::SourceRef;
-use crate::{
-    Branch, CommitError, Hydrate, Index, NetworkedIndex, RemoteFallback, RemoteSite, Snapshot,
-};
+use crate::{Branch, CommitError, Index, RemoteFallback, RemoteSite, Snapshot};
 use dialog_artifacts::{Asset, BlobIndexExt as _, BlobRecord, Entity, Instruction};
 use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync};
 use dialog_effects::MethodExt as _;
+use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::prelude::ArchiveExt as _;
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify};
+use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::prelude::{ArchiveBlobExt as _, ReadBlobExt as _};
 use dialog_effects::blob::{
     BlobError, BlobReader, ByteRange, Import as BlobImport, Read as BlobRead, Write as BlobWrite,
@@ -224,25 +226,6 @@ fn blob_hash(entity: &Entity) -> Result<Blake3Hash, BlobError> {
         .ok_or_else(|| BlobError::NotFound(format!("not a blob entity: {entity}")))
 }
 
-/// Build the tree store for reading the content a line vouches for.
-///
-/// A branch tracking a remote upstream may need remote-only tree nodes to read
-/// it — after a fast-forward pull only the revision pointer is
-/// local, and the index nodes hydrate lazily. Fall back to the remote archive
-/// on a local miss (caching what lands), as `commit` does. With no remote
-/// upstream (a snapshot never has one) this degrades to a plain local index.
-pub(crate) async fn index_store<'s, 'e, Env>(
-    source: impl Into<SourceRef<'s>>,
-    env: &'e Env,
-) -> NetworkedIndex<'e, dyn Reads>
-where
-    Env: Reads + 'static,
-{
-    let source = source.into();
-    let remote = source.fallback();
-    NetworkedIndex::erased(env, source.archive().index(), remote)
-}
-
 /// The size of the content the line's current tree vouches for under `hash`,
 /// by an asset's `dialog.asset/size` fact or a legacy blob-index entry, or
 /// `None` when it vouches for no such content.
@@ -256,15 +239,19 @@ where
         + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
-        + Provider<crate::Hydrate>
+        + Provider<ArchiveLoad>
+        + Provider<BlobLoad>
+        + dialog_common::Holds
         + ConditionalSync
         + 'static,
 {
     let Some(revision) = source.revision() else {
         return Ok(None);
     };
-    let store = index_store(source, env).await;
-    let tree = Index::from_hash(NodeHash::from(*revision.tree.hash()));
+    // A tree node the replica lacks (after a fast-forward pull only the
+    // revision pointer is local) hydrates through the env's load.
+    let store = erased(env);
+    let tree = Index::at(source.catalog(), NodeHash::from(*revision.tree.hash()));
     Ok(tree.content_size(&store, hash.as_bytes()).await?)
 }
 
@@ -280,15 +267,19 @@ where
         + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
-        + Provider<Hydrate>
+        + Provider<ArchiveLoad>
+        + Provider<BlobLoad>
+        + dialog_common::Holds
         + ConditionalSync
         + 'static,
 {
     let Some(revision) = source.revision() else {
         return Ok(false);
     };
-    let store = index_store(source, env).await;
-    let tree = Index::from_hash(NodeHash::from(*revision.tree.hash()));
+    // A tree node the replica lacks (after a fast-forward pull only the
+    // revision pointer is local) hydrates through the env's load.
+    let store = erased(env);
+    let tree = Index::at(source.catalog(), NodeHash::from(*revision.tree.hash()));
     Ok(tree.get_blob(&store, hash.as_bytes()).await?.is_some())
 }
 
@@ -307,7 +298,9 @@ impl BlobSize<'_> {
             + Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
+            + dialog_common::Holds
             + ConditionalSync
             + 'static,
     {
@@ -339,8 +332,10 @@ impl ReadBlob<'_> {
             + Provider<BlobRead>
             + Provider<BlobImport>
             + Provider<Resolve>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + Provider<Fork<RemoteSite, BlobRead>>
+            + dialog_common::Holds
             + ConditionalSync
             + 'static,
     {
@@ -365,8 +360,13 @@ impl ReadBlob<'_> {
         };
 
         // Local miss. Hydrate from the upstream peer, if any (a snapshot
-        // has none: its reads are local).
-        let remote = match line.fallback() {
+        // has none: its reads are local). Asked only now, on the miss: a
+        // read the local blob store answers never works out the route.
+        let route = match line {
+            SourceRef::Branch(branch) => branch.fallback(),
+            SourceRef::Snapshot(_) => RemoteFallback::None,
+        };
+        let remote = match route {
             RemoteFallback::Remote(remote) => remote,
             RemoteFallback::None => return Err(BlobError::NotFound(miss_key).into()),
             RemoteFallback::Unavailable { remote, reason } => {
@@ -459,8 +459,10 @@ where
             + Provider<Publish>
             + Provider<Identify>
             + Provider<Attest>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + Provider<Fork<RemoteSite, Resolve>>
+            + dialog_common::Holds
             + ConditionalSync
             + 'static,
     {
@@ -517,8 +519,10 @@ impl RetractBlob<'_> {
             + Provider<Publish>
             + Provider<Identify>
             + Provider<Attest>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + Provider<Fork<RemoteSite, Resolve>>
+            + dialog_common::Holds
             + ConditionalSync
             + 'static,
     {
@@ -737,9 +741,12 @@ mod tests {
             .await?;
         let hash = entity.blob_hash().expect("an asset entity");
 
-        let store = super::index_store(&branch, &operator).await;
+        let store = &operator;
         let revision = branch.revision().expect("the import minted a revision");
-        let tree = crate::Index::from_hash(super::NodeHash::from(*revision.tree.hash()));
+        let tree = crate::Index::at(
+            branch.archive().index(),
+            super::NodeHash::from(*revision.tree.hash()),
+        );
         assert_eq!(
             tree.asset_size(&store, &hash).await?,
             Some(payload.len() as u64)

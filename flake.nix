@@ -167,6 +167,7 @@
               soak:program
               soak:artifacts
               soak:converge
+              soak:subscription
               soak:sync
             '';
           };
@@ -193,6 +194,20 @@
             command = ''
               export DIALOG_PROGRAM_OPS="''${DIALOG_PROGRAM_OPS:-2000}"
               cargo test -p dialog-search-tree --release --test program
+            '';
+          };
+
+          # The randomized subscription invariant from the normal suite,
+          # over far more seeds. DIALOG_SUBSCRIPTION_SEEDS is a comma list
+          # of seeds and half-open ranges; a failure names the seed and
+          # step, and DIALOG_SUBSCRIPTION_SEEDS=<seed> reruns it alone.
+          "soak:subscription" = {
+            description = "Subscription invariant sweep (DIALOG_SUBSCRIPTION_SEEDS/_STEPS override)";
+            command = ''
+              export DIALOG_SUBSCRIPTION_SEEDS="''${DIALOG_SUBSCRIPTION_SEEDS:-0..300}"
+              export DIALOG_SUBSCRIPTION_STEPS="''${DIALOG_SUBSCRIPTION_STEPS:-100}"
+              cargo test -p dialog-repository --release --lib -- --exact \
+                repository::branch::subscription::invariants::a_maintained_subscription_matches_a_fresh_evaluation_after_random_changes
             '';
           };
 

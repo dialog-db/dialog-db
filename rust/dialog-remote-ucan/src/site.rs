@@ -39,6 +39,12 @@ impl UcanSite {
         &self.sockets
     }
 
+    /// How long an invocation waits for the service to begin answering,
+    /// over the socket or as a request: [`Liveness::answer`](crate::socket::Liveness::answer).
+    pub(crate) fn answer(&self) -> std::time::Duration {
+        self.sockets.liveness().answer
+    }
+
     /// A site whose socket connections are kept by `liveness`: how often
     /// they are pinged, and when one is given up on (see
     /// [`Liveness`](crate::socket::Liveness)).

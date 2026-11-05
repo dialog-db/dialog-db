@@ -24,7 +24,9 @@ use dialog_baseline::repo::DialogRepo;
 use dialog_baseline::se::{SeLog, se_instructions};
 use dialog_capability::Provider;
 use dialog_common::{Blake3Hash, ConditionalSync};
-use dialog_search_tree::{Buffer as TreeBuffer, LoadBlock, NodeBody};
+use dialog_effects::archive::Load;
+use dialog_effects::archive::prelude::CatalogScope;
+use dialog_search_tree::{Buffer as TreeBuffer, NodeBody};
 
 #[derive(Default, Clone, Copy)]
 struct ClassVolume {
@@ -115,15 +117,19 @@ fn per_commit(class: &ClassVolume, window: usize) -> String {
 
 /// Probes the live tree: root block size, root novelty ops, root links,
 /// and depth along the leftmost path.
-async fn probe<Env>(env: &Env, root: Blake3Hash) -> anyhow::Result<(usize, usize, usize, usize)>
+async fn probe<Env>(
+    env: &Env,
+    catalog: &CatalogScope,
+    root: Blake3Hash,
+) -> anyhow::Result<(usize, usize, usize, usize)>
 where
-    Env: Provider<LoadBlock> + ConditionalSync,
+    Env: Provider<Load> + ConditionalSync,
 {
     let mut hash = root;
     let mut depth = 0usize;
     let mut root_stats = (0usize, 0usize, 0usize);
     loop {
-        let (node, size) = node(env, &hash).await?;
+        let (node, size) = node(env, catalog, &hash).await?;
         depth += 1;
         match node.body() {
             NodeBody::Index(index) => {
@@ -189,7 +195,7 @@ fn main() -> anyhow::Result<()> {
                 let root = repo
                     .root()
                     .expect("the branch has commits, so it has a tree");
-                let (root_size, root_ops, root_links, depth) = probe(&repo.index(), root).await?;
+                let (root_size, root_ops, root_links, depth) = probe(repo.operator(), &repo.catalog(), root).await?;
                 // The probe's own reads are not the commits' traffic.
                 classifier.take();
                 println!(

@@ -5,7 +5,9 @@ use anyhow::Result;
 use dialog_artifacts::{Datum, Key, State};
 use dialog_capability::Provider;
 use dialog_common::{Blake3Hash, ConditionalSync};
-use dialog_search_tree::{LoadBlock, PersistentNode};
+use dialog_effects::archive::Load;
+use dialog_effects::archive::prelude::CatalogScope;
+use dialog_search_tree::PersistentNode;
 
 /// A node of an artifact tree, as stored.
 pub type TreeNode = PersistentNode<Key, State<Datum>>;
@@ -22,13 +24,17 @@ pub struct Visit {
     pub node: TreeNode,
 }
 
-/// The node stored under `hash`, loaded through `env`, and its encoded
-/// size in bytes.
-pub async fn node<Env>(env: &Env, hash: &Blake3Hash) -> Result<(TreeNode, usize)>
+/// The node stored under `hash` in `catalog`, loaded through `env`, and
+/// its encoded size in bytes.
+pub async fn node<Env>(
+    env: &Env,
+    catalog: &CatalogScope,
+    hash: &Blake3Hash,
+) -> Result<(TreeNode, usize)>
 where
-    Env: Provider<LoadBlock> + ConditionalSync,
+    Env: Provider<Load> + ConditionalSync + ?Sized,
 {
-    let block = LoadBlock::new(hash.clone())
+    let block = Load::new(catalog.clone(), hash.clone())
         .perform(env)
         .await?
         .ok_or_else(|| anyhow::anyhow!("reachable node {hash} missing"))?;
@@ -36,19 +42,20 @@ where
     Ok((TreeNode::try_from(block)?, size))
 }
 
-/// Visits every node reachable from `root` depth first, children left to
-/// right, so leaves arrive in key order.
+/// Visits every node reachable from `root` in `catalog` depth first,
+/// children left to right, so leaves arrive in key order.
 pub async fn walk<Env>(
     env: &Env,
+    catalog: &CatalogScope,
     root: Blake3Hash,
     mut visit: impl FnMut(Visit) -> Result<()>,
 ) -> Result<()>
 where
-    Env: Provider<LoadBlock> + ConditionalSync,
+    Env: Provider<Load> + ConditionalSync + ?Sized,
 {
     let mut stack = vec![(root, Vec::new())];
     while let Some((hash, separator)) = stack.pop() {
-        let (node, size) = node(env, &hash).await?;
+        let (node, size) = node(env, catalog, &hash).await?;
         if let dialog_search_tree::NodeBody::Index(index) = node.body() {
             for at in (0..index.len()).rev() {
                 stack.push((index.hash_at(at)?.clone(), index.separator(at)?));

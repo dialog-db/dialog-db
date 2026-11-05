@@ -25,9 +25,10 @@
 
 use anyhow::Result;
 use dialog_common::Blake3Hash;
-use dialog_search_tree::{Buffer, Delta, HitchhikerTree, MemoryBlocks, PersistentTree};
+use dialog_search_tree::helpers::Blocks;
+use dialog_search_tree::{Buffer, Delta, HitchhikerTree, PersistentTree};
 
-type Store = MemoryBlocks;
+type Store = Blocks;
 type Tree = PersistentTree<[u8; 4], Vec<u8>>;
 
 /// One write op. Keys are `u32` big-endian so byte order is key order;
@@ -131,8 +132,8 @@ async fn checkpoint_root(tree: &Tree, storage: &Store, label: &str) -> Result<Bl
 
 /// Canonical sequential edits: persist + settle every op.
 async fn run_canonical(program: &Program) -> Result<Vec<Blake3Hash>> {
-    let mut storage: Store = MemoryBlocks::new();
-    let mut tree = Tree::empty();
+    let mut storage: Store = Blocks::new();
+    let mut tree = Tree::empty_in(dialog_search_tree::helpers::test_catalog());
     let mut roots = Vec::new();
     for (at, op) in program.ops.iter().enumerate() {
         let mut delta = Delta::zero();
@@ -148,7 +149,7 @@ async fn run_canonical(program: &Program) -> Result<Vec<Blake3Hash>> {
             }
             Op::Delete(key) => edit.delete(&key.to_be_bytes(), &storage).await?,
         }
-        .persist(&mut delta)?;
+        .persist(&mut delta, &storage)?;
         settle(&mut delta, &mut storage).await?;
         if program.checkpoints.contains(&(at + 1)) {
             roots.push(checkpoint_root(&tree, &storage, "canonical").await?);
@@ -165,8 +166,8 @@ async fn run_buffered(
     op_buf: Option<usize>,
     persist_every: usize,
 ) -> Result<Vec<Blake3Hash>> {
-    let mut storage: Store = MemoryBlocks::new();
-    let mut tree = Tree::empty();
+    let mut storage: Store = Blocks::new();
+    let mut tree = Tree::empty_in(dialog_search_tree::helpers::test_catalog());
     let mut roots = Vec::new();
     let open = |tree: &Tree, op_buf: Option<usize>| {
         let buffered = HitchhikerTree::open(tree);
@@ -205,9 +206,9 @@ async fn run_buffered(
             // Publish the buffered form and reopen over it: the persisted
             // spine round-trip every real commit performs.
             let mut delta = Delta::zero();
-            let root = buffered.persist(&mut delta)?;
+            let root = buffered.persist(&mut delta, &storage)?;
             settle(&mut delta, &mut storage).await?;
-            tree = Tree::from_hash_with_cache(root, Default::default());
+            tree = Tree::at(dialog_search_tree::helpers::test_catalog(), root);
             buffered = open(&tree, op_buf);
         }
     }

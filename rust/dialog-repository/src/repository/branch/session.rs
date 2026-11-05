@@ -1,3 +1,5 @@
+use dialog_effects::archive::Load as ArchiveLoad;
+use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::Read as BlobRead;
 use std::cell::Cell;
 use std::collections::HashSet;
@@ -5,15 +7,16 @@ use std::iter::once;
 
 use dialog_artifacts::history::Edition;
 use dialog_artifacts::selector::Constrained;
+use dialog_artifacts::tree::ArtifactNodeCache;
 use dialog_artifacts::{
     Artifact, ArtifactSelector, ArtifactStream, ArtifactView, Changes, DialogArtifactsError,
     Entity, Estimate, Likelihood, Preload, PreloadRequest, Select, SortKey, Speculation, Statement,
     sort_key,
 };
-use dialog_artifacts::{LoadBlob, Relation as ArtifactsRelation, Standing, Value};
-use dialog_capability::{Capability, Fork, Provider};
+use dialog_artifacts::{Relation as ArtifactsRelation, Standing, Value};
+use dialog_capability::{Capability, Fork, Provider, Subject};
 use dialog_common::{Blake3Hash, Buffer, ConditionalSync, Held, Holds};
-use dialog_effects::archive::{Get, Put};
+use dialog_effects::archive::{ArchiveError, Get, Put};
 use dialog_effects::authority::{Identify, Operator, OperatorExt as _};
 use dialog_effects::memory::Resolve;
 use dialog_query::attribute::AttributeDescriptor;
@@ -27,16 +30,17 @@ use dialog_query::rule::statement::on_entity;
 use dialog_query::session::{ProgramAnalysis, Quarantine};
 use dialog_query::source::SelectRules;
 use dialog_query::{Claim, DeductiveRule, Negation, Premise, Proposition};
-use dialog_search_tree::{DialogSearchTreeError, LoadBlock, Manifest, PersistentNode};
+use dialog_search_tree::{Manifest, PersistentNode};
 use futures_util::future::try_join_all;
 use futures_util::{TryStreamExt as _, stream};
+use std::sync::OnceLock;
 use std::sync::{Arc, LazyLock, Mutex};
 use tokio::sync::OnceCell;
 
 use crate::CommitError;
 use crate::REGISTRY;
 use crate::layer::{Hidden, MergeKeys, filter_hidden, merge_grouped};
-use crate::repository::archive::networked::Reads;
+use crate::repository::archive::TreeEnv;
 use crate::repository::branch::select::line_manifest;
 use crate::repository::ephemeral::Window;
 use crate::repository::fetch::Driven;
@@ -52,7 +56,7 @@ use crate::rules::{
 use crate::schema::{
     Branch as BranchConcept, DidExt as _, Replica, Session, SessionBranch, session,
 };
-use crate::{Branch, Ephemeral, Hydrate, NetworkedIndex, RemoteSite, Snapshot, Staged};
+use crate::{Branch, Ephemeral, RemoteSite, Snapshot, Staged};
 
 /// A composable query over one or more lines (branches, snapshots)
 /// plus an in-memory overlay.
@@ -351,7 +355,8 @@ impl<'a, Q: Application> SelectQuery<'a, Q> {
             + Provider<Put>
             + Provider<Resolve>
             + Provider<Identify>
-            + Provider<Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + Provider<Preload>
             + Provider<Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
@@ -398,12 +403,13 @@ impl<'a, Q: Application> SelectQuery<'a, Q> {
 /// settles successions reaches the evaluator from every crate that
 /// commits; erased, those names and copies collapse.
 pub(crate) trait Capabilities:
-    Reads
+    TreeEnv
     + Provider<BlobRead>
     + Provider<Get>
     + Provider<Put>
     + Provider<Resolve>
-    + Provider<Hydrate>
+    + Provider<ArchiveLoad>
+    + Provider<BlobLoad>
     + Provider<Preload>
     + Provider<Fork<RemoteSite, Resolve>>
     + Holds
@@ -412,12 +418,13 @@ pub(crate) trait Capabilities:
 }
 
 impl<T> Capabilities for T where
-    T: Reads
+    T: TreeEnv
         + Provider<BlobRead>
         + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
-        + Provider<Hydrate>
+        + Provider<ArchiveLoad>
+        + Provider<BlobLoad>
         + Provider<Preload>
         + Provider<Fork<RemoteSite, Resolve>>
         + Holds
@@ -464,9 +471,10 @@ pub(crate) struct QueryEnv<'a> {
     /// table instead of computing a throwaway one.
     fixpoint: Option<(Entity, Continuation)>,
     /// Whether any line can fetch what it lacks (see
-    /// [`SourceRef::fetches`](crate::repository::source::SourceRef)):
-    /// preload hints are refused when none can.
-    fetches: bool,
+    /// [`Routes::fetches`](crate::Routes::fetches)): preload hints are
+    /// refused when none can. Asked of the env's routes on the first hint,
+    /// and shared by clones.
+    fetches: Arc<OnceLock<bool>>,
     /// The per-query memo rule heads share their source body's rows
     /// through.
     memo: Memo,
@@ -541,7 +549,6 @@ impl<'a> QueryEnv<'a> {
     /// its session overlay, and the per-query overlay as a transient
     /// layer), so the paths can never diverge on it.
     pub(crate) fn new(sources: Vec<Source>, overlay: Ephemeral, env: &'a Erased) -> Self {
-        let fetches = sources.iter().any(|source| source.as_ref().fetches());
         Self {
             sources,
             overlay,
@@ -550,7 +557,7 @@ impl<'a> QueryEnv<'a> {
             demand: None,
             reads: Arc::new(Mutex::new(Vec::new())),
             fixpoint: None,
-            fetches,
+            fetches: Arc::default(),
             memo: Memo::default(),
             env,
         }
@@ -756,7 +763,7 @@ impl Clone for QueryEnv<'_> {
             demand: self.demand.clone(),
             reads: self.reads.clone(),
             fixpoint: self.fixpoint.clone(),
-            fetches: self.fetches,
+            fetches: self.fetches.clone(),
             memo: Memo::default(),
             env: self.env,
         }
@@ -780,13 +787,11 @@ pub(crate) async fn select_from_source<'a>(
     input: ArtifactSelector<Constrained>,
 ) -> Result<ArtifactStream<'a>, DialogArtifactsError> {
     let select = crate::Select::from_source(source, input);
-    let remote = source.fallback();
     // Concurrent reads of one digest share fetch-and-hydrate through
-    // the env's own `Hydrate` flight (see `crate::Hydrate`), with
-    // every other evaluation in the process.
-    let reads: &dyn Reads = env;
-    let store = NetworkedIndex::new(reads, select.catalog(), remote);
-    Ok(select.execute_boxed(store).await?)
+    // the env's own `Load` (see `crate::load_or_hydrate`), with every
+    // other evaluation in the process.
+    let reads: &dyn TreeEnv = env;
+    Ok(select.execute_boxed(reads).await?)
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
@@ -999,9 +1004,7 @@ impl Provider<Estimate> for QueryEnv<'_> {
         let mut total: Option<u64> = None;
         for source in &self.sources {
             let select = crate::Select::from_source(source.as_ref(), input.clone());
-            let remote = source.as_ref().fallback();
-            let store = NetworkedIndex::new(self.env as &dyn Reads, select.catalog(), remote);
-            if let Some(estimate) = select.estimate(store).await? {
+            if let Some(estimate) = select.estimate(self.env as &dyn TreeEnv).await? {
                 total = Some(total.unwrap_or(0).saturating_add(estimate));
             }
         }
@@ -1027,33 +1030,47 @@ impl Provider<Estimate> for QueryEnv<'_> {
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl Provider<Preload> for QueryEnv<'_> {
     async fn execute(&self, input: PreloadRequest) -> bool {
-        if !self.fetches {
+        // Warming ahead of demand has something to do only for a line whose
+        // misses hydrate from somewhere.
+        let fetches = *self.fetches.get_or_init(|| {
+            let routes = crate::Routes::of(self.env);
+            self.sources
+                .iter()
+                .any(|source| routes.fetches(source.as_ref().subject().did()))
+        });
+        if !fetches {
             return false;
         }
         Provider::<Preload>::execute(self.env, input).await
     }
 }
 
+/// Whether `load` asks for a block anywhere the query reads (the
+/// resolver's wildcard archive, see [`dialog_query::resolver::anywhere`])
+/// rather than in one catalog.
+fn anywhere(subject: &dialog_capability::Did) -> bool {
+    Subject::from(subject.clone()).is_any()
+}
+
 // The spilled-value load behind `tree/value`: the same line-by-line
 // walk as `Load`, reading each line's spill lane (its blob store, then
 // the block catalog for values spilled before they moved to blobs,
-// with the remote fallback a fact scan uses). Spilled values are not
-// nodes, so the node cache is not consulted.
+// hydrating as a fact scan does). Spilled values are not nodes, so the
+// node cache is not consulted. A load of one archive's value is that
+// archive's, read through the env.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<'a> Provider<LoadBlob> for QueryEnv<'a> {
-    async fn execute(
-        &self,
-        LoadBlob { hash }: LoadBlob,
-    ) -> Result<Option<Buffer>, DialogArtifactsError> {
+impl<'a> Provider<BlobLoad> for QueryEnv<'a> {
+    async fn execute(&self, load: BlobLoad) -> Result<Option<Buffer>, ArchiveError> {
+        if !anywhere(load.archive.subject()) {
+            return load.perform(self.env).await;
+        }
         for source in &self.sources {
-            let source = source.as_ref();
-            let store = NetworkedIndex::new(
-                self.env as &dyn Reads,
-                source.archive().index(),
-                source.fallback(),
-            );
-            if let Some(bytes) = store.load_blob(&hash).await? {
+            let line = BlobLoad {
+                archive: source.as_ref().archive(),
+                ..load.clone()
+            };
+            if let Some(bytes) = line.perform(self.env).await? {
                 return Ok(Some(bytes));
             }
         }
@@ -1062,36 +1079,48 @@ impl<'a> Provider<LoadBlob> for QueryEnv<'a> {
 }
 
 // The idempotent block-load behind resolver premises (`tree/node` &
-// co). No demand is recorded: the block behind a hash is
-// content-addressed and can never change, so no tree diff could ever
-// invalidate a row derived from it — the soundness argument lives in
-// `dialog_artifacts::inspect`. Reads go through each line's archive
-// catalog capability with the same remote fallback a fact scan uses;
-// the first line that has the block wins (content addressing makes
-// them interchangeable), and a block absent everywhere contributes
-// nothing. Reads go through the line's shared node cache (the same
-// one the eager root probe in `select.rs` and `Subscription::touched`
-// use): a resolver join re-resolves the same reference once per outer
-// row, and a raw backend get would re-fetch that identical immutable
-// block every time.
+// co), which ask for a block anywhere the query reads. No demand is
+// recorded: the block behind a hash is content-addressed and can never
+// change, so no tree diff could ever invalidate a row derived from it —
+// the soundness argument lives in `dialog_artifacts::inspect`. Each
+// line's catalog is tried in turn, through the env's load (so a miss
+// hydrates as a fact scan's does); the first line that has the block
+// wins (content addressing makes them interchangeable), and a block
+// absent everywhere contributes nothing. Reads go through the node cache
+// the env holds for each line's repository (the same one the eager root
+// probe in `select.rs` and `Subscription::touched` use): a resolver join
+// re-resolves the same reference once per outer row, and a raw backend
+// get would re-fetch that identical immutable block every time. A load
+// of one catalog's block is that catalog's, read through the env.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<'a> Provider<LoadBlock> for QueryEnv<'a> {
-    async fn execute(&self, load: LoadBlock) -> Result<Option<Buffer>, DialogSearchTreeError> {
+impl<'a> Provider<ArchiveLoad> for QueryEnv<'a> {
+    async fn execute(&self, load: ArchiveLoad) -> Result<Option<Buffer>, ArchiveError> {
+        if !anywhere(load.catalog.subject()) {
+            return load.perform(self.env).await;
+        }
         for source in &self.sources {
             let source = source.as_ref();
-            let remote = source.fallback();
-            let store =
-                NetworkedIndex::new(self.env as &dyn Reads, source.archive().index(), remote);
-            let cache = source.node_cache();
-            if let Some(node) = cache.get_cached(&load.hash) {
+            let cache = ArtifactNodeCache::of(self.env, source.subject().did());
+            if let Some(node) = cache
+                .as_ref()
+                .and_then(|cache| cache.get_cached(&load.digest))
+            {
                 return Ok(Some(node.buffer().clone()));
             }
-            if let Some(block) = load.clone().perform(&store).await? {
-                // A block that checks as a node joins the cache; any other
-                // block is returned as it is, for the caller to read.
-                if let Ok(node) = PersistentNode::try_from(block.clone()) {
-                    cache.insert(load.hash.clone(), node);
+            let line = ArchiveLoad {
+                catalog: source.catalog(),
+                ..load.clone()
+            };
+            if let Some(block) = line.perform(self.env).await? {
+                // A block that is the one asked for and checks as a node
+                // joins the cache; any other block is returned as it is,
+                // for the caller to read.
+                if let Some(cache) = &cache
+                    && block.blake3_hash() == &load.digest
+                    && let Ok(node) = PersistentNode::try_from(block.clone())
+                {
+                    cache.insert(load.digest.clone(), node);
                 }
                 return Ok(Some(block));
             }
@@ -1168,10 +1197,10 @@ impl<'a> QueryEnv<'a> {
                 }
                 Err(error) => return Err(error),
             };
-            let standing = Standing {
-                version: row.standing(),
-                cause: Claim::from(artifact.clone()).cause().clone(),
-            };
+            let standing = Standing::new(
+                row.standing(),
+                Claim::from(artifact.clone()).cause().clone(),
+            );
             artifacts.push((artifact, standing));
         }
         Ok(artifacts)
@@ -1755,11 +1784,10 @@ impl<'a> QueryEnv<'a> {
     /// Whether some rule derives the relation `the` names, as
     /// [`resolve_bundle`](Self::resolve_bundle) would find one for the
     /// attribute concept over it: a built-in, or a rule under the
-    /// relation's `derives` key on any layer, with the rules installed
-    /// before the index existed folded into the committed key. Only the
-    /// index is read from the key the attribute spells; no concept is
-    /// described or hashed and no body is hydrated, which is what a
-    /// commit asks once per relation it writes.
+    /// relation's `derives` key on any layer. Only the index is read
+    /// from the key the attribute spells; no concept is described or
+    /// hashed and no body is hydrated, which is what a commit asks once
+    /// per relation it writes.
     pub(crate) async fn rules_derive(
         &self,
         the: &ArtifactsRelation,
@@ -1801,12 +1829,12 @@ impl<'a> QueryEnv<'a> {
     /// attributes besides the engine, so its rules install as written.
     /// An attribute concept is the relation of its attribute: the
     /// implicit scan plus the head of every rule deriving the
-    /// attribute, found by the `derives` index, by the built-ins, and,
-    /// for rules installed before the index existed, by the concept
-    /// they conclude. Any other concept selects: its rule reads each
-    /// derived attribute through the attribute concept and the rest
-    /// from stored facts, and a rule concluding exactly this concept
-    /// without a `derives` index installs as written beside it.
+    /// attribute, found by the `derives` index and by the built-ins.
+    /// Any other concept selects: its rule reads each derived attribute
+    /// through the attribute concept and the rest from stored facts, so
+    /// a rule written against a wider or narrower concept still answers
+    /// the attributes it derives. Neither path reads a rule's
+    /// `conclusion` (see [`Index`]).
     #[tracing::instrument(skip_all, name = "resolve_bundle")]
     async fn resolve_bundle(
         &self,
@@ -1844,10 +1872,8 @@ impl<'a> QueryEnv<'a> {
             }
             // The rules deriving each relation the field reads, found
             // by the `derives` index, whatever type or pick this read
-            // declares over the relation. A rule installed before the
-            // index existed concluded the attribute concept of the
-            // relation itself, read under no pick: that is the
-            // entity it is found by.
+            // declares over the relation: the key is the relation's
+            // `on:` entity, spelled from a pick-less read of it.
             for relation in field.descriptor().relations() {
                 let single = ConceptDescriptor::of_attribute(&ConceptFieldDescriptor::required(
                     AttributeDescriptor::over(
@@ -2124,6 +2150,8 @@ impl Branch {
 /// satisfy.
 #[cfg(test)]
 mod rule_tests {
+    use dialog_effects::archive::Load as ArchiveLoad;
+    use dialog_effects::blob::Load as BlobLoad;
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
@@ -2180,7 +2208,8 @@ mod rule_tests {
             + dialog_capability::Provider<Put>
             + dialog_capability::Provider<Resolve>
             + dialog_capability::Provider<Identify>
-            + dialog_capability::Provider<crate::Hydrate>
+            + dialog_capability::Provider<ArchiveLoad>
+            + dialog_capability::Provider<BlobLoad>
             + dialog_capability::Provider<dialog_artifacts::Preload>
             + dialog_capability::Provider<dialog_artifacts::Speculation>
             + dialog_capability::Provider<Fork<RemoteSite, Resolve>>
@@ -2265,7 +2294,8 @@ mod rule_tests {
             + dialog_capability::Provider<Put>
             + dialog_capability::Provider<Resolve>
             + dialog_capability::Provider<Identify>
-            + dialog_capability::Provider<crate::Hydrate>
+            + dialog_capability::Provider<ArchiveLoad>
+            + dialog_capability::Provider<BlobLoad>
             + dialog_capability::Provider<dialog_artifacts::Preload>
             + dialog_capability::Provider<dialog_artifacts::Speculation>
             + dialog_capability::Provider<Fork<RemoteSite, Resolve>>
@@ -2345,7 +2375,8 @@ mod rule_tests {
             + dialog_capability::Provider<Put>
             + dialog_capability::Provider<Resolve>
             + dialog_capability::Provider<Identify>
-            + dialog_capability::Provider<crate::Hydrate>
+            + dialog_capability::Provider<ArchiveLoad>
+            + dialog_capability::Provider<BlobLoad>
             + dialog_capability::Provider<dialog_artifacts::Preload>
             + dialog_capability::Provider<dialog_artifacts::Speculation>
             + dialog_capability::Provider<Fork<RemoteSite, Resolve>>

@@ -21,6 +21,7 @@ use dialog_artifacts::{Artifact, ArtifactSelector, Changes, Entity, Relation, Va
 use dialog_capability::{Fork, Provider, Subject};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::{ConditionalSync, Holds};
+use dialog_effects::archive::prelude::CatalogScope;
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify};
 use dialog_effects::blob::Read as BlobRead;
@@ -29,7 +30,6 @@ use dialog_effects::space::{Create as SpaceCreate, Load as SpaceLoad};
 use dialog_effects::storage::Location;
 use dialog_peer::helpers::unique_name;
 use dialog_peer::{Peer, Session};
-use dialog_repository::LocalIndex;
 use dialog_repository::{
     Branch, BranchReference, PeersEnv, RemoteSite, RepositoryExt as _, TransactionBatch,
     TransactionCommit,
@@ -119,7 +119,8 @@ where
         + Provider<SpaceCreate>
         + Provider<List>
         + PeersEnv
-        + Provider<dialog_repository::Hydrate>
+        + Provider<dialog_effects::archive::Load>
+        + Provider<dialog_effects::blob::Load>
         + Provider<dialog_artifacts::Preload>
         + Provider<dialog_artifacts::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
@@ -201,14 +202,17 @@ where
     /// The tree the branch head names.
     pub fn tree(&self) -> ArtifactTree {
         match self.branch.revision() {
-            Some(revision) => ArtifactTree::from_hash(NodeHash::from(*revision.tree.hash())),
-            None => ArtifactTree::empty(),
+            Some(revision) => {
+                ArtifactTree::at(self.catalog(), NodeHash::from(*revision.tree.hash()))
+            }
+            None => ArtifactTree::empty_in(self.catalog()),
         }
     }
 
-    /// Loads the branch's tree nodes and spilled values from its archive.
-    pub fn index(&self) -> LocalIndex<'_, Env> {
-        LocalIndex::new(&self.operator, self.branch.archive().index())
+    /// The catalog the branch's tree keeps its blocks in: a tree read
+    /// through the operator loads its nodes from here.
+    pub fn catalog(&self) -> CatalogScope {
+        self.branch.archive().index()
     }
 
     /// Every fact matching `selector`, materialized.

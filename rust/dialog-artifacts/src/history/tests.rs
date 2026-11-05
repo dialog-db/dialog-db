@@ -1,11 +1,12 @@
 //! Tests reproducing the scenarios illustrated in `notes/version-control.md`
 
+use dialog_search_tree::helpers::test_catalog;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::ArchiveDelta;
 use anyhow::Result;
-use dialog_search_tree::MemoryBlocks;
+use dialog_search_tree::helpers::Blocks;
 use ed25519_dalek::SigningKey;
 use futures_util::TryStreamExt as _;
 
@@ -528,7 +529,7 @@ async fn it_records_multiple_values_per_attribute() -> Result<()> {
 async fn it_records_history_in_the_artifact_tree() -> Result<()> {
     use futures_util::stream;
 
-    let store = MemoryBlocks::new();
+    let store = Blocks::new();
 
     let entity = Entity::new()?;
     let the: Relation = "post/title".parse()?;
@@ -546,9 +547,9 @@ async fn it_records_history_in_the_artifact_tree() -> Result<()> {
     // Persist each version-tagged batch so the next edit can read the
     // spine back — data and history land in the same tree, so one root
     // covers both.
-    let mut tree = ArtifactTree::empty();
+    let mut tree = ArtifactTree::empty_in(test_catalog());
     let apply = async |tree: &mut ArtifactTree,
-                       store: &MemoryBlocks,
+                       store: &Blocks,
                        version: Version,
                        instruction: Instruction|
            -> Result<()> {
@@ -629,7 +630,7 @@ async fn it_succeeds_the_claim_the_succession_elects() -> Result<()> {
     use crate::Pick;
     use futures_util::stream;
 
-    let store = MemoryBlocks::new();
+    let store = Blocks::new();
     let entity = Entity::new()?;
     let the: Relation = "org/salary".parse()?;
     let salary = |value: u32| Artifact {
@@ -644,9 +645,9 @@ async fn it_succeeds_the_claim_the_succession_elects() -> Result<()> {
     let fourth = Version::new(Origin::from([7u8; 32]), Edition::new(3));
     let fifth = Version::new(Origin::from([7u8; 32]), Edition::new(4));
 
-    let mut tree = ArtifactTree::empty();
+    let mut tree = ArtifactTree::empty_in(test_catalog());
     let apply = async |tree: &mut ArtifactTree,
-                       store: &MemoryBlocks,
+                       store: &Blocks,
                        version: Version,
                        instruction: Instruction|
            -> Result<bool> {
@@ -662,7 +663,7 @@ async fn it_succeeds_the_claim_the_succession_elects() -> Result<()> {
         delta.flush_into(store);
         Ok(changed)
     };
-    let held = async |tree: &ArtifactTree, store: &MemoryBlocks| -> Result<Vec<u128>> {
+    let held = async |tree: &ArtifactTree, store: &Blocks| -> Result<Vec<u128>> {
         let selector = crate::ArtifactSelector::new()
             .of(entity.clone())
             .the(the.clone());
@@ -764,7 +765,7 @@ async fn it_succeeds_the_claim_the_succession_elects() -> Result<()> {
 async fn it_selects_the_records_of_one_revision() -> Result<()> {
     use futures_util::stream;
 
-    let store = MemoryBlocks::new();
+    let store = Blocks::new();
 
     let entity = Entity::new()?;
     let the: Relation = "post/title".parse()?;
@@ -779,9 +780,9 @@ async fn it_selects_the_records_of_one_revision() -> Result<()> {
     let second = Version::new(Origin::from([8u8; 32]), Edition::new(1));
     let third = Version::new(Origin::from([8u8; 32]), Edition::new(2));
 
-    let mut tree = ArtifactTree::empty();
+    let mut tree = ArtifactTree::empty_in(test_catalog());
     let apply = async |tree: &mut ArtifactTree,
-                       store: &MemoryBlocks,
+                       store: &Blocks,
                        version: Version,
                        instructions: Vec<Instruction>|
            -> Result<()> {
@@ -884,7 +885,7 @@ async fn it_selects_the_records_of_one_revision() -> Result<()> {
 async fn it_selects_records_whose_values_spilled() -> Result<()> {
     use futures_util::stream;
 
-    let store = MemoryBlocks::new();
+    let store = Blocks::new();
 
     let entity = Entity::new()?;
     let the: Relation = "post/body".parse()?;
@@ -892,7 +893,7 @@ async fn it_selects_records_whose_values_spilled() -> Result<()> {
     let body = "x".repeat(4096);
     let version = Version::new(Origin::from([9u8; 32]), Edition::new(0));
 
-    let mut tree = ArtifactTree::empty();
+    let mut tree = ArtifactTree::empty_in(test_catalog());
     let mut delta = ArchiveDelta::zero();
     tree.apply_versioned(
         &store,
@@ -931,19 +932,18 @@ async fn it_selects_records_whose_values_spilled() -> Result<()> {
 async fn it_fetches_spilled_history_values_concurrently() -> Result<()> {
     use dialog_capability::Provider;
     use dialog_common::{Blake3Hash, Buffer};
-    use dialog_search_tree::{DialogSearchTreeError, LoadBlock};
+    use dialog_effects::archive::{self, ArchiveError};
+    use dialog_effects::blob;
     use futures_util::stream;
     use std::future::poll_fn;
     use std::sync::Arc;
     use std::task::Poll;
 
-    use crate::LoadBlob;
-
     /// Counts reads in flight; every read parks once so concurrently
     /// polled reads overlap.
     #[derive(Clone)]
     struct Gauge {
-        inner: MemoryBlocks,
+        inner: Blocks,
         in_flight: Arc<AtomicUsize>,
         peak: Arc<AtomicUsize>,
     }
@@ -969,30 +969,33 @@ async fn it_fetches_spilled_history_values_concurrently() -> Result<()> {
         }
     }
 
+    /// Holds nothing, so every node read is a gauged read.
+    impl dialog_common::Holds for Gauge {
+        fn held(&self, _key: &str) -> Option<dialog_common::Held> {
+            None
+        }
+
+        fn hold(&self, _key: String, _handle: dialog_common::Held) {}
+    }
+
     #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
     #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-    impl Provider<LoadBlock> for Gauge {
-        async fn execute(
-            &self,
-            LoadBlock { hash }: LoadBlock,
-        ) -> Result<Option<Buffer>, DialogSearchTreeError> {
-            Ok(self.read(&hash).await)
+    impl Provider<archive::Load> for Gauge {
+        async fn execute(&self, load: archive::Load) -> Result<Option<Buffer>, ArchiveError> {
+            Ok(self.read(&load.digest).await)
         }
     }
 
     #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
     #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-    impl Provider<LoadBlob> for Gauge {
-        async fn execute(
-            &self,
-            LoadBlob { hash }: LoadBlob,
-        ) -> Result<Option<Buffer>, DialogArtifactsError> {
-            Ok(self.read(&hash).await)
+    impl Provider<blob::Load> for Gauge {
+        async fn execute(&self, load: blob::Load) -> Result<Option<Buffer>, ArchiveError> {
+            Ok(self.read(&load.digest).await)
         }
     }
 
     let store = Gauge {
-        inner: MemoryBlocks::new(),
+        inner: Blocks::new(),
         in_flight: Arc::new(AtomicUsize::new(0)),
         peak: Arc::new(AtomicUsize::new(0)),
     };
@@ -1003,7 +1006,7 @@ async fn it_fetches_spilled_history_values_concurrently() -> Result<()> {
     let bodies: Vec<String> = (0..24)
         .map(|index| format!("{index}:").repeat(2048))
         .collect();
-    let mut tree = ArtifactTree::empty();
+    let mut tree = ArtifactTree::empty_in(test_catalog());
     let mut delta = ArchiveDelta::zero();
     let mut claims = Vec::new();
     for body in &bodies {
@@ -1023,7 +1026,10 @@ async fn it_fetches_spilled_history_values_concurrently() -> Result<()> {
 
     // A cold reader: no node or spill cache holds anything yet, so every
     // spilled block reads from the store.
-    let history = TreeHistory::new(ArtifactTree::from_hash(tree.root().clone()), store.clone());
+    let history = TreeHistory::new(
+        ArtifactTree::at(test_catalog(), tree.root().clone()),
+        store.clone(),
+    );
     store.peak.store(0, Ordering::SeqCst);
     let records: Vec<_> = history.select(version).try_collect().await?;
     assert_eq!(records.len(), bodies.len());
@@ -1219,7 +1225,7 @@ async fn it_never_leaps_over_a_merge() -> Result<()> {
 async fn it_collapses_a_same_batch_assert_and_retract() -> Result<()> {
     use futures_util::stream;
 
-    let store = MemoryBlocks::new();
+    let store = Blocks::new();
 
     let entity = Entity::new()?;
     let the: Relation = "post/title".parse()?;
@@ -1231,7 +1237,7 @@ async fn it_collapses_a_same_batch_assert_and_retract() -> Result<()> {
     };
     let version = Version::new(Origin::from([7u8; 32]), Edition::new(0));
 
-    let mut tree = ArtifactTree::empty();
+    let mut tree = ArtifactTree::empty_in(test_catalog());
     let mut delta = ArchiveDelta::zero();
     let changed = tree
         .apply_versioned(
@@ -1282,7 +1288,7 @@ async fn it_collapses_a_same_batch_assert_and_retract() -> Result<()> {
 async fn it_keeps_a_fact_retracted_and_re_asserted_in_one_batch() -> Result<()> {
     use futures_util::stream;
 
-    let store = MemoryBlocks::new();
+    let store = Blocks::new();
 
     let entity = Entity::new()?;
     let the: Relation = "post/title".parse()?;
@@ -1295,7 +1301,7 @@ async fn it_keeps_a_fact_retracted_and_re_asserted_in_one_batch() -> Result<()> 
     let first = Version::new(Origin::from([7u8; 32]), Edition::new(0));
     let second = Version::new(Origin::from([7u8; 32]), Edition::new(1));
 
-    let mut tree = ArtifactTree::empty();
+    let mut tree = ArtifactTree::empty_in(test_catalog());
     let mut delta = ArchiveDelta::zero();
 
     // Establish the fact, so the retraction below has something standing
@@ -1359,7 +1365,7 @@ async fn it_keeps_a_fact_retracted_and_re_asserted_in_one_batch() -> Result<()> 
 async fn it_reads_spilled_claim_values_back_through_history() -> Result<()> {
     use futures_util::stream;
 
-    let store = MemoryBlocks::new();
+    let store = Blocks::new();
 
     let inline_n = dialog_search_tree::Manifest::default().inline_n as usize;
     let big = Value::String("z".repeat(inline_n + 1));
@@ -1374,7 +1380,7 @@ async fn it_reads_spilled_claim_values_back_through_history() -> Result<()> {
     let first = Version::new(Origin::from([7u8; 32]), Edition::new(0));
     let second = Version::new(Origin::from([7u8; 32]), Edition::new(1));
 
-    let mut tree = ArtifactTree::empty();
+    let mut tree = ArtifactTree::empty_in(test_catalog());
     for (version, instruction) in [
         (
             first,
@@ -1417,7 +1423,7 @@ async fn it_reads_spilled_claim_values_back_through_history() -> Result<()> {
 async fn it_ignores_a_retraction_of_a_nonexistent_fact() -> Result<()> {
     use futures_util::stream;
 
-    let store = MemoryBlocks::new();
+    let store = Blocks::new();
 
     let entity = Entity::new()?;
     let the: Relation = "post/title".parse()?;
@@ -1429,7 +1435,7 @@ async fn it_ignores_a_retraction_of_a_nonexistent_fact() -> Result<()> {
     };
     let version = Version::new(Origin::from([7u8; 32]), Edition::new(0));
 
-    let mut tree = ArtifactTree::empty();
+    let mut tree = ArtifactTree::empty_in(test_catalog());
     let mut delta = ArchiveDelta::zero();
     let changed = tree
         .apply_versioned(
@@ -1477,7 +1483,7 @@ async fn it_folds_same_batch_records_at_one_history_key() -> Result<()> {
     use crate::State;
     use crate::merge::coverage_scope;
 
-    let store = MemoryBlocks::new();
+    let store = Blocks::new();
 
     let entity = Entity::new()?;
     let the: Relation = "post/title".parse()?;
@@ -1490,7 +1496,7 @@ async fn it_folds_same_batch_records_at_one_history_key() -> Result<()> {
     let old = Version::new(Origin::from([7u8; 32]), Edition::new(0));
     let new = Version::new(Origin::from([7u8; 32]), Edition::new(1));
 
-    let mut tree = ArtifactTree::empty();
+    let mut tree = ArtifactTree::empty_in(test_catalog());
     for (version, instructions) in [
         (
             old,
@@ -1573,7 +1579,7 @@ async fn it_folds_same_batch_records_at_one_history_key() -> Result<()> {
 async fn it_covers_every_observed_claim_of_a_retracted_value() -> Result<()> {
     use futures_util::stream;
 
-    let store = MemoryBlocks::new();
+    let store = Blocks::new();
 
     let entity = Entity::new()?;
     let the: Relation = "task/label".parse()?;
@@ -1591,7 +1597,7 @@ async fn it_covers_every_observed_claim_of_a_retracted_value() -> Result<()> {
     let mallory = Version::new(Origin::from([2u8; 32]), Edition::new(1));
     let retractor = Version::new(Origin::from([3u8; 32]), Edition::new(2));
 
-    let mut tree = ArtifactTree::empty();
+    let mut tree = ArtifactTree::empty_in(test_catalog());
     for (version, instruction) in [
         (bob, Instruction::Assert(urgent.clone(), crate::Pick::All)),
         (
@@ -1646,7 +1652,7 @@ async fn it_unions_contended_claim_versions_in_either_direction() -> Result<()> 
     use dialog_search_tree::TreeDifference;
     use futures_util::{StreamExt as _, stream};
 
-    let store = MemoryBlocks::new();
+    let store = Blocks::new();
 
     let entity = Entity::new()?;
     let the: Relation = "task/label".parse()?;
@@ -1665,7 +1671,7 @@ async fn it_unions_contended_claim_versions_in_either_direction() -> Result<()> 
     // either tree can see and spares the test a block-transfer step.
     let mut replicas = Vec::new();
     for version in [bob, mallory] {
-        let mut tree = ArtifactTree::empty();
+        let mut tree = ArtifactTree::empty_in(test_catalog());
         let mut delta = ArchiveDelta::zero();
         tree.apply_versioned(
             &store,
@@ -1681,7 +1687,7 @@ async fn it_unions_contended_claim_versions_in_either_direction() -> Result<()> 
     let mut a = replicas.pop().expect("two replicas were built");
 
     let storage = store.clone();
-    let empty = ArtifactTree::empty();
+    let empty = ArtifactTree::empty_in(test_catalog());
 
     // Each side's full state as a change stream, the shape a pull ships
     // when the sync base is empty: bare adds, no removes, so the
@@ -1706,12 +1712,12 @@ async fn it_unions_contended_claim_versions_in_either_direction() -> Result<()> 
         .edit()
         .integrate(stream::iter(from_b.into_iter().map(Ok)), &storage)
         .await?
-        .persist(delta.blocks())?;
+        .persist(delta.blocks(), &storage)?;
     b = b
         .edit()
         .integrate(stream::iter(from_a.into_iter().map(Ok)), &storage)
         .await?
-        .persist(delta.blocks())?;
+        .persist(delta.blocks(), &storage)?;
     delta.flush_into(&store);
 
     assert_eq!(
@@ -1750,7 +1756,7 @@ async fn it_unions_contended_claim_versions_in_either_direction() -> Result<()> 
 async fn it_supersedes_only_different_values_when_replacing_many() -> Result<()> {
     use futures_util::stream;
 
-    let store = MemoryBlocks::new();
+    let store = Blocks::new();
 
     let entity = Entity::new()?;
     let the: Relation = "post/title".parse()?;
@@ -1765,9 +1771,9 @@ async fn it_supersedes_only_different_values_when_replacing_many() -> Result<()>
     let second = Version::new(Origin::from([7u8; 32]), Edition::new(1));
     let third = Version::new(Origin::from([7u8; 32]), Edition::new(2));
 
-    let mut tree = ArtifactTree::empty();
+    let mut tree = ArtifactTree::empty_in(test_catalog());
     let apply = async |tree: &mut ArtifactTree,
-                       store: &MemoryBlocks,
+                       store: &Blocks,
                        version: Version,
                        instruction: Instruction|
            -> Result<bool> {
@@ -1859,7 +1865,7 @@ async fn it_supersedes_only_different_values_when_replacing_many() -> Result<()>
 async fn it_disambiguates_truncated_history_keys_in_queries() -> Result<()> {
     use futures_util::stream;
 
-    let store = MemoryBlocks::new();
+    let store = Blocks::new();
 
     let head = "test/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     let long_x: Relation = format!("{head}x").parse()?;
@@ -1881,7 +1887,7 @@ async fn it_disambiguates_truncated_history_keys_in_queries() -> Result<()> {
         )
     };
 
-    let mut tree = ArtifactTree::empty();
+    let mut tree = ArtifactTree::empty_in(test_catalog());
     let mut delta = ArchiveDelta::zero();
     tree.apply_versioned(
         &store,
@@ -1993,7 +1999,7 @@ async fn it_refuses_forged_revision_records_in_the_tree() -> Result<()> {
 
     use ed25519_dalek::Signer as _;
 
-    let store = MemoryBlocks::new();
+    let store = Blocks::new();
 
     let key = signing_key(7);
     let did_key = {
@@ -2016,7 +2022,7 @@ async fn it_refuses_forged_revision_records_in_the_tree() -> Result<()> {
     };
     signed.signature = key.sign(&signed.payload()?).to_bytes().to_vec();
 
-    let mut tree = ArtifactTree::empty();
+    let mut tree = ArtifactTree::empty_in(test_catalog());
     let mut delta = ArchiveDelta::zero();
     tree.record(
         &store,
@@ -2063,7 +2069,7 @@ async fn it_reads_a_spilled_revision_record_back() -> Result<()> {
     use std::collections::BTreeSet;
     use std::sync::{Arc, Mutex};
 
-    let store = MemoryBlocks::new();
+    let store = Blocks::new();
 
     let key = signing_key(9);
     let did_key = {
@@ -2091,8 +2097,7 @@ async fn it_reads_a_spilled_revision_record_back() -> Result<()> {
         panic!("a record larger than inline_n spills");
     };
 
-    let mut tree: ArtifactTree =
-        PersistentTree::empty_with_manifest(small.clone(), dialog_search_tree::NodeCache::new());
+    let mut tree: ArtifactTree = PersistentTree::empty_with_manifest(test_catalog(), small.clone());
     let mut delta = ArchiveDelta::zero();
     tree.record(&store, &mut delta, entries).await?;
     delta.flush_into(&store);
@@ -2103,12 +2108,12 @@ async fn it_reads_a_spilled_revision_record_back() -> Result<()> {
 
     let storage = store.clone();
     let observed = Arc::new(Mutex::new(BTreeSet::new()));
-    let empty: ArtifactTree =
-        PersistentTree::empty_with_manifest(small, dialog_search_tree::NodeCache::new());
+    let empty: ArtifactTree = PersistentTree::empty_with_manifest(test_catalog(), small);
     let changes = observe_revisions(
         empty.differentiate(&tree, &storage, &storage),
         observed.clone(),
         store.clone(),
+        tree.catalog().archive(),
     );
     let _: Vec<_> = changes.try_collect().await?;
     assert!(
@@ -2461,7 +2466,7 @@ async fn it_mirrors_covering_records_into_the_coverage_region() -> Result<()> {
     use crate::key::varkey::{ValuePayload, parse_key};
     use crate::merge::coverage_scope;
 
-    let store = MemoryBlocks::new();
+    let store = Blocks::new();
 
     let entity = Entity::new()?;
     let the: Relation = "post/title".parse()?;
@@ -2476,7 +2481,7 @@ async fn it_mirrors_covering_records_into_the_coverage_region() -> Result<()> {
     let second = Version::new(Origin::from([8u8; 32]), Edition::new(1));
     let third = Version::new(Origin::from([8u8; 32]), Edition::new(2));
 
-    let mut tree = ArtifactTree::empty();
+    let mut tree = ArtifactTree::empty_in(test_catalog());
     for (version, instruction) in [
         (first, Instruction::Assert(title("Hej"), crate::Pick::All)),
         (second, Instruction::Assert(title("Hi"), crate::Pick::Last)),

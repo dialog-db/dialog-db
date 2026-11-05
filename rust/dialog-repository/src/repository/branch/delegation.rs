@@ -47,8 +47,10 @@
 //! #         + Provider<BlobWrite>
 //! #         + Provider<BlobImport>
 //! #         + Provider<BlobRead>
-//! #         + Provider<dialog_repository::Hydrate>
+//! #         + Provider<dialog_effects::archive::Load>
+//! #         + Provider<dialog_effects::blob::Load>
 //! #         + Provider<Fork<RemoteSite, Resolve>>
+//! #         + dialog_common::Holds
 //! #         + dialog_common::ConditionalSync
 //! #         + 'static,
 //! # {
@@ -64,8 +66,8 @@
 mod prove;
 pub use prove::*;
 
+use crate::repository::archive::erased;
 use crate::repository::branch::asset::recorded_size;
-use crate::repository::branch::blob::index_store;
 use crate::repository::source::SourceRef;
 use crate::{Branch, CommitError, Index, RemoteSite};
 use dialog_artifacts::{
@@ -76,9 +78,11 @@ use dialog_capability::access::{Certificate as _, Delegation as _};
 use dialog_capability::{ANY_SUBJECT, Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::ConditionalSync;
+use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify};
 use dialog_effects::blob::Import as BlobImport;
+use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::Read as BlobRead;
 use dialog_effects::blob::Write as BlobWrite;
 use dialog_effects::memory::{Publish, Resolve};
@@ -236,15 +240,20 @@ impl RetainDelegation<'_> {
             + Provider<Identify>
             + Provider<Attest>
             + Provider<BlobWrite>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + Provider<Fork<RemoteSite, Resolve>>
+            + dialog_common::Holds
             + ConditionalSync
             + 'static,
     {
         let branch = self.branch;
-        let store = index_store(branch, env).await;
+        let store = erased(env);
         let tree = branch.revision().map(|revision| {
-            Index::from_hash_with_cache(NodeHash::from(*revision.tree.hash()), branch.node_cache())
+            Index::at(
+                branch.archive().index(),
+                NodeHash::from(*revision.tree.hash()),
+            )
         });
 
         let mut instructions = Vec::new();
@@ -333,8 +342,10 @@ impl RetractDelegation<'_> {
             + Provider<Identify>
             + Provider<Attest>
             + Provider<BlobWrite>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + Provider<Fork<RemoteSite, Resolve>>
+            + dialog_common::Holds
             + ConditionalSync
             + 'static,
     {
@@ -342,9 +353,11 @@ impl RetractDelegation<'_> {
         let Some(revision) = branch.revision() else {
             return Ok(Vec::new());
         };
-        let store = index_store(branch, env).await;
-        let tree =
-            Index::from_hash_with_cache(NodeHash::from(*revision.tree.hash()), branch.node_cache());
+        let store = erased(env);
+        let tree = Index::at(
+            branch.archive().index(),
+            NodeHash::from(*revision.tree.hash()),
+        );
 
         let mut instructions = Vec::new();
         let mut entries = Vec::new();

@@ -3,10 +3,12 @@
 use std::{collections::VecDeque, sync::mpsc::Sender};
 
 use dialog_artifacts::{Datum, DialogArtifactsError, Index, Key, State};
-use dialog_search_tree::{Accessor, NodeBody, NodeCache, PersistentNode};
+use dialog_search_tree::{Accessor, NodeBody, PersistentNode};
 
 use super::store::WorkerMessage;
-use crate::Blocks;
+use std::sync::Arc;
+
+use crate::DiagnoseSession;
 
 /// Statistics about the structure and content of a probabilistic search tree.
 ///
@@ -33,8 +35,8 @@ pub struct ArtifactsTreeStats {
 pub struct ArtifactsTreeAnalysis {
     /// The probabilistic search tree index to analyze
     tree: Index,
-    /// Where the tree's blocks load from
-    storage: Blocks,
+    /// The session the tree's blocks load through
+    storage: Arc<DiagnoseSession>,
     /// Channel sender for worker messages
     tx: Sender<WorkerMessage>,
 }
@@ -47,7 +49,7 @@ impl ArtifactsTreeAnalysis {
     /// * `tree` - The probabilistic search tree index to analyze
     /// * `storage` - Where the tree's blocks load from
     /// * `tx` - Channel sender for worker messages
-    pub fn new(tree: Index, storage: Blocks, tx: Sender<WorkerMessage>) -> Self {
+    pub fn new(tree: Index, storage: Arc<DiagnoseSession>, tx: Sender<WorkerMessage>) -> Self {
         Self { tree, storage, tx }
     }
 
@@ -64,10 +66,11 @@ impl ArtifactsTreeAnalysis {
         };
 
         let storage = self.storage.clone();
+        let catalog = self.tree.catalog().clone();
         let tx = self.tx.clone();
 
         tokio::spawn(async move {
-            let accessor = Accessor::new(NodeCache::new(), &storage);
+            let accessor = Accessor::new(storage.as_ref(), &catalog);
 
             let mut stats = ArtifactsTreeStats::default();
             let mut levels = VecDeque::from([vec![root]]);

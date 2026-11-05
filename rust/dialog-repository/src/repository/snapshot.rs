@@ -48,6 +48,8 @@
 //! upstream as the walk proceeds, which is what makes the result complete.
 
 use core::ops::RangeInclusive;
+use dialog_effects::archive::Load as ArchiveLoad;
+use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::prelude::{ArchiveBlobExt as _, ReadBlobExt as _, WriteBlobExt as _};
 use std::collections::HashSet;
 
@@ -57,11 +59,11 @@ use dialog_artifacts::history::{
 };
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{
-    ArtifactSelector, BlobIndexExt as _, Datum, DialogArtifactsError, Entity, Key, LoadBlob,
-    ShipmentRef, State, Statement, shipment_ref,
+    ArtifactSelector, BlobIndexExt as _, Datum, DialogArtifactsError, Entity, Key, ShipmentRef,
+    State, Statement, shipment_ref,
 };
 use dialog_capability::{Did, Fork, Provider, Subject};
-use dialog_common::{Blake3Hash as NodeHash, Buffer, ConditionalSync};
+use dialog_common::{Blake3Hash as NodeHash, Buffer, ConditionalSync, Holds};
 use dialog_effects::archive::prelude::{
     ArchiveExt as _, ArchiveScope, CatalogExt as _, CatalogScope, DEFAULT_CATALOG, PutBlockExt as _,
 };
@@ -76,11 +78,13 @@ use parking_lot::RwLock;
 
 use dialog_varsig::Principal;
 
+use crate::repository::archive::erased;
+use crate::repository::archive::routes;
 use crate::repository::remote::Step;
 use crate::repository::source::{Caches, SourceRef};
 use crate::{
-    BlobArchive, Branch, ConnectedReplica, Ephemeral, Index, NetworkedIndex, PublishError,
-    RemoteSite, Repository, Revision, Select, SelectQuery, SnapshotError,
+    BlobArchive, Branch, ConnectedReplica, Ephemeral, Index, PublishError, RemoteSite, Repository,
+    Revision, Select, SelectQuery, SnapshotError,
 };
 use dialog_effects::MethodExt as _;
 
@@ -238,6 +242,24 @@ impl Branch {
             overlay: Ephemeral::default(),
         })
     }
+
+    /// This branch as it stood at `revision`, under `overlay` as its
+    /// session line: what a subscription reads the state before a
+    /// change from, with the pinned revision and the overlay rewound
+    /// to the pinned sequence. Shares the branch's caches, and reads
+    /// through the env as the branch does, so a block the replica never
+    /// fetched hydrates from where the branch's repository's blocks live.
+    pub(crate) fn view(&self, revision: Revision, overlay: Ephemeral) -> Snapshot {
+        Snapshot {
+            subject: self.subject(),
+            head: RwLock::new(Head {
+                revision,
+                lineage: None,
+            }),
+            caches: self.caches(),
+            overlay,
+        }
+    }
 }
 
 impl Snapshot {
@@ -388,18 +410,11 @@ impl Snapshot {
 
     /// The recorded claim lineage at this snapshot's revision. See
     /// [`Branch::history`].
-    /// A snapshot tracks no upstream, so this reads purely locally.
-    pub fn history<'a, Env>(&self, env: &'a Env) -> TreeHistory<NetworkedIndex<'a, Env>>
+    /// A read that misses locally hydrates through the env, as a branch's
+    /// does (see [`Routes`](crate::Routes)).
+    pub fn history<'a, Env>(&self, env: &'a Env) -> TreeHistory<&'a Env>
     where
-        Env: Provider<BlobRead>
-            + Provider<Get>
-            + Provider<Put>
-            + Provider<memory::Resolve>
-            + Provider<crate::Hydrate>
-            + Provider<dialog_artifacts::Preload>
-            + Provider<dialog_artifacts::Speculation>
-            + ConditionalSync
-            + 'static,
+        Env: Provider<ArchiveLoad> + Provider<BlobLoad> + Holds + ConditionalSync + ?Sized,
     {
         SourceRef::from(self).history(env)
     }
@@ -412,15 +427,7 @@ impl Snapshot {
         limit: usize,
     ) -> Result<Vec<(Version, RevisionRecord)>, DialogArtifactsError>
     where
-        Env: Provider<BlobRead>
-            + Provider<Get>
-            + Provider<Put>
-            + Provider<memory::Resolve>
-            + Provider<crate::Hydrate>
-            + Provider<dialog_artifacts::Preload>
-            + Provider<dialog_artifacts::Speculation>
-            + ConditionalSync
-            + 'static,
+        Env: Provider<ArchiveLoad> + Provider<BlobLoad> + Holds + ConditionalSync + ?Sized,
     {
         SourceRef::from(self).log(env, limit).await
     }
@@ -644,10 +651,12 @@ impl SnapshotExport {
             + Provider<Put>
             + Provider<BlobRead>
             + Provider<BlobImport>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, BlobRead>>
+            + dialog_common::Holds
             + ConditionalSync
             + 'static,
     {
@@ -666,12 +675,23 @@ impl SnapshotExport {
         let assets = self.assets;
 
         try_stream! {
-            // With an upstream a read-miss falls through to the remote and
-            // is cached; without one the index is exactly what this store
-            // holds.
-            let index = NetworkedIndex::erased(env, catalog, upstream);
-            let storage = index.clone();
-            let tree = Index::from_hash(root);
+            // A download hydrates read-misses from its upstream, lent to
+            // the env for the walk; any other export reads exactly what
+            // this store holds.
+            let _loan = upstream.as_ref().map(|remote| {
+                routes::lend(
+                    &crate::Routes::of(env),
+                    &subject.did().clone(),
+                    &crate::RemoteFallback::Remote(remote.clone()),
+                )
+            });
+            // A tree read and a spill read each load; without a download
+            // every load is local, so the export is what this store holds.
+            let local = upstream.is_none();
+            let storage = erased(env);
+            let index = &storage;
+            let tree = Index::at(catalog.clone(), root);
+            let tree = if local { tree.locally() } else { tree };
 
             let mut spills: HashSet<[u8; 32]> = HashSet::new();
             let mut blobs: Vec<NodeHash> = Vec::new();
@@ -717,8 +737,15 @@ impl SnapshotExport {
                 // exactly like stored entries (a buffered retract
                 // references nothing of its own). The closure only
                 // collects: classification returns artifact errors,
-                // which do not belong in a tree-walk callback.
-                let mut entries: Vec<(Key, State<Datum>)> = Vec::new();
+                // which do not belong in a tree-walk callback. The
+                // buffer is sized from the node's own count first: grown
+                // entry by entry, its copies cost whatever the allocator's
+                // layout makes them, which varies run to run and showed
+                // in the walk's instruction count as noise.
+                let mut entries: Vec<(Key, State<Datum>)> = Vec::with_capacity(match node.body() {
+                    NodeBody::Segment(segment) => segment.len(),
+                    NodeBody::Index(index) => index.novelty_len(),
+                });
                 match node.body() {
                     NodeBody::Segment(segment) => {
                         segment.for_each_entry::<Key, _>(|key, value| {
@@ -760,9 +787,15 @@ impl SnapshotExport {
             let mut spill_reads = stream::iter(spills.into_iter().map(
                 |reference| {
                     let storage = &storage;
+                    let archive = catalog.archive();
                     async move {
                         let digest = NodeHash::from(reference);
-                        let bytes = LoadBlob::new(digest.clone()).perform(storage).await;
+                        let load = BlobLoad::new(archive, digest.clone());
+                        let load = if local { load.locally() } else { load };
+                        let bytes = load
+                            .perform(storage)
+                            .await
+                            .map_err(DialogArtifactsError::from);
                         (digest, bytes)
                     }
                 },
@@ -798,7 +831,6 @@ impl SnapshotExport {
             // complete refuses.
             let mut blob_reads = stream::iter(blobs.into_iter().map(|digest| {
                 let tree = &tree;
-                let index = &index;
                 let hydrate = &hydrate;
                 let subject = subject.clone();
                 async move {
