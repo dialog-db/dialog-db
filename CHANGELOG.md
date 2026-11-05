@@ -16,6 +16,8 @@ says how to cut a release.
 
 ### A difference reads a leaf both sides share only at the keys its buffered ops touch
 
+[#736](https://github.com/dialog-db/dialog-db/pull/736)
+
 When two trees hold the same leaf and differ only in the ops a buffer
 above routes to it, the comparison now resolves just the keys those
 ops cover: each side's winning op, or the stored entry where that side
