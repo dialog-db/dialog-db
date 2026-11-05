@@ -853,7 +853,7 @@ fn is_running(_pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
+    use std::sync::{Arc, Barrier};
 
     /// A PID no process has: Linux's `pid_max` is at most 2^22.
     const GONE_PID: u32 = 999_999_999;
@@ -941,6 +941,29 @@ mod tests {
     }
 
     #[dialog_common::test]
+    async fn it_writes_the_holder_into_the_lock_file() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let lock_path = dir.path().join("cell.lock");
+        let _guard = LockGuard::acquire(lock_path.clone())?;
+        let content = std::fs::read(&lock_path)?;
+        let (pid, _token) = parse_holder(&content).expect("lock file reads as `pid token`");
+        assert_eq!(pid, std::process::id());
+        // The claim's temporary file is gone.
+        assert_eq!(names(dir.path())?, ["cell.lock"]);
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_removes_a_released_lock_file() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let lock_path = dir.path().join("cell.lock");
+        drop(LockGuard::acquire(lock_path.clone())?);
+        assert!(!lock_path.exists(), "a released lock file is removed");
+        assert!(names(dir.path())?.is_empty());
+        Ok(())
+    }
+
+    #[dialog_common::test]
     async fn it_holds_a_lock_whose_file_is_empty() -> anyhow::Result<()> {
         // The PID-file lock this replaced deleted a lock file it found empty
         // as corrupt, which let a second writer in while the first had
@@ -960,6 +983,61 @@ mod tests {
     }
 
     #[dialog_common::test]
+    async fn it_holds_a_lock_whose_file_does_not_read_as_pid_and_token() -> anyhow::Result<()> {
+        // A bare PID, as the previous release's lock wrote, a half-written
+        // claim, and garbage are all held, whatever process they name.
+        let dir = tempfile::tempdir()?;
+        let lock_path = dir.path().join("cell.lock");
+        for content in [
+            GONE_PID.to_string(),
+            format!("{GONE_PID} "),
+            format!("{GONE_PID} x"),
+            format!("{GONE_PID} 7\n"),
+            "0 7".to_string(),
+            "not a lock".to_string(),
+        ] {
+            std::fs::write(&lock_path, &content)?;
+            assert!(
+                matches!(
+                    LockGuard::acquire(lock_path.clone()),
+                    Err(FileSystemError::Lock(_))
+                ),
+                "{content:?} is held"
+            );
+            assert_eq!(std::fs::read(&lock_path)?, content.as_bytes());
+        }
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_refuses_a_lock_naming_a_running_process() -> anyhow::Result<()> {
+        // A lock naming this process, written by hand: running, so held.
+        let dir = tempfile::tempdir()?;
+        let lock_path = dir.path().join("cell.lock");
+        let content = format!("{} 7", std::process::id());
+        std::fs::write(&lock_path, &content)?;
+        assert!(matches!(
+            LockGuard::acquire(lock_path.clone()),
+            Err(FileSystemError::Lock(_))
+        ));
+        assert_eq!(std::fs::read_to_string(&lock_path)?, content);
+
+        // A running process other than this one, which the liveness check
+        // has to answer for: the test runner that started this process.
+        #[cfg(unix)]
+        {
+            let content = format!("{} 7", std::os::unix::process::parent_id());
+            std::fs::write(&lock_path, &content)?;
+            assert!(matches!(
+                LockGuard::acquire(lock_path.clone()),
+                Err(FileSystemError::Lock(_))
+            ));
+            assert_eq!(std::fs::read_to_string(&lock_path)?, content);
+        }
+        Ok(())
+    }
+
+    #[dialog_common::test]
     async fn it_takes_a_lock_left_by_a_holder_that_is_gone() -> anyhow::Result<()> {
         // A lock file left behind by a holder that crashed is recovered.
         let dir = tempfile::tempdir()?;
@@ -973,6 +1051,60 @@ mod tests {
         );
         // Neither the recovery link nor a temporary file is left behind.
         assert_eq!(names(dir.path())?, ["cell.lock"]);
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    fn it_recovers_a_lock_whose_holder_is_gone_exactly_once() -> anyhow::Result<()> {
+        // Writers that all find the same gone holder must not all take its
+        // lock: exactly one of them holds it.
+        const WRITERS: usize = 8;
+        let dir = tempfile::tempdir()?;
+        let lock_path = dir.path().join("cell.lock");
+        for round in 0..100 {
+            std::fs::write(&lock_path, format!("{GONE_PID} {round}"))?;
+            let start = Arc::new(Barrier::new(WRITERS));
+            let done = Arc::new(Barrier::new(WRITERS));
+            let threads: Vec<_> = (0..WRITERS)
+                .map(|_| {
+                    let lock_path = lock_path.clone();
+                    let start = start.clone();
+                    let done = done.clone();
+                    std::thread::spawn(move || {
+                        start.wait();
+                        let result = LockGuard::acquire(lock_path);
+                        // Hold until everyone has tried.
+                        done.wait();
+                        match result {
+                            Ok(_guard) => true,
+                            Err(FileSystemError::Lock(_)) => false,
+                            Err(other) => panic!("expected a Lock refusal, got {other:?}"),
+                        }
+                    })
+                })
+                .collect();
+            let held = threads
+                .into_iter()
+                .map(|thread| thread.join().expect("a writer panicked"))
+                .filter(|held| *held)
+                .count();
+            assert_eq!(held, 1, "round {round}: {held} writers held the lock");
+            assert!(names(dir.path())?.is_empty(), "round {round}");
+        }
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_leaves_a_lock_file_another_holder_replaced() -> anyhow::Result<()> {
+        // A guard releases only its own hold: if its file now names another
+        // holder, dropping the guard leaves that holder's file in place.
+        let dir = tempfile::tempdir()?;
+        let lock_path = dir.path().join("cell.lock");
+        let guard = LockGuard::acquire(lock_path.clone())?;
+        let other = format!("{GONE_PID} 7");
+        std::fs::write(&lock_path, &other)?;
+        drop(guard);
+        assert_eq!(std::fs::read_to_string(&lock_path)?, other);
         Ok(())
     }
 
