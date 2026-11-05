@@ -86,7 +86,7 @@ pub trait Transfer: ConditionalSend {
 /// One request, one response — and, where the transport can, one stream.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-pub trait Channel: ConditionalSync {
+pub trait Channel: ConditionalSend + ConditionalSync {
     /// Send `request` to `peer` and read its answer.
     ///
     /// `request` is a `ctn-v1` container and the answer is an encoded
@@ -140,7 +140,7 @@ pub trait Channel: ConditionalSync {
 /// dialed yet, and that stops being true without anything being rebuilt.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-pub trait Connect: ConditionalSync {
+pub trait Connect: ConditionalSend + ConditionalSync {
     /// Produce the channel, or say why there is not one yet.
     async fn connect(&self) -> Result<std::sync::Arc<dyn Channel>, ChannelError>;
 }

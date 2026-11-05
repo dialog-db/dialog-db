@@ -72,7 +72,7 @@ pub use archive::*;
 /// without colliding with what they import themselves.
 mod reads {
     pub use dialog_capability::Provider;
-    pub use dialog_common::{ConditionalSync, Holds};
+    pub use dialog_common::{ConditionalSend, ConditionalSync, Holds};
     pub use dialog_effects::{archive, blob};
 }
 

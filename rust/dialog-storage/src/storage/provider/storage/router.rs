@@ -40,7 +40,7 @@ impl<T, E: From<StorageError>> FromSubjectNotFound for Result<T, E> {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S, Fx> Provider<Fx> for Router<S>
 where
-    S: Provider<Fx> + ConditionalSync + Clone,
+    S: Provider<Fx> + ConditionalSend + ConditionalSync + Clone,
     Fx: Effect + ConditionalSend + 'static,
     Fx::Output: FromSubjectNotFound,
     Capability<Fx>: ConditionalSend,

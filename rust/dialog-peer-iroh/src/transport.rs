@@ -292,8 +292,8 @@ pub async fn accept<S, Resolver, Revocations>(
     responder: Arc<Responder<S, Resolver, Revocations>>,
 ) where
     S: Store + ConditionalSend + 'static,
-    Resolver: Provider<Resolve> + ConditionalSync + 'static,
-    Revocations: RevocationChecker + ConditionalSync + 'static,
+    Resolver: Provider<Resolve> + ConditionalSend + ConditionalSync + 'static,
+    Revocations: RevocationChecker + ConditionalSend + ConditionalSync + 'static,
 {
     while let Some(incoming) = endpoint.accept().await {
         let responder = responder.clone();
@@ -320,8 +320,8 @@ async fn serve_connection<S, Resolver, Revocations>(
     responder: Arc<Responder<S, Resolver, Revocations>>,
 ) where
     S: Store + ConditionalSend + 'static,
-    Resolver: Provider<Resolve> + ConditionalSync + 'static,
-    Revocations: RevocationChecker + ConditionalSync + 'static,
+    Resolver: Provider<Resolve> + ConditionalSend + ConditionalSync + 'static,
+    Revocations: RevocationChecker + ConditionalSend + ConditionalSync + 'static,
 {
     let peer = connection.remote_id();
 
@@ -363,8 +363,8 @@ async fn serve_stream<S, Resolver, Revocations>(
 ) -> Result<(), ChannelError>
 where
     S: Store + ConditionalSend + 'static,
-    Resolver: Provider<Resolve> + ConditionalSync + 'static,
-    Revocations: RevocationChecker + ConditionalSync + 'static,
+    Resolver: Provider<Resolve> + ConditionalSend + ConditionalSync + 'static,
+    Revocations: RevocationChecker + ConditionalSend + ConditionalSync + 'static,
 {
     let request = read_frame("request", transfer).await?;
 

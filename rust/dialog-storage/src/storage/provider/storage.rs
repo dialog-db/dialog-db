@@ -88,7 +88,7 @@ impl<S: Clone> Clone for Storage<S> {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S> Provider<archive::Load> for Storage<S>
 where
-    S: Clone + ConditionalSync,
+    S: Clone + ConditionalSend + ConditionalSync,
     Router<S>: Provider<archive::Get> + ConditionalSync,
 {
     async fn execute(
@@ -104,7 +104,7 @@ where
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S> Provider<blob::Load> for Storage<S>
 where
-    S: Clone + ConditionalSync,
+    S: Clone + ConditionalSend + ConditionalSync,
     Router<S>: Provider<archive::Get> + Provider<blob::Read> + ConditionalSync,
 {
     async fn execute(
@@ -149,7 +149,7 @@ fn refused(location: &storage::Location) -> storage::StorageError {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S> Provider<storage::Load> for Storage<S>
 where
-    S: Clone + ConditionalSync,
+    S: Clone + ConditionalSend + ConditionalSync,
     Loader<S>: Provider<storage::Load>,
     Self: ConditionalSend + ConditionalSync,
 {
@@ -176,7 +176,7 @@ where
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S> Provider<storage::Create> for Storage<S>
 where
-    S: Clone + ConditionalSync,
+    S: Clone + ConditionalSend + ConditionalSync,
     Loader<S>: Provider<storage::Create>,
     Self: ConditionalSend + ConditionalSync,
 {
@@ -200,7 +200,7 @@ where
 
 impl<S> Storage<S>
 where
-    S: crate::provider::SpaceProvider + Clone + ConditionalSync,
+    S: crate::provider::SpaceProvider + Clone + ConditionalSend + ConditionalSync,
     Self: ConditionalSend + ConditionalSync,
 {
     /// The identity of the space `did`, if it is mounted here: its
@@ -223,7 +223,7 @@ where
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S, P> Provider<Prove<P>> for Storage<S>
 where
-    S: Clone + ConditionalSync,
+    S: Clone + ConditionalSend + ConditionalSync,
     P: Protocol,
     P::Access: Clone + ConditionalSend + ConditionalSync,
     P::Certificate: Clone + ConditionalSend + ConditionalSync,
@@ -240,7 +240,7 @@ where
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S, P> Provider<Export<P>> for Storage<S>
 where
-    S: Clone + ConditionalSync,
+    S: Clone + ConditionalSend + ConditionalSync,
     P: Protocol,
     P::Certificate: ConditionalSend + ConditionalSync,
     Router<S>: Provider<Export<P>>,
@@ -258,7 +258,7 @@ where
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S, P> Provider<Forget<P>> for Storage<S>
 where
-    S: Clone + ConditionalSync,
+    S: Clone + ConditionalSend + ConditionalSync,
     P: Protocol,
     P::Certificate:
         serde::Serialize + for<'de> serde::Deserialize<'de> + ConditionalSend + ConditionalSync,
@@ -274,7 +274,7 @@ where
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S, P> Provider<Retain<P>> for Storage<S>
 where
-    S: Clone + ConditionalSync,
+    S: Clone + ConditionalSend + ConditionalSync,
     P: Protocol,
     P::Delegation: ConditionalSend + ConditionalSync,
     Router<S>: Provider<Retain<P>>,

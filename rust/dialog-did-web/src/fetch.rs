@@ -62,7 +62,7 @@ fn check_size(url: &str, len: Option<u64>) -> Result<(), ResolveError> {
 /// loopback host.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-pub trait Fetch: ConditionalSync {
+pub trait Fetch: ConditionalSend + ConditionalSync {
     /// GET `url` and return the response body bytes.
     ///
     /// # Errors
