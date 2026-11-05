@@ -16,9 +16,9 @@ says how to cut a release.
 
 ### A tree reads its catalog's blocks through `Load` on the env, and the env hydrates
 
-Stacked on [#730](https://github.com/dialog-db/dialog-db/pull/730), from
-the branch `worker/confident-tesla-y27ghw-effects` (pull request to
-come); argued in [notes/tree-reads-as-effects.md](./notes/tree-reads-as-effects.md).
+[#735](https://github.com/dialog-db/dialog-db/pull/735), after
+[#730](https://github.com/dialog-db/dialog-db/pull/730); argued in
+[notes/tree-reads-as-effects.md](./notes/tree-reads-as-effects.md).
 
 A search tree is now a root under a catalog, and it reads a node by
 performing the new `dialog_effects::archive::Load` command on the

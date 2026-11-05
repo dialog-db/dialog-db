@@ -1,7 +1,7 @@
 # The search tree reads through capabilities
 
 Status: taken. Step two after the store-held node cache (#730); lands
-on the branch `worker/confident-tesla-y27ghw-effects`, stacked on #730.
+in #735.
 
 ## Context
 
