@@ -16,7 +16,7 @@ says how to cut a release.
 
 ### A file store's write lock is never taken by two writers at once
 
-[#723](https://github.com/dialog-db/dialog-db/pull/723)
+[#741](https://github.com/dialog-db/dialog-db/pull/741), on [#723](https://github.com/dialog-db/dialog-db/pull/723)
 
 A native file store guards each cell's compare-and-swap with a lock file.
 It was a PID lock taken through `pidlock`, whose acquire creates the file
