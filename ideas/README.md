@@ -16,3 +16,5 @@ becomes a note in `notes/`.
   Exchange and 22× on tonk-team's pushed history, and grow with the live
   tree. Decoding a node's rows costs about a file read; rebuilding the
   block costs 10× more, and blocks an older encoder wrote do not rebuild.
+  [Design](single-file-format-design.md): an archive provider that keeps
+  hot nodes whole and history as frames.

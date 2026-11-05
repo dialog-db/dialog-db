@@ -1306,6 +1306,10 @@ fn measure(source: Source, checkpoints: &[usize]) -> anyhow::Result<()> {
     let mut by_first_store = ColumnStore::new(32, written.path())?;
     let mut by_first_store_named = 0usize;
     let (mut lineage_bases, mut agree) = (0usize, 0usize);
+    // Nodes a later node of the same kind and first key supersedes: under
+    // a "newest stays whole" policy, everything else stays a raw block.
+    let mut superseded: HashSet<u32> = HashSet::new();
+    let mut node_bytes: Vec<usize> = Vec::new();
     let mut rows_time = Duration::ZERO;
 
     println!("{}", header());
@@ -1374,6 +1378,10 @@ fn measure(source: Source, checkpoints: &[usize]) -> anyhow::Result<()> {
         lineage_bases += base_rows.is_some() as usize;
         agree += (base_rows.is_some() && base_rows.map(|(p, _)| p) == guess) as usize;
         by_first_store_named += guess.is_some() as usize;
+        if let Some(position) = guess {
+            superseded.insert(position);
+        }
+        node_bytes.push(len);
         by_first_store.put(
             &block.hash,
             &rows,
@@ -1452,6 +1460,18 @@ fn measure(source: Source, checkpoints: &[usize]) -> anyhow::Result<()> {
             mib(store.bytes),
         );
     }
+    let whole: usize = node_bytes
+        .iter()
+        .enumerate()
+        .filter(|(position, _)| !superseded.contains(&(*position as u32)))
+        .map(|(_, bytes)| bytes)
+        .sum();
+    eprintln!(
+        "  newest stays whole: {} of {} nodes, {} MiB, are never superseded by first key",
+        node_bytes.len() - superseded.len(),
+        node_bytes.len(),
+        mib(whole),
+    );
     eprintln!(
         "  columnar/32 by first key: {} MiB of frames ({} named a predecessor; lineage named {}, and {} of those agree)",
         mib(by_first_store.bytes),
@@ -1697,6 +1717,69 @@ fn read_costs(
             realize(frame(hash), tokens, frames, &manifests[hash])?,
         )
     })?;
+    // Where a realize spends its time, over the live segments: building
+    // the entries from rows (keys from tokens, datums deserialized), then
+    // the tree's encoder, then the validation every read pays when it
+    // turns bytes into a node, from a file or not.
+    if let Some(store) = columns.first() {
+        let segments: Vec<&Blake3Hash> = reached
+            .iter()
+            .filter(|hash| matches!(nodes[*hash].body(), NodeBody::Segment(_)))
+            .collect();
+        let (mut build, mut datums, mut encode, mut validate) = (
+            Duration::ZERO,
+            Duration::ZERO,
+            Duration::ZERO,
+            Duration::ZERO,
+        );
+        let passes = 5;
+        for _ in 0..passes {
+            for hash in &segments {
+                let rows = store.rows(positions[*hash]);
+                let started = Instant::now();
+                let mut entries = Vec::with_capacity(rows.sections[0].len());
+                for row in &rows.sections[0] {
+                    let form = row[0] as u8;
+                    let parts: Vec<&[u8]> = (0..slots_of(form))
+                        .map(|slot| tokens.by_id(row[1 + slot]))
+                        .collect();
+                    let key = key_from_tokens(form, &parts);
+                    let datum_started = Instant::now();
+                    let value = datum_from(tokens.by_id(row[4]))?;
+                    datums += datum_started.elapsed();
+                    entries.push(Entry {
+                        key: <Key as TreeKey>::try_from_bytes(&key)?,
+                        value,
+                    });
+                }
+                build += started.elapsed();
+                let started = Instant::now();
+                let bytes = PersistentNodeBody::from_segment(
+                    PersistentSegment::from_entries::<Key>(entries)?,
+                    manifests[*hash].clone(),
+                )
+                .as_bytes()?
+                .to_vec();
+                encode += started.elapsed();
+                let started = Instant::now();
+                let node = TreeNode::try_from(Buffer::from(bytes))?;
+                validate += started.elapsed();
+                anyhow::ensure!(
+                    node.buffer().as_ref().len() == nodes[*hash].buffer().as_ref().len()
+                );
+            }
+        }
+        let count = (passes * segments.len()).max(1) as f64;
+        let per = |elapsed: Duration| elapsed.as_secs_f64() * 1e6 / count;
+        eprintln!(
+            "  realize of a live segment ({} of them), us: build entries {:.1} (of which datums {:.1}), encode {:.1}; validating a node from bytes {:.1}",
+            segments.len(),
+            per(build),
+            per(datums),
+            per(encode),
+            per(validate),
+        );
+    }
     for store in columns {
         let label = |what: &str| format!("columnar/{}: {what}", store.interval);
         // Decoding the rows is what a reader that worked on rows would pay;
