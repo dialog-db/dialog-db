@@ -44,8 +44,8 @@ What this changes for you:
   catalog.
 - `dialog_repository::LocalIndex` and `NetworkedIndex` are removed: read
   through the env itself (`tree.get(key, &env)`, `select.execute(&env)`).
-  `NetworkedIndex::with_priority(p)` is `tree.ranked(p)`, and
-  `NetworkedIndex::locally(true)` is `tree.locally()` (or
+  `NetworkedIndex::with_priority(p)` is `tree.ranked(p)`; a tree that
+  must read only what the replica holds is `tree.locally()` (or
   `Load::locally()` for a single read). `load_or_hydrate`,
   `load_blob_or_hydrate`, `hydrate` and `RemoteFallback` stay where they
   were exported.
@@ -81,8 +81,13 @@ What this changes for you:
 - Any read of a repository one of whose open branches tracks a remote
   can hydrate a block it lacks, a snapshot's and a transaction's staged
   view included, and a branch can hydrate a block only a sibling's remote
-  holds. With no remote tracked a read is local, as before. An export
-  that does not download reads only what the replica holds.
+  holds. A miss tries every remote the subject's open branches track, in
+  the order they were opened and each in its tracking order, where before
+  only the reading branch's first remote was asked; a miss no reachable
+  remote answers fails naming the first remote that could not be reached,
+  rather than reading as absent. With no remote tracked a read is local,
+  as before. An export that does not download reads only what the replica
+  holds.
 - A push's novelty walk, its subtree forwarding and its spilled-value
   shipping read only the local archive, by `Get`, and never hydrate.
 

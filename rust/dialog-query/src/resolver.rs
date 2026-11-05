@@ -54,6 +54,7 @@ use std::sync::LazyLock;
 use base58::{FromBase58, ToBase58};
 use dialog_artifacts::{DialogArtifactsError, inspect};
 use dialog_capability::Subject;
+use dialog_common::{Blake3Hash, Buffer};
 use dialog_effects::archive::prelude::ArchiveScope;
 use dialog_effects::{archive, blob};
 use serde::{Deserialize, Serialize};
@@ -87,6 +88,24 @@ use crate::{Environment, Parameters, Schema, Scope, Value, try_stream};
 /// ```
 pub fn anywhere() -> ArchiveScope {
     ArchiveScope::new(Subject::any())
+}
+
+/// `block` if it hashes to `reference`. A resolver's rows are a pure
+/// function of the reference (see the module doc), which holds only of
+/// the bytes the reference names: an environment handing back other bytes
+/// for it (a corrupt store, a line answering for the wrong block) is a
+/// failed read, refused rather than inspected as if it were the block.
+fn verified(
+    reference: &inspect::NodeReference,
+    block: Buffer,
+) -> Result<Buffer, DialogArtifactsError> {
+    if block.blake3_hash() != &Blake3Hash::from(*reference) {
+        return Err(DialogArtifactsError::InvalidValue(format!(
+            "block {} does not hash to its reference",
+            reference.to_base58()
+        )));
+    }
+    Ok(block)
 }
 
 /// Base cost of a resolver step: one content-addressed block fetch
@@ -877,7 +896,7 @@ impl ResolverQuery {
                 let Some(block) = loaded else {
                     continue;
                 };
-                let bytes = block.into_vec();
+                let bytes = verified(&reference, block)?.into_vec();
                 match &resolver {
                     ResolverQuery::TreeNode(query) => {
                         let Ok(node) = inspect::inspect_node(bytes) else {
@@ -1083,5 +1102,30 @@ impl Application for ResolverQuery {
 impl Display for ResolverQuery {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}(of: {})", self.name(), self.of())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    /// A resolver inspects only the block its reference names: the bytes
+    /// an environment hands back are checked against the reference, so a
+    /// store answering with another block fails the premise rather than
+    /// yielding rows attributed to a block it never read.
+    #[dialog_common::test]
+    fn it_refuses_a_block_that_does_not_hash_to_its_reference() {
+        let asked = Buffer::from(b"the block asked for".to_vec());
+        let other = Buffer::from(b"some other block".to_vec());
+        let reference: inspect::NodeReference = *asked.blake3_hash().as_bytes();
+
+        assert_eq!(verified(&reference, asked.clone()).unwrap(), asked);
+        assert!(matches!(
+            verified(&reference, other),
+            Err(DialogArtifactsError::InvalidValue(_))
+        ));
     }
 }

@@ -69,12 +69,17 @@ impl Registered {
             Some((at, count, _)) if *count == connections && self.tracking.is_at(at.as_ref())
         );
         if !current {
-            let tracked = self.tracking.content().unwrap_or_default();
+            // One read of the cell: the routes are worked out from the
+            // content of the version they are memoized under.
+            let (tracked, version) = match self.tracking.edition() {
+                Some(edition) => (edition.content, Some(edition.version)),
+                None => (Tracking::default(), None),
+            };
             let routes: Vec<HydrationRoute> = fallbacks_of(&tracked, &self.host, &self.answers)
                 .iter()
                 .filter_map(route_of)
                 .collect();
-            *memo = Some((self.tracking.version(), connections, routes));
+            *memo = Some((version, connections, routes));
         }
         match memo.as_ref() {
             Some((_, _, routes)) => answer(routes),

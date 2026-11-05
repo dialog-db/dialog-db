@@ -675,9 +675,6 @@ impl SnapshotExport {
         let assets = self.assets;
 
         try_stream! {
-            // With an upstream a read-miss falls through to the remote and
-            // is cached; without one the index is exactly what this store
-            // holds.
             // A download hydrates read-misses from its upstream, lent to
             // the env for the walk; any other export reads exactly what
             // this store holds.

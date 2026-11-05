@@ -1528,8 +1528,10 @@ impl PreparedPull<'_> {
         let catalog = branch.archive().index();
         let upstream = TreeHistory::from_root(catalog.clone(), merged.merges.tree.hash(), env)
             .with_record_cache(branch.records());
-        // What the branch holds is local, so its history reads nothing from
-        // the network.
+        // The branch's own history reads through the env too: on a full
+        // replica every record it asks for is local, and on one that
+        // adopted a head it never read, a record it lacks hydrates like
+        // any other miss instead of failing the walk.
         let known = match branch.revision() {
             Some(head) => TreeHistory::from_root(catalog.clone(), head.tree.hash(), env),
             None => TreeHistory::empty(catalog, env),

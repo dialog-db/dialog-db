@@ -45,8 +45,10 @@ pub enum Route {
 /// Something that knows where a subject's blocks live: what a registry
 /// asks, on a local miss, for its subject's routes.
 ///
-/// The registry asks while it holds its own lock, so an implementation
-/// must not reach back into the registry.
+/// [`subject`](Self::subject) and [`is_open`](Self::is_open) are asked
+/// under the registry's lock and must not block; [`routes`](Self::routes)
+/// and [`fetches`](Self::fetches) are asked outside it, and may take locks
+/// of their own, but must not register or lend while answering.
 pub trait Routing: ConditionalSend + ConditionalSync {
     /// The subject whose blocks it routes.
     fn subject(&self) -> &Did;
@@ -198,14 +200,23 @@ impl Routes {
     /// and warming ahead of demand has nothing to do.
     pub fn fetches(&self, subject: &Did) -> bool {
         let remote = |route: &Route| matches!(route, Route::Remote { .. });
-        let registry = self.lock();
-        registry
-            .lent
-            .iter()
-            .any(|(_, lent, route)| lent == subject && remote(route))
-            || registry.routing.iter().any(|(_, routing)| {
-                routing.subject() == subject && routing.is_open() && routing.fetches()
-            })
+        let routing: Vec<Arc<dyn Routing>> = {
+            let registry = self.lock();
+            if registry
+                .lent
+                .iter()
+                .any(|(_, lent, route)| lent == subject && remote(route))
+            {
+                return true;
+            }
+            registry
+                .routing
+                .iter()
+                .filter(|(_, routing)| routing.subject() == subject && routing.is_open())
+                .map(|(_, routing)| routing.clone())
+                .collect()
+        };
+        routing.iter().any(|routing| routing.fetches())
     }
 }
 
