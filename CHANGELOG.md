@@ -76,6 +76,13 @@ What this changes for you:
 - Durability matches the `fs` provider: appends are not synced.
   `FileArchive::sync` gives a point that is.
 - `Options::frames = false` keeps every block whole.
+- With the `transcode` feature, `transcode_spaces` (and the
+  `dialog-transcode --spaces <directory>` binary) moves a replica the `fs`
+  provider wrote into the file: every space under a profile directory gets
+  the `archive.dialog` a file-archive space reads, beside the rest of the
+  space. `transcode` does the same for any `BlockSource`, such as a flat
+  directory of fetched blocks. Every block reads back as the bytes it was;
+  nodes in an older layout are kept whole.
 
 Why: a replica's history costs a file per block per version, which is
 most of what a replica weighs. Replaying 4096 Stack Exchange commits, the

@@ -1287,7 +1287,9 @@ version = "0.4.0-rc.3"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base58",
  "crc32fast",
+ "dialog-archive-file",
  "dialog-artifacts",
  "dialog-capability",
  "dialog-common",

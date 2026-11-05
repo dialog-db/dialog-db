@@ -129,6 +129,24 @@ impl Tokens {
         self.extents.len() + self.pending_ends.len()
     }
 
+    /// Drops the pending tokens past the first `keep`: those interned for a
+    /// node that is kept whole after all.
+    pub fn roll_back(&mut self, keep: usize) {
+        while self.pending_ends.len() > keep {
+            let id = (self.len() - 1) as u32;
+            let token = self.get(id).expect("a pending token").to_vec();
+            let hash = self.hasher.hash_one(token.as_slice());
+            if let Some(ids) = &mut self.ids
+                && let Ok(entry) = ids.find_entry(hash, |candidate| *candidate == id)
+            {
+                entry.remove();
+            }
+            self.pending_ends.pop();
+            let end = self.pending_ends.last().copied().unwrap_or(0) as usize;
+            self.pending.truncate(end);
+        }
+    }
+
     /// How many tokens are pending.
     pub fn pending(&self) -> usize {
         self.pending_ends.len()

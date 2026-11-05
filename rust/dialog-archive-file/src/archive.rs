@@ -1216,12 +1216,15 @@ impl FileArchive {
         let node_ids = &state.node_ids;
         let child =
             |hash: &Blake3Hash| staged_ids.get(hash).or_else(|| node_ids.get(hash)).copied();
-        // A node that does not split into rows (another tree's, say) is
-        // kept whole; its tokens stay, unnamed.
+        // A node that does not split into rows (another tree's, say), or
+        // whose frame does not rebuild its block, is kept whole, and the
+        // tokens interned for it are dropped again: nothing names them.
+        let mark = state.tokens.pending();
         let started = Instant::now();
         let rows = rows_of(node, &mut state.tokens, child);
         Timings::add(&self.inner.timings.split, started);
         let Ok(rows) = rows else {
+            state.tokens.roll_back(mark);
             return Ok(None);
         };
         let started = Instant::now();
@@ -1268,6 +1271,7 @@ impl FileArchive {
         FrameHeader::get(&mut reader)?;
         let decoded = get_rows(&mut reader, rows.kind, base_rows.as_deref())?;
         if decoded != rows {
+            state.tokens.roll_back(mark);
             return Ok(None);
         }
         let realized = realize(&rows, &state.tokens, &manifest, |id| {
@@ -1278,6 +1282,7 @@ impl FileArchive {
         });
         Timings::add(&self.inner.timings.verify, started);
         if realized.ok().as_deref() != Some(block.as_ref()) {
+            state.tokens.roll_back(mark);
             return Ok(None);
         }
         let depth = base.and_then(depth_of).map_or(0, |depth| depth + 1);
