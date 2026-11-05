@@ -3,7 +3,7 @@
 //! Layout: `{space_root}/memory/{space}/{cell}`
 //!
 //! Implements transactional cell storage with CAS (Compare-And-Swap) semantics.
-//! Uses OS file locks (`flock`) for cross-process coordination and BLAKE3
+//! Uses lock files naming their holder for cross-process coordination and BLAKE3
 //! content hashing for edition tracking.
 
 use super::{FileSystem, FileSystemError, FileSystemHandle};
@@ -65,8 +65,8 @@ impl FileSystemHandle {
 
     /// Acquire a cross-writer lock on this handle for a CAS critical section.
     ///
-    /// On native this is an exclusive OS file lock (`flock`, or `LockFileEx`
-    /// on Windows) on `{path}.lock`, a file left in place after release; on
+    /// On native this is a lock file at `{path}.lock` naming the process that
+    /// holds it, removed on release; on
     /// the web it is a [Web Locks API][weblocks] lock keyed by this handle's
     /// URL. The guard releases the lock when dropped.
     ///
@@ -885,11 +885,12 @@ mod tests {
         let cell_handle = provider.memory()?.resolve("local")?.cell("test")?;
         let cell_path: std::path::PathBuf = cell_handle.try_into()?;
         let lock_path = super::super::native::lock_path(&cell_path);
-        // A lock file nobody holds, like the PID files an older store left
-        std::fs::write(&lock_path, b"999999999")?;
+        // The lock file of a writer that crashed holding it: `pid token`,
+        // naming a PID no process has
+        std::fs::write(&lock_path, b"999999999 7")?;
         assert!(lock_path.exists(), "stale lock file should exist");
 
-        // Publish should succeed: a lock file is not a held lock
+        // Publish should succeed: a gone holder's lock is recovered
         let edition = did
             .clone()
             .reader()

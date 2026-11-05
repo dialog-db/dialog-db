@@ -11,7 +11,7 @@ use dialog_effects::storage::{Directory, Location};
 use std::env;
 use std::io;
 use std::io::SeekFrom;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use url::Url;
@@ -536,7 +536,7 @@ impl FileWriter {
 }
 
 /// Acquire a cross-process write lock for the given handle's CAS critical
-/// section. The lock file lives at `{path}.lock`.
+/// section. The lock file lives at `{path}.lock`; see [`LockGuard`].
 pub(crate) async fn lock(handle: &FileSystemHandle) -> Result<LockGuard, FileSystemError> {
     let path: PathBuf = handle.try_into()?;
     let lock_path = lock_path(&path);
@@ -550,57 +550,128 @@ pub(crate) async fn lock(handle: &FileSystemHandle) -> Result<LockGuard, FileSys
 /// The lock file for the cell at `path`: `{path}.lock`. The suffix is
 /// appended rather than set as the extension, so cells `a.x` and `a.y` get
 /// locks of their own instead of sharing `a.lock`.
-pub(crate) fn lock_path(path: &std::path::Path) -> PathBuf {
+pub(crate) fn lock_path(path: &Path) -> PathBuf {
+    sibling(path, ".lock")
+}
+
+/// `path` with `suffix` appended to its last component.
+fn sibling(path: &Path, suffix: &str) -> PathBuf {
     let mut name = path.as_os_str().to_owned();
-    name.push(".lock");
+    name.push(suffix);
     PathBuf::from(name)
 }
 
-/// An exclusive OS file lock (`flock` on Unix, `LockFileEx` on Windows) on a
-/// cell's lock file, released when dropped.
+/// How many times [`LockGuard::acquire`] tries to claim the lock: once, and
+/// once more when the lock file it found was released, or was recovered
+/// from a holder that is gone, before it could read it.
+const CLAIM_ATTEMPTS: usize = 2;
+
+/// A cell's write lock: the lock file `{cell}.lock`, holding `"{pid} {token}"`
+/// for the process that holds it and a random token naming this one hold.
 ///
-/// The kernel decides who holds the lock, so two writers can never both hold
-/// it, and it is released when its holder's file is closed — including when
-/// the holder dies — so there is no stale lock to detect. Each acquire opens
-/// the file afresh, so two tasks in one process exclude each other too.
+/// The lock is a plain file rather than an OS lock (`flock`), so it works on
+/// network and FUSE filesystems, where an OS lock errors or is silently not
+/// enforced. It follows four rules:
 ///
-/// That holds on local filesystems. On Linux NFS the kernel emulates `flock`
-/// with a lock owned by the whole process, so two tasks in one process would
-/// both get it; stores are expected to be on local disk.
+/// - **A lock file is held unless proven otherwise.** One that is empty or
+///   does not read as `pid token` is held, and is never deleted: it may be a
+///   writer that has created it and not yet written it.
+/// - **A claim never shows an empty lock file.** The content is written to a
+///   temporary file `{lock}.{pid}.{token}.tmp` first and hard-linked to the
+///   lock path, which fails atomically if a lock file is there. Where hard
+///   links are not supported, the lock file is created with `create_new` and
+///   written after; by the first rule, a writer that arrives in between is
+///   refused.
+/// - **A lock whose holder is gone is recovered by one writer.** A writer that
+///   reads `pid token` naming a process that is not running links the lock
+///   file to `{lock}.stale.{token}`, a name only one writer can create. It
+///   then checks that the file it linked still reads what it read (the lock
+///   may have been recovered and claimed again in between), removes the lock
+///   file, removes its link, and claims again.
+/// - **A guard releases only its own hold.** On drop it removes the lock file
+///   if the file still reads this guard's `pid token`, and leaves it
+///   otherwise. No running holder's lock is ever recovered, so nothing
+///   replaces the file between that read and the removal.
 ///
-/// The lock file is never removed: unlinking a locked file would let a later
-/// writer lock a new file at the same path while another still holds the old.
+/// A writer that finds the lock held is refused at once with
+/// [`FileSystemError::Lock`]; nothing waits here. A lock naming this process
+/// is held, so two tasks of one process exclude each other.
+///
+/// Whether a holder is running is asked of the OS, in this process's PID
+/// namespace: writers sharing a store must share one (a writer in another
+/// container sees a PID that means nothing here). If a gone holder's PID has
+/// since been given to another process, its lock looks held until the lock
+/// file is deleted by hand. So does a gone holder's lock on a filesystem
+/// without hard links, and one whose recovery was interrupted by a crash
+/// (delete its `{lock}.stale.{token}` too).
 pub(crate) struct LockGuard {
-    // Held only so the lock lives until the guard drops; closing the file
-    // releases it.
-    _file: std::fs::File,
+    path: PathBuf,
+    content: String,
+}
+
+/// What a writer that found the lock file learned by reading it.
+enum Holder {
+    /// The lock file was gone by the time it was read.
+    Released,
+    /// Held: by a running process, by this one, or by a writer whose
+    /// content does not read as `pid token`.
+    Held,
+    /// Names a process that is not running.
+    Gone {
+        /// The content read, which recovery checks the file still holds.
+        content: Vec<u8>,
+        /// The gone holder's token, which names the recovery link.
+        token: u64,
+    },
 }
 
 impl LockGuard {
     /// Take the lock at the given path.
     ///
-    /// If the lock is held, returns an error immediately rather than waiting.
-    /// Nothing retries it here: the caller gets the error, as it did with the
-    /// previous PID lock.
+    /// If the lock is held, returns [`FileSystemError::Lock`] immediately
+    /// rather than waiting; the caller decides whether to try again.
     fn acquire(path: PathBuf) -> Result<Self, FileSystemError> {
-        let mut options = std::fs::OpenOptions::new();
-        options.create(true).truncate(false).read(true).write(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
+        let pid = std::process::id();
+        for _ in 0..CLAIM_ATTEMPTS {
+            if let Some(guard) = Self::claim(&path, pid)? {
+                return Ok(guard);
+            }
+            match holder(&path, pid)? {
+                Holder::Released => {}
+                Holder::Held => break,
+                Holder::Gone { content, token } => recover(&path, &content, token)?,
+            }
         }
-        let file = options.open(&path).map_err(|e| {
-            FileSystemError::Lock(format!("Failed to open lock file {}: {e}", path.display()))
-        })?;
+        Err(FileSystemError::Lock(format!(
+            "Concurrent write in progress (lock {} held)",
+            path.display()
+        )))
+    }
 
-        match file.try_lock() {
-            Ok(()) => Ok(Self { _file: file }),
-            Err(std::fs::TryLockError::WouldBlock) => Err(FileSystemError::Lock(format!(
-                "Concurrent write in progress (lock {} held)",
-                path.display()
-            ))),
-            Err(std::fs::TryLockError::Error(e)) => Err(FileSystemError::Lock(format!(
+    /// Create the lock file with this hold's content already in it, or
+    /// return `None` if a lock file is there.
+    fn claim(path: &Path, pid: u32) -> Result<Option<Self>, FileSystemError> {
+        let token = token();
+        let content = format!("{pid} {token}");
+        let tmp = sibling(path, &format!(".{pid}.{token}.tmp"));
+        write_new(&tmp, content.as_bytes()).map_err(|e| {
+            FileSystemError::Lock(format!("Failed to create lock file {}: {e}", tmp.display()))
+        })?;
+        let linked = std::fs::hard_link(&tmp, path);
+        let _ = std::fs::remove_file(&tmp);
+        let created = match linked {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Ok(None),
+            // No hard links here: create the file and write it after.
+            Err(_) => write_new(path, content.as_bytes()),
+        };
+        match created {
+            Ok(()) => Ok(Some(Self {
+                path: path.to_path_buf(),
+                content,
+            })),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(None),
+            Err(e) => Err(FileSystemError::Lock(format!(
                 "Failed to acquire lock {}: {e}",
                 path.display()
             ))),
@@ -608,9 +679,193 @@ impl LockGuard {
     }
 }
 
+impl Drop for LockGuard {
+    fn drop(&mut self) {
+        if std::fs::read(&self.path).is_ok_and(|now| now == self.content.as_bytes()) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+/// Create the file at `path`, which must not exist, holding `content`. A
+/// file that was created but could not be written is removed.
+fn write_new(path: &Path, content: &[u8]) -> io::Result<()> {
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    if let Err(e) = file.write_all(content) {
+        drop(file);
+        let _ = std::fs::remove_file(path);
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// Read the lock file at `path`, which a claim found there, and say who
+/// holds it.
+fn holder(path: &Path, pid: u32) -> Result<Holder, FileSystemError> {
+    let content = match std::fs::read(path) {
+        Ok(content) => content,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Holder::Released),
+        Err(e) => {
+            return Err(FileSystemError::Lock(format!(
+                "Failed to read lock {}: {e}",
+                path.display()
+            )));
+        }
+    };
+    match parse_holder(&content) {
+        Some((holder, token)) if holder != pid && !is_running(holder) => {
+            Ok(Holder::Gone { content, token })
+        }
+        _ => Ok(Holder::Held),
+    }
+}
+
+/// Remove the lock file at `path` if it still holds `content`, the lock of
+/// a holder that is gone, unless another writer is recovering it.
+fn recover(path: &Path, content: &[u8], token: u64) -> Result<(), FileSystemError> {
+    let link = sibling(path, &format!(".stale.{token}"));
+    match std::fs::hard_link(path, &link) {
+        Ok(()) => {}
+        // Another writer is recovering it, or already has.
+        Err(e)
+            if matches!(
+                e.kind(),
+                io::ErrorKind::AlreadyExists | io::ErrorKind::NotFound
+            ) =>
+        {
+            return Ok(());
+        }
+        Err(e) => {
+            return Err(FileSystemError::Lock(format!(
+                "Cannot recover lock {} from a holder that is gone ({e}); \
+                 delete it by hand if no writer is running",
+                path.display()
+            )));
+        }
+    }
+    // The link names the file that was at the lock path when it was made.
+    // If that is still the gone holder's, nobody else can remove it while
+    // the link exists, so removing the lock path removes that file.
+    let unchanged = std::fs::read(&link).is_ok_and(|now| now == content);
+    let removed = if unchanged {
+        match std::fs::remove_file(path) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        }
+    } else {
+        Ok(())
+    };
+    let _ = std::fs::remove_file(&link);
+    removed.map_err(|e| {
+        FileSystemError::Lock(format!("Failed to recover lock {}: {e}", path.display()))
+    })
+}
+
+/// Read a lock file's content as `"{pid} {token}"`, both decimal. A PID no
+/// process can have (zero, or past `i32::MAX`) does not read.
+fn parse_holder(content: &[u8]) -> Option<(u32, u64)> {
+    let (pid, token) = std::str::from_utf8(content).ok()?.split_once(' ')?;
+    let decimal = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    if !decimal(pid) || !decimal(token) {
+        return None;
+    }
+    let pid: u32 = pid.parse().ok()?;
+    if pid == 0 || i32::try_from(pid).is_err() {
+        return None;
+    }
+    Some((pid, token.parse().ok()?))
+}
+
+/// A token for one hold: random, so two holds by one process, or by two
+/// processes given the same PID, do not share one.
+fn token() -> u64 {
+    use std::hash::{BuildHasher, Hasher};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    // `RandomState` is seeded from the OS's random source.
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    hasher.write_u64(COUNTER.fetch_add(1, Ordering::Relaxed));
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or_default();
+    hasher.write_u128(now);
+    hasher.finish()
+}
+
+/// Whether the process `pid` is running, in this process's PID namespace.
+/// Anything short of proof that it is not counts as running.
+#[cfg(unix)]
+fn is_running(pid: u32) -> bool {
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return true;
+    };
+    // SAFETY: signal 0 delivers nothing; `kill` only checks that `pid`
+    // exists and could be signalled, and `pid` is positive, so it names one
+    // process rather than a group.
+    if unsafe { libc::kill(pid, 0) } == 0 {
+        return true;
+    }
+    // EPERM: it exists, and belongs to another user.
+    io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+}
+
+/// Whether the process `pid` is running. Anything short of proof that it is
+/// not counts as running.
+#[cfg(windows)]
+fn is_running(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, ERROR_INVALID_PARAMETER, GetLastError, STILL_ACTIVE,
+    };
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    // SAFETY: `OpenProcess` takes no pointers; the handle it returns is
+    // checked for null, passed only to `GetExitCodeProcess` with a valid
+    // out-pointer, and closed once.
+    unsafe {
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if process.is_null() {
+            // No process has this id; access denied means one does.
+            return GetLastError() != ERROR_INVALID_PARAMETER;
+        }
+        let mut code = 0u32;
+        let read = GetExitCodeProcess(process, &mut code);
+        CloseHandle(process);
+        read == 0 || code == STILL_ACTIVE as u32
+    }
+}
+
+/// No way to ask on this platform: every holder counts as running.
+#[cfg(not(any(unix, windows)))]
+fn is_running(_pid: u32) -> bool {
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    /// A PID no process has: Linux's `pid_max` is at most 2^22.
+    const GONE_PID: u32 = 999_999_999;
+
+    /// The names in `dir`, sorted.
+    fn names(dir: &Path) -> anyhow::Result<Vec<String>> {
+        let mut names = std::fs::read_dir(dir)?
+            .map(|entry| Ok(entry?.file_name().to_string_lossy().into_owned()))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        names.sort();
+        Ok(names)
+    }
 
     #[dialog_common::test]
     async fn it_fails_lock_when_held_by_same_process() -> anyhow::Result<()> {
@@ -689,32 +944,40 @@ mod tests {
     async fn it_holds_a_lock_whose_file_is_empty() -> anyhow::Result<()> {
         // The PID-file lock this replaced deleted a lock file it found empty
         // as corrupt, which let a second writer in while the first had
-        // created the file but not yet written its PID. Holding the lock must
-        // not depend on what the file contains.
+        // created the file but not yet written its PID. An empty lock file is
+        // held, and nobody deletes it.
         let dir = tempfile::tempdir()?;
         let lock_path = dir.path().join("cell.lock");
-        let _guard = LockGuard::acquire(lock_path.clone())?;
-        assert_eq!(std::fs::metadata(&lock_path)?.len(), 0);
+        std::fs::write(&lock_path, b"")?;
         assert!(matches!(
-            LockGuard::acquire(lock_path),
+            LockGuard::acquire(lock_path.clone()),
             Err(FileSystemError::Lock(_))
         ));
+        assert_eq!(std::fs::read(&lock_path)?, b"");
+        // The refused claim left no temporary file behind.
+        assert_eq!(names(dir.path())?, ["cell.lock"]);
         Ok(())
     }
 
     #[dialog_common::test]
     async fn it_takes_a_lock_left_by_a_holder_that_is_gone() -> anyhow::Result<()> {
-        // A lock file left behind (as after a crash) is not a held lock.
+        // A lock file left behind by a holder that crashed is recovered.
         let dir = tempfile::tempdir()?;
         let lock_path = dir.path().join("cell.lock");
-        std::fs::write(&lock_path, "999999")?;
-        let _guard = LockGuard::acquire(lock_path)?;
+        std::fs::write(&lock_path, format!("{GONE_PID} 7"))?;
+        let _guard = LockGuard::acquire(lock_path.clone())?;
+        let content = std::fs::read(&lock_path)?;
+        assert_eq!(
+            parse_holder(&content).map(|(pid, _)| pid),
+            Some(std::process::id())
+        );
+        // Neither the recovery link nor a temporary file is left behind.
+        assert_eq!(names(dir.path())?, ["cell.lock"]);
         Ok(())
     }
 
     #[dialog_common::test]
     fn it_never_lets_two_writers_hold_one_lock() -> anyhow::Result<()> {
-        use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
         let dir = tempfile::tempdir()?;
         let lock_path = dir.path().join("cell.lock");
