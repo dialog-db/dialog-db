@@ -21,6 +21,7 @@ pub(crate) mod test {
     use crate::recall::{BodyMemo, Memo};
     use crate::session::RuleRegistry;
     use dialog_artifacts::selector::Constrained;
+    use dialog_artifacts::tree::ArtifactNodeCache;
     use dialog_artifacts::{
         ArtifactSelector, ArtifactStream, DialogArtifactsError, LoadBlob, Select,
     };
@@ -135,7 +136,12 @@ pub(crate) mod test {
             &self,
             load: LoadBlock,
         ) -> Result<Option<dialog_common::Buffer>, DialogSearchTreeError> {
-            let store = NetworkedIndex::new(self.operator, self.branch.archive().index(), None);
+            let store = NetworkedIndex::new(
+                self.operator,
+                self.branch.archive().index(),
+                None,
+                ArtifactNodeCache::new(),
+            );
             load.perform(&store).await
         }
     }
@@ -148,7 +154,12 @@ pub(crate) mod test {
             &self,
             load: LoadBlob,
         ) -> Result<Option<dialog_common::Buffer>, DialogArtifactsError> {
-            let store = NetworkedIndex::new(self.operator, self.branch.archive().index(), None);
+            let store = NetworkedIndex::new(
+                self.operator,
+                self.branch.archive().index(),
+                None,
+                ArtifactNodeCache::new(),
+            );
             load.perform(&store).await
         }
     }

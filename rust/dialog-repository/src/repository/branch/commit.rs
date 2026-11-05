@@ -584,7 +584,8 @@ where
         // — with its cause — on the first read that needed it, while a
         // commit every block of which is local proceeds untouched.
         let remote = source.fallback();
-        let store = NetworkedIndex::erased(env, source.archive().index(), remote);
+        let store =
+            NetworkedIndex::erased(env, source.archive().index(), remote, source.node_cache());
 
         // Discover who we are up front: the revision is attributed to the
         // profile / operator, and the commit's `Version` — the identifier
@@ -634,10 +635,7 @@ where
         let mut tree = match (self.rebuild, base_revision.as_ref()) {
             (Some(rebuilt), _) => rebuilt,
             (None, Some(base)) => {
-                let tree = Index::from_hash_with_cache(
-                    NodeHash::from(*base.tree.hash()),
-                    source.node_cache(),
-                );
+                let tree = Index::from_hash(NodeHash::from(*base.tree.hash()));
                 // A tree written the way an earlier release laid values out
                 // is read, never extended: it is rewritten first (see
                 // `Branch::migrate_storage`), and every write after that
@@ -655,7 +653,7 @@ where
                 }
                 tree
             }
-            (None, None) => Index::empty_with_cache(source.node_cache()),
+            (None, None) => Index::empty(),
         };
 
         // Drain the change stream into the tree. EAV/AEV/VAE writes,
@@ -768,13 +766,7 @@ where
             if !changed && *tree.root().as_bytes() == *revision.tree.hash() {
                 return Ok(Outcome::Unchanged(revision));
             }
-            persist(
-                &source.archive().index(),
-                &source.node_cache(),
-                &mut delta,
-                env,
-            )
-            .await?;
+            persist(store.local(), &mut delta, env).await?;
             revision.tree = TreeReference::from(*tree.root().as_bytes());
             revision.signature = Attest::new(revision.payload()).perform(env).await?;
             return Ok(Outcome::Minted(Box::new(Minted {
@@ -797,12 +789,8 @@ where
         let parent = base_revision.as_ref().map(Revision::version);
         let skips = match base_revision.as_ref() {
             Some(base) => {
-                let history = TreeHistory::from_root_with_cache(
-                    base.tree.hash(),
-                    store.clone(),
-                    source.node_cache(),
-                )
-                .with_record_cache(source.records());
+                let history = TreeHistory::from_root(base.tree.hash(), store.clone())
+                    .with_record_cache(source.records());
                 extend_skips(&history, &base.version()).await?
             }
             None => Vec::new(),
@@ -826,17 +814,12 @@ where
             version,
             &source.contexts(),
             &store,
-            &source.node_cache(),
             || {
                 let base = base_revision
                     .as_ref()
                     .expect("only a commit with a parent walks its history");
-                TreeHistory::from_root_with_cache(
-                    base.tree.hash(),
-                    store.clone(),
-                    source.node_cache(),
-                )
-                .with_record_cache(source.records())
+                TreeHistory::from_root(base.tree.hash(), store.clone())
+                    .with_record_cache(source.records())
             },
         )
         .await?;
@@ -892,13 +875,7 @@ where
         // reference-counted, so nothing is copied on the way in, and
         // providers with native batching persist it in a single round trip
         // (one IndexedDB transaction).
-        persist(
-            &source.archive().index(),
-            &source.node_cache(),
-            &mut delta,
-            env,
-        )
-        .await?;
+        persist(store.local(), &mut delta, env).await?;
 
         revision.tree = TreeReference::from(*tree.root().as_bytes());
         revision.publish_region(count);
@@ -1140,6 +1117,7 @@ mod history_tests {
 
     use crate::helpers::test_repo;
     use anyhow::Result;
+    use dialog_artifacts::tree::ArtifactNodeCache;
     use dialog_peer::helpers::test_session_with_peer;
 
     use dialog_artifacts::history::{
@@ -1513,7 +1491,12 @@ mod history_tests {
         use dialog_artifacts::tree::ArtifactTreeExt as _;
         use dialog_common::Blake3Hash as NodeHash;
 
-        let store = NetworkedIndex::new(&operator, branch.archive().index(), None);
+        let store = NetworkedIndex::new(
+            &operator,
+            branch.archive().index(),
+            None,
+            ArtifactNodeCache::new(),
+        );
         let tree = Index::from_hash(NodeHash::from(*revision.tree.hash()));
         let data = tree
             .select_data(store, &"post:1".parse()?, &"post/title".parse()?)

@@ -258,7 +258,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         for (key, value) in chunk {
             edit = edit.insert(key.clone(), value.clone(), &storage).await?;
         }
-        tree = edit.persist(&mut delta)?;
+        tree = edit.persist(&mut delta, &storage)?;
         for (_, buffer) in delta.flush() {
             storage.store(buffer);
         }

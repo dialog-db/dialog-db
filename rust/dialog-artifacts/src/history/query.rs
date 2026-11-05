@@ -8,9 +8,7 @@ use futures_util::{Stream, StreamExt, TryStreamExt};
 
 use crate::Value;
 use crate::tree::ArtifactTreeExt as _;
-use crate::tree::{
-    ArtifactNodeCache, ArtifactTree, SPILL_LOOKAHEAD, SpillCache, fetch_spilled_cached, spill_cache,
-};
+use crate::tree::{ArtifactTree, SPILL_LOOKAHEAD, SpillCache, fetch_spilled_cached, spill_cache};
 use crate::{
     DialogArtifactsError, Entity, Key, Relation, State, history_claim_range, history_key_version,
     history_region_range, history_version_range,
@@ -90,7 +88,13 @@ where
         }
     }
 
-    /// Read history from the artifact tree rooted at `root`
+    /// Read history from the artifact tree rooted at `root`.
+    ///
+    /// The tree is read through `store`, so repeated history lookups (the
+    /// frontier reads of [`common_ancestor`](super::common_ancestor), or the
+    /// skip table construction of [`extend_skips`](super::extend_skips))
+    /// that re-walk the same spine are answered from whatever node cache the
+    /// store keeps.
     pub fn from_root(root: &Blake3Hash, store: S) -> Self {
         Self::new(ArtifactTree::from_hash(NodeHash::from(*root)), store)
     }
@@ -102,19 +106,6 @@ where
     ) -> Self {
         self.records = records;
         self
-    }
-
-    /// Read history from the artifact tree rooted at `root`, sharing the
-    /// given node cache: repeated history lookups (e.g. the frontier reads
-    /// of [`common_ancestor`](super::common_ancestor), or the skip table
-    /// construction of [`extend_skips`](super::extend_skips)) re-walk the
-    /// same tree spine, and content-addressed keys make sharing the cache
-    /// with other readers of the same store safe.
-    pub fn from_root_with_cache(root: &Blake3Hash, store: S, cache: ArtifactNodeCache) -> Self {
-        Self::new(
-            ArtifactTree::from_hash_with_cache(NodeHash::from(*root), cache),
-            store,
-        )
     }
 
     /// The history records the selector covers, in key order (ascending by
@@ -195,8 +186,8 @@ where
     /// Read history over no tree at all — the shape of a branch with no
     /// revision. There is no root to read records from, so every lookup
     /// resolves to nothing without touching storage.
-    pub fn empty_with_cache(store: S, cache: ArtifactNodeCache) -> Self {
-        Self::new(ArtifactTree::empty_with_cache(cache), store)
+    pub fn empty(store: S) -> Self {
+        Self::new(ArtifactTree::empty(), store)
     }
 
     /// Every record in the history region, in key order (ascending by

@@ -148,7 +148,7 @@ async fn run_canonical(program: &Program) -> Result<Vec<Blake3Hash>> {
             }
             Op::Delete(key) => edit.delete(&key.to_be_bytes(), &storage).await?,
         }
-        .persist(&mut delta)?;
+        .persist(&mut delta, &storage)?;
         settle(&mut delta, &mut storage).await?;
         if program.checkpoints.contains(&(at + 1)) {
             roots.push(checkpoint_root(&tree, &storage, "canonical").await?);
@@ -205,9 +205,9 @@ async fn run_buffered(
             // Publish the buffered form and reopen over it: the persisted
             // spine round-trip every real commit performs.
             let mut delta = Delta::zero();
-            let root = buffered.persist(&mut delta)?;
+            let root = buffered.persist(&mut delta, &storage)?;
             settle(&mut delta, &mut storage).await?;
-            tree = Tree::from_hash_with_cache(root, Default::default());
+            tree = Tree::from_hash(root);
             buffered = open(&tree, op_buf);
         }
     }

@@ -795,15 +795,12 @@ where
     // select does: a pulled head's changed paths may reference
     // remote-only blocks.
     let remote = source.fallback();
-    let store = crate::NetworkedIndex::erased(env, branch.archive().index(), remote);
+    let store =
+        crate::NetworkedIndex::erased(env, branch.archive().index(), remote, branch.node_cache());
     let raw_store = store.clone();
     let storage = store;
-    let previous = crate::Index::from_hash_with_cache(
-        NodeHash::from(*watermark.tree.hash()),
-        branch.node_cache(),
-    );
-    let next =
-        crate::Index::from_hash_with_cache(NodeHash::from(*head.tree.hash()), branch.node_cache());
+    let previous = crate::Index::from_hash(NodeHash::from(*watermark.tree.hash()));
+    let next = crate::Index::from_hash(NodeHash::from(*head.tree.hash()));
 
     let scope = vec![
         <EntityKey<Key> as KeyViewConstruct>::min().into_key()

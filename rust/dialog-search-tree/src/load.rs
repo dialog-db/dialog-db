@@ -33,7 +33,7 @@ impl LoadBlock {
     /// the block is genuinely not reachable.
     pub async fn perform<Env>(self, env: &Env) -> Result<Option<Buffer>, DialogSearchTreeError>
     where
-        Env: Provider<LoadBlock> + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync + ?Sized,
     {
         let hash = self.hash.clone();
         match env.execute(self).await? {

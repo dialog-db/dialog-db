@@ -1,11 +1,12 @@
 use async_trait::async_trait;
-use dialog_artifacts::{DialogArtifactsError, LoadBlob};
+use dialog_artifacts::tree::ArtifactNodeCache;
+use dialog_artifacts::{Datum, DialogArtifactsError, Key, LoadBlob, State};
 use dialog_capability::Provider;
 use dialog_common::{Blake3Hash, Buffer, ConditionalSync};
 use dialog_effects::archive::prelude::CatalogScope;
 use dialog_effects::archive::{ArchiveError, Get};
 use dialog_effects::blob::{BlobError, BlobReader, Read as BlobRead};
-use dialog_search_tree::{DialogSearchTreeError, LoadBlock};
+use dialog_search_tree::{DialogSearchTreeError, LoadBlock, Nodes};
 
 /// Local content-addressed index backed by archive capabilities.
 ///
@@ -13,9 +14,15 @@ use dialog_search_tree::{DialogSearchTreeError, LoadBlock};
 /// from one catalog of the local archive, performing `Get` against the
 /// environment it borrows. It never writes: a commit writes what its batch
 /// staged.
+///
+/// It keeps the nodes trees read through it in `nodes` (see [`Nodes`]): the
+/// handle on the repository's node cache, so a node one read checked is
+/// answered from memory for every later read of the same repository, and
+/// a node a persist through it sealed is there before the flush.
 pub struct LocalIndex<'a, Env: ?Sized> {
     env: &'a Env,
     catalog: CatalogScope,
+    nodes: ArtifactNodeCache,
 }
 
 impl<Env: ?Sized> Clone for LocalIndex<'_, Env> {
@@ -23,14 +30,20 @@ impl<Env: ?Sized> Clone for LocalIndex<'_, Env> {
         Self {
             env: self.env,
             catalog: self.catalog.clone(),
+            nodes: self.nodes.clone(),
         }
     }
 }
 
 impl<'a, Env: ?Sized> LocalIndex<'a, Env> {
-    /// Create a local index for the given catalog capability.
-    pub fn new(env: &'a Env, catalog: CatalogScope) -> Self {
-        Self { env, catalog }
+    /// Create a local index for the given catalog capability, keeping the
+    /// nodes read through it in `nodes`.
+    pub fn new(env: &'a Env, catalog: CatalogScope, nodes: ArtifactNodeCache) -> Self {
+        Self {
+            env,
+            catalog,
+            nodes,
+        }
     }
 
     /// The catalog capability this index operates on.
@@ -41,6 +54,11 @@ impl<'a, Env: ?Sized> LocalIndex<'a, Env> {
     /// The environment reference.
     pub fn env(&self) -> &'a Env {
         self.env
+    }
+
+    /// The node cache this index keeps tree nodes in.
+    pub(crate) fn nodes(&self) -> &ArtifactNodeCache {
+        &self.nodes
     }
 }
 
@@ -125,6 +143,17 @@ where
     }
 }
 
+/// Tree nodes are read through the node cache this index holds, then the
+/// local archive.
+impl<Env> Nodes<Key, State<Datum>> for LocalIndex<'_, Env>
+where
+    Env: ?Sized + Provider<Get> + ConditionalSync,
+{
+    fn kept(&self) -> Option<&ArtifactNodeCache> {
+        Some(&self.nodes)
+    }
+}
+
 /// Spilled values load from the local blob store, falling back to the
 /// block catalog for values spilled before they moved to blobs.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -191,7 +220,7 @@ mod tests {
         let block = Buffer::from(b"a block".to_vec());
         catalog.clone().put(block.clone()).perform(env).await?;
 
-        let index = LocalIndex::new(env, catalog);
+        let index = LocalIndex::new(env, catalog, ArtifactNodeCache::new());
         let node = LoadBlock::new(block.blake3_hash().clone())
             .perform(&index)
             .await?;
@@ -232,7 +261,7 @@ mod tests {
         writer.write_all(value.as_ref()).await?;
         writer.finish().await?;
 
-        let index = LocalIndex::new(env, catalog);
+        let index = LocalIndex::new(env, catalog, ArtifactNodeCache::new());
         let blob = LoadBlob::new(digest.clone()).perform(&index).await?;
         let node = LoadBlock::new(digest).perform(&index).await?;
 
@@ -254,7 +283,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_loads_nothing_for_a_missing_hash() -> Result<()> {
         let env = Volatile::new();
-        let index = LocalIndex::new(&env, test_catalog("index"));
+        let index = LocalIndex::new(&env, test_catalog("index"), ArtifactNodeCache::new());
 
         let missing = Buffer::from(b"never stored".to_vec());
         let node = LoadBlock::new(missing.blake3_hash().clone())
@@ -271,7 +300,7 @@ mod tests {
         let block = Buffer::from(b"isolated".to_vec());
         put(&env, &test_catalog("a"), &block).await?;
 
-        let other = LocalIndex::new(&env, test_catalog("b"));
+        let other = LocalIndex::new(&env, test_catalog("b"), ArtifactNodeCache::new());
         assert!(
             LoadBlock::new(block.blake3_hash().clone())
                 .perform(&other)
@@ -279,7 +308,7 @@ mod tests {
                 .is_none()
         );
 
-        let same = LocalIndex::new(&env, test_catalog("a"));
+        let same = LocalIndex::new(&env, test_catalog("a"), ArtifactNodeCache::new());
         assert_eq!(
             LoadBlock::new(block.blake3_hash().clone())
                 .perform(&same)

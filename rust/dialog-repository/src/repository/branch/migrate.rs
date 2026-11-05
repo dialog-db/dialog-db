@@ -76,9 +76,13 @@ impl Branch {
         let Some(revision) = self.revision() else {
             return Ok(None);
         };
-        let store = NetworkedIndex::new(env, self.archive().index(), self.fallback());
-        let tree =
-            Index::from_hash_with_cache(NodeHash::from(*revision.tree.hash()), self.node_cache());
+        let store = NetworkedIndex::new(
+            env,
+            self.archive().index(),
+            self.fallback(),
+            self.node_cache(),
+        );
+        let tree = Index::from_hash(NodeHash::from(*revision.tree.hash()));
         let manifest = tree
             .manifest(&store)
             .await
@@ -162,9 +166,13 @@ impl RekeyStorage<'_> {
         let Some(revision) = branch.revision() else {
             return Ok(None);
         };
-        let store = NetworkedIndex::erased(env, branch.archive().index(), branch.fallback());
-        let tree =
-            Index::from_hash_with_cache(NodeHash::from(*revision.tree.hash()), branch.node_cache());
+        let store = NetworkedIndex::erased(
+            env,
+            branch.archive().index(),
+            branch.fallback(),
+            branch.node_cache(),
+        );
+        let tree = Index::from_hash(NodeHash::from(*revision.tree.hash()));
         let manifest = tree
             .manifest(&store)
             .await
@@ -179,14 +187,8 @@ impl RekeyStorage<'_> {
         // The rewrite's nodes are persisted before the revision that
         // names them is minted: a revision points only at durable blocks.
         let mut delta = ArchiveDelta::zero();
-        let rewritten = rekey_tree(&tree, &store, &mut delta, target, branch.node_cache()).await?;
-        persist(
-            &branch.archive().index(),
-            &branch.node_cache(),
-            &mut delta,
-            env,
-        )
-        .await?;
+        let rewritten = rekey_tree(&tree, &store, &mut delta, target).await?;
+        persist(store.local(), &mut delta, env).await?;
         // Boxed: the commit is a large future, and this one runs once.
         let revision = Box::pin(
             branch
@@ -272,21 +274,15 @@ where
     }
     let root = tree.root().clone();
     if let Some(rewritten) = branch.rewrites().get_cached(&root) {
-        return Ok(Index::from_hash_with_cache(rewritten, branch.node_cache()));
+        return Ok(Index::from_hash(rewritten));
     }
     let target = Manifest {
         value_encoding: NUMBER_BAND,
         ..manifest
     };
     let mut delta = ArchiveDelta::zero();
-    let rewritten = rekey_tree(&tree, store, &mut delta, target, branch.node_cache()).await?;
-    persist(
-        &branch.archive().index(),
-        &branch.node_cache(),
-        &mut delta,
-        env,
-    )
-    .await?;
+    let rewritten = rekey_tree(&tree, store, &mut delta, target).await?;
+    persist(store.local(), &mut delta, env).await?;
     branch.rewrites().insert(root, rewritten.root().clone());
     Ok(rewritten)
 }

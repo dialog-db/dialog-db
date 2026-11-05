@@ -785,7 +785,7 @@ pub(crate) async fn select_from_source<'a>(
     // the env's own `Hydrate` flight (see `crate::Hydrate`), with
     // every other evaluation in the process.
     let reads: &dyn Reads = env;
-    let store = NetworkedIndex::new(reads, select.catalog(), remote);
+    let store = NetworkedIndex::new(reads, select.catalog(), remote, source.node_cache());
     Ok(select.execute_boxed(store).await?)
 }
 
@@ -1000,7 +1000,12 @@ impl Provider<Estimate> for QueryEnv<'_> {
         for source in &self.sources {
             let select = crate::Select::from_source(source.as_ref(), input.clone());
             let remote = source.as_ref().fallback();
-            let store = NetworkedIndex::new(self.env as &dyn Reads, select.catalog(), remote);
+            let store = NetworkedIndex::new(
+                self.env as &dyn Reads,
+                select.catalog(),
+                remote,
+                source.as_ref().node_cache(),
+            );
             if let Some(estimate) = select.estimate(store).await? {
                 total = Some(total.unwrap_or(0).saturating_add(estimate));
             }
@@ -1052,6 +1057,7 @@ impl<'a> Provider<LoadBlob> for QueryEnv<'a> {
                 self.env as &dyn Reads,
                 source.archive().index(),
                 source.fallback(),
+                source.node_cache(),
             );
             if let Some(bytes) = store.load_blob(&hash).await? {
                 return Ok(Some(bytes));
@@ -1081,8 +1087,12 @@ impl<'a> Provider<LoadBlock> for QueryEnv<'a> {
         for source in &self.sources {
             let source = source.as_ref();
             let remote = source.fallback();
-            let store =
-                NetworkedIndex::new(self.env as &dyn Reads, source.archive().index(), remote);
+            let store = NetworkedIndex::new(
+                self.env as &dyn Reads,
+                source.archive().index(),
+                remote,
+                source.node_cache(),
+            );
             let cache = source.node_cache();
             if let Some(node) = cache.get_cached(&load.hash) {
                 return Ok(Some(node.buffer().clone()));
