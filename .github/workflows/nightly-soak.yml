@@ -86,7 +86,7 @@ jobs:
     steps:
       - uses: cisagov/action-disable-apparmor@v1
       - uses: actions/checkout@v4
-      - uses: wimpysworld/nothing-but-nix@main
+      - uses: wimpysworld/nothing-but-nix@687c797a730352432950c707ab493fcc951818d7 # v10; v11 and main put TMPDIR under /nix/tmp, which breaks the Nix installer
         with:
           root-safe-haven: '16384'
       - uses: cachix/install-nix-action@v31
