@@ -90,7 +90,8 @@ impl Directory {
         }
     }
 
-    fn directory(&self, catalog: &str) -> PathBuf {
+    /// The directory `catalog`'s blocks are in.
+    pub fn directory(&self, catalog: &str) -> PathBuf {
         match &self.flat {
             Some(_) => self.root.clone(),
             None => self.root.join(catalog),
@@ -213,14 +214,15 @@ pub fn transcode(source: &impl BlockSource, target: &FileArchive) -> io::Result<
     Transcode::default().run(source, target)
 }
 
-/// Transcodes every space under `root` (each directory holding an `fs`
-/// archive, `{space}/archive/{catalog}/{hash}`) into the file a
-/// file-archive space reads, `{space}/archive.dialog`
-/// ([`FILE_NAME`]), beside the rest of the space. A
-/// profile directory holds several spaces (the peer's own state, and a space
-/// per repository); a replica moves to the file when all of them do. The
-/// `fs` archives are left where they are.
-pub fn transcode_spaces(root: impl AsRef<Path>) -> io::Result<Vec<(PathBuf, Report)>> {
+/// Where a space's archive is being written while it migrates: renamed to
+/// [`FILE_NAME`] once every block is in it, so a space never has a partial
+/// `archive.dialog`.
+pub const MIGRATING: &str = "archive.dialog.migrating";
+
+/// Every space under `root`: each directory holding an `fs` archive,
+/// `{space}/archive/{catalog}/{hash}`. A profile directory holds several
+/// (the peer's own state, and a space per repository).
+pub fn spaces(root: impl AsRef<Path>) -> io::Result<Vec<PathBuf>> {
     let mut spaces = Vec::new();
     let mut stack = vec![root.as_ref().to_path_buf()];
     while let Some(directory) = stack.pop() {
@@ -235,17 +237,130 @@ pub fn transcode_spaces(root: impl AsRef<Path>) -> io::Result<Vec<(PathBuf, Repo
         }
     }
     spaces.sort();
-    let mut reports = Vec::with_capacity(spaces.len());
-    for space in spaces {
-        let archive = FileArchive::open(space.join(FILE_NAME))
-            .map_err(|error| io::Error::other(error.to_string()))?;
-        let report = transcode(&Directory::space(&space), &archive)?;
+    Ok(spaces)
+}
+
+/// The spaces under `root` that have not moved to the file yet: an `fs`
+/// archive and no [`FILE_NAME`] beside it. A space that has one was
+/// migrated, or was written by a file-archive space all along.
+pub fn unmigrated(root: impl AsRef<Path>) -> io::Result<Vec<PathBuf>> {
+    Ok(spaces(root)?
+        .into_iter()
+        .filter(|space| !space.join(FILE_NAME).exists())
+        .collect())
+}
+
+/// How many blocks a space's `fs` archive holds, and their bytes: what
+/// migrating it reads.
+pub fn size(space: impl AsRef<Path>) -> io::Result<(u64, u64)> {
+    let source = Directory::space(space);
+    let (mut blocks, mut bytes) = (0, 0);
+    for catalog in source.catalogs()? {
+        for entry in std::fs::read_dir(source.directory(&catalog))? {
+            let metadata = entry?.metadata()?;
+            if metadata.is_file() {
+                blocks += 1;
+                bytes += metadata.len();
+            }
+        }
+    }
+    Ok((blocks, bytes))
+}
+
+/// Moves one space into the file a file-archive space reads: transcodes its
+/// `fs` archive into [`MIGRATING`], makes that durable, then renames it to
+/// [`FILE_NAME`]. Interrupted, it resumes: the blocks already in
+/// [`MIGRATING`] are not written again. With `remove_source`, the `fs`
+/// archive is deleted once the file is in place; otherwise it is left, and
+/// a file-archive space never reads it.
+pub fn migrate_space(space: impl AsRef<Path>, remove_source: bool) -> io::Result<Report> {
+    let space = space.as_ref();
+    let migrating = space.join(MIGRATING);
+    let report = {
+        let archive =
+            FileArchive::open(&migrating).map_err(|error| io::Error::other(error.to_string()))?;
+        let report = transcode(&Directory::space(space), &archive)?;
         archive
             .sync()
             .map_err(|error| io::Error::other(error.to_string()))?;
+        report
+    };
+    std::fs::rename(&migrating, space.join(FILE_NAME))?;
+    if remove_source {
+        std::fs::remove_dir_all(space.join("archive"))?;
+    }
+    Ok(report)
+}
+
+/// Moves every space under `root` that has not moved yet (see
+/// [`unmigrated`]) into the file, each with [`migrate_space`]. The `fs`
+/// archives are left where they are.
+pub fn transcode_spaces(root: impl AsRef<Path>) -> io::Result<Vec<(PathBuf, Report)>> {
+    let mut reports = Vec::new();
+    for space in unmigrated(root)? {
+        let report = migrate_space(&space, false)?;
         reports.push((space, report));
     }
     Ok(reports)
+}
+
+/// The `archive-file` step: every space of a replica, moved into the
+/// single-file archive (see [`migrate_space`]).
+///
+/// It is a conversion, not an upgrade: a replica on the `fs` provider is
+/// not out of date, and a space reads the file only when it is opened as a
+/// file-archive space. An application that switches its spaces to
+/// [`FileArchive`] runs this step before it opens them.
+#[derive(Clone, Debug, Default)]
+pub struct ArchiveFile {
+    /// Delete each space's `fs` archive once its file is in place.
+    pub remove_source: bool,
+}
+
+impl crate::Step for ArchiveFile {
+    fn id(&self) -> &'static str {
+        "archive-file"
+    }
+
+    fn summary(&self) -> &'static str {
+        "move each space's blocks from a file per block into one archive file"
+    }
+
+    fn pending(&self, replica: &Path) -> io::Result<Vec<crate::Pending>> {
+        unmigrated(replica)?
+            .into_iter()
+            .map(|space| {
+                let (blocks, bytes) = size(&space)?;
+                Ok(crate::Pending {
+                    step: self.id(),
+                    detail: format!(
+                        "{blocks} blocks ({:.1} MiB) into {}",
+                        bytes as f64 / (1024.0 * 1024.0),
+                        space.join(FILE_NAME).display()
+                    ),
+                    at: space,
+                })
+            })
+            .collect()
+    }
+
+    fn apply(&self, pending: &crate::Pending) -> io::Result<crate::Applied> {
+        let report = migrate_space(&pending.at, self.remove_source)?;
+        let (frames, whole, others) = report.catalogs.iter().fold((0, 0, 0), |sum, catalog| {
+            (
+                sum.0 + catalog.frames,
+                sum.1 + catalog.whole_nodes,
+                sum.2 + catalog.others,
+            )
+        });
+        Ok(crate::Applied {
+            step: self.id(),
+            at: pending.at.clone(),
+            detail: format!(
+                "{frames} tree nodes as frames, {whole} kept whole, {others} other blocks"
+            ),
+        })
+    }
 }
 
 impl Transcode {

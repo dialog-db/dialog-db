@@ -76,16 +76,20 @@ What this changes for you:
 - Durability matches the `fs` provider: appends are not synced.
   `FileArchive::sync` gives a point that is.
 - `Options::frames = false` keeps every block whole.
-- The new `dialog-migration` crate holds migrations, each behind a feature
-  of its own, and a `dialog-migrate` binary that runs whichever it was
-  built with. Its `archive-file` migration moves a replica the `fs`
-  provider wrote into the file: `dialog-migrate archive-file --spaces
-  <directory>` (or `archive_file::transcode_spaces`) gives every space
-  under a profile directory the `archive.dialog` a file-archive space
-  reads, beside the rest of the space. `archive_file::transcode` does the
-  same for any `BlockSource`, such as a flat directory of fetched blocks.
-  Every block reads back as the bytes it was; nodes in an older layout are
-  kept whole.
+- The new `dialog-migration` crate holds migrations an application runs
+  before it opens a replica, each behind a feature of its own, and the
+  `dialog-migrate` binary that runs them. A migration is a `Step` that finds
+  its work by looking at the replica, so it is safe to run on every start:
+  `Migrations::plan` says what the steps would do, `Migrations::run` does
+  it, and an interrupted run picks up where it stopped. The `archive-file`
+  step (`archive_file::ArchiveFile`) moves every space of a replica the
+  `fs` provider wrote into the `archive.dialog` a file-archive space reads,
+  writing it under another name and renaming it once complete; with
+  `remove_source` it deletes the `fs` archive after. It is a conversion an
+  application opts into, not an upgrade every replica needs. Every block
+  reads back as the bytes it was; nodes in an older layout are kept whole.
+  `dialog-migrate [--dry-run] [--step <id>] [--remove-source] <replica>`
+  runs the steps; `--source`, `--target` and `--catalog` move one store.
 
 Why: a replica's history costs a file per block per version, which is
 most of what a replica weighs. Replaying 4096 Stack Exchange commits, the

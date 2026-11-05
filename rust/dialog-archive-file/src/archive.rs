@@ -1746,3 +1746,53 @@ mod offsets_instead_of_ids {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod record_breakdown {
+    use super::*;
+
+    /// Prints the bytes of the file named by `DIALOG_ARCHIVE_INDEX`, record
+    /// kind by record kind, headers included, with the padding and lengths
+    /// inside token records apart from the tokens. Run by hand.
+    #[test]
+    #[ignore = "breaks down the records of a file named by DIALOG_ARCHIVE_INDEX"]
+    fn record_breakdown() -> anyhow::Result<()> {
+        let Ok(path) = std::env::var("DIALOG_ARCHIVE_INDEX") else {
+            return Ok(());
+        };
+        let file = File::open(&path)?;
+        let len = file.metadata()?.len();
+        let mut at = MAGIC.len() as u64;
+        let mut totals: std::collections::BTreeMap<String, (u64, u64)> = Default::default();
+        let (mut token_bytes, mut token_count) = (0u64, 0u64);
+        while let Some(record) = read_record(&file, at, len)? {
+            let entry = totals.entry(format!("{:?}", record.kind)).or_default();
+            entry.0 += 1;
+            entry.1 += record.end() - record.offset;
+            if record.kind == Kind::Tokens {
+                let mut reader = Reader::new(&record.body);
+                for _ in 0..reader.varint()? {
+                    let size = reader.varint()? as usize;
+                    let pad = reader.byte()? as usize;
+                    reader.take(pad)?;
+                    reader.take(size)?;
+                    token_bytes += size as u64;
+                    token_count += 1;
+                }
+            }
+            at = record.end();
+        }
+        let mib = |bytes: u64| format!("{:.2} MiB", bytes as f64 / (1024.0 * 1024.0));
+        println!("file {} ({len} bytes)", mib(len));
+        for (kind, (count, bytes)) in &totals {
+            println!("  {kind}: {count} records, {}", mib(*bytes));
+        }
+        let tokens = totals.get("Tokens").map_or(0, |(_, bytes)| *bytes);
+        println!(
+            "  of the token records: {} of token bytes ({token_count} tokens), {} of lengths, padding and headers",
+            mib(token_bytes),
+            mib(tokens - token_bytes)
+        );
+        Ok(())
+    }
+}

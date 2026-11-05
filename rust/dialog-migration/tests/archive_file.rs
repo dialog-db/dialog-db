@@ -159,3 +159,86 @@ async fn it_transcodes_a_replica_the_fs_provider_wrote() -> anyhow::Result<()> {
     assert_eq!(after, before);
     Ok(())
 }
+
+/// An application's migration, as a library: a plan that changes nothing,
+/// a run that moves every space, and a second run with nothing left to do;
+/// a run interrupted mid-way picks up where it stopped; and the `fs`
+/// archives go once asked to.
+#[tokio::test]
+async fn it_migrates_a_replica_as_an_application_would() -> anyhow::Result<()> {
+    use dialog_migration::Migrations;
+    use dialog_migration::archive_file::{ArchiveFile, MIGRATING};
+
+    let directory = tempfile::tempdir()?;
+    let at = At::At(directory.path().to_string_lossy().into_owned());
+    let before = {
+        let _entropy = Seed::new(733).entropy();
+        let (operator, branch) = open!(NativeSpace, at, true);
+        for commit in 0..8 {
+            let changes: Changes = (0..10)
+                .map(|row| {
+                    Ok(Instruction::Assert(
+                        Artifact {
+                            the: Relation::from_str("person/name")?,
+                            of: Entity::from_str(&format!(
+                                "did:test:person-{}",
+                                (commit * 3 + row) % 30
+                            ))?,
+                            is: Value::String(format!("name {commit}.{row}")),
+                            cause: None,
+                        },
+                        Pick::Last,
+                    ))
+                })
+                .collect::<anyhow::Result<_>>()?;
+            branch
+                .transaction()
+                .integrate(changes)
+                .commit()
+                .publish()
+                .perform(&operator)
+                .await?;
+        }
+        select_all!(operator, branch)
+    };
+
+    let repo = directory.path().join("repo");
+    let migrations = Migrations::new().with(ArchiveFile {
+        remove_source: true,
+    });
+
+    // The plan names both spaces, and changes nothing.
+    let plan = migrations.plan(directory.path())?;
+    assert_eq!(plan.len(), 2, "{plan:?}");
+    assert!(!repo.join(FILE_NAME).exists());
+
+    // A run interrupted mid-way: part of the repository's blocks are in
+    // the file being written, none has its final name yet.
+    {
+        let partial = FileArchive::open(repo.join(MIGRATING))?;
+        let source = Directory::space(&repo);
+        let hashes = source.hashes("index")?;
+        for hash in hashes.iter().take(hashes.len() / 2) {
+            let block = source.read("index", hash)?.expect("a block it lists");
+            partial.append("index", &[block])?;
+        }
+    }
+    assert_eq!(migrations.plan(directory.path())?.len(), 2);
+
+    // The run finishes it, every space moved and its `fs` archive gone.
+    let applied = migrations.run(directory.path())?;
+    assert_eq!(applied.len(), 2, "{applied:?}");
+    for (space, _) in [(directory.path().join("peer"), ()), (repo.clone(), ())] {
+        assert!(space.join(FILE_NAME).exists(), "{}", space.display());
+        assert!(!space.join(MIGRATING).exists());
+        assert!(!space.join("archive").exists(), "the fs archive is removed");
+    }
+
+    // Nothing is left to do.
+    assert!(migrations.plan(directory.path())?.is_empty());
+    assert!(migrations.run(directory.path())?.is_empty());
+
+    let (operator, branch) = open!(FileArchiveSpace, at, false);
+    assert_eq!(select_all!(operator, branch), before);
+    Ok(())
+}
