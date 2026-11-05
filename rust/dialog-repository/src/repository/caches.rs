@@ -632,7 +632,13 @@ mod tests {
     use dialog_peer::{Peer, PeerSpace, Session};
     use futures_util::stream;
 
-    use super::HeldCaches;
+    use dialog_artifacts::tree::SPILL_CACHE_BUDGET;
+    use dialog_query::concept::query::PLAN_CACHE_CAPACITY;
+    use dialog_query::formula::FORMULA_CACHE_CAPACITY;
+    use dialog_query::the;
+    use dialog_search_tree::{CACHE_CAPACITY, NODE_CACHE_BUDGET};
+
+    use super::{CacheBudget, HeldCaches};
     use crate::helpers::test_repo;
     use crate::registry::RegistryEnv;
     use crate::{Branch, CommitError, RemoteSite, Repository};
@@ -993,6 +999,181 @@ mod tests {
 
         assert!(main.node_cache().is_empty());
         assert!(main.node_cache().get_cached(&root).is_none());
+        Ok(())
+    }
+
+    /// A budget that sets nothing is today's sizes, and so are the caches
+    /// [`HeldCaches::new`] and [`HeldCaches::with_budget`] build: every
+    /// default is the constant each cache was fixed at before it could be
+    /// chosen.
+    #[dialog_common::test]
+    fn it_builds_todays_caches_from_a_budget_that_sets_nothing() -> Result<()> {
+        let defaults = HeldCaches::builder();
+        assert_eq!(defaults, CacheBudget::default());
+        assert_eq!(defaults.node_bytes(), NODE_CACHE_BUDGET);
+        assert_eq!(defaults.spill_bytes(), SPILL_CACHE_BUDGET);
+        assert_eq!(defaults.entry_capacity(), CACHE_CAPACITY);
+        assert_eq!(defaults.rule_capacity(), CACHE_CAPACITY);
+        assert_eq!(defaults.plan_capacity(), PLAN_CACHE_CAPACITY);
+        assert_eq!(defaults.formula_capacity(), FORMULA_CACHE_CAPACITY);
+
+        let caches = HeldCaches::new();
+        assert_eq!(caches.limits(), defaults);
+        assert_eq!(caches.budget(), NODE_CACHE_BUDGET);
+        assert_eq!(caches.spills.budget(), SPILL_CACHE_BUDGET);
+        assert_eq!(caches.formulas().capacity(), FORMULA_CACHE_CAPACITY);
+        let shared = caches.shared.lock().unwrap().clone();
+        assert_eq!(shared.content.capacity(), CACHE_CAPACITY);
+        assert_eq!(shared.plans.capacity(), PLAN_CACHE_CAPACITY);
+        let repository = super::Repository::new(&caches.limits());
+        assert_eq!(repository.records.capacity(), CACHE_CAPACITY);
+        assert_eq!(repository.rewrites.capacity(), CACHE_CAPACITY);
+
+        assert_eq!(
+            HeldCaches::with_budget(1024).limits(),
+            defaults.nodes(1024),
+            "with_budget sets the nodes alone"
+        );
+        Ok(())
+    }
+
+    /// Every cap the builder sets reaches the cache it names: a repository's
+    /// entry-bounded caches hold `entries` and evict past them, and the
+    /// rule content, plans and formula outputs hold what they were given.
+    #[dialog_common::test]
+    async fn it_keeps_each_cache_to_the_cap_the_builder_set() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let caches = HeldCaches::builder()
+            .nodes(4096)
+            .spills(2048)
+            .entries(2)
+            .rules(3)
+            .formulas(5)
+            .build();
+        caches.hold(&operator);
+        let repository = test_repo(&operator, &profile).await;
+        commit(&repository, &operator).await?;
+
+        let opened = caches.branch(&repository.branch("main"));
+        assert_eq!(opened.records.capacity(), 2);
+        for key in 0..3u8 {
+            opened
+                .rewrites
+                .insert(NodeHash::from([key; 32]), NodeHash::from([key; 32]));
+        }
+        assert_eq!(opened.rewrites.len(), 2, "the third entry evicts one");
+        assert_eq!(opened.limits.entry_capacity(), 2);
+
+        assert_eq!(caches.budget(), 4096);
+        assert_eq!(opened.spills.budget(), 2048);
+        assert_eq!(opened.plans.capacity(), 3);
+        let shared = caches.shared.lock().unwrap().clone();
+        assert_eq!(shared.content.capacity(), 3);
+        assert_eq!(caches.formulas().capacity(), 5);
+        assert!(
+            caches.entries() >= 2,
+            "the entries held are counted: {}",
+            caches.entries()
+        );
+        Ok(())
+    }
+
+    /// One spill budget bounds every repository together: two repositories
+    /// read through one cache, a block one put in is evicted by a block the
+    /// other put in once they do not both fit, and `bytes` counts it.
+    /// Releasing a repository leaves the spilled values, which are kept
+    /// for every repository by content; clearing lets them go.
+    #[dialog_common::test]
+    async fn it_shares_one_spill_budget_among_repositories() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let caches = HeldCaches::builder().spills(1000).build();
+        caches.hold(&operator);
+        let ours = test_repo(&operator, &profile).await;
+        let theirs = test_repo(&operator, &profile).await;
+        let our_spills = caches.branch(&ours.branch("main")).spills;
+        let their_spills = caches.branch(&theirs.branch("main")).spills;
+
+        our_spills.insert([1; 32], vec![1; 600]);
+        assert_eq!(
+            their_spills.get(&[1; 32]),
+            Some(vec![1; 600]),
+            "both read the one cache"
+        );
+        their_spills.insert([2; 32], vec![2; 600]);
+        assert_eq!(caches.spill_bytes(), 600, "the budget holds one block");
+        assert!(our_spills.get(&[1; 32]).is_none(), "the older block went");
+        assert_eq!(caches.bytes(), caches.nodes.bytes() + 600);
+
+        caches.release(&theirs.did());
+        assert_eq!(
+            our_spills.get(&[2; 32]),
+            Some(vec![2; 600]),
+            "release keeps spilled values"
+        );
+        caches.clear();
+        assert_eq!(caches.spill_bytes(), 0);
+        Ok(())
+    }
+
+    /// A snapshot taken through an environment holding budgeted caches
+    /// keeps to the budget: its caches keyed by version hold the budget's
+    /// entries, and it reads spilled values, rule content and plans
+    /// through the environment's own. A snapshot taken without the
+    /// environment keeps today's sizes.
+    #[dialog_common::test]
+    async fn it_sizes_a_snapshot_by_the_budget_of_its_environment() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let caches = HeldCaches::builder()
+            .spills(1000)
+            .entries(2)
+            .rules(3)
+            .build();
+        caches.hold(&operator);
+        let repository = test_repo(&operator, &profile).await;
+        let (main, _) = commit(&repository, &operator).await?;
+        let revision = main.revision().expect("the commit set a head");
+
+        let snapshot = repository.snapshot_in(&operator, revision.clone());
+        let held = snapshot.caches();
+        assert_eq!(held.records.capacity(), 2);
+        assert_eq!(held.rewrites.capacity(), 2);
+        assert_eq!(held.plans.capacity(), 3);
+        assert_eq!(held.spills.budget(), 1000);
+        held.spills.insert([3; 32], vec![3; 10]);
+        assert_eq!(caches.spill_bytes(), 10, "the snapshot's spills are held");
+        assert!(
+            held.records.is_empty(),
+            "what is keyed by version starts cold"
+        );
+
+        let unbudgeted = repository.snapshot(revision);
+        assert_eq!(unbudgeted.caches().records.capacity(), CACHE_CAPACITY);
+        assert_eq!(unbudgeted.caches().spills.budget(), SPILL_CACHE_BUDGET);
+        Ok(())
+    }
+
+    /// The caches a transaction batch keeps to itself are sized by the
+    /// budget of the branch it was staged from.
+    #[dialog_common::test]
+    async fn it_sizes_a_batch_by_the_budget_of_its_branch() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        HeldCaches::builder().entries(2).build().hold(&operator);
+        let repository = test_repo(&operator, &profile).await;
+        let main = repository.branch("main").open().perform(&operator).await?;
+
+        let batch = main
+            .transaction()
+            .assert(
+                the!("user/name")
+                    .of("user:1".parse::<dialog_artifacts::Entity>()?)
+                    .is("Alice".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        assert_eq!(batch.caches().records.capacity(), 2);
+        assert_eq!(batch.caches().limits.entry_capacity(), 2);
         Ok(())
     }
 }
