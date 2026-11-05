@@ -49,6 +49,10 @@ section() {
   echo
 }
 
+# The body usually sits beside the delta dirs, and when neither gate
+# uploaded one its directory was never created.
+mkdir -p "$(dirname "$body")"
+
 {
   echo "$marker"
   echo "## Cost against the base"
