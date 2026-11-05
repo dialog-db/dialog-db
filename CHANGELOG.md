@@ -16,31 +16,56 @@ says how to cut a release.
 
 ### A file store's write lock is never taken by two writers at once
 
+[#723](https://github.com/dialog-db/dialog-db/pull/723)
+
 A native file store guards each cell's compare-and-swap with a lock file.
 It was a PID lock taken through `pidlock`, whose acquire creates the file
 and writes the PID after; a second writer arriving in between read no PID,
 removed the file as corrupt, and took the lock too. Both then compared
 against the same version and both wrote, so the later write replaced the
 earlier one and each reported success: a commit racing a pull of the same
-branch could vanish without an error. The lock is now an OS file lock
-(`flock` on Unix, `LockFileEx` on Windows, through std's
-`File::try_lock`), so the kernel
-decides who holds it and releases it when its holder exits.
+branch could vanish without an error. Two writers that both found a dead
+holder's lock could also both remove it and both take it.
+
+The lock is still a file, `{cell}.lock`, now holding `{pid} {token}`: the
+holder's process and a random token naming that one hold. A lock file is
+held unless proven otherwise, so one that is empty or does not read as
+`pid token` is held and never deleted. A writer writes its content to a
+temporary file first and hard-links it into place, which fails if a lock
+file is there, so a lock file never exists without its content; on a
+filesystem without hard links it creates the file and writes it after,
+and a writer arriving in between is refused. A lock naming a process
+that is not running is recovered by exactly one writer, which first
+links it to `{cell}.lock.stale.{token}` (a name only one writer can
+create) and checks the file still names the gone holder before removing
+it.
 
 What this changes for you:
 
 - Concurrent writers of one store, in one process or several, no longer
-  lose a write to each other. A writer that loses the lock is refused
-  with `Concurrent write in progress`, as before.
-- A crashed writer's lock is free at once; there is no stale-lock check.
-- Lock files hold no PID and are left in place after release, and the
-  refusal no longer names the holder's PID.
+  lose a write to each other. A writer that finds the lock held is
+  refused with `FileSystemError::Lock` (`Concurrent write in progress`),
+  as before.
+- A crashed writer's lock is recovered by the next writer, once the
+  crashed process is gone. Whether it is gone is asked of the OS in the
+  writer's own PID namespace, so writers sharing one store must share a
+  PID namespace. If the crashed writer's PID has been given to another
+  process, its lock looks held until the lock file is deleted by hand;
+  so does a crashed writer's lock on a filesystem without hard links.
+- A lock file that is empty or does not read as `pid token` is held,
+  whoever wrote it, and has to be deleted by hand if no writer is
+  running.
+- Lock files are removed on release, by the writer that holds them
+  only: a writer whose lock file now names another holder leaves it.
+- Cells whose names differ only in extension (`a.x`, `a.y`) get a lock
+  each, instead of sharing `a.lock`.
 - `pidlock` is no longer a dependency.
 
 Why: a write lock that two writers can hold at once does not guard the
 compare-and-swap, and the writes it loses are reported as successes, so
-nothing downstream can notice or repair them. A kernel-held lock has no
-window between creating the lock and claiming it.
+nothing downstream can notice or repair them. The lock stays a file
+rather than an OS lock (`flock`), which errors or is not enforced on
+network and FUSE filesystems that stores live on.
 
 ### Distinct members inserted between the same neighbours get distinct positions
 
@@ -1870,6 +1895,16 @@ thread multiplies whatever it holds by the size of the thread pool.
 
 ### Compatibility and migration
 
+- Nothing stored or synced changes for the file store's lock; only the
+  lock files beside its cells do. A lock file the previous release left
+  behind holds a bare PID, which this release reads as held: if its
+  writer crashed holding it, delete it by hand. A writer on the previous
+  release and one on this release do not exclude each other while both
+  write one store during an upgrade, since the older one deletes a lock
+  file it cannot read as a PID as stale, and this release's is
+  `pid token` (and for a cell whose name has an extension, the two
+  releases lock different files). Stop writers on the previous release before starting ones
+  on this release.
 - Positions already stored keep their bytes and their order: nothing is
   rewritten, and both releases read every position the other writes. Only
   newly derived positions differ. An older replica and this one derive
