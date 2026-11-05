@@ -101,6 +101,9 @@ const FS_BLOCK: usize = 4096;
 const LEVEL: i32 = 3;
 /// Keyframe intervals for the delta models; `usize::MAX` never resets.
 const INTERVALS: [usize; 3] = [8, 32, usize::MAX];
+/// The child offset marking a link to a node the file does not hold; the
+/// child's 32-byte hash follows it.
+const ABSENT: u32 = u32::MAX;
 /// The entry form of a key stored as one opaque token.
 const FORM_OPAQUE: u8 = 0xFE;
 
@@ -337,10 +340,17 @@ fn frame(
             for at in 0..index.len() {
                 let separator = index.separator(at)?;
                 out.extend_from_slice(&tokens.intern("separator", &separator).to_le_bytes());
-                let child = frames
-                    .get(index.hash_at(at)?)
-                    .ok_or_else(|| anyhow::anyhow!("a child is written before its parent"))?;
-                out.extend_from_slice(&child.to_le_bytes());
+                // A child the replica does not hold (a lazily fetched
+                // replica holds only what it read) has no frame to point
+                // at, so the link carries the child's hash instead.
+                let child = index.hash_at(at)?;
+                match frames.get(child) {
+                    Some(offset) => out.extend_from_slice(&offset.to_le_bytes()),
+                    None => {
+                        out.extend_from_slice(&ABSENT.to_le_bytes());
+                        out.extend_from_slice(child.as_bytes());
+                    }
+                }
                 out.push(index.scale_at(at)?.as_u8());
             }
             out.extend_from_slice(&(index.novelty.len() as u32).to_le_bytes());
@@ -426,8 +436,14 @@ fn realize(
         let mut links = Vec::with_capacity(count);
         for _ in 0..count {
             let separator = tokens.get(get_u32(frame, &mut at)).to_vec();
-            let child = frames.at(get_u32(frame, &mut at));
-            let node = Blake3Hash::from(<[u8; 32]>::try_from(&child[..32])?);
+            let offset = get_u32(frame, &mut at);
+            let child = if offset == ABSENT {
+                at += 32;
+                &frame[at - 32..at]
+            } else {
+                &frames.at(offset)[..32]
+            };
+            let node = Blake3Hash::from(<[u8; 32]>::try_from(child)?);
             let scale = Scale::from_u8(frame[at]);
             at += 1;
             links.push(Link {
@@ -604,9 +620,11 @@ fn live(
     let (mut reached, mut bytes, mut entries) = (Vec::new(), 0, 0);
     let mut stack = vec![root.clone()];
     while let Some(hash) = stack.pop() {
-        let node = nodes
-            .get(&hash)
-            .ok_or_else(|| anyhow::anyhow!("live node {hash} was never written"))?;
+        // A partial replica holds only the nodes it read; the live tree
+        // is what of it the replica holds.
+        let Some(node) = nodes.get(&hash) else {
+            continue;
+        };
         bytes += node.buffer().as_ref().len();
         match node.body() {
             NodeBody::Index(index) => {
@@ -1104,7 +1122,10 @@ fn measure(source: Source, checkpoints: &[usize]) -> anyhow::Result<()> {
             if !seen.insert(hash.clone()) {
                 continue;
             }
-            if let NodeBody::Index(index) = nodes[&hash].body() {
+            let Some(node) = nodes.get(&hash) else {
+                continue;
+            };
+            if let NodeBody::Index(index) = node.body() {
                 for at in 0..index.len() {
                     stack.push((index.hash_at(at)?.clone(), depth + 1, index.separator(at)?));
                 }

@@ -234,6 +234,11 @@ cargo run --release -p dialog-baseline --example single_file_census -- \
   history path/to/replica
 ```
 
+`archive` mode also reads a partial replica, one that fetched nodes lazily
+and holds only what it read: a link to a child it does not hold carries
+the child's hash in the frame instead of an offset, and the live tree is
+what of it the replica holds.
+
 `path/to/replica` holds `archive/` and `blob/`. The head tree's history
 region keeps one record per claim every revision made, under that
 revision's version, so grouping records by version and replaying the
