@@ -193,7 +193,7 @@ fn describe(archive: &Option<FileArchive>) -> String {
     };
     let stats = archive.stats();
     format!(
-        "{} whole ({}), {} frames ({} against another, {}), {} tokens ({}); index {} in memory\n\
+        "{} whole ({}), {} frames ({} against another, {}), {} tokens ({}); index {} in memory (file pages mapped, not counted)\n\
          {:<12} appends: split {}, encode {}, verify {}, write {}",
         stats.blocks,
         mib(stats.block_bytes),
@@ -245,7 +245,10 @@ async fn main() -> anyhow::Result<()> {
 
     let nothing = |_: &Path| -> anyhow::Result<Option<FileArchive>> { Ok(None) };
     let mut runs = Vec::new();
-    for which in ["fs", "file/whole", "file/frames"] {
+    // `DIALOG_BENCH_STORES=fs,file/frames` runs only those.
+    let stores = std::env::var("DIALOG_BENCH_STORES")
+        .unwrap_or_else(|_| "fs,file/whole,file/frames".to_string());
+    for which in stores.split(',') {
         let temporary = tempfile::tempdir()?;
         let directory = temporary.path().to_path_buf();
         let run = match which {
@@ -300,6 +303,19 @@ async fn main() -> anyhow::Result<()> {
         );
         if !run.detail.is_empty() {
             println!("{:<12} {}", "", run.detail);
+        }
+        let file = directory.join("repo").join(FILE_NAME);
+        if file.exists() {
+            // A reader's open, from the checkpoint and the records after it.
+            let started = Instant::now();
+            let reader = FileArchive::open(&file)?;
+            let opened = started.elapsed();
+            println!(
+                "{:<12} reopened in {}: index {} in memory",
+                "",
+                ms(opened),
+                mib(reader.stats().index_memory as u64)
+            );
         }
         runs.push(run);
     }

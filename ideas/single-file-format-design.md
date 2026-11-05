@@ -171,7 +171,8 @@ crc32 | body`:
 
 ## Reads
 
-`Nodes::load_node(hash)`: the node cache, else the index, then decode the
+Token bytes are read in place through a mapping of the file; the index
+keeps where each token is, not its bytes. `Nodes::load_node(hash)`: the node cache, else the index, then decode the
 frame chain (at most 32 frames) into rows and return a node over them.
 `archive::Get(hash)`: the same rows, realized into the wire block and
 verified against the hash. A frame is only written once its rows realize
@@ -247,7 +248,7 @@ as rough, and the archive's own timers as firmer.
 | cold scan, 8 attributes | 29–35 ms | 27–35 ms | 34–39 ms |
 | cold point reads, 256 | 12–14 ms | 7–8 ms | 17–23 ms |
 | warm scan / points | 15–21 / 2–3 ms | 14–23 / 2 ms | 13–14 / 3 ms |
-| archive index in memory | — | 0.8 MiB | 23.4 MiB |
+| archive index in memory | — | 0.8 MiB | 4.0–4.1 MiB, tokens mapped |
 
 What it says:
 
@@ -266,7 +267,14 @@ What it says:
   about what reading a block file does, so cold reads reach parity with
   `fs`, not better. What step 4 buys beyond that is memory: a cached node
   over shared tokens instead of its block plus its decoded keys.
-- **The in-memory index is the token region**: 23.4 MiB, mostly the
-  10.2 MiB of token bytes plus its growth slack. For a replica larger than
-  memory the region has to be read through a mapping of the file, not
-  held in memory.
+- **Tokens are read through a mapping of the file.** Holding them in
+  memory made the index 23.4 MiB, mostly the 10.2 MiB of token bytes plus
+  growth slack, so it would not scale past memory. Mapped, the index is
+  where each token, node and block sits: 4.0 MiB for a reader, which opens
+  from a checkpoint in 26 ms without reading a token. The table that finds
+  a token by its bytes is built by a writer, on its first write. The
+  pages a read touches belong to the OS page cache, which can drop them.
+- **The same replay writes a different number of blocks from run to run**
+  (11,780 to 14,916 in the `fs` archive, 14,738 to 15,193 in the file), so
+  part of the commit-time spread is the repository doing different work,
+  not the archive. Why it differs is open.

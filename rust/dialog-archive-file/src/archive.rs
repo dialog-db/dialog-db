@@ -105,12 +105,9 @@ struct State {
     /// The latest node of each lineage, for the next to be written against.
     lineages: HashMap<Lineage, u32>,
     tokens: Tokens,
-    /// Where each token record starts, so a checkpoint can name them.
-    token_records: Vec<u64>,
-    /// Bytes of whole blocks, frames and tokens, for [`Stats`].
+    /// Bytes of whole blocks and frames, for [`Stats`].
     block_bytes: u64,
     frame_bytes: u64,
-    token_bytes: u64,
 }
 
 impl State {
@@ -424,9 +421,7 @@ fn index_record(state: &mut State, kind: Kind, offset: u64, body: &[u8]) -> io::
             );
         }
         Kind::Tokens => {
-            state.tokens.read_record(body)?;
-            state.token_records.push(offset);
-            state.token_bytes += body.len() as u64;
+            state.tokens.read_record(body, body_offset)?;
         }
         Kind::Frame => {
             let header = FrameHeader::get(&mut Reader::new(body))?;
@@ -459,17 +454,23 @@ fn index_record(state: &mut State, kind: Kind, offset: u64, body: &[u8]) -> io::
     Ok(())
 }
 
-/// The body of a checkpoint record: where every token record starts, every
-/// node, and every whole block.
+/// The body of a checkpoint record: where every token is, every node, and
+/// every whole block.
 fn checkpoint_body(state: &State) -> io::Result<Vec<u8>> {
     let mut body = Vec::new();
     put_varint(&mut body, state.catalogs.len() as u64);
     for catalog in &state.catalogs {
         put_catalog(&mut body, catalog)?;
     }
-    put_varint(&mut body, state.token_records.len() as u64);
-    for offset in &state.token_records {
-        body.extend_from_slice(&offset.to_le_bytes());
+    // Where every token is: tokens are written in id order, so each starts
+    // after the one before.
+    let extents = state.tokens.extents();
+    put_varint(&mut body, extents.len() as u64);
+    let mut previous = 0;
+    for (offset, len) in extents {
+        put_varint(&mut body, offset - previous);
+        put_varint(&mut body, *len as u64);
+        previous = *offset;
     }
     put_varint(&mut body, state.nodes.len() as u64);
     for node in &state.nodes {
@@ -503,7 +504,7 @@ fn checkpoint_body(state: &State) -> io::Result<Vec<u8>> {
     Ok(body)
 }
 
-fn read_checkpoint(file: &File, len: u64, body: &[u8]) -> io::Result<State> {
+fn read_checkpoint(len: u64, body: &[u8]) -> io::Result<State> {
     let mut state = State::default();
     let mut reader = Reader::new(body);
     let fixed =
@@ -514,12 +515,14 @@ fn read_checkpoint(file: &File, len: u64, body: &[u8]) -> io::Result<State> {
         let catalog = get_catalog(&mut reader)?;
         state.catalogs.push(catalog);
     }
+    let mut offset = 0u64;
     for _ in 0..reader.varint()? {
-        let offset = u64_of(fixed(&mut reader, 8)?);
-        let record = read_record(file, offset, len)?
-            .filter(|record| record.kind == Kind::Tokens)
-            .ok_or_else(|| invalid("a checkpoint names a token record the file lacks"))?;
-        index_record(&mut state, Kind::Tokens, offset, &record.body)?;
+        offset += reader.varint()?;
+        let size = reader.u32()?;
+        if offset + size as u64 > len {
+            return Err(invalid("a checkpoint names a token past the file's end"));
+        }
+        state.tokens.push(offset, size);
     }
     for _ in 0..reader.varint()? {
         let hash = Blake3Hash::from(<[u8; 32]>::try_from(reader.take(32)?).expect("32 bytes"));
@@ -673,11 +676,12 @@ fn recover(file: &File) -> io::Result<(State, Writer)> {
         && let Some(record) = read_record(file, named, len)?
         && record.kind == Kind::Checkpoint
     {
-        state = read_checkpoint(file, len, &record.body)?;
+        state = read_checkpoint(len, &record.body)?;
         writer.checkpoint = named;
         writer.end = record.end();
     }
     catch_up(file, &mut state, &mut writer)?;
+    state.tokens.map(file)?;
     Ok((state, writer))
 }
 
@@ -823,7 +827,12 @@ impl FileArchive {
             frames_against: state.nodes.iter().filter(|node| node.depth > 0).count(),
             frame_bytes: state.frame_bytes,
             tokens: state.tokens.len(),
-            token_bytes: state.token_bytes,
+            token_bytes: state
+                .tokens
+                .extents()
+                .iter()
+                .map(|(_, len)| *len as u64)
+                .sum(),
             index_memory: state.tokens.footprint()
                 + state.nodes.capacity() * size_of::<Node>()
                 + state.node_ids.capacity() * (32 + 4 + 1)
@@ -917,7 +926,8 @@ impl FileArchive {
             return Ok(());
         }
         let mut state = self.inner.state.write();
-        follow(&self.inner.file, &mut state, &mut writer, len, true)
+        follow(&self.inner.file, &mut state, &mut writer, len, true)?;
+        state.tokens.map(&self.inner.file)
     }
 
     /// The block a node's rows stand for.
@@ -981,6 +991,7 @@ impl FileArchive {
             // This process's turn: read what others appended since its
             // last, then append after it.
             catch_up(file, &mut state, &mut writer)?;
+            state.tokens.map(file)?;
             let end = writer.end;
             self.write(&mut writer, &mut state, catalog, blocks)
                 .inspect_err(|_| {
@@ -1038,7 +1049,6 @@ impl FileArchive {
             }
         }
 
-        let mark = state.tokens.mark();
         let catalog_id = state.catalog(catalog);
         let first_id = state.nodes.len() as u32;
         // Nodes this append writes as frames: their ids, rows and bodies,
@@ -1097,10 +1107,9 @@ impl FileArchive {
         // the tokens it names, then blocks and frames in order.
         let mut bytes = Vec::new();
         let mut token_record = None;
-        if state.tokens.added_since(mark) > 0 {
-            token_record = Some(writer.end);
-            let body = state.tokens.record_since(mark);
-            state.token_bytes += body.len() as u64;
+        if state.tokens.pending() > 0 {
+            let (body, places) = state.tokens.take_pending();
+            token_record = Some((writer.end + HEADER, places));
             put_record(&mut bytes, Kind::Tokens, &body)?;
         }
         for item in pending {
@@ -1125,12 +1134,13 @@ impl FileArchive {
                 }
             }
         }
-        if let Some(offset) = token_record {
-            state.token_records.push(offset);
-        }
         let started = Instant::now();
         write_at(&self.inner.file, writer.end, &bytes)?;
         Timings::add(&self.inner.timings.write, started);
+        if let Some((body_offset, places)) = token_record {
+            state.tokens.settle(body_offset, &places);
+            state.tokens.map(&self.inner.file)?;
+        }
         writer.end += bytes.len() as u64;
         writer.since += bytes.len() as u64;
         {

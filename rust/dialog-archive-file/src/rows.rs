@@ -114,6 +114,11 @@ impl<'a> Reader<'a> {
         Self { bytes, at: 0 }
     }
 
+    /// How many bytes have been read.
+    pub fn position(&self) -> usize {
+        self.at
+    }
+
     pub fn is_empty(&self) -> bool {
         self.at >= self.bytes.len()
     }
