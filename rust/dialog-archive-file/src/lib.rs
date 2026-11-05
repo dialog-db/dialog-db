@@ -10,10 +10,11 @@
 //! way the `fs` provider does, from one file instead of a file per block.
 //! The tree, queries and sync read and write it as they do any archive.
 //!
-//! This is the first step of `ideas/single-file-format-design.md`: every
-//! block is stored whole. Frames, the compact form for nodes nobody reads,
-//! come later and change what a record can hold, not how the archive is
-//! used.
+//! It builds `ideas/single-file-format-design.md` up to its fifth step: an
+//! artifact tree node is kept as a frame over the file's tokens, and a read
+//! realizes the node's block from its frame. Writers in any number of
+//! processes take turns on the file's lock. Serving the tree a node read
+//! straight from its rows, without realizing a block, is the step after.
 //!
 //! ```no_run
 //! # use dialog_archive_file::FileArchive;
@@ -29,7 +30,10 @@
 
 mod archive;
 mod file;
+mod node;
 mod resource;
+mod rows;
+mod tokens;
 
-pub use archive::{CHECKPOINT_EVERY, FileArchive, Options};
+pub use archive::{CHAIN, CHECKPOINT_EVERY, FileArchive, Options, Stats};
 pub use resource::{FILE_NAME, OpenError, file_at};

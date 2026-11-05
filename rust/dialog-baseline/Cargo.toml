@@ -39,6 +39,9 @@ dialog-search-tree = { workspace = true, features = ["audit"] }
 dialog-storage = { workspace = true, features = ["helpers"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+# The single-file archive, measured against the `fs` archive
+# (`examples/file_archive_bench.rs`).
+dialog-archive-file = { workspace = true }
 criterion = { version = "0.5", features = ["async_tokio"] }
 # The single-file census (`examples/single_file_census.rs`) serializes tree
 # values to measure them and models compressed and delta-encoded stores.

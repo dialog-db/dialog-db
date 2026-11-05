@@ -24,9 +24,11 @@ provider that keeps a space's blocks in one append-only file instead of a
 file per block. It answers `archive::Get`, `Put` and `Import` like the
 `fs` provider, and opens from a space's `Location` (`Resource<Location>`),
 so a `Space` can take it as its archive and keep memory, credentials and
-blobs where they were. Every block is stored whole for now; the compact
-frames the design describes come in later changes and do not change how
-the archive is used. Native only.
+blobs where they were. A node of the artifact tree is kept as a frame:
+rows of ids into the file's tokens (each distinct entity, attribute, value
+and datum once), written against the node it supersedes. A frame is only
+written once it realizes to the exact block; anything else is kept whole.
+A read realizes the block. Native only.
 
 What this changes for you:
 
@@ -34,14 +36,18 @@ What this changes for you:
   FileSystem, FileSystem, FileSystem>` is a space whose blocks live in
   `archive.dialog` in the space's directory. The tree, queries and sync
   work through it unchanged.
-- A file this process already has open is shared, not opened twice.
+- Any number of processes can open one file. Writers take turns on an
+  exclusive lock on it and read what the others appended first; readers
+  take no lock. A file this process already has open is shared, not
+  opened twice.
 - Durability matches the `fs` provider: appends are not synced.
   `FileArchive::sync` gives a point that is.
+- `Options::frames = false` keeps every block whole.
 
 Why: a replica's history costs a file per block per version, which is
-most of what a replica weighs. One file is the base the compact encoding
-measured in the single-file spike builds on, and it is useful on its own:
-one file to move, copy and open.
+most of what a replica weighs. Replaying 4096 Stack Exchange commits, the
+`fs` archive takes about 1.2 GiB and the file 13 MiB.
+
 ### Distinct members inserted between the same neighbours get distinct positions
 
 A position's fractional tail comes from a bias derived from the member's

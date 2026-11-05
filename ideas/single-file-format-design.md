@@ -217,14 +217,56 @@ in a footer is read from the start and its torn tail is dropped. (Built:
 2. **Done.** The archive effects over the file with every block whole,
    opened from a space's `Location`. A repository commits, reopens and
    queries through it (`tests/repository.rs`).
-3. **Writers across processes.** The writer lock, catching up on records
-   other processes appended, and readers that follow the file's growth.
-   Needed before anything else uses the file, because two processes
-   appending today would write over each other.
+3. **Done.** Writers across processes: the writer lock, catching up on
+   records other processes appended, and readers that follow the file's
+   growth (`tests/repository.rs` runs two processes appending at once).
 4. **A node over rows** in `dialog-search-tree`: the index and segment
    accessors as an interface with two backings, the archived block and
    rows over a token region, tested by reading every node of the spike's
    datasets both ways and comparing every accessor.
-5. **Frames.** Tokens, rows, predecessors and the checked conversion in the
-   file; `Nodes::load_node` returning nodes over rows; `Get` realizing.
+5. **Done, with reads realizing.** Frames: tokens, rows, predecessors and
+   the checked conversion in the file; `Get` realizes. Until step 4, a
+   tree read of a frame realizes too.
 6. **The perf gate's scenarios** over it, against the `fs` archive.
+
+## Measured, steps 1–3 and 5
+
+`examples/file_archive_bench.rs` in dialog-baseline replays the Stack
+Exchange log through a repository, one branch commit per transaction, into
+three spaces that differ only in their archive. Then it reopens each and
+reads, cold (an empty node cache, a warm OS page cache) and warm. These
+numbers are for 4096 commits (9,915 facts) on a shared container.
+Repository-level times moved by up to 50% between identical runs (the
+whole-block commit was 6.8 ms in one run and 10.2 in the next). Read them
+as rough, and the archive's own timers as firmer.
+
+| | `fs` | file, whole | file, frames |
+|---|---|---|---|
+| on disk | 1185 MiB, 14,916 files | 1218 MiB | **13.2 MiB** |
+| commit | 5.7–6.7 ms | 6.8–10.2 ms | 9.0–9.1 ms |
+| cold scan, 8 attributes | 29–35 ms | 27–35 ms | 34–39 ms |
+| cold point reads, 256 | 12–14 ms | 7–8 ms | 17–23 ms |
+| warm scan / points | 15–21 / 2–3 ms | 14–23 / 2 ms | 13–14 / 3 ms |
+| archive index in memory | — | 0.8 MiB | 23.4 MiB |
+
+What it says:
+
+- **Size holds up through a real repository**: 90× smaller than the `fs`
+  archive. 14,738 frames take 2.7 MiB and 33k tokens 10.2 MiB, so the
+  tokens are the data.
+- **Writing a frame costs about 630 µs a node**: 330 µs to read the block
+  as a node and split it into rows (a datum is deserialized and
+  re-archived to become a token), and 300 µs to verify, mostly realizing.
+  That is about 2.3 ms a commit. The file write itself drops from 5.3 s
+  (whole) to 0.1 s.
+- **A cold read pays realizing** (about 140 µs a node), so cold point
+  reads are 1.5–3× slower than `fs` and warm reads are the same: the node
+  cache above the archive holds realized nodes. Step 4 is what removes
+  that cost, and the census bounds what it can buy: decoding rows costs
+  about what reading a block file does, so cold reads reach parity with
+  `fs`, not better. What step 4 buys beyond that is memory: a cached node
+  over shared tokens instead of its block plus its decoded keys.
+- **The in-memory index is the token region**: 23.4 MiB, mostly the
+  10.2 MiB of token bytes plus its growth slack. For a replica larger than
+  memory the region has to be read through a mapping of the file, not
+  held in memory.

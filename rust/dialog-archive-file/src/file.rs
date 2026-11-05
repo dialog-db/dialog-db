@@ -29,6 +29,12 @@ pub(crate) enum Kind {
     /// The offset of the latest checkpoint record, or 0 for none. Written
     /// last by every append, so a file that ends in a footer ends whole.
     Footer,
+    /// Tokens, each a length and its bytes. A token's id is its place among
+    /// all the tokens the file holds, in file order.
+    Tokens,
+    /// A tree node as rows of token ids, possibly written against the rows
+    /// of the node it supersedes.
+    Frame,
 }
 
 impl Kind {
@@ -37,6 +43,8 @@ impl Kind {
             Kind::Block => 1,
             Kind::Checkpoint => 2,
             Kind::Footer => 3,
+            Kind::Tokens => 4,
+            Kind::Frame => 5,
         }
     }
 
@@ -45,6 +53,8 @@ impl Kind {
             1 => Some(Kind::Block),
             2 => Some(Kind::Checkpoint),
             3 => Some(Kind::Footer),
+            4 => Some(Kind::Tokens),
+            5 => Some(Kind::Frame),
             _ => None,
         }
     }
