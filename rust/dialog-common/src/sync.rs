@@ -5,8 +5,9 @@
 //! that an implementer will be shared across threads.
 //!
 //! On `wasm32-unknown-unknown` targets, the traits effectively represent no
-//! new bound. But, on other targets they represent `Send` or `Send + Sync`
-//! bounds (depending on which one is used).
+//! new bound. But, on other targets they represent `Send` or `Sync` bounds
+//! (depending on which one is used). They are independent: a bound that needs
+//! both spells out `ConditionalSend + ConditionalSync`.
 
 #[allow(missing_docs)]
 #[cfg(not(target_arch = "wasm32"))]
@@ -17,10 +18,10 @@ impl<S> ConditionalSend for S where S: Send {}
 
 #[allow(missing_docs)]
 #[cfg(not(target_arch = "wasm32"))]
-pub trait ConditionalSync: Send + Sync {}
+pub trait ConditionalSync: Sync {}
 
 #[cfg(not(target_arch = "wasm32"))]
-impl<S> ConditionalSync for S where S: Send + Sync {}
+impl<S> ConditionalSync for S where S: Sync {}
 
 #[allow(missing_docs)]
 #[cfg(target_arch = "wasm32")]

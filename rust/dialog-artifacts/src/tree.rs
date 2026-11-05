@@ -603,7 +603,12 @@ pub trait ArtifactTreeExt {
         the: &crate::Relation,
     ) -> Result<Vec<Datum>, DialogArtifactsError>
     where
-        S: Provider<archive::Load> + Provider<blob::Load> + Holds + ConditionalSync + Clone;
+        S: Provider<archive::Load>
+            + Provider<blob::Load>
+            + Holds
+            + ConditionalSend
+            + ConditionalSync
+            + Clone;
 
     /// Look up data at `(the, of)` through the attribute-ordered index,
     /// the ordering revision records are stored in.
@@ -614,7 +619,12 @@ pub trait ArtifactTreeExt {
         the: &crate::Relation,
     ) -> Result<Vec<Artifact>, DialogArtifactsError>
     where
-        S: Provider<archive::Load> + Provider<blob::Load> + Holds + ConditionalSync + Clone;
+        S: Provider<archive::Load>
+            + Provider<blob::Load>
+            + Holds
+            + ConditionalSend
+            + ConditionalSync
+            + Clone;
 
     /// This tree's format [`Manifest`], as carried by its root node.
     ///
@@ -632,7 +642,12 @@ pub trait ArtifactTreeExt {
         delta: &ArchiveDelta,
     ) -> Result<Manifest, DialogArtifactsError>
     where
-        S: Provider<archive::Load> + Provider<blob::Load> + Holds + ConditionalSync + Clone;
+        S: Provider<archive::Load>
+            + Provider<blob::Load>
+            + Holds
+            + ConditionalSend
+            + ConditionalSync
+            + Clone;
 
     /// Write pre-built entries (e.g. revision lineage records — see
     /// [`RevisionRecord::entries`](crate::history::RevisionRecord::entries))
@@ -671,7 +686,13 @@ pub trait ArtifactTreeExt {
     ) -> impl Stream<Item = Result<ArtifactView, DialogArtifactsError>> + 's + ConditionalSend
     where
         Self: Sized,
-        S: Provider<archive::Load> + Provider<blob::Load> + Holds + ConditionalSync + Clone + 's;
+        S: Provider<archive::Load>
+            + Provider<blob::Load>
+            + Holds
+            + ConditionalSend
+            + ConditionalSync
+            + Clone
+            + 's;
 
     /// Like [`scan`](Self::scan), but yields every row as an owned
     /// [`Artifact`] materialized from the scan's OWN key parse.
@@ -694,7 +715,13 @@ pub trait ArtifactTreeExt {
     ) -> impl Stream<Item = Result<Artifact, DialogArtifactsError>> + 's + ConditionalSend
     where
         Self: Sized,
-        S: Provider<archive::Load> + Provider<blob::Load> + Holds + ConditionalSync + Clone + 's;
+        S: Provider<archive::Load>
+            + Provider<blob::Load>
+            + Holds
+            + ConditionalSend
+            + ConditionalSync
+            + Clone
+            + 's;
 
     /// An advisory upper-bound estimate of how many artifacts the `selector`'s
     /// key range spans, read from the range's edge paths (see
@@ -710,7 +737,12 @@ pub trait ArtifactTreeExt {
     ) -> Result<Option<u64>, DialogArtifactsError>
     where
         Self: Sized,
-        S: Provider<archive::Load> + Provider<blob::Load> + Holds + ConditionalSync + Clone;
+        S: Provider<archive::Load>
+            + Provider<blob::Load>
+            + Holds
+            + ConditionalSend
+            + ConditionalSync
+            + Clone;
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -780,7 +812,12 @@ impl ArtifactTreeExt for ArtifactTree {
         the: &crate::Relation,
     ) -> Result<Vec<Datum>, DialogArtifactsError>
     where
-        S: Provider<archive::Load> + Provider<blob::Load> + Holds + ConditionalSync + Clone,
+        S: Provider<archive::Load>
+            + Provider<blob::Load>
+            + Holds
+            + ConditionalSend
+            + ConditionalSync
+            + Clone,
     {
         let storage = store;
 
@@ -813,7 +850,12 @@ impl ArtifactTreeExt for ArtifactTree {
         the: &crate::Relation,
     ) -> Result<Vec<Artifact>, DialogArtifactsError>
     where
-        S: Provider<archive::Load> + Provider<blob::Load> + Holds + ConditionalSync + Clone,
+        S: Provider<archive::Load>
+            + Provider<blob::Load>
+            + Holds
+            + ConditionalSend
+            + ConditionalSync
+            + Clone,
     {
         let storage = store;
 
@@ -853,7 +895,12 @@ impl ArtifactTreeExt for ArtifactTree {
         delta: &ArchiveDelta,
     ) -> Result<Manifest, DialogArtifactsError>
     where
-        S: Provider<archive::Load> + Provider<blob::Load> + Holds + ConditionalSync + Clone,
+        S: Provider<archive::Load>
+            + Provider<blob::Load>
+            + Holds
+            + ConditionalSend
+            + ConditionalSync
+            + Clone,
     {
         // Read through `delta`: this tree's root may have been persisted by an
         // earlier batch that the caller has not flushed to `store` yet, so the
@@ -897,7 +944,12 @@ impl ArtifactTreeExt for ArtifactTree {
         selector: ArtifactSelector<Constrained>,
     ) -> Result<Option<u64>, DialogArtifactsError>
     where
-        S: Provider<archive::Load> + Provider<blob::Load> + Holds + ConditionalSync + Clone,
+        S: Provider<archive::Load>
+            + Provider<blob::Load>
+            + Holds
+            + ConditionalSend
+            + ConditionalSync
+            + Clone,
     {
         let tree = self;
         let storage = store;
@@ -923,7 +975,13 @@ impl ArtifactTreeExt for ArtifactTree {
         selector: ArtifactSelector<Constrained>,
     ) -> impl Stream<Item = Result<ArtifactView, DialogArtifactsError>> + 's + ConditionalSend
     where
-        S: Provider<archive::Load> + Provider<blob::Load> + Holds + ConditionalSync + Clone + 's,
+        S: Provider<archive::Load>
+            + Provider<blob::Load>
+            + Holds
+            + ConditionalSend
+            + ConditionalSync
+            + Clone
+            + 's,
     {
         let tree = self;
         // Spilled value blocks are fetched by reference from the blobs of
@@ -1036,7 +1094,13 @@ impl ArtifactTreeExt for ArtifactTree {
         selector: ArtifactSelector<Constrained>,
     ) -> impl Stream<Item = Result<Artifact, DialogArtifactsError>> + 's + ConditionalSend
     where
-        S: Provider<archive::Load> + Provider<blob::Load> + Holds + ConditionalSync + Clone + 's,
+        S: Provider<archive::Load>
+            + Provider<blob::Load>
+            + Holds
+            + ConditionalSend
+            + ConditionalSync
+            + Clone
+            + 's,
     {
         let tree = self;
         // Spilled value blocks are fetched by reference from the blobs of

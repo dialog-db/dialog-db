@@ -6,7 +6,7 @@
 
 use std::ops::{Deref, DerefMut};
 
-use dialog_common::ConditionalSync;
+use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_search_tree::{
     Component as TreeComponent, DialogSearchTreeError, Key as TreeKey, Manifest, Schema,
 };
@@ -25,7 +25,10 @@ pub trait KeyType:
 }
 
 /// A value that may be stored against a key in an artifact index.
-pub trait ValueType: Debug + ConditionalSync + Clone + Serialize + DeserializeOwned {}
+pub trait ValueType:
+    Debug + ConditionalSend + ConditionalSync + Clone + Serialize + DeserializeOwned
+{
+}
 use serde::{Deserialize, Serialize};
 
 mod attribute;

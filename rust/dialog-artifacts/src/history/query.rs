@@ -208,7 +208,12 @@ where
 
 impl<S> History for TreeHistory<S>
 where
-    S: Provider<archive::Load> + Provider<blob::Load> + Holds + ConditionalSync + Clone,
+    S: Provider<archive::Load>
+        + Provider<blob::Load>
+        + Holds
+        + ConditionalSend
+        + ConditionalSync
+        + Clone,
 {
     async fn claims_at(
         &self,
