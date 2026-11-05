@@ -1287,9 +1287,7 @@ version = "0.4.0-rc.3"
 dependencies = [
  "anyhow",
  "async-trait",
- "base58",
  "crc32fast",
- "dialog-archive-file",
  "dialog-artifacts",
  "dialog-capability",
  "dialog-common",
@@ -1603,6 +1601,27 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "dialog-migration"
+version = "0.4.0-rc.3"
+dependencies = [
+ "anyhow",
+ "base58",
+ "dialog-archive-file",
+ "dialog-artifacts",
+ "dialog-capability",
+ "dialog-common",
+ "dialog-effects",
+ "dialog-migration",
+ "dialog-peer",
+ "dialog-repository",
+ "dialog-search-tree",
+ "dialog-storage",
+ "futures-util",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]

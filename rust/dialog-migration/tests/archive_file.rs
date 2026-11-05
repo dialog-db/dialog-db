@@ -2,17 +2,17 @@
 //! every block reads back as the bytes it was, and a repository opened over
 //! the file reads what the replica committed.
 
-#![cfg(all(not(target_arch = "wasm32"), feature = "transcode"))]
+#![cfg(not(target_arch = "wasm32"))]
 
 use std::str::FromStr;
 
-use dialog_archive_file::transcode::{BlockSource, Directory, transcode_spaces};
 use dialog_archive_file::{FILE_NAME, FileArchive};
 use dialog_artifacts::{
     Artifact, ArtifactSelector, Changes, Entity, Instruction, Pick, Relation, Value,
 };
 use dialog_capability::Subject;
 use dialog_effects::storage::{Directory as At, Location};
+use dialog_migration::archive_file::{BlockSource, Directory, transcode_spaces};
 use dialog_peer::helpers::{Seed, open_peer_as, test_owned};
 use dialog_repository::RepositoryExt as _;
 use dialog_storage::provider::storage::NativeSpace;

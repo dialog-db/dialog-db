@@ -12,18 +12,7 @@ publish = false
 # every dependency is target-gated so the workspace's wasm dependency set is
 # unaffected.
 
-[features]
-# Transcoding a block store (a directory of blocks, or an `fs` space's
-# archive) into the file, and the `dialog-transcode` binary that does it.
-transcode = ["dep:base58"]
-
-[[bin]]
-name = "dialog-transcode"
-path = "src/bin/transcode.rs"
-required-features = ["transcode"]
-
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-base58 = { workspace = true, optional = true }
 async-trait = { workspace = true }
 crc32fast = { workspace = true }
 dialog-artifacts = { workspace = true }
@@ -40,9 +29,6 @@ zerocopy = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 anyhow = { workspace = true }
-# The crate itself, with transcoding, so its tests run whatever features
-# the test run picks.
-dialog-archive-file = { workspace = true, features = ["transcode"] }
 dialog-peer = { workspace = true, features = ["helpers"] }
 dialog-repository = { workspace = true }
 futures-util = { workspace = true }

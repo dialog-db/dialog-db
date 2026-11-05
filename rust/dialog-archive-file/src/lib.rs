@@ -34,8 +34,6 @@ mod node;
 mod resource;
 mod rows;
 mod tokens;
-#[cfg(feature = "transcode")]
-pub mod transcode;
 
 pub use archive::{CHAIN, CHECKPOINT_EVERY, FileArchive, Options, Stats};
 pub use resource::{FILE_NAME, OpenError, file_at};

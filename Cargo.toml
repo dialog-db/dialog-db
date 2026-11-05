@@ -25,6 +25,7 @@ members = [
     "rust/dialog-common",
     "rust/dialog-effects",
     "rust/dialog-macros",
+    "rust/dialog-migration",
     "rust/dialog-diagnose",
     "rust/dialog-encoding",
     "rust/dialog-number",
@@ -217,6 +218,10 @@ zmij = "1"
 
 [workspace.dependencies.dialog-archive-file]
 path = "./rust/dialog-archive-file"
+version = "0.4.0-rc.3"
+
+[workspace.dependencies.dialog-migration]
+path = "./rust/dialog-migration"
 version = "0.4.0-rc.3"
 
 [workspace.dependencies.dialog-artifacts]

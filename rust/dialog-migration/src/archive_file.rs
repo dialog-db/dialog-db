@@ -1,9 +1,10 @@
-//! Transcoding a block store into a [`FileArchive`].
+//! The `archive-file` migration: a block store into a [`FileArchive`].
 //!
 //! A replica kept a block per file (the `fs` provider's archive, or a
 //! directory of blocks fetched from a remote) moves into the single file
 //! with [`transcode`]: every block of every catalog, written so the file
-//! keeps tree nodes as compactly as it can.
+//! keeps tree nodes as compactly as it can. A whole replica (every space
+//! of a profile directory) moves with [`transcode_spaces`].
 //!
 //! How compact that is depends on the order blocks arrive in: a node is
 //! written against the node it supersedes, so the versions of a node should
@@ -27,12 +28,18 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use base58::{FromBase58 as _, ToBase58 as _};
-use dialog_artifacts::{HISTORY_KEY_TAG, Key};
+use dialog_archive_file::{FILE_NAME, FileArchive};
+use dialog_artifacts::{Datum, HISTORY_KEY_TAG, Key, State};
 use dialog_common::{Blake3Hash, Buffer};
-use dialog_search_tree::{NodeBody, NoveltyOp};
+use dialog_search_tree::{NodeBody, NoveltyOp, PersistentNode};
 
-use crate::FileArchive;
-use crate::node::tree_node;
+/// A node of the artifact tree.
+type TreeNode = PersistentNode<Key, State<Datum>>;
+
+/// `block` read as an artifact tree node, if it is one.
+fn tree_node(block: &Buffer) -> Option<TreeNode> {
+    TreeNode::try_from(block.clone()).ok()
+}
 
 /// Where a transcode reads blocks from.
 pub trait BlockSource {
@@ -209,7 +216,7 @@ pub fn transcode(source: &impl BlockSource, target: &FileArchive) -> io::Result<
 /// Transcodes every space under `root` (each directory holding an `fs`
 /// archive, `{space}/archive/{catalog}/{hash}`) into the file a
 /// file-archive space reads, `{space}/archive.dialog`
-/// ([`FILE_NAME`](crate::FILE_NAME)), beside the rest of the space. A
+/// ([`FILE_NAME`]), beside the rest of the space. A
 /// profile directory holds several spaces (the peer's own state, and a space
 /// per repository); a replica moves to the file when all of them do. The
 /// `fs` archives are left where they are.
@@ -230,7 +237,7 @@ pub fn transcode_spaces(root: impl AsRef<Path>) -> io::Result<Vec<(PathBuf, Repo
     spaces.sort();
     let mut reports = Vec::with_capacity(spaces.len());
     for space in spaces {
-        let archive = FileArchive::open(space.join(crate::FILE_NAME))
+        let archive = FileArchive::open(space.join(FILE_NAME))
             .map_err(|error| io::Error::other(error.to_string()))?;
         let report = transcode(&Directory::space(&space), &archive)?;
         archive
@@ -401,7 +408,7 @@ fn tree_error(error: impl std::fmt::Display) -> io::Error {
 }
 
 /// A node's children, and the history records it holds itself.
-fn shape(node: &crate::node::TreeNode) -> io::Result<Shape> {
+fn shape(node: &TreeNode) -> io::Result<Shape> {
     Ok(match node.body() {
         NodeBody::Segment(segment) => {
             let mut history = 0;
