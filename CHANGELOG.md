@@ -68,6 +68,31 @@ nothing downstream can notice or repair them. The lock stays a file
 rather than an OS lock (`flock`), which errors or is not enforced on
 network and FUSE filesystems that stores live on.
 
+### dialog-storage reads a browser file without `wasm-streams`
+
+[#744](https://github.com/dialog-db/dialog-db/pull/744)
+
+The web file system provider read a `File` through the `wasm-streams`
+crate's `ReadableStream` adapter. That crate exports its adapters through
+`#[wasm_bindgen]` under names that carry no version, so two versions of it
+in one wasm module are duplicate symbols at link time. The workspace had
+pinned it to 0.5 to match the copy `reqwest` brings in through `iroh`
+(#521), while an embedder linking the Cloudflare `worker` crate needs 0.6,
+and no version satisfied both. The provider now reads the stream through
+web-sys's default reader and the crate is gone from dialog-storage.
+
+What this changes for you:
+
+- dialog-storage no longer depends on `wasm-streams`, so an embedder may
+  link whichever version its other dependencies need.
+- Nothing stored or synced changes, and the reader's behaviour is the
+  same: chunks arrive as they are read, and dropping the reader before the
+  end cancels the stream.
+
+Why: a dependency that can only ever be one version across a whole wasm
+module should not be pinned by a library that uses one call of it.
+
+
 ### A pull or a push that meets another revision under its own head's version is refused
 
 Fixing [#705](https://github.com/dialog-db/dialog-db/issues/705)

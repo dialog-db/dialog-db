@@ -17,7 +17,6 @@
 //! [fsapi]: https://developer.mozilla.org/en-US/docs/Web/API/File_System_API
 
 use super::{FileReader, FileSystem, FileSystemError, FileSystemHandle};
-use futures_util::StreamExt;
 use js_sys::Uint8Array;
 use std::rc::Rc;
 use url::Url;
@@ -682,14 +681,74 @@ pub(super) async fn open_reader(
         file.stream()
     };
 
-    let stream = wasm_streams::ReadableStream::from_raw(readable.unchecked_into())
-        .into_stream()
-        .map(|chunk| {
-            chunk
+    Ok(Box::pin(read_chunks(readable)))
+}
+
+/// The chunks of `readable`, read through its default reader.
+///
+/// This reads the stream with web-sys alone rather than through the
+/// `wasm-streams` crate: that crate exports its stream adapters through
+/// `#[wasm_bindgen]` under names that carry no version, so two versions of
+/// it in one wasm module are duplicate symbols at link time, and an
+/// embedder that links another copy (the Cloudflare `worker` crate needs
+/// one) could not pick a version that both agreed on.
+fn read_chunks(
+    readable: web_sys::ReadableStream,
+) -> impl futures_util::Stream<Item = Result<Vec<u8>, FileSystemError>> {
+    /// A reader that gives the stream back at its end, and cancels the
+    /// stream if it is dropped before that.
+    struct Reading {
+        reader: web_sys::ReadableStreamDefaultReader,
+        done: bool,
+    }
+
+    impl Reading {
+        fn end(&mut self) {
+            if !self.done {
+                self.done = true;
+                self.reader.release_lock();
+            }
+        }
+    }
+
+    impl Drop for Reading {
+        fn drop(&mut self) {
+            if !self.done {
+                let _ = self.reader.cancel();
+                self.end();
+            }
+        }
+    }
+
+    let reader: web_sys::ReadableStreamDefaultReader = readable.get_reader().unchecked_into();
+    futures_util::stream::unfold(
+        Reading {
+            reader,
+            done: false,
+        },
+        |mut reading| async move {
+            if reading.done {
+                return None;
+            }
+            let result = match JsFuture::from(reading.reader.read()).await {
+                Ok(result) => result,
+                Err(error) => {
+                    reading.end();
+                    return Some((Err(js_io_error("reading stream", error)), reading));
+                }
+            };
+            let field = |name: &str| js_sys::Reflect::get(&result, &JsValue::from_str(name));
+            let done = field("done").ok().and_then(|done| done.as_bool());
+            if done.unwrap_or(true) {
+                reading.end();
+                return None;
+            }
+            let chunk = field("value")
                 .map(|value| Uint8Array::new(&value).to_vec())
-                .map_err(|e| js_io_error("reading stream", e))
-        });
-    Ok(Box::pin(stream))
+                .map_err(|error| js_io_error("reading stream", error));
+            Some((chunk, reading))
+        },
+    )
 }
 
 /// Process-local counter for unique staging file names.

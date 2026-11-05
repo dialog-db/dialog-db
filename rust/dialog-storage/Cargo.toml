@@ -105,9 +105,9 @@ web-sys = { workspace = true, features = [
   "LockManager",
   "Navigator",
   "ReadableStream",
+  "ReadableStreamDefaultReader",
   "StorageManager",
 ] }
-wasm-streams = { workspace = true }
 
 [dev-dependencies]
 anyhow = { workspace = true }
