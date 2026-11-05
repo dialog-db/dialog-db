@@ -1356,7 +1356,8 @@ fn index_tree_estimate(blocks: &[&Written], source: &Source) -> anyhow::Result<(
     const COPY: u64 = 3;
     for fanout in [64u64, 128, 256] {
         let ends_leaf = |hash: &Blake3Hash| {
-            u16::from_le_bytes([hash.as_bytes()[30], hash.as_bytes()[31]]) as u64 % fanout == 0
+            (u16::from_le_bytes([hash.as_bytes()[30], hash.as_bytes()[31]]) as u64)
+                .is_multiple_of(fanout)
         };
         let mut index: std::collections::BTreeSet<[u8; 32]> = std::collections::BTreeSet::new();
         // Each leaf's versions since its last whole frame, by its first key.
