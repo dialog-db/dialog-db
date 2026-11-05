@@ -996,7 +996,9 @@ fn first_key(node: &TreeNode) -> anyhow::Result<Option<Vec<u8>>> {
             .keys::<Key>()?
             .next_key()?
             .map(|(_, key)| key.to_vec()),
-        NodeBody::Index(index) => (index.len() > 0).then(|| index.separator(0)).transpose()?,
+        NodeBody::Index(index) => (!index.is_empty())
+            .then(|| index.separator(0))
+            .transpose()?,
     })
 }
 
