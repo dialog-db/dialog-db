@@ -122,6 +122,17 @@ impl Meter for Probe {
     }
 }
 
+/// A replica that adopted a branch by root and remembers nothing, from
+/// [`Env::adopter`]: a device of its own on the same storage.
+pub struct Adopter {
+    /// The operator of the replica's own session.
+    pub reader: Operator,
+    /// The replica's branch.
+    pub branch: Branch,
+    /// The branch it adopted, opened in its session, to pull from again.
+    pub upstream: Branch,
+}
+
 /// The branch every scenario works on. Not `main`: opening the space
 /// records its access there (a fresh account key, its encrypted secret
 /// and a delegation, random by design), and a scenario's commits must
@@ -189,24 +200,33 @@ impl Env {
     /// setup wrote would answer its reads; after it, its first read
     /// faults the tree in from the root, as a device that holds nothing
     /// of the tree does.
-    pub async fn adopter(&self, name: &str, upstream: &str) -> Result<(Operator, Branch)> {
+    pub async fn adopter(&self, name: &str, upstream: &str) -> Result<Adopter> {
         let session = self
             .profile
             .session(name.as_bytes())
             .space(self.profile.state())
             .allow(Subject::any())
             .await?;
-        let operator = Metered::new(session, self.operator.meter().clone());
-        let repository = self.profile.space("perf").open().perform(&operator).await?;
-        let upstream = repository
-            .branch(upstream)
-            .open()
-            .perform(&operator)
-            .await?;
-        let branch = repository.branch(name).open().perform(&operator).await?;
-        branch.pull().from(&upstream).perform(&operator).await?;
-        self.profile.caches().release(&repository.did());
-        Ok((operator, branch))
+        let reader = Metered::new(session, self.operator.meter().clone());
+        let repository = self.profile.space("perf").open().perform(&reader).await?;
+        let upstream = repository.branch(upstream).open().perform(&reader).await?;
+        let branch = repository.branch(name).open().perform(&reader).await?;
+        branch.pull().from(&upstream).perform(&reader).await?;
+        self.forget();
+        Ok(Adopter {
+            reader,
+            branch,
+            upstream,
+        })
+    }
+
+    /// Let go of every cache the peer holds for the repository, so the
+    /// next read of anything faults it in from storage. Sessions of one
+    /// peer share the caches, so this reaches an adopter's too: a scenario
+    /// that wants a device's own tree warm and a commit it has not pulled
+    /// cold forgets after the commit and reads its tree once more.
+    pub fn forget(&self) {
+        self.profile.caches().release(&self.repository.did());
     }
 
     /// The branch's head, for telling whether two runs minted the same

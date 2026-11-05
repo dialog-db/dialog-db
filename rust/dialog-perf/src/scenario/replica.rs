@@ -10,7 +10,7 @@ use dialog_query::query::Output as _;
 use dialog_repository::Branch;
 
 use super::{Outcome, Prepared, seed_stuff, stuff_name};
-use crate::env::{Env, Operator, assert_all, entity, fact, query, text};
+use crate::env::{Adopter, Env, Operator, assert_all, entity, fact, query, text};
 
 /// How many entities the history seeds before the origins commit.
 const SEEDED: usize = 100;
@@ -78,7 +78,11 @@ pub async fn first_query(size: usize) -> Result<Box<dyn Prepared>> {
         .from(&previous)
         .perform(&env.operator)
         .await?;
-    let (reader, adopter) = env.adopter("adopter", crate::env::SCENARIO_BRANCH).await?;
+    let Adopter {
+        reader,
+        branch: adopter,
+        ..
+    } = env.adopter("adopter", crate::env::SCENARIO_BRANCH).await?;
     Ok(Box::new(FirstQuery {
         env,
         reader,
