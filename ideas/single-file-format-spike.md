@@ -22,8 +22,9 @@ them with the tree's encoder costs 150–225 µs, and that is the tree's
 encoder, not the format. So the format reads fast only if the tree can work
 on rows, keeping blocks for sync and verification.
 
-And it cannot rebuild old blocks: 36% of the nodes in tonk-team's pushed
-history were written by an older encoder that today's does not reproduce.
+And it cannot rebuild old blocks with one encoder: 36% of the nodes in
+tonk-team's pushed history are in the tree's legacy layout, which today's
+encoder does not write.
 
 Against the success bars:
 
@@ -31,7 +32,7 @@ Against the success bars:
 |---|---|---|
 | ≥ 10× smaller than file-per-block | **met on SE** (20×); 9.9× on tonk-team's history, just under | **met**: 87× on SE, 22× on tonk-team's history |
 | grows with live facts, not commits | **not met**: 2.76× for 2× commits on SE, live tree 2.14× | **met on SE**: 2.27× for 2× commits, live tree 2.14× |
-| get by hash still works and verifies | **met for blocks today's encoder wrote**; 3,145 of 8,768 tonk-team nodes (180 MiB) realize to different bytes | same |
+| get by hash still works and verifies | **met for the tagged layout**; the 3,145 of 8,768 tonk-team nodes (180 MiB) in the legacy layout realize to different bytes | same |
 | reads near the block store | **not met**: realizing costs 130–175 µs, against 14 µs to read a file | **met for rows** (5–27 µs), **not met for blocks** (150–225 µs) |
 | writes | not timed | encode + append 10–30 µs per node; splitting a node into rows 200 µs; a file per block 290–460 µs, all without fsync |
 | perf gate within tolerance | **not measured**: there is no provider yet | same |
@@ -137,11 +138,12 @@ each (the history region only grows; `DIALOG_CENSUS_ORDER=history`). The
 - **Old blocks do not round-trip.** 3,145 of the 8,768 nodes, holding 180
   MiB, realize to bytes that differ from their block: segments 40 bytes
   shorter, index nodes 16. They are one era, roots 31 to 356 of 770; the
-  head tree's 685 nodes all round-trip. A block an older encoder wrote
-  carries something today's no longer writes, so a frame rebuilt with
-  today's encoder has a different hash. A single-file format has to keep
-  those blocks verbatim (here that is 180 MiB, most of the saving) or keep
-  every encoder it ever shipped and record which one a frame needs.
+  head tree's 685 nodes all round-trip. They are exactly the nodes in the
+  tree's legacy layout (`LEGACY_LAYOUT`), which the tree still reads; a
+  frame rebuilt with today's encoder comes out in the tagged layout, with a
+  different hash. A single-file format has to record a frame's layout and
+  keep an encoder for each (here, one more), or keep legacy blocks
+  verbatim (180 MiB, most of the saving).
 - **The 2 GB.** R2 holds 568.5 MiB for this space, and some blocks in a
   local replica are not on R2 at all (4 of 8 sampled). The 2 GB replica is
   a device's, and it holds blocks that never reached R2.

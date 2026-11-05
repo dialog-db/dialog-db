@@ -1472,6 +1472,19 @@ fn measure(source: Source, checkpoints: &[usize]) -> anyhow::Result<()> {
             .iter()
             .map(|hash| blocks[position[hash]].commit)
             .collect();
+        let legacy = differ
+            .iter()
+            .filter(|hash| {
+                nodes[*hash].layout_version() != nodes[&roots[roots.len() - 1]].layout_version()
+            })
+            .count();
+        let legacy_all = nodes
+            .values()
+            .filter(|node| node.layout_version() != nodes[&roots[roots.len() - 1]].layout_version())
+            .count();
+        eprintln!(
+            "  {legacy} of them, and {legacy_all} nodes in all, are in a layout other than the head's"
+        );
         eprintln!(
             "  the {} that differ hold {} MiB as blocks, written in commits {}..={}",
             differ.len(),
