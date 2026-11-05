@@ -32,10 +32,16 @@ What this changes for you:
   write `ConditionalSend + ConditionalSync`.
 - These traits now name both bounds as supertraits, so what implements
   them and what a bound on them implies is unchanged:
-  `dialog_artifacts::{ArchiveReader, ValueType, History}`,
-  `dialog_search_tree::Nodes`, `dialog_did_web::Fetch`,
+  `dialog_artifacts::{ValueType, History}`, `dialog_did_web::Fetch`,
   `dialog_remote_ucan::Presented`, `dialog_peer_iroh::{Channel, Connect}`
   and the `dialog_peer` helpers' `Meter`.
+- A store a tree reads through by value asks for `ConditionalSend` as
+  well, since it is moved into the read's future: the `S` of the
+  `dialog_artifacts::ArtifactTreeExt` and `BlobIndexExt` methods,
+  `TreeHistory`, `blob_changes` and `spilled_refs`, and of the query
+  builder's `execute`, `execute_owned` and `estimate` in
+  `dialog_repository`. An env passed by reference (`perform(&env)`)
+  still asks only for `ConditionalSync`.
 - `dialog_query::merge_join` and `multi_merge_join` ask for
   `ConditionalSend + ConditionalSync` on their key function and key, and
   the `Resolver` and `Revocations` of `dialog_peer_iroh::accept` ask for
@@ -44,6 +50,115 @@ What this changes for you:
 Why: a bound named `Sync` that also demands `Send` hides what code
 actually needs, and makes a type that is `Sync` but not `Send` impossible
 to accept through it.
+
+### Distinct members inserted between the same neighbours get distinct positions
+
+A position's fractional tail comes from a bias derived from the member's
+identity. The bias was the first six base62 digits of the identity bytes,
+and base62 is a big-endian re-encoding, so those digits depend only on the
+identity's leading bytes and its length. Every `did:key:z6Mk…` entity
+shares both, so every one of them got the same bias (`13lS7E`, or
+`FvVVmY` one character shorter). The bias is now taken from the identity's
+BLAKE3 digest.
+
+What this changes for you:
+
+- `Bias::derive` returns a different bias for the same identity, so
+  `dialog_artifacts::position::insert` and the `dialog/position` formula
+  derive different positions than before for the same member and
+  neighbours. Derivation is still deterministic: every replica on this
+  release derives the same position for the same insert.
+- Two different members inserted into the same slot used to derive the
+  same position, so a relation that keeps one member per position kept
+  only one of them. They now land apart.
+
+Why: the bias exists so distinct members disperse while the same member
+converges. Read off the identity's head it converged for everything, so
+concurrent inserts into one slot collided instead of interleaving.
+
+### A tree reads its catalog's blocks through `Load` on the env, and the env hydrates
+
+[#735](https://github.com/dialog-db/dialog-db/pull/735), after
+[#730](https://github.com/dialog-db/dialog-db/pull/730); argued in
+[notes/tree-reads-as-effects.md](./notes/tree-reads-as-effects.md).
+
+A search tree is now a root under a catalog, and it reads a node by
+performing the new `dialog_effects::archive::Load` command on the
+environment it is given: the block its `Get` names, from the local
+archive, or else hydrated from where the environment knows the subject's
+blocks live. A spilled value is read the same way through
+`dialog_effects::blob::Load`. The environment holds the checked-node
+cache (`NodeCache::of(env, subject)`) and the hydration routes
+(`dialog_network::Routes`, which a branch registers when it opens), so a
+peer answers every tree read the same way, sharing in-flight hydrations
+through its `Hydrate` scheduler. The store wrappers that bridged the old
+subject-less `LoadBlock` to the env are gone. `Get` is unchanged and
+never hydrates.
+
+What this changes for you:
+
+- `LoadBlock`, `LoadBlob`, `ArchiveReader`, `Nodes`, `Cached`,
+  `ArtifactNodes` and `MemoryBlocks` are removed. A tree reads through any
+  `Env: Provider<archive::Load> + Holds + ConditionalSync` (plus
+  `Provider<blob::Load>` for artifact trees, and `Provider<archive::Get>`
+  where a difference is computed). A test store is
+  `dialog_search_tree::helpers::Blocks`, a `Volatile` under a test
+  catalog.
+- `dialog_repository::LocalIndex` and `NetworkedIndex` are removed: read
+  through the env itself (`tree.get(key, &env)`, `select.execute(&env)`).
+  `NetworkedIndex::with_priority(p)` is `tree.ranked(p)`; a tree that
+  must read only what the replica holds is `tree.locally()` (or
+  `Load::locally()` for a single read). `load_or_hydrate`,
+  `load_blob_or_hydrate`, `hydrate` and `RemoteFallback` stay where they
+  were exported.
+- `PersistentTree::empty()` and `PersistentTree::from_hash(root)` are
+  `PersistentTree::empty_in(catalog)` and `PersistentTree::at(catalog,
+  root)`; `empty_with_manifest`, `TransientTree::new`,
+  `TransientTree::with_manifest`, `TransientTree::empty_with_manifest`,
+  `TransientTree::stitch`, `HitchhikerTree::empty`, `TreeHistory::from_root`,
+  `TreeHistory::empty` and `distribution::capture` take the catalog, and
+  `Accessor::new(env, catalog)` does too. `PersistentTree::catalog()`,
+  `with_root`, `reading()`, `ranked(priority)` and `locally()` are new;
+  `NodeCache::of`, `NodeCache::hold` and `NodeCache::held_by` find and
+  place the cache an env holds.
+- `fetch_spilled`, `fetch_spilled_cached`, `fetch_spilled_reference` and
+  `merge::observe_revisions` take the archive the value lives in; a
+  spilled value is read by `load_spill`.
+- `Branch::history`, `Snapshot::history`, `Branch::log`, `Snapshot::log`,
+  `Select::perform` and `Select::estimate_perform` ask less of the env
+  (the two loads and `Holds`), and the commands that read trees ask
+  `Holds` of it. Every peer and session already holds.
+- `HeldCaches` holds its node cache where trees find it, so the budget,
+  `release` and `clear` govern every tree read through the env, and an
+  env given its own `HeldCaches` before anything opens keeps nodes under
+  that budget.
+- A borrowed environment is an environment: `&T` provides every command
+  `T` provides (`dialog_capability::Provider`) and holds what `T` holds
+  (`dialog_common::Holds`).
+- A resolver premise (`tree/node`, `tree/span`, `tree/key`, `tree/value`)
+  loads the block it names against the wildcard subject's archive
+  (`dialog_query::resolver::anywhere`), and `Scope` asks for the two
+  loads instead of `LoadBlock` and `LoadBlob`. A query over several lines
+  answers from each line's catalog in turn.
+- Any read of a repository one of whose open branches tracks a remote
+  can hydrate a block it lacks, a snapshot's and a transaction's staged
+  view included, and a branch can hydrate a block only a sibling's remote
+  holds. A miss tries every remote the subject's open branches track, in
+  the order they were opened and each in its tracking order, where before
+  only the reading branch's first remote was asked; a miss no reachable
+  remote answers fails naming the first remote that could not be reached,
+  rather than reading as absent. With no remote tracked a read is local,
+  as before. An export that does not download reads only what the replica
+  holds.
+- A push's novelty walk, its subtree forwarding and its spilled-value
+  shipping read only the local archive, by `Get`, and never hydrate.
+
+Why: the tree's read was a command with no subject, so every reader
+needed a wrapper that knew the catalog, another that knew where to
+hydrate from (worked out per read by `Branch::fallback`, which was about
+9% of a worker's CPU), and the node cache was plumbed through them. Read
+as a capability on the env, there is one way to get a node, which goes
+through the cache and the env's hydration, and nothing to wrap.
 
 ### A difference reads a leaf both sides share only at the keys its buffered ops touch
 
@@ -800,6 +915,14 @@ has a tree to canonicalize even when the link itself wrote nothing.
 
 #### Compatibility and migration
 
+- Nothing stored or synced changes for trees reading through `Load`:
+  blocks, nodes, spilled values and their hashes are the same bytes,
+  `Get`'s wire shape is unchanged, nothing is rewritten on upgrade, and an
+  older release reads everything this one writes. `Load` is a local
+  command and never crosses the wire; what changes is which reads may
+  hydrate a block the replica lacks (any read of a repository an open
+  branch of which tracks a remote), and that a hydrated block is written
+  back locally as before. Nothing for an embedder to run.
 - A reset that moves a branch forward only changes nothing stored or
   synced, and rewrites nothing. Heads an earlier release forked by a
   takeover and a commit keep their fork; nothing finds or repairs it.
@@ -1756,6 +1879,12 @@ thread multiplies whatever it holds by the size of the thread pool.
 
 ### Compatibility and migration
 
+- Positions already stored keep their bytes and their order: nothing is
+  rewritten, and both releases read every position the other writes. Only
+  newly derived positions differ. An older replica and this one derive
+  different positions for the same insert, so the same insert made on both
+  no longer converges to one entry; each still lands between the
+  neighbours it named.
 - Nothing stored or synced changes for the node cache moving to the
   store: trees, nodes and their hashes are the same bytes, nothing is
   rewritten on upgrade, and an older release reads everything this one

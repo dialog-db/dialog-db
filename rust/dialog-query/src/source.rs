@@ -21,14 +21,12 @@ pub(crate) mod test {
     use crate::recall::{BodyMemo, Memo};
     use crate::session::RuleRegistry;
     use dialog_artifacts::selector::Constrained;
-    use dialog_artifacts::tree::ArtifactNodeCache;
-    use dialog_artifacts::{
-        ArtifactSelector, ArtifactStream, DialogArtifactsError, LoadBlob, Select,
-    };
+    use dialog_artifacts::{ArtifactSelector, ArtifactStream, DialogArtifactsError, Select};
     use dialog_capability::Provider;
+    use dialog_effects::archive::{self, ArchiveError};
+    use dialog_effects::blob;
     use dialog_peer::Peer as DialogOperator;
-    use dialog_repository::{Branch, NetworkedIndex};
-    use dialog_search_tree::{DialogSearchTreeError, LoadBlock};
+    use dialog_repository::Branch;
     use dialog_storage::provider::storage::VolatileSpace;
 
     type Operator = DialogOperator<VolatileSpace, dialog_peer::Session>;
@@ -128,39 +126,38 @@ pub(crate) mod test {
         }
     }
 
-    // Raw node loads for resolver premises, local archive only.
+    // Raw node loads for resolver premises, which ask for a block anywhere
+    // the query reads: the branch's archive catalog, through the operator.
     #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
     #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-    impl Provider<LoadBlock> for TestEnv<'_> {
+    impl Provider<archive::Load> for TestEnv<'_> {
         async fn execute(
             &self,
-            load: LoadBlock,
-        ) -> Result<Option<dialog_common::Buffer>, DialogSearchTreeError> {
-            let store = NetworkedIndex::new(
-                self.operator,
-                self.branch.archive().index(),
-                None,
-                ArtifactNodeCache::new(),
-            );
-            load.perform(&store).await
+            load: archive::Load,
+        ) -> Result<Option<dialog_common::Buffer>, ArchiveError> {
+            archive::Load {
+                catalog: self.branch.archive().index(),
+                ..load
+            }
+            .perform(self.operator)
+            .await
         }
     }
 
-    // Spilled-value loads for `tree/value`, local archive only.
+    // Spilled-value loads for `tree/value`, from the branch's archive.
     #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
     #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-    impl Provider<LoadBlob> for TestEnv<'_> {
+    impl Provider<blob::Load> for TestEnv<'_> {
         async fn execute(
             &self,
-            load: LoadBlob,
-        ) -> Result<Option<dialog_common::Buffer>, DialogArtifactsError> {
-            let store = NetworkedIndex::new(
-                self.operator,
-                self.branch.archive().index(),
-                None,
-                ArtifactNodeCache::new(),
-            );
-            load.perform(&store).await
+            load: blob::Load,
+        ) -> Result<Option<dialog_common::Buffer>, ArchiveError> {
+            blob::Load {
+                archive: self.branch.archive(),
+                ..load
+            }
+            .perform(self.operator)
+            .await
         }
     }
 }

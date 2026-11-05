@@ -10,7 +10,7 @@ use futures_util::{Stream, TryStreamExt};
 use tokio::sync::Mutex;
 
 use super::store::WorkerMessage;
-use crate::Blocks;
+use crate::DiagnoseSession;
 
 /// Internal state for the artifacts cursor.
 ///
@@ -34,8 +34,8 @@ pub struct ArtifactsCursor {
     state: Arc<Mutex<ArtifactsCursorState>>,
     /// The probabilistic search tree index containing the facts
     tree: Index,
-    /// Where the tree's blocks load from
-    storage: Blocks,
+    /// The session the tree's blocks load through
+    storage: Arc<DiagnoseSession>,
     /// Channel sender for worker messages
     tx: Sender<WorkerMessage>,
 }
@@ -48,7 +48,7 @@ impl ArtifactsCursor {
     /// * `tree` - The probabilistic search tree index containing facts data
     /// * `storage` - Where the tree's blocks load from
     /// * `tx` - Channel sender for worker messages
-    pub fn new(tree: Index, storage: Blocks, tx: Sender<WorkerMessage>) -> Self {
+    pub fn new(tree: Index, storage: Arc<DiagnoseSession>, tx: Sender<WorkerMessage>) -> Self {
         Self {
             state: Default::default(),
             tree,
@@ -83,10 +83,10 @@ impl ArtifactsCursor {
                 return Ok(());
             }
 
-            let tree_storage = storage;
+            let tree_storage = storage.as_ref();
             let mut stream: Pin<Box<dyn Stream<Item = _> + Send>> = match state.last_key.clone() {
-                Some(key) => Box::pin(tree.stream_range(key.., &tree_storage)),
-                None => Box::pin(tree.stream(&tree_storage)),
+                Some(key) => Box::pin(tree.stream_range(key.., tree_storage)),
+                None => Box::pin(tree.stream(tree_storage)),
             };
 
             while let Some(element) = stream.try_next().await? {

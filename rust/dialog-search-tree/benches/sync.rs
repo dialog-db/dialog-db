@@ -37,12 +37,11 @@ use std::sync::{
 
 use async_trait::async_trait;
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use dialog_capability::Provider;
+use dialog_capability::{Capability, Provider};
 use dialog_common::{Blake3Hash, helpers::BenchData};
-use dialog_search_tree::{
-    Buffer, Delta, DialogSearchTreeError, FlushPolicy, HitchhikerTree, LoadBlock, MemoryBlocks,
-    PersistentTree,
-};
+use dialog_effects::archive::{ArchiveError, Get, Load};
+use dialog_search_tree::helpers::Blocks;
+use dialog_search_tree::{Buffer, Delta, FlushPolicy, HitchhikerTree, PersistentTree};
 use futures_util::StreamExt;
 
 const BENCH_SEED: u64 = 42;
@@ -53,11 +52,11 @@ const BASE_SIZE: usize = 10_000;
 /// The per-node novelty capacity for the hitchhiker tree.
 const OP_BUF_SIZE: usize = 1024;
 
-/// [`MemoryBlocks`] that count loads and the bytes they return. Each `get` models one block a remote would
+/// [`Blocks`] that count loads and the bytes they return. Each `get` models one block a remote would
 /// have to serve, so the count is the sync round-trip proxy.
 #[derive(Clone)]
 struct CountingBackend {
-    inner: MemoryBlocks,
+    inner: Blocks,
     gets: Arc<AtomicU64>,
     get_bytes: Arc<AtomicU64>,
 }
@@ -65,7 +64,7 @@ struct CountingBackend {
 impl CountingBackend {
     fn new() -> Self {
         Self {
-            inner: MemoryBlocks::new(),
+            inner: Blocks::new(),
             gets: Arc::new(AtomicU64::new(0)),
             get_bytes: Arc::new(AtomicU64::new(0)),
         }
@@ -90,23 +89,44 @@ impl CountingBackend {
     }
 }
 
-/// Keeps nothing, so every node read is a counted block read.
-impl<Key, Value> dialog_search_tree::Nodes<Key, Value> for CountingBackend {}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<LoadBlock> for CountingBackend {
-    async fn execute(
-        &self,
-        LoadBlock { hash }: LoadBlock,
-    ) -> Result<Option<Buffer>, DialogSearchTreeError> {
-        let result = self.inner.get(&hash);
+impl CountingBackend {
+    fn count(&self, hash: &Blake3Hash) -> Option<Buffer> {
+        let result = self.inner.get(hash);
         self.gets.fetch_add(1, Ordering::Relaxed);
         if let Some(bytes) = &result {
             self.get_bytes
                 .fetch_add(bytes.as_ref().len() as u64, Ordering::Relaxed);
         }
-        Ok(result)
+        result
+    }
+}
+
+/// Holds nothing, so every node read is a counted block read.
+impl dialog_common::Holds for CountingBackend {
+    fn held(&self, _key: &str) -> Option<dialog_common::Held> {
+        None
+    }
+
+    fn hold(&self, _key: String, _handle: dialog_common::Held) {}
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl Provider<Load> for CountingBackend {
+    async fn execute(&self, load: Load) -> Result<Option<Buffer>, ArchiveError> {
+        Ok(self.count(&load.digest))
+    }
+}
+
+/// A local-only read counts as a read of the block too.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl Provider<Get> for CountingBackend {
+    async fn execute(&self, get: Capability<Get>) -> Result<Option<Vec<u8>>, ArchiveError> {
+        use dialog_effects::archive::prelude::GetExt as _;
+        Ok(self
+            .count(get.digest())
+            .map(|block| block.as_ref().to_vec()))
     }
 }
 
@@ -132,7 +152,7 @@ async fn build_base(base_size: usize) -> (Tree, Storage) {
     let keys = data.sequential_buffers::<16>(base_size);
 
     let mut storage = CountingBackend::new();
-    let mut tree = Tree::empty();
+    let mut tree = Tree::empty_in(dialog_search_tree::helpers::test_catalog());
     let mut delta = Delta::zero();
     for key in &keys {
         tree = tree
@@ -203,7 +223,10 @@ async fn advance_hitchhiker(base: &Tree, keys: &[[u8; 16]], storage: &mut Storag
     let mut delta = Delta::zero();
     let root = hh.persist(&mut delta, storage).unwrap();
     let churn = flush_counting(&mut delta, storage).await;
-    (Tree::from_hash(root), churn)
+    (
+        Tree::at(dialog_search_tree::helpers::test_catalog(), root),
+        churn,
+    )
 }
 
 /// Runs the full differential between `from` and `to` (consuming the change

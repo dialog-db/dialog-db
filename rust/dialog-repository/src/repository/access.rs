@@ -37,6 +37,8 @@
 //!   any not-yet-upgraded code path. A rerun after a partial failure
 //!   re-skips by content address and drains the remainder.
 
+use dialog_effects::archive::Load as ArchiveLoad;
+use dialog_effects::blob::Load as BlobLoad;
 use std::collections::BTreeMap;
 
 use crate::RemoteSite;
@@ -153,8 +155,19 @@ macro_rules! migrate_authority {
     )+};
 }
 
+// Migration is a local operation: a load is answered as the read, by
+// the storage, and hydrates from nowhere.
 migrate_storage!(
-    Get, Put, Import, Resolve, Publish, BlobRead, BlobWrite, BlobImport
+    Get,
+    Put,
+    Import,
+    Resolve,
+    Publish,
+    BlobRead,
+    BlobWrite,
+    BlobImport,
+    ArchiveLoad,
+    BlobLoad,
 );
 migrate_authority!(Identify, Attest);
 
@@ -185,29 +198,6 @@ where
         _input: <Fork<RemoteSite, BlobRead> as Command>::Input,
     ) -> <Fork<RemoteSite, BlobRead> as Command>::Output {
         Err(BlobError::NotFound("migration reads no remote".to_string()))
-    }
-}
-
-// Hydration under migration is the plain, unshared read: the local
-// check runs, and the remote leg degrades to the fork stub above
-// (migration is a local operation).
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<S> Provider<crate::Hydrate> for MigrateEnv<S>
-where
-    S: Clone + ConditionalSend + ConditionalSync + 'static,
-    Self: Provider<Get>
-        + Provider<Put>
-        + Provider<BlobRead>
-        + Provider<BlobImport>
-        + ConditionalSync
-        + 'static,
-{
-    async fn execute(
-        &self,
-        input: <crate::Hydrate as Command>::Input,
-    ) -> <crate::Hydrate as Command>::Output {
-        crate::hydrate(self, input).await
     }
 }
 

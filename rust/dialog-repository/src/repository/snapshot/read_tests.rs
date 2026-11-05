@@ -19,8 +19,10 @@ use crate::repository::source::SourceRef;
 use crate::schema::DidExt as _;
 use dialog_capability::{Fork, Provider};
 use dialog_common::{ConditionalSync, Holds};
+use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::Identify;
+use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::memory::Resolve;
 
 use crate::{Blob, CommitError, QueryLayer, RemoteSite, Select, TreeReference, schema};
@@ -59,10 +61,12 @@ where
         + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
-        + Provider<crate::Hydrate>
+        + Provider<ArchiveLoad>
+        + Provider<BlobLoad>
         + Provider<dialog_artifacts::Preload>
         + Provider<dialog_artifacts::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
+        + dialog_common::Holds
         + ConditionalSync
         + 'static,
 {
@@ -99,7 +103,8 @@ where
         + Provider<Put>
         + Provider<Resolve>
         + Provider<Identify>
-        + Provider<crate::Hydrate>
+        + Provider<ArchiveLoad>
+        + Provider<BlobLoad>
         + Provider<dialog_artifacts::Preload>
         + Provider<dialog_artifacts::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
@@ -125,7 +130,8 @@ where
         + Provider<Put>
         + Provider<Resolve>
         + Provider<Identify>
-        + Provider<crate::Hydrate>
+        + Provider<ArchiveLoad>
+        + Provider<BlobLoad>
         + Provider<dialog_artifacts::Preload>
         + Provider<dialog_artifacts::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>

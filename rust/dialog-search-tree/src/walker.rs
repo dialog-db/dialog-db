@@ -1,4 +1,4 @@
-use crate::Nodes;
+use crate::reads::*;
 use std::{
     collections::HashSet,
     future::Future,
@@ -392,7 +392,7 @@ where
     ) -> impl Stream<Item = Result<Entry<Key, Value>, DialogSearchTreeError>> + ConditionalSend
     where
         R: RangeBounds<Key> + ConditionalSend,
-        Env: Nodes<Key, Value>,
+        Env: Provider<Load> + Holds + ConditionalSync,
     {
         // A thin adapter, not another generator: wrapping the walk in a
         // second `try_stream!` layer measurably bloats every future that
@@ -415,7 +415,7 @@ where
     ) -> impl Stream<Item = Result<Entry<KeyHandle, Value>, DialogSearchTreeError>> + ConditionalSend
     where
         R: RangeBounds<Key> + ConditionalSend,
-        Env: Nodes<Key, Value>,
+        Env: Provider<Load> + Holds + ConditionalSync,
     {
         self.stream_scan::<R, Env, KeyHandle>(range, accessor)
     }
@@ -430,7 +430,7 @@ where
     ) -> impl Stream<Item = Result<Entry<Out, Value>, DialogSearchTreeError>> + ConditionalSend
     where
         R: RangeBounds<Key> + ConditionalSend,
-        Env: Nodes<Key, Value>,
+        Env: Provider<Load> + Holds + ConditionalSync,
         Out: ScanKey + 'static,
     {
         try_stream! {
@@ -445,7 +445,7 @@ where
                 Bound::Unbounded => <Key as self::Key>::min(),
             };
             let Some(search_result) = self
-                .search(&start_key, accessor, SearchOptions::default())
+                .search(&start_key, accessor.clone(), SearchOptions::default())
                 .await?
             else {
                 return;
@@ -708,7 +708,7 @@ where
         options: SearchOptions,
     ) -> Result<Option<SearchResult<Key, Value>>, DialogSearchTreeError>
     where
-        Env: Nodes<Key, Value>,
+        Env: Provider<Load> + Holds + ConditionalSync,
     {
         let Some(root) = &self.root else {
             return Ok(None);
@@ -844,7 +844,7 @@ where
             Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
         + ConditionalSync,
-    Env: Nodes<Key, Value>,
+    Env: Provider<Load> + Holds + ConditionalSync,
 {
     // Only prefetch when the caller's key matches the leaf's last entry;
     // boundary-delete overflow can't happen otherwise.
@@ -1052,7 +1052,7 @@ impl<Key, Value> SearchResult<Key, Value> {
 mod walker_novelty_tests {
     #![allow(unexpected_cfgs)]
 
-    use crate::MemoryBlocks;
+    use crate::helpers::Blocks;
     use anyhow::Result;
     use dialog_common::Blake3Hash;
     use futures_util::StreamExt as _;
@@ -1062,7 +1062,7 @@ mod walker_novelty_tests {
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-    type Store = MemoryBlocks;
+    type Store = Blocks;
     type Tree = PersistentTree<[u8; 4], Vec<u8>>;
 
     async fn settle(delta: &mut Delta<Blake3Hash, Buffer>, storage: &mut Store) -> Result<()> {
@@ -1078,9 +1078,9 @@ mod walker_novelty_tests {
     /// commit path produces.
     #[dialog_common::test]
     async fn it_accumulates_across_successive_buffered_writes() -> Result<()> {
-        let mut storage: Store = MemoryBlocks::new();
+        let mut storage: Store = Blocks::new();
 
-        let mut tree = Tree::empty();
+        let mut tree = Tree::empty_in(crate::helpers::test_catalog());
         let mut expected: Vec<([u8; 4], Vec<u8>)> = Vec::new();
 
         // 50 successive "commits", each buffering one write over the last
@@ -1096,7 +1096,7 @@ mod walker_novelty_tests {
             let mut delta = Delta::zero();
             let root = buffered.persist(&mut delta, &storage)?;
             settle(&mut delta, &mut storage).await?;
-            tree = Tree::from_hash(root);
+            tree = Tree::at(crate::helpers::test_catalog(), root);
 
             expected.retain(|(k, _)| *k != key);
             expected.push((key, value));
@@ -1146,8 +1146,8 @@ mod walker_novelty_tests {
                 (rng >> 32) as u32
             };
 
-            let mut storage: Store = MemoryBlocks::new();
-            let mut tree = Tree::empty();
+            let mut storage: Store = Blocks::new();
+            let mut tree = Tree::empty_in(crate::helpers::test_catalog());
             let mut expected: std::collections::BTreeMap<[u8; 4], Vec<u8>> = Default::default();
 
             for batch in 0..20u32 {
@@ -1165,7 +1165,7 @@ mod walker_novelty_tests {
                 let mut delta = Delta::zero();
                 let root = buffered.persist(&mut delta, &storage)?;
                 settle(&mut delta, &mut storage).await?;
-                tree = Tree::from_hash(root);
+                tree = Tree::at(crate::helpers::test_catalog(), root);
 
                 let mut seen = Vec::new();
                 {
@@ -1203,11 +1203,11 @@ mod walker_novelty_tests {
                 (rng >> 32) as u32
             };
 
-            let mut storage: Store = MemoryBlocks::new();
+            let mut storage: Store = Blocks::new();
 
             // Random base, random keys (big-endian so byte order is key order).
             let base_keys: Vec<u32> = (0..300).map(|_| next() % 4000).collect();
-            let mut base = Tree::empty();
+            let mut base = Tree::empty_in(crate::helpers::test_catalog());
             let mut delta = Delta::zero();
             for key in &base_keys {
                 base = base
@@ -1242,7 +1242,7 @@ mod walker_novelty_tests {
             let mut delta = Delta::zero();
             let buffered_root = buffered.persist(&mut delta, &storage)?;
             settle(&mut delta, &mut storage).await?;
-            let buffered_tree = Tree::from_hash(buffered_root);
+            let buffered_tree = Tree::at(crate::helpers::test_catalog(), buffered_root);
 
             let mut delta = Delta::zero();
             let canonical_tree = canonical.canonicalize(&storage, &mut delta).await?;
@@ -1320,7 +1320,7 @@ mod prefetch_tests {
     /// node cache is cold, so that reads reach the backend.
     async fn built_tree(storage: &mut Storage) -> Result<Tree> {
         let mut delta = Delta::zero();
-        let mut edit = Tree::empty().edit();
+        let mut edit = Tree::empty_in(crate::helpers::test_catalog()).edit();
 
         for entry in 0..ENTRIES {
             edit = edit
@@ -1333,7 +1333,10 @@ mod prefetch_tests {
             storage.store(buffer);
         }
 
-        Ok(Tree::from_hash(tree.root().clone()))
+        Ok(Tree::at(
+            crate::helpers::test_catalog(),
+            tree.root().clone(),
+        ))
     }
 
     async fn load(
@@ -1363,8 +1366,9 @@ mod prefetch_tests {
         let tree = built_tree(&mut storage).await?;
         // The read-ahead and the reader share one node cache, as a tree's
         // reads through one store do.
-        let store = crate::Cached::new(crate::NodeCache::new(), &storage);
-        let accessor = crate::Accessor::new(&store);
+        let store = crate::helpers::Holding::new(&storage);
+        let accessor =
+            crate::Accessor::<[u8; 4], Vec<u8>, _>::new(&store, &crate::helpers::test_catalog());
 
         // The root's second child, and a key from its leftmost leaf.
         let root = load(&storage, tree.root()).await?;
@@ -1405,7 +1409,7 @@ mod prefetch_tests {
         backend.reset();
 
         // A cold node cache the read-aheads land in.
-        let store = crate::Cached::new(crate::NodeCache::new(), &storage);
+        let store = crate::helpers::Holding::new(&storage);
         let entries: Vec<_> = tree.stream(&store).try_collect().await?;
 
         assert_eq!(entries.len() as u32, ENTRIES);
@@ -1451,7 +1455,7 @@ mod prefetch_tests {
 
         // A fresh handle, so the scan's node cache is cold and every node
         // it touches reaches the backend.
-        let scan_tree = Tree::from_hash(tree.root().clone());
+        let scan_tree = Tree::at(crate::helpers::test_catalog(), tree.root().clone());
         backend.reset();
         let entries: Vec<_> = scan_tree
             .stream_range(100u32.to_be_bytes()..=103u32.to_be_bytes(), &storage)
@@ -1541,7 +1545,7 @@ mod prefetch_tests {
         let boundary = first_key_under(&storage, index.hash_at(1)?.clone()).await?;
 
         // One store, so the two scans share its node cache.
-        let store = crate::Cached::new(crate::NodeCache::new(), &storage);
+        let store = crate::helpers::Holding::new(&storage);
         let mut parked = std::pin::pin!(tree.stream(&store));
         loop {
             let entry = parked

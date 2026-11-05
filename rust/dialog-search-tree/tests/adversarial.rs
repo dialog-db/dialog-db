@@ -21,11 +21,10 @@
 
 use anyhow::Result;
 use dialog_common::Blake3Hash;
-use dialog_search_tree::{
-    Buffer, Delta, HitchhikerTree, Manifest, MemoryBlocks, PersistentTree, TransientTree,
-};
+use dialog_search_tree::helpers::Blocks;
+use dialog_search_tree::{Buffer, Delta, HitchhikerTree, Manifest, PersistentTree, TransientTree};
 
-type Store = MemoryBlocks;
+type Store = Blocks;
 type TreeKey = [u8; 40];
 type Tree = PersistentTree<TreeKey, Vec<u8>>;
 
@@ -171,13 +170,16 @@ async fn checkpoint_root(tree: &Tree, storage: &Store, label: &str) -> Result<Bl
 /// Canonical sequential edits under `manifest`: the first write stamps it,
 /// every later edit recovers it from the root.
 async fn run_canonical(program: &Program, manifest: Manifest) -> Result<Vec<Blake3Hash>> {
-    let mut storage: Store = MemoryBlocks::new();
-    let mut tree = Tree::empty();
+    let mut storage: Store = Blocks::new();
+    let mut tree = Tree::empty_in(dialog_search_tree::helpers::test_catalog());
     let mut roots = Vec::new();
     for (at, op) in program.ops.iter().enumerate() {
         let mut delta = Delta::zero();
         let edit = if tree.stored_root().is_none() {
-            TransientTree::empty_with_manifest(manifest.clone())
+            TransientTree::empty_with_manifest(
+                dialog_search_tree::helpers::test_catalog(),
+                manifest.clone(),
+            )
         } else {
             tree.edit()
         };
@@ -214,14 +216,17 @@ async fn run_buffered(
         session += 1;
         chosen
     };
-    let mut storage: Store = MemoryBlocks::new();
+    let mut storage: Store = Blocks::new();
 
     // Stamp the manifest with the first op through a canonical edit, so the
     // buffered session opens over a root that carries it.
     let mut ops = program.ops.iter();
     let first = *ops.next().expect("programs are non-empty");
     let mut delta = Delta::zero();
-    let seed_edit = TransientTree::empty_with_manifest(manifest.clone());
+    let seed_edit = TransientTree::empty_with_manifest(
+        dialog_search_tree::helpers::test_catalog(),
+        manifest.clone(),
+    );
     let mut tree = match first {
         Op::Insert(key, len) => {
             seed_edit
@@ -268,7 +273,7 @@ async fn run_buffered(
             let mut delta = Delta::zero();
             let root = buffered.persist(&mut delta, &storage)?;
             settle(&mut delta, &mut storage).await?;
-            tree = Tree::from_hash(root);
+            tree = Tree::at(dialog_search_tree::helpers::test_catalog(), root);
             buffered = open.clone()(&tree, next_buf());
         }
     }
@@ -410,12 +415,15 @@ async fn minimize_caught_divergence() -> Result<()> {
         checkpoints: vec![minimal],
     };
     // Re-run both arms, retaining the trees this time.
-    let mut storage: Store = MemoryBlocks::new();
-    let mut tree = Tree::empty();
+    let mut storage: Store = Blocks::new();
+    let mut tree = Tree::empty_in(dialog_search_tree::helpers::test_catalog());
     for op in &program.ops {
         let mut delta = Delta::zero();
         let edit = if tree.stored_root().is_none() {
-            TransientTree::empty_with_manifest(manifest.clone())
+            TransientTree::empty_with_manifest(
+                dialog_search_tree::helpers::test_catalog(),
+                manifest.clone(),
+            )
         } else {
             tree.edit()
         };
@@ -434,11 +442,14 @@ async fn minimize_caught_divergence() -> Result<()> {
     // Mixed arm, retaining the final canonicalized tree: reuse run_buffered
     // by reading back its root through a fresh replay with the same store
     // is intrusive; instead re-run its logic inline at this small size.
-    let mut storage2: Store = MemoryBlocks::new();
+    let mut storage2: Store = Blocks::new();
     let mut ops2 = program.ops.iter();
     let first = *ops2.next().expect("non-empty");
     let mut delta = Delta::zero();
-    let seed_edit = TransientTree::empty_with_manifest(manifest.clone());
+    let seed_edit = TransientTree::empty_with_manifest(
+        dialog_search_tree::helpers::test_catalog(),
+        manifest.clone(),
+    );
     let mut tree2 = match first {
         Op::Insert(key, len) => {
             seed_edit
@@ -479,7 +490,7 @@ async fn minimize_caught_divergence() -> Result<()> {
             let mut delta = Delta::zero();
             let root = buffered.persist(&mut delta, &storage)?;
             settle(&mut delta, &mut storage2).await?;
-            tree2 = Tree::from_hash(root);
+            tree2 = Tree::at(dialog_search_tree::helpers::test_catalog(), root);
             buffered = open.clone()(&tree2, bufs[session % bufs.len()]);
             session += 1;
         }

@@ -17,7 +17,7 @@
 //! [`BlobRecord`]'s conversions so callers deal in `{version, size}`, not raw
 //! `Datum` fields, and a leading version byte lets the record grow.
 
-use crate::ArchiveReader;
+use crate::reads::*;
 use async_stream::try_stream;
 use async_trait::async_trait;
 use dialog_common::ConditionalSend;
@@ -158,7 +158,14 @@ pub fn blob_changes<'s, S>(
     store: S,
 ) -> impl Stream<Item = Result<BlobChange, DialogArtifactsError>> + 's + ConditionalSend
 where
-    S: ArchiveReader + Clone + 's,
+    S: Provider<archive::Load>
+        + Provider<archive::Get>
+        + Provider<blob::Load>
+        + Holds
+        + ConditionalSend
+        + ConditionalSync
+        + Clone
+        + 's,
 {
     let storage = store;
     try_stream! {
@@ -191,7 +198,12 @@ pub trait BlobIndexExt {
         hash: &Blake3Hash,
     ) -> Result<Option<BlobRecord>, DialogArtifactsError>
     where
-        S: ArchiveReader + Clone;
+        S: Provider<archive::Load>
+            + Provider<blob::Load>
+            + Holds
+            + ConditionalSend
+            + ConditionalSync
+            + Clone;
 
     /// The size of the content this tree vouches for under `hash`, by an
     /// asset's `dialog.asset/size` fact or, in a tree written before the
@@ -206,7 +218,12 @@ pub trait BlobIndexExt {
         hash: &Blake3Hash,
     ) -> Result<Option<u64>, DialogArtifactsError>
     where
-        S: ArchiveReader + Clone;
+        S: Provider<archive::Load>
+            + Provider<blob::Load>
+            + Holds
+            + ConditionalSend
+            + ConditionalSync
+            + Clone;
 
     /// The size an asset's `dialog.asset/size` fact records for `hash`, or
     /// `None` when this tree records no such asset. Unlike
@@ -218,12 +235,22 @@ pub trait BlobIndexExt {
         hash: &Blake3Hash,
     ) -> Result<Option<u64>, DialogArtifactsError>
     where
-        S: ArchiveReader + Clone;
+        S: Provider<archive::Load>
+            + Provider<blob::Load>
+            + Holds
+            + ConditionalSend
+            + ConditionalSync
+            + Clone;
 
     /// Whether the index references a blob.
     async fn has_blob<S>(&self, store: &S, hash: &Blake3Hash) -> Result<bool, DialogArtifactsError>
     where
-        S: ArchiveReader + Clone,
+        S: Provider<archive::Load>
+            + Provider<blob::Load>
+            + Holds
+            + ConditionalSend
+            + ConditionalSync
+            + Clone,
     {
         Ok(self.get_blob(store, hash).await?.is_some())
     }
@@ -238,7 +265,13 @@ pub trait BlobIndexExt {
     ) -> impl Stream<Item = Result<(Blake3Hash, BlobRecord), DialogArtifactsError>> + 's + ConditionalSend
     where
         Self: Sized,
-        S: ArchiveReader + Clone + 's;
+        S: Provider<archive::Load>
+            + Provider<blob::Load>
+            + Holds
+            + ConditionalSend
+            + ConditionalSync
+            + Clone
+            + 's;
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -250,7 +283,12 @@ impl BlobIndexExt for ArtifactTree {
         hash: &Blake3Hash,
     ) -> Result<Option<BlobRecord>, DialogArtifactsError>
     where
-        S: ArchiveReader + Clone,
+        S: Provider<archive::Load>
+            + Provider<blob::Load>
+            + Holds
+            + ConditionalSend
+            + ConditionalSync
+            + Clone,
     {
         let storage = store.clone();
         let key = BlobKey::new(hash).into_key();
@@ -266,7 +304,12 @@ impl BlobIndexExt for ArtifactTree {
         hash: &Blake3Hash,
     ) -> Result<Option<u64>, DialogArtifactsError>
     where
-        S: ArchiveReader + Clone,
+        S: Provider<archive::Load>
+            + Provider<blob::Load>
+            + Holds
+            + ConditionalSend
+            + ConditionalSync
+            + Clone,
     {
         if let Some(size) = self.asset_size(store, hash).await? {
             return Ok(Some(size));
@@ -280,7 +323,12 @@ impl BlobIndexExt for ArtifactTree {
         hash: &Blake3Hash,
     ) -> Result<Option<u64>, DialogArtifactsError>
     where
-        S: ArchiveReader + Clone,
+        S: Provider<archive::Load>
+            + Provider<blob::Load>
+            + Holds
+            + ConditionalSend
+            + ConditionalSync
+            + Clone,
     {
         let entity = Entity::from_blob(hash)?;
         let attribute: Relation = ASSET_SIZE.parse()?;
@@ -305,7 +353,13 @@ impl BlobIndexExt for ArtifactTree {
     ) -> impl Stream<Item = Result<(Blake3Hash, BlobRecord), DialogArtifactsError>> + 's + ConditionalSend
     where
         Self: Sized,
-        S: ArchiveReader + Clone + 's,
+        S: Provider<archive::Load>
+            + Provider<blob::Load>
+            + Holds
+            + ConditionalSend
+            + ConditionalSync
+            + Clone
+            + 's,
     {
         let tree: ArtifactTree = self;
         let storage = store;
@@ -326,12 +380,13 @@ impl BlobIndexExt for ArtifactTree {
 
 #[cfg(test)]
 mod tests {
+    use dialog_search_tree::helpers::test_catalog;
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
     use crate::ArchiveDelta;
-    use dialog_search_tree::MemoryBlocks;
+    use dialog_search_tree::helpers::Blocks;
 
     use futures_util::TryStreamExt;
 
@@ -343,7 +398,7 @@ mod tests {
     /// retired holds one.
     async fn put_legacy(
         tree: &mut ArtifactTree,
-        store: &MemoryBlocks,
+        store: &Blocks,
         hash: &Blake3Hash,
         record: BlobRecord,
     ) -> Result<(), DialogArtifactsError> {
@@ -355,7 +410,7 @@ mod tests {
     /// commit does.
     async fn retract(
         tree: &mut ArtifactTree,
-        store: &MemoryBlocks,
+        store: &Blocks,
         hash: &Blake3Hash,
     ) -> Result<(), DialogArtifactsError> {
         let (key, state) = BlobRecord::retract_entry(hash);
@@ -364,7 +419,7 @@ mod tests {
 
     async fn write(
         tree: &mut ArtifactTree,
-        store: &MemoryBlocks,
+        store: &Blocks,
         key: crate::Key,
         state: State<Datum>,
     ) -> Result<(), DialogArtifactsError> {
@@ -377,8 +432,8 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_round_trips_a_blob_record() -> Result<(), DialogArtifactsError> {
-        let store = MemoryBlocks::new();
-        let mut tree = ArtifactTree::empty();
+        let store = Blocks::new();
+        let mut tree = ArtifactTree::empty_in(test_catalog());
 
         put_legacy(&mut tree, &store, &hash(1), BlobRecord::new(4096)).await?;
 
@@ -394,8 +449,8 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_lists_blobs_in_hash_order() -> Result<(), DialogArtifactsError> {
-        let store = MemoryBlocks::new();
-        let mut tree = ArtifactTree::empty();
+        let store = Blocks::new();
+        let mut tree = ArtifactTree::empty_in(test_catalog());
 
         for seed in [3u8, 1, 2] {
             put_legacy(&mut tree, &store, &hash(seed), BlobRecord::new(seed as u64)).await?;
@@ -415,8 +470,8 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_retracts_a_blob_reference() -> Result<(), DialogArtifactsError> {
-        let store = MemoryBlocks::new();
-        let mut tree = ArtifactTree::empty();
+        let store = Blocks::new();
+        let mut tree = ArtifactTree::empty_in(test_catalog());
 
         for seed in [1u8, 2] {
             put_legacy(&mut tree, &store, &hash(seed), BlobRecord::new(seed as u64)).await?;
@@ -442,8 +497,8 @@ mod tests {
     /// entry is retracted. No asset fact names it.
     #[dialog_common::test]
     async fn it_sizes_content_only_a_legacy_entry_records() -> Result<(), DialogArtifactsError> {
-        let store = MemoryBlocks::new();
-        let mut tree = ArtifactTree::empty();
+        let store = Blocks::new();
+        let mut tree = ArtifactTree::empty_in(test_catalog());
 
         put_legacy(&mut tree, &store, &hash(1), BlobRecord::new(10)).await?;
         assert_eq!(tree.content_size(&store, &hash(1)).await?, Some(10));
@@ -457,9 +512,9 @@ mod tests {
     #[dialog_common::test]
     async fn it_surfaces_a_retraction_as_removed_in_the_differential()
     -> Result<(), DialogArtifactsError> {
-        let store = MemoryBlocks::new();
+        let store = Blocks::new();
 
-        let mut checkpoint = ArtifactTree::empty();
+        let mut checkpoint = ArtifactTree::empty_in(test_catalog());
         put_legacy(&mut checkpoint, &store, &hash(1), BlobRecord::new(10)).await?;
 
         let mut current = checkpoint.clone();
@@ -479,9 +534,9 @@ mod tests {
     #[dialog_common::test]
     async fn it_ships_nothing_for_a_retraction_of_an_unreferenced_blob()
     -> Result<(), DialogArtifactsError> {
-        let store = MemoryBlocks::new();
+        let store = Blocks::new();
 
-        let checkpoint = ArtifactTree::empty();
+        let checkpoint = ArtifactTree::empty_in(test_catalog());
         let mut current = checkpoint.clone();
         retract(&mut current, &store, &hash(9)).await?;
 
@@ -496,10 +551,10 @@ mod tests {
     #[dialog_common::test]
     async fn it_detects_newly_referenced_blobs_from_the_differential()
     -> Result<(), DialogArtifactsError> {
-        let store = MemoryBlocks::new();
+        let store = Blocks::new();
 
         // Checkpoint references blob A.
-        let mut checkpoint = ArtifactTree::empty();
+        let mut checkpoint = ArtifactTree::empty_in(test_catalog());
         put_legacy(&mut checkpoint, &store, &hash(1), BlobRecord::new(10)).await?;
 
         // Current adds blob B and keeps A.
