@@ -94,6 +94,32 @@ Why: a bound named `Sync` that also demands `Send` hides what code
 actually needs, and makes a type that is `Sync` but not `Send` impossible
 to accept through it.
 
+### A pull that loses its publish forgets the head it minted
+
+[#704](https://github.com/dialog-db/dialog-db/pull/704)
+
+A pull remembered its merged head's causal context at prepare time,
+before publishing it. A merge prepared on a stale view of the head mints
+the version of the commit already landed on it (a version is the origin
+and its edition, so two revisions minted on one parent by one origin
+share it), so when its publish lost, its context stayed in the memo under
+that commit's version: the commit read as having seen the upstream, and
+the next merge screened the upstream's claims out as removed. The context
+now enters the memo only once the head is published, as a commit's does.
+
+What this changes for you:
+
+- A branch whose pull loses the race to a commit through another handle
+  no longer drops the upstream's claims on its next merge. Nothing stored
+  changes: the memo is in memory, and a pull that lands is remembered as
+  before.
+- `PreparedPull::commit` still fails such a race with
+  `PullError::Publish(PublishError::VersionMismatch)`; the caller refreshes
+  and pulls again, as before.
+
+Why: the memo speaks for heads that landed, and a context remembered
+before the publish speaks for one that may never land.
+
 ### Distinct members inserted between the same neighbours get distinct positions
 
 A position's fractional tail comes from a bias derived from the member's

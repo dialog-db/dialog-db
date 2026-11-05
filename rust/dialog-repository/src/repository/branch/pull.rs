@@ -1722,6 +1722,7 @@ mod tests {
 
     use super::PreparedPull;
     use crate::helpers::test_repo;
+    use crate::{PublishError, PullError};
     use anyhow::Result;
     use dialog_peer::helpers::test_session_with_peer;
 
@@ -2083,9 +2084,13 @@ mod tests {
             minted, landed,
             "the merge mints the landed commit's version"
         );
+        let lost = prepared.commit(&operator).await;
         assert!(
-            prepared.commit(&operator).await.is_err(),
-            "the merge loses its publish"
+            matches!(
+                lost,
+                Err(PullError::Publish(PublishError::VersionMismatch { .. }))
+            ),
+            "the merge loses its publish to the landed commit: {lost:?}"
         );
 
         super::super::context::region_agrees(&other, &operator, "the landed commit").await?;
