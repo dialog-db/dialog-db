@@ -326,6 +326,15 @@ const MOVED_HEAD_RETRIES: usize = 4;
 /// A commit that loses the head to another writer is applied again on
 /// the head that won. The changes are statements, not edits derived from
 /// what the head held, so they mean the same on either head.
+///
+/// A registry an earlier release laid out (see
+/// [`Branch::migrate_storage`]) is moved to this release's layout and
+/// the changes applied on the rewrite. Nothing outside this crate writes
+/// a registry, so nothing else would ever move it, and a repository's
+/// own upgrade writes here when it opens: without this, an open of a
+/// repository an earlier release left fails on every attempt. A registry
+/// holds facts only, so the storage rewrite is the whole move: it has no
+/// rules for [`Branch::upgrade_rules`] to re-install.
 pub(crate) async fn apply<Env: RegistryEnv>(
     registry: &Branch,
     changes: Changes,
@@ -355,6 +364,19 @@ pub(crate) async fn apply<Env: RegistryEnv>(
                 if attempt < MOVED_HEAD_RETRIES =>
             {
                 attempt += 1;
+                registry.refresh(env).await?;
+                instructions = changes.clone().into_instructions();
+            }
+            // Refused before anything was written. Another writer may
+            // migrate the same head meanwhile; the rewrite is
+            // deterministic, so losing that race leaves the same tree,
+            // and the head that won is the one applied on.
+            Err(CommitError::NeedsMigration(_)) if attempt < MOVED_HEAD_RETRIES => {
+                attempt += 1;
+                match Box::pin(registry.migrate_storage().perform(env)).await {
+                    Ok(_) | Err(CommitError::Publish(PublishError::VersionMismatch { .. })) => {}
+                    Err(error) => return Err(error),
+                }
                 registry.refresh(env).await?;
                 instructions = changes.clone().into_instructions();
             }
