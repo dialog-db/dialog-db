@@ -1,9 +1,13 @@
-//! The operator's own [`Hydrate`] provider: on-demand replication as an
-//! effect of the environment.
+//! The operator's own [`Load`] and [`Hydrate`] providers: on-demand
+//! replication as an effect of the environment.
 //!
-//! The caller ([`NetworkedIndex`](dialog_repository::NetworkedIndex))
-//! resolves the routing per call and performs [`Hydrate`], borrowing the
-//! operator for exactly the duration of the perform. The sharing lives
+//! A reader performs [`Load`] (or [`BlobLoad`] for a spilled value) on the
+//! peer. The peer answers from its storage, and on a miss routes the read
+//! to the remotes the subject's open branches registered (see
+//! [`Routes`](dialog_repository::Routes)) and performs [`Hydrate`] on
+//! itself, borrowing itself for exactly the duration of the perform. With
+//! no route registered for the subject, a miss is a miss. [`Get`] is the
+//! storage's alone and never hydrates. The sharing lives
 //! here: concurrent hydrations of one digest anywhere in the process —
 //! queries, subscriptions, transaction queries, pull — join one shared
 //! fetch-and-write-back through the operator's digest-keyed flight.
@@ -23,13 +27,18 @@
 //! by priority (demand before speculative warming), then arrival. The
 //! readers keep no widths of their own.
 
+use dialog_effects::blob::Load as BlobLoad;
 use std::sync::Arc;
 
 use dialog_capability::{Fork, Provider};
+use dialog_common::{Buffer, Holds};
 use dialog_common::{ConditionalSend, ConditionalSync};
+use dialog_effects::archive::Load;
 use dialog_effects::archive::{ArchiveError, Get, Put};
 use dialog_effects::blob::{Import as BlobImport, Read as BlobRead};
-use dialog_repository::{Hydrate, HydrationRequest, RemoteSite, hydrate};
+use dialog_repository::{
+    Hydrate, HydrationRequest, RemoteSite, hydrate, load_blob_or_hydrate, load_or_hydrate,
+};
 
 use super::{Mode, Peer};
 
@@ -72,5 +81,29 @@ where
             })
             .await;
         outcome.map_err(ArchiveError::Storage)
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<S, M: Mode> Provider<Load> for Peer<S, M>
+where
+    S: Clone + ConditionalSend + ConditionalSync + 'static,
+    Self: Provider<Get> + Provider<Hydrate> + Holds + ConditionalSync,
+{
+    async fn execute(&self, load: Load) -> Result<Option<Buffer>, ArchiveError> {
+        load_or_hydrate(self, load).await
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<S, M: Mode> Provider<BlobLoad> for Peer<S, M>
+where
+    S: Clone + ConditionalSend + ConditionalSync + 'static,
+    Self: Provider<Get> + Provider<BlobRead> + Provider<Hydrate> + Holds + ConditionalSync,
+{
+    async fn execute(&self, load: BlobLoad) -> Result<Option<Buffer>, ArchiveError> {
+        load_blob_or_hydrate(self, load).await
     }
 }

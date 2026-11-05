@@ -24,7 +24,9 @@ use dialog_artifacts::{Artifact, ArtifactSelector, Entity, Value};
 use dialog_capability::access::{AuthorizeError, Certificate as _, Proof as _, TimeRange};
 use dialog_capability::{ANY_SUBJECT, Did, Fork, Provider};
 use dialog_common::ConditionalSync;
+use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::{Get, Put};
+use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::{Import as BlobImport, Read as BlobRead};
 use dialog_effects::memory::Resolve;
 use dialog_ucan::{Scope, UcanCertificate, UcanDelegation, UcanProof};
@@ -40,7 +42,7 @@ use super::{
     DELEGATION_AUDIENCE, DELEGATION_COMMAND, DELEGATION_EXPIRATION, DELEGATION_ISSUER,
     DELEGATION_NOT_BEFORE, DELEGATION_SUBJECT, Delegations,
 };
-use crate::repository::branch::blob::index_store;
+use crate::repository::archive::erased;
 use crate::{Blob, Branch, RemoteSite, Select};
 
 /// Maximum chain depth, matching
@@ -94,9 +96,11 @@ impl IssuedBy<'_> {
             + Provider<Resolve>
             + Provider<BlobRead>
             + Provider<BlobImport>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + Provider<Fork<RemoteSite, Resolve>>
             + Provider<Fork<RemoteSite, BlobRead>>
+            + dialog_common::Holds
             + ConditionalSync
             + 'static,
     {
@@ -129,9 +133,11 @@ impl IssuedTo<'_> {
             + Provider<Resolve>
             + Provider<BlobRead>
             + Provider<BlobImport>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + Provider<Fork<RemoteSite, Resolve>>
             + Provider<Fork<RemoteSite, BlobRead>>
+            + dialog_common::Holds
             + ConditionalSync
             + 'static,
     {
@@ -165,9 +171,11 @@ impl Retained<'_> {
             + Provider<Resolve>
             + Provider<BlobRead>
             + Provider<BlobImport>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + Provider<Fork<RemoteSite, Resolve>>
             + Provider<Fork<RemoteSite, BlobRead>>
+            + dialog_common::Holds
             + ConditionalSync
             + 'static,
     {
@@ -195,16 +203,18 @@ where
         + Provider<Resolve>
         + Provider<BlobRead>
         + Provider<BlobImport>
-        + Provider<crate::Hydrate>
+        + Provider<ArchiveLoad>
+        + Provider<BlobLoad>
         + Provider<Fork<RemoteSite, Resolve>>
         + Provider<Fork<RemoteSite, BlobRead>>
+        + dialog_common::Holds
         + ConditionalSync
         + 'static,
 {
     if branch.revision().is_none() {
         return Ok(Vec::new());
     }
-    let store = index_store(branch, env).await;
+    let store = erased(env);
     let attribute = attribute
         .parse()
         .map_err(|error| malformed("delegation attribute", error))?;
@@ -318,9 +328,11 @@ impl ProveDelegation<'_> {
             + Provider<Resolve>
             + Provider<BlobRead>
             + Provider<BlobImport>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + Provider<Fork<RemoteSite, Resolve>>
             + Provider<Fork<RemoteSite, BlobRead>>
+            + dialog_common::Holds
             + ConditionalSync
             + 'static,
     {
@@ -337,7 +349,7 @@ impl ProveDelegation<'_> {
             return Ok(UcanProof::new(access.clone()));
         }
 
-        let store = index_store(branch, env).await;
+        let store = erased(env);
 
         let mut queue: Vec<Hop> = vec![Hop {
             audience: self.principal.clone(),
@@ -359,7 +371,7 @@ impl ProveDelegation<'_> {
                     .the(DELEGATION_AUDIENCE.parse().expect("valid attribute"))
                     .is(Value::String(hop.audience.to_string())),
             )
-            .execute(store.clone())
+            .execute(store)
             .await
             .map_err(|error| malformed("candidate scan failed", error))?;
             futures_util::pin_mut!(candidates);
@@ -445,7 +457,11 @@ impl ProveDelegation<'_> {
         subject: &Did,
     ) -> Result<Option<Candidate>, AuthorizeError>
     where
-        S: dialog_artifacts::ArchiveReader + Clone,
+        S: Provider<ArchiveLoad>
+            + Provider<BlobLoad>
+            + dialog_common::Holds
+            + ConditionalSync
+            + Clone,
     {
         let facts = Select::new(branch, ArtifactSelector::new().of(entity.clone()))
             .execute(store.clone())
@@ -535,9 +551,11 @@ impl ProveDelegation<'_> {
             + Provider<Resolve>
             + Provider<BlobRead>
             + Provider<BlobImport>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + Provider<Fork<RemoteSite, Resolve>>
             + Provider<Fork<RemoteSite, BlobRead>>
+            + dialog_common::Holds
             + ConditionalSync
             + 'static,
     {

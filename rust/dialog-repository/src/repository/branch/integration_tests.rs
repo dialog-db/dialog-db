@@ -5,6 +5,12 @@
 
 #[cfg(target_arch = "wasm32")]
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+#[cfg(not(feature = "web-integration-tests"))]
+use dialog_effects::archive::Load as ArchiveLoad;
+#[cfg(not(feature = "web-integration-tests"))]
+use dialog_effects::archive::prelude::CatalogScope;
+#[cfg(not(feature = "web-integration-tests"))]
+use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::storage::Location;
 
 use dialog_effects::MethodExt as _;
@@ -16,12 +22,11 @@ use crate::contact;
 use crate::helpers::connect;
 use crate::schema::DidExt as _;
 use crate::{
-    Blob, Branch, Index, Item, NetworkedIndex, Repository, RepositoryExt as _, Revision,
-    SiteAddress, SnapshotError, peer_did,
+    Blob, Branch, Index, Item, Repository, RepositoryExt as _, Revision, SiteAddress,
+    SnapshotError, peer_did,
 };
 use anyhow::{Context as _, Result};
 use dialog_artifacts::Asset;
-use dialog_artifacts::tree::ArtifactNodeCache;
 use dialog_artifacts::{
     Artifact, ArtifactSelector, Datum, ENTITY_KEY_TAG, HISTORY_KEY_TAG, Instruction, Key, State,
     Value,
@@ -2177,8 +2182,8 @@ async fn it_keeps_a_retraction_through_a_concurrent_pull(s3: S3Address) -> Resul
 /// The everyday device cycle: a quiet replica pulls (scenario-3
 /// fast-forward adoption — the head lands by root, zero block reads),
 /// commits something of its own, and pushes. The push's novelty diff
-/// walks base against current through the LOCAL archive only
-/// (`LocalIndex`, no remote fallback), and where the trees differ it
+/// walks base against current through the LOCAL archive only (both sides
+/// boundaries, read by `Get`, never hydrating), and where the trees differ it
 /// descends into base-side nodes the adoption never fetched — failing
 /// `Tree operation failed during push: Problem accessing node: Blob not
 /// found` even though the missing nodes live on the very remote being
@@ -2521,7 +2526,8 @@ delegate_provider!(
     dialog_effects::memory::Publish,
     dialog_effects::blob::Read,
     dialog_effects::blob::Import,
-    crate::Hydrate,
+    ArchiveLoad,
+    BlobLoad,
     Fork<RemoteSite, dialog_effects::archive::Get>,
     Fork<RemoteSite, dialog_effects::archive::Put>,
     Fork<RemoteSite, dialog_effects::memory::Resolve>,
@@ -2553,13 +2559,13 @@ where
 /// blocks they reference are all present too. This must hold after ANY
 /// prefix of a push, aborted pushes included: it is what entitles a
 /// later pusher to prune a whole subtree on one positive existence
-/// probe. The head is walked through `index` (the pusher's archive,
+/// probe. The head is walked in `catalog` (the pusher's archive,
 /// optionally hydrating through a source remote), never trusting the
 /// remote under test for its own audit.
 #[cfg(not(feature = "web-integration-tests"))]
 async fn assert_remote_closure_complete(
     operator: &Peer<VolatileSpace, dialog_peer::Session>,
-    index: NetworkedIndex<'_, Peer<VolatileSpace, dialog_peer::Session>>,
+    catalog: CatalogScope,
     head: NodeHash,
     remote: &ConnectedReplica,
 ) -> Result<()> {
@@ -2567,8 +2573,8 @@ async fn assert_remote_closure_complete(
     // and the blob/spill references its entries carry (stored entries in
     // a segment, buffered ops in an index node — both are bytes of the
     // node that holds them).
-    let storage = index;
-    let tree = Index::from_hash(head);
+    let storage = operator;
+    let tree = Index::at(catalog, head);
     let mut nodes: Vec<(NodeHash, Vec<NodeHash>, Vec<ShipmentRef>)> = Vec::new();
     let visits = tree.traverse_available(&storage);
     futures_util::pin_mut!(visits);
@@ -2755,12 +2761,7 @@ async fn it_leaves_an_aborted_push_closure_complete(s3: S3Address) -> Result<()>
         .perform(&operator)
         .await?;
     let head = NodeHash::from(*branch.revision().expect("committed").tree.hash());
-    let index = NetworkedIndex::new(
-        &operator,
-        branch.archive().index(),
-        None,
-        ArtifactNodeCache::new(),
-    );
+    let index = branch.archive().index();
     assert_remote_closure_complete(&operator, index, head, &origin).await?;
 
     Ok(())
@@ -2874,12 +2875,7 @@ async fn it_leaves_an_aborted_bridge_push_closure_complete(s3: S3Address) -> Res
     // Audit B against the full head, hydrating the walk through A (the
     // bridge holds the adopted region only by reference).
     let head = NodeHash::from(*bridge_branch.revision().expect("committed").tree.hash());
-    let index = NetworkedIndex::new(
-        &operator,
-        bridge_branch.archive().index(),
-        Some(origin_a.clone()),
-        ArtifactNodeCache::new(),
-    );
+    let index = bridge_branch.archive().index();
     assert_remote_closure_complete(&operator, index, head, &origin_b).await?;
 
     Ok(())
@@ -3479,7 +3475,7 @@ async fn it_downloads_the_account_branch_on_login(ucan: UcanS3Address) -> Result
     // Every retained delegation's envelope must now be readable from the
     // device's LOCAL blob provider — no remote reach in this env.
     use dialog_artifacts::ArtifactSelector;
-    let store = super::blob::index_store(&device_branch, &device_operator).await;
+    let store = &device_operator;
     let facts: Vec<_> = crate::Select::new(
         &device_branch,
         ArtifactSelector::new().the(crate::DELEGATION_AUDIENCE.parse().unwrap()),
@@ -4380,9 +4376,8 @@ async fn raw_spill_references<C: dialog_varsig::Principal>(
     revision: &Revision,
 ) -> Result<(HashSet<NodeHash>, HashSet<NodeHash>)> {
     let catalog = ArchiveScope::new(repository.subject()).index();
-    let index = NetworkedIndex::new(env, catalog, None, ArtifactNodeCache::new());
-    let storage = index;
-    let tree = Index::from_hash(NodeHash::from(*revision.tree.hash()));
+    let storage = env;
+    let tree = Index::at(catalog, NodeHash::from(*revision.tree.hash()));
 
     let mut current = HashSet::new();
     let mut history = HashSet::new();
@@ -5263,17 +5258,16 @@ async fn it_downloads_serially_while_pushing_concurrently(ucan: UcanS3Address) -
     // root-to-leaf and each level's read names the next, so depth bounds
     // how many fetches CANNOT overlap however wide the fan-out is.
     let head = NodeHash::from(*replica.revision().expect("pulled").tree.hash());
-    let depth_index = NetworkedIndex::new(
-        &replica_operator,
-        replica.archive().index(),
-        None,
-        ArtifactNodeCache::new(),
-    );
-    let depth_storage = depth_index;
+    use dialog_effects::archive::Load;
+    let depth_storage = &replica_operator;
+    let depth_catalog = replica.archive().index();
     let mut depth = 0usize;
     let mut at = Some(head);
     while let Some(hash) = at.take() {
-        let Some(bytes) = depth_storage.load(&hash).await? else {
+        let Some(bytes) = Load::new(depth_catalog.clone(), hash)
+            .perform(depth_storage)
+            .await?
+        else {
             break;
         };
         depth += 1;

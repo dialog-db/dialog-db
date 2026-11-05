@@ -40,14 +40,16 @@
 //! Recording and dropping an asset are both a transaction's job:
 //! `tx.assert(asset)` records it and `tx.retract(asset)` drops it.
 
-use crate::repository::archive::networked::write_blob;
-use crate::repository::branch::blob::index_store;
+use crate::repository::archive::erased;
+use crate::repository::archive::write_blob;
 use crate::repository::source::SourceRef;
-use crate::{Branch, CommitError, Hydrate, Index, Snapshot};
+use crate::{Branch, CommitError, Index, Snapshot};
 use dialog_artifacts::{Asset, AssetChange, BlobIndexExt as _, Instruction};
 use dialog_capability::Provider;
 use dialog_common::{Blake3Hash, Blake3Hash as NodeHash, ConditionalSend, ConditionalSync};
+use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::{Get, Put};
+use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::{
     BlobError, Import as BlobImport, Read as BlobRead, Size as BlobSize, Write as BlobWrite,
 };
@@ -157,7 +159,9 @@ where
         + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
-        + Provider<Hydrate>
+        + Provider<ArchiveLoad>
+        + Provider<BlobLoad>
+        + dialog_common::Holds
         + ConditionalSync
         + 'static,
 {
@@ -201,17 +205,21 @@ where
         + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
-        + Provider<Hydrate>
+        + Provider<ArchiveLoad>
+        + Provider<BlobLoad>
+        + dialog_common::Holds
         + ConditionalSync
         + 'static,
 {
     let Some(revision) = source.revision() else {
         return Ok(None);
     };
-    let store = index_store(source, env).await;
-    Ok(Index::from_hash(NodeHash::from(*revision.tree.hash()))
-        .asset_size(&store, hash)
-        .await?)
+    let store = erased(env);
+    Ok(
+        Index::at(source.catalog(), NodeHash::from(*revision.tree.hash()))
+            .asset_size(&store, hash)
+            .await?,
+    )
 }
 
 /// Import `content` into `source`'s blob store under `asset`'s hash and
@@ -258,7 +266,9 @@ where
         + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
-        + Provider<Hydrate>
+        + Provider<ArchiveLoad>
+        + Provider<BlobLoad>
+        + dialog_common::Holds
         + ConditionalSync
         + 'static,
 {

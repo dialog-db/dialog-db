@@ -13,7 +13,7 @@ use dialog_artifacts::{
     ArchiveDelta, Artifact, ArtifactSelector, ArtifactView, Cause, Entity, Instruction, Relation,
     SortKey, Uri, Value, sort_key,
 };
-use dialog_search_tree::{Manifest, MemoryBlocks};
+use dialog_search_tree::{Manifest, helpers::Blocks};
 use futures_util::TryStreamExt as _;
 
 /// The sort key under the format the stores here are created with: a new
@@ -50,8 +50,8 @@ fn probe_values() -> Vec<Value> {
 /// interleave wrongly.
 #[tokio::test]
 async fn it_derives_sort_keys_identical_to_the_field_path() -> Result<()> {
-    let blocks = MemoryBlocks::new();
-    let mut index = ArtifactTree::empty();
+    let blocks = Blocks::new();
+    let mut index = ArtifactTree::empty_in(dialog_search_tree::helpers::test_catalog());
     let mut delta = ArchiveDelta::zero();
 
     let mut instructions = Vec::new();

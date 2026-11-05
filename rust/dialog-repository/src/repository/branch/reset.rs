@@ -1,12 +1,15 @@
 use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
 use dialog_effects::Rejection;
+use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::{Get as ArchiveGet, Put as ArchivePut};
+use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::Read as BlobRead;
 use dialog_effects::memory::{Publish, Resolve};
 
 use super::context::{full_context, head_observes};
-use crate::{Branch, NetworkedIndex, PublishError, Revision};
+use crate::repository::archive::erased;
+use crate::{Branch, PublishError, Revision};
 
 /// Command that resets a branch to a given revision.
 ///
@@ -62,7 +65,9 @@ impl Reset<'_> {
             + Provider<ArchiveGet>
             + Provider<ArchivePut>
             + Provider<Resolve>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
+            + dialog_common::Holds
             + ConditionalSync
             + 'static,
     {
@@ -124,17 +129,15 @@ where
         + Provider<ArchiveGet>
         + Provider<ArchivePut>
         + Provider<Resolve>
-        + Provider<crate::Hydrate>
+        + Provider<ArchiveLoad>
+        + Provider<BlobLoad>
+        + dialog_common::Holds
         + ConditionalSync
         + 'static,
 {
     let version = head.version();
-    let store = NetworkedIndex::erased(
-        env,
-        branch.archive().index(),
-        branch.fallback(),
-        branch.node_cache(),
-    );
+    let store = erased(env);
+    let catalog = branch.archive().index();
     let unreadable = |error: dialog_artifacts::DialogArtifactsError| {
         PublishError::Storage(format!(
             "could not tell whether the revision holds branch {}'s head: {error}",
@@ -146,6 +149,7 @@ where
         &version,
         &branch.contexts(),
         &branch.records(),
+        &catalog,
         &store,
     )
     .await
@@ -154,7 +158,7 @@ where
         return Ok(seen);
     }
     let history = branch.history(env);
-    let context = full_context(revision, &branch.contexts(), &store, &history)
+    let context = full_context(revision, &branch.contexts(), &catalog, &store, &history)
         .await
         .map_err(unreadable)?;
     Ok(context.observes(&version))

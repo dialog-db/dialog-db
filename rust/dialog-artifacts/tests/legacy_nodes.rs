@@ -8,7 +8,7 @@ use std::str::FromStr as _;
 use dialog_artifacts::tree::{ArtifactTree, ArtifactTreeExt as _, spill_cache};
 use dialog_artifacts::{Artifact, ArtifactSelector, Entity, Relation, Value};
 use dialog_common::Blake3Hash;
-use dialog_search_tree::MemoryBlocks;
+use dialog_search_tree::helpers::Blocks;
 use futures_util::TryStreamExt as _;
 
 const FIXTURE: &str = include_str!("fixtures/legacy-artifact-nodes.txt");
@@ -40,7 +40,7 @@ fn expected(n: u32) -> Artifact {
 
 #[tokio::test]
 async fn it_reads_an_artifact_tree_written_in_the_legacy_layout() -> anyhow::Result<()> {
-    let store = MemoryBlocks::new();
+    let store = Blocks::new();
     let mut root = None;
     for line in FIXTURE.lines() {
         if let Some(hex) = line.strip_prefix("tree root=") {
@@ -53,7 +53,10 @@ async fn it_reads_an_artifact_tree_written_in_the_legacy_layout() -> anyhow::Res
     let spill = "x".repeat(5000).into_bytes();
     store.store(spill.into());
 
-    let tree = ArtifactTree::from_hash(root.expect("a root line"));
+    let tree = ArtifactTree::at(
+        dialog_search_tree::helpers::test_catalog(),
+        root.expect("a root line"),
+    );
     for attribute in ["fixture/name", "fixture/bio"] {
         let mut rows: Vec<Artifact> = tree
             .clone()
