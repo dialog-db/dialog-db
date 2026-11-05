@@ -11,7 +11,7 @@
 use dialog_artifacts::history::{
     CausalityCache, ContextCache, RevisionRecord, TreeHistory, Version, log,
 };
-use dialog_artifacts::tree::{ArtifactNodeCache, SpillCache, spill_cache};
+use dialog_artifacts::tree::{ArtifactNodeCache, SpillCache};
 use dialog_artifacts::{Changes, DialogArtifactsError, Entity, SpineSlot, Statement as _};
 use dialog_capability::{Capability, Provider, Subject};
 use dialog_common::{Blake3Hash as NodeHash, ConditionalSync, Holds};
@@ -25,6 +25,7 @@ use dialog_storage::Blake3Hash;
 use std::sync::Arc;
 
 use crate::repository::branch::LayerMetadataMemo;
+use crate::repository::caches::CacheBudget;
 use crate::rules::{RuleCache, SharedRuleCache};
 use crate::schema::Replica;
 use crate::{Branch, Ephemeral, Index, Revision, Snapshot};
@@ -307,22 +308,27 @@ pub(crate) struct Caches {
     /// [`Branch::layer_metadata`](crate::Branch)), so a branch opened again
     /// does not derive and key it again.
     pub(crate) metadata: LayerMetadataMemo,
+    /// How large the caches of a set derived from this one (a transaction
+    /// batch's) may grow.
+    pub(crate) limits: CacheBudget,
 }
 
 impl Caches {
-    /// A cold set.
-    pub(crate) fn new() -> Self {
+    /// A cold set of its own, every cache at the size `limits` gives it.
+    pub(crate) fn sized(limits: CacheBudget) -> Self {
+        let entries = limits.entry_capacity();
         Self {
-            nodes: dialog_search_tree::NodeCache::new(),
-            spills: spill_cache(),
+            nodes: dialog_search_tree::NodeCache::with_budget(limits.node_bytes()),
+            spills: SpillCache::with_budget(limits.spill_bytes()),
             rules: Arc::new(RuleCache::new()),
-            plans: PlanCache::default(),
-            causality: CausalityCache::new(),
-            contexts: ContextCache::new(),
-            records: Cache::new(),
-            rewrites: Cache::new(),
+            plans: PlanCache::with_capacity(limits.plan_capacity()),
+            causality: CausalityCache::with_capacity(entries),
+            contexts: ContextCache::with_capacity(entries),
+            records: Cache::with_capacity(entries),
+            rewrites: Cache::with_capacity(entries),
             spine: SpineSlot::new(),
             metadata: LayerMetadataMemo::default(),
+            limits,
         }
     }
 }

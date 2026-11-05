@@ -23,7 +23,7 @@ pub(crate) mod branch;
 pub use branch::*;
 
 mod caches;
-pub use caches::HeldCaches;
+pub use caches::{CacheBudget, HeldCaches};
 
 mod create;
 pub use create::*;
