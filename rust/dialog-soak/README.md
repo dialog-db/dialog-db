@@ -174,7 +174,8 @@ what each stands for. Things to watch:
 - **`requery` should be 0 requests** — a warm replica must not re-fetch.
 - **`dup` should stay 0 everywhere** — a duplicate fetch means a block
   was paid for and thrown away (the walker's range-bounded read-ahead
-  and `NetworkedIndex` hydration exist to prevent exactly this).
+  and the env's shared hydration of a tree's loads exist to prevent
+  exactly this).
 - **`concept`'s `chain`** is the sequential-chain depth of the query
   engine's cold join — the number the parallel-replication work (#492)
   drives down. `rounds` bounds the same quantity from modeled time and

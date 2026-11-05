@@ -28,15 +28,13 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
-use base58::ToBase58 as _;
-use dialog_artifacts::tree::{ArtifactNodeCache, ArtifactTree, ArtifactTreeExt, spill_cache};
-use dialog_artifacts::{
-    Artifact, ArtifactSelector, Datum, DialogArtifactsError, Key, LoadBlob, State, Value,
-};
-use dialog_capability::Provider;
+use dialog_artifacts::tree::{ArtifactTree, ArtifactTreeExt, spill_cache};
+use dialog_artifacts::{Artifact, ArtifactSelector, Datum, Key, State, Value};
+use dialog_baseline::replica::Replica;
 use dialog_common::{Blake3Hash, Buffer};
 use dialog_search_tree::{
-    DialogSearchTreeError, LoadBlock, NodeBody, NodeCache, Nodes, PersistentNode,
+    NodeBody, PersistentNode,
+    helpers::{Holding, test_catalog},
 };
 use futures_util::{StreamExt as _, TryStreamExt as _};
 
@@ -85,46 +83,6 @@ fn held() -> usize {
 
 fn mib(bytes: usize) -> String {
     format!("{:.1}", bytes as f64 / (1024.0 * 1024.0))
-}
-
-/// A replica's file-per-block archive read through a node cache, with
-/// spilled values from its blob directory: what a replica on disk does, so
-/// the cache's heap is what the cache holds, not bytes loaded beforehand.
-#[derive(Clone)]
-struct Reader {
-    blocks: PathBuf,
-    blobs: PathBuf,
-    cache: ArtifactNodeCache,
-}
-
-#[async_trait::async_trait]
-impl Provider<LoadBlock> for Reader {
-    async fn execute(
-        &self,
-        LoadBlock { hash }: LoadBlock,
-    ) -> Result<Option<Buffer>, DialogSearchTreeError> {
-        Ok(std::fs::read(self.blocks.join(hash.as_bytes().to_base58()))
-            .ok()
-            .map(Buffer::from))
-    }
-}
-
-impl Nodes<Key, State<Datum>> for Reader {
-    fn kept(&self) -> Option<&ArtifactNodeCache> {
-        Some(&self.cache)
-    }
-}
-
-#[async_trait::async_trait]
-impl Provider<LoadBlob> for Reader {
-    async fn execute(
-        &self,
-        LoadBlob { hash }: LoadBlob,
-    ) -> Result<Option<Buffer>, DialogArtifactsError> {
-        Ok(std::fs::read(self.blobs.join(hash.as_bytes().to_base58()))
-            .ok()
-            .map(Buffer::from))
-    }
 }
 
 /// The directory of `archive` that holds tree nodes, and the root of the
@@ -207,11 +165,11 @@ fn main() -> anyhow::Result<()> {
             .ok_or_else(|| anyhow::anyhow!("usage: memory_census <replica directory>"))?,
     );
     let (blocks, root, block_bytes) = load(&directory.join("archive"))?;
-    let reader = Reader {
-        blocks,
-        blobs: directory.join("blob"),
-        cache: NodeCache::with_budget(1 << 34),
-    };
+    // The replica read from disk on every load, as a replica on disk is,
+    // through a node cache of its own: the cache's heap is what it holds.
+    let replica = Replica::on_disk(blocks, Some(directory.join("blob")));
+    let reader = Holding::new(&replica);
+    let catalog = test_catalog();
     println!(
         "replica {}: {} MiB of blocks, head {root}",
         directory.display(),
@@ -231,7 +189,7 @@ fn main() -> anyhow::Result<()> {
         let started = Instant::now();
         let mut rows = 0usize;
         {
-            let stream = ArtifactTree::from_hash(root.clone()).scan(
+            let stream = ArtifactTree::at(catalog.clone(), root.clone()).scan(
                 reader.clone(),
                 spill_cache(),
                 every(),
@@ -243,8 +201,8 @@ fn main() -> anyhow::Result<()> {
             }
         }
         let cache_heap = held() - before;
-        let cached_nodes = reader.cache.len();
-        let cached_bytes = reader.cache.bytes();
+        let cached_nodes = reader.cache::<Key, State<Datum>>().len();
+        let cached_bytes = reader.cache::<Key, State<Datum>>().bytes();
         println!(
             "\nnode cache after scanning every fact once ({rows} facts, {:.2}s):",
             started.elapsed().as_secs_f64()
@@ -258,7 +216,7 @@ fn main() -> anyhow::Result<()> {
         // Layer 2: a materialized result of every fact.
         let before = held();
         PEAK.store(before, Ordering::Relaxed);
-        let artifacts: Vec<Artifact> = ArtifactTree::from_hash(root.clone())
+        let artifacts: Vec<Artifact> = ArtifactTree::at(catalog.clone(), root.clone())
             .scan_owned(reader.clone(), spill_cache(), every())
             .try_collect()
             .await?;
@@ -364,8 +322,8 @@ fn main() -> anyhow::Result<()> {
             "  still held once the result is gone: {} MiB ({} bytes a row); the cache counts {} MiB in {} nodes",
             mib(residual),
             residual / count.max(1),
-            mib(reader.cache.bytes()),
-            reader.cache.len()
+            mib(reader.cache::<Key, State<Datum>>().bytes()),
+            reader.cache::<Key, State<Datum>>().len()
         );
         anyhow::Ok(())
     })?;

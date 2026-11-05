@@ -45,6 +45,9 @@ criterion = { version = "0.5", features = ["async_tokio"] }
 blake3 = { workspace = true }
 rkyv = { workspace = true }
 zstd = "0.13"
+# The search tree's volatile test archive, for the examples that build
+# trees outside a repository.
+dialog-search-tree = { workspace = true, features = ["audit", "helpers"] }
 
 [[bench]]
 name = "sqlite_vs_dialog"

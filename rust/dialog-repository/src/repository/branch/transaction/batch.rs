@@ -38,9 +38,11 @@ use dialog_artifacts::{
 use dialog_capability::history::Origin;
 use dialog_capability::{Did, Fork, Provider};
 use dialog_common::{ConditionalSync, Holds};
+use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify, OperatorExt as _};
 use dialog_effects::blob::Import as BlobImport;
+use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::Read as BlobRead;
 use dialog_effects::blob::Size as BlobSize;
 use dialog_effects::memory::{Current, Publish, Resolve, Version as MemoryVersion};
@@ -416,7 +418,8 @@ impl TransactionPublish<&Branch> {
             + Provider<Publish>
             + Provider<Identify>
             + Provider<Attest>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
@@ -444,7 +447,8 @@ impl TransactionPublish<TransactionBatch> {
             + Provider<Publish>
             + Provider<Identify>
             + Provider<Attest>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
@@ -485,7 +489,8 @@ impl TransactionCommit<&Branch> {
             + Provider<Resolve>
             + Provider<Identify>
             + Provider<Attest>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
@@ -596,7 +601,8 @@ impl TransactionCommit<TransactionBatch> {
             + Provider<Resolve>
             + Provider<Identify>
             + Provider<Attest>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
@@ -711,7 +717,8 @@ where
         + Provider<Resolve>
         + Provider<Identify>
         + Provider<Attest>
-        + Provider<crate::Hydrate>
+        + Provider<ArchiveLoad>
+        + Provider<BlobLoad>
         + Provider<dialog_artifacts::Preload>
         + Provider<dialog_artifacts::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>

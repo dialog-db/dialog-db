@@ -105,7 +105,7 @@ fn main() -> anyhow::Result<()> {
         // In-order walk, so the global key sequence stays contiguous for
         // stretch accounting.
         let mut census = Census::default();
-        walk(&repo.index(), root, |visit| {
+        walk(repo.operator(), &repo.catalog(), root, |visit| {
             match visit.node.body() {
                 NodeBody::Index(index) => {
                     for at in 1..index.len() {

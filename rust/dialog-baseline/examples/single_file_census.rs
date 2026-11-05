@@ -80,23 +80,23 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
-use base58::ToBase58 as _;
 use dialog_artifacts::history::{Edition, Record};
 use dialog_artifacts::tree::{ArtifactTree, fetch_spilled};
 use dialog_artifacts::{
-    ATTRIBUTE_KEY_TAG, Artifact, BLOB_KEY_TAG, Datum, DialogArtifactsError, ENTITY_KEY_TAG,
-    Instruction, Key, LoadBlob, Pick, Relation, State, VALUE_KEY_TAG, history_region_range,
+    ATTRIBUTE_KEY_TAG, Artifact, BLOB_KEY_TAG, Datum, ENTITY_KEY_TAG, Instruction, Key, Pick,
+    Relation, State, VALUE_KEY_TAG, history_region_range,
 };
 use dialog_baseline::metered::Meter;
 use dialog_baseline::nodes::TreeNode;
+use dialog_baseline::replica::Replica;
 use dialog_baseline::repo::DialogRepo;
 use dialog_baseline::se::{SeLog, se_instructions};
-use dialog_capability::Provider;
+use dialog_capability::{Did, Subject};
 use dialog_common::{Blake3Hash, Buffer};
+use dialog_effects::archive::prelude::ArchiveScope;
 use dialog_search_tree::{
-    DialogSearchTreeError, Entry, Key as TreeKey, Link, LoadBlock, Manifest, MemoryBlocks,
-    NodeBody, Nodes, NoveltyBuffer, NoveltyEntry, NoveltyOp, PersistentNodeBody, PersistentSegment,
-    Scale, Separator, into_owned,
+    Entry, Key as TreeKey, Link, Manifest, NodeBody, NoveltyBuffer, NoveltyEntry, NoveltyOp,
+    PersistentNodeBody, PersistentSegment, Scale, Separator, into_owned,
 };
 use futures_util::TryStreamExt as _;
 
@@ -1055,39 +1055,6 @@ fn history_counts(
     Ok(counts)
 }
 
-/// A replica's file-per-block store, read as an archive the artifact tree
-/// can load nodes and spilled values from: nodes from memory, spilled
-/// values from the replica's blob directory.
-#[derive(Clone)]
-struct Replica {
-    nodes: MemoryBlocks,
-    blobs: PathBuf,
-}
-
-#[async_trait::async_trait]
-impl Provider<LoadBlock> for Replica {
-    async fn execute(
-        &self,
-        LoadBlock { hash }: LoadBlock,
-    ) -> Result<Option<Buffer>, DialogSearchTreeError> {
-        Ok(self.nodes.get(&hash))
-    }
-}
-
-impl Nodes<Key, State<Datum>> for Replica {}
-
-#[async_trait::async_trait]
-impl Provider<LoadBlob> for Replica {
-    async fn execute(
-        &self,
-        LoadBlob { hash }: LoadBlob,
-    ) -> Result<Option<Buffer>, DialogArtifactsError> {
-        Ok(std::fs::read(self.blobs.join(hash.as_bytes().to_base58()))
-            .ok()
-            .map(Buffer::from))
-    }
-}
-
 /// The commits of a replica, rebuilt from its head tree: the history
 /// region keeps one record per claim every revision made, under that
 /// revision's version, with the claim, its polarity and the versions it
@@ -1108,13 +1075,10 @@ fn history(directory: &Path) -> anyhow::Result<Vec<Vec<Instruction>>> {
         .find(|block| archive.roots.contains(&block.hash))
         .map(|block| block.hash.clone())
         .ok_or_else(|| anyhow::anyhow!("the archive holds no tree root"))?;
-    let replica = Replica {
-        nodes: MemoryBlocks::new(),
-        blobs: directory.join("blob"),
-    };
-    for block in &archive.blocks {
-        replica.nodes.store(block.bytes.clone());
-    }
+    let replica = Replica::in_memory(
+        archive.blocks.iter().map(|block| block.bytes.clone()),
+        Some(directory.join("blob")),
+    );
     drop(archive);
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -1123,7 +1087,10 @@ fn history(directory: &Path) -> anyhow::Result<Vec<Vec<Instruction>>> {
     let mut stand_ins = 0usize;
     let mut reserved = 0usize;
     runtime.block_on(async {
-        let tree = ArtifactTree::from_hash(head.clone());
+        // The replica answers every catalog's reads, so any catalog will do.
+        let did: Did = "did:key:zSingleFileCensus".parse()?;
+        let catalog = ArchiveScope::new(Subject::from(did)).index();
+        let tree = ArtifactTree::at(catalog.clone(), head.clone());
         let (from, to) = history_region_range();
         let stream = tree.stream_range(from..=to, &replica);
         futures_util::pin_mut!(stream);
@@ -1134,7 +1101,7 @@ fn history(directory: &Path) -> anyhow::Result<Vec<Vec<Instruction>>> {
             let Some(version) = datum.version else {
                 continue;
             };
-            let spilled = match fetch_spilled(&replica, &entry.key).await {
+            let spilled = match fetch_spilled(&replica, &catalog.archive(), &entry.key).await {
                 Ok(spilled) => spilled,
                 Err(_) => {
                     stand_ins += 1;

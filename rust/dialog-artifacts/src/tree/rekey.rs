@@ -14,6 +14,7 @@
 //! earlier release wrote and its rewrite as one tree, and a migration
 //! two replicas run on their own converge.
 
+use crate::reads::*;
 use std::mem;
 
 use dialog_search_tree::Manifest;
@@ -24,8 +25,8 @@ use crate::key::varkey::{ValuePayload, build_key, parse_key};
 use crate::merge::full_scope;
 use crate::tree::{ArtifactTree, ArtifactTreeExt as _};
 use crate::{
-    ArchiveDelta, ArchiveReader, BLOB_KEY_TAG, CONTEXT_KEY_TAG, DialogArtifactsError, Key,
-    ValueDataType, encode_key_value_owned,
+    ArchiveDelta, BLOB_KEY_TAG, CONTEXT_KEY_TAG, DialogArtifactsError, Key, ValueDataType,
+    encode_key_value_owned,
 };
 
 /// How many entries one edit batch of the rewrite inserts.
@@ -79,10 +80,10 @@ pub async fn rekey_tree<S>(
     manifest: Manifest,
 ) -> Result<ArtifactTree, DialogArtifactsError>
 where
-    S: ArchiveReader + Clone,
+    S: Provider<archive::Load> + Provider<blob::Load> + Holds + ConditionalSync + Clone,
 {
     let value_encoding = manifest.value_encoding;
-    let mut target = ArtifactTree::empty_with_manifest(manifest);
+    let mut target = ArtifactTree::empty_with_manifest(source.catalog().clone(), manifest);
     let [range] = full_scope();
     let stream = source.stream_range_handles(range, store);
     tokio::pin!(stream);
@@ -103,11 +104,12 @@ where
 #[cfg(test)]
 mod tests {
     #![allow(unexpected_cfgs)]
+    use dialog_search_tree::helpers::test_catalog;
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-    use dialog_search_tree::{Manifest, MemoryBlocks, PersistentTree};
+    use dialog_search_tree::{Manifest, PersistentTree, helpers::Blocks};
     use futures_util::{TryStreamExt as _, stream};
 
     use super::rekey_tree;
@@ -149,11 +151,9 @@ mod tests {
         Ok(instructions)
     }
 
-    async fn tree(
-        store: &MemoryBlocks,
-        instructions: Vec<Instruction>,
-    ) -> anyhow::Result<ArtifactTree> {
-        let mut tree: ArtifactTree = PersistentTree::empty_with_manifest(Manifest::default());
+    async fn tree(store: &Blocks, instructions: Vec<Instruction>) -> anyhow::Result<ArtifactTree> {
+        let mut tree: ArtifactTree =
+            PersistentTree::empty_with_manifest(test_catalog(), Manifest::default());
         let mut delta = ArchiveDelta::zero();
         tree.apply(store, &mut delta, stream::iter(instructions))
             .await?;
@@ -161,7 +161,7 @@ mod tests {
         Ok(tree)
     }
 
-    async fn sizes(tree: &ArtifactTree, store: &MemoryBlocks) -> anyhow::Result<Vec<Value>> {
+    async fn sizes(tree: &ArtifactTree, store: &Blocks) -> anyhow::Result<Vec<Value>> {
         let rows: Vec<Artifact> = tree
             .clone()
             .scan_owned(
@@ -187,7 +187,7 @@ mod tests {
 
     async fn rekeyed(
         tree: &ArtifactTree,
-        store: &MemoryBlocks,
+        store: &Blocks,
         value_encoding: u32,
     ) -> anyhow::Result<ArtifactTree> {
         let manifest = Manifest {
@@ -206,7 +206,7 @@ mod tests {
     /// same numbers read back, each in the band the rewrite put it in.
     #[dialog_common::test]
     async fn it_rewrites_a_tree_losslessly_and_deterministically() -> anyhow::Result<()> {
-        let store = MemoryBlocks::new();
+        let store = Blocks::new();
         let values = vec![
             Value::UnsignedInt(3),
             Value::SignedInt(-2),
@@ -247,7 +247,7 @@ mod tests {
     /// it re-keys.
     #[dialog_common::test]
     async fn it_rewrites_a_tree_holding_blob_index_entries() -> anyhow::Result<()> {
-        let store = MemoryBlocks::new();
+        let store = Blocks::new();
         let values = vec![Value::UnsignedInt(3), Value::Float(2.5)];
         let original = tree(&store, items(&values)?).await?;
         let mut legacy = rekeyed(&original, &store, 0).await?;

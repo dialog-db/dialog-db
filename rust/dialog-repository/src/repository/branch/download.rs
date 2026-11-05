@@ -15,6 +15,8 @@
 //! the two acts — adopt the upstream head, then materialize it.
 
 use core::ops::RangeInclusive;
+use dialog_effects::archive::Load as ArchiveLoad;
+use dialog_effects::blob::Load as BlobLoad;
 
 use dialog_artifacts::merge::data_scope;
 use dialog_capability::{Fork, Provider};
@@ -110,10 +112,12 @@ impl Download<'_> {
             + Provider<Resolve>
             + Provider<BlobRead>
             + Provider<BlobImport>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, BlobRead>>
+            + dialog_common::Holds
             + ConditionalSync
             + 'static,
     {
@@ -207,7 +211,8 @@ impl<'a> PullDownload<'a> {
             + Provider<Attest>
             + Provider<BlobRead>
             + Provider<BlobImport>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>

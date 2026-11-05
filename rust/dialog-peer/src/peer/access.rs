@@ -40,8 +40,11 @@ use dialog_capability::access::{
 use dialog_capability::{Capability, Command, Did, Fork, Policy as _, Provider, Subject};
 use dialog_common::time::{self, UNIX_EPOCH};
 use dialog_common::{ConditionalSend, ConditionalSync};
+use dialog_effects::archive::ArchiveError;
+use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify};
+use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::{BlobError, Import as BlobImport, Read as BlobRead, Write as BlobWrite};
 use dialog_effects::memory::{Publish, Resolve};
 use dialog_repository::{Branch, RemoteSite};
@@ -200,6 +203,52 @@ where
         input: <dialog_repository::Hydrate as Command>::Input,
     ) -> <dialog_repository::Hydrate as Command>::Output {
         dialog_repository::hydrate(self, input).await
+    }
+}
+
+// A load for the walk hydrates through the plain hydration above, from
+// the routes the operator's branches registered: the walk reads what any
+// read of the operator would, without joining its shared flight.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<S, M: Mode> Provider<ArchiveLoad> for AccessEnv<S, M>
+where
+    S: Clone + ConditionalSend + ConditionalSync + 'static,
+    Self: Provider<Get> + Provider<dialog_repository::Hydrate> + ConditionalSync,
+{
+    async fn execute(
+        &self,
+        load: ArchiveLoad,
+    ) -> Result<Option<dialog_common::Buffer>, ArchiveError> {
+        dialog_repository::load_or_hydrate(self, load).await
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<S, M: Mode> Provider<BlobLoad> for AccessEnv<S, M>
+where
+    S: Clone + ConditionalSend + ConditionalSync + 'static,
+    Self:
+        Provider<Get> + Provider<BlobRead> + Provider<dialog_repository::Hydrate> + ConditionalSync,
+{
+    async fn execute(&self, load: BlobLoad) -> Result<Option<dialog_common::Buffer>, ArchiveError> {
+        dialog_repository::load_blob_or_hydrate(self, load).await
+    }
+}
+
+/// The walk keeps what the operator keeps: its caches and its routes.
+impl<S: Clone, M: Mode> dialog_common::Holds for AccessEnv<S, M> {
+    fn held(&self, key: &str) -> Option<dialog_common::Held> {
+        self.operator.held(key)
+    }
+
+    fn hold(&self, key: String, handle: dialog_common::Held) {
+        self.operator.hold(key, handle)
+    }
+
+    fn held_or(&self, key: &str, make: &dyn Fn() -> dialog_common::Held) -> dialog_common::Held {
+        self.operator.held_or(key, make)
     }
 }
 

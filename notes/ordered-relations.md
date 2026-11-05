@@ -89,7 +89,7 @@ position = major (1 byte, base52 A–Z a–z)
   increment/decrement moves whole steps.
 - **Patch** is the unbounded fractional tail where the **bias**
   lands: `deriveBias(item) = base62-digits(item bytes)` (the merkle
-  reference re-encoded). New positions take their tail from the bias;
+  reference re-encoded; the Rust port hashes it first, see below). New positions take their tail from the bias;
   when low/high patches are consecutive the bias is appended (median
   fallback when absent); when an intermediate digit exists, its
   tie-break digit is nudged to the bias's head digit when that fits
@@ -202,7 +202,12 @@ Two properties come along for free:
      the POC appends the full ~43-digit re-encoded reference, which
      would blow the attribute budget; six uniform digits make
      same-slot collisions negligible and truncation is deterministic,
-     so convergence is unaffected.
+     so convergence is unaffected. The digits come from the
+     reference's BLAKE3 digest, not the reference itself: base62 is a
+     big-endian re-encoding, so its *leading* digits are fixed by the
+     leading bytes and the length, and every `did:key:z6Mk…` entity
+     shares both. Truncating the reference directly gave every such
+     member the same bias.
   2. **No out-of-alphabet sentinels** — open bounds are explicit
      (`Option`), so `/` and `{` can never reach a stored position.
   3. **Exhaustion is an error** (`PositionError::Exhausted`) instead

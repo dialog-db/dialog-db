@@ -14,8 +14,10 @@
 //!   transactional memory cells with built-in edition tracking, plus
 //!   `.fork(&address)` variants that retarget the same commands at a
 //!   remote site.
-//! - [`LocalIndex`] — loads a branch's tree nodes and spilled values
-//!   through archive capabilities.
+//! - [`load_or_hydrate`] — how an environment answers a tree's
+//!   [`Load`](dialog_effects::archive::Load) of a block: from the local
+//!   archive, or hydrated from the [`Routes`] the subject's open branches
+//!   register.
 //!
 //! Branches, remotes, and sync operations build on this base in
 //! follow-up crates / PRs.

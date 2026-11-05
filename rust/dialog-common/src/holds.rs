@@ -2,6 +2,7 @@
 
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
+use std::hash::{BuildHasherDefault, Hasher};
 use std::sync::{Arc, Mutex};
 
 /// A handle an environment holds, type-erased. `Send + Sync` on native,
@@ -48,6 +49,21 @@ pub trait Holds {
     }
 }
 
+/// A borrowed environment holds what the environment holds.
+impl<T: Holds + ?Sized> Holds for &T {
+    fn held(&self, key: &str) -> Option<Held> {
+        (**self).held(key)
+    }
+
+    fn hold(&self, key: String, handle: Held) {
+        (**self).hold(key, handle)
+    }
+
+    fn held_or(&self, key: &str, make: &dyn Fn() -> Held) -> Held {
+        (**self).held_or(key, make)
+    }
+}
+
 /// The key code that holds a `T` under `name` holds it under.
 ///
 /// The key names `T` by its type id, so two builds of one crate in a
@@ -58,10 +74,49 @@ pub fn held_key<T: Any>(name: &str) -> String {
     format!("{name}:{:?}", TypeId::of::<T>())
 }
 
+/// Hashes a held key a word at a time.
+///
+/// A key is chosen by the code that holds under it, never by input, so it
+/// needs no defence against chosen collisions; and code that reads a tree
+/// looks its node cache up for every operation, where hashing the key a
+/// byte-round at a time was a measurable share of a point read.
+#[derive(Default)]
+struct KeyHasher(u64);
+
+impl KeyHasher {
+    const SEED: u64 = 0x51_7c_c1_b7_27_22_0a_95;
+
+    fn add(&mut self, word: u64) {
+        self.0 = (self.0.rotate_left(5) ^ word).wrapping_mul(Self::SEED);
+    }
+}
+
+impl Hasher for KeyHasher {
+    fn write(&mut self, bytes: &[u8]) {
+        let (words, rest) = bytes.as_chunks::<8>();
+        for word in words {
+            self.add(u64::from_le_bytes(*word));
+        }
+        if !rest.is_empty() {
+            let mut chunk = [0u8; 8];
+            chunk[..rest.len()].copy_from_slice(rest);
+            self.add(u64::from_le_bytes(chunk));
+        }
+    }
+
+    fn write_u8(&mut self, byte: u8) {
+        self.add(u64::from(byte));
+    }
+
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
 /// A map of held handles, for an environment to embed and delegate
 /// [`Holds`] to. Clones share the map.
 #[derive(Clone, Default)]
-pub struct Holdings(Arc<Mutex<HashMap<String, Held>>>);
+pub struct Holdings(Arc<Mutex<HashMap<String, Held, BuildHasherDefault<KeyHasher>>>>);
 
 impl std::fmt::Debug for Holdings {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

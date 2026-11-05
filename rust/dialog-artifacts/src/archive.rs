@@ -3,70 +3,47 @@
 //! An artifact tree touches two kinds of content-addressed bytes: the tree's
 //! own nodes (blocks) and the values too large to live in a key (blobs,
 //! spilled values). They share an address space, a BLAKE3 hash, but not a
-//! meaning, so they never share a path either. Nodes load through the tree's
-//! [`LoadBlock`]; spilled values load through [`LoadBlob`]. A batch stages what it
-//! writes in an [`ArchiveDelta`] that keeps the two lanes apart, and its
-//! commit writes each lane where that lane belongs.
+//! meaning, so they never share a path either. A tree's nodes are blocks of
+//! its catalog, read through [`archive::Load`]; spilled values are blobs of
+//! the catalog's archive, read through [`blob::Load`] ([`load_spill`]). A
+//! batch stages what it writes in an [`ArchiveDelta`] that keeps the two
+//! lanes apart, and its commit writes each lane where that lane belongs.
 
-use crate::tree::ArtifactNodes;
 use async_trait::async_trait;
-use dialog_capability::{Command, Provider};
-use dialog_common::{Blake3Hash, Buffer, ConditionalSync};
-use dialog_search_tree::{Delta, DialogSearchTreeError, MemoryBlocks, NodeCache, Nodes};
-
-pub use dialog_search_tree::LoadBlock;
+use dialog_capability::{Capability, Provider};
+use dialog_common::{Blake3Hash, Buffer, ConditionalSync, Held, Holds};
+use dialog_effects::archive::prelude::ArchiveScope;
+use dialog_effects::archive::{self, ArchiveError, Get};
+use dialog_effects::blob;
+use dialog_search_tree::Delta;
 
 use crate::DialogArtifactsError;
-#[cfg(test)]
-use dialog_search_tree::helpers::ObservingBlocks;
 
-/// Command for loading a spilled value's bytes by the hash its key carries.
+/// The spilled value stored under `hash` in `archive`'s blobs, loaded
+/// through `env` and checked: `None` when `env` can reach no such value.
 ///
-/// The spilled-value counterpart of the tree's [`LoadBlock`]: the same hash,
-/// a different lane. `Ok(None)` means the provider cannot reach the blob.
-/// [`perform`](Self::perform) checks the bytes against the hash asked for,
-/// so a provider never has to be trusted to return the right ones.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LoadBlob {
-    /// The content hash of the blob to load.
-    pub hash: Blake3Hash,
-}
-
-impl LoadBlob {
-    /// Load the blob stored under `hash`.
-    pub fn new(hash: Blake3Hash) -> Self {
-        Self { hash }
-    }
-
-    /// Perform this load against an env that can provide it, refusing bytes
-    /// that do not hash to the blob asked for.
-    pub async fn perform<Env>(self, env: &Env) -> Result<Option<Buffer>, DialogArtifactsError>
-    where
-        Env: Provider<LoadBlob> + ConditionalSync,
+/// It performs [`blob::Load`], so an environment that knows where the
+/// archive's subject keeps its blobs besides the local store hydrates a
+/// local miss. Bytes that do not hash to `hash` fail the read rather than
+/// reading as absent.
+pub async fn load_spill<Env>(
+    env: &Env,
+    archive: &ArchiveScope,
+    hash: &Blake3Hash,
+) -> Result<Option<Buffer>, DialogArtifactsError>
+where
+    Env: Provider<blob::Load> + ConditionalSync + ?Sized,
+{
+    match blob::Load::new(archive.clone(), hash.clone())
+        .perform(env)
+        .await?
     {
-        let hash = self.hash.clone();
-        match env.execute(self).await? {
-            Some(blob) if blob.blake3_hash() != &hash => Err(DialogArtifactsError::InvalidValue(
-                format!("spilled value {hash} does not hash to its reference"),
-            )),
-            loaded => Ok(loaded),
-        }
+        Some(blob) if blob.blake3_hash() != hash => Err(DialogArtifactsError::InvalidValue(
+            format!("spilled value {hash} does not hash to its reference"),
+        )),
+        loaded => Ok(loaded),
     }
 }
-
-impl Command for LoadBlob {
-    type Input = Self;
-    type Output = Result<Option<Buffer>, DialogArtifactsError>;
-}
-
-/// An environment an artifact tree can be read from: it loads nodes and
-/// spilled values.
-///
-/// Its nodes come through [`Nodes`], so whatever node cache the environment
-/// keeps answers every tree read made through it.
-pub trait ArchiveReader: ArtifactNodes + Provider<LoadBlob> + ConditionalSync {}
-
-impl<Env> ArchiveReader for Env where Env: ArtifactNodes + Provider<LoadBlob> + ConditionalSync {}
 
 /// What a batch of edits stages for its commit: the tree nodes it persisted
 /// (blocks) and the spilled values it wrote (blobs), each under its content
@@ -150,19 +127,24 @@ impl ArchiveDelta {
     }
 }
 
-/// Reads an [`ArchiveDelta`]'s staged lanes over an environment: a node or
-/// spilled value the batch staged is served from its lane, and everything
-/// else from the environment.
+/// An environment that reads an [`ArchiveDelta`]'s staged lanes before the
+/// environment it is over: a node or spilled value the batch staged is
+/// served from its lane, and everything else from the environment.
 ///
 /// This is what lets a batch keep editing a tree it persisted but has not
-/// flushed, and read the values it spilled before its commit writes them.
+/// flushed, and read the values it spilled, before its commit writes them.
+/// A persist keeps the nodes it seals in the node cache the environment
+/// holds, but an environment may hold none, and a held cache may let a
+/// sealed node go under its budget before the flush: the staged blocks are
+/// what a batch reads them back from then. It holds what the environment
+/// holds, so a tree read through it finds the environment's node cache.
 #[derive(Clone)]
-pub struct DeltaOverlay<'a, Env> {
+pub struct DeltaOverlay<'a, Env: ?Sized> {
     delta: ArchiveDelta,
     env: &'a Env,
 }
 
-impl<'a, Env> DeltaOverlay<'a, Env> {
+impl<'a, Env: ?Sized> DeltaOverlay<'a, Env> {
     /// Reads `delta`'s staged lanes before `env`. The overlay shares the
     /// delta, so it also sees what is staged after it was made.
     pub fn new(delta: &ArchiveDelta, env: &'a Env) -> Self {
@@ -171,81 +153,83 @@ impl<'a, Env> DeltaOverlay<'a, Env> {
             env,
         }
     }
+
+    /// The environment underneath.
+    pub fn env(&self) -> &'a Env {
+        self.env
+    }
+}
+
+impl<Env: Holds + ?Sized> Holds for DeltaOverlay<'_, Env> {
+    fn held(&self, key: &str) -> Option<Held> {
+        self.env.held(key)
+    }
+
+    fn hold(&self, key: String, handle: Held) {
+        self.env.hold(key, handle)
+    }
+
+    fn held_or(&self, key: &str, make: &dyn Fn() -> Held) -> Held {
+        self.env.held_or(key, make)
+    }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Env> Provider<LoadBlock> for DeltaOverlay<'_, Env>
+impl<Env> Provider<archive::Load> for DeltaOverlay<'_, Env>
 where
-    Env: Provider<LoadBlock> + ConditionalSync,
+    Env: Provider<archive::Load> + ConditionalSync + ?Sized,
 {
-    async fn execute(&self, load: LoadBlock) -> Result<Option<Buffer>, DialogSearchTreeError> {
-        if let Some(block) = self.delta.block(&load.hash) {
+    async fn execute(&self, load: archive::Load) -> Result<Option<Buffer>, ArchiveError> {
+        if let Some(block) = self.delta.block(&load.digest) {
             return Ok(Some(block));
         }
         load.perform(self.env).await
     }
 }
 
-/// The overlay keeps what its environment keeps: a node read through it is
-/// answered from the environment's node cache first, then from the staged
-/// blocks, then from the environment's own.
-impl<K, V, Env> Nodes<K, V> for DeltaOverlay<'_, Env>
+/// A staged block is one the replica minted, so a local-only read finds it
+/// as it finds what the local archive holds.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<Env> Provider<Get> for DeltaOverlay<'_, Env>
 where
-    Env: Nodes<K, V>,
+    Env: Provider<Get> + ConditionalSync + ?Sized,
 {
-    fn kept(&self) -> Option<&NodeCache<K, V>> {
-        self.env.kept()
+    async fn execute(&self, get: Capability<Get>) -> Result<Option<Vec<u8>>, ArchiveError> {
+        use dialog_effects::archive::prelude::GetExt as _;
+        if let Some(block) = self.delta.block(get.digest()) {
+            return Ok(Some(block.as_ref().to_vec()));
+        }
+        get.perform(self.env).await
     }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Env> Provider<LoadBlob> for DeltaOverlay<'_, Env>
+impl<Env> Provider<blob::Load> for DeltaOverlay<'_, Env>
 where
-    Env: Provider<LoadBlob> + ConditionalSync,
+    Env: Provider<blob::Load> + ConditionalSync + ?Sized,
 {
-    async fn execute(&self, load: LoadBlob) -> Result<Option<Buffer>, DialogArtifactsError> {
-        if let Some(blob) = self.delta.blob(&load.hash) {
+    async fn execute(&self, load: blob::Load) -> Result<Option<Buffer>, ArchiveError> {
+        if let Some(blob) = self.delta.blob(&load.digest) {
             return Ok(Some(blob));
         }
         load.perform(self.env).await
     }
 }
 
-/// Serves spilled values from the same memory the tree's nodes live in, the
-/// way an archive holding both kinds of block does.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<LoadBlob> for MemoryBlocks {
-    async fn execute(
-        &self,
-        LoadBlob { hash }: LoadBlob,
-    ) -> Result<Option<Buffer>, DialogArtifactsError> {
-        Ok(self.get(&hash))
-    }
-}
+#[cfg(any(test, feature = "helpers"))]
+use dialog_search_tree::helpers::Blocks;
 
+#[cfg(any(test, feature = "helpers"))]
 impl ArchiveDelta {
     /// Keeps every staged node and spilled value in `blocks`, emptying both
-    /// lanes: an in-memory stand-in for a commit.
-    pub fn flush_into(&mut self, blocks: &MemoryBlocks) {
+    /// lanes: an in-memory stand-in for a commit. A spilled value is kept
+    /// as a block of the catalog, where a spilled-value read finds it.
+    pub fn flush_into(&mut self, blocks: &Blocks) {
         for block in self.flush_blocks().chain(self.flush_blobs()) {
             blocks.store(block);
         }
-    }
-}
-
-/// Serves spilled values from the observed blocks, so tests can count reads
-/// through both lanes.
-#[cfg(test)]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<LoadBlob> for ObservingBlocks {
-    async fn execute(
-        &self,
-        LoadBlob { hash }: LoadBlob,
-    ) -> Result<Option<Buffer>, DialogArtifactsError> {
-        Ok(LoadBlock::new(hash).perform(self).await?)
     }
 }
