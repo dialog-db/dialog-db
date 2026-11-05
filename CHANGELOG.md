@@ -16,7 +16,7 @@ says how to cut a release.
 
 ### An environment bounds every cache it holds, and spilled values share one budget
 
-Pull request to come.
+[#742](https://github.com/dialog-db/dialog-db/pull/742)
 
 `HeldCaches::builder()` returns a `CacheBudget` that sets the size of
 every cache an environment holds for its repositories: tree nodes and
@@ -29,10 +29,10 @@ the same budget. Nothing configured, every cache keeps the size it had.
 What this changes for you:
 
 - `HeldCaches::builder().nodes(bytes).spills(bytes).entries(n).rules(n)
-  .formulas(n).build()` builds caches that keep to each cap. `entries`
-  bounds each repository's causal verdicts, contexts, revision records and
-  rewritten trees; `rules` bounds the shared rule content (heads, bodies,
-  selecting rules) and query plans. `HeldCaches::new()` and
+  .plans(n).formulas(n).build()` builds caches that keep to each cap.
+  `entries` bounds each repository's causal verdicts, contexts, revision
+  records and rewritten trees; `rules` bounds the shared rule content
+  (heads, bodies, selecting rules) and `plans` the query plans. `HeldCaches::new()` and
   `with_budget(bytes)` are shorthands for the defaults
   (`CacheBudget::default()`), and `HeldCaches::limits()` reads the budget
   back.
@@ -84,8 +84,6 @@ What this changes for you:
 
 Why: a dependency that can only ever be one version across a whole wasm
 module should not be pinned by a library that uses one call of it.
-
-
 
 ### A pull or a push that meets another revision under its own head's version is refused
 

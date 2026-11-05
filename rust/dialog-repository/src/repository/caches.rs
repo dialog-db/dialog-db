@@ -103,7 +103,8 @@ fn scope(repository: &Did) -> Scope {
 ///     .nodes(24 * MIB) // every repository's tree nodes together
 ///     .spills(4 * MIB) // every repository's spilled values together
 ///     .entries(512) // per repository: verdicts, contexts, records, rewrites
-///     .rules(512) // rule content and query plans, for the environment
+///     .rules(512) // rule content, for the environment
+///     .plans(1024) // query plans, for the environment
 ///     .formulas(1024) // formula outputs, for the environment
 ///     .build()
 ///     .hold(env);
@@ -159,10 +160,16 @@ impl CacheBudget {
     }
 
     /// Remember at most `n` entries in each cache of rule content (heads,
-    /// deductive and inductive bodies, selecting rules) and at most `n`
-    /// query plans, for the environment. Zero is raised to one.
+    /// deductive and inductive bodies, selecting rules), for the
+    /// environment. Zero is raised to one.
     pub fn rules(mut self, n: usize) -> Self {
         self.rules = n;
+        self
+    }
+
+    /// Remember at most `n` query plans, for the environment. Zero is
+    /// raised to one.
+    pub fn plans(mut self, n: usize) -> Self {
         self.plans = n;
         self
     }
@@ -1048,6 +1055,7 @@ mod tests {
             .spills(2048)
             .entries(2)
             .rules(3)
+            .plans(4)
             .formulas(5)
             .build();
         caches.hold(&operator);
@@ -1066,7 +1074,7 @@ mod tests {
 
         assert_eq!(caches.budget(), 4096);
         assert_eq!(opened.spills.budget(), 2048);
-        assert_eq!(opened.plans.capacity(), 3);
+        assert_eq!(opened.plans.capacity(), 4);
         let shared = caches.shared.lock().unwrap().clone();
         assert_eq!(shared.content.capacity(), 3);
         assert_eq!(caches.formulas().capacity(), 5);
@@ -1127,6 +1135,7 @@ mod tests {
             .spills(1000)
             .entries(2)
             .rules(3)
+            .plans(4)
             .build();
         caches.hold(&operator);
         let repository = test_repo(&operator, &profile).await;
@@ -1137,7 +1146,7 @@ mod tests {
         let held = snapshot.caches();
         assert_eq!(held.records.capacity(), 2);
         assert_eq!(held.rewrites.capacity(), 2);
-        assert_eq!(held.plans.capacity(), 3);
+        assert_eq!(held.plans.capacity(), 4);
         assert_eq!(held.spills.budget(), 1000);
         held.spills.insert([3; 32], vec![3; 10]);
         assert_eq!(caches.spill_bytes(), 10, "the snapshot's spills are held");
