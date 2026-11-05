@@ -14,6 +14,31 @@ says how to cut a release.
 
 ## Unreleased
 
+### Distinct members inserted between the same neighbours get distinct positions
+
+A position's fractional tail comes from a bias derived from the member's
+identity. The bias was the first six base62 digits of the identity bytes,
+and base62 is a big-endian re-encoding, so those digits depend only on the
+identity's leading bytes and its length. Every `did:key:z6Mk…` entity
+shares both, so every one of them got the same bias (`13lS7E`, or
+`FvVVmY` one character shorter). The bias is now taken from the identity's
+BLAKE3 digest.
+
+What this changes for you:
+
+- `Bias::derive` returns a different bias for the same identity, so
+  `dialog_artifacts::position::insert` and the `dialog/position` formula
+  derive different positions than before for the same member and
+  neighbours. Derivation is still deterministic: every replica on this
+  release derives the same position for the same insert.
+- Two different members inserted into the same slot used to derive the
+  same position, so a relation that keeps one member per position kept
+  only one of them. They now land apart.
+
+Why: the bias exists so distinct members disperse while the same member
+converges. Read off the identity's head it converged for everything, so
+concurrent inserts into one slot collided instead of interleaving.
+
 ### A tree reads its catalog's blocks through `Load` on the env, and the env hydrates
 
 [#735](https://github.com/dialog-db/dialog-db/pull/735), after
@@ -1817,6 +1842,12 @@ thread multiplies whatever it holds by the size of the thread pool.
 
 ### Compatibility and migration
 
+- Positions already stored keep their bytes and their order: nothing is
+  rewritten, and both releases read every position the other writes. Only
+  newly derived positions differ. An older replica and this one derive
+  different positions for the same insert, so the same insert made on both
+  no longer converges to one entry; each still lands between the
+  neighbours it named.
 - Nothing stored or synced changes for the node cache moving to the
   store: trees, nodes and their hashes are the same bytes, nothing is
   rewritten on upgrade, and an older release reads everything this one
