@@ -1508,3 +1508,222 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod index_breakdown {
+    use super::*;
+
+    /// Prints what the in-memory index of the file named by
+    /// `DIALOG_ARCHIVE_INDEX` holds, structure by structure. Run by hand.
+    #[test]
+    #[ignore = "breaks down the index of a file named by DIALOG_ARCHIVE_INDEX"]
+    fn index_breakdown() -> anyhow::Result<()> {
+        let Ok(path) = std::env::var("DIALOG_ARCHIVE_INDEX") else {
+            return Ok(());
+        };
+        let archive = FileArchive::open(&path)?;
+        let state = archive.inner.state.read();
+        let places: usize = state.blocks.values().map(HashMap::len).sum();
+        let capacity: usize = state.blocks.values().map(HashMap::capacity).sum();
+        let kib = |bytes: usize| format!("{:.0} KiB", bytes as f64 / 1024.0);
+        let file = archive.stats().file_bytes as usize;
+        println!("file {}", kib(file));
+        println!(
+            "blocks by catalog and hash: {places} entries, {} slots × {} B = {}",
+            capacity,
+            32 + size_of::<Place>() + 1,
+            kib(capacity * (32 + size_of::<Place>() + 1))
+        );
+        println!(
+            "nodes by id: {} × {} B = {}",
+            state.nodes.capacity(),
+            size_of::<Node>(),
+            kib(state.nodes.capacity() * size_of::<Node>())
+        );
+        println!(
+            "node ids by hash: {} slots × {} B = {}",
+            state.node_ids.capacity(),
+            32 + 4 + 1,
+            kib(state.node_ids.capacity() * 37)
+        );
+        println!(
+            "latest node per lineage: {} entries, {} slots × {} B = {}",
+            state.lineages.len(),
+            state.lineages.capacity(),
+            size_of::<Lineage>() + 4 + 1,
+            kib(state.lineages.capacity() * (size_of::<Lineage>() + 5))
+        );
+        println!(
+            "tokens: {} tokens, where each is and whether it was checked: {}",
+            state.tokens.len(),
+            kib(state.tokens.footprint())
+        );
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod offsets_instead_of_ids {
+    use super::*;
+    use crate::rows::{NONE, Row, Section, sections_of};
+
+    /// What frames would take if rows named tokens and children by file
+    /// offset rather than dense id, written against the same predecessors;
+    /// and what checking every datum once costs. Run by hand on the file
+    /// named by `DIALOG_ARCHIVE_INDEX`.
+    #[test]
+    #[ignore = "measures the file named by DIALOG_ARCHIVE_INDEX"]
+    fn offsets_instead_of_ids() -> anyhow::Result<()> {
+        let Ok(path) = std::env::var("DIALOG_ARCHIVE_INDEX") else {
+            return Ok(());
+        };
+        let archive = FileArchive::open(&path)?;
+        let state = archive.inner.state.read();
+        let token = |id: u32| state.tokens.extent(id).map(|(offset, _)| offset).unwrap();
+        let by_offset = |rows: &Rows| -> Vec<Vec<[u64; 5]>> {
+            sections_of(rows.kind)
+                .iter()
+                .zip(&rows.sections)
+                .map(|(section, rows)| {
+                    rows.iter()
+                        .map(|row| {
+                            let mut out = [0u64; 5];
+                            for field in 0..5 {
+                                out[field] = row[field] as u64;
+                            }
+                            let id = |value: u32| {
+                                if value == NONE {
+                                    u64::MAX
+                                } else {
+                                    token(value)
+                                }
+                            };
+                            match section {
+                                Section::Entries | Section::Ops => {
+                                    for slot in 1..4 {
+                                        if row[slot] != 0 || slot == 1 {
+                                            out[slot] = token(row[slot]);
+                                        }
+                                    }
+                                    out[4] = id(row[4]);
+                                }
+                                Section::Links => {
+                                    out[0] = token(row[0]);
+                                    out[1] = if row[1] == NONE {
+                                        u64::MAX
+                                    } else {
+                                        state.nodes[row[1] as usize].extent.offset
+                                    };
+                                    out[3] = id(row[3]);
+                                }
+                                Section::Buffers => {}
+                            }
+                            out
+                        })
+                        .collect()
+                })
+                .collect()
+        };
+        // Zigzag-delta varint bytes of every column of `rows`, written as
+        // literals: the width of the ids against the width of the offsets.
+        let width = |rows: &[Vec<[u64; 5]>]| -> usize {
+            let mut bytes = 0;
+            for section in rows {
+                for field in 0..5 {
+                    let mut previous = 0i128;
+                    for row in section {
+                        if row[field] == u64::MAX {
+                            continue;
+                        }
+                        let delta = row[field] as i128 - previous;
+                        previous = row[field] as i128;
+                        let zigzag = ((delta << 1) ^ (delta >> 127)) as u128;
+                        bytes += (128 - zigzag.leading_zeros() as usize).max(1).div_ceil(7);
+                    }
+                }
+            }
+            bytes
+        };
+        let (mut ids, mut offsets, mut literal_rows, mut frames) = (0, 0, 0usize, 0usize);
+        for id in 0..state.nodes.len() as u32 {
+            let (rows, _) = archive.rows(&state, &HashMap::new(), id)?;
+            let node = &state.nodes[id as usize];
+            frames += node.extent.len as usize;
+            // Only literal rows carry ids: a frame against a predecessor
+            // copies the rest. Count every row of whole frames, and the rows
+            // a frame against a predecessor does not share with it.
+            let literal: Rows = if node.depth == 0 {
+                (*rows).clone()
+            } else {
+                let mut body = vec![0u8; node.extent.len as usize];
+                read_at(&archive.inner.file, node.extent.offset, &mut body)?;
+                let header = FrameHeader::get(&mut Reader::new(&body))?;
+                let base = archive
+                    .rows(&state, &HashMap::new(), header.base.unwrap())?
+                    .0;
+                Rows {
+                    kind: rows.kind,
+                    sections: rows
+                        .sections
+                        .iter()
+                        .zip(&base.sections)
+                        .map(|(ours, theirs)| {
+                            let known: HashSet<&Row> = theirs.iter().collect();
+                            ours.iter()
+                                .filter(|row| !known.contains(row))
+                                .copied()
+                                .collect()
+                        })
+                        .collect(),
+                }
+            };
+            literal_rows += literal.sections.iter().map(Vec::len).sum::<usize>();
+            let as_ids: Vec<Vec<[u64; 5]>> = literal
+                .sections
+                .iter()
+                .map(|section| {
+                    section
+                        .iter()
+                        .map(|row| {
+                            row.map(|value| {
+                                if value == NONE {
+                                    u64::MAX
+                                } else {
+                                    value as u64
+                                }
+                            })
+                        })
+                        .collect()
+                })
+                .collect();
+            ids += width(&as_ids);
+            offsets += width(&by_offset(&literal));
+        }
+        println!(
+            "frames {} KiB; literal rows {literal_rows}: id columns {} KiB, offset columns {} KiB",
+            frames / 1024,
+            ids / 1024,
+            offsets / 1024
+        );
+
+        let started = std::time::Instant::now();
+        let mut datums = 0;
+        for id in 0..state.tokens.len() as u32 {
+            let bytes = state.tokens.get(id).unwrap();
+            if rkyv::access::<
+                rkyv::Archived<dialog_artifacts::State<dialog_artifacts::Datum>>,
+                rkyv::rancor::Error,
+            >(bytes)
+            .is_ok()
+            {
+                datums += 1;
+            }
+        }
+        println!(
+            "checking every token as a datum: {datums} datums of {} tokens in {:?}",
+            state.tokens.len(),
+            started.elapsed()
+        );
+        Ok(())
+    }
+}
