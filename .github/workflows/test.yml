@@ -42,7 +42,7 @@ jobs:
     steps:
       - uses: cisagov/action-disable-apparmor@v1
       - uses: actions/checkout@v4
-      - uses: wimpysworld/nothing-but-nix@baf7355748bb5651f08b839669d6bb39051b2874 # main before 153c2fb, whose /nix/tmp TMPDIR breaks the Nix installer
+      - uses: wimpysworld/nothing-but-nix@687c797a730352432950c707ab493fcc951818d7 # v10; v11 and main put TMPDIR under /nix/tmp, which breaks the Nix installer
         with:
           root-safe-haven: '16384'
       - uses: cachix/install-nix-action@v31
@@ -83,7 +83,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 2
-      - uses: wimpysworld/nothing-but-nix@baf7355748bb5651f08b839669d6bb39051b2874 # main before 153c2fb, whose /nix/tmp TMPDIR breaks the Nix installer
+      - uses: wimpysworld/nothing-but-nix@687c797a730352432950c707ab493fcc951818d7 # v10; v11 and main put TMPDIR under /nix/tmp, which breaks the Nix installer
         with:
           root-safe-haven: '16384'
       - uses: cachix/install-nix-action@v31
@@ -164,7 +164,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 2
-      - uses: wimpysworld/nothing-but-nix@baf7355748bb5651f08b839669d6bb39051b2874 # main before 153c2fb, whose /nix/tmp TMPDIR breaks the Nix installer
+      - uses: wimpysworld/nothing-but-nix@687c797a730352432950c707ab493fcc951818d7 # v10; v11 and main put TMPDIR under /nix/tmp, which breaks the Nix installer
         with:
           root-safe-haven: '16384'
       - uses: cachix/install-nix-action@v31
@@ -290,7 +290,7 @@ jobs:
       # SEE: https://github.com/actions/runner-images/issues/10015
       - uses: cisagov/action-disable-apparmor@v1
       - uses: actions/checkout@v4
-      - uses: wimpysworld/nothing-but-nix@baf7355748bb5651f08b839669d6bb39051b2874 # main before 153c2fb, whose /nix/tmp TMPDIR breaks the Nix installer
+      - uses: wimpysworld/nothing-but-nix@687c797a730352432950c707ab493fcc951818d7 # v10; v11 and main put TMPDIR under /nix/tmp, which breaks the Nix installer
         with:
           root-safe-haven: '16384'
       - uses: cachix/install-nix-action@v31
