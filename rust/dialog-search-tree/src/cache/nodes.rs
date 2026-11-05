@@ -29,6 +29,67 @@ const HELD: &str = "dialog.nodes";
 /// No slot.
 const NIL: u32 = u32::MAX;
 
+/// The key an environment holds a `NodeCache<Key, Value>` under, made once
+/// per type: a tree looks its cache up for every operation it runs, and
+/// spelling the key ([`held_key`]) each time would cost more than the read
+/// it answers from memory.
+fn key_of<T: std::any::Any>() -> &'static str {
+    use std::any::TypeId;
+    use std::cell::Cell;
+    use std::collections::HashMap;
+    use std::sync::{OnceLock, RwLock};
+
+    static KEYS: OnceLock<RwLock<HashMap<TypeId, &'static str>>> = OnceLock::new();
+    thread_local! {
+        static LAST: Cell<Option<(TypeId, &'static str)>> = const { Cell::new(None) };
+    }
+    let id = TypeId::of::<T>();
+    // Nearly every lookup is of the type the one before it was.
+    if let Some((last, key)) = LAST.with(Cell::get)
+        && last == id
+    {
+        return key;
+    }
+    let keys = KEYS.get_or_init(RwLock::default);
+    let known = keys
+        .read()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .get(&id)
+        .copied();
+    let key = known.unwrap_or_else(|| {
+        keys.write()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .entry(id)
+            // One per cache type a process reads trees of: a handful.
+            .or_insert_with(|| Box::leak(held_key::<T>(HELD).into_boxed_str()))
+    });
+    LAST.with(|last| last.set(Some((id, key))));
+    key
+}
+
+/// The scope a repository's nodes are kept under in an environment's cache
+/// (`Scope::named` of its DID), remembered for the last repository this
+/// thread asked about: nearly every operation reads the repository the one
+/// before it read, and the scope is a hash of its name.
+fn scope_of(subject: &Did) -> Scope {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static LAST: RefCell<Option<(Did, Scope)>> = const { RefCell::new(None) };
+    }
+    LAST.with(|last| {
+        let mut last = last.borrow_mut();
+        match &*last {
+            Some((did, scope)) if did == subject => *scope,
+            _ => {
+                let scope = Scope::named(subject.as_str().as_bytes());
+                *last = Some((subject.clone(), scope));
+                scope
+            }
+        }
+    })
+}
+
 /// Whose nodes a [`NodeCache`] handle reads and writes.
 ///
 /// Two repositories may hold the same node, and a cache they share keeps it
@@ -355,20 +416,20 @@ impl<Key, Value> NodeCache<Key, Value> {
         Key: ConditionalSend + ConditionalSync + 'static,
         Value: ConditionalSend + ConditionalSync + 'static,
     {
-        let key = held_key::<Self>(HELD);
-        let held = match env.held(&key) {
+        let key = key_of::<Self>();
+        let held = match env.held(key) {
             Some(held) => held,
             None => {
-                let made = env.held_or(&key, &|| std::sync::Arc::new(Self::new()));
+                let made = env.held_or(key, &|| std::sync::Arc::new(Self::new()));
                 // An environment that keeps nothing hands back what it was
                 // given and forgets it: a cache per read would cost a read
                 // ahead its landing place, so it gets none.
-                env.held(&key)?;
+                env.held(key)?;
                 made
             }
         };
         held.downcast_ref::<Self>()
-            .map(|cache| cache.scoped(Scope::named(subject.as_str().as_bytes())))
+            .map(|cache| cache.scoped(scope_of(subject)))
     }
 
     /// The node cache `env` holds, if it holds one, without making one: the
@@ -380,9 +441,7 @@ impl<Key, Value> NodeCache<Key, Value> {
         Key: ConditionalSend + ConditionalSync + 'static,
         Value: ConditionalSend + ConditionalSync + 'static,
     {
-        env.held(&held_key::<Self>(HELD))?
-            .downcast_ref::<Self>()
-            .cloned()
+        env.held(key_of::<Self>())?.downcast_ref::<Self>().cloned()
     }
 
     /// Have `env` hold this cache, in place of any it held: what trees read
@@ -393,7 +452,10 @@ impl<Key, Value> NodeCache<Key, Value> {
         Key: ConditionalSend + ConditionalSync + 'static,
         Value: ConditionalSend + ConditionalSync + 'static,
     {
-        env.hold(held_key::<Self>(HELD), std::sync::Arc::new(self.clone()));
+        env.hold(
+            key_of::<Self>().to_string(),
+            std::sync::Arc::new(self.clone()),
+        );
     }
 
     /// A handle on the same cache for `scope`: it sees the nodes `scope`
