@@ -28,8 +28,8 @@ const CACHE_CAPACITY: usize = 2048;
 #[derive(Clone)]
 pub struct Cache<K, V>
 where
-    K: Eq + Hash + Clone + ConditionalSync,
-    V: Clone + ConditionalSync,
+    K: Eq + Hash + Clone + ConditionalSend + ConditionalSync,
+    V: Clone + ConditionalSend + ConditionalSync,
 {
     #[cfg(not(target_arch = "wasm32"))]
     cache: SieveCache<K, V>,
@@ -43,8 +43,8 @@ where
 
 impl<K, V> std::fmt::Debug for Cache<K, V>
 where
-    K: Eq + Hash + Clone + ConditionalSync,
-    V: Clone + ConditionalSync,
+    K: Eq + Hash + Clone + ConditionalSend + ConditionalSync,
+    V: Clone + ConditionalSend + ConditionalSync,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut debug_struct = f.debug_struct("Cache");
@@ -60,8 +60,8 @@ where
 
 impl<K, V> Default for Cache<K, V>
 where
-    K: Eq + Hash + Clone + ConditionalSync,
-    V: Clone + ConditionalSync,
+    K: Eq + Hash + Clone + ConditionalSend + ConditionalSync,
+    V: Clone + ConditionalSend + ConditionalSync,
 {
     fn default() -> Self {
         Self::new()

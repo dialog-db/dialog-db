@@ -7,7 +7,7 @@ use dialog_artifacts::{
 };
 use dialog_capability::Provider;
 use dialog_common::Blake3Hash as NodeHash;
-use dialog_common::{ConditionalSync, Holds};
+use dialog_common::{ConditionalSend, ConditionalSync, Holds};
 use dialog_effects::archive::Get;
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::blob::Load as BlobLoad;
@@ -158,7 +158,13 @@ impl Select<'_> {
         DialogSearchTreeError,
     >
     where
-        S: Provider<ArchiveLoad> + Provider<BlobLoad> + Holds + ConditionalSync + Clone + 's,
+        S: Provider<ArchiveLoad>
+            + Provider<BlobLoad>
+            + Holds
+            + ConditionalSend
+            + ConditionalSync
+            + Clone
+            + 's,
     {
         let tree = self.probed_tree(&store).await?;
         // EAV/AEV/VAE dispatch + per-entry filtering lives in the shared
@@ -177,7 +183,13 @@ impl Select<'_> {
         store: S,
     ) -> Result<ArtifactStream<'s>, DialogSearchTreeError>
     where
-        S: Provider<ArchiveLoad> + Provider<BlobLoad> + Holds + ConditionalSync + Clone + 's,
+        S: Provider<ArchiveLoad>
+            + Provider<BlobLoad>
+            + Holds
+            + ConditionalSend
+            + ConditionalSync
+            + Clone
+            + 's,
     {
         let tree = self.probed_tree(&store).await?;
         Ok(Box::pin(tree.scan(
@@ -208,7 +220,12 @@ impl Select<'_> {
     /// needs. Returns `None` for an empty tree.
     pub async fn estimate<S>(self, store: S) -> Result<Option<u64>, DialogArtifactsError>
     where
-        S: Provider<ArchiveLoad> + Provider<BlobLoad> + Holds + ConditionalSync + Clone,
+        S: Provider<ArchiveLoad>
+            + Provider<BlobLoad>
+            + Holds
+            + ConditionalSend
+            + ConditionalSync
+            + Clone,
     {
         let Some(tree_hash) = self.tree_hash() else {
             return Ok(None);
@@ -229,7 +246,13 @@ impl Select<'_> {
         DialogSearchTreeError,
     >
     where
-        S: Provider<ArchiveLoad> + Provider<BlobLoad> + Holds + ConditionalSync + Clone + 's,
+        S: Provider<ArchiveLoad>
+            + Provider<BlobLoad>
+            + Holds
+            + ConditionalSend
+            + ConditionalSync
+            + Clone
+            + 's,
     {
         let tree = self.probed_tree(&store).await?;
         Ok(tree.scan_owned(store, self.source.spill_cache(), self.selector))
@@ -275,7 +298,13 @@ impl SelectOwned<'_> {
         DialogSearchTreeError,
     >
     where
-        S: Provider<ArchiveLoad> + Provider<BlobLoad> + Holds + ConditionalSync + Clone + 's,
+        S: Provider<ArchiveLoad>
+            + Provider<BlobLoad>
+            + Holds
+            + ConditionalSend
+            + ConditionalSync
+            + Clone
+            + 's,
     {
         self.0.execute_owned(store).await
     }

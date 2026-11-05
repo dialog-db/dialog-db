@@ -14,6 +14,7 @@ says how to cut a release.
 
 ## Unreleased
 
+
 ### A pull or a push that meets another revision under its own head's version is refused
 
 Fixing [#705](https://github.com/dialog-db/dialog-db/issues/705)
@@ -55,6 +56,43 @@ breaking that rule cost a write without an error. A refusal the writer
 can see is the least the replica owes it; keeping both writes by a merge
 cannot be done soundly, since each head's context already claims the
 other's write and the merge would screen it out as removed.
+
+### `ConditionalSync` means `Sync`, not `Send + Sync`
+
+[#734](https://github.com/dialog-db/dialog-db/pull/734)
+
+`dialog_common::ConditionalSync` was `Send + Sync` on native targets, so
+a `ConditionalSync` bound quietly asked for `Send` as well, and a bound
+that needed only `Sync` could not say so. It is now `Sync`, matching its
+name and `dialog_ucan_core::ConditionalSync`; `ConditionalSend` is the
+bound for `Send`. On wasm both remain no bound at all.
+
+What this changes for you:
+
+- A generic bounded only by `ConditionalSync` is no longer known to be
+  `Send` on native. Where your code moves it into a `Send` future, sends
+  an `Arc` of it to a task, or stores it in a type that must be `Send`,
+  write `ConditionalSend + ConditionalSync`.
+- These traits now name both bounds as supertraits, so what implements
+  them and what a bound on them implies is unchanged:
+  `dialog_artifacts::{ValueType, History}`, `dialog_did_web::Fetch`,
+  `dialog_remote_ucan::Presented`, `dialog_peer_iroh::{Channel, Connect}`
+  and the `dialog_peer` helpers' `Meter`.
+- A store a tree reads through by value asks for `ConditionalSend` as
+  well, since it is moved into the read's future: the `S` of the
+  `dialog_artifacts::ArtifactTreeExt` and `BlobIndexExt` methods,
+  `TreeHistory`, `blob_changes` and `spilled_refs`, and of the query
+  builder's `execute`, `execute_owned` and `estimate` in
+  `dialog_repository`. An env passed by reference (`perform(&env)`)
+  still asks only for `ConditionalSync`.
+- `dialog_query::merge_join` and `multi_merge_join` ask for
+  `ConditionalSend + ConditionalSync` on their key function and key, and
+  the `Resolver` and `Revocations` of `dialog_peer_iroh::accept` ask for
+  both, as they always needed.
+
+Why: a bound named `Sync` that also demands `Send` hides what code
+actually needs, and makes a type that is `Sync` but not `Send` impossible
+to accept through it.
 
 ### Distinct members inserted between the same neighbours get distinct positions
 

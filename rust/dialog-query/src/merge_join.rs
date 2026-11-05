@@ -30,7 +30,7 @@ use futures_util::StreamExt;
 use futures_util::future::try_join_all;
 use futures_util::stream::Peekable;
 
-use dialog_common::ConditionalSync;
+use dialog_common::{ConditionalSend, ConditionalSync};
 
 use crate::error::EvaluationError;
 use crate::selection::{Match, Selection};
@@ -57,8 +57,8 @@ pub fn merge_join<'a, L, R, K, Key>(left: L, right: R, key: K) -> impl Selection
 where
     L: Selection + 'a,
     R: Selection + 'a,
-    K: Fn(&Match) -> Option<Key> + ConditionalSync + 'a,
-    Key: Ord + Clone + ConditionalSync + 'a,
+    K: Fn(&Match) -> Option<Key> + ConditionalSend + ConditionalSync + 'a,
+    Key: Ord + Clone + ConditionalSend + ConditionalSync + 'a,
 {
     try_stream! {
         let mut left = Box::pin(left.peekable());
@@ -277,8 +277,8 @@ where
 pub fn multi_merge_join<'a, S, K, Key>(inputs: Vec<S>, key: K) -> impl Selection + 'a
 where
     S: Selection + 'a,
-    K: Fn(&Match) -> Option<Key> + ConditionalSync + 'a,
-    Key: Ord + Clone + ConditionalSync + 'a,
+    K: Fn(&Match) -> Option<Key> + ConditionalSend + ConditionalSync + 'a,
+    Key: Ord + Clone + ConditionalSend + ConditionalSync + 'a,
 {
     try_stream! {
         if inputs.is_empty() {
