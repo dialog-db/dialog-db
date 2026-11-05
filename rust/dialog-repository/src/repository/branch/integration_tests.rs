@@ -21,6 +21,7 @@ use crate::{
 };
 use anyhow::{Context as _, Result};
 use dialog_artifacts::Asset;
+use dialog_artifacts::tree::ArtifactNodeCache;
 use dialog_artifacts::{
     Artifact, ArtifactSelector, Datum, ENTITY_KEY_TAG, HISTORY_KEY_TAG, Instruction, Key, State,
     Value,
@@ -2755,7 +2756,12 @@ async fn it_leaves_an_aborted_push_closure_complete(s3: S3Address) -> Result<()>
         .perform(&operator)
         .await?;
     let head = NodeHash::from(*branch.revision().expect("committed").tree.hash());
-    let index = NetworkedIndex::new(&operator, branch.archive().index(), None);
+    let index = NetworkedIndex::new(
+        &operator,
+        branch.archive().index(),
+        None,
+        ArtifactNodeCache::new(),
+    );
     assert_remote_closure_complete(&operator, index, head, &origin).await?;
 
     Ok(())
@@ -2873,6 +2879,7 @@ async fn it_leaves_an_aborted_bridge_push_closure_complete(s3: S3Address) -> Res
         &operator,
         bridge_branch.archive().index(),
         Some(origin_a.clone()),
+        ArtifactNodeCache::new(),
     );
     assert_remote_closure_complete(&operator, index, head, &origin_b).await?;
 
@@ -4374,7 +4381,7 @@ async fn raw_spill_references<C: dialog_varsig::Principal>(
     revision: &Revision,
 ) -> Result<(HashSet<NodeHash>, HashSet<NodeHash>)> {
     let catalog = ArchiveScope::new(repository.subject()).index();
-    let index = NetworkedIndex::new(env, catalog, None);
+    let index = NetworkedIndex::new(env, catalog, None, ArtifactNodeCache::new());
     let storage = index;
     let tree = Index::from_hash(NodeHash::from(*revision.tree.hash()));
 
@@ -5257,7 +5264,12 @@ async fn it_downloads_serially_while_pushing_concurrently(ucan: UcanS3Address) -
     // root-to-leaf and each level's read names the next, so depth bounds
     // how many fetches CANNOT overlap however wide the fan-out is.
     let head = NodeHash::from(*replica.revision().expect("pulled").tree.hash());
-    let depth_index = NetworkedIndex::new(&replica_operator, replica.archive().index(), None);
+    let depth_index = NetworkedIndex::new(
+        &replica_operator,
+        replica.archive().index(),
+        None,
+        ArtifactNodeCache::new(),
+    );
     let depth_storage = depth_index;
     let mut depth = 0usize;
     let mut at = Some(head);
@@ -5421,8 +5433,11 @@ async fn it_downloads_delegation_blobs_concurrently(ucan: UcanS3Address) -> Resu
     }
     // Device links and space index rows: the ordinary facts that sit
     // beside the delegations on a real profile branch, so the download
-    // walks a tree of mixed content rather than one uniform region.
-    let rows: Vec<_> = (0..160)
+    // walks a tree of mixed content rather than one uniform region, and
+    // enough of them that the tree is many blocks, not a handful: the
+    // guard below on the blocks the download moves must not sit one
+    // block above what a small tree would give.
+    let rows: Vec<_> = (0..480)
         .map(|i| {
             Instruction::Assert(
                 Artifact {
@@ -5511,9 +5526,16 @@ async fn it_downloads_delegation_blobs_concurrently(ucan: UcanS3Address) -> Resu
         "the replica materialized without one remote fetch, so it was not \
          cold and this measured local reads"
     );
+    // What the download moved: the blocks it fetched from the remote.
+    // Local reads are not that measure any more. A block is read from
+    // the local store once, before it hydrates, and never again for the
+    // merge or the walk, so `reads` counts the tree's blocks and nothing
+    // else; on a tree of nine blocks it sat one above a floor of eight
+    // and wasm's scheduling put it on the other side.
     assert!(
-        reads > 8,
-        "the download must move a real tree to measure anything (got {reads})"
+        hydrations > 8,
+        "the download must move a real tree to measure anything (fetched \
+         {hydrations} blocks from the remote, read {reads} locally)"
     );
     assert!(
         blob_reads > 0,

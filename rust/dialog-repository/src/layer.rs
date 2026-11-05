@@ -293,7 +293,7 @@ mod tests {
     use dialog_artifacts::{
         Artifact, Changes, DialogArtifactsError, Entity, Instruction, Update as _, Value,
     };
-    use dialog_search_tree::{MemoryBlocks, NodeCache};
+    use dialog_search_tree::MemoryBlocks;
 
     fn artifact(of: &str, the: &str, is: &str) -> Artifact {
         Artifact {
@@ -410,7 +410,7 @@ mod tests {
 
         let store = MemoryBlocks::new();
         let mut delta = ArchiveDelta::zero();
-        let mut tree = ArtifactTree::empty_with_manifest(manifest, NodeCache::new());
+        let mut tree = ArtifactTree::empty_with_manifest(manifest);
         tree.apply(
             &store,
             &mut delta,

@@ -785,7 +785,7 @@ pub(crate) async fn select_from_source<'a>(
     // the env's own `Hydrate` flight (see `crate::Hydrate`), with
     // every other evaluation in the process.
     let reads: &dyn Reads = env;
-    let store = NetworkedIndex::new(reads, select.catalog(), remote);
+    let store = NetworkedIndex::new(reads, select.catalog(), remote, source.node_cache());
     Ok(select.execute_boxed(store).await?)
 }
 
@@ -1000,7 +1000,12 @@ impl Provider<Estimate> for QueryEnv<'_> {
         for source in &self.sources {
             let select = crate::Select::from_source(source.as_ref(), input.clone());
             let remote = source.as_ref().fallback();
-            let store = NetworkedIndex::new(self.env as &dyn Reads, select.catalog(), remote);
+            let store = NetworkedIndex::new(
+                self.env as &dyn Reads,
+                select.catalog(),
+                remote,
+                source.as_ref().node_cache(),
+            );
             if let Some(estimate) = select.estimate(store).await? {
                 total = Some(total.unwrap_or(0).saturating_add(estimate));
             }
@@ -1052,6 +1057,7 @@ impl<'a> Provider<LoadBlob> for QueryEnv<'a> {
                 self.env as &dyn Reads,
                 source.archive().index(),
                 source.fallback(),
+                source.node_cache(),
             );
             if let Some(bytes) = store.load_blob(&hash).await? {
                 return Ok(Some(bytes));
@@ -1081,8 +1087,12 @@ impl<'a> Provider<LoadBlock> for QueryEnv<'a> {
         for source in &self.sources {
             let source = source.as_ref();
             let remote = source.fallback();
-            let store =
-                NetworkedIndex::new(self.env as &dyn Reads, source.archive().index(), remote);
+            let store = NetworkedIndex::new(
+                self.env as &dyn Reads,
+                source.archive().index(),
+                remote,
+                source.node_cache(),
+            );
             let cache = source.node_cache();
             if let Some(node) = cache.get_cached(&load.hash) {
                 return Ok(Some(node.buffer().clone()));
@@ -1168,10 +1178,10 @@ impl<'a> QueryEnv<'a> {
                 }
                 Err(error) => return Err(error),
             };
-            let standing = Standing {
-                version: row.standing(),
-                cause: Claim::from(artifact.clone()).cause().clone(),
-            };
+            let standing = Standing::new(
+                row.standing(),
+                Claim::from(artifact.clone()).cause().clone(),
+            );
             artifacts.push((artifact, standing));
         }
         Ok(artifacts)
@@ -1755,11 +1765,10 @@ impl<'a> QueryEnv<'a> {
     /// Whether some rule derives the relation `the` names, as
     /// [`resolve_bundle`](Self::resolve_bundle) would find one for the
     /// attribute concept over it: a built-in, or a rule under the
-    /// relation's `derives` key on any layer, with the rules installed
-    /// before the index existed folded into the committed key. Only the
-    /// index is read from the key the attribute spells; no concept is
-    /// described or hashed and no body is hydrated, which is what a
-    /// commit asks once per relation it writes.
+    /// relation's `derives` key on any layer. Only the index is read
+    /// from the key the attribute spells; no concept is described or
+    /// hashed and no body is hydrated, which is what a commit asks once
+    /// per relation it writes.
     pub(crate) async fn rules_derive(
         &self,
         the: &ArtifactsRelation,
@@ -1801,12 +1810,12 @@ impl<'a> QueryEnv<'a> {
     /// attributes besides the engine, so its rules install as written.
     /// An attribute concept is the relation of its attribute: the
     /// implicit scan plus the head of every rule deriving the
-    /// attribute, found by the `derives` index, by the built-ins, and,
-    /// for rules installed before the index existed, by the concept
-    /// they conclude. Any other concept selects: its rule reads each
-    /// derived attribute through the attribute concept and the rest
-    /// from stored facts, and a rule concluding exactly this concept
-    /// without a `derives` index installs as written beside it.
+    /// attribute, found by the `derives` index and by the built-ins.
+    /// Any other concept selects: its rule reads each derived attribute
+    /// through the attribute concept and the rest from stored facts, so
+    /// a rule written against a wider or narrower concept still answers
+    /// the attributes it derives. Neither path reads a rule's
+    /// `conclusion` (see [`Index`]).
     #[tracing::instrument(skip_all, name = "resolve_bundle")]
     async fn resolve_bundle(
         &self,
@@ -1844,10 +1853,8 @@ impl<'a> QueryEnv<'a> {
             }
             // The rules deriving each relation the field reads, found
             // by the `derives` index, whatever type or pick this read
-            // declares over the relation. A rule installed before the
-            // index existed concluded the attribute concept of the
-            // relation itself, read under no pick: that is the
-            // entity it is found by.
+            // declares over the relation: the key is the relation's
+            // `on:` entity, spelled from a pick-less read of it.
             for relation in field.descriptor().relations() {
                 let single = ConceptDescriptor::of_attribute(&ConceptFieldDescriptor::required(
                     AttributeDescriptor::over(

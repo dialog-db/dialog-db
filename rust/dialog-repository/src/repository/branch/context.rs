@@ -14,7 +14,6 @@ use dialog_artifacts::history::{
     Context, ContextCache, Held, History, RevisionRecord, Version, Watermark, context_in,
     region_entry, region_writes,
 };
-use dialog_artifacts::tree::ArtifactNodeCache;
 use dialog_artifacts::{ArchiveReader, Datum, DialogArtifactsError, Key, State, context_entry};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_search_tree::Cache;
@@ -52,7 +51,6 @@ pub(crate) async fn published_context<S>(
     head: &Revision,
     contexts: &ContextCache,
     store: &S,
-    cache: &ArtifactNodeCache,
 ) -> Result<Option<Arc<Context>>, DialogArtifactsError>
 where
     S: ArchiveReader + Clone,
@@ -65,8 +63,7 @@ where
         Some(context) => Arc::new(context.clone()),
         None if !head.region => return Ok(None),
         None => {
-            let tree =
-                Index::from_hash_with_cache(NodeHash::from(*head.tree.hash()), cache.clone());
+            let tree = Index::from_hash(NodeHash::from(*head.tree.hash()));
             Arc::new(head.context_from_region(context_in(&tree, store).await?)?)
         }
     };
@@ -120,7 +117,6 @@ pub(crate) async fn head_observes<S>(
     contexts: &ContextCache,
     records: &Cache<Version, RevisionRecord>,
     store: &S,
-    cache: &ArtifactNodeCache,
 ) -> Result<Option<bool>, DialogArtifactsError>
 where
     S: ArchiveReader + Clone,
@@ -143,7 +139,7 @@ where
     {
         return Ok(Some(true));
     }
-    let tree = Index::from_hash_with_cache(NodeHash::from(*head.tree.hash()), cache.clone());
+    let tree = Index::from_hash(NodeHash::from(*head.tree.hash()));
     Ok(Some(
         region_entry(&tree, &version.origin, store)
             .await?
@@ -158,14 +154,13 @@ pub(crate) async fn full_context<S, H>(
     head: &Revision,
     contexts: &ContextCache,
     store: &S,
-    cache: &ArtifactNodeCache,
     history: &H,
 ) -> Result<Arc<Context>, DialogArtifactsError>
 where
     S: ArchiveReader + Clone,
     H: History,
 {
-    match published_context(head, contexts, store, cache).await? {
+    match published_context(head, contexts, store).await? {
         Some(context) => Ok(context),
         None => contexts.context_of(&head.version(), history).await,
     }
@@ -220,7 +215,6 @@ pub(crate) async fn successor<S, H>(
     version: Version,
     contexts: &ContextCache,
     store: &S,
-    cache: &ArtifactNodeCache,
     history: impl FnOnce() -> H,
 ) -> Result<Successor, DialogArtifactsError>
 where
@@ -248,7 +242,7 @@ where
                 context: None,
             });
         }
-        let tree = Index::from_hash_with_cache(NodeHash::from(*parent.tree.hash()), cache.clone());
+        let tree = Index::from_hash(NodeHash::from(*parent.tree.hash()));
         let held = region_entry(&tree, &version.origin, store).await?;
         let ours = Watermark {
             edition: version.edition,
@@ -266,7 +260,7 @@ where
     }
     let before = match remembered {
         Some(context) => context,
-        None => full_context(parent, contexts, store, cache, &history()).await?,
+        None => full_context(parent, contexts, store, &history()).await?,
     };
     let mut context = Context::clone(&before);
     context.record(version);
@@ -318,15 +312,13 @@ where
     let head = source
         .revision()
         .ok_or_else(|| DialogArtifactsError::InvalidKey("the line has no head".into()))?;
-    let store = NetworkedIndex::new(env, source.archive().index(), source.fallback());
-    full_context(
-        &head,
-        &source.contexts(),
-        &store,
-        &source.node_cache(),
-        &source.history(env),
-    )
-    .await
+    let store = NetworkedIndex::new(
+        env,
+        source.archive().index(),
+        source.fallback(),
+        source.node_cache(),
+    );
+    full_context(&head, &source.contexts(), &store, &source.history(env)).await
 }
 
 /// Check what `source`'s head keeps in its tree's context region, as a
@@ -358,8 +350,13 @@ where
         head.region && head.context.is_none(),
         "{what}: the head keeps its context in its tree's region"
     );
-    let store = NetworkedIndex::new(env, source.archive().index(), source.fallback());
-    let tree = Index::from_hash_with_cache(NodeHash::from(*head.tree.hash()), source.node_cache());
+    let store = NetworkedIndex::new(
+        env,
+        source.archive().index(),
+        source.fallback(),
+        source.node_cache(),
+    );
+    let tree = Index::from_hash(NodeHash::from(*head.tree.hash()));
     let raw = context_in(&tree, &store).await?;
     let read = head.context_from_region(raw.clone())?;
     let walked = context_of(&head.version(), &source.history(env)).await?;

@@ -51,7 +51,7 @@ async fn build<D: Distribution>(
             .insert(*k, v.to_vec(), &storage)
             .await
             .unwrap()
-            .persist(&mut delta)
+            .persist(&mut delta, &storage)
             .unwrap();
         // Flush after each persist so the next edit can load the nodes this persist created.
         for (_, buffer) in delta.flush() {

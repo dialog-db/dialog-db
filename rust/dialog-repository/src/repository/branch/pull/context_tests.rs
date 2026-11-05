@@ -771,7 +771,12 @@ async fn it_answers_observes_after_a_takeover_at_zero_reads() -> Result<()> {
         .clone()
         .expect("the joiner adopted a head")
         .version();
-    let store = NetworkedIndex::new(&device, joiner.archive().index(), joiner.fallback());
+    let store = NetworkedIndex::new(
+        &device,
+        joiner.archive().index(),
+        joiner.fallback(),
+        ArtifactNodeCache::new(),
+    );
     device.reset();
     let seen = head_observes(
         &ours,
@@ -779,7 +784,6 @@ async fn it_answers_observes_after_a_takeover_at_zero_reads() -> Result<()> {
         &ContextCache::new(),
         &joiner.records(),
         &store,
-        &ArtifactNodeCache::new(),
     )
     .await?;
     assert_eq!(seen, Some(true));
@@ -789,15 +793,7 @@ async fn it_answers_observes_after_a_takeover_at_zero_reads() -> Result<()> {
         "the record answers: {:?}",
         device.snapshot()
     );
-    let seen = head_observes(
-        &ours,
-        &theirs,
-        &ContextCache::new(),
-        &Cache::new(),
-        &store,
-        &ArtifactNodeCache::new(),
-    )
-    .await?;
+    let seen = head_observes(&ours, &theirs, &ContextCache::new(), &Cache::new(), &store).await?;
     assert_eq!(seen, Some(true));
     assert!(
         device.block_reads() > 0,

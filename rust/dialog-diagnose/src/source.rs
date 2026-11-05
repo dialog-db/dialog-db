@@ -7,7 +7,10 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use dialog_artifacts::{Artifact, DialogArtifactsError, Index, Instruction, LoadBlob};
+use dialog_artifacts::tree::ArtifactNodeCache;
+use dialog_artifacts::{
+    Artifact, Datum, DialogArtifactsError, Index, Instruction, Key, LoadBlob, State,
+};
 use dialog_capability::{Provider, Subject};
 use dialog_common::{Blake3Hash, Buffer, ConditionalSend};
 use dialog_effects::archive::prelude::CatalogScope;
@@ -15,7 +18,7 @@ use dialog_effects::storage::Location;
 use dialog_peer::helpers::{open_peer, test_storage, unique_name};
 use dialog_peer::{Peer, Session};
 use dialog_repository::{LocalIndex, RepositoryExt as _};
-use dialog_search_tree::{DialogSearchTreeError, LoadBlock};
+use dialog_search_tree::{DialogSearchTreeError, LoadBlock, Nodes};
 use dialog_storage::provider::storage::VolatileSpace;
 use futures_util::{Stream, StreamExt as _};
 
@@ -25,16 +28,27 @@ type DiagnoseSession = Peer<VolatileSpace, Session>;
 /// Loads the explored branch's tree nodes and spilled values from its
 /// archive catalog, through the session the branch was loaded by.
 ///
-/// Clones share the session, so every background worker can hold one.
+/// It keeps the nodes it reads for the whole session in one node cache, so
+/// every view (the hierarchy, the analysis, the artifact listing) reads a
+/// node from the archive once. Clones share the session and the cache, so
+/// every background worker can hold one.
 #[derive(Clone)]
 pub struct Blocks {
     session: Arc<DiagnoseSession>,
     catalog: CatalogScope,
+    nodes: ArtifactNodeCache,
 }
 
 impl Blocks {
     fn index(&self) -> LocalIndex<'_, DiagnoseSession> {
-        LocalIndex::new(&self.session, self.catalog.clone())
+        LocalIndex::new(&self.session, self.catalog.clone(), self.nodes.clone())
+    }
+}
+
+/// Tree nodes are read through the session's node cache.
+impl Nodes<Key, State<Datum>> for Blocks {
+    fn kept(&self) -> Option<&ArtifactNodeCache> {
+        Some(&self.nodes)
     }
 }
 
@@ -107,6 +121,7 @@ where
         blocks: Blocks {
             catalog: branch.archive().index(),
             session: Arc::new(session),
+            nodes: ArtifactNodeCache::new(),
         },
     })
 }

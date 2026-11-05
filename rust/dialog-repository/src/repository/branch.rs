@@ -435,6 +435,32 @@ impl Branch {
         self.sharing(self.tracked().pushes(&self.subject()))
     }
 
+    /// `upstream`, reaching its peer through the record of the host's
+    /// connection to it when it is a remote the branch has connected to.
+    fn sharing_one(&self, upstream: Upstream) -> Upstream {
+        let Upstream::Remote {
+            remote,
+            branch,
+            tree,
+        } = upstream
+        else {
+            return upstream;
+        };
+        let answers = self
+            .answers
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let remote = match answers.get(remote.peer()) {
+            Some(answered) => remote.sharing(answered.clone()),
+            None => remote,
+        };
+        Upstream::Remote {
+            remote,
+            branch,
+            tree,
+        }
+    }
+
     /// `upstreams`, with each remote reaching its peer through the record
     /// of the host's connection to it, where the branch has connected.
     pub(crate) fn sharing(&self, upstreams: Upstreams) -> Upstreams {
@@ -497,11 +523,22 @@ impl Branch {
     /// Where a read of content this branch holds by reference falls back
     /// to: an upstream at a peer, or else a peer this branch pulled from
     /// once without tracking it, whose tree it may have adopted unread.
+    ///
+    /// Every read asks this, so it finds the one route it needs rather
+    /// than building every upstream: building one derives its sync target,
+    /// a hash, and gathering them compares each pair.
     pub(crate) fn fallback(&self) -> RemoteFallback {
-        match self.upstreams().fallback() {
-            RemoteFallback::None => self.tracked().synced_with(&self.subject()).fallback(),
-            fallback => fallback,
+        let tracked = self.tracked();
+        let host = self.subject();
+        if let Some(route) = tracked.first_remote_route() {
+            return self.sharing_one(route.upstream(&host, None)).fallback();
         }
+        tracked
+            .synced
+            .iter()
+            .map(|synced| synced.route.upstream(&host, None).fallback())
+            .find(|fallback| !matches!(fallback, RemoteFallback::None))
+            .unwrap_or(RemoteFallback::None)
     }
 
     /// Every upstream, pulled from or pushed to.

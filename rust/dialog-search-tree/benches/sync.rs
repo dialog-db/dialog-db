@@ -90,6 +90,9 @@ impl CountingBackend {
     }
 }
 
+/// Keeps nothing, so every node read is a counted block read.
+impl<Key, Value> dialog_search_tree::Nodes<Key, Value> for CountingBackend {}
+
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Provider<LoadBlock> for CountingBackend {
@@ -137,7 +140,7 @@ async fn build_base(base_size: usize) -> (Tree, Storage) {
             .insert(*key, key.to_vec(), &storage)
             .await
             .unwrap()
-            .persist(&mut delta)
+            .persist(&mut delta, &storage)
             .unwrap();
         flush_counting(&mut delta, &mut storage).await;
     }
@@ -171,7 +174,7 @@ async fn advance_persistent(base: &Tree, keys: &[[u8; 16]], storage: &mut Storag
             .insert(*key, key.to_vec(), storage)
             .await
             .unwrap()
-            .persist(&mut delta)
+            .persist(&mut delta, storage)
             .unwrap();
         churn += flush_counting(&mut delta, storage).await;
     }
@@ -198,7 +201,7 @@ async fn advance_hitchhiker(base: &Tree, keys: &[[u8; 16]], storage: &mut Storag
         hh = hh.insert(*key, key.to_vec(), storage).await.unwrap();
     }
     let mut delta = Delta::zero();
-    let root = hh.persist(&mut delta).unwrap();
+    let root = hh.persist(&mut delta, storage).unwrap();
     let churn = flush_counting(&mut delta, storage).await;
     (Tree::from_hash(root), churn)
 }

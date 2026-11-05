@@ -240,7 +240,7 @@ where
 {
     let source = source.into();
     let remote = source.fallback();
-    NetworkedIndex::erased(env, source.archive().index(), remote)
+    NetworkedIndex::erased(env, source.archive().index(), remote, source.node_cache())
 }
 
 /// The size of the content the line's current tree vouches for under `hash`,

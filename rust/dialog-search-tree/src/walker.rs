@@ -1,3 +1,4 @@
+use crate::Nodes;
 use std::{
     collections::HashSet,
     future::Future,
@@ -7,7 +8,6 @@ use std::{
 };
 
 use async_stream::try_stream;
-use dialog_capability::Provider;
 use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync};
 use futures_core::Stream;
 use futures_util::{StreamExt as _, stream::FuturesUnordered};
@@ -23,7 +23,7 @@ use rkyv::{
 use std::sync::Arc;
 
 use crate::{
-    Accessor, DecodedKeys, DialogSearchTreeError, Entry, Key, Link, LoadBlock, NodeBody, NoveltyOp,
+    Accessor, DecodedKeys, DialogSearchTreeError, Entry, Key, Link, NodeBody, NoveltyOp,
     PersistentNode, Value, into_owned,
 };
 
@@ -392,7 +392,7 @@ where
     ) -> impl Stream<Item = Result<Entry<Key, Value>, DialogSearchTreeError>> + ConditionalSend
     where
         R: RangeBounds<Key> + ConditionalSend,
-        Env: Provider<LoadBlock> + ConditionalSync,
+        Env: Nodes<Key, Value>,
     {
         // A thin adapter, not another generator: wrapping the walk in a
         // second `try_stream!` layer measurably bloats every future that
@@ -415,7 +415,7 @@ where
     ) -> impl Stream<Item = Result<Entry<KeyHandle, Value>, DialogSearchTreeError>> + ConditionalSend
     where
         R: RangeBounds<Key> + ConditionalSend,
-        Env: Provider<LoadBlock> + ConditionalSync,
+        Env: Nodes<Key, Value>,
     {
         self.stream_scan::<R, Env, KeyHandle>(range, accessor)
     }
@@ -430,7 +430,7 @@ where
     ) -> impl Stream<Item = Result<Entry<Out, Value>, DialogSearchTreeError>> + ConditionalSend
     where
         R: RangeBounds<Key> + ConditionalSend,
-        Env: Provider<LoadBlock> + ConditionalSync,
+        Env: Nodes<Key, Value>,
         Out: ScanKey + 'static,
     {
         try_stream! {
@@ -445,7 +445,7 @@ where
                 Bound::Unbounded => <Key as self::Key>::min(),
             };
             let Some(search_result) = self
-                .search(&start_key, accessor.clone(), SearchOptions::default())
+                .search(&start_key, accessor, SearchOptions::default())
                 .await?
             else {
                 return;
@@ -490,10 +490,15 @@ where
                             Bound::Excluded(bound) => Bound::Excluded(bound.as_ref()),
                             Bound::Unbounded => Bound::Unbounded,
                         })?;
-                        for sibling in (child_index + 1)..visitable {
-                            let hash = index.hash_at(sibling)?.clone();
-                            if queued.insert(hash.clone()) {
-                                warming.push(accessor.warm(hash));
+                        // A store that keeps nothing has nowhere for a
+                        // read-ahead to land: the walk would read each
+                        // sibling twice, so it reads them as it reaches them.
+                        if accessor.keeps() {
+                            for sibling in (child_index + 1)..visitable {
+                                let hash = index.hash_at(sibling)?.clone();
+                                if queued.insert(hash.clone()) {
+                                    warming.push(accessor.warm(hash));
+                                }
                             }
                         }
 
@@ -703,7 +708,7 @@ where
         options: SearchOptions,
     ) -> Result<Option<SearchResult<Key, Value>>, DialogSearchTreeError>
     where
-        Env: Provider<LoadBlock> + ConditionalSync,
+        Env: Nodes<Key, Value>,
     {
         let Some(root) = &self.root else {
             return Ok(None);
@@ -839,7 +844,7 @@ where
             Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
         + ConditionalSync,
-    Env: Provider<LoadBlock> + ConditionalSync,
+    Env: Nodes<Key, Value>,
 {
     // Only prefetch when the caller's key matches the leaf's last entry;
     // boundary-delete overflow can't happen otherwise.
@@ -1089,9 +1094,9 @@ mod walker_novelty_tests {
                 .insert(key, value.clone(), &storage)
                 .await?;
             let mut delta = Delta::zero();
-            let root = buffered.persist(&mut delta)?;
+            let root = buffered.persist(&mut delta, &storage)?;
             settle(&mut delta, &mut storage).await?;
-            tree = Tree::from_hash_with_cache(root, Default::default());
+            tree = Tree::from_hash(root);
 
             expected.retain(|(k, _)| *k != key);
             expected.push((key, value));
@@ -1158,9 +1163,9 @@ mod walker_novelty_tests {
                     expected.insert(key.to_be_bytes(), value);
                 }
                 let mut delta = Delta::zero();
-                let root = buffered.persist(&mut delta)?;
+                let root = buffered.persist(&mut delta, &storage)?;
                 settle(&mut delta, &mut storage).await?;
-                tree = Tree::from_hash_with_cache(root, Default::default());
+                tree = Tree::from_hash(root);
 
                 let mut seen = Vec::new();
                 {
@@ -1209,7 +1214,7 @@ mod walker_novelty_tests {
                     .edit()
                     .insert(key.to_be_bytes(), key.to_be_bytes().to_vec(), &storage)
                     .await?
-                    .persist(&mut delta)?;
+                    .persist(&mut delta, &storage)?;
                 settle(&mut delta, &mut storage).await?;
             }
 
@@ -1235,9 +1240,9 @@ mod walker_novelty_tests {
             }
 
             let mut delta = Delta::zero();
-            let buffered_root = buffered.persist(&mut delta)?;
+            let buffered_root = buffered.persist(&mut delta, &storage)?;
             settle(&mut delta, &mut storage).await?;
-            let buffered_tree = Tree::from_hash_with_cache(buffered_root, Default::default());
+            let buffered_tree = Tree::from_hash(buffered_root);
 
             let mut delta = Delta::zero();
             let canonical_tree = canonical.canonicalize(&storage, &mut delta).await?;
@@ -1323,7 +1328,7 @@ mod prefetch_tests {
                 .await?;
         }
 
-        let tree = edit.persist(&mut delta)?;
+        let tree = edit.persist(&mut delta, storage)?;
         for (_, buffer) in delta.flush() {
             storage.store(buffer);
         }
@@ -1356,7 +1361,10 @@ mod prefetch_tests {
 
         let mut storage = ObservingBlocks::new();
         let tree = built_tree(&mut storage).await?;
-        let accessor = crate::Accessor::new(tree.node_cache(), &storage);
+        // The read-ahead and the reader share one node cache, as a tree's
+        // reads through one store do.
+        let store = crate::Cached::new(crate::NodeCache::new(), &storage);
+        let accessor = crate::Accessor::new(&store);
 
         // The root's second child, and a key from its leftmost leaf.
         let root = load(&storage, tree.root()).await?;
@@ -1380,7 +1388,7 @@ mod prefetch_tests {
         let mut context = Context::from_waker(waker);
         assert!(matches!(warm.as_mut().poll(&mut context), Poll::Pending));
 
-        let read = tree.get(&key, &storage);
+        let read = tree.get(&key, &store);
         let value = tokio::time::timeout(std::time::Duration::from_secs(2), read)
             .await
             .expect("a reader must not wait on a read-ahead nobody drives")?;
@@ -1396,7 +1404,9 @@ mod prefetch_tests {
         let backend = storage.clone();
         backend.reset();
 
-        let entries: Vec<_> = tree.stream(&storage).try_collect().await?;
+        // A cold node cache the read-aheads land in.
+        let store = crate::Cached::new(crate::NodeCache::new(), &storage);
+        let entries: Vec<_> = tree.stream(&store).try_collect().await?;
 
         assert_eq!(entries.len() as u32, ENTRIES);
         assert!(
@@ -1530,7 +1540,9 @@ mod prefetch_tests {
         }
         let boundary = first_key_under(&storage, index.hash_at(1)?.clone()).await?;
 
-        let mut parked = std::pin::pin!(tree.stream(&storage));
+        // One store, so the two scans share its node cache.
+        let store = crate::Cached::new(crate::NodeCache::new(), &storage);
+        let mut parked = std::pin::pin!(tree.stream(&store));
         loop {
             let entry = parked
                 .try_next()
@@ -1545,7 +1557,7 @@ mod prefetch_tests {
             "scan A holds read-aheads in flight while parked"
         );
 
-        let scan = tree.stream(&storage).try_collect::<Vec<_>>();
+        let scan = tree.stream(&store).try_collect::<Vec<_>>();
         let entries = tokio::time::timeout(std::time::Duration::from_secs(2), scan)
             .await
             .expect("a scan must not wait on another scan's read-ahead")?;

@@ -141,7 +141,7 @@ impl<'a> SourceRef<'a> {
     /// The remote block reads fall back to on a local miss: the first
     /// peer among a branch's upstreams, as last resolved (a branch that
     /// tracks a peer must hydrate blocks it holds by reference); none for
-    /// a snapshot.
+    /// a snapshot a caller mints, the branch's for a view of its past.
     ///
     /// An upstream whose peer could not be resolved is carried as
     /// [`RemoteFallback::Unavailable`] rather than dropped: reads the
@@ -150,11 +150,12 @@ impl<'a> SourceRef<'a> {
     pub(crate) fn fallback(self) -> RemoteFallback {
         match self {
             SourceRef::Branch(branch) => branch.fallback(),
-            SourceRef::Snapshot(_) => RemoteFallback::None,
+            SourceRef::Snapshot(snapshot) => snapshot.fallback(),
         }
     }
 
-    /// The shared node cache tree reads go through.
+    /// The shared node cache this line's stores keep tree nodes in: what a
+    /// [`NetworkedIndex`] over this line is built with.
     pub(crate) fn node_cache(self) -> ArtifactNodeCache {
         match self {
             SourceRef::Branch(branch) => branch.node_cache(),
@@ -276,11 +277,11 @@ impl<'a> SourceRef<'a> {
             + 'static,
     {
         let remote = self.fallback();
-        let store = NetworkedIndex::new(env, self.archive().index(), remote);
+        let store = NetworkedIndex::new(env, self.archive().index(), remote, self.node_cache());
         let history = match self.root() {
-            Some(root) => TreeHistory::from_root_with_cache(&root, store, self.node_cache()),
+            Some(root) => TreeHistory::from_root(&root, store),
             // No revision, no tree, no records.
-            None => TreeHistory::empty_with_cache(store, self.node_cache()),
+            None => TreeHistory::empty(store),
         };
         history.with_record_cache(self.records())
     }

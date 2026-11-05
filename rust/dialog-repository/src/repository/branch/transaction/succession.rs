@@ -350,10 +350,10 @@ async fn claims_of(
     for row in rows {
         let artifact = row.to_owned().map_err(|error| failed(&error))?;
         claims.push(Candidate {
-            standing: Some(Standing {
-                version: row.standing(),
-                cause: Claim::from(artifact.clone()).cause().clone(),
-            }),
+            standing: Some(Standing::new(
+                row.standing(),
+                Claim::from(artifact.clone()).cause().clone(),
+            )),
             value: artifact.is,
             claim: row.key().is_some(),
         });
@@ -569,10 +569,7 @@ impl Cell {
         // tie among them falls to the value, as it does in every read
         // and in the tree.
         let staged = |value: &Value| Candidate {
-            standing: Some(Standing {
-                version: Some((edition, [0; 32])),
-                cause: Cause([0; 32]),
-            }),
+            standing: Some(Standing::new(Some((edition, [0; 32])), Cause([0; 32]))),
             value: value.clone(),
             claim: true,
         };

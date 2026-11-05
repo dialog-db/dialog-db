@@ -6,7 +6,7 @@ use dialog_common::{Blake3Hash, Buffer};
 use hashbrown::HashMap;
 use parking_lot::RwLock;
 
-use crate::{Delta, DialogSearchTreeError, LoadBlock};
+use crate::{Delta, DialogSearchTreeError, LoadBlock, Nodes};
 
 /// Blocks held in memory under their content hash, loadable by the tree.
 ///
@@ -77,3 +77,7 @@ impl Provider<LoadBlock> for MemoryBlocks {
         Ok(self.get(&hash))
     }
 }
+
+/// Keeps nothing: every node is read from the blocks and checked again.
+/// Wrap these in [`Cached`](crate::Cached) to keep what a tree reads.
+impl<Key, Value> Nodes<Key, Value> for MemoryBlocks {}

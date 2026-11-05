@@ -12,6 +12,7 @@ use dialog_effects::archive::{Get, Put};
 use dialog_effects::blob::prelude::{ArchiveBlobExt as _, ReadBlobExt as _, WriteBlobExt as _};
 use dialog_effects::blob::{BlobError, BlobReader, Import as BlobImport, Read as BlobRead};
 use dialog_effects::memory::{Current, Publish, Resolve};
+use dialog_search_tree::Nodes as _;
 use dialog_search_tree::{
     MissingBlocks, MissingPolicy, NodeBody, NoveltyOp, PersistentNode, TreeDifference, into_owned,
 };
@@ -290,34 +291,21 @@ async fn holds<Env: ResolveEnv>(
         RemoteFallback::Unavailable { remote, .. } => Some(remote.clone()),
         RemoteFallback::None => None,
     };
-    let store = NetworkedIndex::erased(env, branch.archive().index(), fallback);
+    let store =
+        NetworkedIndex::erased(env, branch.archive().index(), fallback, branch.node_cache());
     let target = match upstream.target() {
         Target::Local(name) => format!("branch {name}"),
         Target::Remote(entity) => format!("upstream {entity}"),
     };
     let observes = async |version: &Version| -> Result<bool, PushError> {
         let answer = async {
-            if let Some(seen) = head_observes(
-                head,
-                version,
-                &branch.contexts(),
-                &branch.records(),
-                &store,
-                &branch.node_cache(),
-            )
-            .await?
+            if let Some(seen) =
+                head_observes(head, version, &branch.contexts(), &branch.records(), &store).await?
             {
                 return Ok(seen);
             }
             let history = branch.history(env);
-            let context = full_context(
-                head,
-                &branch.contexts(),
-                &store,
-                &branch.node_cache(),
-                &history,
-            )
-            .await?;
+            let context = full_context(head, &branch.contexts(), &store, &history).await?;
             Ok::<_, dialog_artifacts::DialogArtifactsError>(context.observes(version))
         };
         answer.await.map_err(|error| match &serving {
@@ -524,7 +512,7 @@ where
                     };
 
                     let index = branch.archive().index();
-                    let store = LocalIndex::new(env, index.clone());
+                    let store = LocalIndex::new(env, index.clone(), branch.node_cache());
                     let base_tree = match &base {
                         Some(base) => Index::from_hash(NodeHash::from(*base.hash())),
                         None => Index::empty(),
@@ -594,7 +582,7 @@ where
                     // the sign-in path this loop awaited each shipment in turn
                     // and measured as the single largest cost of the push (one
                     // round trip per spilled value, one after another).
-                    let blob_store = LocalIndex::new(env, index.clone());
+                    let blob_store = LocalIndex::new(env, index.clone(), branch.node_cache());
                     let shipments = shipment_refs(&difference)
                         .map(|shipment| {
                             ship(
@@ -1106,7 +1094,7 @@ where
         + 'static,
 {
     if let LocalCopy::Unprobed = local
-        && let Some(bytes) = LocalIndex::new(env, branch.archive().index())
+        && let Some(bytes) = LocalIndex::new(env, branch.archive().index(), branch.node_cache())
             .load_blob(digest)
             .await
             .map_err(|error| dialog_search_tree::DialogSearchTreeError::Storage(error.into()))?
@@ -1222,29 +1210,30 @@ where
         .map_err(PushError::from)
 }
 
-/// A block's bytes from wherever this replica can reach them: the local
-/// archive first (free), then each source remote in order.
-async fn block_from_anywhere<Env>(
+/// A tree node from wherever this replica can reach it: the local archive
+/// first, read through the branch's node cache (free when the cache holds
+/// it), then each source remote in order.
+///
+/// A node a remote serves is parsed and handed back, never kept: it is
+/// streamed through to the target, so the local archive does not hold it,
+/// and the branch's cache keeps only what its archive holds.
+async fn node_from_anywhere<Env>(
     hash: &NodeHash,
     branch: &Branch,
     sources: &[ConnectedReplica],
     env: &Env,
-) -> Result<Option<Vec<u8>>, PushError>
+) -> Result<Option<PersistentNode<ArtifactKey, State<Datum>>>, PushError>
 where
     Env:
         Provider<Get> + Provider<Put> + Provider<Fork<RemoteSite, Get>> + ConditionalSync + 'static,
 {
-    let local = LocalIndex::new(env, branch.archive().index());
-    if let Some(bytes) = local
-        .load(hash)
-        .await
-        .map_err(|error| dialog_search_tree::DialogSearchTreeError::Storage(error.into()))?
-    {
-        return Ok(Some(bytes.into_vec()));
+    let local = LocalIndex::new(env, branch.archive().index(), branch.node_cache());
+    if let Some(node) = local.load_node(hash).await? {
+        return Ok(Some(node));
     }
     for source in sources {
         if let Some(bytes) = remote_block(hash, source, env).await? {
-            return Ok(Some(bytes));
+            return Ok(Some(PersistentNode::try_from(Buffer::from(bytes))?));
         }
     }
     Ok(None)
@@ -1408,16 +1397,14 @@ where
                 if target_may_have && remote_has_block(&hash, target, env).await? {
                     continue;
                 }
-                let Some(bytes) = block_from_anywhere(&hash, branch, sources, env).await? else {
+                let Some(node) = node_from_anywhere(&hash, branch, sources, env).await? else {
                     return Err(dialog_search_tree::DialogSearchTreeError::Node(format!(
                         "node {hash} is referenced by the head but reachable from no store: \
                          not local, not on the push target, not on any tracked remote"
                     ))
                     .into());
                 };
-                let node = PersistentNode::<ArtifactKey, State<Datum>>::try_from(Buffer::from(
-                    bytes.clone(),
-                ))?;
+                let bytes = node.buffer().as_ref().to_vec();
 
                 // The entries this node carries (stored in a segment,
                 // buffered in an index) may name blob bytes and spilled

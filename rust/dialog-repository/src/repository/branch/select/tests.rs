@@ -14,6 +14,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use async_trait::async_trait;
 use dialog_artifacts::selector::Constrained;
+use dialog_artifacts::tree::ArtifactNodeCache;
 use dialog_artifacts::{
     Artifact, ArtifactSelector, Changes, DialogArtifactsError, Entity, Exporter, Instruction,
     LoadBlob, NameShape, Relation, Symbol, Update as _, Value, encode_value_owned,
@@ -151,7 +152,7 @@ async fn spilled_block(
     operator: &Operator,
 ) -> Result<Option<Vec<u8>>> {
     let reference = Blake3Hash::from(value.to_reference());
-    let block = LocalIndex::new(operator, branch.archive().index())
+    let block = LocalIndex::new(operator, branch.archive().index(), branch.node_cache())
         .load(&reference)
         .await?;
     assert!(
@@ -193,6 +194,18 @@ impl Clone for WithoutSpills<'_> {
 impl Provider<LoadBlock> for WithoutSpills<'_> {
     async fn execute(&self, load: LoadBlock) -> Result<Option<Buffer>, DialogSearchTreeError> {
         load.perform(&self.0).await
+    }
+}
+
+/// Tree nodes are read through the local index's node cache.
+impl
+    dialog_search_tree::Nodes<
+        dialog_artifacts::Key,
+        dialog_artifacts::State<dialog_artifacts::Datum>,
+    > for WithoutSpills<'_>
+{
+    fn kept(&self) -> Option<&ArtifactNodeCache> {
+        self.0.kept()
     }
 }
 
@@ -1749,6 +1762,7 @@ async fn it_errors_when_a_spilled_block_is_missing() -> Result<()> {
         .execute(WithoutSpills(LocalIndex::new(
             &operator,
             cold.archive().index(),
+            cold.node_cache(),
         )))
         .await?
         .collect()

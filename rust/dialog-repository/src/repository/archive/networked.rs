@@ -5,14 +5,15 @@ use std::sync::Arc;
 
 use crate::RemoteSite;
 use async_trait::async_trait;
-use dialog_artifacts::{DialogArtifactsError, LoadBlob};
+use dialog_artifacts::tree::ArtifactNodeCache;
+use dialog_artifacts::{Datum, DialogArtifactsError, Key, LoadBlob, State};
 use dialog_capability::Fork;
 use dialog_capability::Provider;
 use dialog_common::{Blake3Hash, Buffer, ConditionalSync, Priority};
 use dialog_effects::archive::prelude::ArchiveExt;
 use dialog_effects::archive::{ArchiveError, Get, Put};
 use dialog_effects::blob::{BlobError, BlobWriter, Import as BlobImport, Read as BlobRead};
-use dialog_search_tree::{DialogSearchTreeError, LoadBlock};
+use dialog_search_tree::{DialogSearchTreeError, LoadBlock, Nodes};
 use std::fmt::Display;
 
 use dialog_capability::Did;
@@ -35,7 +36,7 @@ use dialog_effects::archive::prelude::CatalogScope;
 /// erased. [`Unavailable`](RemoteFallback::Unavailable) keeps that cause
 /// attached: reads that the local archive can satisfy still succeed, and
 /// the first read that *needs* the remote fails naming it.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum RemoteFallback {
     /// No remote is tracked; a local miss is an ordinary `None`.
     None,
@@ -116,9 +117,16 @@ impl<'a, Env: ?Sized> NetworkedIndex<'a, Env> {
     /// Create a networked index. With [`RemoteFallback::Remote`] (or a
     /// `Some(remote)`), reads that miss locally fall back to the remote
     /// and cache the result; see [`RemoteFallback`] for the other modes.
-    pub fn new(env: &'a Env, index: CatalogScope, remote: impl Into<RemoteFallback>) -> Self {
+    /// Tree nodes read through it are kept in `nodes` (see
+    /// [`LocalIndex::new`]).
+    pub fn new(
+        env: &'a Env,
+        index: CatalogScope,
+        remote: impl Into<RemoteFallback>,
+        nodes: ArtifactNodeCache,
+    ) -> Self {
         Self {
-            local: LocalIndex::new(env, index),
+            local: LocalIndex::new(env, index, nodes),
             remote: remote.into(),
             priority: Priority::Demand,
         }
@@ -134,6 +142,11 @@ impl<'a, Env: ?Sized> NetworkedIndex<'a, Env> {
     pub fn with_priority(mut self, priority: Priority) -> Self {
         self.priority = priority;
         self
+    }
+
+    /// The local index this reads first, and writes through.
+    pub(crate) fn local(&self) -> &LocalIndex<'a, Env> {
+        &self.local
     }
 }
 
@@ -167,11 +180,12 @@ impl<'a> NetworkedIndex<'a, dyn Reads> {
         env: &'a Env,
         index: CatalogScope,
         remote: impl Into<RemoteFallback>,
+        nodes: ArtifactNodeCache,
     ) -> Self
     where
         Env: Reads + 'static,
     {
-        Self::new(env, index, remote)
+        Self::new(env, index, remote, nodes)
     }
 }
 
@@ -270,6 +284,17 @@ where
         self.load(&hash)
             .await
             .map_err(|error| DialogSearchTreeError::Storage(error.into()))
+    }
+}
+
+/// Tree nodes are read through the node cache the local index holds, then
+/// the local archive, then the tracked remote.
+impl<Env> Nodes<Key, State<Datum>> for NetworkedIndex<'_, Env>
+where
+    Env: ?Sized + Provider<Get> + Provider<Hydrate> + ConditionalSync,
+{
+    fn kept(&self) -> Option<&ArtifactNodeCache> {
+        self.local.kept()
     }
 }
 
@@ -389,7 +414,8 @@ where
         + ConditionalSync
         + 'static,
 {
-    let local = LocalIndex::new(env, catalog.clone());
+    // Only the blob lane is read here, so no node is ever kept.
+    let local = LocalIndex::new(env, catalog.clone(), ArtifactNodeCache::new());
     if let Some(blob) = local.load_blob(&digest).await? {
         return Ok(Some(Arc::new(blob.into_vec())));
     }
@@ -489,6 +515,7 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use crate::helpers::connect;
+    use dialog_artifacts::tree::ArtifactNodeCache;
     use std::sync::Arc;
 
     use anyhow::Result;
@@ -567,12 +594,14 @@ mod tests {
             &env,
             branch.archive().index(),
             RemoteFallback::Remote(origin.clone()),
+            ArtifactNodeCache::new(),
         );
         assert_eq!(demand.load(&absent).await?, None);
         let speculative = NetworkedIndex::new(
             &env,
             branch.archive().index(),
             RemoteFallback::Remote(origin),
+            ArtifactNodeCache::new(),
         )
         .with_priority(Priority::Maybe);
         assert_eq!(speculative.load(&absent).await?, None);
@@ -604,6 +633,7 @@ mod tests {
                 remote: "origin".into(),
                 reason: "no credential saved for the site".into(),
             },
+            ArtifactNodeCache::new(),
         );
 
         // A locally held block reads back: unavailability of the remote
@@ -636,8 +666,12 @@ mod tests {
 
         // The same miss under no tracked remote stays an ordinary `None`:
         // only the *unavailable* state escalates.
-        let local_only =
-            NetworkedIndex::new(&operator, branch.archive().index(), RemoteFallback::None);
+        let local_only = NetworkedIndex::new(
+            &operator,
+            branch.archive().index(),
+            RemoteFallback::None,
+            ArtifactNodeCache::new(),
+        );
         assert_eq!(
             local_only.load(&absent_key).await?,
             None,

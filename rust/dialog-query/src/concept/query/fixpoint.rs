@@ -34,6 +34,13 @@
 //! with [`EvaluationError::AbsenceThroughRecursion`]. A read under
 //! `last` is not one: inside its component it reads every candidate the
 //! fixpoint has derived, and its readers elect the newest at the exit.
+//! A rule that rewrites a cell it reads under `last` is a set read
+//! inside the component too; its row records the values of the cell it
+//! displaced ([`Answer::displaced`]), and the exit ranks each cell's
+//! candidates by those successions ([`rank_successions`]) before it
+//! elects, so the rewrite wins over what it read, and a cycle of
+//! rewrites, which no rank can order, is elected among as concurrent
+//! candidates.
 //! A fold inside a component has no reading at all and stays refused
 //! ([`ProgramAnalysis::check`]).
 //!
@@ -44,7 +51,7 @@
 
 use super::ConceptQuery;
 use crate::artifact::Artifact;
-use crate::attribute::Relation;
+use crate::attribute::{Relation, The};
 use crate::concept::descriptor::ConceptDescriptor;
 use crate::error::EvaluationError;
 use crate::negation::Negation;
@@ -65,7 +72,7 @@ use dialog_capability::Provider;
 use futures_util::TryStreamExt;
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 
 /// Upper bound on fixpoint rounds before the query fails loudly. A
 /// round derives at least one new row (otherwise the fixpoint has
@@ -88,6 +95,23 @@ pub struct Answer {
     pub row: Row,
     /// The newest standing among the row's derivations.
     pub standing: Option<Standing>,
+    /// The other values of the row's own cell its derivations read, by
+    /// identity key: what the row displaces as a candidate for the
+    /// cell. The exit ranks a cell's candidates by these successions
+    /// ([`rank_successions`]). Empty for a row of a concept that is not
+    /// an attribute, or of a rule that does not read its own relation.
+    pub displaced: BTreeSet<Vec<u8>>,
+}
+
+impl Answer {
+    /// A row standing as `standing`, displacing nothing.
+    pub fn new(row: Row, standing: Option<Standing>) -> Self {
+        Answer {
+            row,
+            standing,
+            displaced: BTreeSet::new(),
+        }
+    }
 }
 
 /// Storage for the answers accumulated during a fixpoint run. The
@@ -95,12 +119,14 @@ pub struct Answer {
 /// implementations; the evaluator only ever appends, advances, and
 /// scans.
 pub trait AnswerTable {
-    /// Stage a freshly derived row, standing as `standing`. Returns
-    /// `true` when the row is new, or known but now stands newer than
-    /// any earlier derivation of it (the newer standing must reach the
-    /// rows derived from it, so the row re-enters the delta); `false`
-    /// otherwise.
-    fn insert(&mut self, concept: &Entity, row: Row, standing: Option<Standing>) -> bool;
+    /// Stage a freshly derived row. Returns `true` when the row is new,
+    /// or known but now stands newer than any earlier derivation of it
+    /// (the newer standing must reach the rows derived from it, so the
+    /// row re-enters the delta); `false` otherwise. What a known row
+    /// displaces grows by what this derivation displaced either way:
+    /// nothing derived from the row reads it, so it need not re-enter
+    /// the delta for that.
+    fn insert(&mut self, concept: &Entity, answer: Answer) -> bool;
 
     /// End the round: staged rows become the new delta and join the
     /// total. Returns `true` when the new delta is non-empty (the
@@ -168,23 +194,28 @@ impl InMemoryAnswerTable {
 }
 
 impl AnswerTable for InMemoryAnswerTable {
-    fn insert(&mut self, concept: &Entity, row: Row, standing: Option<Standing>) -> bool {
-        let key = row_key(&row);
-        if let Some(known) = self.total.get(concept).and_then(|rows| rows.get(&key))
-            && known.standing >= standing
+    fn insert(&mut self, concept: &Entity, answer: Answer) -> bool {
+        let key = row_key(&answer.row);
+        if let Some(known) = self
+            .total
+            .get_mut(concept)
+            .and_then(|rows| rows.get_mut(&key))
+            && known.standing >= answer.standing
         {
+            known.displaced.extend(answer.displaced);
             return false;
         }
         match self.staged.entry(concept.clone()).or_default().entry(key) {
             Entry::Vacant(slot) => {
-                slot.insert(Answer { row, standing });
+                slot.insert(answer);
                 true
             }
             Entry::Occupied(mut slot) => {
                 let staged = slot.get_mut();
-                if staged.standing < standing {
-                    staged.standing = standing;
+                if staged.standing < answer.standing {
+                    staged.standing = answer.standing;
                 }
+                staged.displaced.extend(answer.displaced);
                 false
             }
         }
@@ -231,12 +262,168 @@ impl InMemoryAnswerTable {
 /// which bound the concept's attribute field, when it is an attribute
 /// concept and a fact did, else the newest fact the match cites. This
 /// is how a rule's row stands outside a cycle, so a value stands the
-/// same whether or not its relation is recursive.
+/// same whether or not its relation is recursive. What the row
+/// displaces of its own cell is kept apart ([`Answer::displaced`]) and
+/// ranked at the exit.
 fn standing_of(descriptor: &ConceptDescriptor, matched: &Match) -> Option<Standing> {
     descriptor
         .attribute_field()
         .and_then(|(name, _)| matched.standing_of(name))
         .or_else(|| matched.standing())
+}
+
+/// The key operand beside the canonical value operand, which an
+/// occurrence of an attribute concept binds a keyed collection's key
+/// under.
+static VALUE_KEY: LazyLock<String> = LazyLock::new(|| The::key_operand(ConceptDescriptor::VALUE));
+
+/// The values of its own cell a row `split` derived as `matched`
+/// displaces: every other value of the cell an occurrence of the rule's
+/// own relation read, by identity key. The values an occurrence read
+/// are bound on the row under the occurrence's terms, so nothing is
+/// recorded at the read; the row is asked once, here, when the
+/// concept is an attribute concept and the row names its entity and
+/// value. Empty for a rule with no such occurrence, at no cost.
+fn displaced_by(member: &Member, split: &SplitRule, matched: &Match) -> BTreeSet<Vec<u8>> {
+    let mut displaced = BTreeSet::new();
+    if !split.own.iter().any(|own| *own) {
+        return displaced;
+    }
+    let Some((name, _)) = member.descriptor.attribute_field() else {
+        return displaced;
+    };
+    let (Some(this), Some(value)) = (matched.value_of("this"), matched.value_of(name)) else {
+        return displaced;
+    };
+    let key = matched.value_of(&member.key_operand);
+    for (occurrence, own) in split.occurrences.iter().zip(&split.own) {
+        if !own {
+            continue;
+        }
+        let read = |param: &str| -> Option<&Value> {
+            match occurrence.terms.get(param)? {
+                Term::Constant(constant) => Some(constant),
+                Term::Variable {
+                    name: Some(variable),
+                    ..
+                } => matched.value_of(variable),
+                Term::Variable { name: None, .. } => None,
+            }
+        };
+        if read("this") != Some(this) || read(&VALUE_KEY) != key {
+            continue;
+        }
+        if let Some(found) = read(ConceptDescriptor::VALUE)
+            && found != value
+        {
+            displaced.insert(found.identity_key());
+        }
+    }
+    displaced
+}
+
+/// Rank each cell's candidates among `rows` by succession, writing the
+/// rank into each row's standing, so the election that follows prefers
+/// a rewrite to what it read. A candidate that displaces another ranks
+/// after it; the rank is the longest chain of displacements leading to
+/// the candidate. Rewrites that read each other back form a cycle,
+/// which no rank orders: its members share the rank of the chain into
+/// the cycle, and stand as concurrent candidates the election settles
+/// by version, cause and value. `field` is the operand the rows hold
+/// the cell's value under.
+pub fn rank_successions(rows: &mut [Answer], field: &str) {
+    // Nothing displaced, nothing to rank: the case of every relation no
+    // rule rewrites from itself.
+    if rows.iter().all(|answer| answer.displaced.is_empty()) {
+        return;
+    }
+    let key_operand = The::key_operand(field);
+    // The rows of each cell, by the cell's identity, with each row's
+    // value identity.
+    let mut cells: BTreeMap<Vec<u8>, Vec<(usize, Vec<u8>)>> = BTreeMap::new();
+    for (index, answer) in rows.iter().enumerate() {
+        let (Some(this), Some(value)) = (answer.row.get("this"), answer.row.get(field)) else {
+            continue;
+        };
+        let mut cell = this.identity_key();
+        if let Some(key) = answer.row.get(&key_operand) {
+            cell.extend(key.identity_key());
+        }
+        cells
+            .entry(cell)
+            .or_default()
+            .push((index, value.identity_key()));
+    }
+    for members in cells.values() {
+        if members.len() < 2 {
+            continue;
+        }
+        // Edges from each candidate to the candidates displacing it,
+        // among the cell's rows.
+        let position = |value: &[u8]| members.iter().position(|(_, held)| held == value);
+        let count = members.len();
+        let mut displaces: Vec<Vec<usize>> = vec![Vec::new(); count];
+        for (to, (index, _)) in members.iter().enumerate() {
+            for value in &rows[*index].displaced {
+                if let Some(from) = position(value)
+                    && from != to
+                {
+                    displaces[from].push(to);
+                }
+            }
+        }
+        // Reachability by displacement, closed: two candidates reaching
+        // each other are one cycle.
+        let mut reaches: Vec<Vec<bool>> = (0..count)
+            .map(|from| {
+                let mut seen = vec![false; count];
+                let mut stack = displaces[from].clone();
+                while let Some(next) = stack.pop() {
+                    if !seen[next] {
+                        seen[next] = true;
+                        stack.extend(displaces[next].iter().copied());
+                    }
+                }
+                seen
+            })
+            .collect();
+        for (from, reached) in reaches.iter_mut().enumerate() {
+            reached[from] = false;
+        }
+        let same_cycle = |a: usize, b: usize| reaches[a][b] && reaches[b][a];
+        // The longest chain of displacements into each candidate,
+        // counted across cycles only: relaxed until nothing moves,
+        // which a chain of at most `count` steps bounds.
+        let mut rank = vec![0u32; count];
+        loop {
+            let mut moved = false;
+            for from in 0..count {
+                for &to in &displaces[from] {
+                    let through = if same_cycle(from, to) {
+                        rank[from]
+                    } else {
+                        rank[from] + 1
+                    };
+                    if rank[to] < through {
+                        rank[to] = through;
+                        moved = true;
+                    }
+                }
+            }
+            if !moved {
+                break;
+            }
+        }
+        for (at, (index, _)) in members.iter().enumerate() {
+            if rank[at] == 0 {
+                continue;
+            }
+            let standing = rows[*index]
+                .standing
+                .get_or_insert_with(|| Standing::new(None, dialog_artifacts::Cause([0; 32])));
+            standing.succession = rank[at];
+        }
+    }
 }
 
 /// Join one caller row against one derived row: bind the caller's
@@ -282,14 +469,20 @@ pub fn join(
 struct SplitRule {
     rule: DeductiveRule,
     occurrences: Vec<ConceptQuery>,
+    /// For each occurrence, whether it reads the relation the rule
+    /// derives: a cell it binds is one the conclusion may displace
+    /// ([`displaced_by`]).
+    own: Vec<bool>,
     base: Vec<Premise>,
 }
 
-/// A component member: its descriptor (for row projection) and its
-/// split rules.
+/// A component member: its descriptor (for row projection), its split
+/// rules, and the key operand beside its attribute field when it is an
+/// attribute concept over a keyed collection.
 struct Member {
     descriptor: ConceptDescriptor,
     rules: Vec<SplitRule>,
+    key_operand: String,
 }
 
 /// The premise's in-component occurrence, when it reads a concept in
@@ -453,6 +646,7 @@ where
         let mut rules = Vec::new();
         for rule in bundle.rules() {
             let mut occurrences = Vec::new();
+            let mut own = Vec::new();
             let mut base = Vec::new();
             for premise in rule.analysis().premises() {
                 match in_component(premise, analysis, &root_entity)? {
@@ -461,6 +655,12 @@ where
                         // premise's spelling; the table holds the
                         // concept's rows under its canonical one.
                         let query = query.clone().canonical();
+                        let target = ProgramAnalysis::node(&query.predicate);
+                        own.push(
+                            target == entity
+                                && query.predicate.attribute_field().is_some()
+                                && descriptor.attribute_field().is_some(),
+                        );
                         queue.push(query.predicate.clone());
                         occurrences.push(query);
                     }
@@ -470,10 +670,22 @@ where
             rules.push(SplitRule {
                 rule: rule.clone(),
                 occurrences,
+                own,
                 base,
             });
         }
-        members.insert(entity, Member { descriptor, rules });
+        let key_operand = descriptor
+            .attribute_field()
+            .map(|(name, _)| The::key_operand(name))
+            .unwrap_or_default();
+        members.insert(
+            entity,
+            Member {
+                descriptor,
+                rules,
+                key_operand,
+            },
+        );
     }
     Ok(members)
 }
@@ -506,7 +718,7 @@ where
     .await?;
     Ok(results
         .iter()
-        .filter_map(|result| answer_complete(&member.descriptor, result))
+        .filter_map(|result| answer_complete(member, split, result))
         .collect())
 }
 
@@ -649,11 +861,13 @@ pub(crate) fn project_complete(descriptor: &ConceptDescriptor, matched: &Match) 
         .then_some(row)
 }
 
-/// [`project_complete`] with the standing the projected row holds.
-fn answer_complete(descriptor: &ConceptDescriptor, matched: &Match) -> Option<Answer> {
-    project_complete(descriptor, matched).map(|row| Answer {
+/// [`project_complete`] with the standing the projected row holds and
+/// the values of its cell it displaces, for a row `split` derived.
+fn answer_complete(member: &Member, split: &SplitRule, matched: &Match) -> Option<Answer> {
+    project_complete(&member.descriptor, matched).map(|row| Answer {
         row,
-        standing: standing_of(descriptor, matched),
+        standing: standing_of(&member.descriptor, matched),
+        displaced: displaced_by(member, split, matched),
     })
 }
 
@@ -671,11 +885,7 @@ where
     Env: crate::Scope<'a>,
 {
     for answer in collect_rule_rows(member, split, rest, matched, scope, env).await? {
-        table.insert(
-            &ProgramAnalysis::node(&member.descriptor),
-            answer.row,
-            answer.standing,
-        );
+        table.insert(&ProgramAnalysis::node(&member.descriptor), answer);
     }
     Ok(())
 }
@@ -732,7 +942,7 @@ where
                 }
                 let node = ProgramAnalysis::node(&member.descriptor);
                 for answer in derived {
-                    table.insert(&node, answer.row, answer.standing);
+                    table.insert(&node, answer);
                 }
             }
         }
@@ -789,7 +999,7 @@ where
         derived.extend(
             complete
                 .iter()
-                .filter_map(|complete| answer_complete(&member.descriptor, complete)),
+                .filter_map(|complete| answer_complete(member, split, complete)),
         );
     }
     Ok(derived)
@@ -831,8 +1041,10 @@ where
             for matched in results {
                 table.insert(
                     &ProgramAnalysis::node(&member.descriptor),
-                    project(&member.descriptor, &matched),
-                    standing_of(&member.descriptor, &matched),
+                    Answer::new(
+                        project(&member.descriptor, &matched),
+                        standing_of(&member.descriptor, &matched),
+                    ),
                 );
             }
         }
@@ -1324,10 +1536,7 @@ where
                                     .get(&target)
                                     .map(|rows| {
                                         rows.values()
-                                            .map(|row| Answer {
-                                                row: row.clone(),
-                                                standing: None,
-                                            })
+                                            .map(|row| Answer::new(row.clone(), None))
                                             .collect()
                                     })
                                     .unwrap_or_default()
@@ -1404,8 +1613,8 @@ where
             };
             let mut survived: Vec<Vec<u8>> = Vec::new();
             for (key, row) in rows {
-                if let Some(standing) = derivable(member, row, table, env).await? {
-                    table.insert(&entity, row.clone(), standing);
+                if let Some(answer) = derivable(member, row, table, env).await? {
+                    table.insert(&entity, answer);
                     survived.push(key.clone());
                     rederived = true;
                 }
@@ -1434,18 +1643,19 @@ where
 /// operands into each rule body (occurrences read the current
 /// table, base premises the current store) and check whether any
 /// result projects back to the row. A row that does stands as the
-/// newest of its surviving derivations, which every derivation is
-/// read for: the one it stood by may be the one deleted.
+/// newest of its surviving derivations, and displaces what any of them
+/// does, which every derivation is read for: the one it stood by may
+/// be the one deleted.
 async fn derivable<'a, Env>(
     member: &Member,
     row: &Row,
     table: &InMemoryAnswerTable,
     env: &'a Env,
-) -> Result<Option<Option<Standing>>, EvaluationError>
+) -> Result<Option<Answer>, EvaluationError>
 where
     Env: crate::Scope<'a>,
 {
-    let mut derived: Option<Option<Standing>> = None;
+    let mut derived: Option<Answer> = None;
     for split in &member.rules {
         let mut seed = Match::new();
         let mut seed_scope = Environment::new();
@@ -1498,9 +1708,14 @@ where
             let rows =
                 collect_rule_rows(member, split, split.base.clone(), matched, &scope, env).await?;
             for candidate in rows {
-                if candidate.row == *row {
-                    derived = Some(derived.flatten().max(candidate.standing));
+                if candidate.row != *row {
+                    continue;
                 }
+                let held = derived.get_or_insert_with(|| Answer::new(row.clone(), None));
+                if held.standing < candidate.standing {
+                    held.standing = candidate.standing;
+                }
+                held.displaced.extend(candidate.displaced);
             }
         }
     }

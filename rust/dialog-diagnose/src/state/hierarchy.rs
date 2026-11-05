@@ -2,8 +2,8 @@
 
 use std::sync::mpsc::Sender;
 
-use dialog_artifacts::{Datum, DialogArtifactsError, Key, LoadBlock, State};
-use dialog_search_tree::{Entry, Key as TreeKey, NodeBody, PersistentNode, into_owned};
+use dialog_artifacts::{Datum, DialogArtifactsError, Key, State};
+use dialog_search_tree::{Entry, Key as TreeKey, NodeBody, Nodes as _, PersistentNode, into_owned};
 use dialog_storage::Blake3Hash;
 
 use super::store::WorkerMessage;
@@ -67,12 +67,12 @@ impl ArtifactsHierarchy {
         let hash = hash.to_owned();
 
         tokio::spawn(async move {
-            let Some(bytes) = LoadBlock::new(hash.into()).perform(&storage).await? else {
+            let Some(block): Option<PersistentNode<Key, State<Datum>>> =
+                storage.load_node(&hash.into()).await?
+            else {
                 // TODO: This should be an error condition
                 return Ok(());
             };
-
-            let block: PersistentNode<Key, State<Datum>> = PersistentNode::try_from(bytes)?;
             let node = match block.body() {
                 NodeBody::Index(index) => {
                     let links = index.links()?;

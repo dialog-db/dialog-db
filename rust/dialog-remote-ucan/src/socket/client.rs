@@ -624,8 +624,9 @@ impl Connection {
     }
 }
 
-/// `future`'s output, or `None` once `limit` has passed.
-async fn within<F: Future>(limit: Duration, future: F) -> Option<F::Output> {
+/// `future`'s output, or `None` once `limit` has passed. Dropping
+/// `future` cancels it: a request still in flight is aborted.
+pub(crate) async fn within<F: Future>(limit: Duration, future: F) -> Option<F::Output> {
     let future = std::pin::pin!(future);
     let timer = Box::pin(time::sleep(limit));
     match select(future, timer).await {

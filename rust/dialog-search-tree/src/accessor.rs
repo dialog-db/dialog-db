@@ -1,49 +1,40 @@
 use std::marker::PhantomData;
 
-use dialog_capability::Provider;
-use dialog_common::{Blake3Hash, ConditionalSync};
+use dialog_common::Blake3Hash;
 use rkyv::{
     bytecheck::CheckBytes,
     rancor::Strategy,
     validation::{Validator, archive::ArchiveValidator, shared::SharedValidator},
 };
 
-use crate::{DialogSearchTreeError, Key, LoadBlock, NodeCache, PersistentNode, Value};
+use crate::{DialogSearchTreeError, Key, Nodes, PersistentNode, Value};
 
-/// Accessor for retrieving durable nodes from cache and the environment.
+/// A tree's reads through the store it reads its nodes from.
 ///
-/// The accessor checks for nodes in the following order:
-/// 1. Cache - recently accessed nodes, already checked
-/// 2. Environment - the [`LoadBlock`] provider, whose bytes are checked once as
-///    they become a node and enter the cache
-///
-/// The accessor borrows its environment for as long as it reads; it never
-/// owns it.
+/// It holds nothing but the borrowed store: every node comes from
+/// [`Nodes::load_node`], so a node the store keeps is answered from memory
+/// and every other is read from the store's blocks, checked once and kept
+/// by the store (if it keeps anything). What it adds is the tree's view of
+/// absence: a node a tree links to and the store does not hold is an error
+/// ([`get_node`](Self::get_node)).
 ///
 /// Unflushed nodes are never read here: in-flight edits live in a
 /// [`TransientTree`](crate::TransientTree)'s spine, and a
-/// [`PersistentTree`](crate::PersistentTree) reads only what has been flushed to
-/// storage. The accumulating delta is purely a persist-time output and is not
+/// [`PersistentTree`](crate::PersistentTree) reads only what its store
+/// holds. The accumulating delta is purely a persist-time output and is not
 /// consulted on the read path.
 pub struct Accessor<'a, Key, Value, Env> {
-    cache: NodeCache<Key, Value>,
     env: &'a Env,
     types: PhantomData<fn() -> (Key, Value)>,
 }
 
-impl<Key, Value, Env> Clone for Accessor<'_, Key, Value, Env>
-where
-    Key: self::Key,
-    Value: self::Value,
-{
+impl<Key, Value, Env> Clone for Accessor<'_, Key, Value, Env> {
     fn clone(&self) -> Self {
-        Self {
-            cache: self.cache.clone(),
-            env: self.env,
-            types: PhantomData,
-        }
+        *self
     }
 }
+
+impl<Key, Value, Env> Copy for Accessor<'_, Key, Value, Env> {}
 
 impl<'a, Key, Value, Env> Accessor<'a, Key, Value, Env>
 where
@@ -52,71 +43,65 @@ where
     Value::Archived: for<'b> CheckBytes<
         Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
     >,
-    Env: Provider<LoadBlock> + ConditionalSync,
+    Env: Nodes<Key, Value>,
 {
-    /// Creates a new accessor over the given cache and environment.
-    pub fn new(cache: NodeCache<Key, Value>, env: &'a Env) -> Self {
+    /// Reads through `env`.
+    pub fn new(env: &'a Env) -> Self {
         Self {
-            cache,
             env,
             types: PhantomData,
         }
     }
 
-    /// Loads the node at `hash` into the cache, without reporting what
-    /// happened, and resolves to the hash it loaded so that a queue of these
-    /// can tell which one finished.
+    /// The store this reads through.
+    pub fn env(&self) -> &'a Env {
+        self.env
+    }
+
+    /// Whether the store keeps the nodes read through it, so a read-ahead
+    /// ([`warm`](Self::warm)) has somewhere to land.
+    pub(crate) fn keeps(&self) -> bool {
+        self.env.kept().is_some()
+    }
+
+    /// Loads the node at `hash` into the store's memory, without reporting
+    /// what happened, and resolves to the hash it loaded so that a queue of
+    /// these can tell which one finished.
     ///
     /// This is a read nobody is waiting on: it makes the node local so that a
-    /// later [`get_node`](Self::get_node) is served from the cache. It
+    /// later [`get_node`](Self::get_node) is served from memory. It
     /// advances only while its owner polls it, which is why a reader that
     /// needs the node meanwhile fetches for itself rather than waiting: only
     /// the owner can join it, by polling it to completion. Nothing observes
     /// its outcome, so a node that is missing or fails to load is left to the
-    /// read that actually needs it.
+    /// read that actually needs it. Over a store that keeps nothing it is a
+    /// read whose result is dropped.
     pub(crate) async fn warm(&self, hash: Blake3Hash) -> Blake3Hash {
-        let _ = self
-            .cache
-            .get_or_fetch(&hash, async |key| self.retrieve(key).await)
-            .await;
+        let _ = self.env.load_node(&hash).await;
         hash
     }
 
-    /// The node at `hash` if the cache holds it, with no IO: a way to reach
-    /// what a held node keeps with it (its piece summary, say) without
-    /// loading a node that is not already here.
+    /// The node at `hash` if the store keeps it in memory, with no IO: a
+    /// way to reach what a held node keeps with it (its piece summary, say)
+    /// without loading a node that is not already here.
     pub(crate) fn cached(&self, hash: &Blake3Hash) -> Option<PersistentNode<Key, Value>> {
-        self.cache.get_cached(hash)
+        self.env.kept()?.get_cached(hash)
     }
 
     /// Retrieves a node by its content hash.
     ///
-    /// Checks the cache first, then the environment. Returns an error if the
-    /// node is in neither. The read is this caller's own: it never waits on
-    /// a read of the same node that someone else has in flight, since only
-    /// that someone could drive it.
+    /// Asks the store, which answers from memory when it keeps the node and
+    /// from its blocks otherwise. Returns an error if the store has no such
+    /// block. The read is this caller's own: it never waits on a read of the
+    /// same node that someone else has in flight, since only that someone
+    /// could drive it.
     pub async fn get_node(
         &self,
         hash: &Blake3Hash,
     ) -> Result<PersistentNode<Key, Value>, DialogSearchTreeError> {
-        self.cache
-            .get_or_fetch(hash, async |key| self.retrieve(key).await)
-            .await?
-            .ok_or_else(|| {
-                DialogSearchTreeError::Node(format!("Block not found in storage: {}", hash))
-            })
-    }
-
-    /// The node stored under `key`, checked as it is read.
-    async fn retrieve(
-        &self,
-        key: &Blake3Hash,
-    ) -> Result<Option<PersistentNode<Key, Value>>, DialogSearchTreeError> {
-        LoadBlock::new(key.clone())
-            .perform(self.env)
-            .await?
-            .map(PersistentNode::try_from)
-            .transpose()
+        self.env.load_node(hash).await?.ok_or_else(|| {
+            DialogSearchTreeError::Node(format!("Block not found in storage: {}", hash))
+        })
     }
 }
 
@@ -128,7 +113,7 @@ mod tests {
     use futures_util::future::join_all;
 
     use crate::{
-        Accessor, Buffer, Delta, NodeCache, PersistentNode, PersistentTree,
+        Accessor, Buffer, Cached, Delta, NodeCache, PersistentNode, PersistentTree,
         helpers::ObservingBlocks,
     };
 
@@ -150,13 +135,14 @@ mod tests {
             .edit()
             .insert(1u32.to_be_bytes(), vec![1], &storage)
             .await?
-            .persist(&mut delta)?;
+            .persist(&mut delta, &storage)?;
         for (_, buffer) in delta.flush() {
             storage.store(buffer);
         }
         let hash = tree.root().clone();
 
-        let accessor = Accessor::new(NodeCache::new(), &storage);
+        let store = Cached::new(NodeCache::new(), &storage);
+        let accessor = Accessor::new(&store);
         backend.reset();
 
         let reads = join_all((0..8).map(|_| accessor.get_node(&hash))).await;
@@ -186,7 +172,8 @@ mod tests {
         let hash = garbage.blake3_hash().clone();
         storage.store(garbage);
 
-        let accessor = Accessor::<[u8; 4], Vec<u8>, _>::new(NodeCache::new(), &storage);
+        let store = Cached::<[u8; 4], Vec<u8>, _>::new(NodeCache::new(), &storage);
+        let accessor = Accessor::new(&store);
         backend.reset();
 
         assert!(accessor.get_node(&hash).await.is_err());

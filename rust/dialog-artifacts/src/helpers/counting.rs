@@ -74,6 +74,10 @@ impl CountingBlocks {
     }
 }
 
+/// Keeps nothing, so every node read is a counted read. Wrap it in a
+/// [`Cached`](dialog_search_tree::Cached) store to keep the nodes read.
+impl<K, V> dialog_search_tree::Nodes<K, V> for CountingBlocks {}
+
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Provider<LoadBlock> for CountingBlocks {

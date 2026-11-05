@@ -21,11 +21,11 @@
 //! - [`TreeDifference::novel_nodes`]: the target-tree nodes absent from the
 //!   source tree (used to upload exactly the missing blocks to a remote).
 
+use crate::Nodes;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
 use async_stream::try_stream;
-use dialog_capability::Provider;
 use dialog_common::{Blake3Hash, ConditionalSync};
 use futures_core::Stream;
 use futures_util::StreamExt;
@@ -52,6 +52,7 @@ const LOAD_CONCURRENCY: usize = 16;
 /// needs the block owns the error and the [`MissingBlocks`] policy.
 async fn preload_block<Key, Value, Env>(
     storage: &Env,
+    missing: MissingBlocks,
     is_target: bool,
     offset: usize,
     hash: Blake3Hash,
@@ -62,12 +63,9 @@ where
     Value::Archived: for<'a> CheckBytes<
         Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
     >,
-    Env: Provider<LoadBlock> + ConditionalSync,
+    Env: Nodes<Key, Value>,
 {
-    let node = match LoadBlock::new(hash.clone()).perform(storage).await {
-        Ok(Some(buffer)) => PersistentNode::try_from(buffer).ok(),
-        _ => None,
-    };
+    let node = read_node(storage, &hash, missing).await.ok().flatten();
     (is_target, offset, node)
 }
 
@@ -83,6 +81,7 @@ type FetchedChild<Key, Value> =
 /// index is consumed — so errors are returned for the descent to own.
 async fn fetch_block<Key, Value, Env>(
     storage: &Env,
+    missing: MissingBlocks,
     at: usize,
     hash: Blake3Hash,
 ) -> (
@@ -95,14 +94,44 @@ where
     Value::Archived: for<'a> CheckBytes<
         Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
     >,
-    Env: Provider<LoadBlock> + ConditionalSync,
+    Env: Nodes<Key, Value>,
 {
-    let result = match LoadBlock::new(hash.clone()).perform(storage).await {
-        Ok(Some(buffer)) => PersistentNode::try_from(buffer).map(Some),
-        Ok(None) => Ok(None),
-        Err(error) => Err(error),
-    };
-    (at, result)
+    (at, read_node(storage, &hash, missing).await)
+}
+
+/// Reads the node stored under `hash` for a comparison side whose absent
+/// blocks mean `missing`; `None` when the block is absent.
+///
+/// A [`Deny`](MissingBlocks::Deny) side reads through the store, so what the
+/// store keeps answers the read from memory.
+///
+/// A [`Boundary`](MissingBlocks::Boundary) side asks the store's blocks
+/// directly, past anything it keeps in memory. That is the one read in this
+/// crate that bypasses the store's cache, on purpose: under that policy
+/// absence is the answer the walk is asking for (where local knowledge
+/// ends), so it must be the store's own word on whether it holds the block,
+/// not whether a node with that hash happens to be in memory.
+async fn read_node<Key, Value, Env>(
+    storage: &Env,
+    hash: &Blake3Hash,
+    missing: MissingBlocks,
+) -> Result<Option<PersistentNode<Key, Value>>, DialogSearchTreeError>
+where
+    Key: self::Key,
+    Value: self::Value,
+    Value::Archived: for<'a> CheckBytes<
+        Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+    >,
+    Env: Nodes<Key, Value>,
+{
+    match missing {
+        MissingBlocks::Deny => storage.load_node(hash).await,
+        MissingBlocks::Boundary => LoadBlock::new(hash.clone())
+            .perform(storage)
+            .await?
+            .map(PersistentNode::try_from)
+            .transpose(),
+    }
 }
 
 /// How a comparison side treats a block that is absent from its storage.
@@ -126,13 +155,19 @@ where
 ///   and content-addressed uploads are idempotent); sound on the TARGET
 ///   side only when absence implies the counterparty holds the block —
 ///   the caller owns that judgement (see `dialog-repository`'s push).
+///
+/// A `Deny` side reads its nodes through its store's [`Nodes::load_node`],
+/// so the nodes the store keeps answer from memory. A `Boundary` side reads
+/// its store's blocks directly, past what the store keeps: the walk is
+/// asking whether the store holds each block, and only the blocks can say.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum MissingBlocks {
     /// A missing block fails the walk (the historical behavior).
     #[default]
     Deny,
     /// A missing block bounds the walk: settle, don't descend, don't
-    /// report novel.
+    /// report novel. Reads bypass the store's node cache, so presence is
+    /// the store's own word.
     Boundary,
 }
 
@@ -438,7 +473,7 @@ impl DryRun<'_> {
 struct SparseTree<'a, Key, Value, Env>
 where
     Key: self::Key,
-    Env: Provider<LoadBlock>,
+    Env: Nodes<Key, Value>,
 {
     storage: &'a Env,
     nodes: Vec<SparseTreeNode<Key, Value>>,
@@ -479,7 +514,7 @@ where
     Value::Archived: for<'b> CheckBytes<
             Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>,
-    Env: Provider<LoadBlock> + ConditionalSync,
+    Env: Nodes<Key, Value>,
 {
     /// The frontier slots still held by reference, with their hashes: the
     /// blocks a later pass reads unless pruning settles them first.
@@ -555,21 +590,23 @@ where
     async fn load(
         storage: &Env,
         hash: &Blake3Hash,
+        missing: MissingBlocks,
     ) -> Result<PersistentNode<Key, Value>, DialogSearchTreeError> {
-        Self::try_load(storage, hash).await?.ok_or_else(|| {
-            DialogSearchTreeError::Node(format!("Block not found in storage: {hash}"))
-        })
+        Self::try_load(storage, hash, missing)
+            .await?
+            .ok_or_else(|| {
+                DialogSearchTreeError::Node(format!("Block not found in storage: {hash}"))
+            })
     }
 
     /// Reads a node from storage by hash; `None` when the block is absent.
+    /// See [`read_node`] for how `missing` decides where the read goes.
     async fn try_load(
         storage: &Env,
         hash: &Blake3Hash,
+        missing: MissingBlocks,
     ) -> Result<Option<PersistentNode<Key, Value>>, DialogSearchTreeError> {
-        match LoadBlock::new(hash.clone()).perform(storage).await? {
-            Some(buffer) => Ok(Some(PersistentNode::try_from(buffer)?)),
-            None => Ok(None),
-        }
+        read_node(storage, hash, missing).await
     }
 
     /// Initializes a sparse tree from a stored root hash. The root is not
@@ -587,7 +624,7 @@ where
     ) -> Result<SparseTree<'a, Key, Value, Env>, DialogSearchTreeError> {
         if let Some(root) = root
             && missing == MissingBlocks::Boundary
-            && Self::try_load(storage, root).await?.is_none()
+            && Self::try_load(storage, root, missing).await?.is_none()
         {
             return Ok(SparseTree {
                 storage,
@@ -606,7 +643,7 @@ where
             });
         }
         let nodes = if let Some(root) = root {
-            let node: PersistentNode<Key, Value> = Self::load(storage, root).await?;
+            let node: PersistentNode<Key, Value> = Self::load(storage, root, missing).await?;
             // A root's frontier bound must be the separator the SAME subtree
             // would carry as a link child on the other side, or equal
             // subtrees at different heights never line up. That propagated
@@ -678,7 +715,7 @@ where
                 // A block planning fetched ahead is read from there, once.
                 let found = match self.prefetched.remove(&link.node) {
                     Some(found) => found,
-                    None => Self::try_load(self.storage, &link.node).await?,
+                    None => Self::try_load(self.storage, &link.node, self.missing).await?,
                 };
                 match found {
                     Some(node) => node,
@@ -903,9 +940,6 @@ where
             }
         }
 
-        let ours_ops = ours_index.all_novelty::<Key>()?;
-        let theirs_ops = theirs_index.all_novelty::<Key>()?;
-
         // Emitting a change for a buffered op needs to know whether the key
         // already exists below: absent means `Add`, present means `Remove(old)`
         // then `Add(new)`, and only the leaf knows the old value. A `Link`
@@ -934,6 +968,11 @@ where
         if lowest.is_empty() {
             return Ok(None);
         }
+        // Decoded only past the separator checks: a root's leftmost
+        // separator is always empty, so at a root the decode would answer a
+        // question already settled.
+        let ours_ops = ours_index.all_novelty::<Key>()?;
+        let theirs_ops = theirs_index.all_novelty::<Key>()?;
         let settleable = |ops: &[NoveltyEntry<Value>]| {
             ops.iter().all(|entry| {
                 matches!(entry.op, NoveltyOp::Assert(_)) && entry.key.as_slice() < lowest.as_slice()
@@ -983,6 +1022,60 @@ where
             ours_only,
             theirs_only,
         }))
+    }
+
+    /// Settles every pair of loaded segments the comparison left with the
+    /// same stored block on both sides, keeping only the keys their routed
+    /// ops touch.
+    ///
+    /// `prune` keeps such a pair because the ops an ancestor routed to it
+    /// differ, and the walk loads both in place. Their stored entries are
+    /// the same bytes, so an entry no op on either side covers reads the
+    /// same on both and cancels in [`TreeDifference::changes`]. Streaming
+    /// the pair would decode every one of those entries on both sides only
+    /// to drop them: a commit buffered at the root routes its ops to whole
+    /// leaves, so every scoped difference over that commit paid for every
+    /// entry of each leaf its ops landed in. Settling resolves each key
+    /// an op covers on both sides instead, its winning op where the side
+    /// has one and the stored entry where it does not, and keeps the keys
+    /// whose two resolutions differ. The entry walk then yields exactly
+    /// the changes it would have yielded from the two whole leaves.
+    ///
+    /// A scoped difference resolves only the covered keys inside its
+    /// scope: a change outside it is spillover that
+    /// [`TreeDifference::changes_within`] drops, so a pair whose ops all
+    /// fall outside settles without reading the leaf at all.
+    ///
+    /// Reads nothing: both segments are already loaded. The settled
+    /// entries keep their lower bounds, so the frontiers stay sorted, and
+    /// [`TreeDifference::novel_nodes`] skips them as it skipped the shared
+    /// blocks they replace.
+    fn settle_shared_segments(
+        source: &mut Self,
+        target: &mut Self,
+        scope: Option<&[core::ops::RangeInclusive<Key>]>,
+    ) -> Result<(), DialogSearchTreeError> {
+        let (mut ours, mut theirs) = (0, 0);
+        while ours < source.nodes.len() && theirs < target.nodes.len() {
+            match source.nodes[ours]
+                .lower_bound()
+                .cmp(target.nodes[theirs].lower_bound())
+            {
+                Ordering::Less => ours += 1,
+                Ordering::Greater => theirs += 1,
+                Ordering::Equal => {
+                    if let Some((settled_ours, settled_theirs)) =
+                        settle_shared_segment(&source.nodes[ours], &target.nodes[theirs], scope)?
+                    {
+                        source.nodes[ours] = settled_ours;
+                        target.nodes[theirs] = settled_theirs;
+                    }
+                    ours += 1;
+                    theirs += 1;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Whether the walk peels this side's node at `at` before the other
@@ -1503,7 +1596,7 @@ where
                     }
                     SparseTreeNode::Ref(link) | SparseTreeNode::Pending { link, .. } => {
                         let pending = pending_ops(sparse_node).to_vec();
-                        match Self::try_load(self.storage, &link.node).await? {
+                        match Self::try_load(self.storage, &link.node, self.missing).await? {
                             Some(node) => (node, pending),
                             // Absent and absence bounds the walk: the stored
                             // entries are held by reference (not this side's
@@ -1573,7 +1666,7 @@ where
                                         let Some((at, hash)) = queue.next() else {
                                             break;
                                         };
-                                        reads.push(fetch_block(self.storage, at, hash));
+                                        reads.push(fetch_block(self.storage, self.missing, at, hash));
                                     }
                                     match reads.next().await {
                                         Some((at, result)) => fetched[at] = Some(result),
@@ -1806,6 +1899,130 @@ where
     }
 }
 
+/// A frontier pair settled by [`settle_shared_segment`]: ours, then theirs.
+type SettledPair<Key, Value> = (SparseTreeNode<Key, Value>, SparseTreeNode<Key, Value>);
+
+/// The pair [`SparseTree::settle_shared_segments`] settles a frontier pair
+/// to, or `None` when the two are not the same loaded segment.
+fn settle_shared_segment<Key, Value>(
+    ours: &SparseTreeNode<Key, Value>,
+    theirs: &SparseTreeNode<Key, Value>,
+    scope: Option<&[core::ops::RangeInclusive<Key>]>,
+) -> Result<Option<SettledPair<Key, Value>>, DialogSearchTreeError>
+where
+    Key: self::Key,
+    Value: self::Value + PartialEq,
+    Value::Archived: for<'b> CheckBytes<
+            Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
+        > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>,
+{
+    let (
+        SparseTreeNode::Loaded {
+            node,
+            lower_bound: ours_bound,
+            pending: ours_pending,
+        },
+        SparseTreeNode::Loaded {
+            node: other,
+            lower_bound: theirs_bound,
+            pending: theirs_pending,
+        },
+    ) = (ours, theirs)
+    else {
+        return Ok(None);
+    };
+    if node.hash() != other.hash() {
+        return Ok(None);
+    }
+    let NodeBody::Segment(segment) = node.body() else {
+        return Ok(None);
+    };
+
+    let ours_ops = winning_ops(ours_pending);
+    let theirs_ops = winning_ops(theirs_pending);
+    fn op_at<'o, Value>(
+        ops: &'o [(Vec<u8>, NoveltyOp<Value>)],
+        key: &[u8],
+    ) -> Option<&'o NoveltyOp<Value>> {
+        ops.binary_search_by(|(candidate, _)| candidate.as_slice().cmp(key))
+            .ok()
+            .map(|at| &ops[at].1)
+    }
+    let mut keys: Vec<&[u8]> = ours_ops
+        .iter()
+        .chain(&theirs_ops)
+        .map(|(key, _)| key.as_slice())
+        .filter(|key| {
+            scope.is_none_or(|scope| {
+                scope
+                    .iter()
+                    .any(|range| *key >= range.start().as_ref() && *key <= range.end().as_ref())
+            })
+        })
+        .collect();
+    keys.sort_unstable();
+    keys.dedup();
+
+    // The stored value under each covered key, read in one pass over the
+    // segment's keys that stops past the last of them. A value is decoded
+    // only when a side has no op of its own to answer with.
+    let mut stored: Vec<Option<Value>> = vec![None; keys.len()];
+    let mut probe = 0;
+    let mut entries = segment.keys::<Key>()?;
+    while probe < keys.len() {
+        let Some((at, key)) = entries.next_key()? else {
+            break;
+        };
+        while probe < keys.len() && keys[probe] < key {
+            probe += 1;
+        }
+        if probe < keys.len() && keys[probe] == key {
+            if op_at(&ours_ops, key).is_none() || op_at(&theirs_ops, key).is_none() {
+                stored[probe] = Some(into_owned(segment.value_at(at)?)?);
+            }
+            probe += 1;
+        }
+    }
+
+    let resolve = |op: Option<&NoveltyOp<Value>>, stored: &Option<Value>| match op {
+        Some(NoveltyOp::Assert(value)) => Some(value.clone()),
+        Some(NoveltyOp::Retract) => None,
+        None => stored.clone(),
+    };
+    let mut ours_settled = Vec::new();
+    let mut theirs_settled = Vec::new();
+    for (key, stored) in keys.iter().zip(&stored) {
+        let ours_value = resolve(op_at(&ours_ops, key), stored);
+        let theirs_value = resolve(op_at(&theirs_ops, key), stored);
+        if ours_value == theirs_value {
+            continue;
+        }
+        if let Some(value) = ours_value {
+            ours_settled.push(NoveltyEntry {
+                key: key.to_vec(),
+                op: NoveltyOp::Assert(value),
+            });
+        }
+        if let Some(value) = theirs_value {
+            theirs_settled.push(NoveltyEntry {
+                key: key.to_vec(),
+                op: NoveltyOp::Assert(value),
+            });
+        }
+    }
+
+    Ok(Some((
+        SparseTreeNode::Settled {
+            lower_bound: ours_bound.clone(),
+            ops: ours_settled,
+        },
+        SparseTreeNode::Settled {
+            lower_bound: theirs_bound.clone(),
+            ops: theirs_settled,
+        },
+    )))
+}
+
 /// Reduces the ops collected along a root-to-leaf path to the winning op per
 /// key, sorted by key.
 ///
@@ -1851,7 +2068,7 @@ where
 pub struct TreeDifference<'a, Key, Value, Env>
 where
     Key: self::Key,
-    Env: Provider<LoadBlock>,
+    Env: Nodes<Key, Value>,
 {
     source: SparseTree<'a, Key, Value, Env>,
     target: SparseTree<'a, Key, Value, Env>,
@@ -1875,7 +2092,7 @@ where
             Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
         + ConditionalSync,
-    Env: Provider<LoadBlock> + ConditionalSync,
+    Env: Nodes<Key, Value>,
 {
     /// Computes the difference between two trees.
     ///
@@ -2131,12 +2348,12 @@ where
                             .into_iter()
                             .enumerate()
                             .map(|(at, (is_target, hash))| {
-                                let storage = if is_target {
-                                    target_storage
+                                let (storage, missing) = if is_target {
+                                    (target_storage, missing.target)
                                 } else {
-                                    source_storage
+                                    (source_storage, missing.source)
                                 };
-                                (at, is_target, storage, hash)
+                                (at, is_target, storage, missing, hash)
                             });
                     #[cfg(test)]
                     let batch = wanted.len();
@@ -2144,11 +2361,12 @@ where
                     let mut reads = futures_util::stream::FuturesUnordered::new();
                     loop {
                         while reads.len() < LOAD_CONCURRENCY {
-                            let Some((at, is_target, storage, hash)) = wanted.next() else {
+                            let Some((at, is_target, storage, missing, hash)) = wanted.next()
+                            else {
                                 break;
                             };
                             sides.push((is_target, hash.clone()));
-                            reads.push(fetch_block(storage, at, hash));
+                            reads.push(fetch_block(storage, missing, at, hash));
                         }
                         let Some((at, read)) = reads.next().await else {
                             break;
@@ -2235,7 +2453,12 @@ where
                         let Some((is_target, offset, storage, hash)) = pending.next() else {
                             break;
                         };
-                        reads.push(preload_block(storage, is_target, offset, hash));
+                        let missing = if is_target {
+                            missing.target
+                        } else {
+                            missing.source
+                        };
+                        reads.push(preload_block(storage, missing, is_target, offset, hash));
                     }
                     match reads.next().await {
                         Some((is_target, offset, Some(node))) => {
@@ -2346,6 +2569,8 @@ where
                 break;
             }
         }
+
+        SparseTree::settle_shared_segments(&mut source, &mut target, scope)?;
 
         Ok(TreeDifference { source, target })
     }
@@ -2536,6 +2761,7 @@ where
                         match SparseTree::<Key, Value, Env>::try_load(
                             self.target.storage,
                             &link.node,
+                            self.target.missing,
                         )
                         .await?
                         {
@@ -2636,6 +2862,9 @@ mod tests {
         }
     }
 
+    /// Keeps nothing, so every node read is a counted block read.
+    impl<Key, Value> crate::Nodes<Key, Value> for CountingBackend {}
+
     #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
     #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
     impl Provider<LoadBlock> for CountingBackend {
@@ -2665,7 +2894,7 @@ mod tests {
                 .edit()
                 .insert(key.to_le_bytes(), value, storage)
                 .await?
-                .persist(&mut delta)?;
+                .persist(&mut delta, storage)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, buffer) in delta.flush() {
                 storage.store(buffer);
@@ -2687,19 +2916,13 @@ mod tests {
         let mut delta = Delta::zero();
         for (key, value) in keys {
             let edit = match tree.stored_root() {
-                Some(root) => crate::TransientTree::with_manifest(
-                    root.clone(),
-                    tree.node_cache(),
-                    manifest.clone(),
-                ),
-                None => {
-                    crate::TransientTree::empty_with_manifest(tree.node_cache(), manifest.clone())
-                }
+                Some(root) => crate::TransientTree::with_manifest(root.clone(), manifest.clone()),
+                None => crate::TransientTree::empty_with_manifest(manifest.clone()),
             };
             tree = edit
                 .insert(key.to_le_bytes(), value, storage)
                 .await?
-                .persist(&mut delta)?;
+                .persist(&mut delta, storage)?;
             for (_, buffer) in delta.flush() {
                 storage.store(buffer);
             }
@@ -2741,7 +2964,7 @@ mod tests {
                 .edit()
                 .insert(i.to_le_bytes(), vec![1], &storage)
                 .await?
-                .persist(&mut delta)?;
+                .persist(&mut delta, &storage)?;
             for (_, buffer) in delta.flush() {
                 storage.store(buffer);
             }
@@ -2811,7 +3034,7 @@ mod tests {
                 .edit()
                 .insert(i.to_le_bytes(), vec![1], &storage)
                 .await?
-                .persist(&mut delta)?;
+                .persist(&mut delta, &storage)?;
             for (_, buffer) in delta.flush() {
                 storage.store(buffer);
             }
@@ -2864,25 +3087,20 @@ mod tests {
             ..Manifest::default()
         };
 
-        let mut edit = crate::TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(
-            Default::default(),
-            custom.clone(),
-        );
+        let mut edit =
+            crate::TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(custom.clone());
         for k in 0..30u32 {
             edit = edit
                 .insert(k.to_le_bytes(), vec![k as u8], &storage)
                 .await?;
         }
         let mut delta = Delta::zero();
-        let populated = edit.persist(&mut delta)?;
+        let populated = edit.persist(&mut delta, &storage)?;
         flush(&mut delta, &mut storage).await?;
 
         let mut delta = Delta::zero();
-        let emptied = crate::TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(
-            Default::default(),
-            custom,
-        )
-        .persist(&mut delta)?;
+        let emptied = crate::TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(custom)
+            .persist(&mut delta, &storage)?;
         flush(&mut delta, &mut storage).await?;
 
         let adds = collect_changes(&emptied, &populated, &storage).await?;
@@ -2901,7 +3119,7 @@ mod tests {
             .edit()
             .integrate(iter(adds.into_iter().map(Ok)), &storage)
             .await?
-            .persist(&mut delta)?;
+            .persist(&mut delta, &storage)?;
         flush(&mut delta, &mut storage).await?;
         assert_eq!(
             adopted.root(),
@@ -2914,7 +3132,7 @@ mod tests {
             .edit()
             .integrate(iter(removes.into_iter().map(Ok)), &storage)
             .await?
-            .persist(&mut delta)?;
+            .persist(&mut delta, &storage)?;
         flush(&mut delta, &mut storage).await?;
         assert_eq!(
             cleared.root(),
@@ -2942,11 +3160,11 @@ mod tests {
             };
         }
         let mut delta = Delta::zero();
-        let root = tree.persist(&mut delta)?;
+        let root = tree.persist(&mut delta, storage)?;
         for (_, buffer) in delta.flush() {
             storage.store(buffer);
         }
-        Ok(TestTree::seal(root, Default::default()))
+        Ok(TestTree::seal(root))
     }
 
     /// Applies `ops` to a buffered tree over `base` and canonicalizes it, so the
@@ -3177,7 +3395,7 @@ mod tests {
             .edit()
             .integrate(changes, &storage)
             .await?
-            .persist(&mut delta)?;
+            .persist(&mut delta, &storage)?;
         for (_, buffer) in delta.flush() {
             storage.store(buffer);
         }
@@ -3207,7 +3425,7 @@ mod tests {
             .edit()
             .insert(1000u32.to_le_bytes(), vec![0xFF], &storage)
             .await?
-            .persist(&mut delta)?;
+            .persist(&mut delta, &storage)?;
         for (_, buffer) in delta.flush() {
             storage.store(buffer);
         }
@@ -3249,7 +3467,7 @@ mod tests {
                 .edit()
                 .insert(key.to_le_bytes(), vec![0xAB], &storage)
                 .await?
-                .persist(&mut delta)?;
+                .persist(&mut delta, &storage)?;
             for (_, buffer) in delta.flush() {
                 storage.store(buffer);
             }
@@ -3336,6 +3554,9 @@ mod tests {
             }
         }
 
+        /// Keeps nothing, so every node read is a counted block read.
+        impl<Key, Value> crate::Nodes<Key, Value> for GaugeBackend {}
+
         #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
         #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
         impl Provider<LoadBlock> for GaugeBackend {
@@ -3367,7 +3588,7 @@ mod tests {
                 .edit()
                 .insert(key.to_le_bytes(), vec![key as u8], &storage)
                 .await?
-                .persist(&mut delta)?;
+                .persist(&mut delta, &storage)?;
             for (_, buffer) in delta.flush() {
                 storage.store(buffer);
             }
@@ -3380,7 +3601,7 @@ mod tests {
                 .edit()
                 .insert(key.to_le_bytes(), vec![0xCD], &storage)
                 .await?
-                .persist(&mut delta)?;
+                .persist(&mut delta, &storage)?;
             for (_, buffer) in delta.flush() {
                 storage.store(buffer);
             }
@@ -3446,7 +3667,7 @@ mod tests {
             .edit()
             .insert(99u32.to_le_bytes(), vec![1], &storage)
             .await?
-            .persist(&mut delta_ours)?;
+            .persist(&mut delta_ours, &storage)?;
         for (_, buffer) in delta_ours.flush() {
             storage.store(buffer);
         }
@@ -3457,7 +3678,7 @@ mod tests {
             .edit()
             .insert(99u32.to_le_bytes(), vec![2], &storage)
             .await?
-            .persist(&mut delta_theirs)?;
+            .persist(&mut delta_theirs, &storage)?;
         for (_, buffer) in delta_theirs.flush() {
             storage.store(buffer);
         }
@@ -3471,7 +3692,7 @@ mod tests {
             .edit()
             .integrate(their_changes, &storage)
             .await?
-            .persist(&mut delta_merged_ours)?;
+            .persist(&mut delta_merged_ours, &storage)?;
 
         let mut merged_theirs = theirs.clone();
         let mut delta_merged_theirs = Delta::zero();
@@ -3480,7 +3701,7 @@ mod tests {
             .edit()
             .integrate(our_changes, &storage)
             .await?
-            .persist(&mut delta_merged_theirs)?;
+            .persist(&mut delta_merged_theirs, &storage)?;
 
         for (_, buffer) in delta_merged_ours.flush() {
             storage.store(buffer);
@@ -3514,7 +3735,7 @@ mod tests {
                 .edit()
                 .insert(i.to_le_bytes(), vec![i as u8], &storage)
                 .await?
-                .persist(&mut delta)?;
+                .persist(&mut delta, &storage)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, buffer) in delta.flush() {
                 storage.store(buffer);
@@ -3580,7 +3801,7 @@ mod tests {
                 .edit()
                 .insert(i.to_le_bytes(), vec![i as u8], &origin)
                 .await?
-                .persist(&mut delta)?;
+                .persist(&mut delta, &origin)?;
             for (_, buffer) in delta.flush() {
                 origin.store(buffer);
             }
@@ -4809,7 +5030,7 @@ mod tests {
             .edit()
             .integrate(iter(changes.into_iter().map(Ok)), &storage)
             .await?
-            .persist(&mut delta)?;
+            .persist(&mut delta, &storage)?;
 
         // Flush so the reads below can load the integrated nodes from storage.
         flush(&mut delta, &mut storage).await?;
@@ -4834,7 +5055,7 @@ mod tests {
             .edit()
             .integrate(iter(changes.into_iter().map(Ok)), &storage)
             .await?
-            .persist(&mut delta)?;
+            .persist(&mut delta, &storage)?;
 
         // Flush so the reads below can load the integrated nodes from storage.
         flush(&mut delta, &mut storage).await?;
@@ -4865,7 +5086,7 @@ mod tests {
             .edit()
             .integrate(iter(changes.into_iter().map(Ok)), &storage)
             .await?
-            .persist(&mut delta)?;
+            .persist(&mut delta, &storage)?;
 
         // Flush so the reads below can load the integrated nodes from storage.
         flush(&mut delta, &mut storage).await?;
@@ -4893,7 +5114,7 @@ mod tests {
             .edit()
             .integrate(iter(changes.into_iter().map(Ok)), &storage)
             .await?
-            .persist(&mut delta)?;
+            .persist(&mut delta, &storage)?;
 
         // Flush so the reads below can load the integrated nodes from storage.
         flush(&mut delta, &mut storage).await?;
@@ -4917,7 +5138,7 @@ mod tests {
             .edit()
             .integrate(iter(changes.into_iter().map(Ok)), &storage)
             .await?
-            .persist(&mut delta)?;
+            .persist(&mut delta, &storage)?;
 
         // Flush so the reads below can load the integrated nodes from storage.
         flush(&mut delta, &mut storage).await?;
@@ -4942,7 +5163,7 @@ mod tests {
             .edit()
             .integrate(iter(changes.into_iter().map(Ok)), &storage)
             .await?
-            .persist(&mut delta)?;
+            .persist(&mut delta, &storage)?;
 
         // Flush so the reads below can load the integrated nodes from storage.
         flush(&mut delta, &mut storage).await?;
@@ -4965,7 +5186,7 @@ mod tests {
             .edit()
             .insert(key(1), vec![20], &storage)
             .await?
-            .persist(&mut delta_a)?;
+            .persist(&mut delta_a, &storage)?;
         flush(&mut delta_a, &mut storage).await?;
 
         let mut tree_b = build([(1, vec![10])], &mut storage).await?;
@@ -4974,7 +5195,7 @@ mod tests {
             .edit()
             .insert(key(1), vec![30], &storage)
             .await?
-            .persist(&mut delta_b)?;
+            .persist(&mut delta_b, &storage)?;
         flush(&mut delta_b, &mut storage).await?;
 
         // Both replicas exchange their changes (relative to an empty tree,
@@ -4988,12 +5209,12 @@ mod tests {
             .edit()
             .integrate(iter(changes_b.into_iter().map(Ok)), &storage)
             .await?
-            .persist(&mut delta_a)?;
+            .persist(&mut delta_a, &storage)?;
         tree_b = tree_b
             .edit()
             .integrate(iter(changes_a.into_iter().map(Ok)), &storage)
             .await?
-            .persist(&mut delta_b)?;
+            .persist(&mut delta_b, &storage)?;
 
         // Flush so the reads below can load the integrated nodes from storage.
         flush(&mut delta_a, &mut storage).await?;
@@ -5030,7 +5251,7 @@ mod tests {
             .edit()
             .integrate(iter(changes.into_iter().map(Ok)), &storage)
             .await?
-            .persist(&mut delta)?;
+            .persist(&mut delta, &storage)?;
 
         // Flush so the reads below can load the integrated nodes from storage.
         flush(&mut delta, &mut storage).await?;
@@ -5055,7 +5276,7 @@ mod tests {
             .edit()
             .integrate(iter(changes.into_iter().map(Ok)), &storage)
             .await?
-            .persist(&mut delta)?;
+            .persist(&mut delta, &storage)?;
 
         // Flush so the reads below can load the integrated nodes from storage.
         flush(&mut delta, &mut storage).await?;
@@ -5083,7 +5304,7 @@ mod tests {
             .edit()
             .integrate(iter(changes.into_iter().map(Ok)), &storage)
             .await?
-            .persist(&mut delta)?;
+            .persist(&mut delta, &storage)?;
 
         // Flush so the reads below can load the integrated nodes from storage.
         flush(&mut delta, &mut storage).await?;
@@ -5114,7 +5335,7 @@ mod tests {
             .edit()
             .integrate(iter(changes.into_iter().map(Ok)), &storage)
             .await?
-            .persist(&mut delta)?;
+            .persist(&mut delta, &storage)?;
 
         // Flush so the reads below can load the integrated nodes from storage.
         flush(&mut delta, &mut storage).await?;
@@ -5148,7 +5369,7 @@ mod tests {
             .edit()
             .integrate(iter(changes.into_iter().map(Ok)), &storage)
             .await?
-            .persist(&mut delta)?;
+            .persist(&mut delta, &storage)?;
 
         // Root hash should match after integration (canonical form)
         assert_eq!(start.root(), &target_root);
@@ -5167,11 +5388,11 @@ mod tests {
             tree = tree.insert(*key, value.clone(), storage).await?;
         }
         let mut delta = Delta::zero();
-        let root = tree.persist(&mut delta)?;
+        let root = tree.persist(&mut delta, storage)?;
         for (_, buffer) in delta.flush() {
             storage.store(buffer);
         }
-        Ok(TestTree::seal(root, Default::default()))
+        Ok(TestTree::seal(root))
     }
 
     /// A fact buffered at the root must sync without descending the tree.
@@ -5344,7 +5565,7 @@ mod tests {
                 .edit()
                 .insert(*key, key.to_vec(), &storage)
                 .await?
-                .persist(&mut delta)?;
+                .persist(&mut delta, &storage)?;
             for (_, buffer) in delta.flush() {
                 storage.store(buffer);
             }
@@ -5357,11 +5578,11 @@ mod tests {
         buffered = buffered.insert(in_tag_1, vec![11], &storage).await?;
         buffered = buffered.insert(in_tag_5, vec![55], &storage).await?;
         let mut delta = Delta::zero();
-        let root = buffered.persist(&mut delta)?;
+        let root = buffered.persist(&mut delta, &storage)?;
         for (_, buffer) in delta.flush() {
             storage.store(buffer);
         }
-        let next = TestTree::from_hash_with_cache(root, Default::default());
+        let next = TestTree::from_hash(root);
 
         for (tag, key) in [(1u8, in_tag_1), (5u8, in_tag_5)] {
             let scope = [[tag, 0, 0, 0]..=[tag, 0xFF, 0xFF, 0xFF]];
@@ -5471,7 +5692,7 @@ mod tests {
                 .edit()
                 .insert(*key, key.to_vec(), &storage)
                 .await?
-                .persist(&mut delta)?;
+                .persist(&mut delta, &storage)?;
             for (_, buffer) in delta.flush() {
                 storage.store(buffer);
             }
@@ -5486,11 +5707,11 @@ mod tests {
                 .insert(beyond, vec![7], &storage)
                 .await?;
             let mut delta = Delta::zero();
-            let root = tree.persist(&mut delta)?;
+            let root = tree.persist(&mut delta, &storage)?;
             for (_, buffer) in delta.flush() {
                 storage.store(buffer);
             }
-            TestTree::from_hash_with_cache(root, Default::default())
+            TestTree::from_hash(root)
         };
 
         // Scope covering only the beyond-the-bound region.
@@ -5597,8 +5818,8 @@ mod tests {
             let result = if canonicalize {
                 tree.canonicalize(storage, &mut delta).await?
             } else {
-                let root = tree.persist(&mut delta)?;
-                TestTree::seal(root, Default::default())
+                let root = tree.persist(&mut delta, storage)?;
+                TestTree::seal(root)
             };
             settle(&mut delta, storage).await?;
             Ok(result)
@@ -5687,7 +5908,7 @@ mod tests {
                 .edit()
                 .insert(key, value, storage)
                 .await?
-                .persist(&mut delta)?;
+                .persist(&mut delta, storage)?;
             for (_, buffer) in delta.flush() {
                 storage.store(buffer);
             }
@@ -5710,11 +5931,11 @@ mod tests {
             };
         }
         let mut delta = Delta::zero();
-        let root = tree.persist(&mut delta)?;
+        let root = tree.persist(&mut delta, storage)?;
         for (_, buffer) in delta.flush() {
             storage.store(buffer);
         }
-        Ok(TestTree::seal(root, Default::default()))
+        Ok(TestTree::seal(root))
     }
 
     async fn canonical_bytes(
@@ -6468,6 +6689,139 @@ mod tests {
         assert!(
             novel <= height,
             "only the extended root is new, with whatever of the path the walk opened: {novel} novel nodes"
+        );
+        Ok(())
+    }
+
+    /// Two sides holding the same stored leaf, differing only in the ops
+    /// routed to it, settle to the keys those ops cover: the entry walk
+    /// decodes nothing else of the leaf, and yields exactly the changes a
+    /// difference of the canonicalized trees yields, in the same order.
+    /// Before, the walk streamed every stored entry of the leaf on both
+    /// sides, so a scoped difference paid for the whole leaf its ops landed
+    /// in, whatever its scope.
+    #[dialog_common::test]
+    async fn it_settles_a_shared_leaf_to_the_keys_its_ops_cover() -> Result<()> {
+        let mut storage = CountingBackend::new();
+        let manifest = Manifest {
+            max_segment: 512,
+            frame_ceiling_factor: 0,
+            ..Manifest::default()
+        };
+        let base = build_with_manifest(
+            (0..2_000u32).map(|i| (i, vec![i as u8])),
+            manifest,
+            &mut storage,
+        )
+        .await?;
+
+        // Keys are little-endian, so `10 + 256 * n` sort next to each other
+        // and land in one leaf; past 2,000 they are absent from the base.
+        let key = |n: u32| 10 + 256 * n;
+        let source_ops = vec![
+            // An op both sides hold cancels.
+            (true, key(0), vec![7]),
+            // The same key asserted with different values.
+            (true, key(1), vec![1]),
+            // A stored key retracted on one side only.
+            (false, key(2), vec![]),
+            // A stored key overwritten on one side only.
+            (true, key(4), vec![5]),
+            // An absent key retracted: nothing to report.
+            (false, key(10), vec![]),
+        ];
+        let target_ops = vec![
+            (true, key(0), vec![7]),
+            (true, key(1), vec![2]),
+            (false, key(3), vec![]),
+            // An absent key inserted.
+            (true, key(9), vec![3]),
+        ];
+        let source = buffered(&base, &source_ops, 1_000_000, &mut storage).await?;
+        let target = buffered(&base, &target_ops, 1_000_000, &mut storage).await?;
+        let source_canonical = canonicalized(&base, &source_ops, 1, &mut storage).await?;
+        let target_canonical = canonicalized(&base, &target_ops, 1, &mut storage).await?;
+
+        let flat = |changes: Vec<Change<[u8; 4], Vec<u8>>>| {
+            changes
+                .into_iter()
+                .map(|change| match change {
+                    Change::Add(entry) => (true, entry.key, entry.value),
+                    Change::Remove(entry) => (false, entry.key, entry.value),
+                })
+                .collect::<Vec<_>>()
+        };
+        let settled = flat(collect_changes(&source, &target, &storage).await?);
+        let canonical =
+            flat(collect_changes(&source_canonical, &target_canonical, &storage).await?);
+        let bytes = |n: u32| key(n).to_le_bytes();
+        assert_eq!(
+            settled,
+            vec![
+                (false, bytes(1), vec![1]),
+                (true, bytes(1), vec![2]),
+                (true, bytes(2), vec![key(2) as u8]),
+                (false, bytes(3), vec![key(3) as u8]),
+                (false, bytes(4), vec![5]),
+                (true, bytes(4), vec![key(4) as u8]),
+                (true, bytes(9), vec![3]),
+            ],
+            "each covered key resolves to its winning op or its stored entry"
+        );
+        assert_eq!(
+            settled, canonical,
+            "settling changes nothing a difference reports"
+        );
+
+        // Scoped, only the covered keys inside the scope resolve. A scope
+        // inside the leaf that covers no op's key reports nothing.
+        for (scope, expected) in [
+            (
+                vec![bytes(1)..=bytes(1)],
+                vec![(false, bytes(1), vec![1]), (true, bytes(1), vec![2])],
+            ),
+            (vec![bytes(5)..=bytes(8)], vec![]),
+        ] {
+            let scoped = flat(collect_scoped_changes(&source, &target, &scope, &storage).await?);
+            let canonical = flat(
+                collect_scoped_changes(&source_canonical, &target_canonical, &scope, &storage)
+                    .await?,
+            );
+            assert_eq!(scoped, expected, "scope {scope:?}");
+            assert_eq!(scoped, canonical, "scope {scope:?}");
+        }
+
+        let difference = TreeDifference::compute(&source, &target, &storage, &storage).await?;
+        let loaded_segment = |node: &super::SparseTreeNode<[u8; 4], Vec<u8>>| match node {
+            super::SparseTreeNode::Loaded { node, .. }
+                if matches!(node.body(), crate::NodeBody::Segment(_)) =>
+            {
+                Some(node.hash().clone())
+            }
+            _ => None,
+        };
+        let theirs: HashSet<Blake3Hash> = difference
+            .target
+            .nodes
+            .iter()
+            .filter_map(loaded_segment)
+            .collect();
+        assert!(
+            difference
+                .source
+                .nodes
+                .iter()
+                .filter_map(loaded_segment)
+                .all(|hash| !theirs.contains(&hash)),
+            "no leaf both sides share is left for the entry walk to stream"
+        );
+        assert!(
+            difference
+                .target
+                .nodes
+                .iter()
+                .any(|node| matches!(node, super::SparseTreeNode::Settled { .. })),
+            "the shared leaf the ops landed in is settled"
         );
         Ok(())
     }
@@ -7360,17 +7714,16 @@ mod tests {
             frame_ceiling_factor: 0,
             ..Manifest::default()
         };
-        let mut base = TestTree::empty();
+        let base: TestTree;
         {
-            let mut edit =
-                crate::TransientTree::empty_with_manifest(base.node_cache(), manifest.clone());
+            let mut edit = crate::TransientTree::empty_with_manifest(manifest.clone());
             for i in 0..120_000u32 {
                 edit = edit
                     .insert(i.to_le_bytes(), vec![(i % 251) as u8], &storage)
                     .await?;
             }
             let mut delta = Delta::zero();
-            base = edit.persist(&mut delta)?;
+            base = edit.persist(&mut delta, &storage)?;
             for (_, buffer) in delta.flush() {
                 storage.store(buffer);
             }
