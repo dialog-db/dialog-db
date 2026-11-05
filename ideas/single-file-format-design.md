@@ -221,14 +221,44 @@ in a footer is read from the start and its torn tail is dropped. (Built:
 3. **Done.** Writers across processes: the writer lock, catching up on
    records other processes appended, and readers that follow the file's
    growth (`tests/repository.rs` runs two processes appending at once).
-4. **A node over rows** in `dialog-search-tree`: the index and segment
-   accessors as an interface with two backings, the archived block and
-   rows over a token region, tested by reading every node of the spike's
-   datasets both ways and comparing every accessor.
-5. **Done, with reads realizing.** Frames: tokens, rows, predecessors and
-   the checked conversion in the file; `Get` realizes. Until step 4, a
-   tree read of a frame realizes too.
+4. **Done.** A node over rows in `dialog-search-tree`: `IndexView` and
+   `SegmentView`, backed by a block or by a store's `NodeRows`, which a
+   `NodeSource` the environment holds hands over before any block is
+   loaded. Tested by reading every node both ways and comparing every
+   accessor (`tests/repository.rs`; by hand, all 14,900 nodes of a
+   4096-commit Stack Exchange file).
+5. **Done.** Frames: tokens, rows, predecessors and the checked conversion
+   in the file; `Get` realizes. The archive is a `NodeSource`.
 6. **The perf gate's scenarios** over it, against the `fs` archive.
+
+## Reading in place (step 4)
+
+What the tree reads, and where from, when the archive serves a node:
+
+- **Keys** are the tokens a row names, compared part by part where the
+  file keeps them (`KeyParts::cmp_bytes`). A cursor that has to hand out a
+  key as one slice writes it into one buffer it reuses, as the columnar
+  segments already do; a binary search over a leaf (a point read, the
+  entry point of a range) compares in place and writes nothing.
+- **Values** are tokens too: each is a standalone archive of a
+  `State<Datum>`, aligned to 16 in the file, read as its archived type
+  where it sits. The archive checks each once, the first time a node that
+  holds it is served.
+- **Children** are named by hash, read from the child's frame header in
+  the file, or from a hash token for a child the file holds no frame of.
+- **Rows** are not read in place. A frame's ids are varint columns written
+  against its predecessor, so serving a node decodes its rows once
+  (through a cache of decoded rows) and records where each part is: about
+  70 bytes an entry, the node's footprint in a node cache. Fixed-width rows
+  would read in place but take several times the bytes; the decode is
+  part of the 9–12 ms a cold read of 256 points takes in all.
+- **Blocks** are built only on asking (`PersistentNode::buffer`): sync,
+  push, and a load through the repository's own block path.
+
+What it does not remove: the tree's scans yield owned values
+(`into_owned` on yield), so a value read in place is deserialized when a
+query takes it, as on main. Removing that is a change to the tree's query
+API, not to its storage.
 
 ## Measured, steps 1–3 and 5
 
@@ -279,11 +309,8 @@ What it says:
   and that needs the tree to say which entries those are.
 - **A cold read pays rebuilding** (about 140–180 µs a node), so cold point
   reads are 2× slower than `fs`, and warm reads are the same: the node
-  cache above the archive holds rebuilt nodes. Step 4 is what removes that
-  cost, and the census bounds what it can buy: decoding rows costs about
-  what reading a block file does, so cold reads reach parity with `fs`,
-  not better. What step 4 buys beyond that is memory: a cached node over
-  shared tokens instead of its block plus its decoded keys.
+  cache above the archive holds rebuilt nodes. Step 4 removes that cost
+  (below).
 - **Tokens are read through a mapping of the file.** Holding them in
   memory made the index 23.4 MiB, mostly the 10.2 MiB of token bytes plus
   growth slack, so it would not scale past memory. Mapped, the index is
@@ -291,3 +318,39 @@ What it says:
   from a checkpoint without reading a token. The table that finds a token
   by its bytes is built by a writer, on its first write. The pages a read
   touches belong to the OS page cache, which can drop them.
+
+## Measured, step 4: nodes served in place, against main
+
+The same bench, with a fourth store, `file/served`: the frames file, with
+the environment holding it as its node source. `fs` is main's archive.
+4096 commits, the same 14,900 blocks and root in every store:
+
+| | `fs` (main) | file, served in place | file, rebuilding blocks |
+|---|---|---|---|
+| on disk | 1147 MiB | **13.5 MiB** | 13.5 MiB |
+| cold scan, 8 attributes | 32–37 ms | **29–37 ms** | 51 ms |
+| cold point reads, 256 | 11–12 ms | **9–12 ms** | 16 ms |
+| warm scan / points | 14–19 / 2 ms | 15–16 / 2 ms | 19 / 2 ms |
+| node cache after the scans | 56 nodes, 2.9 MiB | 56 nodes, **1.0 MiB** | — |
+| heap the scans leave held | 6.2 MiB | **4.3 MiB** | — |
+| heap the open takes | 7.8 MiB | 13.0 MiB | — |
+| commit | 5.8–6.8 ms | 7.6–10.4 ms | 9.6 ms |
+
+What it says:
+
+- **Cold reads match main's.** Served in place, a cold read costs what
+  reading a block file does, as the census predicted; rebuilding the block
+  made it about 1.5× to 2× slower.
+- **A cached node is a third of a cached block**: 18 KB against 53 KB, for
+  the same 56 nodes. The rest of what reads leave held (about 3.3 MiB) is
+  shared by both stores: other caches, not nodes.
+- **The open costs 5 MiB more**: the archive's index (4 MiB), what main
+  does not have since a directory is its index. That is where each token,
+  node and block is; it grows with the file, not with what is read.
+- **Commits still pay the frame's write cost**, about 2.3 ms more than a
+  whole-block file. A commit that reads through served nodes skips the
+  rebuild on its own reads, so it lands between the whole-block file and
+  the rebuilding one; the spread between runs is as large as that gap.
+- Warm point reads first came out at 5 ms: the walker streamed a served
+  leaf from its first key, as it must for a block's columnar keys. It now
+  enters a served leaf by a binary search in place (`keys_from`).
