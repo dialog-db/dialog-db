@@ -48,6 +48,111 @@ Why: a replica's history costs a file per block per version, which is
 most of what a replica weighs. Replaying 4096 Stack Exchange commits, the
 `fs` archive takes about 1.2 GiB and the file 13 MiB.
 
+### A pull or a push that meets another revision under its own head's version is refused
+
+Fixing [#705](https://github.com/dialog-db/dialog-db/issues/705)
+
+Two replicas writing with one key on one branch share an origin, since
+an origin derives from the branch and the issuer. When both build on the
+same head, each mints the next edition of it over its own tree: two
+revisions under one version. Every context that holds one claims the
+other, so the second writer's pull took the first's head as already seen
+and merged nothing, and its push then replaced that head. Both writers
+were told their write synced, one write was gone, and the two replicas
+kept different trees under one version for good. A pull or a push now
+compares the upstream's head with the branch's own head first, and when
+they are the same version over different trees, refuses with an error
+that says so.
+
+What this changes for you:
+
+- `PullError::WriterRacedItself { branch, ours, theirs }` and
+  `PushError::WriterRacedItself { branch, ours, theirs }` are new. A pull
+  or a push that meets the rival head returns one and writes nothing: not
+  the branch's head, not its sync base, not the upstream. A sync loop
+  that pulls on `PushError::NonFastForward` and pushes again now stops
+  with this error instead of reporting the write synced.
+- The refused write is not lost: written again on a replica that has
+  not written (one that pulls the upstream fresh), it lands on top of the
+  rival. Writers that need to write at once each need a key of their
+  own, which is what dialog's model has always assumed.
+- A head that wrote first and a sync with no rival behave as before. The
+  check compares two heads already in hand, so it reads nothing.
+- Still not detected: a replica that minted two or more revisions on the
+  shared head before it syncs holds a head above the rival's edition,
+  and nothing on either head tells the rival from its own earlier
+  revision. One write per sync per key, as the stateless workers of #705
+  do, is caught.
+
+Why: concurrent writers sharing one identity are outside the model, but
+breaking that rule cost a write without an error. A refusal the writer
+can see is the least the replica owes it; keeping both writes by a merge
+cannot be done soundly, since each head's context already claims the
+other's write and the merge would screen it out as removed.
+
+### `ConditionalSync` means `Sync`, not `Send + Sync`
+
+[#734](https://github.com/dialog-db/dialog-db/pull/734)
+
+`dialog_common::ConditionalSync` was `Send + Sync` on native targets, so
+a `ConditionalSync` bound quietly asked for `Send` as well, and a bound
+that needed only `Sync` could not say so. It is now `Sync`, matching its
+name and `dialog_ucan_core::ConditionalSync`; `ConditionalSend` is the
+bound for `Send`. On wasm both remain no bound at all.
+
+What this changes for you:
+
+- A generic bounded only by `ConditionalSync` is no longer known to be
+  `Send` on native. Where your code moves it into a `Send` future, sends
+  an `Arc` of it to a task, or stores it in a type that must be `Send`,
+  write `ConditionalSend + ConditionalSync`.
+- These traits now name both bounds as supertraits, so what implements
+  them and what a bound on them implies is unchanged:
+  `dialog_artifacts::{ValueType, History}`, `dialog_did_web::Fetch`,
+  `dialog_remote_ucan::Presented`, `dialog_peer_iroh::{Channel, Connect}`
+  and the `dialog_peer` helpers' `Meter`.
+- A store a tree reads through by value asks for `ConditionalSend` as
+  well, since it is moved into the read's future: the `S` of the
+  `dialog_artifacts::ArtifactTreeExt` and `BlobIndexExt` methods,
+  `TreeHistory`, `blob_changes` and `spilled_refs`, and of the query
+  builder's `execute`, `execute_owned` and `estimate` in
+  `dialog_repository`. An env passed by reference (`perform(&env)`)
+  still asks only for `ConditionalSync`.
+- `dialog_query::merge_join` and `multi_merge_join` ask for
+  `ConditionalSend + ConditionalSync` on their key function and key, and
+  the `Resolver` and `Revocations` of `dialog_peer_iroh::accept` ask for
+  both, as they always needed.
+
+Why: a bound named `Sync` that also demands `Send` hides what code
+actually needs, and makes a type that is `Sync` but not `Send` impossible
+to accept through it.
+
+### A pull that loses its publish forgets the head it minted
+
+[#704](https://github.com/dialog-db/dialog-db/pull/704)
+
+A pull remembered its merged head's causal context at prepare time,
+before publishing it. A merge prepared on a stale view of the head mints
+the version of the commit already landed on it (a version is the origin
+and its edition, so two revisions minted on one parent by one origin
+share it), so when its publish lost, its context stayed in the memo under
+that commit's version: the commit read as having seen the upstream, and
+the next merge screened the upstream's claims out as removed. The context
+now enters the memo only once the head is published, as a commit's does.
+
+What this changes for you:
+
+- A branch whose pull loses the race to a commit through another handle
+  no longer drops the upstream's claims on its next merge. Nothing stored
+  changes: the memo is in memory, and a pull that lands is remembered as
+  before.
+- `PreparedPull::commit` still fails such a race with
+  `PullError::Publish(PublishError::VersionMismatch)`; the caller refreshes
+  and pulls again, as before.
+
+Why: the memo speaks for heads that landed, and a context remembered
+before the publish speaks for one that may never land.
+
 ### Distinct members inserted between the same neighbours get distinct positions
 
 A position's fractional tail comes from a bias derived from the member's
@@ -1876,6 +1981,12 @@ thread multiplies whatever it holds by the size of the thread pool.
 
 ### Compatibility and migration
 
+- Nothing stored or synced changes for the refusal of a rival head of
+  one version (#705): nothing is rewritten on upgrade, and heads, trees
+  and the wire format are as before, so an older release reads all this
+  one writes. An older release still takes a rival head as seen, so a
+  write it races with one of this release under the same key can still
+  be dropped there; upgrade every replica that shares a key.
 - Nothing an existing space holds changes or is read differently for the
   single-file archive: it is a new provider a space opts into. A space
   opened with `FileArchive` does not read an `fs` archive's directory of

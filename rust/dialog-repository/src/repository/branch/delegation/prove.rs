@@ -23,7 +23,7 @@
 use dialog_artifacts::{Artifact, ArtifactSelector, Entity, Value};
 use dialog_capability::access::{AuthorizeError, Certificate as _, Proof as _, TimeRange};
 use dialog_capability::{ANY_SUBJECT, Did, Fork, Provider};
-use dialog_common::ConditionalSync;
+use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::blob::Load as BlobLoad;
@@ -460,6 +460,7 @@ impl ProveDelegation<'_> {
         S: Provider<ArchiveLoad>
             + Provider<BlobLoad>
             + dialog_common::Holds
+            + ConditionalSend
             + ConditionalSync
             + Clone,
     {

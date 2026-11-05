@@ -220,6 +220,7 @@ where
         + Provider<archive::Get>
         + Provider<blob::Load>
         + Holds
+        + ConditionalSend
         + ConditionalSync
         + Clone
         + 's,

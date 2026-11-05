@@ -484,7 +484,7 @@ mod tests {
     #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
     impl<P> Provider<Load> for Recording<P>
     where
-        P: Provider<Get> + Holds + ConditionalSync,
+        P: Provider<Get> + Holds + ConditionalSend + ConditionalSync,
     {
         async fn execute(&self, load: Load) -> <Load as Command>::Output {
             super::load_or_hydrate(self, load).await

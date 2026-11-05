@@ -9,7 +9,7 @@ use std::ops::Deref;
 
 use async_trait::async_trait;
 use dialog_capability::{Command, Provider};
-use dialog_common::ConditionalSync;
+use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_effects::storage::{Directory, Location};
 
 use crate::provider::{FileSystem, FileSystemError, Space, Storage};
@@ -72,7 +72,7 @@ impl Deref for TempFileSystem {
 impl<C> Provider<C> for TempFileSystem
 where
     C: Command,
-    C::Input: ConditionalSync + 'static,
+    C::Input: ConditionalSend + 'static,
     FileSystem: Provider<C> + ConditionalSync,
 {
     async fn execute(&self, input: C::Input) -> C::Output {
