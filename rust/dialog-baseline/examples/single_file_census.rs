@@ -988,6 +988,18 @@ fn scan(directory: &Path) -> anyhow::Result<Source> {
     })
 }
 
+/// The first key a node holds: a segment's first entry, an index's first
+/// separator. `None` for a node with nothing in it.
+fn first_key(node: &TreeNode) -> anyhow::Result<Option<Vec<u8>>> {
+    Ok(match node.body() {
+        NodeBody::Segment(segment) => segment
+            .keys::<Key>()?
+            .next_key()?
+            .map(|(_, key)| key.to_vec()),
+        NodeBody::Index(index) => (index.len() > 0).then(|| index.separator(0)).transpose()?,
+    })
+}
+
 /// The history records under each root: the leaf entries and buffered
 /// assertions whose key is in the history region, counted once per node.
 fn history_counts(
@@ -1286,6 +1298,12 @@ fn measure(source: Source, checkpoints: &[usize]) -> anyhow::Result<()> {
         .collect::<anyhow::Result<_>>()?;
     let mut positions: HashMap<Blake3Hash, u32> = HashMap::new();
     let mut all_rows: Vec<Rows> = Vec::new();
+    // What a provider can know without the tree's lineage: the latest
+    // frame of the same kind that starts at the same key.
+    let mut by_first: HashMap<(u8, Vec<u8>), u32> = HashMap::new();
+    let mut by_first_store = ColumnStore::new(32, written.path())?;
+    let mut by_first_store_named = 0usize;
+    let (mut lineage_bases, mut agree) = (0usize, 0usize);
     let mut rows_time = Duration::ZERO;
 
     println!("{}", header());
@@ -1346,6 +1364,21 @@ fn measure(source: Source, checkpoints: &[usize]) -> anyhow::Result<()> {
             .map(|&position| (position, &all_rows[position as usize]));
         for store in &mut columns {
             store.put(&block.hash, &rows, base_rows)?;
+        }
+        let first = first_key(node)?;
+        let guess = first
+            .clone()
+            .and_then(|first| by_first.get(&(rows.kind, first)).copied());
+        lineage_bases += base_rows.is_some() as usize;
+        agree += (base_rows.is_some() && base_rows.map(|(p, _)| p) == guess) as usize;
+        by_first_store_named += guess.is_some() as usize;
+        by_first_store.put(
+            &block.hash,
+            &rows,
+            guess.map(|position| (position, &all_rows[position as usize])),
+        )?;
+        if let Some(first) = first {
+            by_first.insert((rows.kind, first), all_rows.len() as u32);
         }
         positions.insert(block.hash.clone(), all_rows.len() as u32);
         all_rows.push(rows);
@@ -1417,6 +1450,13 @@ fn measure(source: Source, checkpoints: &[usize]) -> anyhow::Result<()> {
             mib(store.bytes),
         );
     }
+    eprintln!(
+        "  columnar/32 by first key: {} MiB of frames ({} named a predecessor; lineage named {}, and {} of those agree)",
+        mib(by_first_store.bytes),
+        by_first_store_named,
+        lineage_bases,
+        agree,
+    );
     drop(all_rows);
 
     // Every columnar frame realizes to its block too. Blocks an older

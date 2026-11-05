@@ -60,6 +60,13 @@ of a segment is two copies around one literal row. Every `K`th version is
 written whole so a read decodes at most `K` frames. `K = 1` is the columnar
 packing alone.
 
+A store does not need the tree's lineage to find a frame's predecessor.
+The census finds it by depth and left separator from every root; a store
+that only sees the blocks it is given can take the latest frame of the
+same kind that starts at the same key. The frames come out the same size
+(1.0 MiB on SE at 2048 commits, 2.5 MiB on tonk-team's pushed history), and
+the two agree on 99% and 96% of the predecessors lineage names.
+
 Stack Exchange, 4096 commits, MiB on disk, cumulative:
 
 | commits | live tree | fs | offsets (idea) | zstd-delta frames/32 | **columnar/1** | **columnar/8** | **columnar/32** |
