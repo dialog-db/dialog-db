@@ -45,6 +45,44 @@ Why: a bound named `Sync` that also demands `Send` hides what code
 actually needs, and makes a type that is `Sync` but not `Send` impossible
 to accept through it.
 
+### A difference reads a leaf both sides share only at the keys its buffered ops touch
+
+[#736](https://github.com/dialog-db/dialog-db/pull/736)
+
+When two trees hold the same leaf and differ only in the ops a buffer
+above routes to it, the comparison now resolves just the keys those
+ops cover: each side's winning op, or the stored entry where that side
+has none. Before, the entry walk streamed every stored entry of the
+leaf on both sides and dropped the ones that matched. A commit buffered
+at the root routes each op to a whole leaf, so every subscription poll
+over the commit decoded every entry of each leaf the commit's ops
+landed in, whatever its scope. A scoped difference now resolves only
+the covered keys inside its scope, so a poll whose scope the commit
+missed reads nothing of those leaves. The buffered fast path also
+checks the leftmost separator before decoding any buffer, since a
+root's is always empty and the decode could never be used.
+
+What this changes for you:
+
+- A subscription poll after a commit costs in proportion to the ops
+  the commit buffered, not to the size of the leaves they land in.
+  `subscribe-fanout` and `subscribe-pulled` (201 polls after a one-note
+  commit) go from about 203M to about 39M instructions, and
+  `subscribe-repoll` from 14.2M to 12.6M.
+- A poll's cost no longer depends on where a written value sorts. A
+  note body sorting into a leaf that every note subscription's
+  rule-discovery scope crosses used to cost each of the 201 polls about
+  370k more instructions than one sorting elsewhere.
+- `differentiate`, `differentiate_within`, `changes` and
+  `changes_within` report the same changes. `TreeDifference::changes`
+  on a difference built by `compute_within` no longer yields
+  out-of-scope spillover from such a leaf; `changes_within` already
+  filtered it.
+
+Why: the stored entries of a shared leaf are the same bytes on both
+sides, so only a key an op covers can differ, and decoding the rest
+was work every subscriber repeated for every commit.
+
 ### A tree reads every node through its store, which keeps what it checked
 
 [#730](https://github.com/dialog-db/dialog-db/pull/730)
