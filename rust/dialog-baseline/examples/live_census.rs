@@ -27,7 +27,9 @@ use dialog_baseline::repo::DialogRepo;
 use dialog_baseline::se::SeLog;
 use dialog_capability::Provider;
 use dialog_common::{Blake3Hash, Buffer, ConditionalSync};
-use dialog_search_tree::{LoadBlock, NodeBody, Value as TreeValue, into_owned};
+use dialog_effects::archive::Load;
+use dialog_effects::archive::prelude::CatalogScope;
+use dialog_search_tree::{NodeBody, Value as TreeValue, into_owned};
 
 /// The size of every distinct block ever written, dead ones included.
 #[derive(Clone, Default)]
@@ -75,9 +77,15 @@ fn stats(label: &str, mut sizes: Vec<usize>, ceiling: usize) {
 /// Walks the tree from `root`, splitting block sizes by node kind.
 /// Spilled value blocks hang off leaf keys and are not walked; this is a
 /// census of TREE nodes, the objects the size policy governs.
-async fn census<Env>(env: &Env, root: Blake3Hash, label: &str, ceiling: usize) -> anyhow::Result<()>
+async fn census<Env>(
+    env: &Env,
+    catalog: &CatalogScope,
+    root: Blake3Hash,
+    label: &str,
+    ceiling: usize,
+) -> anyhow::Result<()>
 where
-    Env: Provider<LoadBlock> + ConditionalSync,
+    Env: Provider<Load> + ConditionalSync,
 {
     let mut leaves = Vec::new();
     let mut quiet = Vec::new();
@@ -87,7 +95,7 @@ where
     // ceiling) and drift (encoded bytes vs weight) separate cleanly.
     let mut weights: Vec<(usize, usize)> = Vec::new();
     let dump = std::env::var("DIALOG_CENSUS_DUMP").is_ok();
-    walk(env, root, |visit| {
+    walk(env, catalog, root, |visit| {
         let size = visit.size;
         match visit.node.body() {
             NodeBody::Index(index) => {
@@ -183,7 +191,8 @@ fn main() -> anyhow::Result<()> {
             .root()
             .expect("the branch has commits, so it has a tree");
         census(
-            &repo.index(),
+            repo.operator(),
+            &repo.catalog(),
             root,
             "buffered operational tree (after replay)",
             ceiling,
@@ -194,7 +203,14 @@ fn main() -> anyhow::Result<()> {
         let root = repo
             .root()
             .expect("the branch has commits, so it has a tree");
-        census(&repo.index(), root, "canonical tree", ceiling).await?;
+        census(
+            repo.operator(),
+            &repo.catalog(),
+            root,
+            "canonical tree",
+            ceiling,
+        )
+        .await?;
 
         // The graveyard, for contrast: every block ever written, dead
         // roots and all.

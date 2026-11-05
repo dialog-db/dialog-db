@@ -36,11 +36,12 @@
 //! leaf paths, and the diff exchanges fewer blocks); bulk-load paths
 //! canonicalize once, explicitly, at the end of the import.
 
-use crate::tree::ArtifactNodes;
-use crate::{ArchiveDelta, ArchiveReader, DeltaOverlay};
+use crate::reads::*;
+use crate::{ArchiveDelta, DeltaOverlay};
 use async_trait::async_trait;
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::ConditionalSend;
+use dialog_effects::archive::prelude::CatalogScope;
 use dialog_search_tree::{
     Buffer, DialogSearchTreeError, Entry, HitchhikerTree, Manifest, TransientTree,
 };
@@ -73,6 +74,9 @@ pub type BufferedArtifactTree = HitchhikerTree<Key, State<Datum>>;
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 pub trait ArtifactWriter: Sized {
+    /// The catalog the target's blocks live in.
+    fn catalog(&self) -> &CatalogScope;
+
     /// Insert (or overwrite) `value` at `key`.
     async fn write<S>(
         self,
@@ -81,7 +85,7 @@ pub trait ArtifactWriter: Sized {
         storage: &S,
     ) -> Result<Self, DialogSearchTreeError>
     where
-        S: ArtifactNodes;
+        S: Provider<archive::Load> + Holds + ConditionalSync;
 
     /// Insert (or overwrite) a batch of entries, one write at a time.
     ///
@@ -98,7 +102,7 @@ pub trait ArtifactWriter: Sized {
         storage: &S,
     ) -> Result<Self, DialogSearchTreeError>
     where
-        S: ArtifactNodes,
+        S: Provider<archive::Load> + Holds + ConditionalSync,
         Self: ConditionalSend,
     {
         for (key, value) in entries {
@@ -110,7 +114,7 @@ pub trait ArtifactWriter: Sized {
     /// Remove `key`, if present.
     async fn erase<S>(self, key: &Key, storage: &S) -> Result<Self, DialogSearchTreeError>
     where
-        S: ArtifactNodes;
+        S: Provider<archive::Load> + Holds + ConditionalSync;
 
     /// Read the value at `key`, seeing this batch's own pending writes.
     async fn read<S>(
@@ -119,7 +123,7 @@ pub trait ArtifactWriter: Sized {
         storage: &S,
     ) -> Result<Option<State<Datum>>, DialogSearchTreeError>
     where
-        S: ArtifactNodes;
+        S: Provider<archive::Load> + Holds + ConditionalSync;
 
     /// Scan `range` in key order, seeing this batch's own pending writes.
     ///
@@ -133,12 +137,16 @@ pub trait ArtifactWriter: Sized {
         storage: &'a S,
     ) -> impl Stream<Item = Result<Entry<Key, State<Datum>>, DialogSearchTreeError>> + 'a
     where
-        S: ArtifactNodes;
+        S: Provider<archive::Load> + Holds + ConditionalSync;
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl ArtifactWriter for TransientTree<Key, State<Datum>> {
+    fn catalog(&self) -> &CatalogScope {
+        TransientTree::catalog(self)
+    }
+
     async fn write<S>(
         self,
         key: Key,
@@ -146,14 +154,14 @@ impl ArtifactWriter for TransientTree<Key, State<Datum>> {
         storage: &S,
     ) -> Result<Self, DialogSearchTreeError>
     where
-        S: ArtifactNodes,
+        S: Provider<archive::Load> + Holds + ConditionalSync,
     {
         self.insert(key, value, storage).await
     }
 
     async fn erase<S>(self, key: &Key, storage: &S) -> Result<Self, DialogSearchTreeError>
     where
-        S: ArtifactNodes,
+        S: Provider<archive::Load> + Holds + ConditionalSync,
     {
         self.delete(key, storage).await
     }
@@ -164,7 +172,7 @@ impl ArtifactWriter for TransientTree<Key, State<Datum>> {
         storage: &S,
     ) -> Result<Option<State<Datum>>, DialogSearchTreeError>
     where
-        S: ArtifactNodes,
+        S: Provider<archive::Load> + Holds + ConditionalSync,
     {
         self.get(key, storage).await
     }
@@ -175,7 +183,7 @@ impl ArtifactWriter for TransientTree<Key, State<Datum>> {
         storage: &'a S,
     ) -> impl Stream<Item = Result<Entry<Key, State<Datum>>, DialogSearchTreeError>> + 'a
     where
-        S: ArtifactNodes,
+        S: Provider<archive::Load> + Holds + ConditionalSync,
     {
         self.stream_range(range, storage)
     }
@@ -184,6 +192,10 @@ impl ArtifactWriter for TransientTree<Key, State<Datum>> {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl ArtifactWriter for BufferedArtifactTree {
+    fn catalog(&self) -> &CatalogScope {
+        HitchhikerTree::catalog(self)
+    }
+
     // Writes route into the buffers with the flush policy DEFERRED: the
     // batch's single settle runs in `seal`, so one commit cascades into any
     // given child at most once, instead of re-flushing the same child on
@@ -197,14 +209,14 @@ impl ArtifactWriter for BufferedArtifactTree {
         storage: &S,
     ) -> Result<Self, DialogSearchTreeError>
     where
-        S: ArtifactNodes,
+        S: Provider<archive::Load> + Holds + ConditionalSync,
     {
         self.insert_deferred(key, value, storage).await
     }
 
     async fn erase<S>(self, key: &Key, storage: &S) -> Result<Self, DialogSearchTreeError>
     where
-        S: ArtifactNodes,
+        S: Provider<archive::Load> + Holds + ConditionalSync,
     {
         self.delete_deferred(key.clone(), storage).await
     }
@@ -215,7 +227,7 @@ impl ArtifactWriter for BufferedArtifactTree {
         storage: &S,
     ) -> Result<Option<State<Datum>>, DialogSearchTreeError>
     where
-        S: ArtifactNodes,
+        S: Provider<archive::Load> + Holds + ConditionalSync,
     {
         self.get(key, storage).await
     }
@@ -226,7 +238,7 @@ impl ArtifactWriter for BufferedArtifactTree {
         storage: &'a S,
     ) -> impl Stream<Item = Result<Entry<Key, State<Datum>>, DialogSearchTreeError>> + 'a
     where
-        S: ArtifactNodes,
+        S: Provider<archive::Load> + Holds + ConditionalSync,
     {
         self.stream_range(range, storage)
     }
@@ -403,7 +415,7 @@ impl BufferedBatch {
         scope: WriteScope,
     ) -> Result<Self, DialogArtifactsError>
     where
-        S: ArchiveReader + Clone,
+        S: Provider<archive::Load> + Provider<blob::Load> + Holds + ConditionalSync + Clone,
         I: Stream<Item = Instruction> + ConditionalSend,
     {
         Self::open_batch(tree, store, version.into(), instructions, scope, None).await
@@ -429,7 +441,7 @@ impl BufferedBatch {
         scope: WriteScope,
     ) -> Result<Self, DialogArtifactsError>
     where
-        S: ArchiveReader + Clone,
+        S: Provider<archive::Load> + Provider<blob::Load> + Holds + ConditionalSync + Clone,
         I: Stream<Item = Instruction> + ConditionalSend,
     {
         Self::open_batch(
@@ -462,7 +474,7 @@ impl BufferedBatch {
         scope: WriteScope,
     ) -> Result<Self, DialogArtifactsError>
     where
-        S: ArchiveReader + Clone,
+        S: Provider<archive::Load> + Provider<blob::Load> + Holds + ConditionalSync + Clone,
         I: Stream<Item = Instruction> + ConditionalSend,
     {
         Self::open_batch(
@@ -485,7 +497,7 @@ impl BufferedBatch {
         slot: Option<SpineSlot>,
     ) -> Result<Self, DialogArtifactsError>
     where
-        S: ArchiveReader + Clone,
+        S: Provider<archive::Load> + Provider<blob::Load> + Holds + ConditionalSync + Clone,
         I: Stream<Item = Instruction> + ConditionalSend,
     {
         // The batch reads through what it stages, so a value it spills is
@@ -538,7 +550,7 @@ impl BufferedBatch {
         scope: WriteScope,
     ) -> Result<Self, DialogArtifactsError>
     where
-        S: ArchiveReader + Clone,
+        S: Provider<archive::Load> + Provider<blob::Load> + Holds + ConditionalSync + Clone,
         I: Stream<Item = Instruction> + ConditionalSend,
     {
         // Read through what the batch staged so far, as its first pass did.
@@ -612,7 +624,7 @@ impl BufferedBatch {
         entries: impl Into<RecordEntries>,
     ) -> Result<Self, DialogArtifactsError>
     where
-        S: ArchiveReader + Clone,
+        S: Provider<archive::Load> + Provider<blob::Load> + Holds + ConditionalSync + Clone,
     {
         let RecordEntries { entries, spill } = entries.into();
         // A spilled record value is staged with the batch's other spills,
@@ -649,7 +661,7 @@ impl BufferedBatch {
         canonicalize: bool,
     ) -> Result<ArtifactTree, DialogArtifactsError>
     where
-        S: ArchiveReader + Clone,
+        S: Provider<archive::Load> + Provider<blob::Load> + Holds + ConditionalSync + Clone,
     {
         // The values the batch spilled go out with its nodes.
         for blob in self.staged.flush_blobs() {
@@ -672,15 +684,17 @@ impl BufferedBatch {
             // bytes.
             let mut tree = self.tree.settle(&storage).await?;
             let root = tree.persist_mut(delta, &storage)?;
+            let catalog = tree.catalog().clone();
             slot.put(root.clone(), tree);
-            ArtifactTree::from_hash(root)
+            ArtifactTree::at(catalog, root)
         } else {
             // Settle the batch's deferred writes, then serialize the spine
             // with its buffers intact and seal the resulting root: the hash
             // covers the buffered ops, so this is a complete identity for
             // the tree's content.
+            let catalog = self.tree.catalog().clone();
             let root = self.tree.settle(&storage).await?.persist(delta, &storage)?;
-            ArtifactTree::from_hash(root)
+            ArtifactTree::at(catalog, root)
         })
     }
 }
@@ -703,7 +717,7 @@ pub async fn apply_buffered<S, I>(
     canonicalize: bool,
 ) -> Result<bool, DialogArtifactsError>
 where
-    S: ArchiveReader + Clone,
+    S: Provider<archive::Load> + Provider<blob::Load> + Holds + ConditionalSync + Clone,
     I: Stream<Item = Instruction> + ConditionalSend,
 {
     let batch =
@@ -726,7 +740,7 @@ pub async fn apply_buffered_reusing<S, I>(
     canonicalize: bool,
 ) -> Result<bool, DialogArtifactsError>
 where
-    S: ArchiveReader + Clone,
+    S: Provider<archive::Load> + Provider<blob::Load> + Holds + ConditionalSync + Clone,
     I: Stream<Item = Instruction> + ConditionalSend,
 {
     let batch = BufferedBatch::apply_reusing(
@@ -745,13 +759,14 @@ where
 
 #[cfg(test)]
 mod tests {
+    use dialog_search_tree::helpers::test_catalog;
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use anyhow::Result;
 
     use crate::ArchiveDelta;
-    use dialog_search_tree::MemoryBlocks;
+    use dialog_search_tree::helpers::Blocks;
 
     use futures_util::stream;
 
@@ -766,8 +781,8 @@ mod tests {
     };
     use futures_util::TryStreamExt as _;
 
-    fn store() -> MemoryBlocks {
-        MemoryBlocks::new()
+    fn store() -> Blocks {
+        Blocks::new()
     }
 
     fn assert_of(entity: &str, value: &str) -> Instruction {
@@ -814,7 +829,7 @@ mod tests {
         let store = store();
         let version = |edition| Version::new(Origin::from([7u8; 32]), Edition::new(edition));
         let slot = SpineSlot::new();
-        let mut tree = ArtifactTree::empty();
+        let mut tree = ArtifactTree::empty_in(test_catalog());
         let mut delta = ArchiveDelta::zero();
         apply_buffered_reusing(
             &slot,
@@ -913,7 +928,7 @@ mod tests {
         const COMMITS: usize = 200;
 
         let store = store();
-        let mut tree = ArtifactTree::empty();
+        let mut tree = ArtifactTree::empty_in(test_catalog());
         for i in 0..COMMITS {
             let mut delta = ArchiveDelta::zero();
             apply_buffered(
@@ -960,7 +975,7 @@ mod tests {
         use crate::tree::ArtifactTreeExt as _;
 
         let store = store();
-        let mut tree = ArtifactTree::empty();
+        let mut tree = ArtifactTree::empty_in(test_catalog());
 
         // Enough commits that the spine grows and the buffers matter, each one
         // buffering its batch and then writing a record entry, as a commit does.
@@ -1042,7 +1057,7 @@ mod tests {
         }
 
         let direct_store = store();
-        let mut direct = ArtifactTree::empty();
+        let mut direct = ArtifactTree::empty_in(test_catalog());
         for batch in batches() {
             let mut delta = ArchiveDelta::zero();
             direct
@@ -1052,7 +1067,7 @@ mod tests {
         }
 
         let buffered_store = store();
-        let mut buffered = ArtifactTree::empty();
+        let mut buffered = ArtifactTree::empty_in(test_catalog());
         for batch in batches() {
             let mut delta = ArchiveDelta::zero();
             apply_buffered(
@@ -1091,7 +1106,7 @@ mod tests {
 
         for canonicalize in [true, false] {
             let buffered_store = store();
-            let mut tree = ArtifactTree::empty();
+            let mut tree = ArtifactTree::empty_in(test_catalog());
             let mut delta = ArchiveDelta::zero();
             let changed = apply_buffered(
                 &mut tree,
@@ -1122,7 +1137,7 @@ mod tests {
                 // The same batch through the canonical path on a fresh tree
                 // must land on the identical root.
                 let direct_store = store();
-                let mut direct = ArtifactTree::empty();
+                let mut direct = ArtifactTree::empty_in(test_catalog());
                 let mut direct_delta = ArchiveDelta::zero();
                 direct
                     .apply_versioned(
@@ -1182,7 +1197,7 @@ mod tests {
         // The canonical reference: data through the canonical edit path, then
         // the record through the canonical `record` surface.
         let direct_store = store();
-        let mut direct = ArtifactTree::empty();
+        let mut direct = ArtifactTree::empty_in(test_catalog());
         let mut direct_delta = ArchiveDelta::zero();
         direct
             .apply_versioned(
@@ -1199,7 +1214,7 @@ mod tests {
         // The batch surface, sealed canonical: the same fact set must land on
         // the byte-identical root.
         let batch_store = store();
-        let base = ArtifactTree::empty();
+        let base = ArtifactTree::empty_in(test_catalog());
         let mut delta = ArchiveDelta::zero();
         let batch = BufferedBatch::apply(
             &base,
@@ -1219,7 +1234,7 @@ mod tests {
         );
         assert_eq!(
             base.root(),
-            ArtifactTree::empty().root(),
+            ArtifactTree::empty_in(test_catalog()).root(),
             "applying a batch must not touch the base tree"
         );
 
@@ -1228,7 +1243,7 @@ mod tests {
         let buffered_store = store();
         let mut delta = ArchiveDelta::zero();
         let batch = BufferedBatch::apply(
-            &ArtifactTree::empty(),
+            &ArtifactTree::empty_in(test_catalog()),
             &buffered_store,
             Some(version()),
             stream::iter(data()),
@@ -1272,7 +1287,7 @@ mod tests {
         let asset = Asset::new(b"asset bytes".to_vec());
 
         let batch = BufferedBatch::apply(
-            &ArtifactTree::empty(),
+            &ArtifactTree::empty_in(test_catalog()),
             &store,
             Some(asset_version()),
             stream::iter(vec![assert_of("user:alice", "Alice")]),
@@ -1297,9 +1312,10 @@ mod tests {
         );
         assert_eq!(tree.content_size(&store, &[0u8; 32]).await?, None);
 
-        let changes: Vec<_> = blob_changes(ArtifactTree::empty(), tree, store.clone())
-            .try_collect()
-            .await?;
+        let changes: Vec<_> =
+            blob_changes(ArtifactTree::empty_in(test_catalog()), tree, store.clone())
+                .try_collect()
+                .await?;
         assert_eq!(changes, vec![BlobChange::Added(*asset.hash())]);
         Ok(())
     }
@@ -1311,7 +1327,7 @@ mod tests {
         let store = store();
         let asset = Asset::new(b"asset bytes".to_vec());
         let refused = BufferedBatch::apply(
-            &ArtifactTree::empty(),
+            &ArtifactTree::empty_in(test_catalog()),
             &store,
             Some(asset_version()),
             stream::iter(vec![Instruction::Assert(asset.fact()?, crate::Pick::All)]),

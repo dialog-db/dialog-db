@@ -12,6 +12,10 @@
 //!               ├── Put { digest, content } → Effect → Result<(), ArchiveError>
 //!               └── Import { blocks } → Effect → Result<(), ArchiveError>
 //! ```
+//!
+//! [`Load`] is the command a reader performs to have the block itself:
+//! answered as `Get` by a store, and hydrated from where the subject's
+//! blocks live by an environment that knows.
 
 use crate::Method;
 use crate::method;
@@ -319,6 +323,9 @@ impl Effect for Import {
 }
 
 pub mod prelude;
+
+mod load;
+pub use load::Load;
 
 /// Errors that can occur during archive operations.
 #[derive(Debug, Error, serde::Serialize, serde::Deserialize)]

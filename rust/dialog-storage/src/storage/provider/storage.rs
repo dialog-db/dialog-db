@@ -82,6 +82,39 @@ impl<S: Clone> Clone for Storage<S> {
     }
 }
 
+/// A storage knows no place to look for a block but the spaces it mounts,
+/// so it answers a load as the read (see [`load`](crate::provider::load)).
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<S> Provider<archive::Load> for Storage<S>
+where
+    S: Clone + ConditionalSync,
+    Router<S>: Provider<archive::Get> + ConditionalSync,
+{
+    async fn execute(
+        &self,
+        load: archive::Load,
+    ) -> Result<Option<dialog_common::Buffer>, archive::ArchiveError> {
+        crate::provider::load::load_block(&self.router, &load).await
+    }
+}
+
+/// A spilled value loads as its blob, or the block it was stored as.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<S> Provider<blob::Load> for Storage<S>
+where
+    S: Clone + ConditionalSync,
+    Router<S>: Provider<archive::Get> + Provider<blob::Read> + ConditionalSync,
+{
+    async fn execute(
+        &self,
+        load: blob::Load,
+    ) -> Result<Option<dialog_common::Buffer>, archive::ArchiveError> {
+        crate::provider::load::load_spill(&self.router, &load).await
+    }
+}
+
 /// The credential a storage hands over for `credential`: its verifier,
 /// when it is a signing key. A storage keeps no signing key; keys belong
 /// to a credential store. What a space from before the credential store

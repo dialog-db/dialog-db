@@ -22,6 +22,7 @@
 
 use dialog_capability::{Capability, Constraint, Policy};
 use dialog_common::{Blake3Hash, Buffer};
+use std::sync::Arc;
 
 use super::{Archive, Block, Catalog, Get, Import, Put};
 use crate::blob::{
@@ -205,7 +206,16 @@ impl PutExt for Capability<Put> {
 /// See [`CellScope`](crate::memory::prelude::CellScope) for why a
 /// stored handle keeps names rather than a chain.
 #[derive(Debug, Clone, PartialEq)]
-pub struct CatalogScope {
+pub struct CatalogScope(
+    /// Shared, so a reader that keeps the catalog it reads (a tree that is
+    /// moved by value through every write of a batch, each load it
+    /// performs) copies one pointer, not the subject and the name.
+    Arc<Named>,
+);
+
+/// A catalog's subject and name.
+#[derive(Debug, PartialEq)]
+struct Named {
     subject: dialog_capability::Subject,
     catalog: String,
 }
@@ -213,44 +223,46 @@ pub struct CatalogScope {
 impl CatalogScope {
     /// Name a catalog without choosing a method.
     pub fn new(subject: dialog_capability::Subject, catalog: impl Into<String>) -> Self {
-        Self {
+        Self(Arc::new(Named {
             subject,
             catalog: catalog.into(),
-        }
+        }))
     }
 
     /// The subject this catalog belongs to.
     pub fn subject(&self) -> &dialog_capability::Did {
-        self.subject.did()
+        self.0.subject.did()
     }
 
     /// The catalog's name.
     pub fn catalog_name(&self) -> &str {
-        &self.catalog
+        &self.0.catalog
     }
 
     /// The archive this catalog belongs to, for reaching its other stores
     /// (its blobs) without naming the subject again.
     pub fn archive(&self) -> ArchiveScope {
-        ArchiveScope::new(self.subject.clone())
+        ArchiveScope::new(self.0.subject.clone())
     }
 
     /// The chain for reading from it.
     pub fn read(&self) -> Capability<Catalog<method::Get>> {
-        self.subject
+        self.0
+            .subject
             .clone()
             .reader()
             .archive()
-            .catalog(self.catalog.clone())
+            .catalog(self.0.catalog.clone())
     }
 
     /// The chain for writing to it.
     pub fn write(&self) -> Capability<Catalog<method::Put>> {
-        self.subject
+        self.0
+            .subject
             .clone()
             .writer()
             .archive()
-            .catalog(self.catalog.clone())
+            .catalog(self.0.catalog.clone())
     }
 
     /// Read a block by digest.

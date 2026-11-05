@@ -88,13 +88,14 @@ impl DiagnoseStore {
     pub async fn new(explored: Explored) -> Self {
         let Explored {
             tree,
-            blocks: storage,
+            session: storage,
         } = explored;
 
         let (tx, message_rx) = channel();
+        let tree_catalog = tree.catalog().clone();
         let cursor = ArtifactsCursor::new(tree.clone(), storage.clone(), tx.clone());
         let analysis = ArtifactsTreeAnalysis::new(tree, storage.clone(), tx.clone());
-        let hierarchy = ArtifactsHierarchy::new(storage, tx);
+        let hierarchy = ArtifactsHierarchy::new(storage, tree_catalog, tx);
 
         Self {
             message_rx,

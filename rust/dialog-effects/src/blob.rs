@@ -234,6 +234,9 @@ impl Effect for Import {
 
 pub mod prelude;
 
+mod load;
+pub use load::Load;
+
 mod error;
 pub use error::*;
 

@@ -19,9 +19,7 @@ use std::time::Instant;
 
 use dialog_common::Blake3Hash;
 use dialog_search_tree::helpers::JournaledBlocks;
-use dialog_search_tree::{
-    Buffer, Cached, Delta, NodeBody, NodeCache, PersistentNode, PersistentTree,
-};
+use dialog_search_tree::{Buffer, Delta, NodeBody, PersistentNode, PersistentTree};
 
 const KEY_LENGTH: usize = 162;
 const ENTITIES: usize = 5_000;
@@ -230,13 +228,13 @@ async fn main() {
     storage.disable_journal();
     // The edits read through one node cache, which keeps the nodes each
     // batch seals for the next.
-    let warm = Cached::new(NodeCache::new(), &storage);
+    let warm = dialog_search_tree::helpers::Holding::new(&storage);
 
     println!("workload: {FACTS} facts (EAV keys, {KEY_LENGTH}B), batches of {BATCH}");
     println!();
 
     // Build in transaction-sized batches, tracking write amplification.
-    let mut tree = Tree::empty();
+    let mut tree = Tree::empty_in(dialog_search_tree::helpers::test_catalog());
     let mut delta = Delta::zero();
     let mut written_nodes = 0usize;
     let mut written_bytes = 0u64;
@@ -294,8 +292,11 @@ async fn main() {
 
     // Point lookups on a cold tree (fresh cache), counting storage reads.
     let mut rng = Rng::new(7);
-    let cold = Tree::from_hash(tree.root().clone());
-    let fresh = Cached::new(NodeCache::new(), &storage);
+    let cold = Tree::at(
+        dialog_search_tree::helpers::test_catalog(),
+        tree.root().clone(),
+    );
+    let fresh = dialog_search_tree::helpers::Holding::new(&storage);
     storage.enable_journal();
     let reads_before = reads(&storage);
     let point = Instant::now();
@@ -314,8 +315,11 @@ async fn main() {
     );
 
     // Bounded range scans (~one entity's facts each) on a cold tree.
-    let cold = Tree::from_hash(tree.root().clone());
-    let fresh = Cached::new(NodeCache::new(), &storage);
+    let cold = Tree::at(
+        dialog_search_tree::helpers::test_catalog(),
+        tree.root().clone(),
+    );
+    let fresh = dialog_search_tree::helpers::Holding::new(&storage);
     let reads_before = reads(&storage);
     let scan = Instant::now();
     let mut scanned = 0usize;
@@ -352,9 +356,15 @@ async fn main() {
         .unwrap();
     flush(&mut delta, &storage).await;
 
-    let old = Tree::from_hash(tree.root().clone());
-    let new = Tree::from_hash(modified.root().clone());
-    let fresh = Cached::new(NodeCache::new(), &storage);
+    let old = Tree::at(
+        dialog_search_tree::helpers::test_catalog(),
+        tree.root().clone(),
+    );
+    let new = Tree::at(
+        dialog_search_tree::helpers::test_catalog(),
+        modified.root().clone(),
+    );
+    let fresh = dialog_search_tree::helpers::Holding::new(&storage);
     let reads_before = reads(&storage);
     let diff = Instant::now();
     let mut changes = 0usize;
