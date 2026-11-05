@@ -26,7 +26,7 @@ use std::sync::Arc;
 
 use crate::repository::branch::LayerMetadataMemo;
 use crate::repository::caches::CacheBudget;
-use crate::rules::{RuleCache, SharedRuleCache};
+use crate::rules::{RuleCache, RuleContent, SharedRuleCache};
 use crate::schema::Replica;
 use crate::{Branch, Ephemeral, Index, Revision, Snapshot};
 
@@ -320,7 +320,9 @@ impl Caches {
         Self {
             nodes: dialog_search_tree::NodeCache::with_budget(limits.node_bytes()),
             spills: SpillCache::with_budget(limits.spill_bytes()),
-            rules: Arc::new(RuleCache::new()),
+            rules: Arc::new(RuleCache::sharing(Arc::new(RuleContent::with_capacity(
+                limits.rule_capacity(),
+            )))),
             plans: PlanCache::with_capacity(limits.plan_capacity()),
             causality: CausalityCache::with_capacity(entries),
             contexts: ContextCache::with_capacity(entries),
