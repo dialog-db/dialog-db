@@ -193,11 +193,14 @@ cold reads of the head for space.
 
 ## Build order
 
-1. The file and its records: append, checksum, footer, checkpoint, open and
-   recover a torn tail. Tested on its own.
-2. The provider with every node whole: `Get`, `Put` and `Import` over the
-   file, passing the tests the `fs` and volatile archive providers pass.
-   This is already a one-file archive at file-per-block speed.
+1. **Done** (`rust/dialog-archive-file`). The file and its records: append,
+   checksum, footer, checkpoint, open and recover a torn tail. Tested on
+   its own.
+2. **Done.** The provider with every node whole: `Get`, `Put` and `Import`
+   over the file, passing the tests the `fs` and volatile archive providers
+   pass, and opened from a space's `Location`. A repository commits,
+   reopens and queries through it (`tests/repository.rs`). This is already
+   a one-file archive.
 3. Frames: tokens, rows, predecessors, the verified conversion, and reads
    through the chain. The census's checks become its tests.
 4. The budget, hole punching and compaction.

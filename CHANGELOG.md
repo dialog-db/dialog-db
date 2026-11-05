@@ -14,6 +14,35 @@ says how to cut a release.
 
 ## Unreleased
 
+### A space can keep its blocks in one file
+
+[#733](https://github.com/dialog-db/dialog-db/pull/733),
+[design](./ideas/single-file-format-design.md)
+
+The new `dialog-archive-file` crate adds `FileArchive`, an archive
+provider that keeps a space's blocks in one append-only file instead of a
+file per block. It answers `archive::Get`, `Put` and `Import` like the
+`fs` provider, and opens from a space's `Location` (`Resource<Location>`),
+so a `Space` can take it as its archive and keep memory, credentials and
+blobs where they were. Every block is stored whole for now; the compact
+frames the design describes come in later changes and do not change how
+the archive is used. Native only.
+
+What this changes for you:
+
+- Nothing, unless you choose it: `Space<FileArchive, FileSystem,
+  FileSystem, FileSystem, FileSystem>` is a space whose blocks live in
+  `archive.dialog` in the space's directory. The tree, queries and sync
+  work through it unchanged.
+- A file this process already has open is shared, not opened twice.
+- Durability matches the `fs` provider: appends are not synced.
+  `FileArchive::sync` gives a point that is.
+
+Why: a replica's history costs a file per block per version, which is
+most of what a replica weighs. One file is the base the compact encoding
+measured in the single-file spike builds on, and it is useful on its own:
+one file to move, copy and open.
+
 ### A tree reads every node through its store, which keeps what it checked
 
 [#730](https://github.com/dialog-db/dialog-db/pull/730)
@@ -1687,6 +1716,12 @@ thread multiplies whatever it holds by the size of the thread pool.
 
 ### Compatibility and migration
 
+- Nothing an existing space holds changes or is read differently for the
+  single-file archive: it is a new provider a space opts into. A space
+  opened with `FileArchive` does not read an `fs` archive's directory of
+  blocks, and the reverse; moving a space between the two means copying
+  its blocks with `Import`. The blocks are the same bytes in both, so an
+  older release reads any block this one stores.
 - Nothing stored or synced changes for the node cache moving to the
   store: trees, nodes and their hashes are the same bytes, nothing is
   rewritten on upgrade, and an older release reads everything this one

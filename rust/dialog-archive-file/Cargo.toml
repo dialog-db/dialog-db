@@ -1,0 +1,35 @@
+[package]
+name = "dialog-archive-file"
+description = "A dialog archive kept in one append-only file"
+edition = "2024"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+
+# Native-only: one file through positioned reads and writes. The library
+# compiles to nothing on wasm32 (see the crate-level cfg in src/lib.rs), and
+# every dependency is target-gated so the workspace's wasm dependency set is
+# unaffected.
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+async-trait = { workspace = true }
+crc32fast = { workspace = true }
+dialog-capability = { workspace = true }
+dialog-common = { workspace = true }
+dialog-effects = { workspace = true }
+dialog-storage = { workspace = true }
+parking_lot = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+anyhow = { workspace = true }
+dialog-artifacts = { workspace = true }
+dialog-peer = { workspace = true, features = ["helpers"] }
+dialog-repository = { workspace = true }
+futures-util = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros"] }
+
+[lints.rust]
+# This cfg is used by the dialog_common::test proc macro for wasm inner tests
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(dialog_test_wasm_integration)"] }

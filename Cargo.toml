@@ -16,6 +16,7 @@ strip = "debuginfo"
 
 [workspace]
 members = [
+    "rust/dialog-archive-file",
     "rust/dialog-artifacts",
     "rust/dialog-baseline",
     "rust/dialog-capability",
@@ -69,6 +70,7 @@ aes-gcm = "0.10"
 base58 = "0.2"
 base64 = "0.22"
 blake3 = "1"
+crc32fast = "1.5"
 brotli = "8"
 bytes = "1"
 chrono = "0.4"
@@ -211,6 +213,10 @@ web-time = "1"
 zerocopy = "0.8"
 zerocopy-derive = "0.8"
 zmij = "1"
+
+[workspace.dependencies.dialog-archive-file]
+path = "./rust/dialog-archive-file"
+version = "0.4.0-rc.3"
 
 [workspace.dependencies.dialog-artifacts]
 path = "./rust/dialog-artifacts"

@@ -1282,6 +1282,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "dialog-archive-file"
+version = "0.4.0-rc.3"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "crc32fast",
+ "dialog-artifacts",
+ "dialog-capability",
+ "dialog-common",
+ "dialog-effects",
+ "dialog-peer",
+ "dialog-repository",
+ "dialog-storage",
+ "futures-util",
+ "parking_lot",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "dialog-artifacts"
 version = "0.4.0-rc.3"
 dependencies = [
