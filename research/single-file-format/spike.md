@@ -2,7 +2,7 @@
 
 The design these results led to is [design.md](design.md).
 
-Spike for [idea.md](idea.md). It measures the
+Spike for [the idea](../single-file-format.md). It measures the
 idea's size claim, and what a read pays for it, before any provider
 exists. It does not build the provider, so it has no perf gate numbers.
 

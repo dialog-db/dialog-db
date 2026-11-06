@@ -1,6 +1,6 @@
 # Single-file representation
 
-Status: Building. See the [journal](journal.md) for where the research stands, and [the spike's results](spike.md) for where it started.
+Status: Building, on [dialog-db/dialog-db#733](https://github.com/dialog-db/dialog-db/pull/733). Its working material is in [`single-file-format/`](single-file-format/): the [journal](single-file-format/journal.md) says where the research stands, the [evaluation](single-file-format/evaluation.md) what decides the open choices, the [design](single-file-format/design.md) what is decided, and [the spike](single-file-format/spike.md) where it started. See the [research index](README.md) for what the statuses mean.
 
 ## Idea
 

@@ -96,6 +96,56 @@ Why: a replica's history costs a file per block per version, which is
 most of what a replica weighs. Replaying 4096 Stack Exchange commits, the
 `fs` archive takes about 1.2 GiB and the file 13 MiB.
 
+### A repository an earlier release left opens, whatever layout its registry is in
+
+Opening or loading a repository that predates layout versioning carries
+its remote and upstream cells over into facts in its registry branch
+(`meta`). A registry an earlier release wrote is laid out from before the
+number band, and a commit into such a tree is refused with
+`CommitError::NeedsMigration`. Nothing moved the registry first, since
+nothing outside dialog-repository writes it, so the open failed with
+`OpenRepositoryError::Upgrade` / `LoadRepositoryError::Upgrade` on every
+attempt, and the repository could not be opened at all. Every write to a
+registry or a host's contacts now moves the branch to this release's
+layout first, when it needs it, and applies the changes on the rewrite.
+
+What this changes for you:
+
+- A repository last written by a release before 0.3.0 opens instead of
+  failing with "The branch must be migrated before it is written".
+- Upstream changes (`set_upstream`) and contact writes on such a branch
+  succeed the same way, where they failed with `NeedsMigration`.
+- An embedder no longer needs to migrate a registry itself; it could not,
+  since the open that fails is the one that would hand it the branch.
+
+Why: the open-time upgrade is the only thing that writes a registry an
+earlier release left, and it ran before any embedder could migrate it.
+
+### dialog-storage reads a browser file without `wasm-streams`
+
+[#744](https://github.com/dialog-db/dialog-db/pull/744)
+
+The web file system provider read a `File` through the `wasm-streams`
+crate's `ReadableStream` adapter. That crate exports its adapters through
+`#[wasm_bindgen]` under names that carry no version, so two versions of it
+in one wasm module are duplicate symbols at link time. The workspace had
+pinned it to 0.5 to match the copy `reqwest` brings in through `iroh`
+(#521), while an embedder linking the Cloudflare `worker` crate needs 0.6,
+and no version satisfied both. The provider now reads the stream through
+web-sys's default reader and the crate is gone from dialog-storage.
+
+What this changes for you:
+
+- dialog-storage no longer depends on `wasm-streams`, so an embedder may
+  link whichever version its other dependencies need.
+- Nothing stored or synced changes, and the reader's behaviour is the
+  same: chunks arrive as they are read, and dropping the reader before the
+  end cancels the stream.
+
+Why: a dependency that can only ever be one version across a whole wasm
+module should not be pinned by a library that uses one call of it.
+
+
 ### A pull or a push that meets another revision under its own head's version is refused
 
 Fixing [#705](https://github.com/dialog-db/dialog-db/issues/705)
@@ -2029,6 +2079,12 @@ thread multiplies whatever it holds by the size of the thread pool.
 
 ### Compatibility and migration
 
+- A registry branch (`meta`) or host state branch an earlier release laid
+  out is rewritten under the number band the first time this release
+  writes it, as `Branch::migrate_storage` rewrites any branch: one pass
+  over its entries, published as a revision that descends from the head.
+  0.2.0 and earlier refuse the rewritten tree by name, as they refuse any
+  migrated tree. An embedder runs nothing.
 - Nothing stored or synced changes for the refusal of a rival head of
   one version (#705): nothing is rewritten on upgrade, and heads, trees
   and the wire format are as before, so an older release reads all this

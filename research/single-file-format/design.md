@@ -1,6 +1,6 @@
 # Single-file archive: design
 
-The decision for building [the single-file format](idea.md),
+The decision for building [the single-file format](../single-file-format.md),
 from what [the spike](spike.md) measured. Numbers below
 are from that census: Stack Exchange at 4096 commits, and tonk-team's whole
 pushed history (9,070 blocks from R2).

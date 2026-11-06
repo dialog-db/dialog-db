@@ -1,7 +1,7 @@
 # Single-file format: journal
 
 What we tried, what it measured, and what we decided, newest last. The
-[idea](idea.md) says why; the [spike](spike.md) holds the first round of
+[idea](../single-file-format.md) says why; the [spike](spike.md) holds the first round of
 measurements in full; the [design](design.md) is the current decision.
 Work happens on the `worker/pensive-edison-fu3bx5` branch, PR
 [#733](https://github.com/dialog-db/dialog-db/pull/733).
