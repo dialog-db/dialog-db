@@ -52,8 +52,10 @@
 use dialog_artifacts::DialogArtifactsError;
 use dialog_capability::{Fork, Provider};
 use dialog_common::{ConditionalSync, Holds};
+use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::Identify;
+use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::Read as BlobRead;
 use dialog_effects::memory::Resolve;
 use dialog_query::query::{Application, Output};
@@ -122,7 +124,8 @@ impl<'a, Q: Application> TransactionSelectQuery<'a, Q> {
             + Provider<Put>
             + Provider<Resolve>
             + Provider<Identify>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>

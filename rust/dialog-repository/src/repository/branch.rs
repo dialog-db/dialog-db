@@ -4,11 +4,11 @@ use crate::{Ephemeral, RemoteFallback, ResolveError, Revision};
 use dialog_capability::Provider;
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::{ConditionalSync, Holds};
-use dialog_effects::blob::Read as BlobRead;
+use dialog_effects::archive::Load as ArchiveLoad;
+use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::memory;
 use dialog_query::concept::query::PlanCache;
 
-use crate::NetworkedIndex;
 use crate::repository::source::{Caches, SourceRef};
 use dialog_artifacts::Changes;
 use dialog_artifacts::DialogArtifactsError;
@@ -20,7 +20,6 @@ use dialog_artifacts::history::{
 use dialog_artifacts::tree::{ArtifactNodeCache, SpillCache};
 use dialog_artifacts::{Exporter, Importer};
 use dialog_capability::{Capability, Did, Subject};
-use dialog_effects::archive::{Get as ArchiveGet, Put as ArchivePut};
 use dialog_effects::authority::{Operator, OperatorExt as _};
 use dialog_query::query::Application;
 use futures_util::lock::{Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard};
@@ -239,6 +238,11 @@ pub struct Branch {
     /// shared by every clone, so a remote built from a route fails over
     /// as the host's connection does rather than starting afresh.
     answers: Answers,
+    /// Where the environment this branch was opened through hydrates its
+    /// subject's blocks from: the branch registered there when it opened
+    /// (see [`Routes`](crate::Routes)), and lends a route there for an
+    /// operation that reads a remote it does not track.
+    routes: crate::Routes,
     /// What every handle of this branch in the environment shares as its
     /// writer: the lock the head moves under, and the head the writer's
     /// last pull adopted. See [`Writer`].
@@ -248,6 +252,55 @@ pub struct Branch {
 /// Which address answered last, per peer: the record each of the host's
 /// connections keeps, collected as a branch connects.
 pub(crate) type Answers = Arc<Mutex<HashMap<Entity, Arc<AtomicUsize>>>>;
+
+/// Every place content a branch tracking `tracked` holds by reference may
+/// live, in the order to try them: the routes at a peer among its pulls and
+/// then its pushes, reachable or not, then the peers it synced with once
+/// without tracking them. Each remote reaches its peer through the record
+/// of the host's connection to it, in `answers`, where there is one.
+pub(crate) fn fallbacks_of(
+    tracked: &Tracking,
+    host: &Subject,
+    answers: &Answers,
+) -> Vec<RemoteFallback> {
+    let answers = answers.lock().unwrap_or_else(|poison| poison.into_inner());
+    let sharing = |upstream: Upstream| match upstream {
+        Upstream::Remote {
+            remote,
+            branch,
+            tree,
+        } => match answers.get(remote.peer()) {
+            Some(answered) => Upstream::Remote {
+                remote: remote.sharing(answered.clone()),
+                branch,
+                tree,
+            },
+            None => Upstream::Remote {
+                remote,
+                branch,
+                tree,
+            },
+        },
+        upstream => upstream,
+    };
+    let tracked_routes = tracked.resolved.iter().flat_map(|resolved| {
+        resolved
+            .pulls
+            .iter()
+            .chain(resolved.pushes.iter())
+            .filter(|route| !matches!(route, Route::Local { .. }))
+    });
+    let synced_routes = tracked.synced.iter().map(|synced| &synced.route);
+    let mut routes: Vec<RemoteFallback> = Vec::new();
+    for route in tracked_routes.chain(synced_routes) {
+        let fallback = sharing(route.upstream(host, None)).fallback();
+        if matches!(fallback, RemoteFallback::None) {
+            continue;
+        }
+        routes.push(fallback);
+    }
+    routes
+}
 
 /// The writers of the branches open through an environment, by branch.
 /// Weak, so a writer lives as long as some handle of its branch does.
@@ -435,6 +488,32 @@ impl Branch {
         self.sharing(self.tracked().pushes(&self.subject()))
     }
 
+    /// `upstream`, reaching its peer through the record of the host's
+    /// connection to it when it is a remote the branch has connected to.
+    fn sharing_one(&self, upstream: Upstream) -> Upstream {
+        let Upstream::Remote {
+            remote,
+            branch,
+            tree,
+        } = upstream
+        else {
+            return upstream;
+        };
+        let answers = self
+            .answers
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let remote = match answers.get(remote.peer()) {
+            Some(answered) => remote.sharing(answered.clone()),
+            None => remote,
+        };
+        Upstream::Remote {
+            remote,
+            branch,
+            tree,
+        }
+    }
+
     /// `upstreams`, with each remote reaching its peer through the record
     /// of the host's connection to it, where the branch has connected.
     pub(crate) fn sharing(&self, upstreams: Upstreams) -> Upstreams {
@@ -494,14 +573,37 @@ impl Branch {
         crate::HeldCaches::of(env).writer(format!("{}:{}", reference.subject(), reference.name()))
     }
 
-    /// Where a read of content this branch holds by reference falls back
-    /// to: an upstream at a peer, or else a peer this branch pulled from
-    /// once without tracking it, whose tree it may have adopted unread.
+    /// Where content this branch holds by reference lives: an upstream at a
+    /// peer, or else a peer this branch pulled from once without tracking
+    /// it, whose tree it may have adopted unread.
+    ///
+    /// Reads do not ask this: the environment hydrates them from the routes
+    /// the branch registered (see [`Routes`](crate::Routes)). It is for what
+    /// needs the route itself, such as naming the remote a failure came
+    /// from, or walking a download from it.
     pub(crate) fn fallback(&self) -> RemoteFallback {
-        match self.upstreams().fallback() {
-            RemoteFallback::None => self.tracked().synced_with(&self.subject()).fallback(),
-            fallback => fallback,
+        let tracked = self.tracked();
+        let host = self.subject();
+        if let Some(route) = tracked.first_remote_route() {
+            return self.sharing_one(route.upstream(&host, None)).fallback();
         }
+        tracked
+            .synced
+            .iter()
+            .map(|synced| synced.route.upstream(&host, None).fallback())
+            .find(|fallback| !matches!(fallback, RemoteFallback::None))
+            .unwrap_or(RemoteFallback::None)
+    }
+
+    /// The routes the environment this branch was opened through hydrates
+    /// its subject's blocks from.
+    pub(crate) fn routes(&self) -> &crate::Routes {
+        &self.routes
+    }
+
+    /// Which address answered last, per peer, as this branch has connected.
+    pub(crate) fn answers(&self) -> &Answers {
+        &self.answers
     }
 
     /// Every upstream, pulled from or pushed to.
@@ -576,19 +678,13 @@ impl Branch {
     ///
     /// History records live in the same tree as the data, so this reads the
     /// history region of the current revision's tree. A read that misses
-    /// locally hydrates from the branch's tracked remote exactly as a fact
-    /// read does, so a replica that materialized only the operational
-    /// regions fetches the history it turns out to need. A branch tracking
-    /// no remote reads purely locally.
-    pub fn history<'a, Env>(&self, env: &'a Env) -> TreeHistory<NetworkedIndex<'a, Env>>
+    /// locally hydrates through the env exactly as a fact read does, so a
+    /// replica that materialized only the operational regions fetches the
+    /// history it turns out to need. A repository none of whose open
+    /// branches tracks a remote reads purely locally.
+    pub fn history<'a, Env>(&self, env: &'a Env) -> TreeHistory<&'a Env>
     where
-        Env: Provider<BlobRead>
-            + Provider<ArchiveGet>
-            + Provider<ArchivePut>
-            + Provider<memory::Resolve>
-            + Provider<crate::Hydrate>
-            + ConditionalSync
-            + 'static,
+        Env: Provider<ArchiveLoad> + Provider<BlobLoad> + Holds + ConditionalSync + ?Sized,
     {
         SourceRef::from(self).history(env)
     }
@@ -605,13 +701,7 @@ impl Branch {
         limit: usize,
     ) -> Result<Vec<(Version, RevisionRecord)>, DialogArtifactsError>
     where
-        Env: Provider<BlobRead>
-            + Provider<ArchiveGet>
-            + Provider<ArchivePut>
-            + Provider<memory::Resolve>
-            + Provider<crate::Hydrate>
-            + ConditionalSync
-            + 'static,
+        Env: Provider<ArchiveLoad> + Provider<BlobLoad> + Holds + ConditionalSync + ?Sized,
     {
         SourceRef::from(self).log(env, limit).await
     }
@@ -633,7 +723,9 @@ impl Branch {
         SelectQuery::new(self, query)
     }
 
-    /// A shared handle to this branch's node cache, for seeding a read tree.
+    /// A shared handle to this branch's node cache: the one every tree read
+    /// through the environment it was opened with keeps its nodes in.
+    #[cfg(test)]
     pub(crate) fn node_cache(&self) -> ArtifactNodeCache {
         self.node_cache.clone()
     }

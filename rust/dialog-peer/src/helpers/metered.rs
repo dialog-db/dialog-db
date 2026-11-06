@@ -1,7 +1,8 @@
 //! An operator that reports every archive block moved through it.
 //!
 //! The repository reads and writes blocks through archive effects: `Get`
-//! for a read, `Put` and `Import` for writes. [`Metered`] wraps an operator
+//! (or the `Load` that reads through it) for a read, `Put` and `Import`
+//! for writes. [`Metered`] wraps an operator
 //! and hands each block's bytes to a [`Meter`] on the way through, so a
 //! measurement sees exactly what a commit or query moved, beneath every
 //! cache the branch keeps. Every other effect passes through untouched.
@@ -12,12 +13,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use dialog_capability::{Capability, Command, Provider};
-use dialog_common::{ConditionalSend, ConditionalSync, Held, Holds};
+use dialog_common::{Buffer, ConditionalSend, ConditionalSync, Held, Holds};
 use dialog_effects::archive::prelude::{ImportExt as _, PutExt as _};
-use dialog_effects::archive::{ArchiveError, Get, Import, Put};
+use dialog_effects::archive::{ArchiveError, Get, Import, Load, Put};
 
 /// Observes the archive blocks an operator moves.
-pub trait Meter: ConditionalSync {
+pub trait Meter: ConditionalSend + ConditionalSync {
     /// A block was written.
     fn wrote(&self, block: &[u8]);
     /// A block was read.
@@ -122,13 +123,22 @@ where
                 self.meter.wrote(block.as_ref());
             }
         }
-        let reads = input_of.is::<Capability<Get>>();
+        // A block is read by a `Get`, or by the `Load` a reader performs to
+        // have it from wherever the env reaches it: the env answers that
+        // beneath this wrapper, so the load is metered as its read.
+        let reads = input_of.is::<Capability<Get>>() || input_of.is::<Load>();
         let output = self.inner.execute(input).await;
-        if reads
-            && let Some(Ok(Some(block))) =
-                (&output as &dyn Any).downcast_ref::<Result<Option<Vec<u8>>, ArchiveError>>()
-        {
-            self.meter.read(block);
+        if reads {
+            let output_of = &output as &dyn Any;
+            if let Some(Ok(Some(block))) =
+                output_of.downcast_ref::<Result<Option<Vec<u8>>, ArchiveError>>()
+            {
+                self.meter.read(block);
+            } else if let Some(Ok(Some(block))) =
+                output_of.downcast_ref::<Result<Option<Buffer>, ArchiveError>>()
+            {
+                self.meter.read(block.as_ref());
+            }
         }
         output
     }

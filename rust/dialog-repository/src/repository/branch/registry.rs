@@ -16,8 +16,10 @@
 use dialog_artifacts::{Changes, DialogArtifactsError, Entity, Statement};
 use dialog_capability::{Capability, Fork, Provider, Subject};
 use dialog_common::{ConditionalSync, Holds};
+use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify, Operator, OperatorExt as _};
+use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::{Import as BlobImport, Read as BlobRead};
 use dialog_effects::memory::{Publish, Resolve};
 use dialog_query::{Output as _, Query, Term};
@@ -40,7 +42,8 @@ pub trait RegistryEnv:
     + Provider<Publish>
     + Provider<Identify>
     + Provider<Attest>
-    + Provider<crate::Hydrate>
+    + Provider<ArchiveLoad>
+    + Provider<BlobLoad>
     + Provider<dialog_artifacts::Preload>
     + Provider<dialog_artifacts::Speculation>
     + Provider<Fork<RemoteSite, Resolve>>
@@ -60,7 +63,8 @@ impl<T> RegistryEnv for T where
         + Provider<Publish>
         + Provider<Identify>
         + Provider<Attest>
-        + Provider<crate::Hydrate>
+        + Provider<ArchiveLoad>
+        + Provider<BlobLoad>
         + Provider<dialog_artifacts::Preload>
         + Provider<dialog_artifacts::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
@@ -322,6 +326,15 @@ const MOVED_HEAD_RETRIES: usize = 4;
 /// A commit that loses the head to another writer is applied again on
 /// the head that won. The changes are statements, not edits derived from
 /// what the head held, so they mean the same on either head.
+///
+/// A registry an earlier release laid out (see
+/// [`Branch::migrate_storage`]) is moved to this release's layout and
+/// the changes applied on the rewrite. Nothing outside this crate writes
+/// a registry, so nothing else would ever move it, and a repository's
+/// own upgrade writes here when it opens: without this, an open of a
+/// repository an earlier release left fails on every attempt. A registry
+/// holds facts only, so the storage rewrite is the whole move: it has no
+/// rules for [`Branch::upgrade_rules`] to re-install.
 pub(crate) async fn apply<Env: RegistryEnv>(
     registry: &Branch,
     changes: Changes,
@@ -351,6 +364,19 @@ pub(crate) async fn apply<Env: RegistryEnv>(
                 if attempt < MOVED_HEAD_RETRIES =>
             {
                 attempt += 1;
+                registry.refresh(env).await?;
+                instructions = changes.clone().into_instructions();
+            }
+            // Refused before anything was written. Another writer may
+            // migrate the same head meanwhile; the rewrite is
+            // deterministic, so losing that race leaves the same tree,
+            // and the head that won is the one applied on.
+            Err(CommitError::NeedsMigration(_)) if attempt < MOVED_HEAD_RETRIES => {
+                attempt += 1;
+                match Box::pin(registry.migrate_storage().perform(env)).await {
+                    Ok(_) | Err(CommitError::Publish(PublishError::VersionMismatch { .. })) => {}
+                    Err(error) => return Err(error),
+                }
                 registry.refresh(env).await?;
                 instructions = changes.clone().into_instructions();
             }
@@ -603,7 +629,7 @@ mod tests {
                 .the("dialog.replica/active-branch".parse()?)
                 .of(replica.this.clone()),
         );
-        let store = crate::NetworkedIndex::new(&operator, select.catalog(), None);
+        let store = &operator;
         let rows: Vec<_> = select.execute(store).await?.collect::<Vec<_>>().await;
 
         assert_eq!(rows.len(), 1, "one active branch recorded: {}", rows.len());

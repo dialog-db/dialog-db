@@ -12,7 +12,7 @@
 //! ```
 
 use dialog_search_tree::{
-    Delta, DialogSearchTreeError, HitchhikerTree, Key as TreeKey, MemoryBlocks, PersistentTree,
+    Delta, DialogSearchTreeError, HitchhikerTree, Key as TreeKey, PersistentTree,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -107,19 +107,19 @@ fn hex(bytes: &[u8]) -> String {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
-    let storage = MemoryBlocks::new();
+    let storage = dialog_search_tree::helpers::Blocks::new();
     let mut delta = Delta::zero();
 
     // Ordinary keys through the canonical edit path, in small sessions.
     let mut rng = Rng::new(1);
     let facts: Vec<VarKey> = (0..6000).map(|_| fact_key(&mut rng)).collect();
-    let mut tree = Tree::empty();
+    let mut tree = Tree::empty_in(storage.catalog().clone());
     for batch in facts.chunks(37) {
         let mut edit = tree.edit();
         for key in batch {
             edit = edit.insert(key.clone(), rng.bytes(24), &storage).await?;
         }
-        tree = edit.persist(&mut delta)?;
+        tree = edit.persist(&mut delta, &storage)?;
         storage.flush(&mut delta);
     }
     println!("facts inserted      {}", hex(tree.root().as_bytes()));
@@ -134,7 +134,7 @@ async fn main() -> anyhow::Result<()> {
         for key in batch {
             edit = edit.delete(key, &storage).await?;
         }
-        tree = edit.persist(&mut delta)?;
+        tree = edit.persist(&mut delta, &storage)?;
         storage.flush(&mut delta);
     }
     println!("facts deleted       {}", hex(tree.root().as_bytes()));
@@ -152,7 +152,7 @@ async fn main() -> anyhow::Result<()> {
             .edit()
             .insert(cluster_key(*cluster, *member), rng.bytes(16), &storage)
             .await?
-            .persist(&mut delta)?;
+            .persist(&mut delta, &storage)?;
         storage.flush(&mut delta);
     }
     println!("clusters inserted   {}", hex(tree.root().as_bytes()));
@@ -162,7 +162,7 @@ async fn main() -> anyhow::Result<()> {
             .edit()
             .delete(&cluster_key(*cluster, *member), &storage)
             .await?
-            .persist(&mut delta)?;
+            .persist(&mut delta, &storage)?;
         storage.flush(&mut delta);
     }
     println!("clusters thinned    {}", hex(tree.root().as_bytes()));
@@ -174,7 +174,7 @@ async fn main() -> anyhow::Result<()> {
         for key in batch {
             edit = edit.insert(key.clone(), rng.bytes(8), &storage).await?;
         }
-        tree = edit.persist(&mut delta)?;
+        tree = edit.persist(&mut delta, &storage)?;
         storage.flush(&mut delta);
     }
     println!("long keys inserted  {}", hex(tree.root().as_bytes()));
@@ -189,19 +189,19 @@ async fn main() -> anyhow::Result<()> {
         writes.swap(at, rng.below(at + 1));
     }
     for batch in writes.chunks(3) {
-        let stored = Tree::from_hash_with_cache(buffered_root.clone(), tree.node_cache());
+        let stored = Tree::at(storage.catalog().clone(), buffered_root.clone());
         let mut buffered = HitchhikerTree::open(&stored);
         for key in batch {
             buffered = buffered
                 .insert(key.clone(), rng.bytes(20), &storage)
                 .await?;
         }
-        buffered_root = buffered.persist(&mut delta)?;
+        buffered_root = buffered.persist(&mut delta, &storage)?;
         storage.flush(&mut delta);
     }
     println!("buffered sealed     {}", hex(buffered_root.as_bytes()));
 
-    let stored = Tree::from_hash_with_cache(buffered_root, tree.node_cache());
+    let stored = Tree::at(storage.catalog().clone(), buffered_root);
     let canonical = HitchhikerTree::open(&stored)
         .canonicalize(&storage, &mut delta)
         .await?;

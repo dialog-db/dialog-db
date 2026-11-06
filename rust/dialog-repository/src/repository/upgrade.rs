@@ -432,13 +432,14 @@ mod tests {
     use crate::Repository;
     use crate::RepositoryExt as _;
     use crate::helpers::{flaky_session_with_peer, test_repo};
+    use crate::registry::RegistryEnv;
     use crate::repository::branch::resolve::resolve;
     use crate::schema::{BranchPull, BranchPush, DidExt as _, Replica};
     use crate::{
         Cell, REGISTRY, RemoteAddress, RemoteEdition, RepositoryMemoryExt as _, Route, SiteAddress,
         Target, TreeReference, UpgradeError, site_address,
     };
-    use dialog_artifacts::Instruction;
+    use dialog_artifacts::{Instruction, NUMBER_BAND};
     use dialog_capability::Provider;
     use dialog_capability::Subject;
     use dialog_common::ConditionalSync;
@@ -793,6 +794,97 @@ mod tests {
 
         version.resolve().perform(&operator).await?;
         assert_eq!(version.content(), Some(VERSION), "opening upgraded it");
+        let draft = reopened.branch("draft").open().perform(&operator).await?;
+        resolve(&draft, &operator).await?;
+        assert_eq!(draft.pulls().iter().count(), 1, "draft pulls from origin");
+        Ok(())
+    }
+
+    /// Leave the registry branch of `subject` as a release before the
+    /// number band left it: with a head, laid out under encoding 0.
+    async fn lay_out_before_the_band<Env: RegistryEnv>(
+        subject: &Subject,
+        operator: &Env,
+    ) -> anyhow::Result<()> {
+        let registry = subject
+            .clone()
+            .branch(REGISTRY)
+            .open()
+            .perform(operator)
+            .await?;
+        registry
+            .commit(stream::iter(Vec::<Instruction>::new()))
+            .machinery()
+            .allow_empty()
+            .perform(operator)
+            .await?;
+        let rewritten = registry.rekey_storage(0).perform(operator).await?;
+        assert!(rewritten.is_some(), "the registry has a head to lay out");
+        registry.refresh(operator).await?;
+        assert_eq!(registry.storage_encoding(operator).await?, Some(0));
+        Ok(())
+    }
+
+    /// A repository an earlier release left holds its registry branch in
+    /// the layout from before the number band, alongside its legacy
+    /// cells. Opening it carries the cells over into that registry
+    /// anyway: the registry is moved to this release's layout first,
+    /// rather than the open failing on a commit into the earlier one.
+    #[dialog_common::test]
+    async fn it_upgrades_a_repository_whose_registry_an_earlier_release_laid_out()
+    -> anyhow::Result<()> {
+        const ONE: &str = "a16652656d6f7465a3647472656598200909090909090909090909090909090909090909090909090909090909090909666272616e63686564726166746672656d6f7465666f726967696e";
+        const REMOTE: &str = "a26761646472657373a1645563616ea168656e64706f696e74781a68747470733a2f2f746f6e6b2e6e6574776f726b2f7563616e2f677375626a65637478386469643a6b65793a7a364d6b68615867425a44766f74446b4c353235376661697a74694769433251744b4c4770626e6e4547746132646f4b";
+
+        fn bytes(hex: &str) -> Vec<u8> {
+            (0..hex.len())
+                .step_by(2)
+                .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).expect("valid hex"))
+                .collect()
+        }
+
+        let (operator, profile) = test_session_with_peer().await;
+        let name = unique_name("legacy");
+        let handle = || SpaceHandle {
+            peer: profile.did(),
+            name: name.clone(),
+        };
+        let repo = handle().open().perform(&operator).await?;
+
+        let version: Cell<u32> = SpaceScope::new(Subject::from(repo.did()), SPACE)
+            .cell(CELL)
+            .into();
+        version.resolve().perform(&operator).await?;
+        if version.content().is_some() {
+            version.retract().perform(&operator).await?;
+        }
+        for (space, cell, content) in [
+            ("remote/origin", "address", REMOTE),
+            ("branch/draft", "upstream", ONE),
+        ] {
+            CellScope::new(Subject::from(repo.did()), space, cell)
+                .publish(bytes(content), None)
+                .perform(&operator)
+                .await?;
+        }
+        lay_out_before_the_band(&Subject::from(repo.did()), &operator).await?;
+
+        let reopened = handle().open().perform(&operator).await;
+        assert!(reopened.is_ok(), "{:?}", reopened.err());
+        version.resolve().perform(&operator).await?;
+        assert_eq!(version.content(), Some(VERSION), "opening upgraded it");
+
+        let registry = Subject::from(repo.did())
+            .branch(REGISTRY)
+            .open()
+            .perform(&operator)
+            .await?;
+        assert_eq!(
+            registry.storage_encoding(&operator).await?,
+            Some(NUMBER_BAND),
+            "the registry is in this release's layout"
+        );
+        let reopened = reopened.expect("checked above");
         let draft = reopened.branch("draft").open().perform(&operator).await?;
         resolve(&draft, &operator).await?;
         assert_eq!(draft.pulls().iter().count(), 1, "draft pulls from origin");

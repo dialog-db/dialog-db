@@ -10,8 +10,7 @@
 //!
 //! `dialog_common` defines a similar pair, but this crate deliberately does
 //! not depend on it: this code is meant to be upstreamable to the UCAN repos
-//! it was forked from, so it must not reach into dialog internals. (That pair
-//! also defines `ConditionalSync` as `Send + Sync`, which these do not.)
+//! it was forked from, so it must not reach into dialog internals.
 
 // bare-send-ok: this is the definition site, so it must name the auto traits
 // it abstracts over; every other use in the crate goes through these.

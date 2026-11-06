@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use dialog_common::ConditionalSync;
+use dialog_common::{ConditionalSend, ConditionalSync};
 
 use crate::{DialogArtifactsError, Entity, Relation};
 
@@ -40,7 +40,7 @@ impl Causality {
 /// have to promise `Send` futures; executors that require `Send` can demand
 /// it at the call site.
 #[allow(async_fn_in_trait)]
-pub trait History: ConditionalSync {
+pub trait History: ConditionalSend + ConditionalSync {
     /// The claims written to `(of, the)` by the revision identified by
     /// `version`. Multiple claims are possible for cardinality-many
     /// attributes; an empty result means the claims have not been replicated.

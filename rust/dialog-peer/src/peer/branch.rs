@@ -20,9 +20,11 @@ use dialog_capability::{Capability, Fork, Policy, Provider, Subject};
 use dialog_common::Blake3Hash;
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_effects::Void;
+use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::prelude::{ArchiveScope, GetBlockExt as _};
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify, OperatorExt as _};
+use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::{Import as BlobImport, Read as BlobRead};
 use dialog_effects::branch::{self as branch_fx, BranchError, BranchRecord};
 use dialog_effects::memory::{MemoryError, Publish, Resolve, Retract};
@@ -50,7 +52,8 @@ pub trait BranchEnv:
     + Provider<Retract>
     + Provider<Identify>
     + Provider<Attest>
-    + Provider<dialog_repository::Hydrate>
+    + Provider<ArchiveLoad>
+    + Provider<BlobLoad>
     + Provider<dialog_artifacts::Preload>
     + Provider<dialog_artifacts::Speculation>
     + Provider<Fork<RemoteSite, Resolve>>
@@ -70,7 +73,8 @@ impl<T> BranchEnv for T where
         + Provider<Retract>
         + Provider<Identify>
         + Provider<Attest>
-        + Provider<dialog_repository::Hydrate>
+        + Provider<ArchiveLoad>
+        + Provider<BlobLoad>
         + Provider<dialog_artifacts::Preload>
         + Provider<dialog_artifacts::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>

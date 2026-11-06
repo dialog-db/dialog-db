@@ -146,6 +146,9 @@ pub struct HeldCaches {
     /// this set, by branch. Not a cache: untouched by `release` and
     /// `clear`, and gone with its last handle.
     writers: Arc<Writers>,
+    /// Where the repositories' blocks hydrate from, as their open branches
+    /// registered. Not a cache: untouched by `release` and `clear`.
+    routes: crate::Routes,
 }
 
 impl fmt::Debug for HeldCaches {
@@ -185,23 +188,46 @@ impl HeldCaches {
             shared: Arc::default(),
             repositories: Arc::default(),
             writers: Arc::default(),
+            routes: crate::Routes::new(),
         }
     }
 
     /// The caches `env` holds, made with the default budget if it holds
     /// none yet.
-    pub fn of<Env: Holds>(env: &Env) -> Self {
+    pub fn of<Env: Holds + ?Sized>(env: &Env) -> Self {
         // Queries may have run through `env` before anything was opened,
         // with a formula cache of their own: these caches take that one.
+        let key = held_key::<Self>(HELD);
+        if let Some(caches) = env
+            .held(&key)
+            .and_then(|held| held.downcast_ref::<Self>().cloned())
+        {
+            return caches;
+        }
         let formulas = FormulaCache::of(env);
-        env.held_or(&held_key::<Self>(HELD), &|| {
-            Arc::new(Self::with_formulas(NODE_CACHE_BUDGET, formulas.clone()))
-        })
-        .downcast_ref::<Self>()
-        .cloned()
-        // Only if something else is held under the key: caches of the
-        // caller's own, which reuse nothing and break nothing.
-        .unwrap_or_default()
+        // So are routes branches registered before any caches were held,
+        // and the nodes trees read through `env` kept before then.
+        let routes = crate::Routes::of(env);
+        let nodes = ArtifactNodeCache::held_by(env);
+        let caches = env
+            .held_or(&key, &|| {
+                let mut caches = Self::with_formulas(NODE_CACHE_BUDGET, formulas.clone());
+                caches.routes = routes.clone();
+                if let Some(nodes) = &nodes {
+                    caches.nodes = nodes.clone();
+                }
+                Arc::new(caches)
+            })
+            .downcast_ref::<Self>()
+            .cloned()
+            // Only if something else is held under the key: caches of the
+            // caller's own, which reuse nothing and break nothing.
+            .unwrap_or_default();
+        // A tree reads the node cache `env` holds (`NodeCache::of`): it is
+        // this one, so a node a branch's read kept answers every tree read
+        // through `env`, and the budget, release and clear here govern it.
+        caches.nodes.hold(env);
+        caches
     }
 
     /// Have `env` hold these caches, in place of any it held.
@@ -210,7 +236,15 @@ impl HeldCaches {
     /// opened from here on uses these.
     pub fn hold<Env: Holds>(&self, env: &Env) {
         env.hold(held_key::<Self>(HELD), Arc::new(self.clone()));
+        self.nodes.hold(env);
         self.formulas.hold(env);
+        self.routes.hold(env);
+    }
+
+    /// Where the repositories opened through an environment holding these
+    /// caches hydrate their blocks from (see [`Routes`](crate::Routes)).
+    pub fn routes(&self) -> crate::Routes {
+        self.routes.clone()
     }
 
     /// The outputs of cached formulas these caches remember.
@@ -342,6 +376,8 @@ impl HeldCaches {
 
 #[cfg(test)]
 mod tests {
+    use dialog_effects::archive::Load as ArchiveLoad;
+    use dialog_effects::blob::Load as BlobLoad;
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
@@ -415,7 +451,8 @@ mod tests {
         Publish,
         BlobRead,
         BlobImport,
-        crate::Hydrate,
+        ArchiveLoad,
+        BlobLoad,
         Fork<RemoteSite, Resolve>,
     );
 

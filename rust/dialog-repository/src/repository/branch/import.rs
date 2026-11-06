@@ -1,9 +1,11 @@
 use dialog_artifacts::{Importer, Instruction};
 use dialog_capability::{Fork, Provider};
 use dialog_common::{ConditionalSend, ConditionalSync};
+use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::{Get, Import as ArchiveImport, Put};
 use dialog_effects::authority::{Attest, Identify};
 use dialog_effects::blob::Import as BlobImport;
+use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::Read as BlobRead;
 use dialog_effects::memory::{Publish, Resolve};
 use futures_util::StreamExt;
@@ -35,8 +37,10 @@ impl<I: Importer + Unpin + ConditionalSend> Import<'_, I> {
             + Provider<Publish>
             + Provider<Identify>
             + Provider<Attest>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + Provider<Fork<RemoteSite, Resolve>>
+            + dialog_common::Holds
             + ConditionalSync
             + 'static,
     {

@@ -7,6 +7,7 @@ use anyhow::Result;
 use dialog_artifacts::{Entity, Pick};
 use dialog_query::query::Output as _;
 use dialog_query::{ConceptConclusion, ConceptDescriptor};
+use dialog_repository::Branch;
 
 use super::{Outcome, Prepared, seed_stuff, stuff, stuff_name};
 use crate::env::{Env, entity, query};
@@ -70,6 +71,54 @@ pub async fn point(size: usize) -> Result<Box<dyn Prepared>> {
     seed_stuff(&env, size, Pick::Last).await?;
     env.reopen().await?;
     Ok(Box::new(Point { env, size }))
+}
+
+struct Sibling {
+    env: Env,
+    sibling: Branch,
+    size: usize,
+}
+
+impl Prepared for Sibling {
+    fn env(&self) -> &Env {
+        &self.env
+    }
+
+    fn measure<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = Result<Outcome>> + 'a>> {
+        Box::pin(async move {
+            // The sibling holds the same tree by root. Its nodes are the
+            // repository's, warm from the scenario branch's commit, so a
+            // read through the sibling touches the archive for nothing.
+            let step = (self.size / PROBES).max(1);
+            let mut rows = 0u64;
+            for probe in 0..PROBES {
+                let this = entity("stuff", (probe * step) % self.size);
+                rows += self
+                    .sibling
+                    .select(query(&stuff_name(), &["name"], Some(&this)))
+                    .perform(&self.env.operator)
+                    .try_vec()
+                    .await?
+                    .len() as u64;
+            }
+            Ok(Outcome::from([("rows".into(), rows)]))
+        })
+    }
+}
+
+/// `read-sibling`: `size` entities committed on the scenario branch, a
+/// second branch of the repository pulled to the same head, then `PROBES`
+/// single-entity reads through the second branch.
+pub async fn sibling(size: usize) -> Result<Box<dyn Prepared>> {
+    let env = Env::open().await?;
+    seed_stuff(&env, size, Pick::Last).await?;
+    let sibling = env.branch("sibling").await?;
+    sibling
+        .pull()
+        .from(&env.branch)
+        .perform(&env.operator)
+        .await?;
+    Ok(Box::new(Sibling { env, sibling, size }))
 }
 
 struct Scan {

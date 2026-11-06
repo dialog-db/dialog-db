@@ -13,22 +13,23 @@ use dialog_artifacts::tree::ArtifactTreeExt as _;
 use dialog_capability::Provider;
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::ConditionalSync;
+use dialog_effects::archive::prelude::CatalogScope;
 use dialog_effects::authority::{Attest, Identify, OperatorExt};
 use dialog_effects::memory::{Publish, Resolve};
 use futures_util::TryStreamExt as _;
 use futures_util::future::{Either, join_all};
 
-use super::context::{full_context, head_observes, held, own_count, published_context};
+use super::context::{full_context, head_observes, held, own_count, published_context, rival};
 use super::fetch::fetch_one;
 use super::migrate::aligned;
 use super::resolve::resolve;
-use crate::RemoteFallback;
 use crate::ResolveEnv;
-use crate::repository::archive::networked::Reads;
 use crate::repository::archive::persist;
+use crate::repository::archive::routes;
+use crate::repository::archive::{TreeEnv, erased};
 use crate::{
-    Branch, Checkpoint, Index, NetworkedIndex, PublishError, PullError, Revision, TreeReference,
-    Upstream, UpstreamBranch,
+    Branch, Checkpoint, Index, PublishError, PullError, Revision, TreeReference, Upstream,
+    UpstreamBranch,
 };
 
 /// Below this divergence mass (summed edition excess, roughly commits),
@@ -309,7 +310,10 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
         // upstream is at a peer, keep it so the merge can fall back to
         // the peer's archive for blocks that aren't local.
         let upstream_revision = fetch_one(branch, &upstream, confirm_upstream, env).await?;
-        let remote = upstream.fallback();
+        // The upstream may be one the branch does not track (a one-off
+        // pull): lend its route for the prepare, so a block of its tree
+        // the walk misses locally hydrates from the peer that holds it.
+        let _loan = routes::lend(branch.routes(), branch.of(), &upstream.fallback());
 
         // Upstream has never received a revision yet — nothing to
         // merge in, so the pull is a no-op.
@@ -327,6 +331,25 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
         upstream_revision
             .verify()
             .map_err(dialog_artifacts::DialogArtifactsError::from)?;
+
+        // A rival head: the upstream's head is another revision under our
+        // head's own version, minted by a replica writing with our key on
+        // the same head we built on (#705). The gates below answer from
+        // versions, and would take it as held or seen (keeping our head,
+        // so its write is never merged and our next push replaces it) or
+        // as holding ours (adopting it over our write). Neither revision
+        // can be merged into the other, since each context claims the
+        // other's write, so the pull is refused before anything is
+        // written. Decided from the two heads in hand, at no read.
+        if let Some(current) = branch.revision()
+            && rival(&current, &upstream_revision)
+        {
+            return Err(PullError::WriterRacedItself {
+                branch: branch.name().to_string(),
+                ours: Box::new(current),
+                theirs: Box::new(upstream_revision),
+            });
+        }
 
         // `base` is the upstream tree at our last sync point with this
         // particular upstream (the divergence marker), `None` before any
@@ -360,20 +383,16 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
         if base.as_ref() == Some(&upstream_revision.tree) {
             let held = match (base_version, branch.revision()) {
                 (_, Some(local)) if Some(&local.tree) == base.as_ref() => true,
-                (Some(version), Some(local)) => {
-                    let store =
-                        NetworkedIndex::erased(env, branch.archive().index(), remote.clone());
-                    head_observes(
-                        &local,
-                        &version,
-                        &branch.contexts(),
-                        &branch.records(),
-                        &store,
-                        &branch.node_cache(),
-                    )
-                    .await?
-                    .unwrap_or(false)
-                }
+                (Some(version), Some(local)) => head_observes(
+                    &local,
+                    &version,
+                    &branch.contexts(),
+                    &branch.records(),
+                    &branch.archive().index(),
+                    &erased(env),
+                )
+                .await?
+                .unwrap_or(false),
                 (_, None) | (None, Some(_)) => false,
             };
             if held {
@@ -393,11 +412,12 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
             .as_ref()
             .map(|revision| revision.tree.clone());
 
-        // `NetworkedIndex` reads from the local archive first and,
-        // when the upstream is remote, falls back to the remote
-        // archive for blocks that haven't been replicated. With
-        // `remote: None` it degrades to a plain local index.
-        let store = NetworkedIndex::erased(env, branch.archive().index(), remote);
+        // The trees read through the env, which answers from the local
+        // archive first and hydrates a block that hasn't been replicated
+        // from the upstream's peer (lent above), or from whatever the
+        // subject's branches track.
+        let store = erased(env);
+        let catalog = branch.archive().index();
 
         // The three trees: last-sync base, the upstream revision we're
         // merging in, and the local tree the merge integrates onto — an
@@ -405,10 +425,8 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
         // index. Hydration is lazy; blocks load on demand as the
         // differential walks them.
         let index_at = |tree: Option<&TreeReference>| match tree {
-            Some(tree) => {
-                Index::from_hash_with_cache(NodeHash::from(*tree.hash()), branch.node_cache())
-            }
-            None => Index::empty_with_cache(branch.node_cache()),
+            Some(tree) => Index::at(catalog.clone(), NodeHash::from(*tree.hash())),
+            None => Index::empty_in(catalog.clone()),
         };
         // The trees as the revisions name them. An arm that reads them
         // aligns them first (`migrate::aligned`): a tree a release before
@@ -439,7 +457,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
             match &local_revision {
                 Some(revision) => {
                     let history = branch.history(env);
-                    full_context(revision, &contexts, &store, &branch.node_cache(), &history).await
+                    full_context(revision, &contexts, &catalog, &store, &history).await
                 }
                 None => Ok(Arc::new(Context::new())),
             }
@@ -464,6 +482,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 branch,
                 head,
                 new_revision: upstream_revision.clone(),
+                context: None,
                 merges: upstream_revision.clone(),
                 sync: upstream.with_tree(upstream_revision.tree.clone()),
                 base,
@@ -489,8 +508,8 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 &upstream_revision.version(),
                 &contexts,
                 &branch.records(),
+                &catalog,
                 &store,
-                &branch.node_cache(),
             )
             .await?
             {
@@ -507,6 +526,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 branch,
                 head,
                 new_revision: current.clone(),
+                context: None,
                 merges: upstream_revision.clone(),
                 sync: upstream.with_tree(upstream_revision.tree.clone()),
                 base,
@@ -519,9 +539,8 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
         // through the store that serves its blocks). `None` for a head
         // minted before heads carried a context, for which the paths that
         // compare contexts are skipped.
-        let upstream_context = || async {
-            published_context(&upstream_revision, &contexts, &store, &branch.node_cache()).await
-        };
+        let upstream_context =
+            || async { published_context(&upstream_revision, &contexts, &catalog, &store).await };
 
         // Fast-forward adoption: we have no novelty of our own (our tree is
         // exactly the sync base) and the upstream has seen our head, so
@@ -547,8 +566,8 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                     &local.version(),
                     &contexts,
                     &branch.records(),
+                    &catalog,
                     &store,
-                    &branch.node_cache(),
                 )
                 .await?
                 .unwrap_or(false),
@@ -558,6 +577,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                     branch,
                     head,
                     new_revision: upstream_revision.clone(),
+                    context: None,
                     merges: upstream_revision.clone(),
                     sync: upstream.with_tree(upstream_revision.tree.clone()),
                     base,
@@ -618,6 +638,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                     branch,
                     head,
                     new_revision: upstream_revision.clone(),
+                    context: None,
                     merges: upstream_revision.clone(),
                     sync: upstream.with_tree(upstream_revision.tree.clone()),
                     base,
@@ -659,8 +680,8 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
         if let Some(local) = &local_revision
             && let Some(theirs) = &upstream_context
             && rival_merges(
-                branch,
-                &store,
+                &catalog,
+                store,
                 (local, &local_context),
                 (&upstream_revision, theirs),
             )
@@ -675,6 +696,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 branch,
                 head,
                 new_revision,
+                context: None,
                 merges: upstream_revision.clone(),
                 sync: upstream.with_tree(upstream_revision.tree.clone()),
                 base,
@@ -708,7 +730,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                     .min(theirs.divergence(&local_context))
                     > SMALL_DIVERGENCE
             {
-                let tree_store = store.clone();
+                let tree_store = store;
                 // The three trees, aligned: a side a release before the
                 // band laid out meets the others rewritten.
                 let _ = base_sync;
@@ -778,7 +800,8 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                     })
                     .collect();
                 let mut stitched =
-                    dialog_search_tree::TransientTree::stitch(stitch_pieces, &tree_store).await?;
+                    dialog_search_tree::TransientTree::stitch(&catalog, stitch_pieces, &tree_store)
+                        .await?;
 
                 // Contested spans: apply the smaller side's screened
                 // delta onto the substrate. Data adds screen by the
@@ -897,7 +920,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 }
 
                 let mut delta = ArchiveDelta::zero();
-                let mut merged = stitched.persist(delta.blocks())?;
+                let mut merged = stitched.persist(delta.blocks(), &tree_store)?;
                 let merged_tree = TreeReference::from(*merged.root().as_bytes());
 
                 // Head selection mirrors the other merge paths, so
@@ -908,6 +931,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                         branch,
                         head,
                         new_revision: upstream_revision.clone(),
+                        context: None,
                         merges: upstream_revision.clone(),
                         sync: upstream.with_tree(upstream_revision.tree.clone()),
                         base,
@@ -918,6 +942,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                         branch,
                         head,
                         new_revision: local.clone(),
+                        context: None,
                         merges: upstream_revision.clone(),
                         sync: upstream.with_tree(upstream_revision.tree.clone()),
                         base,
@@ -945,7 +970,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 // The record's key carries its value through the tree's own
                 // inline-vs-spill threshold, so read it off the tree rather
                 // than assuming the default.
-                let manifest = merged.format_manifest(store.clone(), &delta).await?;
+                let manifest = merged.format_manifest(store, &delta).await?;
                 // The merged head's context is the union of both sides' plus
                 // its own version. The stitched tree's
                 // context region is pieced from both sides' regions, so the
@@ -966,20 +991,14 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 revision.tree = TreeReference::from(*merged.root().as_bytes());
                 revision.publish_region(own_count(&revision, &context));
                 revision.signature = Attest::new(revision.payload()).perform(env).await?;
-                contexts.insert(revision.version(), context);
 
-                persist(
-                    &branch.archive().index(),
-                    &branch.node_cache(),
-                    &mut delta,
-                    env,
-                )
-                .await?;
+                persist(&catalog, &mut delta, env).await?;
 
                 return Ok(PreparedPull::Merged(Box::new(Merged {
                     branch,
                     head,
                     new_revision: revision,
+                    context: Some(Arc::new(context)),
                     merges: upstream_revision.clone(),
                     sync: upstream.with_tree(upstream_revision.tree.clone()),
                     base,
@@ -1022,7 +1041,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
             else if let Some(local) = &local_revision
                 && local_context.divergence(theirs) <= theirs.divergence(&local_context)
             {
-                let tree_store = store.clone();
+                let tree_store = store;
                 // The trees, aligned, their tree the substrate.
                 let base_tree = aligned(branch, base_tree.clone(), &store, env).await?;
                 let local_tree = aligned(branch, local_index.clone(), &store, env).await?;
@@ -1046,7 +1065,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                     &tree_store,
                     dialog_search_tree::Prefetch::Eager,
                 );
-                let screen_store = store.clone();
+                let screen_store = store;
                 let screened_history = if unacquainted {
                     Either::Left(history_changes)
                 } else {
@@ -1066,7 +1085,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 let mut delta = ArchiveDelta::zero();
                 merged = Box::pin(merged.edit().integrate(screened, &tree_store))
                     .await?
-                    .persist(delta.blocks())?;
+                    .persist(delta.blocks(), &tree_store)?;
                 let merged_tree = TreeReference::from(*merged.root().as_bytes());
 
                 // The replay can degenerate, and the head selection must
@@ -1083,6 +1102,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                         branch,
                         head,
                         new_revision: upstream_revision.clone(),
+                        context: None,
                         merges: upstream_revision.clone(),
                         sync: upstream.with_tree(upstream_revision.tree.clone()),
                         base,
@@ -1093,6 +1113,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                         branch,
                         head,
                         new_revision: local.clone(),
+                        context: None,
                         merges: upstream_revision.clone(),
                         sync: upstream.with_tree(upstream_revision.tree.clone()),
                         base,
@@ -1124,7 +1145,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 // The record's key carries its value through the tree's own
                 // inline-vs-spill threshold, so read it off the tree rather
                 // than assuming the default.
-                let manifest = merged.format_manifest(store.clone(), &delta).await?;
+                let manifest = merged.format_manifest(store, &delta).await?;
                 // The merged head's context is the union of both sides' plus
                 // its own version. The merged tree started as
                 // theirs, so its context region is theirs, and the entries it
@@ -1142,20 +1163,14 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 revision.tree = TreeReference::from(*merged.root().as_bytes());
                 revision.publish_region(own_count(&revision, &context));
                 revision.signature = Attest::new(revision.payload()).perform(env).await?;
-                contexts.insert(revision.version(), context);
 
-                persist(
-                    &branch.archive().index(),
-                    &branch.node_cache(),
-                    &mut delta,
-                    env,
-                )
-                .await?;
+                persist(&catalog, &mut delta, env).await?;
 
                 return Ok(PreparedPull::Merged(Box::new(Merged {
                     branch,
                     head,
                     new_revision: revision,
+                    context: Some(Arc::new(context)),
                     merges: upstream_revision.clone(),
                     sync: upstream.with_tree(upstream_revision.tree.clone()),
                     base,
@@ -1172,8 +1187,8 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
         // preserved by construction — the merge starts from the local
         // tree — and each differential only reads blocks on paths where
         // base and upstream actually differ within its region.
-        let tree_store = store.clone();
-        let screen_store = store.clone();
+        let tree_store = store;
+        let screen_store = store;
         // The trees, aligned. An upstream head laid out the earlier way is
         // not adopted here: the head minted below descends from it over
         // its rewrite, so this replica's head is one it writes into.
@@ -1229,7 +1244,8 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
         // upstream — derived at zero extra reads, in place of the
         // ancestry walk.
         let observed = Arc::new(Mutex::new(BTreeSet::new()));
-        let observed_data = merge::observe_revisions(data_changes, observed.clone(), store.clone());
+        let observed_data =
+            merge::observe_revisions(data_changes, observed.clone(), store, branch.archive());
         let screened_data = if unacquainted {
             Either::Left(observed_data)
         } else {
@@ -1240,7 +1256,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
         let mut delta = ArchiveDelta::zero();
         merged = Box::pin(merged.edit().integrate(screened, &tree_store))
             .await?
-            .persist(delta.blocks())?;
+            .persist(delta.blocks(), &tree_store)?;
 
         let merged_tree = TreeReference::from(*merged.root().as_bytes());
 
@@ -1333,7 +1349,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 // The record's key carries its value through the tree's own
                 // inline-vs-spill threshold, so read it off the tree rather
                 // than assuming the default.
-                let manifest = merged.format_manifest(store.clone(), &delta).await?;
+                let manifest = merged.format_manifest(store, &delta).await?;
                 // The minted head publishes its watermark: the merged
                 // context plus its own version, its active set signed with
                 // the rest of the head and the whole of it in the tree's
@@ -1366,11 +1382,11 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
         // base records may be in neither side is a branch with no head
         // but a stale nonempty sync base — an inconsistent state; skip
         // the memo and let the next pull derive by the walk.
-        if had_local_head || base.is_none() {
+        let context = (had_local_head || base.is_none()).then(|| {
             let mut context = merged_context;
             context.record(new_revision.version());
-            contexts.insert(new_revision.version(), context);
-        }
+            Arc::new(context)
+        });
 
         // Persist the merged tree's pending nodes to the local archive
         // before referencing its root in a revision. The whole flush
@@ -1378,18 +1394,13 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
         // reference-counted (nothing is copied on the way in) and
         // providers with native batching persist it in a single round
         // trip.
-        persist(
-            &branch.archive().index(),
-            &branch.node_cache(),
-            &mut delta,
-            env,
-        )
-        .await?;
+        persist(&catalog, &mut delta, env).await?;
 
         Ok(PreparedPull::Merged(Box::new(Merged {
             branch,
             head,
             new_revision,
+            context,
             merges: upstream_revision.clone(),
             sync: upstream.with_tree(upstream_revision.tree),
             base,
@@ -1406,8 +1417,8 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
 /// them reads the two revision records, to tell a merge from a commit of
 /// its own claims, which two concurrent commits on a shared base would be.
 async fn rival_merges(
-    branch: &Branch,
-    store: &NetworkedIndex<'_, dyn Reads>,
+    catalog: &CatalogScope,
+    store: &dyn TreeEnv,
     (local, ours): (&Revision, &Context),
     (upstream, theirs): (&Revision, &Context),
 ) -> Result<bool, PullError> {
@@ -1420,13 +1431,9 @@ async fn rival_merges(
         return Ok(false);
     }
     for (revision, version) in [(local, local_version), (upstream, upstream_version)] {
-        let record = TreeHistory::from_root_with_cache(
-            revision.tree.hash(),
-            store.clone(),
-            branch.node_cache(),
-        )
-        .revision_record(&version)
-        .await?;
+        let record = TreeHistory::from_root(catalog.clone(), revision.tree.hash(), store)
+            .revision_record(&version)
+            .await?;
         if record.is_none_or(|record| record.parents.len() <= 1) {
             return Ok(false);
         }
@@ -1473,6 +1480,13 @@ pub struct Merged<'a> {
     head: Checkpoint<Revision>,
     /// The merged revision to publish as the new head.
     new_revision: Revision,
+    /// The new head's full context, remembered only once the head lands.
+    /// A merge that loses its publish is minted again under the same
+    /// version with other parents (as the commit that beat it may already
+    /// be), so a memo entry written at prepare time would speak for a
+    /// revision that never landed, and later merges would screen out the
+    /// upstream's claims as seen.
+    context: Option<Arc<Context>>,
     /// The upstream revision this merge brings in: the head the prepare
     /// fetched and verified, and the only one the commit adopts, however
     /// far the upstream has moved since.
@@ -1545,20 +1559,18 @@ impl PreparedPull<'_> {
         if branch.revision().map(|head| head.version()) == Some(merged.new_revision.version()) {
             return Ok(Vec::new());
         }
-        let upstream = TreeHistory::from_root_with_cache(
-            merged.merges.tree.hash(),
-            NetworkedIndex::new(env, branch.archive().index(), merged.sync.fallback()),
-            branch.node_cache(),
-        )
-        .with_record_cache(branch.records());
-        // What the branch holds is local, so its history reads nothing from
-        // the network.
-        let local = NetworkedIndex::new(env, branch.archive().index(), RemoteFallback::None);
+        // The upstream's history may hold blocks only its peer has.
+        let _loan = routes::lend(branch.routes(), branch.of(), &merged.sync.fallback());
+        let catalog = branch.archive().index();
+        let upstream = TreeHistory::from_root(catalog.clone(), merged.merges.tree.hash(), env)
+            .with_record_cache(branch.records());
+        // The branch's own history reads through the env too: on a full
+        // replica every record it asks for is local, and on one that
+        // adopted a head it never read, a record it lacks hydrates like
+        // any other miss instead of failing the walk.
         let known = match branch.revision() {
-            Some(head) => {
-                TreeHistory::from_root_with_cache(head.tree.hash(), local, branch.node_cache())
-            }
-            None => TreeHistory::empty_with_cache(local, branch.node_cache()),
+            Some(head) => TreeHistory::from_root(catalog.clone(), head.tree.hash(), env),
+            None => TreeHistory::empty(catalog, env),
         };
         let novel = novelty(&merged.merges.version(), &upstream, &known).await?;
         let mut revisions = Vec::with_capacity(novel.len());
@@ -1609,6 +1621,7 @@ impl PreparedPull<'_> {
             branch,
             head,
             new_revision,
+            context,
             merges,
             sync,
             base,
@@ -1642,6 +1655,9 @@ impl PreparedPull<'_> {
             // another handle must still know it moved by this writer's
             // own doing (see `Commit::merge`).
             branch.writer().adopt(new_revision.version());
+        }
+        if let Some(context) = context {
+            branch.contexts().insert(new_revision.version(), context);
         }
 
         // Advance the pulled upstream's recorded sync base to the tree we
@@ -1706,6 +1722,7 @@ mod tests {
 
     use super::PreparedPull;
     use crate::helpers::test_repo;
+    use crate::{PublishError, PullError};
     use anyhow::Result;
     use dialog_peer::helpers::test_session_with_peer;
 
@@ -2015,6 +2032,68 @@ mod tests {
             "the pulled upstream change must survive too"
         );
 
+        Ok(())
+    }
+
+    /// A pull whose publish loses its CAS leaves nothing in the memo for
+    /// the head it minted. A pull prepared on a stale view of the head
+    /// mints the same version as the commit that already landed on it
+    /// (both build on the same parent), and were its context remembered,
+    /// it would speak for that commit: the commit would read as having
+    /// seen the upstream, and the next merge would screen out the
+    /// upstream's claims as removed.
+    #[dialog_common::test]
+    async fn it_forgets_the_context_of_a_merge_that_lost_its_publish() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let assert = |the: &str, of: &str| -> Result<Instruction> {
+            Ok(Instruction::Assert(
+                Artifact {
+                    the: the.parse()?,
+                    of: of.parse()?,
+                    is: Value::String(of.to_string()),
+                    cause: None,
+                },
+                dialog_artifacts::Pick::All,
+            ))
+        };
+
+        let main = repo.branch("main").open().perform(&operator).await?;
+        main.commit(stream::iter(vec![assert("user/name", "user:main")?]))
+            .perform(&operator)
+            .await?;
+        let feature = repo.branch("feature").open().perform(&operator).await?;
+        feature.set_upstream(&main).perform(&operator).await?;
+        feature
+            .commit(stream::iter(vec![assert("user/email", "user:f1")?]))
+            .perform(&operator)
+            .await?;
+
+        // Another handle commits on the head `feature` still holds, and
+        // `feature` then prepares a merge on that stale head: both mint
+        // one version.
+        let other = repo.branch("feature").open().perform(&operator).await?;
+        other
+            .commit(stream::iter(vec![assert("user/email", "user:f2")?]))
+            .perform(&operator)
+            .await?;
+        let prepared = feature.pull().prepare(&operator).await?;
+        let minted = prepared.revision().map(|revision| revision.version());
+        let landed = other.revision().map(|revision| revision.version());
+        assert_eq!(
+            minted, landed,
+            "the merge mints the landed commit's version"
+        );
+        let lost = prepared.commit(&operator).await;
+        assert!(
+            matches!(
+                lost,
+                Err(PullError::Publish(PublishError::VersionMismatch { .. }))
+            ),
+            "the merge loses its publish to the landed commit: {lost:?}"
+        );
+
+        super::super::context::region_agrees(&other, &operator, "the landed commit").await?;
         Ok(())
     }
 
@@ -3926,7 +4005,7 @@ mod history_tests {
     /// inline context beside it, fails verification.
     #[dialog_common::test]
     async fn it_publishes_the_watermark_with_the_head() -> Result<()> {
-        use crate::{Index, NetworkedIndex};
+        use crate::Index;
         use dialog_artifacts::history::{
             Edition, HistoryError, Origin, Version, context_in, context_of,
         };
@@ -3951,9 +4030,8 @@ mod history_tests {
             head.context.is_none() && head.region,
             "a freshly minted head keeps its context in its tree's region"
         );
-        let store = NetworkedIndex::new(&operator, main.archive().index(), None);
-        let tree =
-            Index::from_hash_with_cache(Blake3Hash::from(*head.tree.hash()), main.node_cache());
+        let store = &operator;
+        let tree = Index::at(main.archive().index(), Blake3Hash::from(*head.tree.hash()));
         let published = head.context_from_region(context_in(&tree, &store).await?)?;
         let history = main.history(&operator);
         let walked = context_of(&head.version(), &history).await?;

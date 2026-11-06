@@ -82,7 +82,7 @@ pub enum Issuance {
 /// as stale anyway.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-pub trait Presented: ConditionalSync {
+pub trait Presented: ConditionalSend + ConditionalSync {
     /// Remember `invocation`, its content identifier, until `until` (Unix
     /// seconds), answering `false` when it is remembered already. `now` is
     /// what the service's clock reads, by which what was remembered until

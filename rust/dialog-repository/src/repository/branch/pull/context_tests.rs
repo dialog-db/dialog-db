@@ -32,10 +32,9 @@ use futures_util::stream;
 
 use super::super::context::{head_observes, region_agrees};
 use crate::helpers::Counting;
-use crate::{Branch, NetworkedIndex, PullError, RepositoryExt as _, Revision};
+use crate::{Branch, HeldCaches, PullError, RepositoryExt as _, Revision};
 use dialog_artifacts::history::ContextCache;
 use dialog_artifacts::history::context_of;
-use dialog_artifacts::tree::ArtifactNodeCache;
 use dialog_search_tree::Cache;
 
 fn artifact(of: &str) -> Artifact {
@@ -414,6 +413,11 @@ async fn it_reads_the_upstreams_region_to_fast_forward_across_origins() -> Resul
         ours.revision().expect("we have a head").origin()
     );
 
+    // The writer is a session of the same peer, so its commits kept their
+    // nodes in the node cache the device's env holds too. Let the
+    // repository's nodes go, so the pull reads as a device that has not
+    // seen the upstream's new head does.
+    HeldCaches::of(&device).release(ours.of());
     device.reset();
     ours.pull().perform(&device).await?;
     assert_eq!(ours.revision(), main.revision(), "a fast-forward");
@@ -771,15 +775,20 @@ async fn it_answers_observes_after_a_takeover_at_zero_reads() -> Result<()> {
         .clone()
         .expect("the joiner adopted a head")
         .version();
-    let store = NetworkedIndex::new(&device, joiner.archive().index(), joiner.fallback());
+    // The env holds the node cache every read through it keeps blocks in,
+    // so the repository's nodes are let go of for a reader that remembers
+    // none (the branch handles keep their record caches).
+    HeldCaches::of(&device).release(joiner.of());
+    let store = &device;
+    let catalog = joiner.archive().index();
     device.reset();
     let seen = head_observes(
         &ours,
         &theirs,
         &ContextCache::new(),
         &joiner.records(),
+        &catalog,
         &store,
-        &ArtifactNodeCache::new(),
     )
     .await?;
     assert_eq!(seen, Some(true));
@@ -794,8 +803,8 @@ async fn it_answers_observes_after_a_takeover_at_zero_reads() -> Result<()> {
         &theirs,
         &ContextCache::new(),
         &Cache::new(),
+        &catalog,
         &store,
-        &ArtifactNodeCache::new(),
     )
     .await?;
     assert_eq!(seen, Some(true));

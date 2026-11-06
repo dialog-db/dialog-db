@@ -65,6 +65,8 @@
 //!
 //! [`AnalyzedRule::is_entity_local`]: dialog_query::rule::analyzer::AnalyzedRule::is_entity_local
 
+use dialog_effects::archive::Load as ArchiveLoad;
+use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::Read as BlobRead;
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
@@ -98,8 +100,9 @@ use futures_util::stream;
 use futures_util::{StreamExt as _, TryStreamExt as _};
 
 use super::session::{QueryEnv, QueryLayer};
+use crate::repository::archive::erased;
 use crate::repository::source::Source;
-use crate::{Branch, Ephemeral, Index, NetworkedIndex, RemoteSite, Revision};
+use crate::{Branch, Ephemeral, Index, RemoteSite, Revision};
 
 /// How many touched entities a maintained poll re-derives at once.
 /// Measured on the catch-up soak's hundred-entity poll (#646): a
@@ -717,7 +720,8 @@ where
             + Provider<Put>
             + Provider<Resolve>
             + Provider<Identify>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
@@ -831,10 +835,12 @@ where
             + Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
+            + dialog_common::Holds
             + ConditionalSync
             + 'static,
     {
@@ -848,30 +854,23 @@ where
             return Ok(Touched::Nothing);
         }
 
-        // Load the remote if the branch tracks one, exactly as a select does:
-        // a pull replicates tree nodes along changed paths but never spilled
-        // value blocks, so the first poll after a pull that lands a spilled
-        // fact inside the cover must be able to read the block through the
-        // remote. A failed load (e.g. no credentials) is carried into the
-        // fallback rather than swallowed: the local archive alone may
-        // still satisfy the poll, and a read that misses fails with the
-        // load failure as its cause instead of a bare not-found.
-        let remote = self.branch.fallback();
-        let store = NetworkedIndex::erased(
-            env,
-            ArchiveScope::new(self.branch.subject()).index(),
-            remote,
-        );
+        // Read exactly as a select does: a pull replicates tree nodes
+        // along changed paths but never spilled value blocks, so the first
+        // poll after a pull that lands a spilled fact inside the cover must
+        // be able to hydrate the block through the env from the remote the
+        // branch tracks. A remote that failed to load fails only a read
+        // that misses, with the load failure as its cause.
+        let archive = ArchiveScope::new(self.branch.subject());
+        let catalog = archive.index();
+        let store = erased(env);
         // Keep the raw backend to fetch spilled value blocks by reference.
-        let raw_store = store.clone();
+        let raw_store = store;
         let storage = store;
         let index_at = |hash: Option<Blake3Hash>| match hash {
-            Some(hash) => {
-                Index::from_hash_with_cache(NodeHash::from(hash), self.branch.node_cache())
-            }
+            Some(hash) => Index::at(catalog.clone(), NodeHash::from(hash)),
             // An unborn side of the diff has no tree; the differential
             // runs against the empty index.
-            None => Index::empty_with_cache(self.branch.node_cache()),
+            None => Index::empty_in(catalog.clone()),
         };
         let previous = index_at(pinned);
         let next = index_at(target);
@@ -903,7 +902,7 @@ where
             // at the same key.
             let arriving = matches!(&change, Change::Add(_));
             if let State::Added(datum) = &entry.value {
-                let spilled = fetch_spilled(&raw_store, &entry.key)
+                let spilled = fetch_spilled(&raw_store, &archive, &entry.key)
                     .await
                     .map_err(|error| EvaluationError::Store(format!("spilled fetch: {error:?}")))?;
                 let fact = Artifact::from_key_datum_with_value(&entry.key, datum, spilled)
@@ -977,7 +976,8 @@ where
             + Provider<Put>
             + Provider<Resolve>
             + Provider<Identify>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
@@ -1185,7 +1185,8 @@ where
             + Provider<Put>
             + Provider<Resolve>
             + Provider<Identify>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
@@ -1241,7 +1242,8 @@ where
             + Provider<Put>
             + Provider<Resolve>
             + Provider<Identify>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
@@ -1284,6 +1286,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    use dialog_effects::archive::Load as ArchiveLoad;
+    use dialog_effects::blob::Load as BlobLoad;
 
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
@@ -1379,7 +1383,8 @@ mod tests {
             + Provider<Put>
             + Provider<Resolve>
             + Provider<Identify>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
@@ -5347,7 +5352,8 @@ mod tests {
     impl Fault for Get {}
     impl Fault for Put {}
     impl Fault for Resolve {}
-    impl Fault for crate::Hydrate {}
+    impl Fault for ArchiveLoad {}
+    impl Fault for BlobLoad {}
     impl Fault for dialog_artifacts::Preload {}
     impl Fault for dialog_artifacts::Speculation {}
     impl Fault for Fork<RemoteSite, Resolve> {}

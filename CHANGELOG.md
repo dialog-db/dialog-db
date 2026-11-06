@@ -14,6 +14,437 @@ says how to cut a release.
 
 ## Unreleased
 
+### A repository an earlier release left opens, whatever layout its registry is in
+
+Opening or loading a repository that predates layout versioning carries
+its remote and upstream cells over into facts in its registry branch
+(`meta`). A registry an earlier release wrote is laid out from before the
+number band, and a commit into such a tree is refused with
+`CommitError::NeedsMigration`. Nothing moved the registry first, since
+nothing outside dialog-repository writes it, so the open failed with
+`OpenRepositoryError::Upgrade` / `LoadRepositoryError::Upgrade` on every
+attempt, and the repository could not be opened at all. Every write to a
+registry or a host's contacts now moves the branch to this release's
+layout first, when it needs it, and applies the changes on the rewrite.
+
+What this changes for you:
+
+- A repository last written by a release before 0.3.0 opens instead of
+  failing with "The branch must be migrated before it is written".
+- Upstream changes (`set_upstream`) and contact writes on such a branch
+  succeed the same way, where they failed with `NeedsMigration`.
+- An embedder no longer needs to migrate a registry itself; it could not,
+  since the open that fails is the one that would hand it the branch.
+
+Why: the open-time upgrade is the only thing that writes a registry an
+earlier release left, and it ran before any embedder could migrate it.
+
+### dialog-storage reads a browser file without `wasm-streams`
+
+[#744](https://github.com/dialog-db/dialog-db/pull/744)
+
+The web file system provider read a `File` through the `wasm-streams`
+crate's `ReadableStream` adapter. That crate exports its adapters through
+`#[wasm_bindgen]` under names that carry no version, so two versions of it
+in one wasm module are duplicate symbols at link time. The workspace had
+pinned it to 0.5 to match the copy `reqwest` brings in through `iroh`
+(#521), while an embedder linking the Cloudflare `worker` crate needs 0.6,
+and no version satisfied both. The provider now reads the stream through
+web-sys's default reader and the crate is gone from dialog-storage.
+
+What this changes for you:
+
+- dialog-storage no longer depends on `wasm-streams`, so an embedder may
+  link whichever version its other dependencies need.
+- Nothing stored or synced changes, and the reader's behaviour is the
+  same: chunks arrive as they are read, and dropping the reader before the
+  end cancels the stream.
+
+Why: a dependency that can only ever be one version across a whole wasm
+module should not be pinned by a library that uses one call of it.
+
+
+### A pull or a push that meets another revision under its own head's version is refused
+
+Fixing [#705](https://github.com/dialog-db/dialog-db/issues/705)
+
+Two replicas writing with one key on one branch share an origin, since
+an origin derives from the branch and the issuer. When both build on the
+same head, each mints the next edition of it over its own tree: two
+revisions under one version. Every context that holds one claims the
+other, so the second writer's pull took the first's head as already seen
+and merged nothing, and its push then replaced that head. Both writers
+were told their write synced, one write was gone, and the two replicas
+kept different trees under one version for good. A pull or a push now
+compares the upstream's head with the branch's own head first, and when
+they are the same version over different trees, refuses with an error
+that says so.
+
+What this changes for you:
+
+- `PullError::WriterRacedItself { branch, ours, theirs }` and
+  `PushError::WriterRacedItself { branch, ours, theirs }` are new. A pull
+  or a push that meets the rival head returns one and writes nothing: not
+  the branch's head, not its sync base, not the upstream. A sync loop
+  that pulls on `PushError::NonFastForward` and pushes again now stops
+  with this error instead of reporting the write synced.
+- The refused write is not lost: written again on a replica that has
+  not written (one that pulls the upstream fresh), it lands on top of the
+  rival. Writers that need to write at once each need a key of their
+  own, which is what dialog's model has always assumed.
+- A head that wrote first and a sync with no rival behave as before. The
+  check compares two heads already in hand, so it reads nothing.
+- Still not detected: a replica that minted two or more revisions on the
+  shared head before it syncs holds a head above the rival's edition,
+  and nothing on either head tells the rival from its own earlier
+  revision. One write per sync per key, as the stateless workers of #705
+  do, is caught.
+
+Why: concurrent writers sharing one identity are outside the model, but
+breaking that rule cost a write without an error. A refusal the writer
+can see is the least the replica owes it; keeping both writes by a merge
+cannot be done soundly, since each head's context already claims the
+other's write and the merge would screen it out as removed.
+
+### `ConditionalSync` means `Sync`, not `Send + Sync`
+
+[#734](https://github.com/dialog-db/dialog-db/pull/734)
+
+`dialog_common::ConditionalSync` was `Send + Sync` on native targets, so
+a `ConditionalSync` bound quietly asked for `Send` as well, and a bound
+that needed only `Sync` could not say so. It is now `Sync`, matching its
+name and `dialog_ucan_core::ConditionalSync`; `ConditionalSend` is the
+bound for `Send`. On wasm both remain no bound at all.
+
+What this changes for you:
+
+- A generic bounded only by `ConditionalSync` is no longer known to be
+  `Send` on native. Where your code moves it into a `Send` future, sends
+  an `Arc` of it to a task, or stores it in a type that must be `Send`,
+  write `ConditionalSend + ConditionalSync`.
+- These traits now name both bounds as supertraits, so what implements
+  them and what a bound on them implies is unchanged:
+  `dialog_artifacts::{ValueType, History}`, `dialog_did_web::Fetch`,
+  `dialog_remote_ucan::Presented`, `dialog_peer_iroh::{Channel, Connect}`
+  and the `dialog_peer` helpers' `Meter`.
+- A store a tree reads through by value asks for `ConditionalSend` as
+  well, since it is moved into the read's future: the `S` of the
+  `dialog_artifacts::ArtifactTreeExt` and `BlobIndexExt` methods,
+  `TreeHistory`, `blob_changes` and `spilled_refs`, and of the query
+  builder's `execute`, `execute_owned` and `estimate` in
+  `dialog_repository`. An env passed by reference (`perform(&env)`)
+  still asks only for `ConditionalSync`.
+- `dialog_query::merge_join` and `multi_merge_join` ask for
+  `ConditionalSend + ConditionalSync` on their key function and key, and
+  the `Resolver` and `Revocations` of `dialog_peer_iroh::accept` ask for
+  both, as they always needed.
+
+Why: a bound named `Sync` that also demands `Send` hides what code
+actually needs, and makes a type that is `Sync` but not `Send` impossible
+to accept through it.
+
+### A pull that loses its publish forgets the head it minted
+
+[#704](https://github.com/dialog-db/dialog-db/pull/704)
+
+A pull remembered its merged head's causal context at prepare time,
+before publishing it. A merge prepared on a stale view of the head mints
+the version of the commit already landed on it (a version is the origin
+and its edition, so two revisions minted on one parent by one origin
+share it), so when its publish lost, its context stayed in the memo under
+that commit's version: the commit read as having seen the upstream, and
+the next merge screened the upstream's claims out as removed. The context
+now enters the memo only once the head is published, as a commit's does.
+
+What this changes for you:
+
+- A branch whose pull loses the race to a commit through another handle
+  no longer drops the upstream's claims on its next merge. Nothing stored
+  changes: the memo is in memory, and a pull that lands is remembered as
+  before.
+- `PreparedPull::commit` still fails such a race with
+  `PullError::Publish(PublishError::VersionMismatch)`; the caller refreshes
+  and pulls again, as before.
+
+Why: the memo speaks for heads that landed, and a context remembered
+before the publish speaks for one that may never land.
+
+### Distinct members inserted between the same neighbours get distinct positions
+
+A position's fractional tail comes from a bias derived from the member's
+identity. The bias was the first six base62 digits of the identity bytes,
+and base62 is a big-endian re-encoding, so those digits depend only on the
+identity's leading bytes and its length. Every `did:key:z6Mk…` entity
+shares both, so every one of them got the same bias (`13lS7E`, or
+`FvVVmY` one character shorter). The bias is now taken from the identity's
+BLAKE3 digest.
+
+What this changes for you:
+
+- `Bias::derive` returns a different bias for the same identity, so
+  `dialog_artifacts::position::insert` and the `dialog/position` formula
+  derive different positions than before for the same member and
+  neighbours. Derivation is still deterministic: every replica on this
+  release derives the same position for the same insert.
+- Two different members inserted into the same slot used to derive the
+  same position, so a relation that keeps one member per position kept
+  only one of them. They now land apart.
+
+Why: the bias exists so distinct members disperse while the same member
+converges. Read off the identity's head it converged for everything, so
+concurrent inserts into one slot collided instead of interleaving.
+
+### A tree reads its catalog's blocks through `Load` on the env, and the env hydrates
+
+[#735](https://github.com/dialog-db/dialog-db/pull/735), after
+[#730](https://github.com/dialog-db/dialog-db/pull/730); argued in
+[notes/tree-reads-as-effects.md](./notes/tree-reads-as-effects.md).
+
+A search tree is now a root under a catalog, and it reads a node by
+performing the new `dialog_effects::archive::Load` command on the
+environment it is given: the block its `Get` names, from the local
+archive, or else hydrated from where the environment knows the subject's
+blocks live. A spilled value is read the same way through
+`dialog_effects::blob::Load`. The environment holds the checked-node
+cache (`NodeCache::of(env, subject)`) and the hydration routes
+(`dialog_network::Routes`, which a branch registers when it opens), so a
+peer answers every tree read the same way, sharing in-flight hydrations
+through its `Hydrate` scheduler. The store wrappers that bridged the old
+subject-less `LoadBlock` to the env are gone. `Get` is unchanged and
+never hydrates.
+
+What this changes for you:
+
+- `LoadBlock`, `LoadBlob`, `ArchiveReader`, `Nodes`, `Cached`,
+  `ArtifactNodes` and `MemoryBlocks` are removed. A tree reads through any
+  `Env: Provider<archive::Load> + Holds + ConditionalSync` (plus
+  `Provider<blob::Load>` for artifact trees, and `Provider<archive::Get>`
+  where a difference is computed). A test store is
+  `dialog_search_tree::helpers::Blocks`, a `Volatile` under a test
+  catalog.
+- `dialog_repository::LocalIndex` and `NetworkedIndex` are removed: read
+  through the env itself (`tree.get(key, &env)`, `select.execute(&env)`).
+  `NetworkedIndex::with_priority(p)` is `tree.ranked(p)`; a tree that
+  must read only what the replica holds is `tree.locally()` (or
+  `Load::locally()` for a single read). `load_or_hydrate`,
+  `load_blob_or_hydrate`, `hydrate` and `RemoteFallback` stay where they
+  were exported.
+- `PersistentTree::empty()` and `PersistentTree::from_hash(root)` are
+  `PersistentTree::empty_in(catalog)` and `PersistentTree::at(catalog,
+  root)`; `empty_with_manifest`, `TransientTree::new`,
+  `TransientTree::with_manifest`, `TransientTree::empty_with_manifest`,
+  `TransientTree::stitch`, `HitchhikerTree::empty`, `TreeHistory::from_root`,
+  `TreeHistory::empty` and `distribution::capture` take the catalog, and
+  `Accessor::new(env, catalog)` does too. `PersistentTree::catalog()`,
+  `with_root`, `reading()`, `ranked(priority)` and `locally()` are new;
+  `NodeCache::of`, `NodeCache::hold` and `NodeCache::held_by` find and
+  place the cache an env holds.
+- `fetch_spilled`, `fetch_spilled_cached`, `fetch_spilled_reference` and
+  `merge::observe_revisions` take the archive the value lives in; a
+  spilled value is read by `load_spill`.
+- `Branch::history`, `Snapshot::history`, `Branch::log`, `Snapshot::log`,
+  `Select::perform` and `Select::estimate_perform` ask less of the env
+  (the two loads and `Holds`), and the commands that read trees ask
+  `Holds` of it. Every peer and session already holds.
+- `HeldCaches` holds its node cache where trees find it, so the budget,
+  `release` and `clear` govern every tree read through the env, and an
+  env given its own `HeldCaches` before anything opens keeps nodes under
+  that budget.
+- A borrowed environment is an environment: `&T` provides every command
+  `T` provides (`dialog_capability::Provider`) and holds what `T` holds
+  (`dialog_common::Holds`).
+- A resolver premise (`tree/node`, `tree/span`, `tree/key`, `tree/value`)
+  loads the block it names against the wildcard subject's archive
+  (`dialog_query::resolver::anywhere`), and `Scope` asks for the two
+  loads instead of `LoadBlock` and `LoadBlob`. A query over several lines
+  answers from each line's catalog in turn.
+- Any read of a repository one of whose open branches tracks a remote
+  can hydrate a block it lacks, a snapshot's and a transaction's staged
+  view included, and a branch can hydrate a block only a sibling's remote
+  holds. A miss tries every remote the subject's open branches track, in
+  the order they were opened and each in its tracking order, where before
+  only the reading branch's first remote was asked; a miss no reachable
+  remote answers fails naming the first remote that could not be reached,
+  rather than reading as absent. With no remote tracked a read is local,
+  as before. An export that does not download reads only what the replica
+  holds.
+- A push's novelty walk, its subtree forwarding and its spilled-value
+  shipping read only the local archive, by `Get`, and never hydrate.
+
+Why: the tree's read was a command with no subject, so every reader
+needed a wrapper that knew the catalog, another that knew where to
+hydrate from (worked out per read by `Branch::fallback`, which was about
+9% of a worker's CPU), and the node cache was plumbed through them. Read
+as a capability on the env, there is one way to get a node, which goes
+through the cache and the env's hydration, and nothing to wrap.
+
+### A difference reads a leaf both sides share only at the keys its buffered ops touch
+
+[#736](https://github.com/dialog-db/dialog-db/pull/736)
+
+When two trees hold the same leaf and differ only in the ops a buffer
+above routes to it, the comparison now resolves just the keys those
+ops cover: each side's winning op, or the stored entry where that side
+has none. Before, the entry walk streamed every stored entry of the
+leaf on both sides and dropped the ones that matched. A commit buffered
+at the root routes each op to a whole leaf, so every subscription poll
+over the commit decoded every entry of each leaf the commit's ops
+landed in, whatever its scope. A scoped difference now resolves only
+the covered keys inside its scope, so a poll whose scope the commit
+missed reads nothing of those leaves. The buffered fast path also
+checks the leftmost separator before decoding any buffer, since a
+root's is always empty and the decode could never be used.
+
+What this changes for you:
+
+- A subscription poll after a commit costs in proportion to the ops
+  the commit buffered, not to the size of the leaves they land in.
+  `subscribe-fanout` and `subscribe-pulled` (201 polls after a one-note
+  commit) go from about 203M to about 39M instructions, and
+  `subscribe-repoll` from 14.2M to 12.6M.
+- A poll's cost no longer depends on where a written value sorts. A
+  note body sorting into a leaf that every note subscription's
+  rule-discovery scope crosses used to cost each of the 201 polls about
+  370k more instructions than one sorting elsewhere.
+- `differentiate`, `differentiate_within`, `changes` and
+  `changes_within` report the same changes. `TreeDifference::changes`
+  on a difference built by `compute_within` no longer yields
+  out-of-scope spillover from such a leaf; `changes_within` already
+  filtered it.
+
+Why: the stored entries of a shared leaf are the same bytes on both
+sides, so only a key an op covers can differ, and decoding the rest
+was work every subscriber repeated for every commit.
+
+### A tree reads every node through its store, which keeps what it checked
+
+[#730](https://github.com/dialog-db/dialog-db/pull/730)
+
+A search tree no longer carries a node cache. The store a tree reads
+through implements the new `dialog_search_tree::Nodes` trait: `kept()`
+names the node cache it holds, if any, and `load_node()` answers a read
+from that cache, else from the store's blocks, checking the node once and
+keeping it. Every tree read goes there: point lookups, scans, traversals,
+differences, edits loading the nodes they rewrite, and persists, which
+keep the nodes they seal in the same cache. A new read path therefore
+cannot bypass the cache, as the difference, `traverse_available`, push's
+subtree forwarding, diagnose and `canonical_divergences` did. In the
+repository the cache is the line's: `LocalIndex` holds the handle and
+`NetworkedIndex` forwards it.
+
+What this changes for you:
+
+- Every tree method that took `Env: Provider<LoadBlock>` takes
+  `Env: Nodes<Key, Value>`. A block store that keeps nothing implements
+  it in one line (`impl<K, V> Nodes<K, V> for MyStore {}`), as
+  `MemoryBlocks`, `ObservingBlocks` and `JournaledBlocks` do; wrap one in
+  `Cached::new(cache, &store)` to keep the nodes read through it.
+- `PersistentTree::node_cache`, `PersistentTree::empty_with_cache` and
+  `PersistentTree::from_hash_with_cache` are removed: use `empty()` and
+  `from_hash(root)`, and give the store the cache.
+  `PersistentTree::empty_with_manifest` takes only the manifest.
+- `TransientTree::new(root)`, `TransientTree::with_manifest(root,
+  manifest)` and `TransientTree::empty_with_manifest(manifest)` drop
+  their cache argument.
+- `TransientTree::persist(delta, store)`, `HitchhikerTree::persist(delta,
+  store)` and `HitchhikerTree::persist_mut(delta, store)` take the store
+  whose cache keeps the sealed nodes. `TransientNode::persist`,
+  `TransientNode::persist_mut` and `Node::into_link` take
+  `Option<&NodeCache>`.
+- `Accessor::new(env)` takes only the store.
+- A difference's `MissingBlocks::Deny` side reads through the store's
+  cache. A `MissingBlocks::Boundary` side reads the store's blocks
+  directly, so absence is the store's own word.
+- A store that keeps nothing skips the range scan's sibling read-ahead
+  and an integration's open-ahead pass, which would only read each node
+  twice.
+- `dialog_artifacts::ArchiveReader` requires `ArtifactNodes`
+  (`Nodes<Key, State<Datum>>`). `DeltaOverlay` keeps what its
+  environment keeps.
+- `TreeHistory::from_root_with_cache` and `TreeHistory::empty_with_cache`
+  are removed: use `TreeHistory::from_root(root, store)` and the new
+  `TreeHistory::empty(store)`. `rekey_tree` drops its cache argument.
+  `distribution::capture` reads through the store.
+- `LocalIndex::new(env, catalog, nodes)` and `NetworkedIndex::new(env,
+  index, remote, nodes)` take the node cache the index keeps.
+- `Select::execute(store)` probes the root and scans through the store,
+  so a store passed in should keep a node cache for repeated selects to
+  be answered from memory.
+- Reads that went around the cache now hit it: a subscription poll's
+  difference, a snapshot export's walk and a preload walk read the
+  line's cache, and a select's scan no longer reads its root again
+  after the probe. The `subscribe-repoll` perf scenario reads no block
+  from the archive where it read 6, and runs 10.6% fewer instructions.
+- A poll after a commit that adds one note, with a subscription per
+  note of 200 (the new `subscribe-fanout` perf scenario), reads 0
+  blocks instead of 806 (32 MB). Every subscription diffs the same two
+  trees within its own demand, and the first to read a changed block
+  keeps it for the rest. In a browser over IndexedDB, which pays a
+  transaction per block read, a write from another device showed on a
+  200-note page in about 0.4 s instead of 2 to 3 s.
+
+Why: the cache was carried by trees and threaded through `*_with_cache`
+constructors, so every read path had to remember to use it, several did
+not, and two places copied the cache-then-store read by hand. Putting it
+on the store makes the cached read exist in one place and every read go
+through it.
+
+### A read finds its remote without deriving every upstream
+
+[#730](https://github.com/dialog-db/dialog-db/pull/730)
+
+Every select, subscription poll and migration check asked the branch
+where a read held by reference falls back to, and the branch answered
+by building its full upstream list: deriving each upstream's sync
+target, a hash, and comparing every pair. It now takes the first route
+at a peer among the pulls and then the pushes, through
+`Tracking::first_remote_route`, so the answer is the same without that
+work. It was about 9% of a Tonk service worker's CPU while switching
+spaces.
+
+What this changes for you:
+
+- `Upstreams::fallback` is removed; `Branch::fallback` no longer builds
+  `upstreams()`.
+- A read's fallback is the one it was: the first upstream at a peer,
+  reachable or not, pulls before pushes, else the first synced route at
+  a peer.
+
+Why: the fallback is asked on every read, and the answer needs one
+route, not a hashed and deduplicated set of them.
+
+### A request the access service never answers is given up on, and a read is sent again
+
+[#727](https://github.com/dialog-db/dialog-db/pull/727)
+
+An invocation `dialog-remote-ucan` sends as an HTTP request (every one
+when the service names no socket, a block read or write, or the fallback
+when the socket does not connect) waited for its answer with no bound.
+One sent on a pooled connection the network had silently dropped, as a
+NAT or a mobile network does a quiet one, was never answered and never
+failed. It now waits as long as an invocation over the socket waits
+(`Liveness::answer`, 30 s by default), plus the time its payload takes
+to upload at 16 KiB/s, and is then aborted and answered as unavailable.
+
+What this changes for you:
+
+- A memory operation sent this way that the service does not begin
+  answering in time fails with `Rejection::Unavailable`, as one over a
+  silent socket already did; a blob read or write fails with a transport
+  error. Either may be tried again with an invocation of its own.
+- `UcanSite::with_liveness` now bounds these requests too.
+- A block or blob read the service has not begun answering after 3 s
+  is sent again, up to seven copies (one more than the connections a
+  browser keeps to one host), and the first answer is taken. A
+  read that met connections the network forgot is answered in seconds
+  rather than failing after 30 s each. The copies carry one invocation,
+  so a service may see it presented more than once; the refusal of a
+  copy as replayed is not taken for the read's answer.
+
+Why: in tonk, a sync whose request was lost this way held the sync of
+every space behind it, so after a few minutes idle on a NATed network,
+changes from another device stopped arriving until the page reloaded.
+
 ### A rule's conclusion under `last` succeeds the claim its body read
 
 Fixes [#724](https://github.com/dialog-db/dialog-db/issues/724)
@@ -602,6 +1033,14 @@ has a tree to canonicalize even when the link itself wrote nothing.
 
 #### Compatibility and migration
 
+- Nothing stored or synced changes for trees reading through `Load`:
+  blocks, nodes, spilled values and their hashes are the same bytes,
+  `Get`'s wire shape is unchanged, nothing is rewritten on upgrade, and an
+  older release reads everything this one writes. `Load` is a local
+  command and never crosses the wire; what changes is which reads may
+  hydrate a block the replica lacks (any read of a repository an open
+  branch of which tracks a remote), and that a hydrated block is written
+  back locally as before. Nothing for an embedder to run.
 - A reset that moves a branch forward only changes nothing stored or
   synced, and rewrites nothing. Heads an earlier release forked by a
   takeover and a commit keep their fork; nothing finds or repairs it.
@@ -1558,6 +1997,28 @@ thread multiplies whatever it holds by the size of the thread pool.
 
 ### Compatibility and migration
 
+- A registry branch (`meta`) or host state branch an earlier release laid
+  out is rewritten under the number band the first time this release
+  writes it, as `Branch::migrate_storage` rewrites any branch: one pass
+  over its entries, published as a revision that descends from the head.
+  0.2.0 and earlier refuse the rewritten tree by name, as they refuse any
+  migrated tree. An embedder runs nothing.
+- Nothing stored or synced changes for the refusal of a rival head of
+  one version (#705): nothing is rewritten on upgrade, and heads, trees
+  and the wire format are as before, so an older release reads all this
+  one writes. An older release still takes a rival head as seen, so a
+  write it races with one of this release under the same key can still
+  be dropped there; upgrade every replica that shares a key.
+- Positions already stored keep their bytes and their order: nothing is
+  rewritten, and both releases read every position the other writes. Only
+  newly derived positions differ. An older replica and this one derive
+  different positions for the same insert, so the same insert made on both
+  no longer converges to one entry; each still lands between the
+  neighbours it named.
+- Nothing stored or synced changes for the node cache moving to the
+  store: trees, nodes and their hashes are the same bytes, nothing is
+  rewritten on upgrade, and an older release reads everything this one
+  writes. Only how often a node is read from the archive changes.
 - Nothing stored changes for the difference that prunes shared
   subtrees: no stored data is rewritten, trees are laid out as before,
   and an older release reads everything this one writes. Only how many

@@ -29,6 +29,94 @@ const PERMIT_MEDIA_TYPE: &str = "application/cbor";
 /// How much of a refusal body is read for its reason.
 const MAX_ERROR_BODY_BYTES: usize = 8 * 1024;
 
+/// The slowest upload a request is given time for, in bytes per second:
+/// about 128 kbit/s, below what a poor mobile link sustains.
+const SLOWEST_UPLOAD: u64 = 16 * 1024;
+
+/// How long a request carrying `payload` bytes waits for the service to
+/// begin answering: `answer`, the time an invocation over the socket
+/// waits ([`Liveness::answer`](crate::socket::Liveness::answer)), plus
+/// the time the payload takes to upload at [`SLOWEST_UPLOAD`].
+///
+/// A request is not otherwise bounded, and one sent on a connection the
+/// network silently dropped (a NAT or a mobile network that forgot an
+/// idle pooled connection, a laptop that changed networks) is never
+/// answered and never fails: whatever waits on it, a sync and every sync
+/// queued behind it, waits for minutes. Given up on, it is answered as
+/// unavailable, to be tried again with an invocation of its own, and the
+/// request is aborted, which drops the connection it was sent on.
+pub(crate) fn deadline(answer: std::time::Duration, payload: usize) -> std::time::Duration {
+    answer + std::time::Duration::from_millis(payload as u64 * 1000 / SLOWEST_UPLOAD)
+}
+
+/// How long a read waits for the service to begin answering before it
+/// is sent again, beside the one still waiting, and the most times it is
+/// sent.
+///
+/// A connection the network forgot (see [`deadline`]) looks, to the
+/// client, like any other idle one, and the client sends on it again.
+/// A read is safe to send twice: whichever copy is answered first is
+/// taken and the others are aborted. The copies carry one invocation, so
+/// a service that remembers what was presented refuses every copy after
+/// the first that reaches it; such a refusal is passed over while a copy
+/// is still waiting, since the copy it refers to will be answered.
+///
+/// Each copy goes out on a connection the ones before are not holding.
+/// When fewer connections were forgotten than a browser keeps to the
+/// service, a copy soon lands on a live one. When all of them were,
+/// the copies hold every connection the browser allows, and the last
+/// copy waits until the first gives up at its deadline, then goes out
+/// on a new connection: the read is answered once, not after a deadline
+/// for each forgotten connection.
+const RESEND_READ_AFTER: std::time::Duration = std::time::Duration::from_secs(3);
+/// One more than the connections a browser keeps open to one host over
+/// HTTP/1.1, so that when every one of them was forgotten the last copy
+/// opens a new one.
+const MOST_READ_COPIES: usize = 7;
+
+/// [`invoke`] a read, which carries no payload and changes nothing,
+/// sending it again every [`RESEND_READ_AFTER`] while no copy has been
+/// answered, or at once when every copy sent has failed, up to
+/// [`MOST_READ_COPIES`] copies. The first answer is taken; when every
+/// copy failed, the last failure is.
+pub(crate) async fn read(
+    answer: std::time::Duration,
+    address: &UcanAddress,
+    authorization: &UcanAuthorization,
+) -> Result<Answer, S3Error> {
+    use futures::StreamExt;
+    use futures::stream::FuturesUnordered;
+
+    let mut copies = FuturesUnordered::new();
+    copies.push(invoke(answer, address, authorization, None));
+    let mut sent = 1;
+    loop {
+        match crate::socket::within(RESEND_READ_AFTER, copies.next()).await {
+            // A copy that reached the service after another did is refused
+            // as replayed, the same invocation presented twice; the one
+            // that reached it first is answered. A refusal is taken only
+            // once no copy is left waiting.
+            Some(Some(Ok(answered))) if answered.is_refusal() && !copies.is_empty() => {}
+            Some(Some(Ok(answered))) => return Ok(answered),
+            Some(Some(Err(failed))) if copies.is_empty() => {
+                if sent == MOST_READ_COPIES {
+                    return Err(failed);
+                }
+                copies.push(invoke(answer, address, authorization, None));
+                sent += 1;
+            }
+            // Another copy is still waiting for its answer.
+            Some(Some(Err(_))) => {}
+            Some(None) => unreachable!("a copy is always waiting while none was answered"),
+            None if sent < MOST_READ_COPIES => {
+                copies.push(invoke(answer, address, authorization, None));
+                sent += 1;
+            }
+            None => {}
+        }
+    }
+}
+
 /// The `Authorization` header value that carries `container`: the
 /// scheme, a space, and the container in the spec's text serialization,
 /// gzipped when that comes out shorter.
@@ -160,11 +248,16 @@ impl Answer {
 /// permit in place of the outcome, from a service that verified the
 /// invocation but performs nothing; or a refusal to read the request,
 /// from a service that looks for the invocation in the body.
+///
+/// A service that has not begun answering by the [`deadline`] for
+/// `answer` and the payload is given up on, as a transport failure.
 pub(crate) async fn invoke(
+    answer: std::time::Duration,
     address: &UcanAddress,
     authorization: &UcanAuthorization,
     payload: Option<Vec<u8>>,
 ) -> Result<Answer, S3Error> {
+    let limit = deadline(answer, payload.as_ref().map_or(0, Vec::len));
     let chain = authorization.invocation().chain();
     let url = labeled(address.endpoint(), chain);
     let credential =
@@ -179,7 +272,13 @@ pub(crate) async fn invoke(
             .header("Content-Type", OBJECT_MEDIA_TYPE)
             .body(payload);
     }
-    let response = request.send().await?;
+    let Some(sent) = crate::socket::within(limit, request.send()).await else {
+        return Err(S3Error::Transport(format!(
+            "the service did not begin answering within {} ms",
+            limit.as_millis()
+        )));
+    };
+    let response = sent?;
 
     let status = response.status().as_u16();
     let etag = response

@@ -9,6 +9,7 @@
 #   scripts/release.sh prepare <version>   set the version, date the changelog
 #   scripts/release.sh check <version>     verify a commit is that release
 #   scripts/release.sh notes <version>     print that release's changelog
+#                                         (cut to what a GitHub release holds)
 #
 # A pre-release (`0.3.0-rc.1`) sets the version and leaves the changelog's
 # `## Unreleased` section where it is; its notes are that section.
@@ -69,6 +70,30 @@ section() {
     inside && /^## / { exit }
     inside { print }
   ' "$changelog"
+}
+
+# GitHub refuses a release body past 125 000 characters. A pre-release's
+# notes are the whole `## Unreleased` section, which grows until the next
+# release, so they are cut at the last `### ` heading that fits under the
+# limit, with a line saying where the rest is.
+notes_limit=120000
+
+notes() {
+  local heading body
+  if [[ -n "$prerelease" ]]; then heading=Unreleased; else heading="$version"; fi
+  body="$(section "$heading")"
+  if (( ${#body} <= notes_limit )); then
+    printf '%s\n' "$body"
+    return
+  fi
+  local url="https://github.com/dialog-db/dialog-db/blob/v$version/CHANGELOG.md"
+  awk -v limit="$notes_limit" '
+    /^### / && total + length($0) + 1 > limit { exit }
+    { total += length($0) + 1 }
+    /^$/ { blanks++; next }
+    { for (; blanks > 0; blanks--) print ""; print }
+  ' <<< "$body"
+  printf '\nThe rest of this section is in [CHANGELOG.md](%s).\n' "$url"
 }
 
 prepare() {
@@ -139,6 +164,6 @@ check() {
 case "$command" in
   prepare) prepare ;;
   check) check ;;
-  notes) if [[ -n "$prerelease" ]]; then section Unreleased; else section "$version"; fi ;;
+  notes) notes ;;
   *) usage ;;
 esac

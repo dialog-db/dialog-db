@@ -21,7 +21,7 @@ use dialog_artifacts::tree::ArtifactTree;
 #[cfg(not(target_arch = "wasm32"))]
 use dialog_artifacts::{ArchiveDelta, Instruction, Key, State, apply_buffered};
 #[cfg(not(target_arch = "wasm32"))]
-use dialog_search_tree::{MemoryBlocks, NodeBody, PersistentNode};
+use dialog_search_tree::{NodeBody, PersistentNode, helpers::Blocks};
 
 #[cfg(not(target_arch = "wasm32"))]
 const ENTITIES: usize = 20_000;
@@ -35,8 +35,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let data = generate_data(ENTITIES)?;
     let fact_count = data.len();
 
-    let blocks = MemoryBlocks::new();
-    let mut index = ArtifactTree::empty();
+    let blocks = Blocks::new();
+    let mut index = ArtifactTree::empty_in(dialog_search_tree::helpers::test_catalog());
     let mut delta = ArchiveDelta::zero();
     apply_buffered(
         &mut index,

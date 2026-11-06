@@ -82,5 +82,5 @@ mod session;
 pub use session::*;
 
 mod client;
-pub(crate) use client::Failed;
+pub(crate) use client::{Failed, within};
 pub use client::{Liveness, Sockets};
