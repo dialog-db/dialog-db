@@ -48,6 +48,12 @@ criterion = { version = "0.5", features = ["async_tokio"] }
 blake3 = { workspace = true }
 rkyv = { workspace = true }
 zstd = "0.13"
+# The tonk benchmarks (`examples/tonk_dataset.rs`, `examples/tonk_bench.rs`)
+# read a space's rules and concepts and keep their dataset as JSON lines.
+dialog-credentials = { workspace = true }
+dialog-query = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
 # The search tree's volatile test archive, for the examples that build
 # trees outside a repository.
 dialog-search-tree = { workspace = true, features = ["audit", "helpers"] }
