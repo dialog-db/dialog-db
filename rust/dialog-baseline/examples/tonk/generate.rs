@@ -15,6 +15,7 @@ use dialog_artifacts::Value;
 use rand::{Rng as _, SeedableRng as _};
 use rand_chacha::ChaCha8Rng;
 
+pub use crate::dataset::Shape;
 use crate::dataset::{Change, Line, Op, Phase, member_entity};
 
 /// The members a generated dataset has write to the space.
@@ -22,29 +23,6 @@ pub const MEMBERS: u32 = 6;
 
 /// How many commands the measured week holds.
 pub const WEEK: usize = 300;
-
-/// The shape a space's records have: how many of each, and how they link.
-#[derive(Debug, Clone)]
-pub struct Shape {
-    /// Issues.
-    pub issues: usize,
-    /// Labels.
-    pub labels: usize,
-    /// Projects.
-    pub projects: usize,
-    /// Label links per issue.
-    pub labels_per_issue: f64,
-    /// The share of issues in a project.
-    pub in_project: f64,
-    /// The share of issues with an assignee.
-    pub assigned: f64,
-    /// Comments per issue, changes left out.
-    pub comments_per_issue: f64,
-    /// Memos.
-    pub memos: usize,
-    /// Mentions per memo.
-    pub mentions_per_memo: f64,
-}
 
 /// The concepts a dataset carries, by name, as descriptor JSON.
 pub type Concepts = BTreeMap<String, serde_json::Value>;
@@ -102,6 +80,7 @@ fn holders(cells: &HashMap<(String, String), Vec<Value>>, the: &str) -> (Vec<Str
 }
 
 /// What an exported space holds that its writes build on.
+#[derive(Default)]
 pub struct Existing {
     /// Issues, with the number of their ident.
     pub issues: Vec<(String, u64)>,

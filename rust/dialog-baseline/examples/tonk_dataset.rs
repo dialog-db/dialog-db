@@ -72,6 +72,12 @@ mod native {
                 eprintln!("wrote {out}, dataset {hash}");
                 Ok(())
             }
+            [mode, export, out] if mode == "schema" => {
+                let lines = schema_of(Path::new(export))?;
+                let hash = dataset::write(Path::new(out), lines)?;
+                eprintln!("wrote {out}, schema {hash}");
+                Ok(())
+            }
             [mode, export, scale, out] if mode == "generate" => {
                 let lines = generated(Path::new(export), scale.parse()?)?;
                 let hash = dataset::write(Path::new(out), lines)?;
@@ -81,7 +87,8 @@ mod native {
             _ => anyhow::bail!(
                 "usage: tonk_dataset export <replica data dir> <out.jsonl>\n       \
                  tonk_dataset week <export.jsonl> <out.jsonl>\n       \
-                 tonk_dataset generate <export.jsonl> <scale> <out.jsonl>"
+                 tonk_dataset schema <export.jsonl> <out.jsonl>\n       \
+                 tonk_dataset generate <export.jsonl or schema.jsonl> <scale> <out.jsonl>"
             ),
         }
     }
@@ -109,9 +116,34 @@ mod native {
             .find(|line| matches!(line, Line::Schema { .. }))
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("the export holds no schema"))?;
-        let (shape, existing) = generate::shape(&lines, &concepts)?;
-        eprintln!("shape of the export: {shape:?}");
+        // A schema carries its space's shape; an export is measured.
+        let given = lines.iter().find_map(|line| match line {
+            Line::Shape(shape) => Some(shape.clone()),
+            _ => None,
+        });
+        let (shape, existing) = match given {
+            Some(shape) => (shape, generate::Existing::default()),
+            None => generate::shape(&lines, &concepts)?,
+        };
+        eprintln!("shape: {shape:?}");
         Ok((lines, concepts, schema, shape, existing))
+    }
+
+    /// The schema alone of an export: its concepts, rules and command
+    /// markers, and the shape of its records (counts and ratios), with
+    /// none of the records. What a run elsewhere generates a dataset from.
+    fn schema_of(export: &Path) -> anyhow::Result<Vec<Line>> {
+        let (_, concepts, schema, shape, _) = read_export(export)?;
+        Ok(vec![
+            Line::Header {
+                source: "schema".into(),
+                seed: 0,
+                scale: 1,
+            },
+            Line::Concepts { concepts },
+            schema,
+            Line::Shape(shape),
+        ])
     }
 
     /// The export, then a week of [`generate::MEMBERS`] members' writes

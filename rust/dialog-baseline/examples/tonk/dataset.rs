@@ -35,8 +35,10 @@ pub enum Line {
     /// The space's rules and command markers, installed in one commit.
     Schema {
         /// Each inductive rule, as the canonical bytes a branch stores.
+        #[serde(with = "hex_list")]
         inductive: Vec<Vec<u8>>,
         /// Each deductive rule, as the canonical bytes a branch stores.
+        #[serde(with = "hex_list")]
         deductive: Vec<Vec<u8>>,
         /// The concepts whose facts are commands, by entity.
         transient: Vec<String>,
@@ -73,6 +75,9 @@ pub enum Line {
     /// The end of a round: every member, in turn, pulls what the others
     /// pushed and pushes what it committed.
     Sync,
+    /// The shape of the space a schema came from: how many records of each
+    /// kind it held and how they linked, with none of the records.
+    Shape(Shape),
 }
 
 /// What a commit or command in a dataset is for.
@@ -132,6 +137,61 @@ pub fn read(path: &Path) -> anyhow::Result<Vec<Line>> {
         lines.push(serde_json::from_str(&line?)?);
     }
     Ok(lines)
+}
+
+/// The shape a space's records have: how many of each, and how they link.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Shape {
+    /// Issues.
+    pub issues: usize,
+    /// Labels.
+    pub labels: usize,
+    /// Projects.
+    pub projects: usize,
+    /// Label links per issue.
+    pub labels_per_issue: f64,
+    /// The share of issues in a project.
+    pub in_project: f64,
+    /// The share of issues with an assignee.
+    pub assigned: f64,
+    /// Comments per issue, changes left out.
+    pub comments_per_issue: f64,
+    /// Memos.
+    pub memos: usize,
+    /// Mentions per memo.
+    pub mentions_per_memo: f64,
+}
+
+/// Byte strings as hex, half the size of JSON's arrays of numbers.
+mod hex_list {
+    use serde::{Deserialize as _, Deserializer, Serializer, de::Error as _};
+
+    pub fn serialize<S: Serializer>(list: &[Vec<u8>], serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(list.iter().map(|bytes| {
+            bytes
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        }))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<Vec<u8>>, D::Error> {
+        Vec::<String>::deserialize(deserializer)?
+            .into_iter()
+            .map(|text| {
+                (0..text.len())
+                    .step_by(2)
+                    .map(|at| {
+                        text.get(at..at + 2)
+                            .and_then(|pair| u8::from_str_radix(pair, 16).ok())
+                            .ok_or_else(|| D::Error::custom("rule bytes are not hex"))
+                    })
+                    .collect()
+            })
+            .collect()
+    }
 }
 
 /// The profile a dataset's entity stands for, if it is `id:member-<n>`.
