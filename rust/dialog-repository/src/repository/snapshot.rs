@@ -443,6 +443,15 @@ impl Snapshot {
         &self.overlay
     }
 
+    /// A handle to this snapshot at its head with `overlay` as its
+    /// ephemeral line, sharing each cache of the snapshot.
+    pub(crate) fn under(&self, overlay: Ephemeral) -> Snapshot {
+        Snapshot {
+            overlay,
+            ..self.clone()
+        }
+    }
+
     /// Bind a scope to one of this snapshot's stores. See
     /// [`Branch::bind`].
     pub fn bind(&self, scope: Entity, target: StoreTarget) -> &Self {

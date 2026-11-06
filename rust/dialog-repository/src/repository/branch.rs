@@ -487,6 +487,15 @@ impl Branch {
         &self.overlay
     }
 
+    /// A handle to this branch with `overlay` as its ephemeral line,
+    /// sharing each cell and cache of the branch.
+    pub(crate) fn under(&self, overlay: Ephemeral) -> Branch {
+        Branch {
+            overlay,
+            ..self.clone()
+        }
+    }
+
     /// Bind a scope to one of this branch's stores, so a write to an
     /// attribute placed on that scope routes there. Local to this
     /// replica; see [`Bindings`].
