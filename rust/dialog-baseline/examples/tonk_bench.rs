@@ -730,6 +730,8 @@ mod native {
 
     /// The value of field `name` of `row`, as text.
     fn field(row: &ConceptConclusion, name: &str) -> Option<String> {
-        row.get::<Entity>(name).ok().map(|entity| entity.to_string())
+        row.get::<Entity>(name)
+            .ok()
+            .map(|entity| entity.to_string())
     }
 }

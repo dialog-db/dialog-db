@@ -172,8 +172,23 @@ pub struct Accessor<'a, Key, Value, Env: ?Sized> {
     cache: Option<NodeCache<Key, Value>>,
     /// The store that hands over nodes as rows, if the environment holds
     /// one for the catalog's subject: asked before a block is loaded.
-    source: Option<std::sync::Arc<dyn NodeSource>>,
+    /// Looked up on the first node the cache does not hold, not when the
+    /// accessor is made: finding it formats a key, and most reads are
+    /// answered from the cache without ever needing it.
+    source: std::sync::OnceLock<Option<std::sync::Arc<dyn NodeSource>>>,
+    /// How [`source`](Self::source) is found in the environment.
+    find_source: Find<Env>,
     reading: Reading,
+}
+
+/// Finds the node source an environment holds for a catalog's subject.
+type Find<Env> = fn(&Env, &CatalogScope) -> Option<std::sync::Arc<dyn NodeSource>>;
+
+fn find_source<Env: Holds + ?Sized>(
+    env: &Env,
+    catalog: &CatalogScope,
+) -> Option<std::sync::Arc<dyn NodeSource>> {
+    <dyn NodeSource>::of(env, catalog.subject())
 }
 
 impl<Key, Value, Env: ?Sized> Clone for Accessor<'_, Key, Value, Env> {
@@ -183,6 +198,7 @@ impl<Key, Value, Env: ?Sized> Clone for Accessor<'_, Key, Value, Env> {
             catalog: self.catalog.clone(),
             cache: self.cache.clone(),
             source: self.source.clone(),
+            find_source: self.find_source,
             reading: self.reading,
         }
     }
@@ -201,7 +217,8 @@ where
             env,
             catalog: catalog.clone(),
             cache: NodeCache::of(env, catalog.subject()),
-            source: <dyn NodeSource>::of(env, catalog.subject()),
+            source: std::sync::OnceLock::new(),
+            find_source: find_source::<Env>,
             reading: Reading::default(),
         }
     }
@@ -251,7 +268,10 @@ where
         hash: &Blake3Hash,
     ) -> Result<Option<PersistentNode<Key, Value>>, DialogSearchTreeError> {
         let fetch = async |hash: &Blake3Hash| {
-            if let Some(node) = from_source(self.source.as_ref(), &self.catalog, hash) {
+            let source = self
+                .source
+                .get_or_init(|| (self.find_source)(self.env, &self.catalog));
+            if let Some(node) = from_source(source.as_ref(), &self.catalog, hash) {
                 return Ok(Some(node));
             }
             fetch_node(self.env, &self.catalog, hash, self.reading).await

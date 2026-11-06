@@ -207,6 +207,9 @@ impl<'a, Value: rkyv::Archive> IndexView<'a, Value> {
 
     /// The child at `at`, materialized as an owned [`Link`].
     pub fn link_at(&self, at: usize) -> Result<Link, DialogSearchTreeError> {
+        if let IndexView::Archived(index) = self {
+            return index.link_at(at);
+        }
         Ok(Link {
             separator: self.separator(at)?.into(),
             node: self.hash_at(at)?.clone(),
@@ -216,7 +219,10 @@ impl<'a, Value: rkyv::Archive> IndexView<'a, Value> {
 
     /// All children, materialized as owned [`Link`]s in child order.
     pub fn links(&self) -> Result<Vec<Link>, DialogSearchTreeError> {
-        (0..self.len()).map(|at| self.link_at(at)).collect()
+        match self {
+            IndexView::Archived(index) => index.links(),
+            IndexView::Rows(_) => (0..self.len()).map(|at| self.link_at(at)).collect(),
+        }
     }
 
     /// Whether any child's content hash equals `hash`.

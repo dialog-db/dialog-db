@@ -460,6 +460,44 @@ level, and what it costs is in writing what a commit or a pull brings in
 get measured, but the write path is the larger question, and the branch's
 5–12% on warm reads needs explaining before the branch can land.
 
+## 2026-11-06 — The branch's own cost, found and mostly fixed
+
+**Question.** Warm reads and commands were 5–12% slower on this branch
+than on main with the same archive. Main had gained six commits since
+the branch last merged it, none on a read or commit path. Where does the
+branch spend it?
+
+**Method.** `dialog-perf` counts the instructions each scenario retires
+under callgrind, which a timing's noise does not touch. Every scenario,
+on main (`5dbde9f`, in a worktree) and on the branch, built with the
+same toolchain; then each regression's profiles compared function by
+function.
+
+**Results.**
+
+- Before: 21 of 29 scenarios over the gate's 3%, every counter (blocks,
+  engine steps) unchanged: `rule-point` +16.0%, `read-point` +12.9%,
+  `commit-batch` +9.0% against main on one toolchain.
+- The cause: every tree read made an accessor, and every accessor looked
+  up the environment's node source, building its key with `format!` (a
+  type id written out in hex) and a held-value lookup. In `read-point`
+  that is 2.4M of the 2.9M extra instructions; the row views themselves
+  cost 0.12M. The lookup now runs on the first node the cache does not
+  hold, at most once an accessor, and not at all for a read the cache
+  answers.
+- The tree diff behind subscriptions built its index links through the
+  view one link at a time; it now hands the archived node's own `links`
+  and `link_at` the work, as main did.
+- After: every scenario within 3% of main, most within 0–2%;
+  `first-query` 10% cheaper. `subscribe-fanout` is at +3.0%, on the
+  line: a node read from its block carries one more pointer (the rows
+  it may have come from), and the diff moves nodes about.
+
+**Decision.** Fixed in the read path; `subscribe-fanout` stays open, to
+be brought under the line by folding the rows pointer into the node's
+existing fields. The six-member run should be repeated with this fix
+before its `fs` and `main/fs` numbers are compared again.
+
 ## How to reproduce
 
 ```sh
