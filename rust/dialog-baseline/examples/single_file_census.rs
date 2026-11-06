@@ -3302,7 +3302,7 @@ impl Hitchhiker {
             out.push((separator, id));
         }
         // Siblings in key order; each later split came off the left part.
-        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out.sort_by_key(|split| split.0);
         out
     }
 
@@ -3344,11 +3344,7 @@ impl Layout for Hitchhiker {
         let split = self.put(root, entries.to_vec(), &mut touched);
         if !split.is_empty() {
             let mut grown = HitchNode::new(false);
-            let first = if self.nodes[root].leaf {
-                self.nodes[root].keys[0]
-            } else {
-                self.nodes[root].keys[0]
-            };
+            let first = self.nodes[root].keys[0];
             grown.keys.push(first);
             grown.children.push(root);
             for (separator, sibling) in split {
