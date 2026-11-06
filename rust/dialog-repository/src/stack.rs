@@ -624,6 +624,30 @@ impl Topology {
         }
     }
 
+    /// The position among the ephemeral layers of the stack, as a composite
+    /// holds them, of each layer that a write of `the` lands in under
+    /// `placements`.
+    pub(crate) fn ephemerals_under(
+        &self,
+        placements: &Placements,
+        the: &dialog_corpus::Relation,
+    ) -> Vec<usize> {
+        let Some(indices) = placements
+            .placement_of(the)
+            .and_then(|scope| self.bound.get(scope))
+        else {
+            return Vec::new();
+        };
+        self.layers
+            .iter()
+            .enumerate()
+            .filter(|(_, layer)| matches!(layer, Layer::Ephemeral(_)))
+            .enumerate()
+            .filter(|(_, (index, _))| indices.contains(index))
+            .map(|(at, _)| at)
+            .collect()
+    }
+
     /// The bottom layer as a branch, or `None` when it is not one.
     fn primary(&self) -> Option<Branch> {
         match self.layers.first() {
@@ -5621,6 +5645,87 @@ mod tests {
         Ok(())
     }
 
+    /// A commit reads the row of an ephemeral layer as it will leave it. A
+    /// rule writes the row in one round, and a second rule reads it in the
+    /// next round of the same commit. The second rule follows each write, as
+    /// it follows a cell of the tree, whether its own cell is in the tree or
+    /// in the layer. The layer of another scope sits between them in the
+    /// stack and gets none of the writes.
+    #[dialog_common::test]
+    async fn it_reads_the_row_of_an_ephemeral_layer_a_rule_wrote_in_a_later_round() -> Result<()> {
+        let follow = |from: &str, to: &str| -> Result<dialog_query::InductiveRule> {
+            Ok(serde_json::from_value(serde_json::json!({
+                "assert!": { "with": { "name": { "the": to, "as": "text:" } } },
+                "when": [{
+                    "assert": { "with": { "name": { "the": from, "as": "text:" } } },
+                    "where": {
+                        "this": { "?": { "name": "this" } },
+                        "name": { "?": { "name": "name" } }
+                    }
+                }]
+            }))?)
+        };
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        shared
+            .transaction()
+            .assert(Placement::new("test.state/name".parse()?, name("state")))
+            .assert(Placement::new("test.noted/name".parse()?, name("state")))
+            .assert(firing_rule("test.state/name")?)
+            .assert(follow("test.state/name", "test.shown/name")?)
+            .assert(follow("test.state/name", "test.noted/name")?)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        shared.refresh(&operator).await?;
+        let other = Ephemeral::create().perform(&operator).await;
+        let state = Ephemeral::create().perform(&operator).await;
+        let top = Ephemeral::create().perform(&operator).await;
+        let stack = Stack::open(top.clone())
+            .link(&top, &shared, name("shared"))
+            .link(&top, &other, name("other"))
+            .link(&top, &state, name("state"))
+            .perform(&operator)
+            .await?;
+        let row: Entity = "row:1".parse()?;
+        let held = |layer: &Ephemeral, the: &str| -> Result<Vec<Value>> {
+            Ok(layer
+                .scan(&Selector::new().the(the.parse()?).of(row.clone()))
+                .into_iter()
+                .map(|fact| fact.is)
+                .collect())
+        };
+        for value in ["general", "books", "general", "books"] {
+            stack
+                .transaction()
+                .dispatch(
+                    dialog_query::the!("test.command/name")
+                        .of(row.clone())
+                        .is(value.to_string()),
+                )
+                .commit()
+                .publish()
+                .perform(&operator)
+                .await?;
+            let expected = vec![Value::String(value.into())];
+            assert_eq!(held(&state, "test.state/name")?, expected);
+            assert_eq!(
+                held(&state, "test.noted/name")?,
+                expected,
+                "after the rule wrote {value}"
+            );
+            assert_eq!(
+                committed(&shared, &operator, "test.shown/name", &row).await?,
+                expected,
+                "after the rule wrote {value}"
+            );
+            assert!(held(&other, "test.state/name")?.is_empty());
+        }
+        Ok(())
+    }
+
     /// Under `max`, a write through a stack leaves a candidate that a rule
     /// derives, which the read still elects, and succeeds no stored claim.
     #[dialog_common::test]
@@ -6938,13 +7043,23 @@ mod tests {
         index
             .overlay()
             .assert(Placement::new(
-                "counter/count".parse()?,
+                "counter/fired".parse()?,
                 name("application"),
             ))?
             .assert(Placement::new("app/note".parse()?, name("application")))?;
         let application = Ephemeral::create().perform(&operator).await;
+        let fired: dialog_query::InductiveRule = serde_json::from_value(serde_json::json!({
+            "assert!": { "with": { "counter": { "the": "counter/fired", "as": "Entity" } } },
+            "when": [{
+                "assert": { "with": { "counter": { "the": "cmd.increment/counter", "as": "Entity" } } },
+                "where": {
+                    "this": { "?": { "name": "this" } },
+                    "counter": { "?": { "name": "counter" } }
+                }
+            }]
+        }))?;
         let mut rule = Changes::new();
-        increment_rule().assert(&mut rule);
+        fired.assert(&mut rule);
         application.apply(rule).unwrap();
         let top = Ephemeral::create().perform(&operator).await;
         let stack = Stack::open(top.clone())
@@ -6958,28 +7073,32 @@ mod tests {
             anyhow::Ok(cell.content())
         };
         let before = watermark().await?;
+        let note = || {
+            Ok::<_, anyhow::Error>(
+                dialog_query::the!("app/note")
+                    .of("note:1".parse::<Entity>()?)
+                    .is("hi".to_string()),
+            )
+        };
 
         // The first commit adopts the head of the bottom.
-        let counter: Entity = "ctr:1".parse()?;
         stack
             .transaction()
-            .assert(
-                dialog_query::the!("counter/count")
-                    .of(counter.clone())
-                    .is(1u64),
-            )
+            .assert(note()?)
             .commit()
             .publish()
             .perform(&operator)
             .await?;
 
         // Another writer of the bottom, as the daemon writes the index.
+        let counter: Entity = "ctr:1".parse()?;
+        let command: Entity = "cmd:1".parse()?;
         let other = repo.branch("index").open().perform(&operator).await?;
         other
             .commit(stream::iter(vec![Instruction::Assert(
                 Fact {
                     the: "cmd.increment/counter".parse()?,
-                    of: "cmd:1".parse()?,
+                    of: command.clone(),
                     is: Value::Entity(counter.clone()),
                     cause: None,
                 },
@@ -6988,26 +7107,40 @@ mod tests {
             .perform(&operator)
             .await?;
         stack.advance(&operator).await?;
-        for _ in 0..2 {
-            stack
-                .transaction()
-                .assert(
-                    dialog_query::the!("app/note")
-                        .of("note:1".parse::<Entity>()?)
-                        .is("hi".to_string()),
-                )
-                .commit()
-                .publish()
-                .perform(&operator)
-                .await?;
-        }
-        // The layer elects among its own rows, so the count that the rule
-        // concludes succeeds the first one. A second firing would read 2 and
-        // write 3.
+
+        // The next commit fires the rule over what the other writer added.
+        stack
+            .transaction()
+            .assert(note()?)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
         assert_eq!(
-            values::<u64>(&stack, &operator, "counter/count", &counter).await?,
-            vec![Value::UnsignedInt(2)],
-            "the rule fired once over what the other writer added"
+            values::<Entity>(&stack, &operator, "counter/fired", &command).await?,
+            vec![Value::Entity(counter.clone())],
+            "the rule fired over what the other writer added"
+        );
+
+        // The commit after it retracts what the rule wrote. A second firing
+        // would write it again.
+        stack
+            .transaction()
+            .retract(
+                dialog_query::the!("counter/fired")
+                    .of(command.clone())
+                    .is(counter.clone()),
+            )
+            .assert(note()?)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        assert!(
+            values::<Entity>(&stack, &operator, "counter/fired", &command)
+                .await?
+                .is_empty(),
+            "the rule did not fire again"
         );
         assert_eq!(
             watermark().await?,

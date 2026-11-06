@@ -75,21 +75,107 @@ pub(crate) enum Landing<'a> {
     Stack(&'a Topology),
 }
 
-/// Which attributes a commit writes to a store under its placements. A
-/// head written to a store keeps its pick, and the store elects among its
-/// own rows of the cell, as it does for a write of the transaction.
+/// Which attributes a commit writes to a store under its placements, and
+/// what a round of its induction reads of each store. A head written to a
+/// store keeps its pick, and the store elects among its own rows of the
+/// cell, as it does for a write of the transaction.
 pub(crate) struct Stores<'a> {
     landing: &'a Landing<'a>,
     placements: &'a Placements,
+    /// The view of the round, each store in it as the writes of the commit
+    /// so far leave it.
+    view: Composite,
 }
 
-impl Stores<'_> {
+impl<'a> Stores<'a> {
+    /// The stores of `view` as `changes` leave them, and the rest of
+    /// `changes`, which a round reads as staged writes above the lines.
+    ///
+    /// A store takes a write when the commit lands, and a write under a
+    /// choosing pick replaces a row of the store then. A row of a store
+    /// also stands above each staged write in a read, so a round that read
+    /// such a write as staged would elect the row the write replaces. Each
+    /// store is copied here with its writes applied, by the same steps that
+    /// land them, so a round reads what the commit will leave.
+    fn over(
+        landing: &'a Landing<'a>,
+        placements: &'a Placements,
+        view: &Composite,
+        changes: &Changes,
+    ) -> (Self, Changes) {
+        let mut stores = Self {
+            landing,
+            placements,
+            view: view.clone(),
+        };
+        let mut staged = Changes::new();
+        let mut written: BTreeMap<usize, Changes> = BTreeMap::new();
+        for instruction in changes.clone().into_instructions() {
+            let (Instruction::Assert(fact, _) | Instruction::Retract(fact)) = &instruction;
+            if !stores.hold(&fact.the) {
+                staged.record(instruction);
+                continue;
+            }
+            for at in stores.positions(&fact.the) {
+                written.entry(at).or_default().record(match &instruction {
+                    Instruction::Assert(fact, pick) => {
+                        Instruction::Assert(fact.clone(), pick.clone())
+                    }
+                    Instruction::Retract(fact) => Instruction::Retract(fact.clone()),
+                });
+            }
+        }
+        for (at, writes) in written {
+            match landing {
+                Landing::Line(_) => {
+                    if let Some(line) = stores.view.sources.get_mut(at) {
+                        let store = line.overlay().extending(writes);
+                        *line = line.under(store);
+                    }
+                }
+                Landing::Stack(_) => {
+                    if let Some(store) = stores.view.ephemerals.get_mut(at) {
+                        *store = store.extending(writes);
+                    }
+                }
+            }
+        }
+        (stores, staged)
+    }
+
     /// Whether a write of `the` lands in a store.
     pub(crate) fn hold(&self, the: &Relation) -> bool {
         match self.landing {
             Landing::Line(bindings) => !self.placements.lands_in_tree(the, bindings),
             Landing::Stack(topology) => !topology.lands_in_trees(self.placements, the),
         }
+    }
+
+    /// Where the stores that a write of `the` lands in stand in the view:
+    /// the session store of its one line, or the ephemeral layers of a
+    /// stack that links bind under the placement of `the`.
+    fn positions(&self, the: &Relation) -> Vec<usize> {
+        match self.landing {
+            Landing::Line(_) => vec![0],
+            Landing::Stack(topology) => topology.ephemerals_under(self.placements, the),
+        }
+    }
+
+    /// Whether each store that a write of `fact` lands in holds its value,
+    /// so the write changes nothing. A row of a line is no row of a store:
+    /// the write lands, and replaces the row that the store holds.
+    fn holding(&self, fact: &Fact) -> bool {
+        let selector = Selector::new()
+            .the(fact.the.clone())
+            .of(fact.of.clone())
+            .is(fact.is.clone());
+        self.positions(&fact.the).into_iter().all(|at| {
+            let store = match self.landing {
+                Landing::Line(_) => self.view.sources.get(at).map(|line| line.overlay()),
+                Landing::Stack(_) => self.view.ephemerals.get(at),
+            };
+            store.is_some_and(|store| !store.scan(&selector).is_empty())
+        })
     }
 }
 
@@ -219,10 +305,6 @@ where
     // each round (cheap, in-memory) so rules installed by this very
     // commit — or by a rule during induction — fire.
     let dispatch = Dispatch::resolve(view, placements, env).await?;
-    let stores = Stores {
-        landing,
-        placements,
-    };
 
     // The identity is resolved once: it only feeds the schema-metadata
     // overlay of the round view, which does not change across rounds.
@@ -337,20 +419,6 @@ where
             }
         }
 
-        // The frozen round view: every line ⊕ durable changes ⊕ this
-        // round's transients, through the same layered QueryEnv a
-        // transaction query uses, so rule bodies read exactly what a
-        // mid-transaction query would: the writes as staged layers
-        // beside the shared metadata.
-        let metadata = view.overlay(&Changes::new(), &operator);
-        // The context of the commit stands through each round. It is no
-        // stimulus, and no round witnesses it, so it fires no rule by itself.
-        let view = QueryEnv::over(view.clone(), metadata, env).with_layers(vec![
-            Staged::from(changes.clone()),
-            Staged::from(transient_overlay.clone()),
-            Staged::from(context.clone()),
-        ]);
-
         // Close the touched set over derivation: a base-fact write
         // reaches inductive rules premised on the derived concepts it
         // (transitively) supports through deductive rules.
@@ -377,6 +445,28 @@ where
         // candidate premised on one changed *derivedly*, which a base
         // row cannot seed.
         let expanded: BTreeSet<Reach> = touched.difference(&direct).cloned().collect();
+
+        // A round that fires nothing reads nothing, and writes nothing for
+        // a next round to take as its stimulus.
+        if candidates.is_empty() {
+            break;
+        }
+
+        // The frozen round view: every line ⊕ durable changes ⊕ this
+        // round's transients, through the same layered QueryEnv a
+        // transaction query uses, so rule bodies read exactly what a
+        // mid-transaction query would: the writes as staged layers
+        // beside the shared metadata. A write that lands in a store is read
+        // in that store, as the commit will leave it.
+        let metadata = view.overlay(&Changes::new(), &operator);
+        let (stores, staged) = Stores::over(landing, placements, view, changes);
+        // The context of the commit stands through each round. It is no
+        // stimulus, and no round witnesses it, so it fires no rule by itself.
+        let view = QueryEnv::over(stores.view.clone(), metadata, env).with_layers(vec![
+            Staged::from(staged),
+            Staged::from(transient_overlay.clone()),
+            Staged::from(context.clone()),
+        ]);
 
         let mut novelty = Changes::new();
         let mut emitted_transients = Changes::new();
@@ -1836,7 +1926,7 @@ async fn emit_matches<'a>(
         // its pick, for the store to elect among its own rows.
         Box::pin(super::succession::resolve_against(view, stores, &mut head)).await?;
         for instruction in head.into_instructions() {
-            if is_novel(view, &instruction).await? {
+            if is_novel(view, stores, &instruction).await? {
                 match instruction {
                     Instruction::Assert(a, policy) => {
                         dialog_corpus::Update::associate(novelty, a.the, a.of, a.is, policy)
@@ -1900,11 +1990,19 @@ fn written_heads(rule: &InductiveRule, matches: &[Match]) -> Result<Vec<WrittenH
 /// This is the fixpoint's convergence test — a rule whose head
 /// re-derives existing state terminates for free. The view is the
 /// frozen round view, so siblings within a round judge novelty against
-/// identical state.
-async fn is_novel<'a>(view: &QueryEnv<'a>, instruction: &Instruction) -> Result<bool, CommitError> {
+/// identical state. An assertion that lands in a store asks that store
+/// alone, since it lands there whatever the lines hold.
+async fn is_novel<'a>(
+    view: &QueryEnv<'a>,
+    stores: &Stores<'_>,
+    instruction: &Instruction,
+) -> Result<bool, CommitError> {
     let fact = match instruction {
         Instruction::Assert(a, _) | Instruction::Retract(a) => a,
     };
+    if matches!(instruction, Instruction::Assert(..)) && stores.hold(&fact.the) {
+        return Ok(!stores.holding(fact));
+    }
     let selector = Selector::new()
         .the(fact.the.clone())
         .of(fact.of.clone())

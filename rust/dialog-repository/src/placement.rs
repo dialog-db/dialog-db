@@ -1482,6 +1482,223 @@ mod tests {
         Ok(())
     }
 
+    /// An inductive rule from `from` to the `to` of the same entity, under
+    /// the pick `last`.
+    fn following(from: &str, to: &str) -> Result<InductiveRule> {
+        Ok(serde_json::from_value(json!({
+            "assert!": { "with": { "name": { "the": to, "as": "text:" } } },
+            "when": [{
+                "assert": { "with": { "name": { "the": from, "as": "text:" } } },
+                "where": {
+                    "this": { "?": { "name": "this" } },
+                    "name": { "?": { "name": "name" } }
+                }
+            }]
+        }))?)
+    }
+
+    /// The values that the session store of `branch` holds of `the` for `of`.
+    fn held_in_session(branch: &Branch, the: &str, of: &Entity) -> Result<Vec<Value>> {
+        Ok(branch
+            .overlay()
+            .scan(&Selector::new().the(the.parse()?).of(of.clone()))
+            .into_iter()
+            .map(|fact| fact.is)
+            .collect())
+    }
+
+    /// A commit reads a session row as it will leave it. A rule writes the
+    /// row in one round, and a second rule reads it in the next round of the
+    /// same commit. The second rule follows each write, as it follows a cell
+    /// of the tree, whether its own cell is in the tree or in the store.
+    #[dialog_common::test]
+    async fn it_reads_the_session_row_a_rule_wrote_in_a_later_round() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        branch.bind(session(), Target::Session);
+        branch
+            .transaction()
+            .assert(Placement::new("ui/selected".parse()?, session()))
+            .assert(Placement::new("ui/noted".parse()?, session()))
+            .assert(following("ui.select/name", "ui/selected")?)
+            .assert(following("ui/selected", "ui/shown")?)
+            .assert(following("ui/selected", "ui/noted")?)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        let doc: Entity = "doc:1".parse()?;
+        for value in ["general", "books", "general", "books"] {
+            branch
+                .transaction()
+                .dispatch(
+                    dialog_query::the!("ui.select/name")
+                        .of(doc.clone())
+                        .is(value.to_string()),
+                )
+                .commit()
+                .publish()
+                .perform(&operator)
+                .await?;
+            branch.refresh(&operator).await?;
+            let expected = vec![Value::String(value.into())];
+            assert_eq!(held_in_session(&branch, "ui/selected", &doc)?, expected);
+            assert_eq!(held_in_session(&branch, "ui/noted", &doc)?, expected);
+            assert_eq!(
+                values::<String, _>(&branch, &operator, "ui/shown", &doc).await?,
+                expected,
+                "after the rule wrote {value}"
+            );
+        }
+        Ok(())
+    }
+
+    /// A commit reads the session row that its own transaction writes. A rule
+    /// fires in the first round on the new value and not on the row that the
+    /// write replaces.
+    #[dialog_common::test]
+    async fn it_reads_the_session_row_a_transaction_wrote_in_the_first_round() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        branch.bind(session(), Target::Session);
+        branch
+            .transaction()
+            .assert(Placement::new("ui/selected".parse()?, session()))
+            .assert(following("ui/selected", "ui/shown")?)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        let doc: Entity = "doc:1".parse()?;
+        for value in ["general", "books", "general"] {
+            branch
+                .transaction()
+                .assert(dialog_query::AttributeStatement {
+                    the: Relation::from("ui/selected".parse::<dialog_corpus::Relation>()?),
+                    of: doc.clone(),
+                    is: Value::String(value.into()),
+                    cause: None,
+                    cardinality: Some(dialog_query::Cardinality::One),
+                    pick: Some(Pick::Last),
+                })
+                .commit()
+                .publish()
+                .perform(&operator)
+                .await?;
+            branch.refresh(&operator).await?;
+            assert_eq!(
+                values::<String, _>(&branch, &operator, "ui/shown", &doc).await?,
+                vec![Value::String(value.into())],
+                "after the transaction wrote {value}"
+            );
+        }
+        Ok(())
+    }
+
+    /// A write of a rule lands in the session store when the tree holds its
+    /// value from before the placement: the row of the tree is no row of the
+    /// store, and the store must still replace its own row. The transaction
+    /// of `it_succeeds_the_session_row_of_a_placed_cell` lands in this way.
+    #[dialog_common::test]
+    async fn it_writes_a_session_row_of_a_value_the_tree_holds() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        branch.bind(session(), Target::Session);
+        let doc: Entity = "doc:1".parse()?;
+        branch
+            .transaction()
+            .assert(
+                dialog_query::the!("ui/selected")
+                    .of(doc.clone())
+                    .is("general".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+        branch
+            .transaction()
+            .assert(Placement::new("ui/selected".parse()?, session()))
+            .assert(following("ui.select/name", "ui/selected")?)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        for value in ["books", "general", "books"] {
+            branch
+                .transaction()
+                .dispatch(
+                    dialog_query::the!("ui.select/name")
+                        .of(doc.clone())
+                        .is(value.to_string()),
+                )
+                .commit()
+                .publish()
+                .perform(&operator)
+                .await?;
+            branch.refresh(&operator).await?;
+            assert_eq!(
+                held_in_session(&branch, "ui/selected", &doc)?,
+                vec![Value::String(value.into())],
+                "after the rule wrote {value}"
+            );
+        }
+        Ok(())
+    }
+
+    /// A rule that writes the value a session row holds writes nothing, so a
+    /// commit of a cycle of rules over the store ends. The value of the tree
+    /// plays no part in it.
+    #[dialog_common::test]
+    async fn it_converges_over_a_session_row_a_cycle_of_rules_writes() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        branch.bind(session(), Target::Session);
+        branch
+            .transaction()
+            .assert(Placement::new("ui/selected".parse()?, session()))
+            .assert(Placement::new("ui/mirror".parse()?, session()))
+            .assert(following("ui.select/name", "ui/selected")?)
+            .assert(following("ui/selected", "ui/mirror")?)
+            .assert(following("ui/mirror", "ui/selected")?)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        let doc: Entity = "doc:1".parse()?;
+        for value in ["general", "books"] {
+            branch
+                .transaction()
+                .dispatch(
+                    dialog_query::the!("ui.select/name")
+                        .of(doc.clone())
+                        .is(value.to_string()),
+                )
+                .commit()
+                .publish()
+                .perform(&operator)
+                .await?;
+            branch.refresh(&operator).await?;
+            let expected = vec![Value::String(value.into())];
+            assert_eq!(held_in_session(&branch, "ui/selected", &doc)?, expected);
+            assert_eq!(held_in_session(&branch, "ui/mirror", &doc)?, expected);
+        }
+        Ok(())
+    }
+
     /// The repository default names the tree: an attribute placed on
     /// the default scope explicitly, or on a second name bound to the
     /// tree, commits to the tree; retracting a placement returns the

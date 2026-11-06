@@ -1163,7 +1163,10 @@ impl<'a> Provider<Select<'a>> for QueryEnv<'a> {
         // the edition the next commit mints, above every committed row
         // and every staged write, so a read elects it under `last` and
         // ranks it with the rest under any other pick, until the
-        // session takes it back.
+        // session takes it back. A write that lands in the store itself
+        // replaces its row at commit: a round of induction reads such a
+        // write in the store, and no staged layer holds it there (see
+        // `Stores` in `transaction::induce`).
         // The edition the next commit mints, found only for a read that
         // meets an overlay or staged row: it reads the first line's
         // revision.

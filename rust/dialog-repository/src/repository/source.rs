@@ -533,6 +533,21 @@ impl Source {
     pub(crate) fn overlay(&self) -> &Ephemeral {
         self.live().overlay()
     }
+
+    /// This line with `store` as its session store, read at the same head:
+    /// what a read sees of the line once a commit lands its session writes.
+    /// The line itself keeps its store.
+    pub(crate) fn under(&self, store: Ephemeral) -> Source {
+        let held = match &self.held {
+            Held::Branch(branch) => Held::Branch(Arc::new(branch.under(store))),
+            Held::Snapshot(snapshot) => Held::Snapshot(Arc::new(snapshot.under(store))),
+        };
+        Source {
+            held,
+            revision: self.revision.clone(),
+            follows: self.follows,
+        }
+    }
 }
 
 impl From<Branch> for Source {
