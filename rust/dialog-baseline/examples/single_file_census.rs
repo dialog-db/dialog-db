@@ -2,7 +2,7 @@
 //! append-only file, under several encodings, against file-per-block, and
 //! what each costs to read a block back.
 //!
-//! The spike for `ideas/single-file-format.md`. It replays the Stack
+//! The spike for `research/single-file-format/idea.md`. It replays the Stack
 //! Exchange log through an in-memory branch, keeps every distinct block the
 //! archive is asked to store (in write order, tagged with the commit that
 //! wrote it), and then models the stores side by side on the same bytes:

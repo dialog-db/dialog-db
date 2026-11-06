@@ -1,7 +1,7 @@
 //! Memory census: what a replica's facts cost in memory while it is
 //! queried, today and if entities, attributes and values were shared tokens.
 //!
-//! The question behind `ideas/single-file-format.md` is not only disk: the
+//! The question behind `research/single-file-format/idea.md` is not only disk: the
 //! same entity, attribute and value bytes appear in the EAV, AEV and VAE
 //! nodes, in every version of a node, and in every row a query returns. This
 //! loads a replica's head tree into memory, then reads it through the same

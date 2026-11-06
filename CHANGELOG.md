@@ -17,7 +17,7 @@ says how to cut a release.
 ### A tree reads a node from its block or from rows a store keeps it in
 
 [#733](https://github.com/dialog-db/dialog-db/pull/733),
-[design](./ideas/single-file-format-design.md)
+[design](./research/single-file-format/design.md)
 
 A node's body is now read through views, `IndexView` and `SegmentView`, that
 either a block or a store's rows back. A store that keeps nodes as rows
@@ -50,7 +50,7 @@ take about a third of the memory of cached blocks.
 ### A space can keep its blocks in one file
 
 [#733](https://github.com/dialog-db/dialog-db/pull/733),
-[design](./ideas/single-file-format-design.md)
+[design](./research/single-file-format/design.md)
 
 The new `dialog-archive-file` crate adds `FileArchive`, an archive
 provider that keeps a space's blocks in one append-only file instead of a

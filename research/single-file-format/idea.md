@@ -1,6 +1,6 @@
 # Single-file representation
 
-Spiked: see [the results](single-file-format-spike.md).
+Spiked: see [the results](spike.md).
 
 ## Idea
 

@@ -1,7 +1,7 @@
 # Single-file archive: design
 
-The decision for building [the single-file format](single-file-format.md),
-from what [the spike](single-file-format-spike.md) measured. Numbers below
+The decision for building [the single-file format](idea.md),
+from what [the spike](spike.md) measured. Numbers below
 are from that census: Stack Exchange at 4096 commits, and tonk-team's whole
 pushed history (9,070 blocks from R2).
 
@@ -59,7 +59,7 @@ on top. A node read from rows skips the encoder, the blake3 of the block
 and the validation, and is the only form in which the file's size win and
 fast reads hold together.
 
-It is also the memory win the [memory census](single-file-format-spike.md#memory-while-querying)
+It is also the memory win the [memory census](spike.md#memory-while-querying)
 points at: a cached node today holds its block plus its decoded keys (about
 twice the block). A node over rows holds 4-byte ids into a token region
 every node shares.

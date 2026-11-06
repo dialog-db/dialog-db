@@ -10,7 +10,7 @@
 //! way the `fs` provider does, from one file instead of a file per block.
 //! The tree, queries and sync read and write it as they do any archive.
 //!
-//! It builds `ideas/single-file-format-design.md` up to its fifth step: an
+//! It builds `research/single-file-format/design.md` up to its fifth step: an
 //! artifact tree node is kept as a frame over the file's tokens, and a read
 //! realizes the node's block from its frame. Writers in any number of
 //! processes take turns on the file's lock. Serving the tree a node read
