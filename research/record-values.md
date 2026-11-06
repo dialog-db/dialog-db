@@ -1,7 +1,8 @@
 # Record values
 
-Status: Exploring. See the [journal](journal.md) for where the research
-stands.
+Status: Exploring. See the [research index](README.md) for what the
+statuses mean, and the [journal](record-values/journal.md) for where the
+research stands.
 
 ## Idea
 
@@ -45,7 +46,7 @@ What I want is a record value that:
    bytes dialog does not interpret, an automerge document for instance,
    under a type that says what they are.
 6. **Imports into the single-file archive.** The file
-   (`research/single-file-format/`, PR
+   ([`single-file-format.md`](single-file-format.md), PR
    [#733](https://github.com/dialog-db/dialog-db/pull/733)) interns a
    record's strings as its own tokens, replacing them with offsets into
    the file, and rebuilds the record's canonical bytes for sync and hashing.

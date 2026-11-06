@@ -1,7 +1,7 @@
 # Record values: journal
 
 What we tried, what it measured, and what we decided, newest last. The
-[idea](idea.md) says why and sets the bars.
+[topic](../record-values.md) says why and sets the bars.
 
 ## Where things stand
 
@@ -14,7 +14,7 @@ statuses mean.
   once; payloads dialog does not interpret are carried under their type;
   equality is of canonical bytes, with token ids a shortcut inside one
   replica.
-- **Open:** the four decisions in the idea (ordering, names on the wire,
+- **Open:** the four decisions in the topic (ordering, names on the wire,
   documents that grow, destructuring without an index).
 - **Next:** a census of the records in tonk-team's history: how many, by
   type, their sizes, and how much of each repeats within the record and
@@ -54,7 +54,7 @@ encoding; equality is of those bytes, and token ids compare them inside a
 replica. Field names live in the record, written once, with later
 occurrences referring back. Where the shared strings sit (one region or
 interleaved) and whether references are offsets is for the spike. The bars
-in the idea are proposed and await the maintainer.
+in the topic are proposed and await the maintainer.
 
 ## How to reproduce
 
