@@ -19,7 +19,8 @@ research/
                           once the research is done
   <topic>/                the working material, while the research runs
     journal.md            what was tried, measured and decided, newest last
-    evaluation.md         the axes a decision is measured on, and where each stands
+    evaluation.md         the result template: the axes a decision is
+                          measured on, every variant, and where each stands
     design.md             the current decision, once there is one
     spike.md              a first round of measurements in full, if there was one
     results/              reports of runs, with their tables and charts
