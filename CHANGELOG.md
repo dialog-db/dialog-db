@@ -68,6 +68,31 @@ nothing downstream can notice or repair them. The lock stays a file
 rather than an OS lock (`flock`), which errors or is not enforced on
 network and FUSE filesystems that stores live on.
 
+### A repository an earlier release left opens, whatever layout its registry is in
+
+Opening or loading a repository that predates layout versioning carries
+its remote and upstream cells over into facts in its registry branch
+(`meta`). A registry an earlier release wrote is laid out from before the
+number band, and a commit into such a tree is refused with
+`CommitError::NeedsMigration`. Nothing moved the registry first, since
+nothing outside dialog-repository writes it, so the open failed with
+`OpenRepositoryError::Upgrade` / `LoadRepositoryError::Upgrade` on every
+attempt, and the repository could not be opened at all. Every write to a
+registry or a host's contacts now moves the branch to this release's
+layout first, when it needs it, and applies the changes on the rewrite.
+
+What this changes for you:
+
+- A repository last written by a release before 0.3.0 opens instead of
+  failing with "The branch must be migrated before it is written".
+- Upstream changes (`set_upstream`) and contact writes on such a branch
+  succeed the same way, where they failed with `NeedsMigration`.
+- An embedder no longer needs to migrate a registry itself; it could not,
+  since the open that fails is the one that would hand it the branch.
+
+Why: the open-time upgrade is the only thing that writes a registry an
+earlier release left, and it ran before any embedder could migrate it.
+
 ### dialog-storage reads a browser file without `wasm-streams`
 
 [#744](https://github.com/dialog-db/dialog-db/pull/744)
@@ -2038,6 +2063,12 @@ thread multiplies whatever it holds by the size of the thread pool.
   cell whose name has an extension, the two releases lock different
   files). Stop writers on the previous release before starting ones on
   this release.
+- A registry branch (`meta`) or host state branch an earlier release laid
+  out is rewritten under the number band the first time this release
+  writes it, as `Branch::migrate_storage` rewrites any branch: one pass
+  over its entries, published as a revision that descends from the head.
+  0.2.0 and earlier refuse the rewritten tree by name, as they refuse any
+  migrated tree. An embedder runs nothing.
 - Nothing stored or synced changes for the refusal of a rival head of
   one version (#705): nothing is rewritten on upgrade, and heads, trees
   and the wire format are as before, so an older release reads all this
