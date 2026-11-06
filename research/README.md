@@ -13,9 +13,10 @@ run. A research topic usually answers a question a
 ```
 research/
   README.md               this index: every topic, with its status
-  <topic>.md              the topic: the idea (question, hypothesis, what
-                          success and failure look like), its status, and
-                          the report once the research is done
+  <topic>.md              the topic: the decision it serves, the idea
+                          (question, hypothesis, variants, what success and
+                          failure look like), its status, and the report
+                          once the research is done
   <topic>/                the working material, while the research runs
     journal.md            what was tried, measured and decided, newest last
     evaluation.md         the axes a decision is measured on, and where each stands

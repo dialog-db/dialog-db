@@ -18,11 +18,11 @@ branch before starting one.
 
 | file | holds | changes |
 |---|---|---|
-| `<topic>.md` | the idea (the question, the hypothesis, what success and failure look like), the status, and the report when it is done | the idea rarely, a change to its bars journaled; the status as it moves |
+| `<topic>.md` | the decision it serves, the idea (the question, the hypothesis, the variants, what success and failure look like), the status, and the report when it is done | the idea rarely, a change to its bars or variants journaled; the status as it moves |
 | `<topic>/journal.md` | what was tried, measured and decided, newest last | every finding |
 | `<topic>/spike.md` | the first round of measurements in full, if there was one | once |
 | `<topic>/design.md` | the current decision and the measurements behind it | when a decision moves |
-| `<topic>/evaluation.md` | the axes a decision is measured on, and where each stands | as runs come in |
+| `<topic>/evaluation.md` | the result template: the axes a decision is measured on, every variant, and where each stands | written before the harness, then as runs come in |
 | `<topic>/results/` | a report per sitting of runs, with its tables and charts | each sitting |
 
 A new topic starts as its file alone, **Proposed**. Picking it up adds the
@@ -37,14 +37,29 @@ measured), **Evaluating** (built, measured against what it would replace),
 **Landed** (merged; the topic's file ends with its report), **Shelved** (not
 worth it; the report says why). The status is in `research/README.md`, at
 the top of the topic's file and in the journal's "Where things stand".
-Change them together.
+Change them together. A research topic's **Building** is not a design
+topic's: here it means the open choices are being measured as the thing is
+built; there it means the approach is decided and design is over.
 
-## 1. The idea: a hypothesis and its bars
+## 1. The idea: a problem, a hypothesis and its bars
 
-Before measuring anything, write down in the topic's file:
+Before a measurement that counts, write down in the topic's file:
 
+- **The decision this serves, and for which problem.** Research collects
+  evidence so a decision can be made; name the decision. When a
+  [design topic](../../../design/README.md) asked the question, link the
+  matrix cell or the claims-ledger hypothesis it came from, and the result
+  goes back there. When there is none, state the problem in a sentence. A
+  topic that cannot say what decision it serves is measuring for its own
+  sake.
 - **The question**, in a sentence, and the **hypothesis**: what you expect
   and why.
+- **The variants**, every one, the baseline included. One hypothesis, several
+  ways it could be realised; `evaluation.md` compares them all. The list is
+  fixed here, at inception. A variant added after results exist is journaled
+  with why, under the same rule as moving a bar, so the contrast is not
+  curated after the fact. A variant that lost stays in the report, so it is
+  not proposed again.
 - **What it is measured against.** The baseline is `main` as it is, not a
   copy of it on the branch. When a branch changes more than the thing under
   test, measure the branch with main's component too, so each change shows
@@ -58,6 +73,15 @@ Before measuring anything, write down in the topic's file:
 Do not move the bars after seeing results. If one was wrong, say so in a
 journal entry, with why, and then change the topic's file.
 
+**Exploring first is allowed, and has an exit.** A topic may start as a
+question with no hypothesis and no bars; that is what **Exploring** is for,
+and `spike.md` is where its numbers go. Spike numbers inform the bars; they
+never decide. Exploring ends one of two ways: a hypothesis and bars are
+written, then the first measurement that counts is run; or the topic is
+**Shelved**, with the spike as the reason. A spike that keeps going without
+either is a measurement with no decision behind it; stop and write the
+bars or the no.
+
 ## 2. The evaluation: axes, not one number
 
 A single measure (size, a point lookup) rarely decides a design. List the
@@ -68,6 +92,12 @@ axes the decision turns on in `evaluation.md`, each with:
 - **Reports:** what is measured, cold and warm where caching matters;
 - **Harness:** the code that runs it;
 - **Status:** not run, or where the numbers are.
+
+Write `evaluation.md` before the harness, as the result template: every
+axis a row, every variant a column, every cell empty. Then read it asking
+"if every cell were filled in, would we know whether to build this?" If
+not, an axis is missing; add it before writing code. If a cell would not
+change the decision, drop the axis rather than build its harness.
 
 Compare every variant, not only the expected winners: a layout that lost
 on one axis can win another. Make variants settings of one build where
@@ -112,10 +142,17 @@ Before trusting a number, check that it measures what it claims:
 
 ## 5. The journal
 
-`journal.md` opens with **Where things stand** (status, what is built,
-the headline numbers, what is next), kept current, then **Datasets**, then
-an entry per finding, newest last, then **How to reproduce** (the exact
-commands). An entry:
+`journal.md` opens with **Where things stand**, kept current, as the four
+questions of reflective inquiry, the same four the design skill opens
+with, so resuming either kind of topic is the same act:
+
+|  | Understanding | Activity |
+|---|---|---|
+| **Status** | What do we know? (the status, the headline numbers, with their grade) | Where are we at? (what is built, what ran) |
+| **Agenda** | What do we need to know? (the open axes and questions) | Where are we going? (the next run, and what it would settle) |
+
+Then **Datasets**, then an entry per finding, newest last, then **How to
+reproduce** (the exact commands). An entry:
 
 ```markdown
 ## 2026-11-06 — <the question, as a short title>
@@ -126,7 +163,11 @@ commands). An entry:
 
 **Results.** The numbers, in a table when there are more than three.
 
-**Decision.** What it settled, or "not decided" and what would decide it.
+**Decision.** What it settled, or "not decided" and what would decide it,
+and on what evidence: how many runs, the spread, one dataset or several.
+Three runs inside their spread settle nothing; say so rather than round
+up. A design topic's claims ledger inherits this grade, not the word
+"confirmed".
 
 Commits: `abc1234`.
 ```
