@@ -5,7 +5,8 @@ it. Each topic is one file, `<topic>.md`: the idea, its status and, once
 the research is done, its report. While the research runs, its working
 material sits beside it in `<topic>/`. The
 [`research` skill](../.claude/skills/research/SKILL.md) is how a topic is
-run.
+run. A research topic usually answers a question a
+[design topic](../design/README.md) could not settle by reasoning.
 
 ## Layout
 
