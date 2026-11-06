@@ -59,7 +59,8 @@ file per block. It answers `archive::Get`, `Put` and `Import` like the
 so a `Space` can take it as its archive and keep memory, credentials and
 blobs where they were. A node of the artifact tree is kept as a frame:
 rows of ids into the file's tokens (each distinct entity, attribute, value
-and datum once), written against the node it supersedes. A frame is only
+and datum once, and each revision's version once, so a history record
+shares its fact's tokens), written against the node it supersedes. A frame is only
 written once it realizes to the exact block; anything else is kept whole.
 A read realizes the block. Native only.
 

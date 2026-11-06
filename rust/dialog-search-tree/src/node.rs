@@ -4,7 +4,7 @@ pub use persistent::*;
 mod archive;
 
 mod rows;
-pub use rows::{KeyParts, NodeRows, NodeSource, RowsKind};
+pub use rows::{KeyParts, MAX_PARTS, NodeRows, NodeSource, RowsKind};
 
 mod view;
 pub use view::{BufferView, IndexView, KeyCursor, SegmentView};

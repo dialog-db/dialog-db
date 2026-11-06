@@ -53,6 +53,7 @@ mod part;
 pub use part::*;
 
 pub(crate) mod varkey;
+pub use varkey::split_record_components;
 
 /// Tag byte of the history index (the fourth index ordering): the region of
 /// the artifact tree holding per-instruction claim-lineage records (see

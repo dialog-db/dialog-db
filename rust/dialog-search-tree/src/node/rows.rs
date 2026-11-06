@@ -26,15 +26,21 @@ use crate::{DialogSearchTreeError, Manifest};
 /// in place, and written out whole only into a caller's scratch buffer.
 #[derive(Clone, Copy, Debug)]
 pub struct KeyParts<'a> {
-    parts: [&'a [u8]; 4],
+    parts: [&'a [u8]; MAX_PARTS],
     count: u8,
 }
 
+/// The most slices a [`KeyParts`] holds.
+pub const MAX_PARTS: usize = 6;
+
 impl<'a> KeyParts<'a> {
-    /// The key whose bytes are `parts`, in order. At most four.
+    /// The key whose bytes are `parts`, in order. At most [`MAX_PARTS`].
     pub fn new(parts: &[&'a [u8]]) -> Self {
-        assert!(parts.len() <= 4, "a key of at most four parts");
-        let mut held: [&'a [u8]; 4] = [&[]; 4];
+        assert!(
+            parts.len() <= MAX_PARTS,
+            "a key of at most {MAX_PARTS} parts"
+        );
+        let mut held: [&'a [u8]; MAX_PARTS] = [&[]; MAX_PARTS];
         held[..parts.len()].copy_from_slice(parts);
         Self {
             parts: held,

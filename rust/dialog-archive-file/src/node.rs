@@ -9,7 +9,8 @@
 use std::io;
 
 use dialog_artifacts::{
-    ATTRIBUTE_KEY_TAG, BLOB_KEY_TAG, Datum, ENTITY_KEY_TAG, Key, State, VALUE_KEY_TAG,
+    ATTRIBUTE_KEY_TAG, BLOB_KEY_TAG, COVERAGE_KEY_TAG, Datum, ENTITY_KEY_TAG, HISTORY_KEY_TAG, Key,
+    State, VALUE_KEY_TAG, split_record_components,
 };
 use dialog_common::{Blake3Hash, Buffer};
 use dialog_search_tree::{
@@ -17,7 +18,7 @@ use dialog_search_tree::{
     PersistentNode, PersistentNodeBody, PersistentSegment, Scale, Separator, into_owned,
 };
 
-use crate::rows::{INDEX, NONE, Row, Rows, SEGMENT, invalid, slots_of};
+use crate::rows::{DATUM, INDEX, NONE, Row, Rows, SEGMENT, SLOTS, invalid, slots_of};
 use crate::tokens::Tokens;
 
 /// A node of the artifact tree.
@@ -35,18 +36,20 @@ pub(crate) fn tree_node(block: &Buffer) -> Option<TreeNode> {
     TreeNode::try_from(block.clone()).ok()
 }
 
-/// Splits a key into its form and the tokens its slots point at: the
-/// entity, the attribute and the value (its type byte and payload together,
-/// so a value is one token in every ordering), each a slice of the key. A
-/// key of any other layout, or one that does not split, is one opaque
-/// token. Returns the form, the tokens and how many there are.
-fn key_tokens(key: &[u8]) -> (u8, [&[u8]; 3], usize) {
-    let opaque = (FORM_OPAQUE, [key, &[][..], &[][..]], 1);
-    let layout = <Key as TreeKey>::layout_of(key).unwrap_or(u8::MAX);
-    let mut parts = Vec::with_capacity(5);
-    if <Key as TreeKey>::components_of(key, layout, &mut parts).is_err() {
+/// Splits a key into its form and the tokens its slots point at, each a
+/// slice of the key: for a fact ordering, the entity, the attribute and the
+/// value (its type byte and payload together, so a value is one token in
+/// every ordering); for a history or coverage record, its version, then the
+/// same three, so a record shares its fact's tokens and a revision's
+/// records share one version. A key of any other layout, or one that does
+/// not split, is one opaque token. Returns the form, the tokens and how many
+/// there are.
+fn key_tokens(key: &[u8]) -> (u8, [&[u8]; SLOTS], usize) {
+    let empty: &[u8] = &[];
+    let opaque = (FORM_OPAQUE, [key, empty, empty, empty], 1);
+    let Some(parts) = split_record_components(key) else {
         return opaque;
-    }
+    };
     // The bytes of `key` from the start of `first` to the end of `last`,
     // which components lay side by side.
     let span = |first: &[u8], last: &[u8]| -> Option<&[u8]> {
@@ -55,13 +58,17 @@ fn key_tokens(key: &[u8]) -> (u8, [&[u8]; 3], usize) {
         let end = (last.as_ptr() as usize).checked_sub(base)? + last.len();
         key.get(start..end)
     };
-    let split = match (layout, parts.as_slice()) {
+    let form = key[0];
+    let split = match (form, parts.as_slice()) {
         (ENTITY_KEY_TAG, [_, entity, attribute, kind, payload])
         | (ATTRIBUTE_KEY_TAG, [_, attribute, entity, kind, payload])
         | (VALUE_KEY_TAG, [_, kind, payload, attribute, entity]) => {
-            span(kind, payload).map(|value| (layout, [*entity, *attribute, value], 3))
+            span(kind, payload).map(|value| (form, [*entity, *attribute, value, empty], 3))
         }
-        (BLOB_KEY_TAG, [_, hash]) => Some((BLOB_KEY_TAG, [*hash, &[][..], &[][..]], 1)),
+        (HISTORY_KEY_TAG | COVERAGE_KEY_TAG, [_, version, entity, attribute, kind, payload]) => {
+            span(kind, payload).map(|value| (form, [*version, *entity, *attribute, value], 4))
+        }
+        (BLOB_KEY_TAG, [_, hash]) => Some((BLOB_KEY_TAG, [*hash, empty, empty, empty], 1)),
         _ => None,
     };
     split.unwrap_or(opaque)
@@ -79,6 +86,9 @@ fn key_from_tokens(form: u8, tokens: &[&[u8]]) -> io::Result<Vec<u8>> {
         (VALUE_KEY_TAG, [entity, attribute, value]) => {
             [&[form][..], value, attribute, entity].concat()
         }
+        (HISTORY_KEY_TAG | COVERAGE_KEY_TAG, [version, entity, attribute, value]) => {
+            [&[form][..], version, entity, attribute, value].concat()
+        }
         (BLOB_KEY_TAG, [hash]) => [&[form][..], hash].concat(),
         (_, [key]) => key.to_vec(),
         _ => return Err(invalid("a key's form and its tokens disagree")),
@@ -88,13 +98,13 @@ fn key_from_tokens(form: u8, tokens: &[&[u8]]) -> io::Result<Vec<u8>> {
 /// The row of one entry's key and datum, by token id.
 fn entry_row(tokens: &mut Tokens, key: &[u8], datum: Option<&State<Datum>>) -> io::Result<Row> {
     let (form, parts, count) = key_tokens(key);
-    let mut row = [form as u32, 0, 0, 0, NONE];
+    let mut row = [form as u32, 0, 0, 0, 0, NONE];
     for (slot, token) in parts[..count].iter().enumerate() {
         row[1 + slot] = tokens.intern(token);
     }
     if let Some(datum) = datum {
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(datum).map_err(tree_error)?;
-        row[4] = tokens.intern(&bytes);
+        row[DATUM] = tokens.intern(&bytes);
     }
     Ok(row)
 }
@@ -110,7 +120,7 @@ fn entry_of(row: &Row, tokens: &Tokens) -> io::Result<(Vec<u8>, Option<State<Dat
     let parts = (0..slots_of(form))
         .map(|slot| token(row[1 + slot]))
         .collect::<io::Result<Vec<_>>>()?;
-    let datum = match row[4] {
+    let datum = match row[DATUM] {
         NONE => None,
         id => {
             let bytes = token(id)?;
@@ -156,12 +166,12 @@ pub(crate) fn rows_of(
                     None => (NONE, tokens.intern(hash.as_bytes())),
                 };
                 let scale = index.scale_at(at).map_err(tree_error)?.as_u8() as u32;
-                links.push([separator, id, scale, absent, 0]);
+                links.push([separator, id, scale, absent, 0, 0]);
             }
             let (mut buffers, mut ops) = (Vec::new(), Vec::new());
             for buffer in index.buffers() {
                 let entries = buffer.entries::<Key>().map_err(tree_error)?;
-                buffers.push([buffer.child(), entries.len() as u32, 0, 0, 0]);
+                buffers.push([buffer.child(), entries.len() as u32, 0, 0, 0, 0]);
                 for item in &entries {
                     let datum = match &item.op {
                         NoveltyOp::Assert(value) => Some(value),

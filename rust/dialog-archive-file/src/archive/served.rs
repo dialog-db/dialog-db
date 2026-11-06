@@ -13,7 +13,8 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use dialog_artifacts::{
-    ATTRIBUTE_KEY_TAG, BLOB_KEY_TAG, Datum, ENTITY_KEY_TAG, State, VALUE_KEY_TAG,
+    ATTRIBUTE_KEY_TAG, BLOB_KEY_TAG, COVERAGE_KEY_TAG, Datum, ENTITY_KEY_TAG, HISTORY_KEY_TAG,
+    State, VALUE_KEY_TAG,
 };
 use dialog_common::{Blake3Hash, Buffer};
 use dialog_effects::archive::prelude::CatalogScope;
@@ -24,7 +25,7 @@ use memmap2::Mmap;
 use zerocopy::FromBytes as _;
 
 use super::{FileArchive, Place, State as Index};
-use crate::rows::{INDEX, NONE, Row, Rows};
+use crate::rows::{DATUM, INDEX, NONE, Row, Rows, SLOTS};
 
 /// Every byte value, so a key's form byte is a slice that lives forever.
 static FORMS: [u8; 256] = {
@@ -44,6 +45,9 @@ struct Part {
     len: u32,
 }
 
+/// No part: a slot a key's form does not use.
+const NO_PART: Part = Part { offset: 0, len: 0 };
+
 /// An entry of a segment, or an operation an index buffers: its key's parts
 /// in key order and its value, each where the file keeps it.
 #[derive(Clone, Copy)]
@@ -51,7 +55,7 @@ struct Entry {
     /// The key's form byte, or none for a key kept whole.
     form: Option<u8>,
     count: u8,
-    parts: [Part; 3],
+    parts: [Part; SLOTS],
     /// The archived value, or none for a retraction.
     value: Option<Part>,
 }
@@ -101,13 +105,16 @@ fn entry(index: &Index, row: &Row, mapped: u64) -> Option<Entry> {
     let form = row[0] as u8;
     let slot = |at: usize| part(index, row[at], mapped);
     let (form, count, parts) = match form {
-        ENTITY_KEY_TAG => (Some(form), 3, [slot(1)?, slot(2)?, slot(3)?]),
-        ATTRIBUTE_KEY_TAG => (Some(form), 3, [slot(2)?, slot(1)?, slot(3)?]),
-        VALUE_KEY_TAG => (Some(form), 3, [slot(3)?, slot(2)?, slot(1)?]),
-        BLOB_KEY_TAG => (Some(form), 1, [slot(1)?, Part::default(), Part::default()]),
-        _ => (None, 1, [slot(1)?, Part::default(), Part::default()]),
+        ENTITY_KEY_TAG => (Some(form), 3, [slot(1)?, slot(2)?, slot(3)?, NO_PART]),
+        ATTRIBUTE_KEY_TAG => (Some(form), 3, [slot(2)?, slot(1)?, slot(3)?, NO_PART]),
+        VALUE_KEY_TAG => (Some(form), 3, [slot(3)?, slot(2)?, slot(1)?, NO_PART]),
+        HISTORY_KEY_TAG | COVERAGE_KEY_TAG => {
+            (Some(form), 4, [slot(1)?, slot(2)?, slot(3)?, slot(4)?])
+        }
+        BLOB_KEY_TAG => (Some(form), 1, [slot(1)?, NO_PART, NO_PART, NO_PART]),
+        _ => (None, 1, [slot(1)?, NO_PART, NO_PART, NO_PART]),
     };
-    let value = match row[4] {
+    let value = match row[DATUM] {
         NONE => None,
         id => {
             index.tokens.checked(id, is_datum)?;
@@ -289,7 +296,7 @@ unsafe impl NodeRows for FileNode {
 
     fn op_key(&self, at: usize) -> KeyParts<'_> {
         let entry = &self.entries[at];
-        let mut parts: [&[u8]; 4] = [&[]; 4];
+        let mut parts: [&[u8]; 1 + SLOTS] = [&[]; 1 + SLOTS];
         let mut count = 0;
         if let Some(form) = entry.form {
             parts[0] = &FORMS[form as usize..form as usize + 1];

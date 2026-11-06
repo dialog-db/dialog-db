@@ -11,7 +11,13 @@ use std::io;
 
 /// One row of a section: the ids an entry, a link or a buffer is made of.
 /// Which field means what depends on the [`Section`].
-pub(crate) type Row = [u32; 5];
+pub(crate) type Row = [u32; 6];
+
+/// The field of an entry's or an operation's row that holds its datum.
+pub(crate) const DATUM: usize = 5;
+
+/// The most token slots a key splits into.
+pub(crate) const SLOTS: usize = 4;
 
 /// A field with no value: a retraction's datum, a link to a child the file
 /// holds no frame of.
@@ -30,7 +36,7 @@ pub(crate) enum Section {
     Entries,
     /// `[separator, child node or NONE, scale, child hash token or NONE, 0]`.
     Links,
-    /// `[child index, ops in the buffer, 0, 0, 0]`.
+    /// `[child index, ops in the buffer, 0, 0, 0, 0]`.
     Buffers,
     /// `[form, slot0, slot1, slot2, datum or NONE for a retraction]`.
     Ops,
@@ -50,9 +56,12 @@ pub(crate) fn sections_of(kind: u8) -> &'static [Section] {
 
 /// How many token slots a key of `form` splits into.
 pub(crate) fn slots_of(form: u8) -> usize {
-    use dialog_artifacts::{ATTRIBUTE_KEY_TAG, ENTITY_KEY_TAG, VALUE_KEY_TAG};
+    use dialog_artifacts::{
+        ATTRIBUTE_KEY_TAG, COVERAGE_KEY_TAG, ENTITY_KEY_TAG, HISTORY_KEY_TAG, VALUE_KEY_TAG,
+    };
     match form {
         ENTITY_KEY_TAG | ATTRIBUTE_KEY_TAG | VALUE_KEY_TAG => 3,
+        HISTORY_KEY_TAG | COVERAGE_KEY_TAG => SLOTS,
         _ => 1,
     }
 }
@@ -188,15 +197,15 @@ fn put_columns(out: &mut Vec<u8>, section: Section, rows: &[&Row]) {
             for row in rows {
                 out.push(row[0] as u8);
             }
-            for slot in 0..3 {
+            for slot in 0..SLOTS {
                 delta(out, 1 + slot, &|row| slots_of(row[0] as u8) > slot);
             }
             if matches!(section, Section::Ops) {
                 for row in rows {
-                    out.push((row[4] != NONE) as u8);
+                    out.push((row[DATUM] != NONE) as u8);
                 }
             }
-            delta(out, 4, &|row| row[4] != NONE);
+            delta(out, DATUM, &|row| row[DATUM] != NONE);
         }
         Section::Links => {
             delta(out, 0, &|_| true);
@@ -219,7 +228,7 @@ fn put_columns(out: &mut Vec<u8>, section: Section, rows: &[&Row]) {
 
 /// Reads `count` rows written by [`put_columns`].
 fn get_columns(reader: &mut Reader, section: Section, count: usize) -> io::Result<Vec<Row>> {
-    let mut rows = vec![[0u32; 5]; count];
+    let mut rows = vec![[0u32; 6]; count];
     let delta = |rows: &mut [Row],
                  reader: &mut Reader,
                  field: usize,
@@ -239,7 +248,7 @@ fn get_columns(reader: &mut Reader, section: Section, count: usize) -> io::Resul
             for row in rows.iter_mut() {
                 row[0] = reader.byte()? as u32;
             }
-            for slot in 0..3 {
+            for slot in 0..SLOTS {
                 delta(&mut rows, reader, 1 + slot, &|row| {
                     slots_of(row[0] as u8) > slot
                 })?;
@@ -247,10 +256,10 @@ fn get_columns(reader: &mut Reader, section: Section, count: usize) -> io::Resul
             if matches!(section, Section::Ops) {
                 for row in rows.iter_mut() {
                     // Mark retractions; asserted datums are read next.
-                    row[4] = if reader.byte()? == 1 { 0 } else { NONE };
+                    row[DATUM] = if reader.byte()? == 1 { 0 } else { NONE };
                 }
             }
-            delta(&mut rows, reader, 4, &|row| row[4] != NONE)?;
+            delta(&mut rows, reader, DATUM, &|row| row[DATUM] != NONE)?;
         }
         Section::Links => {
             delta(&mut rows, reader, 0, &|_| true)?;
@@ -440,11 +449,15 @@ mod tests {
     #[test]
     fn it_reads_back_rows_written_whole_and_against_a_base() -> io::Result<()> {
         let form = dialog_artifacts::ENTITY_KEY_TAG as u32;
-        let base = segment((0..50).map(|n| [form, 1, n + 2, n * 3, n + 100]).collect());
+        let base = segment(
+            (0..50)
+                .map(|n| [form, 1, n + 2, n * 3, 0, n + 100])
+                .collect(),
+        );
         let mut changed = base.sections[0].clone();
-        changed[10][4] = 999;
+        changed[10][DATUM] = 999;
         changed.remove(30);
-        changed.insert(40, [form, 1, 77, 5, 200]);
+        changed.insert(40, [form, 1, 77, 5, 0, 200]);
         let rows = segment(changed);
 
         let mut whole = Vec::new();
@@ -466,9 +479,13 @@ mod tests {
         let rows = Rows {
             kind: INDEX,
             sections: vec![
-                vec![[3, 0, 1, NONE, 0], [5, NONE, 2, 40, 0], [9, 7, 0, NONE, 0]],
-                vec![[0, 2, 0, 0, 0]],
-                vec![[0xFE, 11, 0, 0, 12], [0xFE, 13, 0, 0, NONE]],
+                vec![
+                    [3, 0, 1, NONE, 0, 0],
+                    [5, NONE, 2, 40, 0, 0],
+                    [9, 7, 0, NONE, 0, 0],
+                ],
+                vec![[0, 2, 0, 0, 0, 0]],
+                vec![[0xFE, 11, 0, 0, 0, 12], [0xFE, 13, 0, 0, 0, NONE]],
             ],
         };
         let mut bytes = Vec::new();
@@ -479,7 +496,7 @@ mod tests {
 
     #[test]
     fn it_fails_on_bytes_that_end_early() {
-        let rows = segment(vec![[0xFE, 7, 0, 0, 9]; 4]);
+        let rows = segment(vec![[0xFE, 7, 0, 0, 0, 9]; 4]);
         let mut bytes = Vec::new();
         put_rows(&mut bytes, &rows, None);
         bytes.truncate(bytes.len() - 2);

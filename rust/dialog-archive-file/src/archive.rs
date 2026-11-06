@@ -1599,15 +1599,15 @@ mod offsets_instead_of_ids {
         let archive = FileArchive::open(&path)?;
         let state = archive.inner.state.read();
         let token = |id: u32| state.tokens.extent(id).map(|(offset, _)| offset).unwrap();
-        let by_offset = |rows: &Rows| -> Vec<Vec<[u64; 5]>> {
+        let by_offset = |rows: &Rows| -> Vec<Vec<[u64; 6]>> {
             sections_of(rows.kind)
                 .iter()
                 .zip(&rows.sections)
                 .map(|(section, rows)| {
                     rows.iter()
                         .map(|row| {
-                            let mut out = [0u64; 5];
-                            for field in 0..5 {
+                            let mut out = [0u64; 6];
+                            for field in 0..6 {
                                 out[field] = row[field] as u64;
                             }
                             let id = |value: u32| {
@@ -1619,12 +1619,12 @@ mod offsets_instead_of_ids {
                             };
                             match section {
                                 Section::Entries | Section::Ops => {
-                                    for slot in 1..4 {
+                                    for slot in 1..=crate::rows::SLOTS {
                                         if row[slot] != 0 || slot == 1 {
                                             out[slot] = token(row[slot]);
                                         }
                                     }
-                                    out[4] = id(row[4]);
+                                    out[crate::rows::DATUM] = id(row[crate::rows::DATUM]);
                                 }
                                 Section::Links => {
                                     out[0] = token(row[0]);
@@ -1645,10 +1645,10 @@ mod offsets_instead_of_ids {
         };
         // Zigzag-delta varint bytes of every column of `rows`, written as
         // literals: the width of the ids against the width of the offsets.
-        let width = |rows: &[Vec<[u64; 5]>]| -> usize {
+        let width = |rows: &[Vec<[u64; 6]>]| -> usize {
             let mut bytes = 0;
             for section in rows {
-                for field in 0..5 {
+                for field in 0..6 {
                     let mut previous = 0i128;
                     for row in section {
                         if row[field] == u64::MAX {
@@ -1697,7 +1697,7 @@ mod offsets_instead_of_ids {
                 }
             };
             literal_rows += literal.sections.iter().map(Vec::len).sum::<usize>();
-            let as_ids: Vec<Vec<[u64; 5]>> = literal
+            let as_ids: Vec<Vec<[u64; 6]>> = literal
                 .sections
                 .iter()
                 .map(|section| {
