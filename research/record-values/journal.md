@@ -25,10 +25,11 @@ statuses mean.
     sources, and the wire carries the canonical form.
   - Repetition is expected mostly across records, and shared through the
     replica's tokens.
+- **Decided, continued:** in destructuring, a field is named by an
+  attribute, which brings its pick and its type. `last` over a field
+  holding several values elects as `last` does between values one
+  revision wrote: the greater value.
 - **Open:**
-  - what an attribute reference brings into destructuring: its relation
-    only, or its type and pick too (which settles `last` over a field
-    holding several values);
   - the surface of destructuring: a pattern in the notation, a formula
     over a path, or both;
   - documents that grow (options in the latest entry);
@@ -210,6 +211,36 @@ Found in the code:
 scans; selection sees only stored claims. This replaces the earlier
 "flat preferred". Not decided: whether an attribute reference brings its
 type and pick into destructuring, and the surface of destructuring.
+
+Commits: this entry.
+
+## 2026-11-06 — `last` inside a record elects by value
+
+**Question.** What a `last` attribute reads from a record field holding
+several values.
+
+**Method.** Discussion. Read `ArtifactView::elect`
+(`dialog-artifacts/src/artifacts/artifact.rs`) and `value_beats`
+(`dialog-artifacts/src/artifacts/update.rs`).
+
+**Results.**
+
+- The maintainer: `last` can elect inside a record as queries already do.
+- `elect` decides in three tiers: the revision's standing (edition, then
+  the hash of the version), the cause, then the value, the greater
+  winning (`value_beats`: the values' own order, their encoding's
+  otherwise). The hash orders revisions, not values.
+- Every pair of a record was written by one revision, so the first two
+  tiers tie and `last` falls to the value. Inside a record, `last` reads as
+  `max` does, which is what it already reads between two values one
+  revision asserts. Concurrent records still compete as whole claims, by
+  revision.
+
+**Decision.** In destructuring, a field is named by an attribute, which
+brings its pick and its type; `last` over several values elects the
+greater. The type applying is inferred from the pick applying, as it
+does for a concept's field, and is to be confirmed. This replaces the
+earlier proposal to refuse `last` over several values.
 
 Commits: this entry.
 
