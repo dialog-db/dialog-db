@@ -109,7 +109,7 @@ impl Tokens {
 
     /// Brings the id table up to every token in the file, building it on
     /// first use. A token written twice keeps its first id.
-    fn build_ids(&mut self) {
+    pub fn build_ids(&mut self) {
         if self.ids.is_none() {
             self.ids = Some(HashTable::with_capacity(self.extents.len()));
             self.indexed = 0;

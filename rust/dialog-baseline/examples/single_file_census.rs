@@ -1324,6 +1324,61 @@ fn file_archive(source: &Source, directory: &Path) -> anyhow::Result<()> {
     );
 
     index_tree_estimate(&kept, source)?;
+    writer_costs(&kept, directory)?;
+    Ok(())
+}
+
+/// What a writer that has just opened the file pays against one that has
+/// been writing: the same file, written up to its last commits, then
+/// reopened by a fresh process, which appends the rest one commit at a time.
+/// The first append builds the writer's token dictionary from the file.
+fn writer_costs(kept: &[&Written], directory: &Path) -> anyhow::Result<()> {
+    use dialog_archive_file::FileArchive;
+    const CATALOG: &str = "index";
+    const TAIL: usize = 20;
+    let mut commits: Vec<Vec<Buffer>> = Vec::new();
+    let mut last = None;
+    for block in kept {
+        if last != Some(block.commit) {
+            commits.push(Vec::new());
+            last = Some(block.commit);
+        }
+        commits
+            .last_mut()
+            .expect("a commit")
+            .push(block.bytes.clone());
+    }
+    let split = commits.len().saturating_sub(TAIL);
+    let path = directory.join("writer.dialog");
+    std::fs::remove_file(&path).ok();
+    {
+        let archive = FileArchive::open(&path)?;
+        for commit in &commits[..split] {
+            archive.append(CATALOG, commit)?;
+        }
+    }
+    // A fresh open: the registry let the handle go when it was dropped.
+    let started = Instant::now();
+    let archive = FileArchive::open(&path)?;
+    let opened = started.elapsed();
+    let dictionary = archive.prepare_writer();
+    let mut times = Vec::new();
+    for commit in &commits[split..] {
+        let started = Instant::now();
+        archive.append(CATALOG, commit)?;
+        times.push(started.elapsed());
+    }
+    let mean = |times: &[Duration]| {
+        times.iter().sum::<Duration>().as_secs_f64() * 1e3 / times.len().max(1) as f64
+    };
+    println!(
+        "a writer that just opened the file: open {:.1} ms, token dictionary {:.1} ms \
+         ({} tokens); then appends of {TAIL} commits, {:.2} ms each on average",
+        opened.as_secs_f64() * 1e3,
+        dictionary.as_secs_f64() * 1e3,
+        archive.stats().tokens,
+        mean(&times),
+    );
     Ok(())
 }
 

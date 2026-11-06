@@ -884,6 +884,16 @@ impl FileArchive {
         }
     }
 
+    /// Builds what a writer looks tokens up by (each token's id, by its
+    /// bytes), if it is not built yet, by reading every token through the
+    /// mapping: the first append of a process does this, so a writer can call
+    /// it ahead of time. Returns how long it took.
+    pub fn prepare_writer(&self) -> Duration {
+        let started = Instant::now();
+        self.inner.state.write().tokens.build_ids();
+        started.elapsed()
+    }
+
     /// Forgets every node's decoded rows, so the next read of each decodes
     /// its frames from the file.
     pub fn forget_rows(&self) {
