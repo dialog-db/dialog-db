@@ -1213,6 +1213,15 @@ fn main() -> anyhow::Result<()> {
     if let Ok(directory) = std::env::var("DIALOG_CENSUS_FILE") {
         return file_archive(&source, Path::new(&directory));
     }
+    if let Ok(record) = std::env::var("DIALOG_CENSUS_INDEX") {
+        let blocks: Vec<&Written> = source.blocks.iter().collect();
+        index_layouts(
+            "replayed history",
+            &appends_of(&blocks),
+            record.parse().unwrap_or(1024),
+        );
+        return Ok(());
+    }
     measure(source, &points)
 }
 
@@ -1325,6 +1334,14 @@ fn file_archive(source: &Source, directory: &Path) -> anyhow::Result<()> {
 
     index_tree_estimate(&kept, source)?;
     writer_costs(&kept, directory)?;
+    if std::env::var("DIALOG_CENSUS_INDEX").is_ok() {
+        let record = archive.stats().file_bytes / kept.len().max(1) as u64;
+        index_layouts(
+            "tonk-team, the blocks the file holds",
+            &appends_of(&kept),
+            record,
+        );
+    }
     Ok(())
 }
 
@@ -2617,4 +2634,486 @@ fn realize_rows(
         )
     };
     Ok(body.as_bytes()?.to_vec())
+}
+
+/// Each commit's blocks, in the order the history wrote them.
+fn appends_of(blocks: &[&Written]) -> Vec<Vec<Blake3Hash>> {
+    let mut appends: Vec<Vec<Blake3Hash>> = Vec::new();
+    let mut last = None;
+    for block in blocks {
+        if last != Some(block.commit) {
+            appends.push(Vec::new());
+            last = Some(block.commit);
+        }
+        appends
+            .last_mut()
+            .expect("an append")
+            .push(block.hash.clone());
+    }
+    appends
+}
+
+/// The 4 KiB page a byte at `position` in the file is on.
+fn page_of(position: u64) -> u64 {
+    position / 4096
+}
+
+/// The pages `len` bytes from `position` cover.
+fn pages_of(position: u64, len: u64) -> std::ops::RangeInclusive<u64> {
+    page_of(position)..=page_of(position + len.max(1) - 1)
+}
+
+fn varint_len(value: u64) -> u64 {
+    (64 - value.leading_zeros() as u64).max(1).div_ceil(7)
+}
+
+/// A block-index layout, replayed over a history one append at a time.
+trait Layout {
+    fn name(&self) -> String;
+    /// Indexes `entries` (each block's hash and where its record starts),
+    /// appending the layout's records at `*end` and moving it past them.
+    /// Returns the bytes written.
+    fn append(&mut self, entries: &[([u8; 32], u64)], end: &mut u64) -> u64;
+    /// The pages a lookup of `hash`, with nothing cached, touches in the
+    /// index before it reaches the block's own record.
+    fn lookup(&self, hash: &[u8; 32]) -> HashSet<u64>;
+}
+
+/// A record header: kind, length, checksum.
+const RECORD: u64 = 9;
+
+/// A B+ tree keyed by block hash, its leaves holding each block's place,
+/// every node a record. `keys_by_pointer` keeps no part of the hash in the
+/// tree (Hyperbee's way: a key is where it is stored, and comparing reads
+/// it there); otherwise each entry keeps 8 bytes of it. With `chain`, a
+/// rewritten node is written against its previous version, whole every
+/// `chain` versions; without, every rewrite is whole (copied paths).
+struct Tree {
+    fanout: usize,
+    keys_by_pointer: bool,
+    chain: Option<usize>,
+    nodes: Vec<TreeNodeSim>,
+    root: usize,
+}
+
+struct TreeNodeSim {
+    leaf: bool,
+    /// A leaf's hashes and places, or an internal node's separators (each
+    /// child's first hash and the place of the record holding it).
+    keys: Vec<([u8; 32], u64)>,
+    children: Vec<usize>,
+    /// Every version written, newest last: where, how long, whether whole.
+    versions: Vec<(u64, u64, bool)>,
+    /// The keys and children as last written, for writing against.
+    written: Option<(Vec<([u8; 32], u64)>, Vec<u64>)>,
+}
+
+impl Tree {
+    fn new(fanout: usize, keys_by_pointer: bool, chain: Option<usize>) -> Self {
+        Self {
+            fanout,
+            keys_by_pointer,
+            chain,
+            nodes: vec![TreeNodeSim {
+                leaf: true,
+                keys: Vec::new(),
+                children: Vec::new(),
+                versions: Vec::new(),
+                written: None,
+            }],
+            root: 0,
+        }
+    }
+
+    fn entry_len(&self, place: u64, child: Option<u64>) -> u64 {
+        let key = if self.keys_by_pointer { 0 } else { 8 };
+        key + varint_len(place) + child.map_or(0, varint_len)
+    }
+
+    /// Where a node's latest version is.
+    fn place(&self, node: usize) -> u64 {
+        self.nodes[node]
+            .versions
+            .last()
+            .map_or(0, |version| version.0)
+    }
+
+    /// Inserts `entry`, marking every node it rewrites.
+    fn insert(&mut self, entry: ([u8; 32], u64), touched: &mut HashSet<usize>) {
+        let mut path = vec![self.root];
+        while !self.nodes[*path.last().expect("a node")].leaf {
+            let node = &self.nodes[*path.last().expect("a node")];
+            let at = node
+                .keys
+                .partition_point(|(key, _)| key <= &entry.0)
+                .saturating_sub(1);
+            path.push(node.children[at]);
+        }
+        let leaf = *path.last().expect("a leaf");
+        let at = self.nodes[leaf]
+            .keys
+            .partition_point(|(key, _)| key < &entry.0);
+        self.nodes[leaf].keys.insert(at, entry);
+        touched.extend(path.iter().copied());
+        // Split overfull nodes bottom up.
+        let mut level = path.len() - 1;
+        loop {
+            let node = path[level];
+            if self.nodes[node].keys.len() <= self.fanout {
+                break;
+            }
+            let half = self.nodes[node].keys.len() / 2;
+            let keys = self.nodes[node].keys.split_off(half);
+            let children = if self.nodes[node].leaf {
+                Vec::new()
+            } else {
+                self.nodes[node].children.split_off(half)
+            };
+            let separator = keys[0];
+            let sibling = self.nodes.len();
+            self.nodes.push(TreeNodeSim {
+                leaf: self.nodes[node].leaf,
+                keys,
+                children,
+                versions: Vec::new(),
+                written: None,
+            });
+            touched.insert(sibling);
+            if level == 0 {
+                let first = self.nodes[node].keys[0];
+                let root = self.nodes.len();
+                self.nodes.push(TreeNodeSim {
+                    leaf: false,
+                    keys: vec![first, separator],
+                    children: vec![node, sibling],
+                    versions: Vec::new(),
+                    written: None,
+                });
+                touched.insert(root);
+                self.root = root;
+                break;
+            }
+            let parent = path[level - 1];
+            let at = self.nodes[parent]
+                .children
+                .iter()
+                .position(|child| *child == node)
+                .expect("a child");
+            self.nodes[parent].keys.insert(at + 1, separator);
+            self.nodes[parent].children.insert(at + 1, sibling);
+            level -= 1;
+        }
+    }
+
+    /// Bytes of a node written whole.
+    fn whole_len(&self, keys: &[([u8; 32], u64)], children: &[u64]) -> u64 {
+        let mut len = RECORD + 2;
+        for (at, (_, place)) in keys.iter().enumerate() {
+            len += self.entry_len(*place, children.get(at).copied());
+        }
+        len
+    }
+
+    /// Bytes of a node written against `before`: copied runs, and the
+    /// entries that are new or moved.
+    fn delta_len(
+        &self,
+        before: &(Vec<([u8; 32], u64)>, Vec<u64>),
+        keys: &[([u8; 32], u64)],
+        children: &[u64],
+    ) -> u64 {
+        let old: HashMap<([u8; 32], u64, Option<u64>), usize> = before
+            .0
+            .iter()
+            .enumerate()
+            .map(|(at, (key, place))| ((*key, *place, before.1.get(at).copied()), at))
+            .collect();
+        let (mut len, mut runs, mut previous) = (RECORD + 2 + 3, 0u64, None::<usize>);
+        for (at, (key, place)) in keys.iter().enumerate() {
+            let child = children.get(at).copied();
+            match old.get(&(*key, *place, child)) {
+                Some(from) if previous.is_some_and(|previous| previous + 1 == *from) => {
+                    previous = Some(*from)
+                }
+                Some(from) => {
+                    runs += 1;
+                    previous = Some(*from);
+                }
+                None => {
+                    len += self.entry_len(*place, child);
+                    previous = None;
+                    runs += 1;
+                }
+            }
+        }
+        len + runs * 3
+    }
+}
+
+impl Layout for Tree {
+    fn name(&self) -> String {
+        format!(
+            "B-tree, {} keys a node, {}, {}",
+            self.fanout,
+            if self.keys_by_pointer {
+                "keys as pointers"
+            } else {
+                "8-byte hash prefix"
+            },
+            match self.chain {
+                None => "whole paths copied".to_string(),
+                Some(chain) => format!("nodes against their last version, whole every {chain}"),
+            }
+        )
+    }
+
+    fn append(&mut self, entries: &[([u8; 32], u64)], end: &mut u64) -> u64 {
+        let mut touched = HashSet::new();
+        let mut sorted = entries.to_vec();
+        sorted.sort();
+        for entry in sorted {
+            self.insert(entry, &mut touched);
+        }
+        // Children first, so a parent names where its children now are.
+        let mut order: Vec<usize> = touched.into_iter().collect();
+        let depth = |tree: &Tree, node: usize| {
+            let mut depth = 0;
+            let mut at = node;
+            while !tree.nodes[at].leaf {
+                at = tree.nodes[at].children[0];
+                depth += 1;
+            }
+            depth
+        };
+        order.sort_by_key(|node| depth(self, *node));
+        let mut written = 0;
+        for node in order {
+            let children: Vec<u64> = self.nodes[node]
+                .children
+                .iter()
+                .map(|child| self.place(*child))
+                .collect();
+            let keys = self.nodes[node].keys.clone();
+            let whole = self.whole_len(&keys, &children);
+            let since_whole = self.nodes[node]
+                .versions
+                .iter()
+                .rev()
+                .take_while(|version| !version.2)
+                .count();
+            let len = match (&self.chain, &self.nodes[node].written) {
+                (Some(chain), Some(before)) if since_whole + 1 < *chain => {
+                    self.delta_len(before, &keys, &children).min(whole)
+                }
+                _ => whole,
+            };
+            let is_whole = len == whole;
+            self.nodes[node].versions.push((*end, len, is_whole));
+            self.nodes[node].written = Some((keys, children));
+            *end += len;
+            written += len;
+        }
+        written
+    }
+
+    fn lookup(&self, hash: &[u8; 32]) -> HashSet<u64> {
+        let mut pages = HashSet::new();
+        let mut at = self.root;
+        loop {
+            let node = &self.nodes[at];
+            // The node's latest version, and every version back to its
+            // last whole one: a delta is read with what it is written
+            // against.
+            for version in node.versions.iter().rev() {
+                pages.extend(pages_of(version.0, version.1));
+                if version.2 {
+                    break;
+                }
+            }
+            // Keys by pointer: each comparison of the binary search reads
+            // the key where it is stored.
+            if self.keys_by_pointer {
+                let (mut low, mut high) = (0, node.keys.len());
+                while low < high {
+                    let middle = (low + high) / 2;
+                    pages.insert(page_of(node.keys[middle].1));
+                    if &node.keys[middle].0 <= hash {
+                        low = middle + 1;
+                    } else {
+                        high = middle;
+                    }
+                }
+            }
+            if node.leaf {
+                return pages;
+            }
+            let child = node
+                .keys
+                .partition_point(|(key, _)| key <= hash)
+                .saturating_sub(1);
+            at = node.children[child];
+        }
+    }
+}
+
+/// Sorted runs of fixed-width entries (8 bytes of hash, 8 of place), one
+/// per append, merged on a carry schedule: whenever `base` runs share a
+/// level, they merge into one run of the next level, as Hypercore merges
+/// its roots. Each run starts with fence keys (the first hash prefix of
+/// each page of entries), so a lookup reads a run's fences, then one page.
+struct Runs {
+    base: usize,
+    /// The live runs, oldest first: level, where, entries.
+    runs: Vec<(u32, u64, Vec<([u8; 32], u64)>)>,
+}
+
+const RUN_ENTRY: u64 = 16;
+
+impl Runs {
+    fn run_len(entries: usize) -> u64 {
+        let pages = (entries as u64 * RUN_ENTRY).div_ceil(4096).max(1);
+        RECORD + 8 + pages * 8 + entries as u64 * RUN_ENTRY
+    }
+}
+
+impl Layout for Runs {
+    fn name(&self) -> String {
+        format!("sorted runs, merged {} at a time", self.base)
+    }
+
+    fn append(&mut self, entries: &[([u8; 32], u64)], end: &mut u64) -> u64 {
+        let mut run = entries.to_vec();
+        run.sort();
+        let mut written = Self::run_len(run.len());
+        self.runs.push((0, *end, run));
+        *end += written;
+        loop {
+            let level = self.runs.last().expect("a run").0;
+            let same = self
+                .runs
+                .iter()
+                .rev()
+                .take_while(|run| run.0 == level)
+                .count();
+            if same < self.base {
+                break;
+            }
+            let merged: Vec<([u8; 32], u64)> = {
+                let mut all: Vec<_> = self
+                    .runs
+                    .drain(self.runs.len() - same..)
+                    .flat_map(|run| run.2)
+                    .collect();
+                all.sort();
+                all
+            };
+            let len = Self::run_len(merged.len());
+            self.runs.push((level + 1, *end, merged));
+            *end += len;
+            written += len;
+        }
+        written
+    }
+
+    fn lookup(&self, hash: &[u8; 32]) -> HashSet<u64> {
+        let mut pages = HashSet::new();
+        for (_, place, entries) in self.runs.iter().rev() {
+            // The header and fences, then the page the fences point at.
+            let fences = (entries.len() as u64 * RUN_ENTRY).div_ceil(4096).max(1) * 8;
+            pages.extend(pages_of(*place, RECORD + 8 + fences));
+            let at = entries.partition_point(|(key, _)| key < hash);
+            let entry_at = place
+                + RECORD
+                + 8
+                + fences
+                + at.min(entries.len().saturating_sub(1)) as u64 * RUN_ENTRY;
+            pages.insert(page_of(entry_at));
+            if entries.get(at).is_some_and(|(key, _)| key == hash) {
+                break;
+            }
+        }
+        pages
+    }
+}
+
+/// Replays `appends` (each append's blocks, in the order the history wrote
+/// them) into every layout, then looks up a sample of the blocks with
+/// nothing cached, and reports what each layout wrote and read.
+fn index_layouts(name: &str, appends: &[Vec<Blake3Hash>], record: u64) {
+    let mut layouts: Vec<Box<dyn Layout>> = vec![
+        Box::new(Tree::new(8, true, None)),
+        Box::new(Tree::new(8, false, None)),
+        Box::new(Tree::new(32, false, None)),
+        Box::new(Tree::new(128, false, None)),
+        Box::new(Tree::new(32, false, Some(8))),
+        Box::new(Tree::new(32, false, Some(32))),
+        Box::new(Tree::new(128, false, Some(8))),
+        Box::new(Tree::new(128, false, Some(32))),
+        Box::new(Runs {
+            base: 2,
+            runs: Vec::new(),
+        }),
+        Box::new(Runs {
+            base: 4,
+            runs: Vec::new(),
+        }),
+        Box::new(Runs {
+            base: 8,
+            runs: Vec::new(),
+        }),
+    ];
+    let blocks: usize = appends.iter().map(Vec::len).sum();
+    let _ = &blocks;
+    println!(
+        "{name}: {} appends, {blocks} blocks, a record every {record} bytes on average",
+        appends.len()
+    );
+    println!(
+        "{:<84} {:>10} {:>11} {:>11} {:>8} {:>8} {:>8}",
+        "layout", "index MiB", "B/append", "max/append", "pages", "p99", "max"
+    );
+    // Lookups at sixteen points of the history, of every 7th block written
+    // by then, so a layout is not judged at one lucky moment (a run count
+    // that just carried into one run, say).
+    let points: Vec<usize> = (1..=16).map(|at| appends.len() * at / 16).collect();
+    for layout in &mut layouts {
+        let mut end = 0u64;
+        let (mut total, mut most) = (0u64, 0u64);
+        let mut written: Vec<[u8; 32]> = Vec::new();
+        let mut pages: Vec<usize> = Vec::new();
+        for (at, append) in appends.iter().enumerate() {
+            let entries: Vec<([u8; 32], u64)> = append
+                .iter()
+                .map(|hash| {
+                    let place = end;
+                    end += record;
+                    (*hash.as_bytes(), place)
+                })
+                .collect();
+            written.extend(entries.iter().map(|(hash, _)| *hash));
+            let bytes = layout.append(&entries, &mut end);
+            total += bytes;
+            most = most.max(bytes);
+            if points.contains(&(at + 1)) {
+                pages.extend(
+                    written
+                        .iter()
+                        .step_by(7)
+                        .map(|hash| layout.lookup(hash).len()),
+                );
+            }
+        }
+        pages.sort();
+        let mean = pages.iter().sum::<usize>() as f64 / pages.len().max(1) as f64;
+        println!(
+            "{:<84} {:>10.2} {:>11.0} {:>11} {:>8.1} {:>8} {:>8}",
+            layout.name(),
+            total as f64 / (1024.0 * 1024.0),
+            total as f64 / appends.len() as f64,
+            most,
+            mean,
+            pages[pages.len() * 99 / 100],
+            pages[pages.len() - 1]
+        );
+    }
 }
