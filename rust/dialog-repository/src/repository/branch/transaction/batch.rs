@@ -497,7 +497,11 @@ impl Transaction<TransactionBatch> {
     pub fn query(&self) -> TransactionQuery<'_> {
         // The batch owns its snapshot, so nothing else moves it: pinning
         // it per query reads the chain tip.
-        TransactionQuery::new(Live::Snapshot(&self.line.snapshot).pin(), self.layers())
+        TransactionQuery::new(
+            Live::Snapshot(&self.line.snapshot).pin(),
+            self.changes.clone(),
+            self.transients.clone(),
+        )
     }
 }
 

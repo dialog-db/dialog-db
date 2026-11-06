@@ -216,18 +216,6 @@ impl<L: Line> Transaction<L> {
     }
 }
 
-impl<L: Line> Transaction<L> {
-    /// The staged layers [`Transaction::query`] reads over the line:
-    /// the durable writes, then the transients. Shared, not copied.
-    fn layers(&self) -> Vec<Staged> {
-        [&self.changes, &self.transients]
-            .into_iter()
-            .filter(|layer| !layer.is_empty())
-            .cloned()
-            .collect()
-    }
-}
-
 impl Transaction<&Branch> {
     /// Run queries against this transaction's "as-if committed" view of
     /// the branch, at the revision the transaction opened at.
@@ -238,7 +226,7 @@ impl Transaction<&Branch> {
     /// stream before the merge. Dispatched transients are part of the
     /// view too. The transaction itself stays open and committable.
     pub fn query(&self) -> TransactionQuery<'_> {
-        TransactionQuery::new(self.view(), self.layers())
+        TransactionQuery::new(self.view(), self.changes.clone(), self.transients.clone())
     }
 
     /// The branch at the revision this transaction pinned.
@@ -257,7 +245,8 @@ impl Transaction<&Snapshot> {
     pub fn query(&self) -> TransactionQuery<'_> {
         TransactionQuery::new(
             View::at(Live::Snapshot(self.line), Some(&self.pinned)),
-            self.layers(),
+            self.changes.clone(),
+            self.transients.clone(),
         )
     }
 }

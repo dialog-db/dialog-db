@@ -57,7 +57,7 @@ use futures_util::{StreamExt as _, TryStreamExt};
 
 use crate::placement::{Bindings, Placements, ScopeMap};
 use crate::repository::archive::erased;
-use crate::repository::branch::session::{Composite, QueryEnv};
+use crate::repository::branch::session::{Composite, Erased, QueryEnv};
 use crate::repository::source::View;
 use crate::rules::{
     TriggerFootprint, hydrate, hydrate_inductive, on_attr, reads_attr, source_attr, transient_attr,
@@ -73,6 +73,16 @@ pub(crate) enum Landing<'a> {
     Line(&'a Bindings),
     /// A commit of a stack, whose links bind a scope to an ephemeral layer.
     Stack(&'a Topology),
+}
+
+impl Landing<'_> {
+    /// Whether a write of `the` lands in a store under `placements`.
+    fn stores(&self, placements: &Placements, the: &Relation) -> bool {
+        match self {
+            Landing::Line(bindings) => !placements.lands_in_tree(the, bindings),
+            Landing::Stack(topology) => !topology.lands_in_trees(placements, the),
+        }
+    }
 }
 
 /// Which attributes a commit writes to a store under its placements, and
@@ -143,12 +153,40 @@ impl<'a> Stores<'a> {
         (stores, staged)
     }
 
+    /// What a read of an open transaction reads: `view` with each store as
+    /// `writes` leave it, by the rule [`over`](Self::over) gives a round of
+    /// induction, and the writes that stay staged above the lines. `source`
+    /// is the line whose placements route the commit.
+    ///
+    /// A write under a transient attribute lands in no store, so it stays
+    /// staged. Writes with none for a store are read as they stand, with no
+    /// copy of them or of a store, so reading a transaction costs a range
+    /// read however many writes it holds.
+    pub(crate) async fn pending(
+        landing: &Landing<'_>,
+        source: &View<'_>,
+        view: Composite,
+        writes: &Staged,
+        env: &Erased,
+    ) -> Result<(Composite, Staged), CommitError> {
+        if writes.is_empty() {
+            return Ok((view, writes.clone()));
+        }
+        let placements = Placements::resolve(source, writes.declarations(), env).await?;
+        let stores =
+            |the: &Relation| !placements.is_transient(the) && landing.stores(&placements, the);
+        if !writes.attributes().any(stores) {
+            return Ok((view, writes.clone()));
+        }
+        let mut changes = writes.export();
+        take_transient(&mut changes, &placements);
+        let (read, _) = Stores::over(landing, &placements, &view, &changes);
+        Ok((read.view, writes.without(stores)))
+    }
+
     /// Whether a write of `the` lands in a store.
     pub(crate) fn hold(&self, the: &Relation) -> bool {
-        match self.landing {
-            Landing::Line(bindings) => !self.placements.lands_in_tree(the, bindings),
-            Landing::Stack(topology) => !topology.lands_in_trees(self.placements, the),
-        }
+        self.landing.stores(self.placements, the)
     }
 
     /// Where the stores that a write of `the` lands in stand in the view:

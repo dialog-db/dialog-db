@@ -126,7 +126,7 @@ use crate::placement::{Bindings, Placements, Target, elected};
 use crate::repository::branch::registry::RegistryEnv;
 use crate::repository::branch::resolve::ResolveEnv;
 use crate::repository::branch::session::{Composite, QueryEnv};
-use crate::repository::branch::transaction::induce::{Landing, Watermark, Witness, induce};
+use crate::repository::branch::transaction::induce::{Landing, Stores, Watermark, Witness, induce};
 use crate::repository::branch::transaction::{refuse_nan, settle_successions};
 use crate::repository::source::{Live, Source};
 use crate::schema::DidExt as _;
@@ -2212,7 +2212,7 @@ impl Stack {
             stack: self.clone(),
             composite: self.composite(),
             changes: Changes::new(),
-            layers: Vec::new(),
+            uncommitted: None,
         }
     }
 
@@ -2769,8 +2769,10 @@ impl<'a> StackTransaction<'a> {
     /// of the stack: the composite at the heads the stack reads at,
     /// with the pending asserts and retracts folded in over it and the
     /// dispatched transients beside them. Retracts hide what the
-    /// layers hold, as the commit would; nothing lands, and the
-    /// transaction stays open and committable. The view is taken as
+    /// layers hold, as the commit would, and a write that lands in an
+    /// ephemeral layer reads in a copy of that layer, as the commit will
+    /// leave it; nothing lands, and the transaction stays open and
+    /// committable. The view is taken as
     /// the writes stand now: later writes to the transaction do not
     /// reach a query already opened.
     pub fn query(&self) -> StackQuery {
@@ -2778,7 +2780,11 @@ impl<'a> StackTransaction<'a> {
             stack: self.stack.clone(),
             composite: self.stack.composite(),
             changes: Changes::new(),
-            layers: vec![self.changes.clone(), self.transients.clone()],
+            uncommitted: Some(Uncommitted {
+                topology: self.stack.topology(),
+                changes: self.changes.clone(),
+                transients: self.transients.clone(),
+            }),
         }
     }
 
@@ -3218,9 +3224,44 @@ pub struct StackQuery {
     stack: Stack,
     composite: Composite,
     changes: Changes,
-    /// The pending writes of a transaction, read above the composite as a
-    /// branch transaction reads its own (see [`Staged`](crate::Staged)).
-    layers: Vec<Staged>,
+    /// The pending writes of a transaction, read as a branch transaction
+    /// reads its own.
+    uncommitted: Option<Uncommitted>,
+}
+
+/// The pending writes of a [`StackTransaction`] that a query reads, with
+/// the shape of the stack that routes them.
+#[derive(Clone)]
+struct Uncommitted {
+    topology: Topology,
+    changes: Staged,
+    transients: Staged,
+}
+
+/// What a read of the stack takes for `composite`: the composite with each
+/// ephemeral layer as the pending writes leave it, and the writes that stay
+/// staged above its lines. With no pending writes, the composite as it is.
+async fn reading<Env>(
+    uncommitted: Option<&Uncommitted>,
+    composite: Composite,
+    env: &Env,
+) -> Result<(Composite, Vec<Staged>), CommitError>
+where
+    Env: StackEnv,
+{
+    let (Some(uncommitted), Some(bottom)) = (uncommitted, composite.sources.first().cloned())
+    else {
+        return Ok((composite, Vec::new()));
+    };
+    let (composite, changes) = Stores::pending(
+        &Landing::Stack(&uncommitted.topology),
+        &bottom.as_view(),
+        composite,
+        &uncommitted.changes,
+        env,
+    )
+    .await?;
+    Ok((composite, vec![changes, uncommitted.transients.clone()]))
 }
 
 impl StackQuery {
@@ -3246,8 +3287,11 @@ impl StackQuery {
             .await
             .map_err(|error| EvaluationError::Store(format!("identify: {error}")))?;
         let overlay = self.composite.overlay(&self.changes, &operator);
-        QueryEnv::over(self.composite.clone(), overlay, env)
-            .with_layers(self.layers.clone())
+        let (composite, layers) = reading(self.uncommitted.as_ref(), self.composite.clone(), env)
+            .await
+            .map_err(|error| EvaluationError::Store(error.to_string()))?;
+        QueryEnv::over(composite, overlay, env)
+            .with_layers(layers)
             .joins_cycle(head)
             .await
     }
@@ -3257,7 +3301,7 @@ impl StackQuery {
         StackSelect {
             composite: self.composite.clone(),
             changes: self.changes.clone(),
-            layers: self.layers.clone(),
+            uncommitted: self.uncommitted.clone(),
             query,
         }
     }
@@ -3269,8 +3313,8 @@ impl StackQuery {
     pub fn subscribe<Q: Application>(&self, query: Q) -> StackSubscription<Q> {
         StackSubscription {
             stack: self.stack.clone(),
-            inner: Subscription::over(self.composite.clone(), self.changes.clone(), query)
-                .with_layers(self.layers.clone()),
+            inner: Subscription::over(self.composite.clone(), self.changes.clone(), query),
+            uncommitted: self.uncommitted.clone(),
         }
     }
 }
@@ -3279,7 +3323,7 @@ impl StackQuery {
 pub struct StackSelect<Q> {
     composite: Composite,
     changes: Changes,
-    layers: Vec<Staged>,
+    uncommitted: Option<Uncommitted>,
     query: Q,
 }
 
@@ -3292,7 +3336,7 @@ impl<Q: Application> StackSelect<Q> {
         let StackSelect {
             composite,
             changes,
-            layers,
+            uncommitted,
             query,
         } = self;
         async_stream::try_stream! {
@@ -3301,7 +3345,10 @@ impl<Q: Application> StackSelect<Q> {
                 .await
                 .map_err(|e| DialogCorpusError::Storage(format!("identify: {e}")))?;
             let overlay = composite.overlay(&changes, &operator);
-            let query_env = QueryEnv::over(composite.clone(), overlay, env).with_layers(layers);
+            let (composite, layers) = reading(uncommitted.as_ref(), composite, env)
+                .await
+                .map_err(|error| DialogCorpusError::Storage(error.to_string()))?;
+            let query_env = QueryEnv::over(composite, overlay, env).with_layers(layers);
             let results = Box::pin(query.perform(&query_env));
             for await result in results {
                 yield result?;
@@ -3315,6 +3362,7 @@ impl<Q: Application> StackSelect<Q> {
 pub struct StackSubscription<Q: Application> {
     stack: Stack,
     inner: Subscription<Q>,
+    uncommitted: Option<Uncommitted>,
 }
 
 impl<Q> StackSubscription<Q>
@@ -3333,7 +3381,18 @@ where
     where
         Env: StackEnv,
     {
-        self.inner.retarget(self.stack.composite());
+        // The composite is read afresh, so the writes route by the shape it
+        // has now. A copy of a layer is new at each poll, so a poll over a
+        // write for a layer evaluates the query afresh, and reports only what
+        // moved.
+        if let Some(uncommitted) = &mut self.uncommitted {
+            uncommitted.topology = self.stack.topology();
+        }
+        let (composite, layers) = reading(self.uncommitted.as_ref(), self.stack.composite(), env)
+            .await
+            .map_err(|error| EvaluationError::Store(error.to_string()))?;
+        self.inner.read_layers(layers);
+        self.inner.retarget(composite);
         self.inner.poll(env).await
     }
 
@@ -5874,6 +5933,99 @@ mod tests {
         let mut subscription = transaction.query().subscribe(query);
         let subscribed = subscription.poll(&operator).await?.expect("initial");
         assert_eq!(salaries(&subscribed.asserted)?, salaries(&selected)?);
+        Ok(())
+    }
+
+    /// The query of a stack transaction reads an ephemeral layer as the commit
+    /// will leave it, whether it selects or subscribes. A write that lands in
+    /// the layer replaces its row of the cell, so each read gives the new value
+    /// alone, a layer of another scope gets nothing, and no layer changes until
+    /// the commit lands.
+    #[dialog_common::test]
+    async fn it_reads_the_row_of_an_ephemeral_layer_a_write_of_the_transaction_replaces()
+    -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        shared
+            .transaction()
+            .assert(Placement::new("test.state/name".parse()?, name("state")))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        shared.refresh(&operator).await?;
+        let other = Ephemeral::create().perform(&operator).await;
+        let state = Ephemeral::create().perform(&operator).await;
+        let top = Ephemeral::create().perform(&operator).await;
+        let stack = Stack::open(top.clone())
+            .link(&top, &shared, name("shared"))
+            .link(&top, &other, name("other"))
+            .link(&top, &state, name("state"))
+            .perform(&operator)
+            .await?;
+        let row: Entity = "row:1".parse()?;
+        let write = |value: &str| -> Result<AttributeStatement> {
+            Ok(AttributeStatement {
+                the: "test.state/name".parse()?,
+                of: row.clone(),
+                is: Value::String(value.into()),
+                cause: None,
+                cardinality: Some(dialog_query::Cardinality::One),
+                pick: Some(Pick::Last),
+            })
+        };
+        let held = |layer: &Ephemeral| -> Result<Vec<Value>> {
+            Ok(layer
+                .scan(
+                    &Selector::new()
+                        .the("test.state/name".parse()?)
+                        .of(row.clone()),
+                )
+                .into_iter()
+                .map(|fact| fact.is)
+                .collect())
+        };
+        let general = vec![Value::String("general".into())];
+        let books = vec![Value::String("books".into())];
+        stack
+            .transaction()
+            .assert(write("general")?)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        assert_eq!(held(&state)?, general);
+
+        let transaction = stack.transaction().assert(write("books")?);
+        let query = transaction.query();
+        assert_eq!(
+            seen::<String>(&query, &operator, "test.state/name", &row).await?,
+            books
+        );
+        assert_eq!(held(&state)?, general, "the layer waits for the commit");
+        assert!(held(&other)?.is_empty());
+
+        let selection = || -> Result<AttributeQuery> {
+            Ok(AttributeQuery::from(
+                Term::<Relation>::from("test.state/name".parse::<Relation>()?)
+                    .of(Term::<Entity>::from(row.clone()))
+                    .is(Term::<String>::var("v")),
+            ))
+        };
+        let mut subscription = query.subscribe(selection()?);
+        let first = subscription.poll(&operator).await?.expect("initial");
+        let subscribed: Vec<Value> = first.asserted.into_iter().map(|claim| claim.is).collect();
+        assert_eq!(subscribed, books);
+        let again = subscription.poll(&operator).await?;
+        assert!(
+            again.is_none_or(|delta| delta.asserted.is_empty() && delta.retracted.is_empty()),
+            "a poll of the same state reports no move"
+        );
+
+        transaction.commit().publish().perform(&operator).await?;
+        assert_eq!(held(&state)?, books);
+        assert!(held(&other)?.is_empty());
         Ok(())
     }
 

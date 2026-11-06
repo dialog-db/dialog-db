@@ -24,6 +24,18 @@
 //! layer holds `X`; the line's `X`, if any, is hidden, but the staged
 //! `X` passes through unmodified.
 //!
+//! # A write that lands in a store
+//!
+//! A row of a store stands above each staged write in a read, and a write
+//! that lands in the store replaces such a row at commit. So a read takes
+//! each such write out of the staged layer and reads a copy of the store
+//! with the write applied, as a round of induction does (see `Stores` in
+//! [`induce`](super::induce)). The read then gives what the commit will
+//! leave. A write that lands in the tree stays staged, and a row of the
+//! store still stands above it. The copy holds the facts of the store, so
+//! a read of a transaction with a write for a store costs that copy. A
+//! transaction with none copies nothing.
+//!
 //! # Auto-injected schema metadata
 //!
 //! `Transaction::query` resolves the operator's identity at
@@ -62,7 +74,8 @@ use dialog_effects::memory::Resolve;
 use dialog_query::query::{Application, Output};
 use dialog_search_tree::nodes;
 
-use crate::repository::branch::session::{QueryEnv, shared_metadata};
+use super::induce::{Landing, Stores};
+use crate::repository::branch::session::{Composite, QueryEnv, shared_metadata};
 use crate::repository::source::View;
 use crate::{RemoteSite, Staged};
 use std::slice::from_ref;
@@ -71,8 +84,8 @@ use std::slice::from_ref;
 /// [`Transaction::query`](crate::repository::branch::Transaction::query)
 /// and [`SnapshotTransaction::query`](crate::SnapshotTransaction::query).
 ///
-/// Holds the transaction's staged layers as they stand (shared, so
-/// taking them copies nothing, and later writes to the transaction do
+/// Holds the transaction's writes and transients as they stand (shared,
+/// so taking them copies nothing, and later writes to the transaction do
 /// not reach them) plus the line (branch or snapshot) it runs on, at
 /// the revision the transaction pinned when it opened. The transaction
 /// itself remains open and committable.
@@ -80,12 +93,17 @@ use std::slice::from_ref;
 /// See module docs for tombstone semantics.
 pub struct TransactionQuery<'a> {
     view: View<'a>,
-    layers: Vec<Staged>,
+    changes: Staged,
+    transients: Staged,
 }
 
 impl<'a> TransactionQuery<'a> {
-    pub(crate) fn new(view: View<'a>, layers: Vec<Staged>) -> Self {
-        Self { view, layers }
+    pub(crate) fn new(view: View<'a>, changes: Staged, transients: Staged) -> Self {
+        Self {
+            view,
+            changes,
+            transients,
+        }
     }
 
     /// Stage a query against this transaction's view. Call
@@ -93,7 +111,8 @@ impl<'a> TransactionQuery<'a> {
     pub fn select<Q: Application>(self, query: Q) -> TransactionSelectQuery<'a, Q> {
         TransactionSelectQuery {
             view: self.view,
-            layers: self.layers,
+            changes: self.changes,
+            transients: self.transients,
             query,
         }
     }
@@ -102,7 +121,8 @@ impl<'a> TransactionQuery<'a> {
 /// A staged query on a [`TransactionQuery`].
 pub struct TransactionSelectQuery<'a, Q> {
     view: View<'a>,
-    layers: Vec<Staged>,
+    changes: Staged,
+    transients: Staged,
     query: Q,
 }
 
@@ -140,7 +160,8 @@ impl<'a, Q: Application> TransactionSelectQuery<'a, Q> {
     {
         let TransactionSelectQuery {
             view,
-            layers,
+            changes,
+            transients,
             query,
         } = self;
         async_stream::try_stream! {
@@ -160,8 +181,23 @@ impl<'a, Q: Application> TransactionSelectQuery<'a, Q> {
             // uses is what guarantees identical behavior — fact reads,
             // tombstones, schema metadata, and deductive-rule
             // resolution all share one implementation.
-            let sources = vec![view.into_source()];
-            let query_env = QueryEnv::new(sources.clone(), overlay, env).with_layers(layers);
+            // A write that lands in a store is read in a copy of that store,
+            // as the commit will leave it (see the module docs).
+            let (composite, changes) = Stores::pending(
+                &Landing::Line(view.bindings()),
+                &view,
+                Composite::of(view.to_source()),
+                &changes,
+                env,
+            )
+            .await
+            .map_err(|error| DialogCorpusError::Storage(error.to_string()))?;
+            let layers = [changes, transients]
+                .into_iter()
+                .filter(|layer| !layer.is_empty())
+                .collect();
+            let sources = composite.sources.clone();
+            let query_env = QueryEnv::over(composite, overlay, env).with_layers(layers);
             let results = Box::pin(query.perform(&query_env));
             // Mid-transaction queries drive the ambient preload queue
             // like any other evaluation (see `crate::repository::fetch`).
