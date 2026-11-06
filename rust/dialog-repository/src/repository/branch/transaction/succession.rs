@@ -32,6 +32,7 @@
 //! reads, so a read over the transaction sees what the commit will
 //! leave.
 
+use super::induce::Stores;
 use crate::repository::CellSettlement;
 use crate::repository::branch::session::{Composite, Erased, QueryEnv};
 use crate::repository::staged::squash;
@@ -292,9 +293,13 @@ impl ReadSettlement {
 /// Settle every succession `head` holds against `view`, the round view
 /// an inductive rule fired on, which is what its head observed: the
 /// claims the view holds, the writes before it in the round included,
-/// and the candidates rules derive through it.
+/// and the candidates rules derive through it. A cell of an attribute in
+/// `stores` keeps its pick, as [`settle`] leaves the write of a
+/// transaction: the row of a store is no claim that a settlement can
+/// succeed, and the store elects among its own rows of the cell.
 pub(crate) async fn resolve_against(
     view: &QueryEnv<'_>,
+    stores: &Stores<'_>,
     head: &mut Changes,
 ) -> Result<(), CommitError> {
     let cells = head.cells_with_successions();
@@ -303,6 +308,9 @@ pub(crate) async fn resolve_against(
     }
     let edition = view.pending_edition();
     for (the, of) in cells {
+        if stores.hold(&the) {
+            continue;
+        }
         let list = head.take_cell(&the, &of);
         let mut cell = Cell::over(claims_of(view, &the, &of).await?);
         let derived = derived_candidates(view, &the, &of).await?;

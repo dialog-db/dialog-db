@@ -126,7 +126,7 @@ use crate::placement::{Bindings, Placements, Target, elected};
 use crate::repository::branch::registry::RegistryEnv;
 use crate::repository::branch::resolve::ResolveEnv;
 use crate::repository::branch::session::{Composite, QueryEnv};
-use crate::repository::branch::transaction::induce::{Watermark, Witness, induce};
+use crate::repository::branch::transaction::induce::{Landing, Watermark, Witness, induce};
 use crate::repository::branch::transaction::{refuse_nan, settle_successions};
 use crate::repository::source::{Live, Source};
 use crate::schema::DidExt as _;
@@ -593,7 +593,7 @@ fn identity(descriptor: &[u8]) -> Entity {
 /// in the stack's shared state, so a link committed through one handle
 /// is the shape every clone reads from then on.
 #[derive(Debug, Clone, Default)]
-struct Topology {
+pub(crate) struct Topology {
     /// Bottom first.
     layers: Vec<Layer>,
     /// Each layer's stack identity, parallel to `layers`.
@@ -609,7 +609,11 @@ impl Topology {
     /// routes it under `placements`: a write placed on a scope that links
     /// bind lands on the layers linked under it, and any other on the
     /// bottom.
-    fn lands_in_trees(&self, placements: &Placements, the: &dialog_corpus::Relation) -> bool {
+    pub(crate) fn lands_in_trees(
+        &self,
+        placements: &Placements,
+        the: &dialog_corpus::Relation,
+    ) -> bool {
         match placements.placement_of(the) {
             None => true,
             Some(scope) => self.bound.get(scope).is_none_or(|indices| {
@@ -3075,6 +3079,7 @@ impl<'a> StackCommit<'a> {
             watermark,
             &composite,
             &staged,
+            &Landing::Stack(&topology),
             &mut changes,
             self.transients.export(),
             self.context.clone(),
@@ -5564,6 +5569,58 @@ mod tests {
         Ok(())
     }
 
+    /// The conclusion of a rule writes as a transaction does: a `last` write
+    /// that lands in an ephemeral layer succeeds the row the layer holds of
+    /// the cell, in each commit that fires the rule, and the rule can write
+    /// an earlier value back.
+    #[dialog_common::test]
+    async fn it_succeeds_the_row_of_an_ephemeral_layer_a_rule_writes() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        shared
+            .transaction()
+            .assert(Placement::new("test.state/name".parse()?, name("state")))
+            .assert(firing_rule("test.state/name")?)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        shared.refresh(&operator).await?;
+        let state = Ephemeral::create().perform(&operator).await;
+        let top = Ephemeral::create().perform(&operator).await;
+        let stack = Stack::open(top.clone())
+            .link(&top, &shared, name("shared"))
+            .link(&top, &state, name("state"))
+            .perform(&operator)
+            .await?;
+        let row: Entity = "row:1".parse()?;
+        for value in ["general", "books", "general"] {
+            stack
+                .transaction()
+                .dispatch(
+                    dialog_query::the!("test.command/name")
+                        .of(row.clone())
+                        .is(value.to_string()),
+                )
+                .commit()
+                .publish()
+                .perform(&operator)
+                .await?;
+            let held: Vec<Value> = state
+                .scan(
+                    &Selector::new()
+                        .the("test.state/name".parse()?)
+                        .of(row.clone()),
+                )
+                .into_iter()
+                .map(|fact| fact.is)
+                .collect();
+            assert_eq!(held, vec![Value::String(value.into())]);
+        }
+        Ok(())
+    }
+
     /// Under `max`, a write through a stack leaves a candidate that a rule
     /// derives, which the read still elects, and succeeds no stored claim.
     #[dialog_common::test]
@@ -6944,12 +7001,12 @@ mod tests {
                 .perform(&operator)
                 .await?;
         }
-        // An ephemeral layer holds no claim for a write to succeed, so the
-        // count that the rule concludes stands beside the first one. A
-        // second firing would add a third.
+        // The layer elects among its own rows, so the count that the rule
+        // concludes succeeds the first one. A second firing would read 2 and
+        // write 3.
         assert_eq!(
             values::<u64>(&stack, &operator, "counter/count", &counter).await?,
-            vec![Value::UnsignedInt(1), Value::UnsignedInt(2)],
+            vec![Value::UnsignedInt(2)],
             "the rule fired once over what the other writer added"
         );
         assert_eq!(

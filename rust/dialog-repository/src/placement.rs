@@ -1424,6 +1424,64 @@ mod tests {
         Ok(())
     }
 
+    /// The conclusion of a rule writes as a transaction does: a `last` write
+    /// that lands in the session store of a branch succeeds the row the
+    /// store holds of the cell.
+    #[dialog_common::test]
+    async fn it_succeeds_the_session_row_a_rule_writes() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        branch.bind(session(), Target::Session);
+        let rule: dialog_query::InductiveRule = serde_json::from_value(serde_json::json!({
+            "assert!": { "with": { "name": { "the": "ui/selected", "as": "text:" } } },
+            "when": [{
+                "assert": { "with": { "name": { "the": "ui.select/name", "as": "text:" } } },
+                "where": {
+                    "this": { "?": { "name": "this" } },
+                    "name": { "?": { "name": "name" } }
+                }
+            }]
+        }))?;
+        branch
+            .transaction()
+            .assert(Placement::new("ui/selected".parse()?, session()))
+            .assert(rule)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        let doc: Entity = "doc:1".parse()?;
+        for value in ["general", "books"] {
+            branch
+                .transaction()
+                .dispatch(
+                    dialog_query::the!("ui.select/name")
+                        .of(doc.clone())
+                        .is(value.to_string()),
+                )
+                .commit()
+                .publish()
+                .perform(&operator)
+                .await?;
+            branch.refresh(&operator).await?;
+        }
+        let held: Vec<Value> = branch
+            .overlay()
+            .scan(
+                &dialog_corpus::Selector::new()
+                    .the("ui/selected".parse()?)
+                    .of(doc),
+            )
+            .into_iter()
+            .map(|fact| fact.is)
+            .collect();
+        assert_eq!(held, vec![Value::String("books".into())]);
+        Ok(())
+    }
+
     /// The repository default names the tree: an attribute placed on
     /// the default scope explicitly, or on a second name bound to the
     /// tree, commits to the tree; retracting a placement returns the
