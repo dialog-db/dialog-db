@@ -413,6 +413,53 @@ history with the week, 10×, then the index layouts.
 
 Commits: `6701aba`.
 
+## 2026-11-06 — The same team against main
+
+**Question.** Against main itself, not this branch with main's archive,
+what does the file cost and save, and what do the branch's other changes
+cost?
+
+**Method.** The run above, with `main/fs` added: the same `tonk_bench`
+built from origin/main (`5dbde9f`) by `bench/main-baseline.sh`, on the
+same dataset file (`d02fd406dacb607d`). Three runs of each of the three,
+interleaved, in one sitting:
+[results/2026-11-06-tonk-1x-main.md](results/2026-11-06-tonk-1x-main.md).
+
+**Results** (median of three; ratios against main):
+
+| | main/fs | fs | file | file ÷ main |
+|---|---|---|---|---|
+| a member's replica after the week | 169.8 MiB | 169.8 MiB | 1.53 MiB | 1/111 |
+| a command, rules included | 17.6 ms | 18.6 ms | 21.5 ms | 1.22 |
+| first command after a pull | 28.9 ms | 31.7 ms | 35.2 ms | 1.22 |
+| pull, in a round | 48.4 ms | 53.1 ms | 74.9 ms | 1.55 |
+| push, in a round | 22.6 ms | 26.6 ms | 41.0 ms | 1.81 |
+| `v2/issue` poll after a pull | 23.8 ms | 24.6 ms | 28.0 ms | 1.18 |
+| `v2/issue`, warm | 45.3 ms | 50.7 ms | 50.7 ms | 1.12 |
+| `v2/issue`, cold (just joined) | 93.4 ms | 110.8 ms | 90.4 ms | 0.97 |
+| `memo/full`, cold | 5.0 ms | 6.3 ms | 3.8 ms | 0.76 |
+
+- Main and `branch/fs` write the same bytes: the archive is all that
+  differs between `fs` and `file`, and nothing the branch changed moves
+  what a replica stores.
+- The branch's other changes (the tree's row read path among them) cost
+  about 5–12% on warm reads and commands against main, before the file
+  is involved: `v2/issue` warm is 45.3 ms on main and 50.7 ms on either
+  branch store. That cost is the branch's, not the file's, and it is not
+  yet explained.
+- The file's own cost is on the write side again: pulls 1.4× and pushes
+  1.5× `branch/fs`. Cold reads of a replica that just joined are level
+  with main or better.
+- The `fs` numbers moved by up to 15% between this sitting and the last
+  (a command: 15.7 ms then, 18.6 ms now): only numbers from one sitting
+  compare.
+
+**Decision.** The index layout is not where the file loses: reads are
+level, and what it costs is in writing what a commit or a pull brings in
+(splitting, encoding against predecessors, verifying). The layouts still
+get measured, but the write path is the larger question, and the branch's
+5–12% on warm reads needs explaining before the branch can land.
+
 ## How to reproduce
 
 ```sh

@@ -103,7 +103,7 @@ indexes, whose first lookup reads the root.
 **Harness.** `dialog-perf`'s scenarios, with the store chosen per run (its
 environment is volatile today), and the tonk-team harness.
 
-**Status.** Not run.
+**Status.** tonk-shaped 1×, `fs` and `file/memory`, three runs each: [results](results/2026-11-06-tonk-1x.md). Main, tonk-team's own history, the scales and the index layouts are not run yet.
 
 ## 2. Writes
 
@@ -129,7 +129,7 @@ the sorted runs carry).
 
 **Harness.** `dialog-perf`, and the tonk-team harness.
 
-**Status.** Not run.
+**Status.** tonk-shaped 1×, `fs` and `file/memory`, three runs each: [results](results/2026-11-06-tonk-1x.md). Main, tonk-team's own history, the scales and the index layouts are not run yet.
 
 ## 3. Sync
 
@@ -153,7 +153,7 @@ ordinary one, and what it appends.
 
 **Harness.** `dialog-soak`, and the tonk-team harness.
 
-**Status.** Not run.
+**Status.** tonk-shaped 1×, `fs` and `file/memory`, three runs each: [results](results/2026-11-06-tonk-1x.md). Main, tonk-team's own history, the scales and the index layouts are not run yet.
 
 ## 4. Subscriptions
 
@@ -179,7 +179,7 @@ delta size, to check every store sees the same delta.
 **Harness.** `dialog-perf`'s subscribe scenario, and the tonk-team
 harness.
 
-**Status.** Not run.
+**Status.** tonk-shaped 1×, `fs` and `file/memory`, three runs each: [results](results/2026-11-06-tonk-1x.md). Main, tonk-team's own history, the scales and the index layouts are not run yet.
 
 ## 5. Memory
 
@@ -217,18 +217,18 @@ growth curves not yet.
    volatile peer today; each takes the store as a setting. On main the
    setting offers `fs` only; it is a small change of its own, which can
    land on main first so the baseline needs no patch.
-3. **The tonk-shaped generator.** Reads the space's schema from the copy,
+3. **The tonk-shaped generator** (built: `tonk_dataset`). Reads the space's schema from the copy,
    generates the records above from a seed through the space's commands,
    and writes them to a dataset file, once.
-4. **A tonk-team harness, in dialog.** No tonk build: it opens a store,
+4. **A tonk-team harness, in dialog** (built: `tonk_bench`, six members on a shared remote). No tonk build: it opens a store,
    replays a dataset file into it (or opens the replica as it is), and
    runs the queries, commands, subscriptions and pulls above through
    dialog's own API, the API main shares. What it cannot see is tonk's own
    cost on top (rendering, the worker's handlers), which no archive
    changes.
-5. **A main worktree.** `origin/main` checked out beside the branch, the
+5. **A main worktree** (built: `bench/main-baseline.sh`). `origin/main` checked out beside the branch, the
    harness built there for `main/fs`, against the same dataset files.
-6. **One report** that puts the six axes side by side for every store,
+6. **One report** (`bench/report.py`, tables and Mermaid bars; the growth curves to come) that puts the six axes side by side for every store,
    with charts (below).
 
 ## Charts
