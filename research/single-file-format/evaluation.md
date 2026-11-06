@@ -74,16 +74,22 @@ the sorted runs carry).
 
 ## 3. Sync
 
-**Workload.** Pulling another replica's changes, which merges and
-re-derives what inductive rules produce:
+**Workload.** Pulling another replica's changes. A pull merges and moves
+the head; it does not run inductive rules. They catch up over the
+pulled-in facts at the next commit, or at an explicit `Branch::induce`
+(the "post-pull instant"), each running them over everything since their
+watermark. Tonk calls neither after a pull, so its rules catch up on the
+first command after one. Both halves are measured:
 
 - `dialog-soak`'s join and catch-up scenarios, the client's space in each
   store;
-- on tonk-team, a replica that is behind pulling what another wrote: the
-  week of issues and memos above.
+- on tonk-team, a replica that is behind pulling what another wrote (the
+  week of issues and memos above), then its first command after.
 
-**Reports.** Time, modeled network cost (the soak's shaped link), bytes
-appended to the receiving file, and the index's writes during the pull.
+**Reports.** For the pull: time, modeled network cost (the soak's shaped
+link), bytes appended to the receiving file, and the index's writes. For
+the catch-up: the time of the first commit after the pull against an
+ordinary one, and what it appends.
 
 **Harness.** `dialog-soak`, and the tonk harness.
 
