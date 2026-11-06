@@ -2705,8 +2705,14 @@ struct TreeNodeSim {
     /// Every version written, newest last: where, how long, whether whole.
     versions: Vec<(u64, u64, bool)>,
     /// The keys and children as last written, for writing against.
-    written: Option<(Vec<([u8; 32], u64)>, Vec<u64>)>,
+    written: Option<LastWritten>,
 }
+
+/// An index entry: a block's hash and where its record is.
+type IndexEntry = ([u8; 32], u64);
+
+/// A node's keys and children's places, as last written.
+type LastWritten = (Vec<IndexEntry>, Vec<u64>);
 
 impl Tree {
     fn new(fanout: usize, keys_by_pointer: bool, chain: Option<usize>) -> Self {
@@ -2818,7 +2824,7 @@ impl Tree {
     /// entries that are new or moved.
     fn delta_len(
         &self,
-        before: &(Vec<([u8; 32], u64)>, Vec<u64>),
+        before: &LastWritten,
         keys: &[([u8; 32], u64)],
         children: &[u64],
     ) -> u64 {
@@ -2964,7 +2970,7 @@ impl Layout for Tree {
 struct Runs {
     base: usize,
     /// The live runs, oldest first: level, where, entries.
-    runs: Vec<(u32, u64, Vec<([u8; 32], u64)>)>,
+    runs: Vec<(u32, u64, Vec<IndexEntry>)>,
 }
 
 const RUN_ENTRY: u64 = 16;
