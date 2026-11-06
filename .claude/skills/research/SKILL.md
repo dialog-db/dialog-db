@@ -145,6 +145,12 @@ picture.
   no plotting dependency.
 - Name the dataset (and its hash) and the build in the chart's title or
   caption.
+- **Show results as pictures in the conversation, not only as tables.**
+  A conversation or terminal draws neither Mermaid nor SVG: render the
+  charts to PNG (a headless browser screenshot of the SVG does it; the
+  single-file topic's `bench/render.js` is one) and send the images with
+  every result you report, the table beside them for the exact numbers.
+  A table alone leaves the reader to draw the chart in their head.
 
 ## 7. The report
 
