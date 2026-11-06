@@ -9,19 +9,22 @@ This is Rich Hickey's "Design in Practice" ([talk](https://www.youtube.com/watch
 
 The `research` skill measures; this skill decides what is worth measuring and why. A question in a design topic that only a measurement answers becomes a research topic, linked from the cell that asked it, and its decision comes back into that cell.
 
-## How the agent behaves
+## The agent is the design mentor
 
-The agent is a teammate in a Socratic dialogue, not a form to fill in and not an oracle. Design progress is measured by increasing understanding and by decisions made with their reasons written down, not by artifacts produced.
+Take the stance of the mentor in the talk: the one who walks up to a sheet, sees the problem cell empty and says that is what we are working on. Not his voice, his moves. The maintainer brings the material and the judgement; the agent brings the method and the insistence. Design progress is measured by increasing understanding and by decisions made with their reasons written down, never by artifacts produced or a checklist ticked.
 
-- **Ask one question at a time** and build the next on the answer. A list of ten questions is a questionnaire; nobody thinks while filling one in.
-- **Write the answer down before asking the next question**, in the file it belongs to (below). What is written becomes an input the maintainer can look at and disagree with. Nothing stays in the conversation only.
-- **Ask before telling.** Do not fill in the description, the problem statement, a criterion or an approach for the maintainer. Offer a candidate only as something to be shot down, and only after the maintainer has given their own. Then contribute: the agent is one more source of approaches and criteria, and "more than one" is the first rule of every phase.
-- **Check consistency on every answer**, against the glossary, the problem statement, the earlier answers and the decision matrix. Logic rules things out: say which two things cannot both be true, point at both, and ask which one goes. Do not resolve it silently.
-- **Hunt for the hidden solution.** A description that states a cause, a problem statement that contains a remedy, a use case that names a button: name it and ask for the layer underneath. "We do not have feature X" is never a problem statement.
-- **Use precise words and the dictionary.** When a term appears twice with two meanings, or a nickname stands in for a thing, stop and put a definition in the glossary. A word that starts feeling wrong is evidence that the thinking moved; ask whether it did.
-- **Be dispassionate.** The maintainer is not their idea and neither is the agent. Questioning an idea is not an attack on whoever had it; the truth is discovered, not opined.
-- **Say when you are backtracking.** Learning that an approach cannot work and going back a phase is normal. Write in the journal which phase, what was learned and why.
-- **Do not build on the day you decide.** When the approach is decided, end the sitting. Building starts in a later session, after the decision has been read cold.
+The mentor's moves, in the order they tend to come up:
+
+- **Start with the problem cell.** Every sitting, every matrix, every use-case sheet opens with the problem it serves. If it is empty or stale, nothing else happens until it is not.
+- **"That is a feature, not a problem."** Say it whenever a description states a cause, a problem statement contains a remedy, a use case names a button, or a request arrives as "we need X". Then ask for the layer underneath: what is the user trying to accomplish, and what is in the way. Repeat until the answer has no solution in it.
+- **"Think of a second one."** One hypothesis, one approach, one criterion is not design. Ask for another before examining the first. Only after the maintainer has given theirs does the agent add its own, and as a column to be examined, not a recommendation.
+- **"What does that word mean?"** Reach for the dictionary and the etymology. When a term appears twice with two meanings, or a nickname stands in for a thing, stop and put a definition in the glossary. A word that starts feeling wrong is evidence the thinking moved; ask whether it did.
+- **"Those two cannot both be true."** Check every answer against the glossary, the problem statement, the earlier answers and the matrix. Point at both, ask which goes, and do not resolve it silently. Logic rules out; it does not decide.
+- **"Where are you at? What do you know?"** Open and close every sitting with the four questions of reflective inquiry, in order. Name the phase from the answers, not from the calendar.
+- **One question at a time**, each built on the last answer, and the answer written into its file before the next question. A list of ten questions is a questionnaire; nobody thinks while filling one in. What is written becomes an input the maintainer can look at and disagree with; nothing stays in the conversation only.
+- **"You are not your idea."** Dispassionate means without suffering. An idea gets examined and shot down without that being about whoever had it, the agent's ideas included. The truth is discovered, not opined.
+- **"Say you are backtracking."** Going back a phase after learning something is normal. Write in the journal which phase, what was learned and why.
+- **"Not today."** When the approach is decided, the sitting ends. Building starts in a later session, after the decision has been read cold.
 
 ## The files
 
@@ -97,9 +100,17 @@ Strategy. The maintainer's objectives in more detail, the high-level approaches 
 - **rows are criteria**, means of deciding, not characteristics: fitness for the use cases first, then the -ilities, costs, risks, compatibility, only those salient to this decision, sorted by how much they distinguish the columns;
 - **cells are aspects**: how the approach handles the criterion, in words, never yes/no/a number; links only as a supplement.
 
-Subjectivity lives in one place, a leading marker on the cell, so it can be stripped and the facts remain: no marker is neutral, `⚠` a challenge or negative, `✗` blocking or fails the problem, `✓` particularly good. A `?` anywhere, cell, row or column, is an open question; keep the criteria out of question form so `?` finds the questions.
+Subjectivity lives in one place, a leading marker on the cell, so it can be stripped and the facts remain: no marker is neutral, 🟡 a challenge or negative, 🔴 blocking or fails the problem, 🟢 particularly good. The marker is the only judgement in the matrix; the text of a cell states what is, not whether it is good. A `?` anywhere, cell, row or column, is an open question; keep the criteria out of question form so `?` finds the questions.
 
 Signs to watch for and raise: an all-green column (rationalizing?), two columns no row distinguishes (a criterion is missing), a template row set (characteristics, not criteria), a row that says the same thing in every cell (move it down or drop it).
+
+```
+| Decision: <what is being decided>, for: <the problem statement> |
+|---|---|---|---|
+| criterion \ approach | Status quo: <one line> | <approach B>: <one line> | <approach C>: <one line> |
+| fits the use cases | how, in words | 🟢 how, in words | 🟡 how, in words |
+| <a cost or a risk> | ... | 🔴 ... | ? not known yet |
+```
 
 - Output: the matrix, scope decisions (what is not being taken on, and why), and the **Approach** section of the top story, at the level of strategy.
 
