@@ -32,11 +32,9 @@ statuses mean.
 - **Open:**
   - the surface of destructuring: a pattern in the notation, a formula
     over a path, or both;
-  - documents that grow (options in the latest entry);
-  - whether an attribute can require its records to satisfy a concept.
-- **Stale:** the [topic](../record-values.md) still states the first
-  entry's framing (a type tag, a string table inside the record, free
-  field names), and is revised next.
+  - documents that grow (options in the third entry);
+  - whether an attribute can require its records to satisfy a concept;
+  - how a reader tells today's dag-cbor records from the new layout.
 - **Next:** a census of the records in tonk-team's history: how many, their
   sizes, and how much repeats across them.
 - **Blocked:** neither dataset is in this session's container.
@@ -241,6 +239,30 @@ brings its pick and its type; `last` over several values elects the
 greater. The type applying is inferred from the pick applying, as it
 does for a concept's field, and is to be confirmed. This replaces the
 earlier proposal to refuse `last` over several values.
+
+Commits: this entry.
+
+## 2026-11-06 — The topic, revised to the decisions so far
+
+**Question.** What the topic states, now that the first entry's framing
+is replaced.
+
+**Method.** Rewrote [the topic](../record-values.md) from the entries
+above. Nothing measured.
+
+**Results.** The topic now has a question and a hypothesis (records as
+sorted pairs laid out as key tails, sharing the replica's tokens), the
+decisions above, and four variants against main. The string table inside
+a record, the type tag and the candidate encodings B and C (CBOR with
+stringref, a canonical FlexBuffers profile) are gone. One question is
+new: with no type tag, a reader still has to tell today's dag-cbor
+records from the new layout.
+
+**Decision.** The bars changed with the hypothesis: a size bar on the
+wire, allowed 25% over dag-cbor because attributes are full relation
+names, and a size bar in the file. They were proposed, never set, and no
+result has been seen, so nothing was moved after a result. They remain
+the maintainer's to set.
 
 Commits: this entry.
 
