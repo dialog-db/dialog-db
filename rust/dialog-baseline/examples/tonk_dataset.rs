@@ -16,7 +16,19 @@
 //! keys keep their size and place. The concepts a space's views query are
 //! taken from its concept records.
 //!
-//! The dataset holds the space's data: write it outside the repository.
+//! A synthetic dataset needs only the space's schema, which
+//! `fixtures/tonk-team-schema.jsonl` holds for tonk-team (its concepts,
+//! rules and command markers, and the shape of its records as counts and
+//! ratios, with none of the records), so it is made anywhere:
+//!
+//! ```sh
+//! cargo run --release -p dialog-baseline --example tonk_dataset -- \
+//!   generate rust/dialog-baseline/fixtures/tonk-team-schema.jsonl 10 tonk-10x.jsonl
+//! ```
+//!
+//! An export holds the space's data: write it outside the repository. The
+//! fixture was made from one with `tonk_dataset schema`, after checking
+//! that its rules' literal values hold no member, address or key.
 
 #[cfg(not(target_arch = "wasm32"))]
 #[path = "tonk/dataset.rs"]
