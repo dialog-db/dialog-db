@@ -582,9 +582,8 @@ impl<Q: Application> Subscription<Q> {
 
     /// Read `layers` above the lines too: the pending writes of a
     /// transaction.
-    pub(crate) fn with_layers(mut self, layers: Vec<Staged>) -> Self {
+    pub(crate) fn read_layers(&mut self, layers: Vec<Staged>) {
         self.layers = layers;
-        self
     }
 
     /// Point the subscription at a fresh composite of the same shape:

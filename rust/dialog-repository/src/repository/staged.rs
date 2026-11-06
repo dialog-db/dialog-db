@@ -39,6 +39,7 @@ use dialog_search_tree::Manifest;
 
 use super::ephemeral::{EphemeralRevision, Facts, Window};
 use crate::Revision;
+use crate::placement::is_declaration;
 use crate::repository::branch::ReadSettlement;
 use crate::rules::{conclusion_attr, is_rule_attribute};
 
@@ -80,6 +81,12 @@ struct State {
     /// The hash of the rule facts held and retracted ([`Facts::rules`]),
     /// once read; reset by a write of one.
     rules: OnceLock<Option<Blake3Hash>>,
+    /// Each attribute the log writes, once: what a read asks of the writes
+    /// to learn whether one lands in a store, with no scan of them.
+    attributes: HashSet<Relation>,
+    /// The log's writes that declare a placement, for a read to resolve
+    /// the placements in force with no scan of the rest.
+    declarations: Changes,
 }
 
 /// A settlement of a store's writes under one observation of the lines.
@@ -177,6 +184,23 @@ impl State {
             is: value.clone(),
             cause: None,
         };
+        if !self.attributes.contains(the) {
+            self.attributes.insert(the.clone());
+        }
+        if is_declaration(the) {
+            match change {
+                Change::Assert(value, policy) => self.declarations.associate(
+                    the.clone(),
+                    of.clone(),
+                    value.clone(),
+                    policy.clone(),
+                ),
+                Change::Retract(value) => {
+                    self.declarations
+                        .dissociate(the.clone(), of.clone(), value.clone())
+                }
+            }
+        }
         match change {
             Change::Assert(value, policy) => {
                 if policy.elects() {
@@ -278,6 +302,30 @@ impl Staged {
     /// Every write in the order the transaction made it.
     pub(crate) fn log(&self) -> &[(Relation, Entity, Change)] {
         &self.0.log
+    }
+
+    /// Each attribute a write names, once.
+    pub(crate) fn attributes(&self) -> impl Iterator<Item = &Relation> {
+        self.0.attributes.iter()
+    }
+
+    /// The writes that declare a placement, as a batch.
+    pub(crate) fn declarations(&self) -> &Changes {
+        &self.0.declarations
+    }
+
+    /// These writes without those of each attribute `leaves` names, in the
+    /// order the transaction made them, as a store of its own: it shares no
+    /// settlement with this one, whose writes differ.
+    pub(crate) fn without(&self, leaves: impl Fn(&Relation) -> bool) -> Self {
+        let mut state = State {
+            assets: self.0.assets.clone(),
+            ..State::default()
+        };
+        for (the, of, change) in self.log().iter().filter(|(the, ..)| !leaves(the)) {
+            state.apply_change(the, of, change);
+        }
+        Self(Arc::new(state))
     }
 
     /// Whether any write succeeds a claim the commit has yet to settle.

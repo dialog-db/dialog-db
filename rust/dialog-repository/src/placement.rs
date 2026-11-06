@@ -101,6 +101,15 @@ pub(crate) fn transient_placement_attr() -> Relation {
     the!("dialog.attribute/transient").into()
 }
 
+/// Whether `the` declares a placement: what [`Placements::resolve`] reads
+/// of a commit's writes.
+pub(crate) fn is_declaration(the: &Relation) -> bool {
+    matches!(
+        the.as_str(),
+        "dialog.attribute/scope" | "dialog.attribute/default" | "dialog.attribute/transient"
+    )
+}
+
 /// The URI scheme attribute entities are minted under.
 const ATTRIBUTE_SCHEME: &str = "attribute:";
 
@@ -1598,6 +1607,164 @@ mod tests {
                 "after the transaction wrote {value}"
             );
         }
+        Ok(())
+    }
+
+    /// A write of `value` to `the` under the pick `last`.
+    fn latest(the: &str, of: &Entity, value: &str) -> Result<dialog_query::AttributeStatement> {
+        Ok(dialog_query::AttributeStatement {
+            the: Relation::from(the.parse::<dialog_corpus::Relation>()?),
+            of: of.clone(),
+            is: Value::String(value.into()),
+            cause: None,
+            cardinality: Some(dialog_query::Cardinality::One),
+            pick: Some(Pick::Last),
+        })
+    }
+
+    /// The selection of each text value of `the` for `of`.
+    fn texts_of(the: &str, of: &Entity) -> Result<AttributeQuery> {
+        Ok(AttributeQuery::from(
+            Term::<Relation>::from(the.parse::<Relation>()?)
+                .of(Term::<Entity>::from(of.clone()))
+                .is(Term::<String>::var("v")),
+        ))
+    }
+
+    /// A query of a transaction reads a store as the commit will leave it.
+    /// A write that lands in the session store replaces the row of the cell,
+    /// so the read gives the new value alone, as it does for a cell of the
+    /// tree, and the store itself does not change until the commit lands.
+    #[dialog_common::test]
+    async fn it_reads_the_session_row_a_write_of_the_transaction_replaces() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        branch.bind(session(), Target::Session);
+        branch
+            .transaction()
+            .assert(Placement::new("ui/selected".parse()?, session()))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+        let doc: Entity = "doc:1".parse()?;
+        let general = || vec![Value::String("general".into())];
+        let books = || vec![Value::String("books".into())];
+        branch
+            .transaction()
+            .assert(latest("ui/selected", &doc, "general")?)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+        assert_eq!(held_in_session(&branch, "ui/selected", &doc)?, general());
+
+        let transaction = branch
+            .transaction()
+            .assert(latest("ui/selected", &doc, "books")?)
+            .assert(latest("ui/title", &doc, "Books")?);
+        let read =
+            async |transaction: &crate::Transaction<&Branch>, the: &str| -> Result<Vec<Value>> {
+                let claims = transaction
+                    .query()
+                    .select(texts_of(the, &doc)?)
+                    .perform(&operator)
+                    .try_vec()
+                    .await?;
+                Ok(claims.into_iter().map(|claim| claim.is).collect())
+            };
+        assert_eq!(read(&transaction, "ui/selected").await?, books());
+        assert_eq!(
+            read(&transaction, "ui/title").await?,
+            vec![Value::String("Books".into())],
+            "a write that lands in the tree stays a staged write"
+        );
+        assert_eq!(
+            held_in_session(&branch, "ui/selected", &doc)?,
+            general(),
+            "the store does not change until the commit lands"
+        );
+
+        // A later write of the same transaction reads the same way, and the
+        // commit leaves what the read gave.
+        let transaction = transaction.assert(latest("ui/selected", &doc, "random")?);
+        let random = vec![Value::String("random".into())];
+        assert_eq!(read(&transaction, "ui/selected").await?, random);
+        transaction.commit().publish().perform(&operator).await?;
+        branch.refresh(&operator).await?;
+        assert_eq!(held_in_session(&branch, "ui/selected", &doc)?, random);
+        Ok(())
+    }
+
+    /// A query of a transaction elects a concept over a store as the commit
+    /// will leave it, on a branch and on a snapshot. A write of an attribute
+    /// that is also transient lives one round and lands in no store, so the
+    /// row of the store stands.
+    #[dialog_common::test]
+    async fn it_elects_over_the_session_row_a_write_of_a_snapshot_replaces() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        branch.bind(session(), Target::Session);
+        branch
+            .transaction()
+            .assert(Placement::new("ui/selected".parse()?, session()))
+            .assert(Placement::new("ui/passing".parse()?, session()))
+            .assert(TransientAttribute::new("ui/passing".parse()?))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+        let doc: Entity = "doc:1".parse()?;
+        let snapshot = branch.snapshot().expect("a committed branch snapshots");
+        snapshot.bind(session(), Target::Session);
+        snapshot
+            .overlay()
+            .assert(latest("ui/passing", &doc, "kept")?)?;
+        snapshot
+            .transaction()
+            .assert(latest("ui/selected", &doc, "general")?)
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let predicate: dialog_query::ConceptDescriptor = serde_json::from_value(json!({ "with": {
+            "name": { "the": "ui/selected", "as": "text:", "cardinality": "one" }
+        }}))?;
+        let mut terms = dialog_query::Parameters::new();
+        terms.insert("this".to_string(), Term::var("this"));
+        terms.insert("name".to_string(), Term::var("name"));
+        let transaction = snapshot
+            .transaction()
+            .assert(latest("ui/selected", &doc, "books")?)
+            .assert(latest("ui/passing", &doc, "gone")?);
+        let rows = transaction
+            .query()
+            .select(dialog_query::ConceptQuery { predicate, terms })
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        let names: Vec<String> = rows
+            .iter()
+            .map(|row| row.get::<String>("name"))
+            .collect::<Result<_, _>>()?;
+        assert_eq!(names, vec!["books".to_string()]);
+
+        let passing = transaction
+            .query()
+            .select(texts_of("ui/passing", &doc)?)
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        let passing: Vec<Value> = passing.into_iter().map(|claim| claim.is).collect();
+        assert!(
+            passing.contains(&Value::String("kept".into())),
+            "a transient write replaces no row of the store: {passing:?}"
+        );
         Ok(())
     }
 
