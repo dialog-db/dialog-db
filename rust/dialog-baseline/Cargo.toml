@@ -52,6 +52,8 @@ zstd = "0.13"
 # read a space's rules and concepts and keep their dataset as JSON lines.
 dialog-credentials = { workspace = true }
 dialog-query = { workspace = true }
+dialog-remote-fs = { workspace = true }
+dialog-varsig = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 # The search tree's volatile test archive, for the examples that build
@@ -65,3 +67,8 @@ harness = false
 [[bench]]
 name = "se_replay"
 harness = false
+
+[lints.rust]
+# `tonk_bench` builds in a worktree of main with `--cfg dialog_main`,
+# leaving out the stores main does not have.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(dialog_main)"] }

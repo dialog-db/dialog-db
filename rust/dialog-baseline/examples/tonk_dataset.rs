@@ -25,6 +25,10 @@
 mod dataset;
 
 #[cfg(not(target_arch = "wasm32"))]
+#[path = "tonk/generate.rs"]
+mod generate;
+
+#[cfg(not(target_arch = "wasm32"))]
 fn main() -> anyhow::Result<()> {
     native::main()
 }
@@ -51,6 +55,7 @@ mod native {
     use futures_util::TryStreamExt as _;
 
     use crate::dataset::{self, Change, Line, Op, Phase};
+    use crate::generate;
 
     pub fn main() -> anyhow::Result<()> {
         let args: Vec<String> = std::env::args().skip(1).collect();
@@ -61,8 +66,93 @@ mod native {
                 eprintln!("wrote {out}, dataset {hash}");
                 Ok(())
             }
-            _ => anyhow::bail!("usage: tonk_dataset export <replica data dir> <out.jsonl>"),
+            [mode, export, out] if mode == "week" => {
+                let lines = week(Path::new(export))?;
+                let hash = dataset::write(Path::new(out), lines)?;
+                eprintln!("wrote {out}, dataset {hash}");
+                Ok(())
+            }
+            [mode, export, scale, out] if mode == "generate" => {
+                let lines = generated(Path::new(export), scale.parse()?)?;
+                let hash = dataset::write(Path::new(out), lines)?;
+                eprintln!("wrote {out}, dataset {hash}");
+                Ok(())
+            }
+            _ => anyhow::bail!(
+                "usage: tonk_dataset export <replica data dir> <out.jsonl>\n       \
+                 tonk_dataset week <export.jsonl> <out.jsonl>\n       \
+                 tonk_dataset generate <export.jsonl> <scale> <out.jsonl>"
+            ),
         }
+    }
+
+    /// The concepts and schema an export carries, and its shape.
+    fn read_export(
+        export: &Path,
+    ) -> anyhow::Result<(
+        Vec<Line>,
+        generate::Concepts,
+        Line,
+        generate::Shape,
+        generate::Existing,
+    )> {
+        let lines = dataset::read(export)?;
+        let concepts = lines
+            .iter()
+            .find_map(|line| match line {
+                Line::Concepts { concepts } => Some(concepts.clone()),
+                _ => None,
+            })
+            .ok_or_else(|| anyhow::anyhow!("the export holds no concepts"))?;
+        let schema = lines
+            .iter()
+            .find(|line| matches!(line, Line::Schema { .. }))
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("the export holds no schema"))?;
+        let (shape, existing) = generate::shape(&lines, &concepts)?;
+        eprintln!("shape of the export: {shape:?}");
+        Ok((lines, concepts, schema, shape, existing))
+    }
+
+    /// The export, then a week of [`generate::MEMBERS`] members' writes
+    /// over it.
+    fn week(export: &Path) -> anyhow::Result<Vec<Line>> {
+        let (mut lines, concepts, _, shape, existing) = read_export(export)?;
+        let mut generator = generate::Generator::new(&concepts, 733).building_on(&existing);
+        if let Some(Line::Header { source, .. }) = lines.first_mut() {
+            *source = "export+week".into();
+        }
+        lines.push(Line::Members {
+            count: generate::MEMBERS,
+        });
+        lines.push(generator.members()?);
+        lines.extend(generator.week(&shape)?);
+        Ok(lines)
+    }
+
+    /// A space shaped like the export at `scale`, built through its
+    /// commands, then a week of its members' writes.
+    fn generated(export: &Path, scale: usize) -> anyhow::Result<Vec<Line>> {
+        let (_, concepts, schema, shape, _) = read_export(export)?;
+        let seed = 733 + scale as u64;
+        let mut generator = generate::Generator::new(&concepts, seed);
+        let mut lines = vec![
+            Line::Header {
+                source: "generate".into(),
+                seed,
+                scale: scale as u32,
+            },
+            Line::Concepts {
+                concepts: concepts.clone(),
+            },
+            schema,
+            Line::Members {
+                count: generate::MEMBERS,
+            },
+        ];
+        lines.extend(generator.space(&shape, scale)?);
+        lines.extend(generator.week(&shape)?);
+        Ok(lines)
     }
 
     /// Every file under `directory`, with when it was last written.

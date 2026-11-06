@@ -48,6 +48,13 @@ pub enum Line {
         /// What it changes, in order.
         changes: Vec<Change>,
     },
+    /// How many members write to the space, each a replica and a profile
+    /// of their own. An entity `id:member-<n>` anywhere in the dataset
+    /// stands for member `n`'s profile, which only a run knows.
+    Members {
+        /// How many.
+        count: u32,
+    },
     /// A command: facts of a transient concept, which the space's rules
     /// turn into what the command does when it is committed.
     Command {
@@ -55,11 +62,17 @@ pub enum Line {
         phase: Phase,
         /// The command concept's name, as the space names it.
         name: String,
-        /// Which of the dataset's people asks.
+        /// Which member sends it.
         author: u32,
-        /// The command's facts.
+        /// The command's facts, dispatched.
         changes: Vec<Change>,
+        /// Facts committed with it, as a page asserts beside a command.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        durable: Vec<Change>,
     },
+    /// The end of a round: every member, in turn, pulls what the others
+    /// pushed and pushes what it committed.
+    Sync,
 }
 
 /// What a commit or command in a dataset is for.
@@ -119,6 +132,16 @@ pub fn read(path: &Path) -> anyhow::Result<Vec<Line>> {
         lines.push(serde_json::from_str(&line?)?);
     }
     Ok(lines)
+}
+
+/// The profile a dataset's entity stands for, if it is `id:member-<n>`.
+pub fn member(entity: &str) -> Option<u32> {
+    entity.strip_prefix("id:member-")?.parse().ok()
+}
+
+/// The entity a dataset writes for member `n`'s profile.
+pub fn member_entity(n: u32) -> String {
+    format!("id:member-{n}")
 }
 
 /// The hash a run names the dataset at `path` by: the first 16 hex digits
