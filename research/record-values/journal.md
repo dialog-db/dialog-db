@@ -9,16 +9,23 @@ What we tried, what it measured, and what we decided, newest last. The
 statuses mean.
 
 - **Built:** nothing.
-- **Decided:** records name their type; fields can be destructured in
-  queries and read without decoding the whole; repeated strings are written
-  once; payloads dialog does not interpret are carried under their type;
-  equality is of canonical bytes, with token ids a shortcut inside one
-  replica.
-- **Open:** the four decisions in the topic (ordering, names on the wire,
-  documents that grow, destructuring without an index).
-- **Next:** a census of the records in tonk-team's history: how many, by
-  type, their sizes, and how much of each repeats within the record and
-  across records.
+- **Decided:** records are flat and atomic. Fields are named by
+  attributes and destructured as `{lat ?lat}`. Equality follows tokens as
+  key comparison does, resolving them across sources, and the wire carries
+  the canonical form. Repetition across records is shared through the
+  replica's tokens, not inside a record. Payloads dialog does not
+  interpret are carried as field values.
+- **Open:** whether a record's attributes name its type, or it carries a
+  tag; a value, or claims on an entity identified by its pairs (which
+  decides whether fields are indexed); many-valued attributes in a record;
+  documents that grow.
+- **Stale:** the [topic](../record-values.md) still states the first
+  entry's framing (a type tag, a string table inside the record, free
+  field names). It is revised once the open three are answered.
+- **Next:** settle the open three by reasoning, then a census of the
+  records in tonk-team's history: how many, their sizes, and how much
+  repeats across them.
+- **Blocked:** neither dataset is in this session's container.
 
 ## Datasets
 
@@ -55,6 +62,47 @@ replica. Field names live in the record, written once, with later
 occurrences referring back. Where the shared strings sit (one region or
 interleaved) and whether references are offsets is for the spike. The bars
 in the topic are proposed and await the maintainer.
+
+## 2026-11-06 — Equality follows tokens, and fields are attributes
+
+**Question.** What a record's canonical form has to carry, once the
+replica shares tokens across records, and how its fields are named.
+
+**Method.** Discussion; nothing measured.
+
+**Results.** As the maintainer stated them:
+
+- Equality follows the pattern of key comparison: records read over the
+  same source compare by their token references, records from different
+  sources resolve their tokens, and the wire carries the resolved,
+  canonical form.
+- Repetition is expected across records, not within one.
+- Fields are named by attributes: in `{lat ?lat}`, `lat` is an attribute
+  reference, not a free name.
+- Records are flat for now; nesting may come later.
+
+Consequences raised, not yet decided:
+
+- `Hash` cannot take the same-source shortcut: equal records from
+  different sources must hash alike, so it runs over the canonical form,
+  computed once and kept with the value.
+- A sorted run of attribute and value pairs is an EAV run without its
+  entity. Laid out as key tails, a record would compare, find a field and
+  split into file tokens with the code and the tokens keys already use.
+- Such a record is a concept instance without `this`. A concept's identity
+  is the sorted set of its attributes' identities (`notes/concept.md`), so
+  the attributes may already name the record's type.
+- The alternative is claims on an entity identified by the hash of its
+  pairs: atomic through the claim that refers to it, every field indexed,
+  at (n+1) claims in three orderings per write, the cost #636 measured.
+
+**Decision.** The four results above are settled. They replace the first
+entry's string table inside the record and its "later occurrences
+referring back": sharing moves from the record to the replica's tokens.
+Not decided: whether attributes name the type, value or entity, and
+many-valued attributes.
+
+Commits: this entry.
 
 ## How to reproduce
 
