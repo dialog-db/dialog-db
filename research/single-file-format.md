@@ -1,6 +1,6 @@
 # Single-file representation
 
-Status: Building, on [dialog-db/dialog-db#733](https://github.com/dialog-db/dialog-db/pull/733), where its research, journal and design live until it lands here. See the [research index](../README.md) for what the statuses mean.
+Status: Building, on [dialog-db/dialog-db#733](https://github.com/dialog-db/dialog-db/pull/733), where its journal, evaluation and results live until it lands. See the [research index](README.md) for what the statuses mean.
 
 ## Idea
 

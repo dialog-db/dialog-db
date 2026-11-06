@@ -1,6 +1,6 @@
 # Graph queries
 
-Status: Proposed. See the [research index](../README.md) for what the statuses mean.
+Status: Proposed. See the [research index](README.md) for what the statuses mean.
 
 ## Idea
 
