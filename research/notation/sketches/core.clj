@@ -2,13 +2,15 @@
 ;; (origin/main), redone in this notation. It is not a line-by-line
 ;; translation: workarounds the notation no longer needs are gone. See
 ;; notebook.clj for the assumptions. Also assumed here: `action: [...]` right
-;; after a concept's head gives the words that say a command, and `role:` on a
-;; `the` line is the palette slot a command's field fills.
+;; after a concept's head gives the words that say a command, and `role:` on an
+;; attribute line is the palette slot a command's field fills.
 ;;
 ;; Could not express:
 ;; - Concept, field and rule descriptions are schema data tonk shows agents; here they are comments.
 ;; - Templates and handlers name models by pinned URI (model=tonk:blob, tonk:site); kept verbatim.
-;; - tonk/load writes site's stored xyz.tonk.site/path: declared twice, transient once.
+;; - tonk/load writes site's stored xyz.tonk.site/path: declared twice, once in
+;;   `:now`. The layer is part of an attribute's identity, so these are two
+;;   attributes, and a rule copies one into the other.
 ;; - A concept with no fields: diagnose keeps its unused name field as the marker's shape.
 ;; - element! is named by its tag, though element's first parameter is its hashed entity.
 ;;
@@ -90,7 +92,7 @@
 ;; the host's FABB, so rendering an empty space rotates no credential.
 ;; `subject` is the replica's subject DID.
 (concept! (blank ?b subject: ?subject)
-  (the dialog.replica/subject of: ?b is: ?subject as: :entity pick: :last))
+  (dialog.replica/subject ?b is: ?subject as: :entity pick: :last))
 
 (view! blank
   show: {:ui """
@@ -115,10 +117,8 @@
 ;; form's hidden input on click (the workspace's `{name}` is a display label);
 ;; `remote` is the sync URL the form submits.
 (concept! (space/enable-sync ?c name: ?name remote: ?remote)
-  (default ?c is: {xyz.tonk.command.create-space/name ?name
-                   xyz.tonk.command.create-space/remote ?remote})
-  (the xyz.tonk.command.create-space/name of: ?c is: ?name as: :text pick: :last transient: true)
-  (the xyz.tonk.command.create-space/remote of: ?c is: ?remote as: :text pick: :last transient: true))
+  (xyz.tonk.command.create-space/name ?c is: ?name as: :text pick: :last layer: :now)
+  (xyz.tonk.command.create-space/remote ?c is: ?remote as: :text pick: :last layer: :now))
 
 ;;; Sharing
 
@@ -136,8 +136,7 @@
   where: {:time ".timeStamp"})
 
 (concept! (tonk/invite ?c time: ?time)
-  (default ?c is: {xyz.tonk.command.invite/time ?time})
-  (the xyz.tonk.command.invite/time of: ?c is: ?time as: (:float 64) pick: :last transient: true))
+  (xyz.tonk.command.invite/time ?c is: ?time as: (:float 64) pick: :last layer: :now))
 
 ;; Stamp the requesting tab's site for its current path on this branch.
 ;; <tonk-site> writes it through the regular transact API instead of a `/site`
@@ -147,8 +146,7 @@
 ;; params, onto that entity in the branch overlay, superseding in place on
 ;; navigation.
 (concept! (tonk/load ?site path: ?path)
-  (default ?site is: {xyz.tonk.site/path ?path})
-  (the xyz.tonk.site/path of: ?site is: ?path as: :text pick: :last transient: true))
+  (xyz.tonk.site/path ?site is: ?path as: :text pick: :last layer: :now))
 
 ;; `tonk:pause-sync` lives on the profile branch (profile.yaml): the FAB
 ;; dispatches it there, carrying the target space.
@@ -159,8 +157,8 @@
 ;; capability, not a secret. `remote` is a legacy sync-endpoint URL suffix,
 ;; empty since the endpoint moved into the chain's signed `home.address` meta.
 (concept! (authorization ?m proof: ?proof remote: ?remote)
-  (the xyz.tonk.authorization/proof of: ?m is: ?proof as: :text pick: :last)
-  (the xyz.tonk.authorization/remote of: ?m is: ?remote as: :text pick: :last))
+  (xyz.tonk.authorization/proof ?m is: ?proof as: :text pick: :last)
+  (xyz.tonk.authorization/remote ?m is: ?remote as: :text pick: :last))
 
 ;; The private half, on the same membership DID: the keypair's base58 seed
 ;; (the `#` fragment of the invite URL) and the complete URL, shortened when
@@ -168,8 +166,8 @@
 ;; overlay, never to the branch tree, so the secrets stay out of storage. The
 ;; URL carries the seed, so it is exactly as secret.
 (concept! (credential ?m seed: ?seed link: ?link)
-  (the xyz.tonk.credential/seed of: ?m is: ?seed as: :text pick: :last)
-  (the xyz.tonk.credential/link of: ?m is: ?link as: :text pick: :last))
+  (xyz.tonk.credential/seed ?m is: ?seed as: :text pick: :last)
+  (xyz.tonk.credential/link ?m is: ?link as: :text pick: :last))
 
 ;; An invite that can be used to join a space: both halves on one membership
 ;; DID, so the share view renders only once the handler has written both.
@@ -214,17 +212,16 @@
 ;; its response have attributes of their own, apart from ordinary sharing's.
 ;; The invite controls fire it on mount.
 (concept! (tonk/agent-handoff ?h time: ?time)
-  (default ?h is: {xyz.tonk.agent-handoff/time ?time})
-  (the xyz.tonk.agent-handoff/time of: ?h is: ?time as: (:float 64) pick: :last))
+  (xyz.tonk.agent-handoff/time ?h is: ?time as: (:float 64) pick: :last))
 
 ;; The session-only response to a handoff: `status` is the ready marker or a
 ;; pending or failure explanation, `link` the scoped invitation URL when ready
 ;; and empty otherwise, `account` the account a legacy handoff required (a
 ;; profile placeholder for bearer invitations).
 (concept! (tonk/agent-handoff-state ?r status: ?status link: ?link account: ?account)
-  (the xyz.tonk.agent-handoff/status of: ?r is: ?status as: :text pick: :last)
-  (the xyz.tonk.agent-handoff/link of: ?r is: ?link as: :text pick: :last)
-  (the xyz.tonk.agent-handoff/account of: ?r is: ?account as: :entity pick: :last))
+  (xyz.tonk.agent-handoff/status ?r is: ?status as: :text pick: :last)
+  (xyz.tonk.agent-handoff/link ?r is: ?link as: :text pick: :last)
+  (xyz.tonk.agent-handoff/account ?r is: ?account as: :entity pick: :last))
 
 (view! tonk/agent-handoff-state
   show: {:ui """
@@ -244,16 +241,14 @@
 ;; Create a separate agent invitation when the user asks for one: a handoff
 ;; that carries the explicit new-invitation marker.
 (concept! (tonk/new-agent-invite ?h time: ?time fresh: ?fresh)
-  (default ?h is: {xyz.tonk.agent-handoff/time ?time
-                   xyz.tonk.agent-handoff/fresh ?fresh})
   (tonk/agent-handoff ?h time: ?time)
-  (the xyz.tonk.agent-handoff/fresh of: ?h is: ?fresh as: :text pick: :last))
+  (xyz.tonk.agent-handoff/fresh ?h is: ?fresh as: :text pick: :last))
 
 ;; The session-only action for another scoped invitation. `mode` is a marker
 ;; only the scoped invitation adapter emits. The controls stay reachable when
 ;; a transient link is unavailable.
 (concept! (tonk/connection-invite-controls ?c mode: ?mode)
-  (the xyz.tonk.agent-handoff/mode of: ?c is: ?mode as: :text pick: :last))
+  (xyz.tonk.agent-handoff/mode ?c is: ?mode as: :text pick: :last))
 
 (view! tonk/connection-invite-controls
   show: {:ui """
@@ -326,8 +321,8 @@
 ;; invitations leave it unused.
 (concept! (tonk/agent-invite ?r name: ?name link: ?link account: ?account)
   (repo/name ?r is: ?name)
-  (the xyz.tonk.agent-invite/link of: ?r is: ?link as: :text pick: :last)
-  (the xyz.tonk.agent-invite/account of: ?r is: ?account as: :entity pick: :last))
+  (xyz.tonk.agent-invite/link ?r is: ?link as: :text pick: :last)
+  (xyz.tonk.agent-invite/account ?r is: ?account as: :entity pick: :last))
 
 ;; Why the latest invite request produced no shareable link, written into the
 ;; session overlay by the worker: a stable refusal class, a human-readable
@@ -336,9 +331,9 @@
 ;; while neither exists they show a pending label, which a refusal replaces
 ;; with the worker's reason.
 (concept! (share/blocked ?s blocked: ?blocked detail: ?detail time: ?time)
-  (the xyz.tonk.share/blocked of: ?s is: ?blocked as: :text pick: :last)
-  (the xyz.tonk.share/detail of: ?s is: ?detail as: :text pick: :last)
-  (the xyz.tonk.share/time of: ?s is: ?time as: (:float 64) pick: :last))
+  (xyz.tonk.share/blocked ?s is: ?blocked as: :text pick: :last)
+  (xyz.tonk.share/detail ?s is: ?detail as: :text pick: :last)
+  (xyz.tonk.share/time ?s is: ?time as: (:float 64) pick: :last))
 
 (view! share/blocked
   show: {:ui """
@@ -392,9 +387,9 @@
 ;; Only a ready response yields an agent prompt. The prompt's attributes
 ;; differ from the response's, or a pending response with an empty link would
 ;; satisfy the prompt concept directly.
-(assert! (tonk/agent-invite ?r name: ?name link: ?link account: ?account)
-  (tonk/repository ?r name: ?name)
-  (tonk/agent-handoff-state ?r status: "ready" link: ?link account: ?account))
+(rule! (assert (tonk/agent-invite ?r name: ?name link: ?link account: ?account))
+  (when (tonk/repository ?r name: ?name)
+        (tonk/agent-handoff-state ?r status: "ready" link: ?link account: ?account)))
 
 ;; The human-facing invitation; the machine instructions live only in the copy
 ;; button's value.
@@ -541,7 +536,7 @@
 ;; The receipt an agent CLI writes once it has pulled this space and sent a
 ;; reply: a durable acknowledgement, deliberately not an online signal.
 (concept! (agent-connection ?a status: ?status)
-  (the xyz.tonk.agent-connection/status of: ?a is: ?status as: :text pick: :last))
+  (xyz.tonk.agent-connection/status ?a is: ?status as: :text pick: :last))
 
 ;; Receipts are access-management data. Connection feedback belongs to the
 ;; initiating session's FAB, never to the shared space's content.
@@ -564,20 +559,19 @@
 ;; invite claimer, and `name` is the member's self-asserted display name for
 ;; this space. Requiring the role makes a row resolve only once it is stamped.
 (concept! (member ?row member: ?account role: ?role name: ?name)
-  (the xyz.tonk.membership/member of: ?row is: ?account as: :entity pick: :last)
-  (the xyz.tonk.membership/role of: ?row is: ?role as: :entity pick: :last)
-  (the xyz.tonk.membership/name of: ?row is: ?name as: :text pick: :last))
+  (xyz.tonk.membership/member ?row is: ?account as: :entity pick: :last)
+  (xyz.tonk.membership/role ?row is: ?role as: :entity pick: :last)
+  (xyz.tonk.membership/name ?row is: ?name as: :text pick: :last))
 
 ;; The DID of the member to remove. Its own attribute concept, so the palette
 ;; rule below can conclude it.
 (concept! (expel-member/member ?of is: ?is)
-  (the xyz.tonk.command.expel-member/member
-      of: ?of
+  (xyz.tonk.command.expel-member/member ?of
       is: ?is
       as: :entity
       pick: :last
       role: :object
-      transient: true))
+      layer: :now))
 
 ;; Remove a member from this space. The worker's handler does the chain work,
 ;; and the service refuses a removal minted under a member's `/use` chain, so
@@ -586,7 +580,6 @@
 ;; the admin hop under the passkey.
 (concept! (member/expel ?c member: ?account)
   action: ["expel" "remove member"]
-  (default ?c is: {expel-member/member ?account})
   (expel-member/member ?c is: ?account))
 
 ;; One roster row, a member's default view: the display name with the DID's
@@ -735,22 +728,20 @@
 ;; operator-signed, so the adopted history's endpoint stays verifiable after
 ;; the origin's own stores are gone. `tree` is the tree root it adopted.
 (concept! (tonk/transplant ?t origin: ?origin revision: ?revision tree: ?tree)
-  (the xyz.tonk.transplant/origin of: ?t is: ?origin as: :entity pick: :last)
-  (the xyz.tonk.transplant/revision of: ?t is: ?revision as: :bytes pick: :last)
-  (the xyz.tonk.transplant/tree of: ?t is: ?tree as: :text pick: :last))
+  (xyz.tonk.transplant/origin ?t is: ?origin as: :entity pick: :last)
+  (xyz.tonk.transplant/revision ?t is: ?revision as: :bytes pick: :last)
+  (xyz.tonk.transplant/tree ?t is: ?tree as: :text pick: :last))
 
 ;;; Repository
 
 (concept! (repo/name ?of is: ?is)
-  (the xyz.tonk.repo/name
-      of: ?of
+  (xyz.tonk.repo/name ?of
       is: ?is
       as: :text
       pick: :last))
 
 (concept! (repo/description ?of is: ?is)
-  (the xyz.tonk.repo/description
-      of: ?of
+  (xyz.tonk.repo/description ?of
       is: ?is
       as: :text
       pick: :last))
@@ -767,8 +758,7 @@
 ;; durable concepts, workflows, decisions and recurring pitfalls, never
 ;; credentials, invite links, transient status or one-off completions.
 (concept! (tonk/agents-markdown ?of is: ?is)
-  (the xyz.tonk.repo/agents
-      of: ?of
+  (xyz.tonk.repo/agents ?of
       is: ?is
       as: :text
       pick: :last))
@@ -787,13 +777,13 @@
 ;; entity label rather than a boolean: a typo cannot read as another kind, and
 ;; a second kind needs no new attribute.
 (concept! (tonk/agent-space ?r kind: ?kind)
-  (the xyz.tonk.repo/kind of: ?r is: ?kind as: :entity pick: :last))
+  (xyz.tonk.repo/kind ?r is: ?kind as: :entity pick: :last))
 
 ;; Which LLM provider's apps an agent space is for (`claude`, `chatgpt`), on
 ;; the same subject DID. An agent is offered again only to an app of the same
 ;; provider, so Claude and ChatGPT never share one.
 (concept! (tonk/agent-provider ?r provider: ?provider)
-  (the xyz.tonk.agent-space/provider of: ?r is: ?provider as: :text pick: :last))
+  (xyz.tonk.agent-space/provider ?r is: ?provider as: :text pick: :last))
 
 ;; One session key's authorization to act for an agent space, and what a
 ;; session list renders. The entity is the delegation, the agent space's
@@ -815,9 +805,9 @@
 ;; `reason` is `case:agent-session`, an entity label, so a list filters
 ;; without opening envelopes.
 (concept! (agent/session ?d created-at: ?created title: ?title reason: ?reason)
-  (the xyz.tonk.agent-session/created-at of: ?d is: ?created as: (:natural 64) pick: :last)
-  (the xyz.tonk.agent-session/title of: ?d is: ?title as: :text pick: :last)
-  (the xyz.tonk.agent-session/reason of: ?d is: ?reason as: :entity pick: :last))
+  (xyz.tonk.agent-session/created-at ?d is: ?created as: (:natural 64) pick: :last)
+  (xyz.tonk.agent-session/title ?d is: ?title as: :text pick: :last)
+  (xyz.tonk.agent-session/reason ?d is: ?reason as: :entity pick: :last))
 
 ;;; Renaming the repository
 
@@ -825,13 +815,11 @@
 ;; The command is an entity of its own, hashed from its fields; the rule reads
 ;; it to rename the repository it names.
 (concept! (tonk/rename-repository ?cmd repository: ?r name: ?name)
-  (default ?cmd is: {xyz.tonk.rename-repository/subject ?r
-                     xyz.tonk.rename-repository/name ?name})
-  (the xyz.tonk.rename-repository/subject of: ?cmd is: ?r as: :entity pick: :last transient: true)
-  (the xyz.tonk.rename-repository/name of: ?cmd is: ?name as: :text pick: :last transient: true))
+  (xyz.tonk.rename-repository/subject ?cmd is: ?r as: :entity pick: :last layer: :now)
+  (xyz.tonk.rename-repository/name ?cmd is: ?name as: :text pick: :last layer: :now))
 
-(assert! (repo/name! ?r is: ?name)
-  (tonk/rename-repository ?cmd repository: ?r name: ?name))
+(rule! (assert! (repo/name ?r is: ?name))
+  (when (tonk/rename-repository ?cmd repository: ?r name: ?name)))
 
 (event! on/repository-rename
   type: "change"
@@ -858,16 +846,15 @@
 ;; the sealed iframe with no profile-branch access. `did` feeds the sigil;
 ;; `name` is the editable display name.
 (concept! (tonk/identity ?self did: ?did name: ?name)
-  (the xyz.tonk.identity/did of: ?self is: ?did as: :entity pick: :last)
-  (the xyz.tonk.identity/name of: ?self is: ?name as: :text pick: :last))
+  (xyz.tonk.identity/did ?self is: ?did as: :entity pick: :last)
+  (xyz.tonk.identity/name ?self is: ?name as: :text pick: :last))
 
 ;; Rename the signed-in member, read from the editable chip's value on commit.
 ;; No rule: a handler in tonk-worker reacts, since it must reach the profile
 ;; meta branch. The attribute is the command's own, so a space rename never
 ;; renames the profile.
 (concept! (profile/rename ?c name: ?name)
-  (default ?c is: {xyz.tonk.command.profile-rename/name ?name})
-  (the xyz.tonk.command.profile-rename/name of: ?c is: ?name as: :text pick: :last transient: true))
+  (xyz.tonk.command.profile-rename/name ?c is: ?name as: :text pick: :last layer: :now))
 
 ;; The repository's name as plain text: a Hub card mounts it with `view=label`
 ;; inside a per-space `with` context, so each card shows its own space's
@@ -890,14 +877,14 @@
 
 ;; An inspector tile body: <tonk-inspector> over the space named by `source`.
 (concept! (inspector ?i source: ?source)
-  (the xyz.tonk.inspector/source of: ?i is: ?source as: :text pick: :last))
+  (xyz.tonk.inspector/source ?i is: ?source as: :text pick: :last))
 
 ;; The imperative escape hatch: <tonk-portal> writes an author's HTML document
 ;; into a sandboxed iframe, for what templates cannot express (canvas, WebGL,
 ;; widgets). The content is ordinary data, fetched by a nested
 ;; `<tonk-display model=portal>`.
 (concept! (portal ?p content: ?content)
-  (the xyz.tonk.portal/content of: ?p is: ?content as: :text pick: :last))
+  (xyz.tonk.portal/content ?p is: ?content as: :text pick: :last))
 
 ;; A nested <tonk-display> with no `view` attribute resolves the view of its
 ;; model.
@@ -965,16 +952,11 @@
            getter: (option ?getter)
            setter: (option ?setter)
            attribute: (option ?attribute))
-  (default ?e is: {xyz.tonk.element/description ?description
-                   xyz.tonk.element.method ?method
-                   xyz.tonk.element.getter ?getter
-                   xyz.tonk.element.setter ?setter
-                   xyz.tonk.element.attribute ?attribute})
-  (the xyz.tonk.element/description of: ?e is: ?description as: :text pick: :last)
-  (the xyz.tonk.element.method of: ?e is: ?method as: (:dictionary :text) pick: :all)
-  (the xyz.tonk.element.getter of: ?e is: ?getter as: (:dictionary :text) pick: :all)
-  (the xyz.tonk.element.setter of: ?e is: ?setter as: (:dictionary :text) pick: :all)
-  (the xyz.tonk.element.attribute of: ?e is: ?attribute as: (:dictionary :text) pick: :all))
+  (xyz.tonk.element/description ?e is: ?description as: :text pick: :last)
+  (xyz.tonk.element.method ?e is: ?method as: (:dictionary :text) pick: :all)
+  (xyz.tonk.element.getter ?e is: ?getter as: (:dictionary :text) pick: :all)
+  (xyz.tonk.element.setter ?e is: ?setter as: (:dictionary :text) pick: :all)
+  (xyz.tonk.element.attribute ?e is: ?attribute as: (:dictionary :text) pick: :all))
 
 ;; The older shape: one JS module that calls `customElements.define` itself.
 ;; Superseded by element for new work but still supported, and the two
@@ -985,8 +967,7 @@
 ;; guard every module carries lets the first to run win. A module runs once
 ;; per realm; replacing one takes effect on the next page load.
 (concept! (component ?c module: ?module)
-  (default ?c is: {xyz.tonk.component/module ?module})
-  (the xyz.tonk.component/module of: ?c is: ?module as: :text pick: :last))
+  (xyz.tonk.component/module ?c is: ?module as: :text pick: :last))
 
 ;; The bridge to the <tonk-component> loader. The single-entity view loads one
 ;; module; templates mount the directory view (a hidden
@@ -1011,9 +992,9 @@
 ;; commits with, and `branch` the active branches, several when overlays are
 ;; used.
 (concept! (db/session ?s profile: ?profile operator: ?operator branch: ?branch)
-  (the dialog.session/profile of: ?s is: ?profile as: :entity pick: :last)
-  (the dialog.session/operator of: ?s is: ?operator as: :entity pick: :last)
-  (the dialog.session/branch of: ?s is: ?branch as: :entity pick: :all))
+  (dialog.session/profile ?s is: ?profile as: :entity pick: :last)
+  (dialog.session/operator ?s is: ?operator as: :entity pick: :last)
+  (dialog.session/branch ?s is: ?branch as: :entity pick: :all))
 
 ;; A branch on some replica (see tonk/replica). Replicas can create same-named
 ;; branches at different revisions, so a branch is unique per replica rather
@@ -1025,11 +1006,11 @@
             tree: ?tree
             revision: ?revision
             edition: ?edition)
-  (the dialog.branch/name of: ?b is: ?name as: :text pick: :last)
-  (the dialog.branch/replica of: ?b is: ?replica as: :entity pick: :last)
-  (the dialog.branch/tree of: ?b is: ?tree as: :entity pick: :last)
-  (the dialog.branch/revision of: ?b is: ?revision as: :entity pick: :last)
-  (the dialog.branch/edition of: ?b is: ?edition as: :natural pick: :last))
+  (dialog.branch/name ?b is: ?name as: :text pick: :last)
+  (dialog.branch/replica ?b is: ?replica as: :entity pick: :last)
+  (dialog.branch/tree ?b is: ?tree as: :entity pick: :last)
+  (dialog.branch/revision ?b is: ?revision as: :entity pick: :last)
+  (dialog.branch/edition ?b is: ?edition as: :natural pick: :last))
 
 ;;; Spaces
 
@@ -1041,9 +1022,9 @@
 ;; space or tonk:profile for the profile's own replica, which the Hub hides in
 ;; CSS.
 (concept! (space ?s name: ?name subject: ?subject kind: ?kind)
-  (the xyz.tonk.replica/name of: ?s is: ?name as: :text pick: :last)
-  (the xyz.tonk.replica/subject of: ?s is: ?subject as: :entity pick: :last)
-  (the xyz.tonk.replica/kind of: ?s is: ?kind as: :entity pick: :last))
+  (xyz.tonk.replica/name ?s is: ?name as: :text pick: :last)
+  (xyz.tonk.replica/subject ?s is: ?subject as: :entity pick: :last)
+  (xyz.tonk.replica/kind ?s is: ?kind as: :entity pick: :last))
 
 ;; The space's default content. The space route mounts
 ;; `<tonk-display entity={replica} model=tonk/space>`, and the `tonk/space`
@@ -1055,11 +1036,11 @@
 ;; chosen its own, and the next upgrade reverts that write with the rest.
 
 (concept! (seed/name ?n entity: ?e)
-  (the xyz.tonk.seed-name/entity of: ?n is: ?e as: :entity pick: :last transient: true))
+  (xyz.tonk.seed-name/entity ?n is: ?e as: :entity pick: :last layer: :now))
 
-(assert! (name! ?n entity: ?e)
-  (seed/name ?n entity: ?e)
-  (unless (name ?n)))
+(rule! (assert! (name ?n entity: ?e))
+  (when (seed/name ?n entity: ?e)
+        (unless (name ?n))))
 
 (seed/name! id:tonk/space entity: tonk:blank)
 
@@ -1067,8 +1048,8 @@
 ;; carry device-specific metadata about the repository. `subject` is the
 ;; repository's did:key, `profile` the persistent identity on this device.
 (concept! (tonk/replica ?r subject: ?subject profile: ?profile)
-  (the dialog.replica/subject of: ?r is: ?subject as: :entity pick: :last)
-  (the dialog.replica/peer of: ?r is: ?profile as: :entity pick: :last))
+  (dialog.replica/subject ?r is: ?subject as: :entity pick: :last)
+  (dialog.replica/peer ?r is: ?profile as: :entity pick: :last))
 
 ;; This device's live sync status, which the chip renders: sync:idle,
 ;; sync:pending, sync:offline, sync:local or sync:paused. The worker stamps it
@@ -1077,7 +1058,7 @@
 ;; entity. The durable pause preference is apart from it, on the replica
 ;; entity, and only the worker reads it.
 (concept! (tonk/sync ?here status: ?status)
-  (the xyz.tonk.sync/status of: ?here is: ?status as: :entity pick: :last))
+  (xyz.tonk.sync/status ?here is: ?status as: :entity pick: :last))
 
 ;;; Site: a tab's location and what it renders
 
@@ -1102,16 +1083,16 @@
             route: ?route
             concept: ?concept
             selection: (option ?selection))
-  (the xyz.tonk.site/path of: ?site is: ?path as: :text pick: :last)
-  (the xyz.tonk.site/anchor of: ?site is: ?anchor as: :text pick: :last)
-  (the xyz.tonk.site/space of: ?site is: ?space as: :text pick: :last)
-  (the xyz.tonk.site/branch of: ?site is: ?branch as: :text pick: :last)
-  (the xyz.tonk.site/replica of: ?site is: ?replica as: :entity pick: :last)
-  (the xyz.tonk.site/branch-entity of: ?site is: ?branch-entity as: :entity pick: :last)
-  (the xyz.tonk.site/profile-branch of: ?site is: ?profile-branch as: :text pick: :last)
-  (the xyz.tonk.site/route of: ?site is: ?route as: :entity pick: :last)
-  (the xyz.tonk.site/concept of: ?site is: ?concept as: :entity pick: :last)
-  (the xyz.tonk.site/selection of: ?site is: ?selection as: :text pick: :last))
+  (xyz.tonk.site/path ?site is: ?path as: :text pick: :last)
+  (xyz.tonk.site/anchor ?site is: ?anchor as: :text pick: :last)
+  (xyz.tonk.site/space ?site is: ?space as: :text pick: :last)
+  (xyz.tonk.site/branch ?site is: ?branch as: :text pick: :last)
+  (xyz.tonk.site/replica ?site is: ?replica as: :entity pick: :last)
+  (xyz.tonk.site/branch-entity ?site is: ?branch-entity as: :entity pick: :last)
+  (xyz.tonk.site/profile-branch ?site is: ?profile-branch as: :text pick: :last)
+  (xyz.tonk.site/route ?site is: ?route as: :entity pick: :last)
+  (xyz.tonk.site/concept ?site is: ?concept as: :entity pick: :last)
+  (xyz.tonk.site/selection ?site is: ?selection as: :text pick: :last))
 
 ;; Report what the page in a tab has selected. Every guest's bootstrap.js
 ;; reports it as it settles, and the handler records it on the tab's site as
@@ -1119,12 +1100,9 @@
 ;; site fact. `site` is `window.tonk.context.site`, an empty `text` clears the
 ;; selection, and `time` makes reporting the same selection again re-fire.
 (concept! (site/select ?c site: ?site text: ?text time: ?time)
-  (default ?c is: {xyz.tonk.command.site-select/site ?site
-                   xyz.tonk.command.site-select/text ?text
-                   xyz.tonk.command.site-select/time ?time})
-  (the xyz.tonk.command.site-select/site of: ?c is: ?site as: :entity pick: :last transient: true)
-  (the xyz.tonk.command.site-select/text of: ?c is: ?text as: :text pick: :last transient: true)
-  (the xyz.tonk.command.site-select/time of: ?c is: ?time as: (:float 64) pick: :last transient: true))
+  (xyz.tonk.command.site-select/site ?c is: ?site as: :entity pick: :last layer: :now)
+  (xyz.tonk.command.site-select/text ?c is: ?text as: :text pick: :last layer: :now)
+  (xyz.tonk.command.site-select/time ?c is: ?time as: (:float 64) pick: :last layer: :now))
 
 ;; A site renders the route model it matched. The shell mounts a fixed
 ;; `<tonk-display entity=site:… model=tonk:site>`, and this view nests the
@@ -1146,9 +1124,8 @@
 ;; A route's entity is hashed from what it maps, so writing the same route
 ;; twice lands on one entity.
 (concept! (route ?r path: ?path concept: ?c)
-  (default ?r is: {xyz.tonk.route/path ?path xyz.tonk.route/concept ?c})
-  (the xyz.tonk.route/path of: ?r is: ?path as: :text pick: :last)
-  (the xyz.tonk.route/concept of: ?r is: ?c as: :entity pick: :last))
+  (xyz.tonk.route/path ?r is: ?path as: :text pick: :last)
+  (xyz.tonk.route/concept ?r is: ?c as: :entity pick: :last))
 
 ;; The routes this library ships are seed/route commands, not routes. The rule
 ;; writes a route for each one whose path no route claims yet. An upgrade
@@ -1157,14 +1134,12 @@
 ;; space's route. A route the space writes for a path the library already
 ;; routed stands beside the library's until that upgrade.
 (concept! (seed/route ?r path: ?path concept: ?c)
-  (default ?r is: {xyz.tonk.seed-route/path ?path
-                   xyz.tonk.seed-route/concept ?c})
-  (the xyz.tonk.seed-route/path of: ?r is: ?path as: :text pick: :last transient: true)
-  (the xyz.tonk.seed-route/concept of: ?r is: ?c as: :entity pick: :last transient: true))
+  (xyz.tonk.seed-route/path ?r is: ?path as: :text pick: :last layer: :now)
+  (xyz.tonk.seed-route/concept ?r is: ?c as: :entity pick: :last layer: :now))
 
-(assert! (route! path: ?path concept: ?c)
-  (seed/route path: ?path concept: ?c)
-  (unless (route path: ?path)))
+(rule! (assert! (route path: ?path concept: ?c))
+  (when (seed/route path: ?path concept: ?c)
+        (unless (route path: ?path))))
 
 ;;; Seeds: the library a space runs
 
@@ -1175,8 +1150,8 @@
 ;; the same shape). `replaces` is the installed seed this one would
 ;; supersede, so an available seed says on its own that it is an update.
 (concept! (seed/available ?seed source: ?source replaces: ?replaces)
-  (the xyz.tonk.seed/source of: ?seed is: ?source as: :text pick: :last)
-  (the xyz.tonk.seed/replaces of: ?seed is: ?replaces as: :entity pick: :last))
+  (xyz.tonk.seed/source ?seed is: ?source as: :text pick: :last)
+  (xyz.tonk.seed/replaces ?seed is: ?replaces as: :entity pick: :last))
 
 ;; The seed a space is running, on the same entity as seed/available, so a
 ;; fetched seed never looks half-installed. A commit records only what it
@@ -1186,8 +1161,8 @@
 ;; one replaced, or `seed:none` on a first install, so the chain reads
 ;; uniformly.
 (concept! (seed/install ?seed prior: ?prior version: ?version)
-  (the xyz.tonk.seed/prior of: ?seed is: ?prior as: :entity pick: :last)
-  (the xyz.tonk.seed/install-version of: ?seed is: ?version as: :text pick: :last))
+  (xyz.tonk.seed/prior ?seed is: ?prior as: :entity pick: :last)
+  (xyz.tonk.seed/install-version ?seed is: ?version as: :text pick: :last))
 
 ;; How releases before complete installs recorded the seed a space runs. An
 ;; upgrade still reads it: a space carrying it was installed, at least in
@@ -1198,8 +1173,8 @@
 ;; inside the commit cannot name it, while a version is known before the
 ;; batch is written. The commit's history lists every claim it wrote.
 (concept! (seed/installed ?seed prior: ?prior version: ?version)
-  (the xyz.tonk.seed/prior of: ?seed is: ?prior as: :entity pick: :last)
-  (the xyz.tonk.seed/version of: ?seed is: ?version as: :text pick: :last))
+  (xyz.tonk.seed/prior ?seed is: ?prior as: :entity pick: :last)
+  (xyz.tonk.seed/version ?seed is: ?version as: :text pick: :last))
 
 ;;; Route models and their views
 
@@ -1209,9 +1184,9 @@
 ;; content can nest routing consumers, and context reaches them only through
 ;; stamped `with` attributes.
 (concept! (space/route ?site replica: ?replica repo: ?repo branch: ?branch)
-  (the xyz.tonk.site/replica of: ?site is: ?replica as: :entity pick: :last)
-  (the xyz.tonk.site/repo of: ?site is: ?repo as: :text pick: :last)
-  (the xyz.tonk.site/branch of: ?site is: ?branch as: :text pick: :last))
+  (xyz.tonk.site/replica ?site is: ?replica as: :entity pick: :last)
+  (xyz.tonk.site/repo ?site is: ?repo as: :text pick: :last)
+  (xyz.tonk.site/branch ?site is: ?branch as: :text pick: :last))
 
 (view! space/route
   show: {:ui """
@@ -1224,10 +1199,10 @@
 ;; that renders the space's content; the FAB portal is still to come. It
 ;; reuses the site's fields: `space` names the routing context.
 (concept! (workspace/shell ?site space: ?space branch: ?branch replica: ?replica repo: ?repo)
-  (the xyz.tonk.site/space of: ?site is: ?space as: :text pick: :last)
-  (the xyz.tonk.site/branch of: ?site is: ?branch as: :text pick: :last)
-  (the xyz.tonk.site/replica of: ?site is: ?replica as: :entity pick: :last)
-  (the xyz.tonk.site/repo of: ?site is: ?repo as: :text pick: :last))
+  (xyz.tonk.site/space ?site is: ?space as: :text pick: :last)
+  (xyz.tonk.site/branch ?site is: ?branch as: :text pick: :last)
+  (xyz.tonk.site/replica ?site is: ?replica as: :entity pick: :last)
+  (xyz.tonk.site/repo ?site is: ?repo as: :text pick: :last))
 
 ;; The shell mounts the space's content through the `tonk/space` name on the
 ;; active replica, the blank canvas until something repoints it, in the
@@ -1250,9 +1225,9 @@
 ;; slash-tolerant extent, so a namespaced model (`tonk/person`) is captured
 ;; whole.
 (concept! (directory/route ?site model: ?model repo: ?repo branch: ?branch)
-  (the xyz.tonk.site/model of: ?site is: ?model as: :text pick: :last)
-  (the xyz.tonk.site/repo of: ?site is: ?repo as: :text pick: :last)
-  (the xyz.tonk.site/branch of: ?site is: ?branch as: :text pick: :last))
+  (xyz.tonk.site/model ?site is: ?model as: :text pick: :last)
+  (xyz.tonk.site/repo ?site is: ?repo as: :text pick: :last)
+  (xyz.tonk.site/branch ?site is: ?branch as: :text pick: :last))
 
 ;; The display carries its own `with`, which it forwards onto the view it
 ;; mounts, so that view's content resolves the route's space with no routing
@@ -1265,10 +1240,10 @@
 ;; One artifact's page, `/space/{name}/{entity}@{model}`: the model's view of
 ;; that one entity.
 (concept! (artifact/route ?site entity: ?entity model: ?model repo: ?repo branch: ?branch)
-  (the xyz.tonk.site/entity of: ?site is: ?entity as: :entity pick: :last)
-  (the xyz.tonk.site/model of: ?site is: ?model as: :text pick: :last)
-  (the xyz.tonk.site/repo of: ?site is: ?repo as: :text pick: :last)
-  (the xyz.tonk.site/branch of: ?site is: ?branch as: :text pick: :last))
+  (xyz.tonk.site/entity ?site is: ?entity as: :entity pick: :last)
+  (xyz.tonk.site/model ?site is: ?model as: :text pick: :last)
+  (xyz.tonk.site/repo ?site is: ?repo as: :text pick: :last)
+  (xyz.tonk.site/branch ?site is: ?branch as: :text pick: :last))
 
 (view! artifact/route
   show: {:ui """
@@ -1284,11 +1259,11 @@
             view: ?view
             repo: ?repo
             branch: ?branch)
-  (the xyz.tonk.site/entity of: ?site is: ?entity as: :entity pick: :last)
-  (the xyz.tonk.site/model of: ?site is: ?model as: :text pick: :last)
-  (the xyz.tonk.site/view of: ?site is: ?view as: :text pick: :last)
-  (the xyz.tonk.site/repo of: ?site is: ?repo as: :text pick: :last)
-  (the xyz.tonk.site/branch of: ?site is: ?branch as: :text pick: :last))
+  (xyz.tonk.site/entity ?site is: ?entity as: :entity pick: :last)
+  (xyz.tonk.site/model ?site is: ?model as: :text pick: :last)
+  (xyz.tonk.site/view ?site is: ?view as: :text pick: :last)
+  (xyz.tonk.site/repo ?site is: ?repo as: :text pick: :last)
+  (xyz.tonk.site/branch ?site is: ?branch as: :text pick: :last))
 
 (view! adhoc/route
   show: {:ui """
@@ -1317,7 +1292,7 @@
 ;; the `with` ancestor and drives itself from the worker's `tree/*` formulas.
 ;; `name` is unused: a concept needs a field.
 (concept! (diagnose ?d name: ?name)
-  (the db.diagnose/name of: ?d is: ?name as: :text pick: :last))
+  (db.diagnose/name ?d is: ?name as: :text pick: :last))
 
 ;; A directory view: the page carries no entity, and the inspector needs
 ;; none, since it renders the whole branch's tree.
@@ -1335,8 +1310,8 @@
 ;; against blob keep working, and blobs already recorded and templates that
 ;; write blob need no change.
 (concept! (blob ?b content-type: ?type name: ?name)
-  (the xyz.tonk.blob/content-type of: ?b is: ?type as: :text pick: :last)
-  (the xyz.tonk.blob/name of: ?b is: ?name as: :text pick: :last))
+  (xyz.tonk.blob/content-type ?b is: ?type as: :text pick: :last)
+  (xyz.tonk.blob/name ?b is: ?name as: :text pick: :last))
 
 ;; What tonk records about an asset beside dialog's `dialog.asset/size`: its
 ;; media type, such as image/png, and its file name. `tonk.dialog.*` marks
@@ -1346,16 +1321,16 @@
 ;; the vocabularies, so nothing is rewritten and views written against either
 ;; concept see every asset.
 (concept! (asset ?a media-type: ?type name: ?name)
-  (the tonk.dialog.asset/media-type of: ?a is: ?type as: :text pick: :last)
-  (the tonk.dialog.asset/name of: ?a is: ?name as: :text pick: :last))
+  (tonk.dialog.asset/media-type ?a is: ?type as: :text pick: :last)
+  (tonk.dialog.asset/name ?a is: ?name as: :text pick: :last))
 
 ;; A blob recorded with the legacy attributes is an asset.
-(assert! (asset ?b media-type: ?type name: ?name)
-  (blob ?b content-type: ?type name: ?name))
+(rule! (assert (asset ?b media-type: ?type name: ?name))
+  (when (blob ?b content-type: ?type name: ?name)))
 
 ;; An asset is a blob, so views that render blobs render it.
-(assert! (blob ?a content-type: ?type name: ?name)
-  (asset ?a media-type: ?type name: ?name))
+(rule! (assert (blob ?a content-type: ?type name: ?name))
+  (when (asset ?a media-type: ?type name: ?name)))
 
 ;; An asset renders the way a blob does: by the rule above it is one.
 (view! asset
@@ -1795,7 +1770,7 @@
 
 ;; Words that say a command, written on the command itself.
 (concept! (intent/action ?command name: ?name)
-  (the tonk.dialog.intent.action/name of: ?command is: ?name as: :text pick: :all))
+  (tonk.dialog.intent.action/name ?command is: ?name as: :text pick: :all))
 
 ;; Interpret what was typed in the palette, where it was opened. The palette
 ;; makes an expression per opening and sends this as the line changes; its
@@ -1811,29 +1786,25 @@
            input: ?input
            site: ?site
            time: ?time)
-  (default ?c is: {tonk.dialog.intent.interpret/expression ?e
-                   tonk.dialog.intent.interpret/input ?input
-                   tonk.dialog.intent.interpret/site ?site
-                   tonk.dialog.intent.interpret/time ?time})
-  (the tonk.dialog.intent.interpret/expression of: ?c is: ?e as: :entity pick: :last transient: true)
-  (the tonk.dialog.intent.interpret/input of: ?c is: ?input as: :text pick: :last transient: true)
-  (the tonk.dialog.intent.interpret/site of: ?c is: ?site as: :entity pick: :last transient: true)
-  (the tonk.dialog.intent.interpret/time of: ?c is: ?time as: (:float 64) pick: :last transient: true))
+  (tonk.dialog.intent.interpret/expression ?c is: ?e as: :entity pick: :last layer: :now)
+  (tonk.dialog.intent.interpret/input ?c is: ?input as: :text pick: :last layer: :now)
+  (tonk.dialog.intent.interpret/site ?c is: ?site as: :entity pick: :last layer: :now)
+  (tonk.dialog.intent.interpret/time ?c is: ?time as: (:float 64) pick: :last layer: :now))
 
 ;; One opening of the command palette, as interpreted so far, in session
 ;; facts: what is typed, the tab's site where it was opened, when the line was
 ;; last interpreted, and the text selected in the page, when there was some.
 (concept! (intent/expression ?e input: ?input site: ?site time: ?time selection: (option ?selection))
-  (the tonk.dialog.intent.expression/input of: ?e is: ?input as: :text pick: :last)
-  (the tonk.dialog.intent.expression/site of: ?e is: ?site as: :entity pick: :last)
-  (the tonk.dialog.intent.expression/time of: ?e is: ?time as: :float pick: :last)
-  (the tonk.dialog.intent.expression/selection of: ?e is: ?selection as: :text pick: :last))
+  (tonk.dialog.intent.expression/input ?e is: ?input as: :text pick: :last)
+  (tonk.dialog.intent.expression/site ?e is: ?site as: :entity pick: :last)
+  (tonk.dialog.intent.expression/time ?e is: ?time as: :float pick: :last)
+  (tonk.dialog.intent.expression/selection ?e is: ?selection as: :text pick: :last))
 
 ;; What an expression could mean as one command. Rules derive the command's
 ;; field values onto it.
 (concept! (intent ?i expression: ?e command: ?command)
-  (the tonk.dialog.intent/expression of: ?i is: ?e as: :entity pick: :last)
-  (the tonk.dialog.intent/command of: ?i is: ?command as: :entity pick: :last))
+  (tonk.dialog.intent/expression ?i is: ?e as: :entity pick: :last)
+  (tonk.dialog.intent/command ?i is: ?command as: :entity pick: :last))
 
 ;; A member as the account member/expel wants. A roster row is the
 ;; membership; the command takes the account's DID, the row's `member`. This
@@ -1841,11 +1812,11 @@
 ;; value as is. Derived on query: nothing is stored, and it follows the
 ;; roster. `name` is the display name the member uses in this space.
 (concept! (member/account ?account name: ?name)
-  (the xyz.tonk.member.account/name of: ?account is: ?name as: :text pick: :last))
+  (xyz.tonk.member.account/name ?account is: ?name as: :text pick: :last))
 
 ;; Every roster member is an account, named by its membership.
-(assert! (member/account ?account name: ?name)
-  (member member: ?account name: ?name))
+(rule! (assert (member/account ?account name: ?name))
+  (when (member member: ?account name: ?name)))
 
 (view! member/account
   show: {:label """
@@ -1859,7 +1830,7 @@
 ;; already there updates it, or does nothing when it is current. `name` is the
 ;; file without `.yaml`.
 (concept! (library/component ?c name: ?name)
-  (the xyz.tonk.library.component/name of: ?c is: ?name as: :text pick: :last))
+  (xyz.tonk.library.component/name ?c is: ?name as: :text pick: :last))
 
 (view! library/component
   show: {:label """
@@ -1876,41 +1847,37 @@
 ;; Which component to install, `tonk:library/<name>`. Its own attribute
 ;; concept, so the palette rule below can conclude it.
 (concept! (install-component/component ?of is: ?is)
-  (the xyz.tonk.command.install-component/component
-      of: ?of
+  (xyz.tonk.command.install-component/component ?of
       is: ?is
       as: :entity
       pick: :last
       role: :object
-      transient: true))
+      layer: :now))
 
 ;; The moment it was asked, which makes each dispatch distinct.
 (concept! (install-component/time ?of is: ?is)
-  (the xyz.tonk.command.install-component/time
-      of: ?of
+  (xyz.tonk.command.install-component/time ?of
       is: ?is
       as: (:float 64)
       pick: :last
       role: :now
-      transient: true))
+      layer: :now))
 
 ;; Install a library component into this space, or update it.
 (concept! (library/install ?c component: ?component time: ?time)
   action: ["install"]
-  (default ?c is: {install-component/component ?component
-                   install-component/time ?time})
   (install-component/component ?c is: ?component)
   (install-component/time ?c is: ?time))
 
 ;; What "install" can be said of: every component.
-(assert! (install-component/component ?i is: ?component)
-  (intent ?i command: library/install)
-  (library/component ?component))
+(rule! (assert (install-component/component ?i is: ?component))
+  (when (intent ?i command: library/install)
+        (library/component ?component)))
 
 ;; What "expel" can be said of: this space's members.
-(assert! (expel-member/member ?i is: ?account)
-  (intent ?i command: member/expel)
-  (member/account ?account))
+(rule! (assert (expel-member/member ?i is: ?account))
+  (when (intent ?i command: member/expel)
+        (member/account ?account)))
 
 ;; tonk/rename-repository has no verb here: the profile's own rename ("rename
 ;; space", the FABB's) says the same thing, and the palette reads both

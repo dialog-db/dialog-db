@@ -2,16 +2,16 @@
 ;; rust/tonk-core/assets/library/notebook.yaml (origin/main) but is not a
 ;; line-by-line translation: workarounds the notation no longer needs are gone.
 ;;
-;; Assumed here, not yet agreed:
-;; - `the` lines may appear in any concept, so a command declares its fields
-;;   in one form.
-;; - A `(default ?x is: {attribute ?v …})` line gives the entity a write gets
-;;   when it leaves ?x out: the hash of that map, its keys resolved to stored
-;;   attribute names (tonk's anchor-less assertion). Queries skip the line.
+;; Assumed here, beyond what design.md agrees:
+;; - An attribute line is a call on the stored name:
+;;   `(xyz.tonk.notebook/title ?of is: ?is as: :text pick: :last)`.
+;; - `layer: :now` puts a command's fields in the layer that lasts one tick:
+;;   written to trigger rules, never stored.
+;; - A write that leaves the entity out lands on the digest of every
+;;   attribute and value it writes, so a command needs no line saying how its
+;;   entity is made.
 ;; - `(option ?x)` marks a parameter a match may leave unbound.
 ;; - A retract through a concept that omits parameters retracts all their values.
-;; - `transient: true` marks a command's fields: written to trigger rules,
-;;   never stored.
 ;; - `event!` and `view!` name what they define by their first argument, the
 ;;   way `concept!` does. How a name binds to an entity is the naming thread.
 ;; - `"""…"""` is a string that may hold `"`.
@@ -19,38 +19,33 @@
 ;;; Attributes
 
 (concept! (notebook/title ?of is: ?is)
-  (the xyz.tonk.notebook/title
-      of: ?of
+  (xyz.tonk.notebook/title ?of
       is: ?is
       as: :text
       pick: :last))
 
 ;; The notebook's blocks in document order, keyed by fractional position.
 (concept! (notebook/entry ?of is: ?is)
-  (the xyz.tonk.notebook
-      of: ?of
+  (xyz.tonk.notebook ?of
       is: ?is
       as: (:sequence :entity)
       pick: :all))
 
 (concept! (block/notebook ?of is: ?is)
-  (the xyz.tonk.notebook.block/notebook
-      of: ?of
+  (xyz.tonk.notebook.block/notebook ?of
       is: ?is
       as: :entity
       pick: :last))
 
 (concept! (block/source ?of is: ?is)
-  (the xyz.tonk.notebook.block/source
-      of: ?of
+  (xyz.tonk.notebook.block/source ?of
       is: ?is
       as: :text
       pick: :last))
 
 ;; Where a block sits. Derived (see below), except at the document edge.
 (concept! (block/at ?of is: ?is)
-  (the xyz.tonk.notebook.block/at
-      of: ?of
+  (xyz.tonk.notebook.block/at ?of
       is: ?is
       as: :text
       pick: :last))
@@ -69,67 +64,52 @@
 ;;; Commands
 
 ;; Insert a block between two others. The element names no entity: the
-;; insert's entity is its default, hashed from its fields, and it becomes the
-;; block's.
+;; insert's entity is the digest of its fields, and it becomes the block's.
 ;; `before:` is the block it precedes, or tonk:notebook/edge at the end.
 ;; `after:` is the existing block the run of inserts follows, or
 ;; tonk:notebook/edge at the start; every insert of one run carries the same
 ;; `after:`.
 (concept! (block/insert ?b notebook: ?n source: ?s after: ?lo before: ?hi)
-  (default ?b is: {xyz.tonk.notebook.insert/notebook ?n
-                   xyz.tonk.notebook.insert/source ?s
-                   xyz.tonk.notebook.insert/after ?lo
-                   xyz.tonk.notebook.insert/before ?hi})
-  (the xyz.tonk.notebook.insert/notebook of: ?b is: ?n as: :entity pick: :last transient: true)
-  (the xyz.tonk.notebook.insert/source of: ?b is: ?s as: :text pick: :last transient: true)
-  (the xyz.tonk.notebook.insert/after of: ?b is: ?lo as: :entity pick: :last transient: true)
-  (the xyz.tonk.notebook.insert/before of: ?b is: ?hi as: :entity pick: :last transient: true))
+  (xyz.tonk.notebook.insert/notebook ?b is: ?n as: :entity pick: :last layer: :now)
+  (xyz.tonk.notebook.insert/source ?b is: ?s as: :text pick: :last layer: :now)
+  (xyz.tonk.notebook.insert/after ?b is: ?lo as: :entity pick: :last layer: :now)
+  (xyz.tonk.notebook.insert/before ?b is: ?hi as: :entity pick: :last layer: :now))
 
 ;; The element's own edits. Each event fills a command, so each is one.
 (concept! (block/edit ?e block: ?b source: ?s notebook: ?n)
-  (default ?e is: {xyz.tonk.block.edit/subject ?b
-                   xyz.tonk.block.edit/source ?s
-                   xyz.tonk.block.edit/notebook ?n})
-  (the xyz.tonk.block.edit/subject of: ?e is: ?b as: :entity pick: :last transient: true)
-  (the xyz.tonk.block.edit/source of: ?e is: ?s as: :text pick: :last transient: true)
-  (the xyz.tonk.block.edit/notebook of: ?e is: ?n as: :entity pick: :last transient: true))
+  (xyz.tonk.block.edit/subject ?e is: ?b as: :entity pick: :last layer: :now)
+  (xyz.tonk.block.edit/source ?e is: ?s as: :text pick: :last layer: :now)
+  (xyz.tonk.block.edit/notebook ?e is: ?n as: :entity pick: :last layer: :now))
 
 (concept! (block/place ?p block: ?b notebook: ?n key: ?key)
-  (default ?p is: {xyz.tonk.block.place/subject ?b
-                   xyz.tonk.block.place/notebook ?n
-                   xyz.tonk.block.place/key ?key})
-  (the xyz.tonk.block.place/subject of: ?p is: ?b as: :entity pick: :last transient: true)
-  (the xyz.tonk.block.place/notebook of: ?p is: ?n as: :entity pick: :last transient: true)
-  (the xyz.tonk.block.place/key of: ?p is: ?key as: :text pick: :last transient: true))
+  (xyz.tonk.block.place/subject ?p is: ?b as: :entity pick: :last layer: :now)
+  (xyz.tonk.block.place/notebook ?p is: ?n as: :entity pick: :last layer: :now)
+  (xyz.tonk.block.place/key ?p is: ?key as: :text pick: :last layer: :now))
 
 (concept! (block/move ?m block: ?b to: ?key)
-  (default ?m is: {xyz.tonk.block.move/subject ?b xyz.tonk.block.move/to ?key})
-  (the xyz.tonk.block.move/subject of: ?m is: ?b as: :entity pick: :last transient: true)
-  (the xyz.tonk.block.move/to of: ?m is: ?key as: :text pick: :last transient: true))
+  (xyz.tonk.block.move/subject ?m is: ?b as: :entity pick: :last layer: :now)
+  (xyz.tonk.block.move/to ?m is: ?key as: :text pick: :last layer: :now))
 
 (concept! (block/remove ?r block: ?b)
-  (default ?r is: {xyz.tonk.block.remove/subject ?b})
-  (the xyz.tonk.block.remove/subject of: ?r is: ?b as: :entity pick: :last transient: true))
+  (xyz.tonk.block.remove/subject ?r is: ?b as: :entity pick: :last layer: :now))
 
 ;; Its own attribute concept, so the palette rule below can conclude it.
 (concept! (retitle/notebook ?of is: ?is)
-  (the xyz.tonk.notebook.retitle/subject
-      of: ?of
+  (xyz.tonk.notebook.retitle/subject ?of
       is: ?is
       as: :entity
       pick: :last
-      transient: true))
+      layer: :now))
 
 (concept! (notebook/retitle ?r notebook: ?n title: ?title)
-  (default ?r is: {retitle/notebook ?n xyz.tonk.notebook.retitle/title ?title})
   (retitle/notebook ?r is: ?n)
-  (the xyz.tonk.notebook.retitle/title of: ?r is: ?title as: :text pick: :last transient: true))
+  (xyz.tonk.notebook.retitle/title ?r is: ?title as: :text pick: :last layer: :now))
 
 ;;; Positions
 
 ;; A block in the sequence is at its entry's key.
-(assert! (block/at ?b is: ?key)
-  (notebook/entry ?n is: {?key ?b}))
+(rule! (assert (block/at ?b is: ?key))
+  (when (notebook/entry ?n is: {?key ?b})))
 
 ;; The edge is at the empty position, which dialog/position reads as an open
 ;; bound. It anchors both ends, so one rule positions every inserted block.
@@ -138,55 +118,55 @@
 ;; An inserted block sits between the run's anchor and its successor, whose
 ;; position is stored, derived the same way, or the edge's. The recursion
 ;; ends at the edge.
-(assert! (block/at ?b is: ?at)
-  (block/insert ?b after: ?lo before: ?hi)
-  (block/at ?lo is: ?lo-at)
-  (block/at ?hi is: ?hi-at)
-  (dialog/position ?b after: ?lo-at before: ?hi-at is: ?at))
+(rule! (assert (block/at ?b is: ?at))
+  (when (block/insert ?b after: ?lo before: ?hi)
+        (block/at ?lo is: ?lo-at)
+        (block/at ?hi is: ?hi-at)
+        (dialog/position ?b after: ?lo-at before: ?hi-at is: ?at)))
 
 ;;; Effects
 
 ;; An insert creates its block and enters it at its derived position.
-(assert! (notebook/block! ?b notebook: ?n source: ?s)
-  (block/insert ?b notebook: ?n source: ?s))
+(rule! (assert! (notebook/block ?b notebook: ?n source: ?s))
+  (when (block/insert ?b notebook: ?n source: ?s)))
 
-(assert! (notebook/entry! ?n is: {?at ?b})
-  (block/insert ?b notebook: ?n)
-  (block/at ?b is: ?at))
+(rule! (assert! (notebook/entry ?n is: {?at ?b}))
+  (when (block/insert ?b notebook: ?n)
+        (block/at ?b is: ?at)))
 
-(assert! (notebook/block! ?b notebook: ?n source: ?s)
-  (block/edit block: ?b source: ?s notebook: ?n))
+(rule! (assert! (notebook/block ?b notebook: ?n source: ?s))
+  (when (block/edit block: ?b source: ?s notebook: ?n)))
 
-(assert! (notebook/entry! ?n is: {?key ?b})
-  (block/place block: ?b notebook: ?n key: ?key))
+(rule! (assert! (notebook/entry ?n is: {?key ?b}))
+  (when (block/place block: ?b notebook: ?n key: ?key)))
 
 ;; A move enters the block under its new key and drops every other key it held.
-(assert! (notebook/entry! ?n is: {?key ?b})
-  (block/move block: ?b to: ?key)
-  (block/notebook ?b is: ?n))
+(rule! (assert! (notebook/entry ?n is: {?key ?b}))
+  (when (block/move block: ?b to: ?key)
+        (block/notebook ?b is: ?n)))
 
-(retract! (notebook/entry! ?n is: {?old ?b})
-  (block/move block: ?b to: ?key)
-  (notebook/entry ?n is: {?old ?b})
-  (!= ?old ?key))
+(rule! (retract! (notebook/entry ?n is: {?old ?b}))
+  (when (block/move block: ?b to: ?key)
+        (notebook/entry ?n is: {?old ?b})
+        (!= ?old ?key)))
 
 ;; A remove drops the block's entries and the block itself.
-(retract! (notebook/entry! ?n is: {?key ?b})
-  (block/remove block: ?b)
-  (notebook/entry ?n is: {?key ?b}))
+(rule! (retract! (notebook/entry ?n is: {?key ?b}))
+  (when (block/remove block: ?b)
+        (notebook/entry ?n is: {?key ?b})))
 
-(retract! (notebook/block! ?b)
-  (block/remove block: ?b))
+(rule! (retract! (notebook/block ?b))
+  (when (block/remove block: ?b)))
 
-(assert! (notebook/title! ?n is: ?title)
-  (notebook/retitle notebook: ?n title: ?title))
+(rule! (assert! (notebook/title ?n is: ?title))
+  (when (notebook/retitle notebook: ?n title: ?title)))
 
 ;; Said from the palette on a notebook's page, a retitle renames that notebook.
-(assert! (retitle/notebook ?i is: ?n)
-  (intent ?i command: notebook/retitle expression: ?e)
-  (intent/expression ?e site: ?site)
-  (site ?site concept: notebook/route)
-  (notebook/route ?site entity: ?n))
+(rule! (assert (retitle/notebook ?i is: ?n))
+  (when (intent ?i command: notebook/retitle expression: ?e)
+        (intent/expression ?e site: ?site)
+        (site ?site concept: notebook/route)
+        (notebook/route ?site entity: ?n)))
 
 ;;; Events: how <tonk-notebook>'s CustomEvents fill the commands. A `where`
 ;;; key names the command parameter the path fills.
@@ -265,8 +245,8 @@
 ;; The index, `/space/{repo}/notebook`: a draft notebook whose heading is the
 ;; switcher.
 (concept! (notebook/index-route ?site repo: ?repo branch: ?branch)
-  (the xyz.tonk.site/repo of: ?site is: ?repo as: :text pick: :last)
-  (the xyz.tonk.site/branch of: ?site is: ?branch as: :text pick: :last))
+  (xyz.tonk.site/repo ?site is: ?repo as: :text pick: :last)
+  (xyz.tonk.site/branch ?site is: ?branch as: :text pick: :last))
 
 (view! notebook/index-route
   show: {:ui """
@@ -286,9 +266,9 @@
 
 ;; One notebook, `/space/{repo}/notebook/{entity}`.
 (concept! (notebook/route ?site entity: ?n repo: ?repo branch: ?branch)
-  (the xyz.tonk.site/entity of: ?site is: ?n as: :entity pick: :last)
-  (the xyz.tonk.site/repo of: ?site is: ?repo as: :text pick: :last)
-  (the xyz.tonk.site/branch of: ?site is: ?branch as: :text pick: :last))
+  (xyz.tonk.site/entity ?site is: ?n as: :entity pick: :last)
+  (xyz.tonk.site/repo ?site is: ?repo as: :text pick: :last)
+  (xyz.tonk.site/branch ?site is: ?branch as: :text pick: :last))
 
 (view! notebook/route
   show: {:ui """
