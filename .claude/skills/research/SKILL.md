@@ -6,41 +6,42 @@ description: Run a research topic under research/ - turn an idea into a hypothes
 # Doing research
 
 Read `research/README.md` first: it lays out the folder and lists every
-idea and topic with its status. An idea lives in `research/ideas/<name>.md`
-until it is picked up; then it becomes a topic, `research/<topic>/`, with
-the idea moved in as `idea.md`. The single-file format
-([dialog-db/dialog-db#733](https://github.com/dialog-db/dialog-db/pull/733),
-`research/single-file-format/` on its branch) is the worked example: read
-its idea, journal and evaluation before starting a topic.
+topic with its status. A topic is one file, `research/<topic>.md`: the
+idea, its status, and its report once the research is done. While the
+research runs, its working material sits beside it in `research/<topic>/`.
+The single-file format
+([dialog-db/dialog-db#733](https://github.com/dialog-db/dialog-db/pull/733))
+is the worked example: read its topic file, journal and evaluation on that
+branch before starting one.
 
 ## The files
 
 | file | holds | changes |
 |---|---|---|
-| `idea.md` | the question, the hypothesis, what success and failure look like | rarely; a change to the criteria is journaled |
-| `journal.md` | what was tried, measured and decided, newest last | every finding |
-| `spike.md` | the first round of measurements in full, if there was one | once |
-| `design.md` | the current decision and the measurements behind it | when a decision moves |
-| `evaluation.md` | the axes a decision is measured on, and where each stands | as runs come in |
-| `results/` | a report per sitting of runs, with its tables and charts | each sitting |
-| `charts/` | charts a report draws as SVG | with their report |
+| `<topic>.md` | the idea (the question, the hypothesis, what success and failure look like), the status, and the report when it is done | the idea rarely, a change to its bars journaled; the status as it moves |
+| `<topic>/journal.md` | what was tried, measured and decided, newest last | every finding |
+| `<topic>/spike.md` | the first round of measurements in full, if there was one | once |
+| `<topic>/design.md` | the current decision and the measurements behind it | when a decision moves |
+| `<topic>/evaluation.md` | the axes a decision is measured on, and where each stands | as runs come in |
+| `<topic>/results/` | a report per sitting of runs, with its tables and charts | each sitting |
 
-Each file opens with the topic's status and links to the others. Picking
-an idea up moves it, with `git mv`, from `research/ideas/<name>.md` to
-`research/<topic>/idea.md`, and adds the topic to the index.
+A new topic starts as its file alone, **Proposed**. Picking it up adds the
+folder and the journal. Finishing it, landed or shelved, writes the report
+into the topic's file (section 7).
 
 ## Statuses
 
 One of **Proposed** (written down, not picked up), **Exploring** (is it
 worth building), **Building** (decided, being built, open choices being
-measured), **Evaluating** (built, measured against what it would replace), **Landed** (merged; notes move to `notes/`),
-**Shelved** (not worth it, for the reasons the journal gives). The status
-is in `research/README.md`, in the journal's "Where things stand", and at
-the top of the idea. Change them together.
+measured), **Evaluating** (built, measured against what it would replace),
+**Landed** (merged; the topic's file ends with its report), **Shelved** (not
+worth it; the report says why). The status is in `research/README.md`, at
+the top of the topic's file and in the journal's "Where things stand".
+Change them together.
 
 ## 1. The idea: a hypothesis and its bars
 
-Before measuring anything, write down in `idea.md`:
+Before measuring anything, write down in the topic's file:
 
 - **The question**, in a sentence, and the **hypothesis**: what you expect
   and why.
@@ -55,7 +56,7 @@ Before measuring anything, write down in `idea.md`:
   maintainer weighs on the numbers.
 
 Do not move the bars after seeing results. If one was wrong, say so in a
-journal entry, with why, and then change the idea.
+journal entry, with why, and then change the topic's file.
 
 ## 2. The evaluation: axes, not one number
 
@@ -153,8 +154,8 @@ picture.
   ```
 
 - **Several series on one chart** (a growth curve per store): an SVG the
-  harness writes, with a legend, committed beside the journal under
-  `research/<topic>/charts/`. Keep it to polylines, axes and labels, with
+  harness writes, with a legend, committed with its run under
+  `research/<topic>/results/`. Keep it to polylines, axes and labels, with
   no plotting dependency.
 - Name the dataset (and its hash) and the build in the chart's title or
   caption.
@@ -167,6 +168,9 @@ picture.
 
 ## 7. The report
 
-Compiling the evaluation into one report (every axis side by side for
-every variant, with its charts, and the decision it supports) comes once
-the axes have run. This skill will grow a section for it.
+When the research is done, landed or shelved, its report goes into the
+topic's file, after the idea: what was decided, the numbers and charts
+that decided it, every variant side by side on every axis, and what was
+left open. The journal and results stay in `research/<topic>/` as the
+record of how it got there. How to compile one will grow here as the
+first topics finish.
