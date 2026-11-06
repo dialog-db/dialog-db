@@ -333,6 +333,42 @@ datasets nor the space's schema they are made with are committed.
 
 **Status.** Planned, not run.
 
+## 2026-11-06 — tonk-team's commands, run from dialog alone
+
+**Question.** Can dialog, with no tonk code, replay tonk-team and run
+its commands the way tonk does?
+
+**Method.** `tonk_dataset export` reads the replica copy: its history
+region as 1457 commits (43,280 claims), and, split off, the rules and
+command markers live at the head (115 inductive rules, 20 deductive, 89
+command concepts, all readable by this build) and 284 concepts rebuilt
+from tonk's concept records (`db.concept.with/*`, `db.attribute/*`,
+`db.name/referent`). `tonk_bench` replays it into a store, installs the
+rules, and dispatches one `v2/issue-create`.
+
+**Results.**
+
+- The replay takes 11.8–14.7 s into `fs`, which then takes 567 MiB.
+- A command must be *dispatched* (`Transaction::dispatch`), not
+  asserted: asserted, its rule still fires, but the event facts are
+  committed with it. Dispatched, the issue appears and the event does
+  not. One `v2/issue-create` commits in 30–35 ms on `fs`, its rules
+  included.
+- The issues page reads `v2/issue` (title, ident and status required,
+  the rest optional), not `bug`, whose fields are all required and which
+  misses an issue created without an assignee: 282 rows against
+  `v2/issue`'s 301. A query taken from a view's model, not from a concept
+  of the same data, is the one to time.
+- The replica holds 301 issues where the live space answered 294 through
+  tonk's `bug:` query: the shape the generator follows is read from the
+  export, not from the live space.
+
+**Decision.** The harness needs no tonk build. Next: the queries of the
+issues, memos and agents pages, a run of commands, subscriptions and
+pulls, then the `file/*` stores and main.
+
+Commits: `516bb7f`, and the bench below.
+
 ## How to reproduce
 
 ```sh
@@ -348,4 +384,10 @@ DIALOG_CENSUS_ORDER=history DIALOG_CENSUS_FILE=out DIALOG_CENSUS_INDEX=1 \
 # a replica into the file
 cargo run --release -p dialog-migration --features archive-file \
   --bin dialog-migrate -- path/to/profile
+
+# tonk-team as a dataset (outside the repository), then its workload
+cargo run --release -p dialog-baseline --example tonk_dataset -- \
+  export path/to/replica/data/main tonk-team.jsonl
+cargo run --release -p dialog-baseline --example tonk_bench -- \
+  tonk-team.jsonl fs path/to/scratch
 ```

@@ -301,21 +301,22 @@ mod native {
                     _ => None,
                 })
         };
-        let mut fields: HashMap<&str, Vec<(&str, &str, bool)>> = HashMap::new();
+        // A concept's fields each name an attribute record; a field is
+        // optional when the concept flags it so.
+        let mut fields: HashMap<&str, Vec<(&str, String, bool)>> = HashMap::new();
         for ((the, of), values) in &cells {
-            let (field, optional) = if let Some(field) = the.strip_prefix("db.concept.with/") {
-                (field, false)
-            } else if let Some(field) = the.strip_prefix("db.concept.optional/") {
-                (field, true)
-            } else {
+            let Some(field) = the.strip_prefix("db.concept.with/") else {
                 continue;
             };
             if let Some(Value::Entity(attribute)) = values.last() {
-                let attribute: &str = Box::leak(attribute.to_string().into_boxed_str());
+                let flag = format!("db.concept.optional/{field}");
+                let optional = cells
+                    .get(&(flag.as_str(), *of))
+                    .is_some_and(|values| values.last() == Some(&&Value::Boolean(true)));
                 fields
                     .entry(of)
                     .or_default()
-                    .push((field, attribute, optional));
+                    .push((field, attribute.to_string(), optional));
             }
         }
         let mut concepts = BTreeMap::new();
@@ -336,6 +337,7 @@ mod native {
             let mut with = serde_json::Map::new();
             for (field, attribute, optional) in fields {
                 let mut descriptor = serde_json::Map::new();
+                let attribute = attribute.as_str();
                 if let Some(id) = one("db.attribute/id", attribute) {
                     descriptor.insert("the".into(), id.into());
                 }

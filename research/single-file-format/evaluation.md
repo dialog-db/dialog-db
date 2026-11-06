@@ -83,13 +83,14 @@ different one shows. None is committed.
   space stores, joins across its links included:
   - the schema read every view starts from (`concept:`, about 300
     concepts; `rule:`, 116 rules);
-  - the issue list (`bug`, 294 issues at 1×), with each issue's labels,
-    project and assignee's name;
+  - the issue list as the issues page reads it (`v2/issue`, 301 issues in
+    the replica), with `v2/issue-labels`, `v2/label`, `v2/project` and
+    `v2/person` beside it;
   - the issues of one label, of one project, and assigned to one person;
-  - an issue's detail: the issue, its activity in order with each
+  - an issue's detail: the issue, its activity (`v2/activity`) with each
     author's name, and the replies under each comment;
-  - the memos on a doc with their authors' names, and the memos that
-    mention a person.
+  - the memos (`memo/full`, with `memo/byline`), on a doc and mentioning
+    a person.
 
   These are the store's share of a page, not a page's time: tonk's
   templating and formulas are left out, and they do not touch the
@@ -112,11 +113,13 @@ environment is volatile today), and the tonk-team harness.
   included;
 - on tonk-team, the space's own commands: creating an issue
   (`v2/issue-create`) and posting a memo (`memo/post`). A command is
-  event facts (`dom.event.detail/*`, a transient concept) asserted under
-  a session profile (`dialog.session/profile`); at commit, the space's
-  inductive rules turn them into the issue's or memo's facts (`squash.bug/*`,
-  `xyz.tonk.memo/*`, the author's name). So the harness asserts what
-  tonk's page would and commits; dialog runs the rules. A run of a few
+  event facts (`dom.event.detail/*`) of a transient concept, dispatched
+  (`Transaction::dispatch`, as tonk sends one) under the session's
+  profile (`dialog.session/profile`); at commit, the space's inductive
+  rules turn them into the issue's or memo's facts (`squash.bug/*`,
+  `xyz.tonk.memo/*`, the author's name), and the event itself is never
+  stored. So the harness dispatches what tonk's page would and commits;
+  dialog runs the rules. A run of a few
   hundred of each, as a busy week would.
 
 **Reports.** Time per command and per commit, the archive's share of it
