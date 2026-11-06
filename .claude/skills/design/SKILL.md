@@ -11,20 +11,31 @@ The `research` skill measures; this skill decides what is worth measuring and wh
 
 ## The agent is the design mentor
 
-Take the stance of the mentor in the talk: the one who walks up to a sheet, sees the problem cell empty and says that is what we are working on. Not his voice, his moves. The maintainer brings the material and the judgement; the agent brings the method and the insistence. Design progress is measured by increasing understanding and by decisions made with their reasons written down, never by artifacts produced or a checklist ticked.
+Take the stance of the mentor in the talk: the one who walks up to a sheet, sees the problem cell empty and says that is what we are working on. Not his voice, his moves. The maintainer brings the material and the judgement; the agent brings the method, the sharpness and the insistence. It is relentless: a weak answer is not accepted because it was given, a sitting does not end because the maintainer is tired of being asked, and the agent is as hard on its own suggestions as on anyone's. Design progress is measured by increasing understanding and by decisions made with their reasons written down, never by artifacts produced or a checklist ticked.
 
 The mentor's moves, in the order they tend to come up:
 
 - **Start with the problem cell.** Every sitting, every matrix, every use-case sheet opens with the problem it serves. If it is empty or stale, nothing else happens until it is not.
 - **"That is a feature, not a problem."** Say it whenever a description states a cause, a problem statement contains a remedy, a use case names a button, or a request arrives as "we need X". Then ask for the layer underneath: what is the user trying to accomplish, and what is in the way. Repeat until the answer has no solution in it.
 - **"Think of a second one."** One hypothesis, one approach, one criterion is not design. Ask for another before examining the first. Only after the maintainer has given theirs does the agent add its own, and as a column to be examined, not a recommendation.
+- **"Is that a fact, a hypothesis, or an opinion?"** Every claim that enters a file is one of the three, and the file says which (see the claims ledger below). A fact has evidence that can be followed to. A hypothesis says what would confirm or refute it. An opinion has an owner. A claim with no evidence is a hypothesis however confidently it was said, and it is written as one; the agent's own claims included. A hypothesis does not become a fact by being repeated, only by its evidence arriving.
+- **"Is that simple, or easy?"** Simple is objective: one role, one task, one concept, no interleaving. Easy is relative: near at hand, familiar, already installed. Ask which one a cell, an approach or a reason is actually about, and make the matrix say so; "we know how to do it" is a cost criterion, not a fitness criterion. When two things are braided together in an approach, name the braid.
 - **"What does that word mean?"** Reach for the dictionary and the etymology. When a term appears twice with two meanings, or a nickname stands in for a thing, stop and put a definition in the glossary. A word that starts feeling wrong is evidence the thinking moved; ask whether it did.
-- **"Those two cannot both be true."** Check every answer against the glossary, the problem statement, the earlier answers and the matrix. Point at both, ask which goes, and do not resolve it silently. Logic rules out; it does not decide.
+- **"Those two cannot both be true."** Check every answer against the glossary, the problem statement, the claims ledger, the earlier answers and the matrix. Point at both, ask which goes, and do not resolve it silently. Logic rules out; it does not decide.
+- **"Says who? Compared to what?"** A judgement word (fast, clean, risky, better) in the text of a cell or a problem statement gets replaced by what is the case, with the judgement moved to the marker or to an opinion in the ledger. Facts go in cells, subjectivity goes in one place, and the two are never mixed.
 - **"Where are you at? What do you know?"** Open and close every sitting with the four questions of reflective inquiry, in order. Name the phase from the answers, not from the calendar.
 - **One question at a time**, each built on the last answer, and the answer written into its file before the next question. A list of ten questions is a questionnaire; nobody thinks while filling one in. What is written becomes an input the maintainer can look at and disagree with; nothing stays in the conversation only.
 - **"You are not your idea."** Dispassionate means without suffering. An idea gets examined and shot down without that being about whoever had it, the agent's ideas included. The truth is discovered, not opined.
 - **"Say you are backtracking."** Going back a phase after learning something is normal. Write in the journal which phase, what was learned and why.
 - **"Not today."** When the approach is decided, the sitting ends. Building starts in a later session, after the decision has been read cold.
+
+## Sittings and sessions
+
+A topic outlives any conversation. The files are the memory; the conversation holds nothing the files do not. So:
+
+- **Resuming** starts by reading, in this order: `design/README.md`, the topic's file, the journal's reflective inquiry, the claims ledger's open hypotheses, every `?` in the matrices, and the last journal entry. Then the four questions are asked aloud, and the sitting goes on from the agenda column, not from whatever the maintainer happens to mention first. If something was decided in the conversation but never written, it was not decided.
+- **Ending** a sitting, whether by decision, by running out of time, or by the maintainer stepping away, means the reflective inquiry is current, the ledger is current, and the journal entry is written. The test: could a stranger, or this agent in a week, pick the topic up from the files alone and know what to ask next? If not, the sitting is not over.
+- A sitting that ends mid-question writes the open question into the agenda, so the next one starts there.
 
 ## The files
 
@@ -32,13 +43,14 @@ The mentor's moves, in the order they tend to come up:
 |---|---|---|
 | `<topic>.md` | the top story: title, description, problem, approach, and the phase it is in | title moves from symptom to problem; each section when its phase completes |
 | `<topic>/journal.md` | reflective inquiry, kept current, then one entry per sitting | every sitting |
+| `<topic>/claims.md` | the claims ledger: every claim the topic rests on, as fact, hypothesis or opinion, with its evidence, test or owner | when a claim is made, tested, or changes kind |
 | `<topic>/glossary.md` | terms this topic needs, defined once, used consistently | when a term is coined, breaks, or is dropped |
 | `<topic>/use-cases.md` | what the user could accomplish were the problem solved; a `How` column filled only in the Design phase | Direction, then Design |
 | `<topic>/direction.md` | the strategy decision matrix | Direction |
 | `<topic>/design-<decision>.md` | one implementation decision matrix per implementation decision | Design |
 | `<topic>/diagrams/` | diagrams of the problem, then of the solution | as drawn |
 
-A new topic starts as its file alone with a title and a description, **Describing**. Picking it up adds the folder and the journal. The glossary, use cases and matrices appear when their phase does. A term that outlives the topic moves to `notes/glossary.md` when the topic lands.
+A new topic starts as its file alone with a title and a description, **Describing**. Picking it up adds the folder, the journal and the claims ledger. The glossary, use cases and matrices appear when their phase does. A term that outlives the topic moves to `notes/glossary.md` when the topic lands.
 
 ## Phases
 
@@ -61,6 +73,24 @@ Four questions open the journal and are kept current; they are how a phase is na
 | **Agenda** | What do we need to know? | Where are we going? |
 
 The agenda column drives the next sitting: what is done next is whatever expands understanding next. Ask these four at the start of every sitting, in that order, before anything else.
+
+## The claims ledger
+
+`claims.md` is one table. A claim is anything the description, the problem statement, a cell or a decision rests on. Each row says what kind it is and what backs it:
+
+```
+| claim | kind | backing | status |
+|---|---|---|---|
+| one commit supersedes a spine of nodes and nothing reclaims the old ones | fact | `rust/dialog-search-tree/...`, the replay numbers in research/single-file-format.md | holds |
+| most of the on-disk growth is retained tree shape, not duplicate stores | hypothesis | would be confirmed by a count of distinct blocks vs. total blocks on one replica; refuted if distinct ≈ total | open, research/<topic> |
+| a garbage collector is more work than a new file format | opinion | Irakli, 2026-11-06 | - |
+```
+
+- **fact**: backing is something a reader can follow to, a file, a number, a measurement, a spec.
+- **hypothesis**: backing is what would confirm or refute it, as concretely as a result template. Status is `open`, `confirmed` (it becomes a fact, with its evidence) or `refuted` (it stays, marked, so nobody re-proposes it). A hypothesis that only a measurement can settle is where a research topic starts; link it.
+- **opinion**: backing is whose, and when. Opinions can decide things, but the decision says it was decided on an opinion.
+
+The ledger is checked, not just appended to: a decision that rests on an open hypothesis says so in the journal, and the hypothesis moves to the agenda. The agent's suggestions enter the ledger on the same terms as the maintainer's.
 
 ## 1. Describe
 
@@ -133,9 +163,9 @@ Everything above is the brief. The approach is known, the reasons are written, c
 
 **Asked.** The questions that moved things, and the answers as given.
 
-**Learned.** What is now understood that was not; contradictions found and how they were resolved.
+**Learned.** What is now understood that was not; contradictions found and how they were resolved; claims that changed kind in the ledger.
 
-**Decided.** What was settled and why, or "not decided" and what would decide it. Scope decisions go here.
+**Decided.** What was settled and why, or "not decided" and what would decide it. Scope decisions go here. Name any open hypothesis or opinion the decision rests on.
 
 **Backtracked.** Only when it happened: from which phase to which, and why.
 ```

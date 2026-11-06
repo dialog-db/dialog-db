@@ -23,6 +23,9 @@ design/
   <topic>/
     journal.md              reflective inquiry, kept current, then an entry
                             per sitting, newest last
+    claims.md               the claims ledger: what the topic rests on, each
+                            a fact with evidence, a hypothesis with its test,
+                            or an opinion with its owner
     glossary.md             terms the topic needs, defined once
     use-cases.md            what the user could accomplish were the problem
                             solved; How filled in the Design phase
