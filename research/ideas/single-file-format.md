@@ -1,5 +1,7 @@
 # Single-file representation
 
+Status: Building, on [dialog-db/dialog-db#733](https://github.com/dialog-db/dialog-db/pull/733), where its research, journal and design live until it lands here. See the [research index](../README.md) for what the statuses mean.
+
 ## Idea
 
 A replica on native is a directory of files, one per block. That is simple

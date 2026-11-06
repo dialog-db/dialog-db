@@ -1,5 +1,7 @@
 # Graph queries
 
+Status: Proposed. See the [research index](../README.md) for what the statuses mean.
+
 ## Idea
 
 A concept's entity-valued field today is `as: entity`. The reader gets a
