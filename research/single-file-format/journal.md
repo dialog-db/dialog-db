@@ -290,8 +290,25 @@ tonk's), writes (tonk's commands creating issues and memos, inductive
 rules and all), sync (pulling another replica's changes), memory (readers
 and writers apart) and storage growth, for `fs`, the file as built today,
 and the two index finalists built for real. It needs the index behind one
-interface, a store per run in `dialog-perf` and `dialog-soak`, and tonk
-patched to build against this branch.
+interface, and a store per run in `dialog-perf` and `dialog-soak`.
+
+**Tonk without tonk.** The first plan patched tonk to build against this
+branch. It need not: tonk-team carries its schema as facts. Its commands
+are inductive rules the space stores: `v2/issue-create` derives a
+`squash.bug` from `dom.event.detail/create-issue-*` event facts, and
+`memo/post` derives an `xyz.tonk.memo` and its author from
+`dom.event.detail/memo-*` and `dialog.session/profile`. The event is a
+transient concept, and the rules run at commit. A harness in dialog
+asserts the event and commits, and the space's own rules do the rest; its
+views' queries are concept queries over the descriptors it stores (294
+issues, 9 memos, about 300 concepts, 116 rules). What this leaves out is
+tonk's own cost, rendering and the worker's handlers, which no archive
+changes.
+
+**Charts.** The report draws each measure as a Mermaid bar chart, stores
+along the axis (GitHub draws them; Mermaid has no legend, so one series a
+chart), and the growth curves as SVG it writes itself, every store on one
+chart with a legend. Each chart has its numbers in a table under it.
 
 **Status.** Planned, not run.
 
