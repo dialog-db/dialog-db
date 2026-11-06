@@ -1,6 +1,6 @@
 # Single-file representation
 
-Spiked: see [the results](spike.md).
+Status: Building. See the [journal](journal.md) for where the research stands, and [the spike's results](spike.md) for where it started.
 
 ## Idea
 

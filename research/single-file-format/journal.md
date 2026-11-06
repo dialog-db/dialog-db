@@ -8,6 +8,9 @@ Work happens on the `worker/pensive-edison-fu3bx5` branch, PR
 
 ## Where things stand
 
+**Status: Building.** See the [research index](../README.md) for what the
+statuses mean.
+
 - **Built:** `dialog-archive-file`, a space's blocks in one append-only
   file, tree nodes as frames over shared tokens, read by the tree in place
   through a mapping of the file; writers take turns across processes.
@@ -18,7 +21,9 @@ Work happens on the `worker/pensive-edison-fu3bx5` branch, PR
   re-measured there yet).
 - **Speed, against main's `fs` archive:** cold reads level, warm reads the
   same, cached nodes a third of the memory; commits about 2.3 ms slower.
-- **Next:** the block index in the file, as a hitchhiker tree.
+- **Next:** the [evaluation](evaluation.md) that decides the block index's
+  layout on queries, writes, sync, memory and storage; a hitchhiker tree
+  leads on size.
 - **Open:** the writer's token dictionary (in memory today, as a cache);
   skipping unchanged entries on write; values yielded in place by the
   tree's scans; Windows; the web (OPFS); verified range reads.
@@ -266,12 +271,29 @@ pages the index reads: cold, and warm (the top cached).
 
 The full table is in the [design](design.md#where-the-block-index-lives-layouts-replayed).
 
-**Decision.** A hitchhiker tree in the file, children named by position:
-the smallest layout without a merge spike, 6–11% of the data, about a page
-a lookup once its root is cached. The first lookup after opening reads the
-root's chain of versions (7–17 pages), once.
+**Leading, not decided.** A hitchhiker tree in the file, children named by
+position: the smallest layout without a merge spike, 6–11% of the data,
+about a page a lookup once its root is cached. The first lookup after
+opening reads the root's chain of versions (7–17 pages), once. Sorted runs
+merged 4 at a time are the other finalist. Size and pages are one axis;
+the evaluation decides on the rest.
 
 Commits: `e368291`, `66eb85d`.
+
+## 2026-11-06 — How we decide: five axes
+
+**Question.** The index layouts were compared on size and pages a lookup
+reads. What else must a decision weigh?
+
+**Plan.** The [evaluation](evaluation.md): queries (real ones, including
+tonk's), writes (tonk's commands creating issues and memos, inductive
+rules and all), sync (pulling another replica's changes), memory (readers
+and writers apart) and storage growth, for `fs`, the file as built today,
+and the two index finalists built for real. It needs the index behind one
+interface, a store per run in `dialog-perf` and `dialog-soak`, and tonk
+patched to build against this branch.
+
+**Status.** Planned, not run.
 
 ## How to reproduce
 
