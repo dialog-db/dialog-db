@@ -9,22 +9,26 @@ What we tried, what it measured, and what we decided, newest last. The
 statuses mean.
 
 - **Built:** nothing.
-- **Decided:** records are flat and atomic. Fields are named by
-  attributes and destructured as `{lat ?lat}`. Equality follows tokens as
-  key comparison does, resolving them across sources, and the wire carries
-  the canonical form. Repetition across records is shared through the
-  replica's tokens, not inside a record. Payloads dialog does not
-  interpret are carried as field values.
-- **Open:** whether a record's attributes name its type, or it carries a
-  tag; a value, or claims on an entity identified by its pairs (which
-  decides whether fields are indexed); many-valued attributes in a record;
-  documents that grow.
+- **Decided:**
+  - A record is an atomic value.
+  - It carries no type tag. Its fields are typed on read by attributes,
+    as claims are, and an attribute with no `as:` takes any value.
+  - Fields are named by attributes and destructured as `{lat ?lat}`.
+  - A field may hold several values, so a record is a set of pairs.
+  - Equality follows tokens as key comparison does, resolving them across
+    sources, and the wire carries the canonical form.
+  - Repetition is expected mostly across records, and shared through the
+    replica's tokens.
+- **Open:**
+  - flat or nested (flat preferred);
+  - what a `last` attribute reads from a field holding several values;
+  - documents that grow (options in the latest entry);
+  - whether an attribute can require its records to satisfy a concept.
 - **Stale:** the [topic](../record-values.md) still states the first
   entry's framing (a type tag, a string table inside the record, free
-  field names). It is revised once the open three are answered.
-- **Next:** settle the open three by reasoning, then a census of the
-  records in tonk-team's history: how many, their sizes, and how much
-  repeats across them.
+  field names), and is revised next.
+- **Next:** a census of the records in tonk-team's history: how many, their
+  sizes, and how much repeats across them.
 - **Blocked:** neither dataset is in this session's container.
 
 ## Datasets
@@ -101,6 +105,63 @@ entry's string table inside the record and its "later occurrences
 referring back": sharing moves from the record to the replica's tokens.
 Not decided: whether attributes name the type, value or entity, and
 many-valued attributes.
+
+Commits: this entry.
+
+## 2026-11-06 — Fields are typed on read, records are values, a field holds a set
+
+**Question.** How a record is typed, whether it is a value or claims on an
+entity, and whether a field holds one value or several.
+
+**Method.** Discussion. Read how dialog types attributes
+(`notes/concept.md`, `AttributeDescriptor` in
+`dialog-query/src/attribute/descriptor.rs`, `type_system.rs`) and what
+happens to concurrent values (`notes/version-control.md`).
+
+**Results.**
+
+- Dialog stores no type beyond each value's own type byte. An attribute
+  is a relation read under an optional type and a pick
+  (`AttributeDescriptor::content_type` is an `Option`); two attributes over
+  one relation under different types are two attributes. Concepts are
+  read, not written: one entity satisfies any number of them.
+- So a record needs no type tag. A field stores its relation and its value
+  with the value's type, as a claim does, and an attribute's `as:` reads
+  it. A record satisfies whichever concepts its fields satisfy. Tonk's
+  `kind` check becomes reading by concept; whether that refuses foreign
+  data as reliably is a hypothesis.
+- A record is an atomic value (the maintainer). The alternative, claims on
+  an entity whose identity is the hash of the record's pairs, is set
+  aside, and with it indexed fields.
+- A field may hold several values: a record is a set of pairs, sorted,
+  without duplicates.
+- Corrections to the previous entry: flat is preferred, not decided, and
+  repetition inside a record is possible, only not expected to be common.
+  A field value is any dialog value and a record is one, so a record nests
+  unless that is forbidden; what is undecided is whether destructuring and
+  import recurse.
+
+Raised, not decided:
+
+- `last` has no meaning inside a record: its pairs have no causal order.
+  `all`, `max`, `min` and `top` read a set of pairs as they read claims. A
+  `last` attribute over a field holding two values needs a rule.
+- Documents that grow, such as automerge. As one value, every edit writes
+  the whole document, every version is kept, and concurrent edits both
+  survive while `last` shows one (`notes/version-control.md`: concurrent
+  values "both survive ... until a later write that has seen both cites
+  and supersedes them"). As a set of changes under an `all` attribute, a
+  write costs one change, a merge between replicas is a union of the sets
+  (which is automerge's own merge), and a snapshot that retracts the
+  changes it covers leaves concurrent changes standing, since a
+  retraction removes only the claims its author saw. The second needs no
+  record at all. #388, which put automerge in records, was closed as
+  "reconsidered".
+
+**Decision.** Records are atomic values with no type tag, typed on read
+by attributes; a field holds a set. This replaces the first entry's "a
+record names its type". Open: nesting, `last` over a set, documents that
+grow.
 
 Commits: this entry.
 
