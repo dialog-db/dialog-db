@@ -9,33 +9,68 @@ stands. Results go in the [journal](journal.md) as they come in.
 ## What is compared
 
 Every axis runs the same stores, each a space that differs only in its
-archive:
+archive, plus main as it is:
 
 | store | what it is |
 |---|---|
-| `fs` | main's archive: a file per block |
+| `main/fs` | **the baseline:** dialog as `main` is, its archive a file per block |
+| `branch/fs` | this branch with main's archive: what the branch's other changes (the tree's read path among them) cost on their own |
 | `file/memory` | the single file as built today: its index loaded into memory at open |
-| `file/hitchhiker` | the single file with its block index in the file as a hitchhiker tree (32 a node, buffers of 256, the root written against its last version, whole every 32) |
-| `file/runs` | the single file with its block index in the file as sorted runs merged 4 at a time, the merges spread over appends |
+| `file/tree` | the index in the file as a search tree, children named by position, every node written whole on change (path-copied) |
+| `file/tree-delta` | the same, each node written against its last version, whole every 32 |
+| `file/hitchhiker` | the same tree with buffers of 256 riding its links, only the root written against its last version, whole every 32 |
+| `file/hitchhiker-delta` | the hitchhiker tree with every node written against its last version |
+| `file/runs` | the index in the file as sorted runs merged 4 at a time, the merges spread over appends |
 
-The two in-file layouts are the finalists of the
-[replay](design.md#where-the-block-index-lives-layouts-replayed); the
-path-copied and per-node-delta trees lost there on size or on cold reads,
-and are not built. Every store reads through the tree in place where it
-can (`NodeSource`). Every identity is derived from one seed, so every store
-writes the same blocks and ends on the same root, and a run refuses to
-report stores that disagree.
+Every permutation the [replay](design.md#where-the-block-index-lives-layouts-replayed)
+looked at is built, not only its two finalists: the replay measured size
+and pages a lookup reads, and a layout that lost there can still win on
+writes or sync. The four tree layouts are one tree with two settings
+(buffers, and which nodes are written as deltas), so they cost one build.
+
+`main/fs` against `branch/fs` isolates the branch's changes outside the
+archive; `branch/fs` against the `file/*` stores isolates the archive. The
+harness uses only the API main and the branch share (repository, branch,
+transaction, query), and is built twice: in this branch, and in a worktree
+of `origin/main`. Every store reads through the tree in place where it can
+(`NodeSource`; main has none, and reads blocks). Every identity is derived
+from one seed, so every store writes the same blocks and ends on the same
+root, and a run refuses to report stores that disagree.
 
 ## Datasets
 
+Every store and every run reads the same dataset: each is generated or
+exported once, to a file outside the repository, and replayed from it.
+The report names each dataset by its file's hash, so a run against a
+different one shows. None is committed.
+
 - **Stack Exchange:** 4096 commits of the `retrocomputing` dump.
 - **tonk-team:** the team space's history, as the replica tonk keeps of
-  it, moved into each store with `dialog-migrate`. Tonk itself does not
-  run: the space carries its own schema (concepts, and the rules behind
-  its commands, as `dialog.rule/*` facts), so dialog alone can query it
-  and run its commands. A copy of the replica is used, and nothing from it
-  is committed: it holds an identity's credentials.
-- **Synthetic, scaled:** the same shapes at 10× and 100×, for growth.
+  it. Main and `branch/fs` open a copy of it as it is; the `file/*` stores
+  open it moved with `dialog-migrate`. Tonk itself does not run: the space
+  carries its own schema (concepts, and the rules behind its commands, as
+  `dialog.rule/*` facts), so dialog alone can query it and run its
+  commands. The copy holds an identity's credentials, so nothing from it
+  is committed.
+- **tonk-shaped, synthetic, at 1×, 10× and 100×:** the space's own schema
+  (read from the copy, not committed) over generated records, cross-linked
+  as tonk-team's are:
+
+  | record | at 1× | links |
+  |---|---|---|
+  | person | 6 | an account each |
+  | label | 11 | |
+  | project | 22 | an initiative each |
+  | issue | 294 | a creator and an assignee (people), 0.6 labels, 0.4 projects |
+  | activity | 168 | on an issue, by a person; comments and changes, replies by parent |
+  | memo | 9 | on a doc, an issue or another memo, 0.9 mentions of people |
+
+  Each record is made by the space's own command where it has one
+  (`v2/issue-create`, `v2/issue-add-label`, `v2/issue-set-project`,
+  `v2/issue-set-assignee`, `v2/issue-post-comment`, `v2/label-create`,
+  `memo/post`), so the history is commits of commands, as a user's is. The
+  generator runs once from a seed and writes the commands it made, in
+  order; every store replays that file.
 
 ## 1. Queries
 
@@ -43,15 +78,22 @@ report stores that disagree.
 
 - the queries of `dialog-perf`'s read and rule scenarios: scans, joins,
   rule-derived concepts;
-- on tonk-team, the queries behind the space's views, as dialog concept
-  queries built from the descriptors the space stores: the issue list
-  (`bug`, 294 issues), an issue's detail (`bug` and its
-  `issue-activity`), the memos on a doc (`memo`; the space holds 9, so this query is
-  measured again after the writes below have added a few hundred), and the schema read
-  (`concept:`, about 300 concepts, and `rule:`, about 120 rules), which
-  every view starts from. These are the store's share of a page, not a
-  page's time: tonk's templating and formulas are left out, and they do
-  not touch the archive.
+- on tonk-team and the tonk-shaped datasets, the queries behind the
+  space's views, as dialog concept queries built from the descriptors the
+  space stores, joins across its links included:
+  - the schema read every view starts from (`concept:`, about 300
+    concepts; `rule:`, 116 rules);
+  - the issue list (`bug`, 294 issues at 1×), with each issue's labels,
+    project and assignee's name;
+  - the issues of one label, of one project, and assigned to one person;
+  - an issue's detail: the issue, its activity in order with each
+    author's name, and the replies under each comment;
+  - the memos on a doc with their authors' names, and the memos that
+    mention a person.
+
+  These are the store's share of a page, not a page's time: tonk's
+  templating and formulas are left out, and they do not touch the
+  archive.
 
 **Reports.** Time, cold (a reopened store, nothing cached) and warm; pages
 read from the file; rows returned. Cold matters most for the in-file
@@ -110,7 +152,33 @@ ordinary one, and what it appends.
 
 **Status.** Not run.
 
-## 4. Memory
+## 4. Subscriptions
+
+**Workload.** The views' queries above held as standing queries
+(`Branch::subscribe`), polled after each write, as a page kept open is.
+A poll diffs the tree between the root it last read and the new one, and
+re-evaluates only where the diff meets the key ranges the query read, so
+its cost is tree nodes read, which the archive serves. Three cases, each
+after a commit:
+
+- a write the query does not read (a memo, under the issue list): the
+  poll only diffs and advances;
+- a write it reads (an issue's label, under the issue list): the poll
+  maintains its result incrementally;
+- a rule installed or changed: the poll re-evaluates in full.
+
+And after a pull, every subscription polled once over the pulled-in
+history.
+
+**Reports.** Time per poll, by case; nodes read per poll; the result's
+delta size, to check every store sees the same delta.
+
+**Harness.** `dialog-perf`'s subscribe scenario, and the tonk-team
+harness.
+
+**Status.** Not run.
+
+## 5. Memory
 
 **Workload.** The phases above, for a reader (a process that only queries)
 and a writer (one that commits and pulls), each in a process of its own.
@@ -124,7 +192,7 @@ role.
 
 **Status.** Not run.
 
-## 5. Storage
+## 6. Storage
 
 **Workload.** Every history replayed append by append.
 
@@ -140,18 +208,24 @@ growth curves not yet.
 ## What it takes
 
 1. **The index layouts, for real.** The archive's index behind one
-   interface, with `file/memory` (today's), `file/hitchhiker` and
-   `file/runs` behind it, each passing the archive's tests and the
-   both-ways node comparison.
+   interface, with every `file/*` store above behind it, each passing the
+   archive's tests and the both-ways node comparison.
 2. **A store per run in `dialog-perf` and `dialog-soak`.** Both run on a
-   volatile peer today; each takes the store as a setting.
-3. **A tonk-team harness, in dialog.** No tonk build: it opens a copy of
-   the migrated replica in each store with `dialog-repository`, reads the
-   concepts and rules the space stores, and runs the queries, commands
-   and pulls above through dialog's own API. What it cannot see is tonk's
-   own cost on top (rendering, the worker's handlers), which no archive
+   volatile peer today; each takes the store as a setting. On main the
+   setting offers `fs` only; it is a small change of its own, which can
+   land on main first so the baseline needs no patch.
+3. **The tonk-shaped generator.** Reads the space's schema from the copy,
+   generates the records above from a seed through the space's commands,
+   and writes them to a dataset file, once.
+4. **A tonk-team harness, in dialog.** No tonk build: it opens a store,
+   replays a dataset file into it (or opens the replica as it is), and
+   runs the queries, commands, subscriptions and pulls above through
+   dialog's own API, the API main shares. What it cannot see is tonk's own
+   cost on top (rendering, the worker's handlers), which no archive
    changes.
-4. **One report** that puts the five axes side by side for every store,
+5. **A main worktree.** `origin/main` checked out beside the branch, the
+   harness built there for `main/fs`, against the same dataset files.
+6. **One report** that puts the six axes side by side for every store,
    with charts (below).
 
 ## Charts
@@ -162,7 +236,7 @@ in the journal as it is:
 - **A bar chart per measure** (Mermaid `xychart-beta`, which GitHub draws):
   the stores along the axis, one bar each. Mermaid draws no legend, so a
   chart carries one series, and each axis's measures come one chart each:
-  query time cold and warm, time per command, bytes per commit, pull time,
+  query time cold and warm, time per command, time per poll, bytes per commit, pull time,
   heap per role.
 - **Growth curves as SVG**, written by the report itself (a few polylines
   and a legend, no plotting dependency): size against appends for every

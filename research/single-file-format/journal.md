@@ -310,6 +310,27 @@ along the axis (GitHub draws them; Mermaid has no legend, so one series a
 chart), and the growth curves as SVG it writes itself, every store on one
 chart with a legend. Each chart has its numbers in a table under it.
 
+**Every permutation, against main.** Every layout the replay looked at
+is built, not only its two finalists: four tree layouts (path-copied, per-
+node delta, hitchhiker, hitchhiker with every node a delta), which are one
+tree with two settings, and the sorted runs. The baseline is main itself,
+built from a worktree of `origin/main`, and `branch/fs` sits between them,
+so the branch's changes outside the archive show apart from the archive's.
+
+**A sixth axis, subscriptions.** A standing query (`Branch::subscribe`,
+on main) re-evaluates only where the tree's diff since its last poll
+meets the ranges it read, so a poll is tree nodes read: the archive's
+cost. Measured for a write the query does not read, one it does, and a
+rule change, and once after a pull.
+
+**One dataset, generated once.** tonk-team links its records: 294 issues
+with 173 label links (11 labels), 119 project links (22 projects),
+assignees and creators among 6 people, 168 activity entries, 9 memos with
+8 mentions. A generator reproduces that shape at 1×, 10× and 100× through
+the space's own commands, from a seed, into a file; every store and both
+builds replay that file, and the report names it by hash. Neither the
+datasets nor the space's schema they are made with are committed.
+
 **Status.** Planned, not run.
 
 ## How to reproduce

@@ -23,7 +23,7 @@ against main's archive: 66× smaller on tonk-team, cold reads level, cached
 nodes a third of the memory, commits about 2.3 ms slower. Being decided:
 where the block index lives (a hitchhiker tree leads on size); the
 [evaluation](single-file-format/evaluation.md) that decides it, on queries,
-writes, sync, memory and storage, is planned and not yet run.
+writes, sync, subscriptions, memory and storage, against main, is planned and not yet run.
 
 [Idea](single-file-format/idea.md) ·
 [spike](single-file-format/spike.md) ·
