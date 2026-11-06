@@ -355,7 +355,7 @@ What it says:
   leaf from its first key, as it must for a block's columnar keys. It now
   enters a served leaf by a binary search in place (`keys_from`).
 
-## Where the block index lives: three layouts, replayed
+## Where the block index lives: layouts, replayed
 
 The index maps every block's hash to where its record is, for every block
 the file holds (tree nodes, versions no tree reaches any more, spilled
@@ -363,43 +363,54 @@ values, revision records). Two ideas carry over from Hyperbee whatever the
 layout: the root is at the tail (the footer names it, so opening reads the
 footer and nothing else), and a key can be a pointer to the record that
 holds it. From Hypercore: a tree's roots merge like a binary counter's
-carries, which is a schedule for merging sorted runs.
+carries, which is a schedule for merging sorted runs. From our own tree:
+hitchhiker buffers, which turn many small writes into few large ones.
+Every tree below names its children by position: the index is not content
+addressed, so nothing hashes its nodes.
 
 `single_file_census` (`DIALOG_CENSUS_INDEX`) replays a history one append
 at a time into each layout, then, at sixteen points of the history, looks
-up every 7th block written by then with nothing cached, counting the 4 KiB
-pages the index reads before the block's own record:
+up every 7th block written by then. It counts the 4 KiB pages the index
+reads before the block's own record, cold (nothing cached) and warm (the
+top cached, as it is once a reader has looked anything up: a tree's root,
+every run's header and fences).
 
 - tonk-team: the 5,925 blocks the modern-only file holds, 444 appends,
   about 2.6 KB of file per block;
-- Stack Exchange: 4,096 commits, 14,821 blocks, about 930 bytes per block.
+- Stack Exchange: 4,096 commits, about 13–15k blocks (the replay mints
+  fresh keys, so the count moves between runs), about 930 bytes per block.
 
-| layout | tonk MiB | tonk pages (p99) | SE MiB | SE pages (p99) | largest append |
-|---|---|---|---|---|---|
-| B-tree, 8 a node, keys as pointers, paths copied | 0.58 | 15.6 (19) | 2.47 | 17.3 (21) | 4.5 KB (SE) |
-| B-tree, 8 a node, 8-byte prefixes, paths copied | 1.20 | 3.5 (5) | 4.99 | 4.0 (6) | 9.1 KB |
-| B-tree, 32 a node, prefixes, paths copied | 1.74 | 2.6 (4) | 8.21 | 2.9 (4) | 15.7 KB |
-| B-tree, 128 a node, prefixes, paths copied | 3.48 | 2.4 (4) | 17.98 | 2.7 (4) | 31.3 KB |
-| B-tree, 32 a node, against last version, whole every 8 | 0.50 | 9.1 (17) | 2.08 | 10.2 (18) | 4.8 KB |
-| B-tree, 32 a node, against last version, whole every 32 | 0.37 | 26.6 (54) | 1.45 | 34.8 (64) | 3.8 KB |
-| B-tree, 128 a node, against last version, whole every 8 | 0.64 | 7.9 (15) | 3.00 | 9.1 (15) | 9.4 KB |
-| sorted runs, merged 2 at a time | 0.73 | 5.6 (11) | 3.14 | 3.8 (8) | 541 KB |
-| sorted runs, merged 4 at a time | 0.40 | 7.6 (15) | 1.71 | 4.8 (12) | 342 KB |
-| sorted runs, merged 8 at a time | 0.26 | 11.4 (27) | 1.24 | 7.2 (20) | 283 KB |
+| layout | tonk MiB | tonk warm (p99) | tonk cold | SE MiB | SE warm (p99) | SE cold | largest append (SE) |
+|---|---|---|---|---|---|---|---|
+| B-tree, 8 a node, keys as pointers, paths copied | 0.58 | 13.3 (17) | 15.6 | 2.13 | 13.2 (18) | 16.8 | 5.2 KB |
+| B-tree, 8 a node, 8-byte prefixes, paths copied | 1.20 | 1.8 (3) | 3.5 | 4.33 | 1.6 (4) | 4.1 | 10.3 KB |
+| B-tree, 32 a node, prefixes, paths copied | 1.74 | 1.2 (3) | 2.6 | 7.15 | 1.2 (3) | 3.0 | 15.6 KB |
+| B-tree, 32 a node, against last version, whole every 8 | 0.50 | 2.6 (8) | 9.1 | 1.80 | 1.7 (5) | 10.5 | 4.5 KB |
+| hitchhiker, 32 a node, buffers of 64, root whole | 0.70 | 0.9 (3) | 3.2 | 4.75 | 0.7 (2) | 3.4 | 6.4 KB |
+| hitchhiker, 32 a node, buffers of 256, root against its last version, whole every 8 | 0.40 | 1.3 (3) | 7.3 | 2.38 | 1.1 (3) | 6.1 | 8.1 KB |
+| **hitchhiker, 32 a node, buffers of 256, root against its last version, whole every 32** | **0.32** | **1.2 (3)** | 17.5 | **1.46** | **1.1 (2)** | 6.6 | **8.0 KB** |
+| hitchhiker, 64 a node, buffers of 512, root against its last version, whole every 64 | 0.27 | 1.4 (4) | 29.3 | 1.11 | 2.0 (4) | 26.3 | 17.7 KB |
+| sorted runs, merged 2 at a time | 0.73 | 1.0 (1) | 5.6 | 2.76 | 1.0 (1) | 3.8 | 443 KB |
+| sorted runs, merged 4 at a time | 0.40 | 1.0 (1) | 7.6 | 1.51 | 1.0 (1) | 4.9 | 288 KB |
+| sorted runs, merged 8 at a time | 0.26 | 1.0 (1) | 11.4 | 1.10 | 1.0 (1) | 7.3 | 243 KB |
 
 The data the index points at is about 5.7 MiB (tonk-team's tree) and
 13 MiB (Stack Exchange).
 
 - Copying whole paths is cheap to read and dear to write: every append
   rewrites a path per new block, and Stack Exchange's many small appends
-  make that 38–136% of the data.
-- Keys as pointers halve that, and cost a page per comparison: 16–17 pages
-  a lookup.
-- Writing nodes against their last version is small, but a cold lookup
-  reads every version back to the last whole one.
-- Sorted runs on a carry schedule sit between: base 4 is 7–13% of the data
-  at about 5–8 pages, with no decoding. Their cost is the merge: an append
-  that completes a carry rewrites every entry below it (342 KB on Stack
-  Exchange at base 4), so merges have to be done incrementally, spread
-  over appends, before the index grows large.
-
+  make that a third of the data or more.
+- Keys as pointers halve that, and cost a page per comparison.
+- Writing every node against its last version is small, but a cold
+  lookup reads every version back to the last whole one.
+- Sorted runs read one page warm, but an append that completes a carry
+  rewrites everything below it (288 KB on Stack Exchange at base 4), a
+  spike that grows with the index.
+- A hitchhiker tree keeps the writes small without the spike: an append
+  rewrites the root (its buffer gains the append's entries) and only now
+  and then the nodes a full buffer flushes into. The root is the one node
+  every lookup reads, so it is the one that can be written against its
+  last version with a long chain: warm, a lookup reads about one page; cold,
+  the first lookup also reads the root's chain. At 32 a node, buffers of
+  256 and the root whole every 32 versions, it is the smallest layout
+  without a spike, 6% (tonk) and 11% (Stack Exchange) of the data.

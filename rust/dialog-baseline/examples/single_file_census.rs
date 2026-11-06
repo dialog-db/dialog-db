@@ -2677,6 +2677,10 @@ trait Layout {
     /// The pages a lookup of `hash`, with nothing cached, touches in the
     /// index before it reaches the block's own record.
     fn lookup(&self, hash: &[u8; 32]) -> HashSet<u64>;
+    /// The same with the top of the layout cached, as it is for a reader
+    /// that has looked anything up: a tree's root, every run's header and
+    /// fences.
+    fn lookup_warm(&self, hash: &[u8; 32]) -> HashSet<u64>;
 }
 
 /// A record header: kind, length, checksum.
@@ -2822,12 +2826,7 @@ impl Tree {
 
     /// Bytes of a node written against `before`: copied runs, and the
     /// entries that are new or moved.
-    fn delta_len(
-        &self,
-        before: &LastWritten,
-        keys: &[([u8; 32], u64)],
-        children: &[u64],
-    ) -> u64 {
+    fn delta_len(&self, before: &LastWritten, keys: &[([u8; 32], u64)], children: &[u64]) -> u64 {
         let old: HashMap<([u8; 32], u64, Option<u64>), usize> = before
             .0
             .iter()
@@ -2920,6 +2919,16 @@ impl Layout for Tree {
             written += len;
         }
         written
+    }
+
+    fn lookup_warm(&self, hash: &[u8; 32]) -> HashSet<u64> {
+        let mut pages = self.lookup(hash);
+        for version in &self.nodes[self.root].versions {
+            for page in pages_of(version.0, version.1) {
+                pages.remove(&page);
+            }
+        }
+        pages
     }
 
     fn lookup(&self, hash: &[u8; 32]) -> HashSet<u64> {
@@ -3021,6 +3030,26 @@ impl Layout for Runs {
         written
     }
 
+    fn lookup_warm(&self, hash: &[u8; 32]) -> HashSet<u64> {
+        let mut pages = HashSet::new();
+        for (_, place, entries) in self.runs.iter().rev() {
+            let fences = (entries.len() as u64 * RUN_ENTRY).div_ceil(4096).max(1) * 8;
+            let at = entries.partition_point(|(key, _)| key < hash);
+            let entry_at = place
+                + RECORD
+                + 8
+                + fences
+                + at.min(entries.len().saturating_sub(1)) as u64 * RUN_ENTRY;
+            // Fences in memory say whether the run can hold the hash, and on
+            // which page: a run whose page range misses it costs nothing.
+            if entries.get(at).is_some_and(|(key, _)| key == hash) {
+                pages.insert(page_of(entry_at));
+                break;
+            }
+        }
+        pages
+    }
+
     fn lookup(&self, hash: &[u8; 32]) -> HashSet<u64> {
         let mut pages = HashSet::new();
         for (_, place, entries) in self.runs.iter().rev() {
@@ -3055,6 +3084,15 @@ fn index_layouts(name: &str, appends: &[Vec<Blake3Hash>], record: u64) {
         Box::new(Tree::new(32, false, Some(32))),
         Box::new(Tree::new(128, false, Some(8))),
         Box::new(Tree::new(128, false, Some(32))),
+        Box::new(Hitchhiker::new(32, 64, None)),
+        Box::new(Hitchhiker::new(32, 256, None)),
+        Box::new(Hitchhiker::new(64, 256, None)),
+        Box::new(Hitchhiker::new(64, 512, None)),
+        Box::new(Hitchhiker::new(32, 256, Some(8))),
+        Box::new(Hitchhiker::new(64, 512, Some(8))),
+        Box::new(Hitchhiker::new(32, 128, Some(32))),
+        Box::new(Hitchhiker::new(32, 256, Some(32))),
+        Box::new(Hitchhiker::new(64, 512, Some(64))),
         Box::new(Runs {
             base: 2,
             runs: Vec::new(),
@@ -3075,8 +3113,8 @@ fn index_layouts(name: &str, appends: &[Vec<Blake3Hash>], record: u64) {
         appends.len()
     );
     println!(
-        "{:<84} {:>10} {:>11} {:>11} {:>8} {:>8} {:>8}",
-        "layout", "index MiB", "B/append", "max/append", "pages", "p99", "max"
+        "{:<84} {:>10} {:>11} {:>11} {:>8} {:>8} {:>8} {:>8} {:>8}",
+        "layout", "index MiB", "B/append", "max/append", "pages", "p99", "max", "warm", "warm p99"
     );
     // Lookups at sixteen points of the history, of every 7th block written
     // by then, so a layout is not judged at one lucky moment (a run count
@@ -3087,6 +3125,7 @@ fn index_layouts(name: &str, appends: &[Vec<Blake3Hash>], record: u64) {
         let (mut total, mut most) = (0u64, 0u64);
         let mut written: Vec<[u8; 32]> = Vec::new();
         let mut pages: Vec<usize> = Vec::new();
+        let mut warm: Vec<usize> = Vec::new();
         for (at, append) in appends.iter().enumerate() {
             let entries: Vec<([u8; 32], u64)> = append
                 .iter()
@@ -3107,19 +3146,308 @@ fn index_layouts(name: &str, appends: &[Vec<Blake3Hash>], record: u64) {
                         .step_by(7)
                         .map(|hash| layout.lookup(hash).len()),
                 );
+                warm.extend(
+                    written
+                        .iter()
+                        .step_by(7)
+                        .map(|hash| layout.lookup_warm(hash).len()),
+                );
             }
         }
         pages.sort();
+        warm.sort();
         let mean = pages.iter().sum::<usize>() as f64 / pages.len().max(1) as f64;
+        let warm_mean = warm.iter().sum::<usize>() as f64 / warm.len().max(1) as f64;
         println!(
-            "{:<84} {:>10.2} {:>11.0} {:>11} {:>8.1} {:>8} {:>8}",
+            "{:<84} {:>10.2} {:>11.0} {:>11} {:>8.1} {:>8} {:>8} {:>8.1} {:>8}",
             layout.name(),
             total as f64 / (1024.0 * 1024.0),
             total as f64 / appends.len() as f64,
             most,
             mean,
             pages[pages.len() * 99 / 100],
-            pages[pages.len() - 1]
+            pages[pages.len() - 1],
+            warm_mean,
+            warm[warm.len() * 99 / 100]
         );
+    }
+}
+
+/// A hitchhiker tree keyed by block hash, children named by position:
+/// an append's entries land in the root's buffer, and a buffer over
+/// `buffer` entries flushes its largest share down to the child it belongs
+/// to, so an append rewrites the root and only now and then the nodes below.
+/// Leaves hold up to `fanout` entries, internal nodes up to `fanout`
+/// children. Entries keep 8 bytes of the hash and the place. With
+/// `root_chain`, the root (rewritten every append) is written against its
+/// last version, whole every `root_chain` versions.
+struct Hitchhiker {
+    fanout: usize,
+    buffer: usize,
+    root_chain: Option<usize>,
+    nodes: Vec<HitchNode>,
+    root: usize,
+}
+
+struct HitchNode {
+    leaf: bool,
+    /// A leaf's entries, or an internal node's separators.
+    keys: Vec<IndexEntry>,
+    children: Vec<usize>,
+    /// An internal node's buffered entries, sorted.
+    buffered: Vec<IndexEntry>,
+    versions: Vec<(u64, u64, bool)>,
+    last: Option<(Vec<IndexEntry>, Vec<IndexEntry>)>,
+}
+
+impl HitchNode {
+    fn new(leaf: bool) -> Self {
+        Self {
+            leaf,
+            keys: Vec::new(),
+            children: Vec::new(),
+            buffered: Vec::new(),
+            versions: Vec::new(),
+            last: None,
+        }
+    }
+}
+
+impl Hitchhiker {
+    fn new(fanout: usize, buffer: usize, root_chain: Option<usize>) -> Self {
+        Self {
+            fanout,
+            buffer,
+            root_chain,
+            nodes: vec![HitchNode::new(true)],
+            root: 0,
+        }
+    }
+
+    fn route(&self, node: usize, hash: &[u8; 32]) -> usize {
+        self.nodes[node]
+            .keys
+            .partition_point(|(key, _)| key <= hash)
+            .saturating_sub(1)
+    }
+
+    /// Puts `entries` into `node`: a leaf takes them, an internal node
+    /// buffers them. Returns the new siblings split off `node`, each with
+    /// its first key, for the caller to link.
+    fn put(
+        &mut self,
+        node: usize,
+        entries: Vec<IndexEntry>,
+        touched: &mut HashSet<usize>,
+    ) -> Vec<(IndexEntry, usize)> {
+        touched.insert(node);
+        if self.nodes[node].leaf {
+            self.nodes[node].keys.extend(entries);
+            self.nodes[node].keys.sort();
+        } else {
+            self.nodes[node].buffered.extend(entries);
+            self.nodes[node].buffered.sort();
+            // Flush the largest share down while the buffer is over.
+            while self.nodes[node].buffered.len() > self.buffer {
+                let mut shares: HashMap<usize, Vec<IndexEntry>> = HashMap::new();
+                for entry in &self.nodes[node].buffered {
+                    shares
+                        .entry(self.route(node, &entry.0))
+                        .or_default()
+                        .push(*entry);
+                }
+                let (child, share) = shares
+                    .into_iter()
+                    .max_by_key(|(at, share)| (share.len(), *at))
+                    .expect("a share");
+                let moving: HashSet<IndexEntry> = share.iter().copied().collect();
+                self.nodes[node]
+                    .buffered
+                    .retain(|entry| !moving.contains(entry));
+                let target = self.nodes[node].children[child];
+                let split = self.put(target, share, touched);
+                // Link what the child split into.
+                let mut at = child;
+                for (separator, sibling) in split {
+                    at += 1;
+                    self.nodes[node].keys.insert(at, separator);
+                    self.nodes[node].children.insert(at, sibling);
+                }
+            }
+        }
+        self.split(node, touched)
+    }
+
+    /// Splits `node` while it is over size, returning the siblings.
+    fn split(&mut self, node: usize, touched: &mut HashSet<usize>) -> Vec<(IndexEntry, usize)> {
+        let mut out = Vec::new();
+        while self.nodes[node].keys.len() > self.fanout {
+            let half = self.nodes[node].keys.len() / 2;
+            let keys = self.nodes[node].keys.split_off(half);
+            let separator = keys[0];
+            let mut sibling = HitchNode::new(self.nodes[node].leaf);
+            if !self.nodes[node].leaf {
+                sibling.children = self.nodes[node].children.split_off(half);
+                let (stay, go): (Vec<IndexEntry>, Vec<IndexEntry>) = self.nodes[node]
+                    .buffered
+                    .iter()
+                    .partition(|entry| entry.0 < separator.0);
+                self.nodes[node].buffered = stay;
+                sibling.buffered = go;
+            }
+            sibling.keys = keys;
+            let id = self.nodes.len();
+            self.nodes.push(sibling);
+            touched.insert(id);
+            out.push((separator, id));
+        }
+        // Siblings in key order; each later split came off the left part.
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
+    fn entry_len(place: u64) -> u64 {
+        8 + varint_len(place)
+    }
+
+    fn node_len(&self, keys: &[IndexEntry], children: &[u64], buffered: &[IndexEntry]) -> u64 {
+        let mut len = RECORD + 3;
+        for (at, (_, place)) in keys.iter().enumerate() {
+            len += match children.get(at) {
+                Some(child) => 8 + varint_len(*child),
+                None => Self::entry_len(*place),
+            };
+        }
+        len + buffered
+            .iter()
+            .map(|(_, place)| Self::entry_len(*place))
+            .sum::<u64>()
+    }
+}
+
+impl Layout for Hitchhiker {
+    fn name(&self) -> String {
+        format!(
+            "hitchhiker tree, {} a node, buffers of {}, root {}",
+            self.fanout,
+            self.buffer,
+            match self.root_chain {
+                None => "whole".to_string(),
+                Some(chain) => format!("against its last version, whole every {chain}"),
+            }
+        )
+    }
+
+    fn append(&mut self, entries: &[IndexEntry], end: &mut u64) -> u64 {
+        let mut touched = HashSet::new();
+        let root = self.root;
+        let split = self.put(root, entries.to_vec(), &mut touched);
+        if !split.is_empty() {
+            let mut grown = HitchNode::new(false);
+            let first = if self.nodes[root].leaf {
+                self.nodes[root].keys[0]
+            } else {
+                self.nodes[root].keys[0]
+            };
+            grown.keys.push(first);
+            grown.children.push(root);
+            for (separator, sibling) in split {
+                grown.keys.push(separator);
+                grown.children.push(sibling);
+            }
+            let id = self.nodes.len();
+            self.nodes.push(grown);
+            touched.insert(id);
+            self.root = id;
+            // A root over size splits again on the next append.
+        }
+        let depth = |tree: &Hitchhiker, node: usize| {
+            let (mut depth, mut at) = (0, node);
+            while !tree.nodes[at].leaf {
+                at = tree.nodes[at].children[0];
+                depth += 1;
+            }
+            depth
+        };
+        let mut order: Vec<usize> = touched.into_iter().collect();
+        order.sort_by_key(|node| depth(self, *node));
+        let mut written = 0;
+        for node in order {
+            let children: Vec<u64> = self.nodes[node]
+                .children
+                .iter()
+                .map(|child| {
+                    self.nodes[*child]
+                        .versions
+                        .last()
+                        .map_or(0, |version| version.0)
+                })
+                .collect();
+            let (keys, buffered) = (
+                self.nodes[node].keys.clone(),
+                self.nodes[node].buffered.clone(),
+            );
+            let whole = self.node_len(&keys, &children, &buffered);
+            let since_whole = self.nodes[node]
+                .versions
+                .iter()
+                .rev()
+                .take_while(|version| !version.2)
+                .count();
+            let len = match (self.root_chain, &self.nodes[node].last) {
+                (Some(chain), Some((_, before)))
+                    if node == self.root && since_whole + 1 < chain =>
+                {
+                    // Against the last version: what the buffer gained, the
+                    // links that moved, and a few copy runs.
+                    let had: HashSet<&IndexEntry> = before.iter().collect();
+                    let gained: u64 = buffered
+                        .iter()
+                        .filter(|entry| !had.contains(entry))
+                        .map(|(_, place)| Self::entry_len(*place))
+                        .sum();
+                    (RECORD + 6 + gained + 12 * 3).min(whole)
+                }
+                _ => whole,
+            };
+            self.nodes[node].versions.push((*end, len, len == whole));
+            self.nodes[node].last = Some((keys, buffered));
+            *end += len;
+            written += len;
+        }
+        written
+    }
+
+    fn lookup_warm(&self, hash: &[u8; 32]) -> HashSet<u64> {
+        let mut pages = self.lookup(hash);
+        for version in &self.nodes[self.root].versions {
+            for page in pages_of(version.0, version.1) {
+                pages.remove(&page);
+            }
+        }
+        pages
+    }
+
+    fn lookup(&self, hash: &[u8; 32]) -> HashSet<u64> {
+        let mut pages = HashSet::new();
+        let mut at = self.root;
+        loop {
+            let node = &self.nodes[at];
+            for version in node.versions.iter().rev() {
+                pages.extend(pages_of(version.0, version.1));
+                if version.2 {
+                    break;
+                }
+            }
+            if node.leaf
+                || node
+                    .buffered
+                    .binary_search_by(|entry| entry.0.cmp(hash))
+                    .is_ok()
+            {
+                return pages;
+            }
+            at = node.children[self.route(at, hash)];
+        }
     }
 }
