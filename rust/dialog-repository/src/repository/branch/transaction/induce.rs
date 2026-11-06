@@ -55,15 +55,43 @@ use dialog_query::rule::statement::Reach;
 use dialog_query::{Any, Binding, Environment, InductiveRule, Match, Term};
 use futures_util::{StreamExt as _, TryStreamExt};
 
-use crate::placement::{Placements, ScopeMap};
+use crate::placement::{Bindings, Placements, ScopeMap};
 use crate::repository::archive::erased;
 use crate::repository::branch::session::{Composite, QueryEnv};
 use crate::repository::source::View;
 use crate::rules::{
     TriggerFootprint, hydrate, hydrate_inductive, on_attr, reads_attr, source_attr, transient_attr,
 };
-use crate::stack::{Guide, GuidedLayer};
+use crate::stack::{Guide, GuidedLayer, Topology};
 use crate::{CommitError, Ephemeral, RemoteSite, Revision, RuleCache, Staged};
+
+/// How a commit binds a scope to a store: what decides whether the write of
+/// a rule's head lands in a store, and not in a tree.
+pub(crate) enum Landing<'a> {
+    /// A commit of one line, whose bindings bind a scope to its session
+    /// store.
+    Line(&'a Bindings),
+    /// A commit of a stack, whose links bind a scope to an ephemeral layer.
+    Stack(&'a Topology),
+}
+
+/// Which attributes a commit writes to a store under its placements. A
+/// head written to a store keeps its pick, and the store elects among its
+/// own rows of the cell, as it does for a write of the transaction.
+pub(crate) struct Stores<'a> {
+    landing: &'a Landing<'a>,
+    placements: &'a Placements,
+}
+
+impl Stores<'_> {
+    /// Whether a write of `the` lands in a store.
+    pub(crate) fn hold(&self, the: &Relation) -> bool {
+        match self.landing {
+            Landing::Line(bindings) => !self.placements.lands_in_tree(the, bindings),
+            Landing::Stack(topology) => !topology.lands_in_trees(self.placements, the),
+        }
+    }
+}
 
 /// Round bound for the induction loop: a cascade still emitting
 /// transients or novelty after this many rounds fails the commit
@@ -101,7 +129,8 @@ impl Witness for &Ephemeral {
 /// read from where `watermark` says;
 /// `view` is every line a rule body reads and every line whose rules
 /// dispatch, which is `source` alone for a transaction on one branch
-/// and the whole composite for a [`Stack`](crate::Stack). `entered` is
+/// and the whole composite for a [`Stack`](crate::Stack). `landing` says
+/// which of the scopes that `placements` name lands in a store. `entered` is
 /// what entered the upper layers of a stack outside it since its last
 /// commit: a change of this commit, as the lag of `source` is.
 ///
@@ -113,6 +142,7 @@ pub(crate) async fn induce<Env, W: Witness>(
     watermark: Watermark,
     view: &Composite,
     placements: &Placements,
+    landing: &Landing<'_>,
     changes: &mut Changes,
     mut transients: Changes,
     context: Changes,
@@ -189,6 +219,10 @@ where
     // each round (cheap, in-memory) so rules installed by this very
     // commit — or by a rule during induction — fire.
     let dispatch = Dispatch::resolve(view, placements, env).await?;
+    let stores = Stores {
+        landing,
+        placements,
+    };
 
     // The identity is resolved once: it only feeds the schema-metadata
     // overlay of the round view, which does not change across rounds.
@@ -378,6 +412,7 @@ where
                     &rule,
                     transient_head,
                     &view,
+                    &stores,
                     &mut novelty,
                     &mut emitted_transients,
                 )
@@ -388,6 +423,7 @@ where
                     transient_head,
                     &assert_rows,
                     &view,
+                    &stores,
                     &mut novelty,
                     &mut emitted_transients,
                 )
@@ -1404,6 +1440,7 @@ async fn fire<'a>(
     rule: &InductiveRule,
     transient_head: bool,
     view: &QueryEnv<'a>,
+    stores: &Stores<'_>,
     novelty: &mut Changes,
     transients: &mut Changes,
 ) -> Result<(), CommitError> {
@@ -1416,7 +1453,16 @@ async fn fire<'a>(
     if matches.is_empty() {
         return Ok(());
     }
-    emit_matches(rule, transient_head, matches, view, novelty, transients).await
+    emit_matches(
+        rule,
+        transient_head,
+        matches,
+        view,
+        stores,
+        novelty,
+        transients,
+    )
+    .await
 }
 
 /// The reach of a rule's concept premises, split by polarity:
@@ -1458,6 +1504,7 @@ async fn fire_seeded<'a>(
     transient_head: bool,
     rows: &[Fact],
     view: &QueryEnv<'a>,
+    stores: &Stores<'_>,
     novelty: &mut Changes,
     transients: &mut Changes,
 ) -> Result<(), CommitError> {
@@ -1465,7 +1512,16 @@ async fn fire_seeded<'a>(
     #[cfg(test)]
     let before = (novelty.clone(), transients.clone());
     if !matches.is_empty() {
-        emit_matches(rule, transient_head, matches, view, novelty, transients).await?;
+        emit_matches(
+            rule,
+            transient_head,
+            matches,
+            view,
+            stores,
+            novelty,
+            transients,
+        )
+        .await?;
     }
     #[cfg(test)]
     oracle::agrees(
@@ -1473,6 +1529,7 @@ async fn fire_seeded<'a>(
         transient_head,
         rows,
         view,
+        stores,
         before,
         novelty,
         transients,
@@ -1722,6 +1779,7 @@ async fn emit_matches<'a>(
     transient_head: bool,
     matches: Vec<Match>,
     view: &QueryEnv<'a>,
+    stores: &Stores<'_>,
     novelty: &mut Changes,
     transients: &mut Changes,
 ) -> Result<(), CommitError> {
@@ -1774,8 +1832,9 @@ async fn emit_matches<'a>(
         }
         // A head written by succession elects the claim it succeeds
         // against the round view, as a transaction's own writes do
-        // against the line at commit.
-        Box::pin(super::succession::resolve_against(view, &mut head)).await?;
+        // against the line at commit. A write that lands in a store keeps
+        // its pick, for the store to elect among its own rows.
+        Box::pin(super::succession::resolve_against(view, stores, &mut head)).await?;
         for instruction in head.into_instructions() {
             if is_novel(view, &instruction).await? {
                 match instruction {
@@ -1868,7 +1927,7 @@ async fn is_novel<'a>(view: &QueryEnv<'a>, instruction: &Instruction) -> Result<
 /// tests reach, not only where a test was written for it.
 #[cfg(test)]
 mod oracle {
-    use super::{InductiveRule, QueryEnv, Seeding, emit_matches, seeded_matches};
+    use super::{InductiveRule, QueryEnv, Seeding, Stores, emit_matches, seeded_matches};
     use crate::CommitError;
     use dialog_corpus::{Changes, Fact};
     use std::cell::Cell;
@@ -1893,11 +1952,13 @@ mod oracle {
     /// grouped firing started from, writes the `novelty` and
     /// `transients` the grouped firing wrote; panics with both when it
     /// does not.
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn agrees(
         rule: &InductiveRule,
         transient_head: bool,
         rows: &[Fact],
         view: &QueryEnv<'_>,
+        stores: &Stores<'_>,
         before: (Changes, Changes),
         novelty: &Changes,
         transients: &Changes,
@@ -1910,6 +1971,7 @@ mod oracle {
                 transient_head,
                 per_row,
                 view,
+                stores,
                 &mut expected_novelty,
                 &mut expected_transients,
             )
@@ -4344,6 +4406,7 @@ mod tests {
             super::Watermark::Cell,
             &Composite::of(view.to_source()),
             &placements,
+            &super::Landing::Line(view.bindings()),
             &mut changes,
             transients,
             Changes::new(),
