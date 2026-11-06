@@ -4,14 +4,23 @@ Phase: **Describing**
 
 ## Description
 
-Irakli says many users ask for collaborative text editing in Dialog, and
-that Dialog has no good solution for it today. The
-[ordered relations note](../notes/ordered-relations.md) lists
-collaborative text as out of scope: fractional indexing interleaves
-concurrent runs, which it calls fine for lists and wrong for text.
+Three builders, three apps, the same shape of complaint:
 
-The title is still a feature. Who asked, what they were doing, and what
-"no good solution" was measured against are not written down yet.
+- **A document editor** built on Tonk. Collaborators race and changes get
+  dropped. Its builder and the maintainer have accepted that multiple
+  editors at once does not work today.
+- **An Obsidian-style notebook.** Its builder does not know how to allow
+  editing the same note across replicas, and is considering an Automerge
+  integration alongside Dialog.
+- **An Observable-style playground** (the maintainer's). Users editing at
+  the same time override each other's changes.
+
+The [ordered relations note](../notes/ordered-relations.md) lists
+collaborative text as out of scope: fractional indexing interleaves
+concurrent runs.
+
+Not yet written down: how each app stores its text in Dialog, and what
+exactly happens to the losing edit.
 
 ## Problem
 
