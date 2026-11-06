@@ -369,6 +369,50 @@ pulls, then the `file/*` stores and main.
 
 Commits: `516bb7f`, and the bench below.
 
+## 2026-11-06 — A team of six on tonk-shaped data: fs against the file
+
+**Question.** With a team writing as tonk's members do, what does the
+single file (as built, its index in memory) cost and save against main's
+archive, on this branch?
+
+**Method.** `tonk_dataset generate` makes a space shaped like tonk-team
+(301 issues, 0.55 labels an issue, 39% in a project, 96% assigned, 0.33
+comments an issue, 9 memos), through the space's commands, then a week:
+25 rounds in which each of six members sends one to three commands on
+their own replica, then everyone pulls and pushes in turn. `tonk_bench`
+runs it with every member on the store under test, sharing a filesystem
+remote. Three runs of each store, interleaved. Full tables in
+[results/2026-11-06-tonk-1x.md](results/2026-11-06-tonk-1x.md).
+
+**Results** (median of three runs; a difference inside the spread between
+runs is not counted):
+
+| | fs | file | file ÷ fs |
+|---|---|---|---|
+| a member's replica after the week | 169.8 MiB | 1.53 MiB | 1/111 |
+| a command, rules included | 15.7 ms | 20.7 ms | 1.32 |
+| first command after a pull | 27.4 ms | 33.6 ms | 1.23 |
+| pull, in a round | 42.9 ms | 71.1 ms | 1.66 |
+| push, in a round | 20.3 ms | 29.6 ms | 1.46 |
+| `v2/issue` poll after a pull | 23.2 ms | 25.5 ms | 1.10 |
+| `v2/issue`, warm | 52.2 ms | 51.7 ms | level |
+| `v2/issue`, cold (just joined) | 82.1 ms | 97.0 ms | 1.18, spreads overlap |
+
+- One run said cold queries were 18% *faster* on the file; three runs say
+  slower, within the noise. A single run decides nothing.
+- Every replica converges on the same 337 issues, on both stores.
+- The cost is on the write side: every block a commit or a pull brings in
+  is split into rows, encoded against its predecessor and verified before
+  it is appended. A pull pays it for every block of everyone else's
+  commits, which is why pulls cost the most.
+
+**Decision.** Not decided: this is the file as built, against `fs` on
+the branch. The pull and commit costs are what the index layouts and the
+write path have to answer. Next: main as the baseline, tonk-team's own
+history with the week, 10×, then the index layouts.
+
+Commits: `6701aba`.
+
 ## How to reproduce
 
 ```sh
