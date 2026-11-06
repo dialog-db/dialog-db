@@ -15,13 +15,22 @@ statuses mean.
     as claims are, and an attribute with no `as:` takes any value.
   - Fields are named by attributes and destructured as `{lat ?lat}`.
   - A field may hold several values, so a record is a set of pairs.
+  - A field may hold an entity, which is followed by an ordinary join, or
+    a nested record, which is destructured.
+  - Selecting an attribute finds only claims the replica stores. A
+    record's fields are never claims: they are reached by destructuring a
+    bound record, never by selection, and a record cannot stand where an
+    entity is expected (`of`).
   - Equality follows tokens as key comparison does, resolving them across
     sources, and the wire carries the canonical form.
   - Repetition is expected mostly across records, and shared through the
     replica's tokens.
 - **Open:**
-  - flat or nested (flat preferred);
-  - what a `last` attribute reads from a field holding several values;
+  - what an attribute reference brings into destructuring: its relation
+    only, or its type and pick too (which settles `last` over a field
+    holding several values);
+  - the surface of destructuring: a pattern in the notation, a formula
+    over a path, or both;
   - documents that grow (options in the latest entry);
   - whether an attribute can require its records to satisfy a concept.
 - **Stale:** the [topic](../record-values.md) still states the first
@@ -162,6 +171,45 @@ Raised, not decided:
 by attributes; a field holds a set. This replaces the first entry's "a
 record names its type". Open: nesting, `last` over a set, documents that
 grow.
+
+Commits: this entry.
+
+## 2026-11-06 — Destructuring is not selection
+
+**Question.** What "fields are not indexed" means, whether records nest,
+and how reading a field relates to selecting an attribute.
+
+**Method.** Discussion. Read how the `of` slot is typed
+(`dialog-query/src/attribute/query/all.rs`) and how the unifier treats a
+conflict (`type_system/unifier.rs`).
+
+**Results.** As the maintainer stated them:
+
+- Selecting `geo/lat` finds nothing unless the replica stores `geo/lat`
+  claims. Holding a record with a `geo/lat` field does not change that.
+- `{ location: { geo/lat: ?l } }` destructures: it reads a field out of a
+  record already bound. Binding a record to `?p` and then selecting
+  `geo/lat` `of: ?p` is not allowed, because selection must work with its
+  entity unbound, and a record's fields are not in the indexes it scans.
+- A field may hold an entity, whose own claims are found by an ordinary
+  join, or a nested record, which is destructured. Records nest.
+- A formula reading a record by path (jq notation was suggested) is an
+  alternative surface; it is still destructuring, not selection.
+
+Found in the code:
+
+- `of` is typed `entity` (`all.rs`), and the unifier refuses an empty meet
+  (`unifier.rs`). A record-typed binding used as `of` is therefore refused
+  when the rule is compiled. When the binding is untyped, it is refused
+  only when the row is read, presumably as no row; that is a hypothesis.
+- "Fields are not indexed", in the previous entry, says the same as the
+  first result: only the whole record is a value in the indexes, found by
+  equality.
+
+**Decision.** Records nest. Destructuring reads a bound record and never
+scans; selection sees only stored claims. This replaces the earlier
+"flat preferred". Not decided: whether an attribute reference brings its
+type and pick into destructuring, and the surface of destructuring.
 
 Commits: this entry.
 
