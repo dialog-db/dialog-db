@@ -1,0 +1,34 @@
+# Survey table
+
+Filled from primary sources, 2026-11-06. `?` is unknown, with what would
+settle it. Cost numbers are deliberately absent: they come from
+[text write cost](../text-write-cost.md) on one trace, not from each
+project's own benchmarks.
+
+| | changes since a version | what the other side must understand | no server | interleaving | Rust and Wasm |
+|---|---|---|---|---|---|
+| **Yjs** | `encodeStateAsUpdate(doc, stateVector)` writes only the missing part; `diffUpdate(update, stateVector)` and `mergeUpdates` work on update bytes without loading a document [1] | a relay that only forwards bytes needs nothing; one that diffs or merges stored updates runs Yjs's update functions [1] | yes | only in a limited multi-replica backward-insertion case [6] | via Yrs |
+| **Yrs** | Yjs update formats v1 and v2, state vectors, diffs, merges [2] | same as Yjs | yes | same algorithm as Yjs | Rust; `ywasm` for Wasm [2]; still reaching feature parity with Yjs [2] |
+| **Automerge** | changes after a set of heads; each change serializes to bytes on its own [3] | the sync protocol runs on documents and sync state on both ends [3]; ? whether a store can serve changes since heads from each change's dependencies without running Automerge | yes | RGA family, which the Fugue paper finds interleaving [6] | Rust core with Wasm (? cite) |
+| **Loro** | `export({mode: "update", from: versionVector})`; import holds back changes whose prerequisites are missing [4] | ? not stated; the examples run Loro on both ends [4] | implied: updates broadcast directly to peers [4] | Fugue based, avoids interleaving [5] | Rust, JS via Wasm, Swift [5] |
+| **Diamond Types** | ? repository not read (fetch refused) | ? | yes, per Eg-walker [7] | ? | Rust [7]; ? Wasm |
+| **Eg-walker** (paper) | events carry an id and parent ids; merging is a union of event sets; a peer applies an event once its parents arrive [8] | to apply: the algorithm. To store and relay: ids and parents only [8] | yes [7] | ? | Diamond Types (Rust), a TypeScript reference [7] |
+| **Fugue** (paper) | n/a, an ordering algorithm | n/a | yes | Fugue: forward non-interleaving; FugueMax: maximally non-interleaving, proven [6] | TypeScript in Collabs [6]; Loro uses a Fugue-based algorithm [5] |
+| **Peritext** | n/a, rich text marks over a list CRDT | n/a | yes | inherits the list CRDT's | prototype in TypeScript; not in Automerge per its README [9]; ? Automerge's own marks |
+| **json-joy** | JSON CRDT patches with a compact binary codec [10]; ? since a version | ? | ? | ? | TypeScript |
+| **DeltaDB** (Zed) | records a delta per operation, each with a stable identity [11] | ? not described | ? replication across machines, hosting not described [11] | ? | pre-release; open source and embeddability not stated [11] |
+
+## Sources
+
+1. [Yjs: document updates](https://docs.yjs.dev/api/document-updates)
+2. [yrs on docs.rs](https://docs.rs/crate/yrs/latest)
+3. [Automerge sync protocol (R bindings article)](https://posit-dev.github.io/automerge-r/articles/sync-protocol.html)
+4. [Loro: sync tutorial](https://www.loro.dev/docs/tutorial/sync)
+5. [Loro 1.0](https://loro.dev/blog/v1.0)
+6. [The Art of the Fugue](https://arxiv.org/abs/2305.00583)
+7. [Kleppmann on Eg-walker](https://martin.kleppmann.com/2025/03/30/eg-walker-collaborative-text.html)
+8. [Eg-walker paper](https://arxiv.org/abs/2409.14252), section 3
+9. [Peritext repository](https://github.com/inkandswitch/peritext)
+10. [json-joy JSON CRDT patch codec](https://streamich.github.io/json-joy/types/json-crdt-patch_codec_compact.CompactCodecNewStrOperation.html)
+11. [Introducing DeltaDB](https://zed.dev/blog/introducing-deltadb)
+12. [Editing traces: concurrent](https://raw.githubusercontent.com/josephg/editing-traces/master/concurrent_traces/README.md)

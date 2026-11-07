@@ -24,3 +24,6 @@
 | fractional-index ordered relations interleave concurrent runs; acceptable for lists, not text | fact | `notes/ordered-relations.md`, maintainer 2026-11-06 | holds |
 | supporting one library well is enough; library agnostic is nice to have | opinion | maintainer, 2026-11-06 | - |
 | a template with a separate sync engine is a legitimate option | opinion | maintainer, 2026-11-06; preferable to avoid two sync engines | - |
+| for change-graph libraries (immutable changes naming their parents), a store that does not run the library can serve "changes since these heads" from ids and parent links alone | hypothesis | research/text-crdt-survey/journal.md; refuted if parent links are not readable without the library | open |
+| version-vector libraries need the library on whoever computes "changes since" | fact | Yjs diff and merge are Yjs functions (survey.md [1]) | holds |
+| a resource synced by Dialog could be a graph of immutable change blocks with a head pointer, the way a memory cell points at a branch revision, so it stays content addressed | hypothesis | Claude, 2026-11-06, from the line above; a column variant to examine, not a recommendation | open |
