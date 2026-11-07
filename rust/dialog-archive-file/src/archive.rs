@@ -352,6 +352,10 @@ struct Inner {
     /// Each manifest token, decoded, for the nodes served to trees.
     manifests: Mutex<HashMap<u32, Arc<Manifest>>>,
     writer: Mutex<Writer>,
+    /// The end of what this process has read of the file or is writing to
+    /// it, so a read that misses asks for another process's appends only
+    /// when the file grew past it, and takes no lock otherwise.
+    known: AtomicU64,
 }
 
 /// What a [`FileArchive`] holds, and what holding it costs.
@@ -838,7 +842,9 @@ impl FileArchive {
             .open(&path)
             .map_err(|error| storage_error(&path, error))?;
         let (state, writer) = recover(&file).map_err(|error| storage_error(&path, error))?;
+        let known = AtomicU64::new(writer.end);
         let inner = Arc::new(Inner {
+            known,
             timings: Timings::default(),
             file,
             path,
@@ -1020,14 +1026,27 @@ impl FileArchive {
     }
 
     fn reread(&self) -> io::Result<()> {
+        // Within what this process read or is writing, nothing is new to
+        // read. An append of its own under way is not waited for: until it
+        // finishes, the block is not there, and a miss says so.
         let len = self.inner.file.metadata()?.len();
+        if len <= self.inner.known.load(Ordering::Acquire) {
+            return Ok(());
+        }
         let mut writer = self.inner.writer.lock();
         if len <= writer.end {
             return Ok(());
         }
         let mut state = self.inner.state.write();
         follow(&self.inner.file, &mut state, &mut writer, len, true)?;
+        self.know(writer.end);
         state.tokens.map(&self.inner.file, writer.end)
+    }
+
+    /// Records that this process has read, or is writing, the file up to
+    /// `end`.
+    fn know(&self, end: u64) {
+        self.inner.known.fetch_max(end, Ordering::AcqRel);
     }
 
     /// The block a node's rows stand for.
@@ -1099,6 +1118,7 @@ impl FileArchive {
             // This process's turn: read what others appended since its
             // last, then append after it.
             catch_up(file, &mut state, &mut writer)?;
+            self.know(writer.end);
             state.tokens.map(file, writer.end)?;
             let end = writer.end;
             self.write(&mut writer, &mut state, catalog, blocks)
@@ -1112,6 +1132,9 @@ impl FileArchive {
             self.inner.rows.lock().clear();
             if let Ok((recovered, end)) = recover(file) {
                 *state = recovered;
+                // The failed append's bytes were dropped: what is known
+                // ends where the file now does.
+                self.inner.known.store(end.end, Ordering::Release);
                 *writer = end;
             }
             storage_error(&self.inner.path, error)
@@ -1248,6 +1271,7 @@ impl FileArchive {
             }
         }
         let started = Instant::now();
+        self.know(writer.end + bytes.len() as u64);
         write_at(&self.inner.file, writer.end, &bytes)?;
         Timings::add(&self.inner.timings.write, started);
         if let Some((body_offset, places)) = token_record {
@@ -1270,6 +1294,7 @@ impl FileArchive {
             writer.since = 0;
         }
         put_record(&mut tail, Kind::Footer, &writer.checkpoint.to_le_bytes())?;
+        self.know(writer.end + tail.len() as u64);
         write_at(&self.inner.file, writer.end, &tail)?;
         writer.end += tail.len() as u64;
         state.tokens.map(&self.inner.file, writer.end)?;
@@ -1615,6 +1640,33 @@ mod tests {
         assert_eq!(archive.len(), 1);
         assert!(archive.get("index", first.blake3_hash())?.is_some());
         assert!(archive.get("index", second.blake3_hash())?.is_none());
+        Ok(())
+    }
+
+    /// A read of a block the file does not hold, while an append holds the
+    /// writer's turn, answers without waiting for it: the file has not
+    /// grown past what this process knows, so there is nothing to read.
+    #[test]
+    fn it_answers_a_miss_while_an_append_holds_the_turn() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let archive = FileArchive::open(directory.path().join("archive"))?;
+        archive.append("index", &[block("held")])?;
+        let turn = archive.inner.writer.lock();
+        let (answer, answered) = std::sync::mpsc::channel();
+        let reader = archive.clone();
+        std::thread::spawn(move || {
+            let _ = answer.send(
+                reader
+                    .get("index", &Blake3Hash::hash(b"absent"))
+                    .map(|found| found.is_none()),
+            );
+        });
+        let missed = answered.recv_timeout(Duration::from_secs(5));
+        drop(turn);
+        assert!(
+            matches!(missed, Ok(Ok(true))),
+            "the miss answered while the turn was held"
+        );
         Ok(())
     }
 
