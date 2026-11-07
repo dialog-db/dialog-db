@@ -234,3 +234,24 @@ write path stops using it.
 **Decided.** The three operations are adopted. The optimistic read is
 open, put to the maintainer.
 
+## 2026-11-07, Delimiting: why a write asks what is in memory
+
+**Asked.** Why does the tree need to know, on a write, whether a node is
+already in memory, and is that a need of the write or a shortcut?
+
+**Learned.** A write in a forced run first checks whether the edit leaves
+every boundary in place, to avoid re-chunking and re-encoding the whole
+run. The check gathers each piece's summary in two passes: pass 1, unable
+to await under the tree borrow, takes summaries from the cache or defers;
+pass 2 reads the deferred pieces ordinarily and keeps their summaries on
+the nodes. The memory-only reads are: one in pass 1 (a sync convenience
+pass 2's read covers), and one after the check (carrying a summary pass 2
+just computed and dropped, through the cache; with no cache it silently
+takes the expensive path). Neither is a need of the write. The one real
+use of caching here is the summary kept on a node across writes, which is
+a provider's caching and needs no request.
+
+**Decided.** Proposed, for the maintainer: the optimistic read is dropped;
+the two sites become a returned value and an ordinary read. Rests on an
+open hypothesis (verdicts unchanged, cost within the gate).
+
