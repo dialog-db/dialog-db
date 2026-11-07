@@ -605,6 +605,49 @@ stacks of a sample of blocks built for `Get`, then the archive's
 
 Commits: `9887124`, `b166bcb`, `805c792`.
 
+## 2026-11-07 — One encode per block
+
+**Question.** Verifying a frame rebuilt its block with the tree's encoder
+and compared the bytes: a second encode of every block appended, the
+largest write cost left. Is it needed?
+
+**Method.** The tree's encoding is canonical (the same entries under the
+same manifest make the same bytes; replicas rely on it to agree on
+hashes), so a frame of a node in the current layout rebuilds its block by
+construction. The rebuild now runs only in debug builds and tests, or
+with `DIALOG_ARCHIVE_VERIFY`; every build checks the frame decodes back
+to its rows and keeps a node of another layout whole without framing it.
+Checked on real data: the local tonk-team replica migrated with the
+rebuild forced on and off gives byte-identical files (688 nodes framed,
+none failing; the append 102 ms against 52 ms). A test appends a real
+segment archived under the older layout with the rebuild off and finds
+it whole; with the layout check removed, it fails. Then six members,
+three interleaved runs each, one sitting
+([results](results/2026-11-07c-tonk-1x-main.md)).
+
+**Results** (median of three; against main):
+
+| | main/fs | file | file ÷ main |
+|---|---|---|---|
+| a command, rules included | 12.6 ms | 13.0 ms | 1.03 |
+| first command after a pull | 21.1 ms | 21.7 ms | 1.03 |
+| pull, in a round | 35.6 ms | 36.7 ms | 1.03 |
+| push, in a round | 17.1 ms | 27.5 ms | 1.60 |
+| `v2/issue` poll after a pull | 18.1 ms | 17.1 ms | 0.94 |
+| `v2/issue`, cold (just joined) | 59.2 ms | 54.7 ms | 0.92 |
+| an issue's detail, cold | 2.53 ms | 1.99 ms | 0.79 |
+| `v2/issue`, warm | 34.5 ms | 35.8 ms | 1.04, within spread |
+
+- Commands and pulls are level with main; cold reads and polls are
+  faster.
+- Push is what is left: about +10 ms a round, the bytes a push uploads,
+  which the file builds from rows for every node it sends (751 blocks
+  for one member over the run).
+
+**Decision.** Kept. Push is next.
+
+Commits: `1c84661`.
+
 ## How to reproduce
 
 ```sh
