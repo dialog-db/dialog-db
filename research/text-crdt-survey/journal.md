@@ -3,7 +3,7 @@
 ## Where things stand
 
 Exploring. First pass done from docs and papers (survey.md). Open: Diamond
-Types, json-joy and DeltaDB rows; whether Automerge changes can be served
+Types' sync and format (its BINARY.md), json-joy and DeltaDB rows; whether Automerge changes can be served
 since heads by a store that does not run Automerge.
 
 ## Datasets
@@ -34,3 +34,17 @@ for the version-vector shape, provided parent links are readable without
 the library. Not yet checked that Automerge exposes them that way.
 
 Commits: see branch history.
+
+## 2026-11-06 — Diamond Types row
+
+**Question.** Fill the row the first pass could not reach.
+
+**Method.** The repository README.
+
+**Results.** Rust, Wasm through npm packages, P2P without a server, plain
+text only, work in progress with an out-of-date crates.io release. How
+peers exchange changes and the file format are not in the README.
+
+**Decision.** Row filled except sync and format; BINARY.md is next for
+those, since it decides whether Diamond Types is a change graph a store
+could serve without running it.
