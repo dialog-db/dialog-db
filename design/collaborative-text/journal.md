@@ -90,3 +90,18 @@ text CRDT libraries and papers on the matrix's rows (the list is in
 research/text-crdt-survey.md); and
 the write-cost measurement against the 2× bar. Not decided: the
 direction; it waits on both.
+
+## 2026-11-06, Directing: what a built-in would reuse (by voice)
+
+**Asked.** Which pieces of Dialog would a native text CRDT reuse? Not
+known; finding out is part of the work. Dialog stores changes, reconciles
+them, has compact encodings and efficient lookups, so pieces are likely
+reusable. Precedent: for encryption, a smaller primitive built on beat
+integrating a whole external system.
+
+**Learned.** The built-in column rests on a hypothesis and an analogy.
+The candidate pieces are named at the level of capabilities, not code.
+
+**Decided.** Not decided. The hypothesis stays open until each candidate
+is tied to the Dialog code a text CRDT would call. No product names for
+the precedent.

@@ -18,7 +18,8 @@
 | a per-edit commit, through any column that routes changes through facts, lands within 2× of a text CRDT library | hypothesis | research/text-write-cost.md; refuted beyond 2× on disk or sync bytes | open |
 | batching edits (per pause, per second) cuts the cost enough to matter | hypothesis | same measurement, with and without batching | open |
 | "changes since a version" can be served by a remote that holds an opaque append-only log and does not understand the CRDT | hypothesis | research/text-crdt-survey.md: how each library computes and applies changes since a version | open |
-| Dialog already does enough of what a text CRDT does that a native one could reuse it | hypothesis | maintainer, 2026-11-06; needs the list of pieces it would reuse, then the survey to check each | open |
+| Dialog already does enough of what a text CRDT does that a native one could reuse it | hypothesis | maintainer, 2026-11-06, speculation by his own account; candidates: storing changes, reconciling changes, compact encodings, lookups; confirmed per piece by naming the Dialog code a text CRDT would call | open |
+| a precedent: for encryption, building on a smaller existing primitive beat bringing a whole external system into Dialog | opinion | maintainer, 2026-11-06; an analogy, not evidence about text | - |
 | a database is always partial, but a peer may hold a whole document before editing it | fact | maintainer, 2026-11-06 | holds |
 | with a whole document per peer, a built-in can order text without fractional indexing's interleaving | hypothesis | follows from the line above and `notes/ordered-relations.md`; checked when the built-in column gets a design | open |
 | fractional-index ordered relations interleave concurrent runs; acceptable for lists, not text | fact | `notes/ordered-relations.md`, maintainer 2026-11-06 | holds |
