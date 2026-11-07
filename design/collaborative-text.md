@@ -1,30 +1,35 @@
 # Collaborative text editing
 
-Phase: **Describing**
+Phase: **Directing**
 
 ## Description
 
-Three builders, three apps, the same shape of complaint:
+Developers want to build applications with collaborative text editing,
+come to Dialog, and we cannot tell them how to do it.
 
-- **A document editor** built on Tonk. Collaborators race and changes get
-  dropped. Its builder and the maintainer have accepted that multiple
-  editors at once does not work today.
-- **An Obsidian-style notebook.** Its builder does not know how to allow
-  editing the same note across replicas, and is considering an Automerge
-  integration alongside Dialog.
-- **An Observable-style playground** (the maintainer's). Users editing at
-  the same time override each other's changes.
+- Most of them evaluated Dialog, saw no answer for text, and picked a
+  text CRDT library instead. They never built on Dialog, so we have no
+  usage from them, only the gap they saw.
+- Three builders did build on Dialog and hit it: a Tonk document editor
+  (racing collaborators drop changes; single editor accepted), an
+  Obsidian-style notebook (no known way to edit a note across replicas;
+  builder considering a text CRDT library alongside), and the
+  maintainer's Observable-style playground (concurrent editors override
+  each other).
+- Earlier spikes (some in notes, some in unmerged PRs) never landed;
+  the maintainer says the tradeoffs stacked up against them.
 
-The [ordered relations note](../notes/ordered-relations.md) lists
-collaborative text as out of scope: fractional indexing interleaves
-concurrent runs.
-
-Not yet written down: how each app stores its text in Dialog, and what
-exactly happens to the losing edit.
+"Support" is open: compose with a text CRDT library, use one from within
+Dialog, or something built in.
 
 ## Problem
 
-?
+Developers want apps where several people edit the same text, peer to
+peer and offline, and every replica converges to the same text without
+losing anyone's edits. Dialog resolves concurrent writes to a text field
+by last writer wins, so one edit is lost. Apps can shrink the loss by
+splitting text into smaller fields, not remove it. So developers pick a
+text CRDT library instead of Dialog.
 
 ## Approach
 

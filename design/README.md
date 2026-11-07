@@ -57,4 +57,4 @@ Backtracking moves a topic to an earlier phase and says so in its journal.
 
 | topic | phase |
 |---|---|
-| [Collaborative text editing](collaborative-text.md) | Describing |
+| [Collaborative text editing](collaborative-text.md) | Directing |
