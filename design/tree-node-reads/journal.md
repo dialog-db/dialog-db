@@ -52,3 +52,27 @@ caches outside the environment, reads that skip it, and environments
 without one. The last two are still possible on main by construction.
 
 **Decided.** Not decided. Next: what "the environment is a cache" means.
+
+## 2026-11-07, Diagnosing: one cache, or the home of every cache
+
+**Asked.** What does "the environment is a cache" mean: one cache the
+environment answers every read from, so callers never see it; or the
+home of every cache, each still consulted by the code that uses it? Answer
+as given: the maintainer asked for the trade-offs, leans to the first ("from
+the tree's perspective it just needs to get a node; why would callers have
+to think about a cache?"), allows there may be cases where seeing the cache
+is useful without knowing what they are, and asked why sync would care.
+
+**Learned.** Every place outside the cache that touches it on main is one
+of three ways of asking for a node: made just now (persist), only from
+memory (`cached`), ahead of need (`warm`, `keeps`). None needs the cache
+itself; each is a policy a request could carry. Sync does not care about
+the cache; it needs bytes rather than nodes, and push forwarding wants a
+remote's block passed through, not kept. The open cost is per read: today a
+cache hit is a direct call on a cache found once per operation; answered by
+the environment, every node read is a capability performed (a hypothesis,
+measurable).
+
+**Decided.** Not decided. A problem statement is drafted in the top story
+for the maintainer to accept or cut.
+

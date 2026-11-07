@@ -35,3 +35,17 @@ tree.
 
 `Holds` keeps other things on main besides the node cache: the query
 engine's formula cache, the repository's caches and the network's routes.
+
+## Problem
+
+*Draft, not yet accepted.* Whether a tree read is cached depends on code
+beside the read rather than on what answers it: the environment owns the
+node cache's memory, but the tree finds the cache itself, through a lookup
+that may come back empty, and fills it itself, and other code fills it
+again its own way. So a read can run against an environment that holds no
+cache without anything failing, a new read path can skip the cache by
+loading and decoding for itself, and a store that keeps nodes in a form of
+its own (the single file's rows) has no way to answer a read but beside it.
+Each new environment or read path has reopened one of these, and fixing
+them has kept falling to the maintainer.
+
