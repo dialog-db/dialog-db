@@ -914,6 +914,43 @@ tonk-team replica migrated into the current format.
 in the file (the hitchhiker tree, 2026-11-06) as the work that makes the
 index bounded. To confirm on a larger file before the format changes.
 
+## 2026-11-07: run-length encoding the columns, as Automerge does
+
+**Question.** `hexane`, Automerge's columnar library, writes integer
+columns as runs over LEB128 (a signed count: positive for one value
+repeated, negative for values written one by one), with deltas inside the
+runs. Frames write every delta one by one. What would runs save?
+
+**Method.** `offsets_instead_of_ids` again, counting only the fields a
+frame writes (the model counted unused slots as zeros before, which the
+encoder never writes; the figures in the last entry are a little high for
+that reason, their ratios hold). Each column's zigzag deltas, one varint
+each, against the same deltas in Automerge's runs.
+
+**Results.**
+
+| | a member | tonk-team |
+|---|---|---|
+| ids, as frames write them | 505 KiB | 812 KiB |
+| ids in runs | 356 KiB (−30%) | 538 KiB (−34%) |
+| offsets in units of 16 | 584 KiB | 887 KiB |
+| offsets in units of 16, in runs | 437 KiB | 617 KiB |
+
+- Runs take a third off the columns: a leaf's form is one value, its
+  entity (or attribute) repeats across rows, and its deltas repeat.
+- In runs, offsets cost less than ids do as frames write them today: 13%
+  and 24% less. The change to offsets and the change to runs together make
+  frames smaller and take the node and token tables out of memory.
+- What else `hexane` does does not carry over as it is: it cuts columns
+  into slabs of 64 with counts, sums and min/max for seeking, in a B-tree
+  in memory, and `load` decodes into owned slabs, nothing read in place.
+  Slabs would matter if a frame were read in place through a page cache
+  and decoded only where a key falls; a node is a few hundred rows, so not
+  yet.
+
+**Decision.** Runs, with offsets in units of 16, for the next frame
+format, to confirm with offsets on a larger file.
+
 ## How to reproduce
 
 ```sh

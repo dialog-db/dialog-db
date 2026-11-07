@@ -2390,26 +2390,65 @@ mod offsets_instead_of_ids {
         };
         // Zigzag-delta varint bytes of every column of `rows`, written as
         // literals: the width of the ids against the width of the offsets.
-        let width = |rows: &[Vec<[u64; 6]>]| -> usize {
-            let mut bytes = 0;
+        // Each column of `rows` as zigzag deltas, one varint a delta.
+        let leb = |value: u128| (128 - value.leading_zeros() as usize).max(1).div_ceil(7);
+        let deltas = |rows: &[Vec<[u64; 6]>]| -> Vec<Vec<u128>> {
+            let mut columns = Vec::new();
             for section in rows {
                 for field in 0..6 {
                     let mut previous = 0i128;
+                    let mut column = Vec::new();
                     for row in section {
                         if row[field] == u64::MAX {
                             continue;
                         }
                         let delta = row[field] as i128 - previous;
                         previous = row[field] as i128;
-                        let zigzag = ((delta << 1) ^ (delta >> 127)) as u128;
-                        bytes += (128 - zigzag.leading_zeros() as usize).max(1).div_ceil(7);
+                        column.push(((delta << 1) ^ (delta >> 127)) as u128);
                     }
+                    columns.push(column);
                 }
+            }
+            columns
+        };
+        let width = |rows: &[Vec<[u64; 6]>]| -> usize {
+            deltas(rows).iter().flatten().map(|delta| leb(*delta)).sum()
+        };
+        // The same deltas run-length encoded as Automerge's columns are
+        // (hexane): a signed count, positive for a value repeated that
+        // many times, negative for that many values written one by one.
+        let run_width = |rows: &[Vec<[u64; 6]>]| -> usize {
+            let mut bytes = 0;
+            for column in deltas(rows) {
+                let mut literals = 0usize;
+                let mut at = 0;
+                let close = |literals: &mut usize, bytes: &mut usize| {
+                    if *literals > 0 {
+                        *bytes += leb((*literals as u128) << 1);
+                        *literals = 0;
+                    }
+                };
+                while at < column.len() {
+                    let mut end = at + 1;
+                    while end < column.len() && column[end] == column[at] {
+                        end += 1;
+                    }
+                    if end - at >= 2 {
+                        close(&mut literals, &mut bytes);
+                        bytes += leb(((end - at) as u128) << 1) + leb(column[at]);
+                    } else {
+                        literals += 1;
+                        bytes += leb(column[at]);
+                    }
+                    at = end;
+                }
+                close(&mut literals, &mut bytes);
             }
             bytes
         };
         let (mut ids, mut offsets, mut aligned, mut literal_rows, mut frames) =
             (0, 0, 0, 0usize, 0usize);
+        let (mut ids_in_runs, mut aligned_in_runs) = (0, 0);
         for id in 0..index.nodes().len() as u32 {
             let (rows, _) = archive.rows(&HashMap::new(), id)?;
             let node = index.node(id).unwrap();
@@ -2459,9 +2498,42 @@ mod offsets_instead_of_ids {
                         .collect()
                 })
                 .collect();
+            // Only the fields a frame writes: a key's unused slots, and a
+            // buffer's or a link's spare ones, are not written at all.
+            let written = |columns: Vec<Vec<[u64; 6]>>| -> Vec<Vec<[u64; 6]>> {
+                sections_of(literal.kind)
+                    .iter()
+                    .zip(&literal.sections)
+                    .zip(columns)
+                    .map(|((section, rows), mut columns)| {
+                        for (row, column) in rows.iter().zip(&mut columns) {
+                            for (field, value) in column.iter_mut().enumerate() {
+                                let kept = match section {
+                                    Section::Entries | Section::Ops => {
+                                        field == 0
+                                            || field == crate::rows::DATUM
+                                            || field <= crate::rows::slots_of(row[0] as u8)
+                                    }
+                                    Section::Links => field < 4,
+                                    Section::Buffers => field < 2,
+                                };
+                                if !kept {
+                                    *value = u64::MAX;
+                                }
+                            }
+                        }
+                        columns
+                    })
+                    .collect()
+            };
+            let as_ids = written(as_ids);
+            let as_offsets = written(by_offset(&literal, 1));
+            let as_aligned = written(by_offset(&literal, crate::tokens::ALIGN));
             ids += width(&as_ids);
-            offsets += width(&by_offset(&literal, 1));
-            aligned += width(&by_offset(&literal, crate::tokens::ALIGN));
+            ids_in_runs += run_width(&as_ids);
+            aligned_in_runs += run_width(&as_aligned);
+            offsets += width(&as_offsets);
+            aligned += width(&as_aligned);
         }
         println!(
             "frames {} KiB; literal rows {literal_rows}: id columns {} KiB, offset columns {} KiB, \
@@ -2470,6 +2542,11 @@ mod offsets_instead_of_ids {
             ids / 1024,
             offsets / 1024,
             aligned / 1024
+        );
+        println!(
+            "run-length encoded as Automerge's columns: id columns {} KiB, aligned offset columns {} KiB",
+            ids_in_runs / 1024,
+            aligned_in_runs / 1024
         );
 
         let started = std::time::Instant::now();
