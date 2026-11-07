@@ -747,3 +747,44 @@ pub(crate) mod tests {
         assert_realizes(keys)
     }
 }
+
+#[cfg(test)]
+mod warm_split {
+    use super::*;
+    use std::time::Instant;
+
+    /// Times splitting every node of the archive file at
+    /// `DIALOG_ARCHIVE_PROFILE` into rows against the file's own id table,
+    /// full, as an append's split runs: most tokens are found, not added.
+    /// Run by hand.
+    #[test]
+    #[ignore = "profiles a file named by DIALOG_ARCHIVE_PROFILE"]
+    fn warm_split() -> anyhow::Result<()> {
+        let Ok(path) = std::env::var("DIALOG_ARCHIVE_PROFILE") else {
+            return Ok(());
+        };
+        let archive = crate::FileArchive::open(&path)?;
+        let mut blocks = Vec::new();
+        for (catalog, hash) in archive.hashes() {
+            blocks.push(Buffer::from(archive.get(&catalog, &hash)?.expect("listed")));
+        }
+        let nodes: Vec<_> = blocks.iter().filter_map(tree_node).collect();
+        archive.prepare_writer();
+        let index = archive.index();
+        for round in 0..3 {
+            let started = Instant::now();
+            let mut new = 0;
+            for node in &nodes {
+                let mut draft = Draft::new(index);
+                rows_of(node, &mut draft, |_| None)?;
+                new += draft.pending();
+            }
+            println!(
+                "round {round}: {} nodes, {:.1} µs a node, {new} tokens new",
+                nodes.len(),
+                started.elapsed().as_secs_f64() * 1e6 / nodes.len() as f64
+            );
+        }
+        Ok(())
+    }
+}

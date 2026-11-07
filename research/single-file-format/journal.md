@@ -793,6 +793,88 @@ interleaved.
 The 6% is the price; ids could be made smaller (delta against a
 column's base, or dense per-node renumbering) if it matters.
 
+## 2026-11-07: reads without a lock, writers prepared before their turn
+
+**Change.** Three steps, each with tests that fail when the property they
+pin is broken (checked by breaking it):
+
+- A read that misses looks for other processes' appends only when the
+  file grew past what this process has read or is writing; before, it
+  took the writer's turn.
+- The index only grows, as the file does: slots that never move, and
+  lock-free maps (`papaya`) for blocks, nodes and lineages. An append
+  writes its records and footer, then publishes tokens, blocks and frames,
+  children first. A test runs a check after every step of publishing;
+  another reads on another thread while an append is held between writing
+  and publishing.
+- An append splits and encodes before its turn against the index as it
+  is, then reconciles in its turn: tokens and nodes another writer
+  appended first take theirs, the rest the next ids, and moved frames are
+  renamed and encoded again (or prepared again, when a node it framed was
+  appended whole).
+
+**Results** (interleaved A/B, three runs each, against the commit before
+lock-free reads):
+
+- As first built, slower: pull +11%, a command +5%, cold `v2/issue` +7%.
+  The archive's own timings put it in splitting (389 → 492 ms a member):
+  the token id table had moved into a lock-free map, whose lookups follow
+  a boxed entry and the slots chain. Splitting against a full table, the
+  same file: 79–82 µs a node before, 93–95 after.
+- The id table is the writer's alone, so it went back to a `hashbrown`
+  table under a lock writers alone take (a draft holds it while it
+  prepares and lets it go before its turn): 83–88 µs a node, and
+
+| | before | now |
+|---|---|---|
+| pull | 43.5 ms | 43.3 ms |
+| push | 17.6 ms | 17.6 ms |
+| a command | 14.9 ms | 14.9 ms |
+| `v2/issue`, cold | 66.6 ms (65.0–69.2) | 69.8 ms (67.1–71.1) |
+| `v2/issue`, warm | 42.2 ms (42.0–44.3) | 44.6 ms (43.7–44.8) |
+| an issue's detail, cold | 2.41 ms | 2.11 ms |
+
+- Writes are level. Reads of `v2/issue` read a few percent higher with
+  overlapping spreads: to watch, not settled. The bench is one thread, so
+  it pays for lock-free reads and cannot show what they buy.
+
+**Decision.** Kept. Commits: `9a074fe`, `aacfbac`, `97abe73`, and the id
+table's.
+
+## 2026-11-07: back to LEB128, measured
+
+**Question.** The bijou64 article says the two are "within a couple of
+percent of each other across realistic workloads"; the file grew 6%. Why?
+
+**Method.** A temporary count in the file's integer writer, over one
+six-member run: every integer by range, with what it costs in each.
+
+**Results.**
+
+| range | integers | bijou64 | LEB128 |
+|---|---|---|---|
+| 0–127 | 1,668,957 | 1 B | 1 B |
+| 128–247 | 74,172 | 1 B | 2 B |
+| 248–503 | 116,549 | 2 B | 2 B |
+| 504–16,383 | 688,525 | 3 B | 2 B |
+| 16,384–66,039 | 16,948 | 3 B | 3 B |
+| all | | 4.09 MB | 3.48 MB |
+
+- The article does not claim bijou64 is never larger: it says it "isn't
+  the most compact varint for every distribution" and that LEB128 "is
+  more compact up to 3 segments". A quarter of the file's integers sit
+  there (504–16,383, most likely deltas in a row's columns between token
+  ids, which number in the tens of thousands); bijou64 wins back 74 KB on
+  128–247 and loses 690 KB there.
+- What bijou64 buys, one encoding per number, matters for bytes that are
+  hashed as written. Nothing in the file is: a frame is checked by reading
+  it back, and a block's hash is over the block it rebuilds.
+
+**Decision.** LEB128 for the file's own records; the magic number moves to
+`DIALOGA\x05`. Smaller ids (a frame naming its distinct tokens once, rows
+indexing into that list) would shrink frames under either encoding, and
+stay open.
+
 ## How to reproduce
 
 ```sh

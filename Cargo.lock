@@ -1288,7 +1288,6 @@ dependencies = [
  "anyhow",
  "arc-swap",
  "async-trait",
- "bijoux",
  "crc32fast",
  "dialog-artifacts",
  "dialog-capability",

@@ -18,8 +18,8 @@ use std::io;
 
 use hashbrown::HashTable;
 
-use crate::archive::{Index, View};
-use crate::rows::{Reader, invalid, put_bijou};
+use crate::archive::{Ids, Index, View};
+use crate::rows::{Reader, invalid, put_varint};
 
 /// The alignment of every token's bytes in the file.
 pub(crate) const ALIGN: u64 = 16;
@@ -35,6 +35,9 @@ pub(crate) trait TokenRead {
 pub(crate) struct Draft<'a> {
     index: &'a Index,
     view: View<'a>,
+    /// The index's id table, held for reading until the draft is done
+    /// interning ([`release`](Self::release)).
+    published: Option<Ids<'a>>,
     /// The id of the first new token.
     first: u32,
     /// The new tokens' bytes, back to back, where each ends, and the hash
@@ -54,6 +57,7 @@ impl<'a> Draft<'a> {
         let view = index.view();
         let first = view.len();
         Self {
+            published: Some(index.ids()),
             index,
             view,
             first,
@@ -67,7 +71,8 @@ impl<'a> Draft<'a> {
     /// The id of `token`, adding it when it is new.
     pub fn intern(&mut self, token: &[u8]) -> u32 {
         let hash = self.index.hash_of(token);
-        if let Some(id) = self.index.find(&self.view, hash, token)
+        if let Some(ids) = &self.published
+            && let Some(id) = Index::find(ids, &self.view, hash, token)
             && id < self.first
         {
             return id;
@@ -84,6 +89,12 @@ impl<'a> Draft<'a> {
         self.ids
             .insert_unique(hash, id, |id| hashes[(*id - first) as usize]);
         id
+    }
+
+    /// Lets the index's id table go: the draft interns nothing more, and
+    /// a writer that publishes needs the table.
+    pub fn release(&mut self) {
+        self.published = None;
     }
 
     /// The id of the first new token.
@@ -126,10 +137,10 @@ impl<'a> Draft<'a> {
     pub fn record(&self, body_offset: u64, ids: &[u32]) -> (Vec<u8>, Vec<(usize, u32)>) {
         let mut body = Vec::with_capacity(self.bytes.len() + 20 * ids.len() + 8);
         let mut places = Vec::with_capacity(ids.len());
-        put_bijou(&mut body, ids.len() as u64);
+        put_varint(&mut body, ids.len() as u64);
         for id in ids {
             let token = self.get(*id).expect("a new token");
-            put_bijou(&mut body, token.len() as u64);
+            put_varint(&mut body, token.len() as u64);
             let after = body_offset + body.len() as u64 + 1;
             let pad = (ALIGN - after % ALIGN) % ALIGN;
             body.push(pad as u8);
@@ -161,10 +172,10 @@ impl TokenRead for Draft<'_> {
 /// holds is, in order.
 pub(crate) fn read_token_record(body: &[u8], body_offset: u64) -> io::Result<Vec<(u64, u32)>> {
     let mut reader = Reader::new(body);
-    let count = reader.bijou()?;
+    let count = reader.varint()?;
     let mut tokens = Vec::with_capacity(count.min(1 << 20) as usize);
     for _ in 0..count {
-        let len = reader.bijou()? as usize;
+        let len = reader.varint()? as usize;
         let pad = reader.byte()? as usize;
         reader.take(pad)?;
         let at = reader.position();

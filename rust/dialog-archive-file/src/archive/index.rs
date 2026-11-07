@@ -13,6 +13,9 @@ use std::fs::File;
 use std::hash::BuildHasher as _;
 use std::io;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+
+use hashbrown::HashTable;
+use parking_lot::RwLock;
 use std::sync::{Arc, OnceLock};
 
 use arc_swap::ArcSwapOption;
@@ -98,6 +101,26 @@ impl<T> Slots<T> {
     }
 }
 
+/// A map read without a lock, hashed as `hashbrown` hashes: the keys are
+/// hashes, ids and short names, which need no defence against crafted
+/// collisions, and are looked up on every token a writer interns.
+pub(crate) type Map<K, V> = papaya::HashMap<K, V, DefaultHashBuilder>;
+
+/// The id table, held for reading: a writer holds it while it drafts an
+/// append, and lets it go before its turn.
+pub(crate) type Ids<'a> = parking_lot::RwLockReadGuard<'a, IdTable>;
+
+/// Each published token's id, found by its bytes' hash and compared
+/// against the token, so the table holds ids, not bytes, up to `indexed`
+/// tokens. A reader never needs it, and it is not read without a lock: a
+/// writer looks up every token of every node it splits, and a table
+/// probed in place is what keeps that cheap.
+#[derive(Default)]
+pub(crate) struct IdTable {
+    table: HashTable<u32>,
+    indexed: usize,
+}
+
 /// Where a token is in the file, and whether it was checked as an archived
 /// datum: a datum is checked once, the first time a node that holds it is
 /// read.
@@ -111,23 +134,19 @@ pub(crate) struct Token {
 #[derive(Default)]
 pub(crate) struct Index {
     catalogs: Slots<String>,
-    catalog_ids: papaya::HashMap<String, u16>,
+    catalog_ids: Map<String, u16>,
     /// Every block, by catalog and hash.
-    blocks: papaya::HashMap<(u16, Blake3Hash), Place>,
+    blocks: Map<(u16, Blake3Hash), Place>,
     /// Every frame, by node id.
     nodes: Slots<Node>,
     /// The latest node of each hash, for naming children.
-    node_ids: papaya::HashMap<Blake3Hash, u32>,
+    node_ids: Map<Blake3Hash, u32>,
     /// The latest node of each lineage, for the next to be written against.
-    lineages: papaya::HashMap<Lineage, u32>,
+    lineages: Map<Lineage, u32>,
     tokens: Slots<Token>,
-    /// A token's id by the hash of its bytes, for a writer to find a token
-    /// it already wrote. Built on a writer's first use, up to `indexed`
-    /// tokens; a reader never needs it. Two tokens whose bytes hash alike
-    /// keep the first: the second is written again, which costs bytes and
-    /// nothing else, since an id always names the bytes it was given.
-    ids: papaya::HashMap<u64, u32>,
-    indexed: AtomicUsize,
+    /// A token's id by its bytes, for a writer to find a token it already
+    /// wrote. Built on a writer's first use; a reader never needs it.
+    ids: RwLock<IdTable>,
     hasher: DefaultHashBuilder,
     /// The file, mapped at least as far as every published token.
     map: ArcSwapOption<Mmap>,
@@ -233,31 +252,46 @@ impl Index {
         self.hasher.hash_one(token)
     }
 
+    /// The id table, held for reading.
+    pub fn ids(&self) -> Ids<'_> {
+        self.ids.read()
+    }
+
     /// The id of a published token equal to `token`, whose bytes hash to
     /// `hash`, if the id table knows it.
-    pub fn find(&self, view: &View<'_>, hash: u64, token: &[u8]) -> Option<u32> {
-        let id = *self.ids.pin().get(&hash)?;
-        (view.get(id) == Some(token)).then_some(id)
+    pub fn find(ids: &IdTable, view: &View<'_>, hash: u64, token: &[u8]) -> Option<u32> {
+        ids.table
+            .find(hash, |id| view.get(*id) == Some(token))
+            .copied()
     }
 
     /// Brings the id table up to every published token. A writer calls it
     /// before it looks tokens up, so the first append of a process reads
     /// every token once; later ones read only what other processes added.
+    /// A token written twice keeps its first id.
     pub fn build_ids(&self) {
-        let view = self.view();
-        let ids = self.ids.pin();
-        let from = self.indexed.load(Ordering::Acquire);
         let to = self.tokens.len();
-        for id in from..to {
-            if let Some(token) = view.get(id as u32) {
-                ids.try_insert(self.hash_of(token), id as u32).ok();
+        if self.ids.read().indexed >= to {
+            return;
+        }
+        let view = self.view();
+        let mut ids = self.ids.write();
+        for id in ids.indexed..to {
+            let Some(token) = view.get(id as u32) else {
+                continue;
+            };
+            let hash = self.hash_of(token);
+            if Self::find(&ids, &view, hash, token).is_none() {
+                ids.table.insert_unique(hash, id as u32, |id| {
+                    self.hash_of(view.get(*id).expect("an indexed token"))
+                });
             }
         }
-        self.indexed.fetch_max(to, Ordering::AcqRel);
+        ids.indexed = ids.indexed.max(to);
     }
 
     pub fn id_table_len(&self) -> usize {
-        self.ids.len()
+        self.ids.read().table.len()
     }
 
     pub fn lineage_count(&self) -> usize {
@@ -310,11 +344,15 @@ impl Index {
         }) as u32;
         // A token the writer found new joins the id table at once, when the
         // table is up to it.
-        if let Some(hash) = hash
-            && self.indexed.load(Ordering::Acquire) == id as usize
-        {
-            self.ids.pin().try_insert(hash, id).ok();
-            self.indexed.fetch_max(id as usize + 1, Ordering::AcqRel);
+        if let Some(hash) = hash {
+            let mut ids = self.ids.write();
+            if ids.indexed == id as usize {
+                let view = self.view();
+                ids.table.insert_unique(hash, id, |id| {
+                    self.hash_of(view.get(*id).expect("an indexed token"))
+                });
+                ids.indexed += 1;
+            }
         }
         id
     }

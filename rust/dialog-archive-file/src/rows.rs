@@ -9,8 +9,6 @@
 use std::collections::HashMap;
 use std::io;
 
-use bijoux::{Decode as _, Encode as _};
-
 /// One row of a section: the ids an entry, a link or a buffer is made of.
 /// Which field means what depends on the [`Section`].
 pub(crate) type Row = [u32; 6];
@@ -133,10 +131,18 @@ impl Rows {
     }
 }
 
-/// Writes `value` as a bijou64 integer: one byte up to 247, and its only
-/// encoding, as the tree's own nodes write theirs.
-pub(crate) fn put_bijou(out: &mut Vec<u8>, value: u64) {
-    value.encode(out);
+/// Writes `value` as an LEB128 varint: seven bits a byte. The file's
+/// integers are mostly ids and deltas between them, from a few hundred to
+/// a few tens of thousands, which LEB128 writes in two bytes where bijou64
+/// takes three. Nothing in the file is hashed as written, so the one
+/// encoding per number bijou64 gives is not needed here: a frame is
+/// checked by reading it back.
+pub(crate) fn put_varint(out: &mut Vec<u8>, mut value: u64) {
+    while value >= 0x80 {
+        out.push((value as u8) | 0x80);
+        value >>= 7;
+    }
+    out.push(value as u8);
 }
 
 pub(crate) fn invalid(message: &str) -> io::Error {
@@ -184,26 +190,34 @@ impl<'a> Reader<'a> {
         Ok(taken)
     }
 
-    /// A bijou64 integer.
-    pub fn bijou(&mut self) -> io::Result<u64> {
-        let (value, read) = u64::decode(&self.bytes[self.at.min(self.bytes.len())..])
-            .map_err(|_| invalid("an integer that is not bijou64"))?;
-        self.at += read;
-        Ok(value)
+    /// An LEB128 varint.
+    pub fn varint(&mut self) -> io::Result<u64> {
+        let (mut value, mut shift) = (0u64, 0);
+        loop {
+            let byte = self.byte()?;
+            if shift > 63 {
+                return Err(invalid("a varint runs too long"));
+            }
+            value |= ((byte & 0x7F) as u64) << shift;
+            if byte < 0x80 {
+                return Ok(value);
+            }
+            shift += 7;
+        }
     }
 
     pub fn u32(&mut self) -> io::Result<u32> {
-        u32::try_from(self.bijou()?).map_err(|_| invalid("an id over 32 bits"))
+        u32::try_from(self.varint()?).map_err(|_| invalid("an id over 32 bits"))
     }
 
     pub fn zigzag(&mut self) -> io::Result<i64> {
-        let raw = self.bijou()?;
+        let raw = self.varint()?;
         Ok(((raw >> 1) as i64) ^ -((raw & 1) as i64))
     }
 }
 
 fn put_zigzag(out: &mut Vec<u8>, value: i64) {
-    put_bijou(out, ((value << 1) ^ (value >> 63)) as u64);
+    put_varint(out, ((value << 1) ^ (value >> 63)) as u64);
 }
 
 /// Writes rows column by column. Ids are zigzag deltas against the same
@@ -244,8 +258,8 @@ fn put_columns(out: &mut Vec<u8>, section: Section, rows: &[&Row]) {
         }
         Section::Buffers => {
             for row in rows {
-                put_bijou(out, row[0] as u64);
-                put_bijou(out, row[1] as u64);
+                put_varint(out, row[0] as u64);
+                put_varint(out, row[1] as u64);
             }
         }
     }
@@ -362,25 +376,25 @@ fn diff(rows: &[Row], base: &[Row]) -> Vec<Op> {
 /// Writes one section: its row count, then, against a predecessor, the
 /// ops, then the literal rows as columns.
 fn put_section(out: &mut Vec<u8>, section: Section, rows: &[Row], base: Option<&[Row]>) {
-    put_bijou(out, rows.len() as u64);
+    put_varint(out, rows.len() as u64);
     let Some(base) = base else {
         put_columns(out, section, &rows.iter().collect::<Vec<_>>());
         return;
     };
     let ops = diff(rows, base);
-    put_bijou(out, ops.len() as u64);
+    put_varint(out, ops.len() as u64);
     let mut literals = Vec::new();
     let (mut i, mut expected) = (0usize, 0i64);
     for op in &ops {
         match op {
             Op::Copy { from, len } => {
-                put_bijou(out, (len << 1 | 1) as u64);
+                put_varint(out, (len << 1 | 1) as u64);
                 put_zigzag(out, *from as i64 - expected);
                 expected = (*from + *len) as i64;
                 i += len;
             }
             Op::Literal(n) => {
-                put_bijou(out, (n << 1) as u64);
+                put_varint(out, (n << 1) as u64);
                 literals.extend(&rows[i..i + n]);
                 i += n;
             }
@@ -394,15 +408,15 @@ fn get_section(
     section: Section,
     base: Option<&[Row]>,
 ) -> io::Result<Vec<Row>> {
-    let count = reader.bijou()? as usize;
+    let count = reader.varint()? as usize;
     let Some(base) = base else {
         return get_columns(reader, section, count);
     };
-    let steps = reader.bijou()? as usize;
+    let steps = reader.varint()? as usize;
     let mut ops = Vec::with_capacity(steps.min(count));
     let (mut literal, mut expected) = (0usize, 0i64);
     for _ in 0..steps {
-        let head = reader.bijou()? as usize;
+        let head = reader.varint()? as usize;
         if head & 1 == 1 {
             let from = expected + reader.zigzag()?;
             let len = head >> 1;

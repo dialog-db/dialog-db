@@ -18,13 +18,13 @@ use parking_lot::Mutex;
 
 use crate::file::{FOOTER, HEADER, Kind, MAGIC, put_record, read_at, read_record, write_at};
 use crate::node::{TreeNode, realize, rows_of, tree_node};
-use crate::rows::{Reader, Rows, get_rows, invalid, put_bijou, put_rows, rename};
+use crate::rows::{Reader, Rows, get_rows, invalid, put_rows, put_varint, rename};
 use crate::tokens::{Draft, TokenRead, read_token_record};
 
 mod index;
 mod served;
 
-pub(crate) use index::{Index, View};
+pub(crate) use index::{Ids, Index, Map, View};
 
 /// The files this process has open, so a second open of one shares it.
 static OPEN: LazyLock<Mutex<HashMap<PathBuf, Weak<Inner>>>> =
@@ -124,14 +124,14 @@ impl FrameHeader {
         put_catalog(out, &self.catalog)?;
         out.extend_from_slice(self.hash.as_bytes());
         out.push(self.kind);
-        put_bijou(out, self.base.map_or(0, |base| base as u64 + 1));
-        put_bijou(out, self.manifest as u64);
+        put_varint(out, self.base.map_or(0, |base| base as u64 + 1));
+        put_varint(out, self.manifest as u64);
         match self.lineage {
             None => out.push(0),
             Some(first) => {
                 out.push(1);
                 for id in first {
-                    put_bijou(out, id as u64);
+                    put_varint(out, id as u64);
                 }
             }
         }
@@ -142,7 +142,7 @@ impl FrameHeader {
         let catalog = get_catalog(reader)?;
         let hash = Blake3Hash::from(<[u8; 32]>::try_from(reader.take(32)?).expect("32 bytes"));
         let kind = reader.byte()?;
-        let base = match reader.bijou()? {
+        let base = match reader.varint()? {
             0 => None,
             base => Some(u32::try_from(base - 1).map_err(|_| invalid("a node id over 32 bits"))?),
         };
@@ -175,7 +175,7 @@ struct Writer {
 /// takes no lock; keeping one takes a short one, for the order they go in.
 struct RowsCache {
     capacity: usize,
-    rows: papaya::HashMap<u32, (Arc<Rows>, u32)>,
+    rows: Map<u32, (Arc<Rows>, u32)>,
     order: Mutex<VecDeque<u32>>,
 }
 
@@ -183,7 +183,7 @@ impl RowsCache {
     fn new(capacity: usize) -> Self {
         Self {
             capacity,
-            rows: papaya::HashMap::new(),
+            rows: Map::default(),
             order: Mutex::new(VecDeque::new()),
         }
     }
@@ -304,7 +304,7 @@ struct Inner {
     index: Index,
     rows: RowsCache,
     /// Each manifest token, decoded, for the nodes served to trees.
-    manifests: papaya::HashMap<u32, Arc<Manifest>>,
+    manifests: Map<u32, Arc<Manifest>>,
     /// The writer's turn in this process: where the next append goes.
     writer: Mutex<Writer>,
     /// The end of what this process has read of the file or is writing to
@@ -545,35 +545,35 @@ fn publish(index: &Index, run: Vec<Indexed>) -> io::Result<()> {
 fn checkpoint_body(index: &Index) -> io::Result<Vec<u8>> {
     let mut body = Vec::new();
     let catalogs: Vec<&str> = index.catalogs().collect();
-    put_bijou(&mut body, catalogs.len() as u64);
+    put_varint(&mut body, catalogs.len() as u64);
     for catalog in &catalogs {
         put_catalog(&mut body, catalog)?;
     }
     // Where every token is: tokens are written in id order, so each starts
     // after the one before.
     let tokens = index.tokens();
-    put_bijou(&mut body, tokens.len() as u64);
+    put_varint(&mut body, tokens.len() as u64);
     let mut previous = 0;
     for token in tokens.iter() {
-        put_bijou(&mut body, token.offset - previous);
-        put_bijou(&mut body, token.len as u64);
+        put_varint(&mut body, token.offset - previous);
+        put_varint(&mut body, token.len as u64);
         previous = token.offset;
     }
     let nodes = index.nodes();
-    put_bijou(&mut body, nodes.len() as u64);
+    put_varint(&mut body, nodes.len() as u64);
     for node in nodes.iter() {
         body.extend_from_slice(node.hash.as_bytes());
         body.extend_from_slice(&node.extent.offset.to_le_bytes());
         body.extend_from_slice(&node.extent.len.to_le_bytes());
         body.push(node.depth);
-        put_bijou(&mut body, node.catalog as u64);
+        put_varint(&mut body, node.catalog as u64);
         body.push(node.kind);
         match node.lineage {
             None => body.push(0),
             Some(first) => {
                 body.push(1);
                 for id in first {
-                    put_bijou(&mut body, id as u64);
+                    put_varint(&mut body, id as u64);
                 }
             }
         }
@@ -600,25 +600,25 @@ fn read_checkpoint(index: &Index, len: u64, body: &[u8]) -> io::Result<()> {
         |reader: &mut Reader, n: usize| -> io::Result<Vec<u8>> { Ok(reader.take(n)?.to_vec()) };
     let u64_of = |bytes: Vec<u8>| u64::from_le_bytes(bytes.try_into().expect("8 bytes"));
     let u32_of = |bytes: Vec<u8>| u32::from_le_bytes(bytes.try_into().expect("4 bytes"));
-    for _ in 0..reader.bijou()? {
+    for _ in 0..reader.varint()? {
         let catalog = get_catalog(&mut reader)?;
         index.add_catalog(&catalog);
     }
     let mut offset = 0u64;
-    for _ in 0..reader.bijou()? {
-        offset += reader.bijou()?;
+    for _ in 0..reader.varint()? {
+        offset += reader.varint()?;
         let size = reader.u32()?;
         if offset + size as u64 > len {
             return Err(invalid("a checkpoint names a token past the file's end"));
         }
         index.add_token(offset, size, None);
     }
-    for _ in 0..reader.bijou()? {
+    for _ in 0..reader.varint()? {
         let hash = Blake3Hash::from(<[u8; 32]>::try_from(reader.take(32)?).expect("32 bytes"));
         let offset = u64_of(fixed(&mut reader, 8)?);
         let size = u32_of(fixed(&mut reader, 4)?);
         let depth = reader.byte()?;
-        let catalog = u16::try_from(reader.bijou()?).map_err(|_| invalid("a catalog index"))?;
+        let catalog = u16::try_from(reader.varint()?).map_err(|_| invalid("a catalog index"))?;
         let kind = reader.byte()?;
         let lineage = match reader.byte()? {
             0 => None,
@@ -902,7 +902,7 @@ impl FileArchive {
             file,
             path,
             rows: RowsCache::new(options.rows_cached),
-            manifests: papaya::HashMap::new(),
+            manifests: Map::default(),
             options,
             index,
             writer: Mutex::new(writer),
@@ -913,6 +913,12 @@ impl FileArchive {
         });
         open.insert(key, Arc::downgrade(&inner));
         Ok(Self { inner })
+    }
+
+    /// The index, for tests that measure what it costs.
+    #[cfg(test)]
+    pub(crate) fn index(&self) -> &Index {
+        &self.inner.index
     }
 
     /// Where the file is.
@@ -1272,6 +1278,7 @@ impl FileArchive {
             );
             items.push(Item::Frame(id, block, frame));
         }
+        draft.release();
         Ok(Some(Prepared {
             catalog,
             draft,
@@ -1298,6 +1305,7 @@ impl FileArchive {
         index.build_ids();
         let catalog_id = index.add_catalog(catalog);
         let view = index.view();
+        let ids = index.ids();
 
         // Tokens: a drafted one the file holds now takes its id; the rest
         // follow every published token, in the order they were drafted.
@@ -1308,7 +1316,7 @@ impl FileArchive {
         for id in first_token..first_token + draft.pending() as u32 {
             let bytes = draft.get(id).expect("a drafted token");
             let hash = draft.hash(id).expect("a drafted token's hash");
-            match index.find(&view, hash, bytes) {
+            match Index::find(&ids, &view, hash, bytes) {
                 Some(held) => tokens.push(held),
                 None => {
                     tokens.push(next_token + new.len() as u32);
@@ -2378,9 +2386,8 @@ mod offsets_instead_of_ids {
                 })
                 .collect()
         };
-        // Zigzag-delta bijou64 bytes of every column of `rows`, written as
+        // Zigzag-delta varint bytes of every column of `rows`, written as
         // literals: the width of the ids against the width of the offsets.
-        // A delta too wide for 64 bits counts the widest encoding.
         let width = |rows: &[Vec<[u64; 6]>]| -> usize {
             let mut bytes = 0;
             for section in rows {
@@ -2393,7 +2400,7 @@ mod offsets_instead_of_ids {
                         let delta = row[field] as i128 - previous;
                         previous = row[field] as i128;
                         let zigzag = ((delta << 1) ^ (delta >> 127)) as u128;
-                        bytes += u64::try_from(zigzag).map_or(9, bijoux::Encode::encoded_len);
+                        bytes += (128 - zigzag.leading_zeros() as usize).max(1).div_ceil(7);
                     }
                 }
             }
@@ -2506,8 +2513,8 @@ mod record_breakdown {
             entry.1 += record.end() - record.offset;
             if record.kind == Kind::Tokens {
                 let mut reader = Reader::new(&record.body);
-                for _ in 0..reader.bijou()? {
-                    let size = reader.bijou()? as usize;
+                for _ in 0..reader.varint()? {
+                    let size = reader.varint()? as usize;
                     let pad = reader.byte()? as usize;
                     reader.take(pad)?;
                     reader.take(size)?;

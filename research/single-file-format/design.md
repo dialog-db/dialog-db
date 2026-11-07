@@ -108,16 +108,27 @@ on one lock.
 This file is WAL mode without the checkpoint, because nothing is ever
 copied back:
 
-- **Readers** take no lock. A reader's snapshot is a footer: everything
-  before it is complete and never changes. To see newer writes, a reader
-  checks the file's length and reads the records past its footer into its
-  index. A reader in another process does the same.
-- **Writers take turns** on an exclusive lock on the file (`flock`, or a
-  lock on a byte range past the end on platforms without it). A writer
-  that takes the lock first reads any records other processes appended
-  since its last turn, so its index is current, then appends its records
-  and a footer, then releases the lock. Within a process the existing
-  mutex orders writers; across processes the file lock does.
+- **Readers** take no lock, in the file or in memory. Everything before a
+  footer is complete and never changes, and the in-memory index is built
+  the same way: structures that only grow (slots that never move, and
+  lock-free maps for blocks, nodes and lineages), added to only once the
+  bytes they name are in the file, tokens before the frames that name
+  them and children before their parents. So whatever a reader finds stays
+  true, and a reader never waits on an append. A read that misses looks
+  for other processes' appends only when the file grew past what this
+  process has read or is writing.
+- **Writers prepare outside their turn and take turns to write.** An
+  append splits its blocks into rows and encodes its frames against the
+  index as it is, drafting new tokens and nodes with the next ids, with
+  no lock but the token id table's (which readers never use). Then it
+  takes its turn: the process's writer mutex and an exclusive lock on the
+  file (`flock`, or a lock on a byte range past the end on platforms
+  without it). In its turn it reads what other processes appended since
+  its last, and reconciles: a token or node another writer appended first
+  takes theirs, the rest take the ids that are next, and frames whose ids
+  moved are renamed and encoded again. A node it framed that another
+  appended whole is prepared again, in the turn. Then it writes its
+  records and a footer, publishes them, and releases the lock.
 - **What can conflict is not here.** Blocks are content-addressed, so two
   writers storing the same block store the same bytes, and the second skips
   it. The conflict that matters is two writers moving the same branch head,
@@ -126,8 +137,9 @@ copied back:
   written under the same lock, and its compare-and-swap is a check against
   the latest head record before appending.
 
-A turn is short: a commit appends a few hundred KB. Turn-taking writers
-therefore behave like concurrent ones in practice, as SQLite's do. What
+A turn is short: a commit appends a few hundred KB, and the splitting and
+encoding are done before it. Turn-taking writers therefore behave like
+concurrent ones in practice, as SQLite's do. What
 the design gives up is two processes writing at the same instant, which
 SQLite gives up too.
 
@@ -161,8 +173,9 @@ crc32 | body`:
 - **Rows.** As in the spike: per leaf entry, the form and the token ids of
   entity, attribute, value and datum; per index link, the separator, the
   child's node id and the scale; per buffered op, an entry with no datum
-  for a retraction. Each column is zigzag-delta bijou64 integers
-  (one encoding per number, as the tree's nodes use); against a
+  for a retraction. Each column is zigzag-delta LEB128 varints
+  (two bytes up to 16,383, where most ids and deltas fall; bijou64 was
+  tried and took 6% more, see the journal); against a
   predecessor a section is copy runs and literal rows.
 - **Predecessor.** The latest node of the same kind that starts at the same
   first key. The store needs nothing from the tree to find it; on both
@@ -211,6 +224,11 @@ in a footer is read from the start and its torn tail is dropped. (Built:
   holding the writer lock, and readers move to it, as SQLite's `VACUUM`.
 - **The web.** OPFS gives one writer per file and synchronous access in a
   worker; it is later work.
+- **One integrating process.** Writers could put blocks into a block store
+  (a directory, as the `fs` provider does), and one process fold them into
+  the file, deleting each once it is in; readers would look in both. Writes
+  would never wait for the file's turn, at the cost of a second place to
+  look and a second process. A topic of its own, not started.
 
 ## Build order
 
@@ -247,7 +265,7 @@ What the tree reads, and where from, when the archive serves a node:
   holds it is served.
 - **Children** are named by hash, read from the child's frame header in
   the file, or from a hash token for a child the file holds no frame of.
-- **Rows** are not read in place. A frame's ids are bijou64 columns written
+- **Rows** are not read in place. A frame's ids are varint columns written
   against its predecessor, so serving a node decodes its rows once
   (through a cache of decoded rows) and records where each part is: about
   70 bytes an entry, the node's footprint in a node cache. Fixed-width rows
