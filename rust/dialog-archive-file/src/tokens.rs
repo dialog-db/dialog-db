@@ -58,6 +58,10 @@ pub(crate) struct Draft<'a> {
     hashes: Vec<u64>,
     /// Each new token's provisional id, found by its bytes' hash.
     ids: HashTable<u32>,
+    /// The tokens of the file this draft found already, by their bytes'
+    /// hash: a node's rows name the same entities and attributes over and
+    /// over, and each is looked up in the file once.
+    found: HashTable<(u64, u32)>,
 }
 
 impl<'a> Draft<'a> {
@@ -72,6 +76,7 @@ impl<'a> Draft<'a> {
             ends: Vec::new(),
             hashes: Vec::new(),
             ids: HashTable::new(),
+            found: HashTable::new(),
         }
     }
 
@@ -92,15 +97,23 @@ impl<'a> Draft<'a> {
             ends: Vec::new(),
             hashes: Vec::new(),
             ids: HashTable::new(),
+            found: HashTable::new(),
         }
     }
 
     /// The value rows name `token` by, adding it when it is new.
     pub fn intern(&mut self, token: &[u8]) -> u32 {
         let hash = crate::hash::hash(token);
+        if let Some((_, id)) = self.found.find(hash, |(found, id)| {
+            *found == hash && self.held.get(*id) == Some(token)
+        }) {
+            return *id;
+        }
         if let Some(find) = &self.find
             && let Some(id) = find(hash, token)
         {
+            self.found
+                .insert_unique(hash, (hash, id), |(hash, _)| *hash);
             return id;
         }
         if let Some(id) = self.ids.find(hash, |id| self.get(*id) == Some(token)) {

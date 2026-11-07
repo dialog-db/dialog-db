@@ -39,6 +39,10 @@ pub(crate) const LEAF: usize = 64;
 pub(crate) const FANOUT: usize = 32;
 /// The most entries an internal node buffers.
 pub(crate) const BUFFER: usize = 256;
+/// The most entries the root buffers. The root is not a record (it lives
+/// in the slot, rewritten by every append), so its buffer costs the file
+/// nothing, and a large one sends a flush's entries down in large groups.
+pub(crate) const ROOT_BUFFER: usize = 2048;
 
 /// Where the tree's nodes are read from: the bytes of the node at an
 /// offset, as [`encode`](Node::encode) wrote them.
@@ -344,8 +348,12 @@ impl Node {
                 buffer: merge(buffer, &entries),
             },
         };
-        while root.buffered() > BUFFER {
-            root.flush(nodes, write)?;
+        // An overflowing buffer is flushed down to half, a group at a time:
+        // the next appends fill it again without flushing.
+        if root.buffered() > ROOT_BUFFER {
+            while root.buffered() > ROOT_BUFFER / 2 {
+                root.flush(nodes, write)?;
+            }
         }
         // A root over too many children splits, and a new root goes above.
         while root.fanout() > FANOUT {
@@ -420,8 +428,10 @@ impl Node {
             }
             Node::Internal { buffer, .. } => {
                 *buffer = merge(std::mem::take(buffer), &batch);
-                while child.buffered() > BUFFER {
-                    child.flush(nodes, write)?;
+                if child.buffered() > BUFFER {
+                    while child.buffered() > BUFFER / 2 {
+                        child.flush(nodes, write)?;
+                    }
                 }
                 if child.fanout() > FANOUT {
                     child.split(write)?
@@ -598,6 +608,30 @@ mod tests {
         Ok(())
     }
 
+    /// Bytes written for each entry inserted, in batches of several sizes,
+    /// as appends of several sizes would insert. Run by hand.
+    #[test]
+    #[ignore = "measures write amplification"]
+    fn write_amplification() -> io::Result<()> {
+        for batch in [4u64, 8, 32, 256] {
+            let memory = Memory::default();
+            let mut root = Node::default();
+            let count = 60_000u64;
+            for at in 0..count / batch {
+                let entries = (0..batch).map(|n| (key(at * batch + n), n)).collect();
+                root = root.insert(&memory, entries, &mut |bytes| memory.write(bytes))?;
+            }
+            let written = *memory.written.borrow();
+            println!(
+                "batches of {batch}: {:.0} bytes written an entry, {} nodes, root {} B",
+                written as f64 / count as f64,
+                memory.nodes.borrow().len(),
+                root.encode().len()
+            );
+        }
+        Ok(())
+    }
+
     /// Most inserts write nothing but the root, and the tree stays shallow
     /// and small against what it holds.
     #[test]
@@ -611,11 +645,16 @@ mod tests {
         }
         let written = *memory.written.borrow();
         let per_entry = written as f64 / count as f64;
-        assert!(per_entry < 200.0, "{per_entry:.0} bytes written an entry");
+        assert!(per_entry < 100.0, "{per_entry:.0} bytes written an entry");
         for n in (0..count).step_by(997) {
             assert_eq!(root.get(&memory, key(n))?, Some(n % 10));
         }
-        assert!(root.encode().len() < 8 * 1024, "the root fits a slot");
+        // The root's buffer is the largest part of a slot: it must leave
+        // room for the rest.
+        assert!(
+            root.encode().len() as u64 <= super::super::slot::SLOT / 2,
+            "the root fits a slot"
+        );
         Ok(())
     }
 }

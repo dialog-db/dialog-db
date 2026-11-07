@@ -6,31 +6,39 @@
 //! index key yields is checked against the bytes it stands for.
 
 const SEED: u64 = 0x9E37_79B9_7F4A_7C15;
-const MULTIPLY: u64 = 0xBF58_476D_1CE4_E5B9;
+const P0: u64 = 0x2D35_8DCC_AA6C_78A5;
+const P1: u64 = 0x8BB8_4B93_962E_ACC9;
+const P2: u64 = 0x4B33_A62E_D433_D4A3;
 
-/// Mixes the bits of `value` (the finalizer of SplitMix64).
-fn mix(mut value: u64) -> u64 {
-    value ^= value >> 30;
-    value = value.wrapping_mul(MULTIPLY);
-    value ^= value >> 27;
-    value = value.wrapping_mul(0x94D0_49BB_1331_11EB);
-    value ^ (value >> 31)
+/// The two halves of the 128-bit product of `a` and `b`, xored.
+fn fold(a: u64, b: u64) -> u64 {
+    let product = u128::from(a) * u128::from(b);
+    product as u64 ^ (product >> 64) as u64
 }
 
-/// The hash of `bytes`: eight bytes at a time, little-endian, each word
-/// mixed into the state, then the length.
+/// Folds sixteen bytes, two little-endian words, into `state`.
+fn absorb(state: u64, block: &[u8; 16]) -> u64 {
+    let (low, high) = block.split_at(8);
+    let low = u64::from_le_bytes(low.try_into().expect("eight bytes"));
+    let high = u64::from_le_bytes(high.try_into().expect("eight bytes"));
+    fold(low ^ P1, high ^ state)
+}
+
+/// The hash of `bytes`: sixteen bytes at a time, each block folded into
+/// the state by one wide multiply, the last block padded with zeros, then
+/// the length.
 pub(crate) fn hash(bytes: &[u8]) -> u64 {
     let mut state = SEED;
-    let (words, rest) = bytes.as_chunks::<8>();
-    for word in words {
-        state = mix(state ^ u64::from_le_bytes(*word)).wrapping_add(SEED);
+    let (blocks, rest) = bytes.as_chunks::<16>();
+    for block in blocks {
+        state = absorb(state, block);
     }
     if !rest.is_empty() {
-        let mut word = [0u8; 8];
-        word[..rest.len()].copy_from_slice(rest);
-        state = mix(state ^ u64::from_le_bytes(word)).wrapping_add(SEED);
+        let mut block = [0u8; 16];
+        block[..rest.len()].copy_from_slice(rest);
+        state = absorb(state, &block);
     }
-    mix(state ^ bytes.len() as u64)
+    fold(state ^ P2, bytes.len() as u64 ^ P0)
 }
 
 #[cfg(test)]
@@ -42,9 +50,9 @@ mod tests {
     #[test]
     fn it_hashes_as_the_format_says() {
         // Computed independently of this code, from the definition above.
-        assert_eq!(hash(b""), 0xE220_A839_7B1D_CDAF);
-        assert_eq!(hash(b"a"), 0xC503_7D9B_6EB8_DA20);
-        assert_eq!(hash(b"mb.artist/name"), 0xD555_3284_2966_42DE);
+        assert_eq!(hash(b""), 0x16C5_6ECB_6524_155D);
+        assert_eq!(hash(b"a"), 0xBD22_77B2_7BBC_20D3);
+        assert_eq!(hash(b"mb.artist/name"), 0x31F8_8A83_EE29_8CB1);
     }
 
     #[test]

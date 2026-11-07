@@ -47,6 +47,38 @@ const TOKENS_REMEMBERED: usize = 1 << 18;
 /// How many datum tokens a reader remembers having checked.
 const DATUMS_CHECKED: usize = 1 << 20;
 
+/// Keys that are hashes already: hashed by taking them as they are.
+#[derive(Clone, Copy, Default)]
+struct Hashed;
+
+impl std::hash::BuildHasher for Hashed {
+    type Hasher = Passed;
+
+    fn build_hasher(&self) -> Passed {
+        Passed(0)
+    }
+}
+
+/// The hasher of [`Hashed`]: the last `u64` written is the hash.
+#[derive(Default)]
+struct Passed(u64);
+
+impl std::hash::Hasher for Passed {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.0 = self.0.rotate_left(8) ^ *byte as u64;
+        }
+    }
+
+    fn write_u64(&mut self, value: u64) {
+        self.0 = value;
+    }
+}
+
 /// How a [`FileArchive`] writes its file.
 #[derive(Clone, Debug)]
 pub struct Options {
@@ -226,7 +258,7 @@ struct Inner {
     checked: papaya::HashSet<u32>,
     /// Where a writer found tokens, by the hash of their bytes: the index
     /// is asked once for each while it stays here.
-    tokens: Mutex<HashMap<u64, u32>>,
+    tokens: Mutex<HashMap<u64, u32, Hashed>>,
     /// The writer's turn in this process.
     writer: Mutex<()>,
     /// The end of what this process has read of the file or is writing to
@@ -489,6 +521,30 @@ fn free(snapshot: &Snapshot, mut key: u64, taken: &mut HashSet<u64>) -> io::Resu
     }
 }
 
+/// The token equal to `token` the file holds as of `snapshot`, by the
+/// value rows name it by: in `remembered`, or found in the index and
+/// remembered there.
+fn find_in(
+    remembered: &mut HashMap<u64, u32, Hashed>,
+    snapshot: &Snapshot,
+    hash: u64,
+    token: &[u8],
+) -> Option<u32> {
+    if let Some(id) = remembered.get(&hash).copied()
+        && snapshot.get(id) == Some(token)
+    {
+        return Some(id);
+    }
+    let (found, _) = snapshot.probe_token(hash, token).ok()?;
+    if let Some(id) = found {
+        if remembered.len() >= TOKENS_REMEMBERED {
+            remembered.clear();
+        }
+        remembered.insert(hash, id);
+    }
+    found
+}
+
 impl FileArchive {
     /// Opens the archive at `path`, creating it when there is no file there.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, ArchiveError> {
@@ -527,7 +583,7 @@ impl FileArchive {
             rows: RowsCache::new(options.rows_cached),
             manifests: papaya::HashMap::new(),
             checked: papaya::HashSet::new(),
-            tokens: Mutex::new(HashMap::new()),
+            tokens: Mutex::new(HashMap::default()),
             options,
             writer: Mutex::new(()),
             #[cfg(test)]
@@ -775,17 +831,7 @@ impl FileArchive {
     /// The token equal to `token` the file holds as of `snapshot`, by the
     /// value rows name it by: remembered, or found in the index.
     fn find_token(&self, snapshot: &Snapshot, hash: u64, token: &[u8]) -> Option<u32> {
-        let remembered = self.inner.tokens.lock().get(&hash).copied();
-        if let Some(id) = remembered
-            && snapshot.get(id) == Some(token)
-        {
-            return Some(id);
-        }
-        let (found, _) = snapshot.probe_token(hash, token).ok()?;
-        if let Some(id) = found {
-            self.remember(&[(hash, id)]);
-        }
-        found
+        find_in(&mut self.inner.tokens.lock(), snapshot, hash, token)
     }
 
     fn remember(&self, tokens: &[(u64, u32)]) {
