@@ -24,8 +24,9 @@ use dialog_search_tree::{
 use memmap2::Mmap;
 use zerocopy::FromBytes as _;
 
-use super::{FileArchive, Place, State as Index};
+use super::{FileArchive, Index, Place, View};
 use crate::rows::{DATUM, INDEX, NONE, Row, Rows, SLOTS};
+use crate::tokens::TokenRead as _;
 
 /// Every byte value, so a key's form byte is a slice that lives forever.
 static FORMS: [u8; 256] = {
@@ -96,12 +97,12 @@ fn is_datum(bytes: &[u8]) -> bool {
 
 /// Where token `id` is, if the file holds it within `mapped` bytes.
 fn part(index: &Index, id: u32, mapped: u64) -> Option<Part> {
-    let (offset, len) = index.tokens.extent(id)?;
+    let (offset, len) = index.extent(id)?;
     (offset + len as u64 <= mapped).then_some(Part { offset, len })
 }
 
 /// An entry or operation row as where its key parts and value are.
-fn entry(index: &Index, row: &Row, mapped: u64) -> Option<Entry> {
+fn entry(index: &Index, view: &View<'_>, row: &Row, mapped: u64) -> Option<Entry> {
     let form = row[0] as u8;
     let slot = |at: usize| part(index, row[at], mapped);
     let (form, count, parts) = match form {
@@ -117,7 +118,9 @@ fn entry(index: &Index, row: &Row, mapped: u64) -> Option<Entry> {
     let value = match row[DATUM] {
         NONE => None,
         id => {
-            index.tokens.checked(id, is_datum)?;
+            if !index.checked(id, view.get(id)?, is_datum) {
+                return None;
+            }
             Some(part(index, id, mapped)?)
         }
     };
@@ -135,30 +138,16 @@ impl FileArchive {
     /// at all.
     pub(crate) fn served(&self, catalog: &str, hash: &Blake3Hash) -> Option<FileNode> {
         let started = std::time::Instant::now();
-        let place = |index: &Index| {
-            index
-                .blocks
-                .get(catalog)
-                .and_then(|blocks| blocks.get(hash))
-                .copied()
-        };
-        let mut index = self.inner.state.read();
-        if place(&index).is_none() {
-            // Appended since this handle last looked, by another handle or
-            // another process: read what they finished, and look again, as
-            // a `Get` does.
-            drop(index);
-            self.reread().ok()?;
-            index = self.inner.state.read();
-        }
-        let Place::Node(id) = place(&index)? else {
+        let Place::Node(id) = self.place(catalog, hash).ok()?? else {
             return None;
         };
-        let (rows, manifest) = self
-            .rows(&index, &std::collections::HashMap::new(), id)
-            .ok()?;
-        let manifest = self.manifest(&index, manifest)?;
-        let map = index.tokens.mapping()?;
+        let (rows, manifest) = self.rows(&std::collections::HashMap::new(), id).ok()?;
+        let index = &self.inner.index;
+        // The view is taken once the node is found: everything it names was
+        // published, and mapped, before it.
+        let view = index.view();
+        let manifest = self.manifest(&view, manifest)?;
+        let map = view.mapping()?;
         let mapped = map.len() as u64;
         let mut node = FileNode {
             archive: self.clone(),
@@ -175,7 +164,7 @@ impl FileArchive {
             links: Vec::new(),
             buffers: Vec::new(),
         };
-        build(&index, &rows, mapped, &mut node)?;
+        build(index, &view, &rows, mapped, &mut node)?;
         super::Timings::add(&self.inner.timings.serve, started);
         self.inner
             .timings
@@ -185,25 +174,30 @@ impl FileArchive {
     }
 
     /// The manifest token `id` decodes to, decoded once.
-    fn manifest(&self, index: &Index, id: u32) -> Option<Arc<Manifest>> {
-        let mut manifests = self.inner.manifests.lock();
+    fn manifest(&self, view: &View<'_>, id: u32) -> Option<Arc<Manifest>> {
+        let manifests = self.inner.manifests.pin();
         if let Some(manifest) = manifests.get(&id) {
             return Some(manifest.clone());
         }
-        let manifest = Arc::new(Manifest::decode(index.tokens.get(id)?).ok()?);
-        manifests.insert(id, manifest.clone());
-        Some(manifest)
+        let manifest = Arc::new(Manifest::decode(view.get(id)?).ok()?);
+        Some(manifests.get_or_insert(id, manifest).clone())
     }
 }
 
 /// Fills `node` with where each of its rows' parts is.
-fn build(index: &Index, rows: &Rows, mapped: u64, node: &mut FileNode) -> Option<()> {
+fn build(
+    index: &Index,
+    view: &View<'_>,
+    rows: &Rows,
+    mapped: u64,
+    node: &mut FileNode,
+) -> Option<()> {
     if rows.kind != INDEX {
         node.entries = rows
             .sections
             .first()?
             .iter()
-            .map(|row| entry(index, row, mapped))
+            .map(|row| entry(index, view, row, mapped))
             .collect::<Option<_>>()?;
         return Some(());
     }
@@ -219,8 +213,8 @@ fn build(index: &Index, rows: &Rows, mapped: u64, node: &mut FileNode) -> Option
                     (hash.len == 32).then_some(hash.offset)?
                 }
                 id => {
-                    let child = index.nodes.get(id as usize)?;
-                    let catalog = index.catalogs.get(child.catalog as usize)?;
+                    let child = index.node(id)?;
+                    let catalog = index.catalog(child.catalog)?;
                     // A frame's body starts with its catalog, then the hash.
                     let at = child.extent.offset + 1 + catalog.len() as u64;
                     (at + 32 <= mapped).then_some(at)?
@@ -235,7 +229,7 @@ fn build(index: &Index, rows: &Rows, mapped: u64, node: &mut FileNode) -> Option
         .collect::<Option<_>>()?;
     node.entries = ops
         .iter()
-        .map(|row| entry(index, row, mapped))
+        .map(|row| entry(index, view, row, mapped))
         .collect::<Option<_>>()?;
     let mut next = 0;
     for buffer in buffers {

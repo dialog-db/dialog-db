@@ -19,7 +19,7 @@ use dialog_search_tree::{
 };
 
 use crate::rows::{DATUM, INDEX, NONE, Row, Rows, SEGMENT, SLOTS, invalid, slots_of};
-use crate::tokens::Tokens;
+use crate::tokens::{Draft, TokenRead};
 
 /// A node of the artifact tree.
 pub(crate) type TreeNode = PersistentNode<Key, State<Datum>>;
@@ -96,7 +96,7 @@ fn key_from_tokens(form: u8, tokens: &[&[u8]]) -> io::Result<Vec<u8>> {
 }
 
 /// The row of one entry's key and datum, by token id.
-fn entry_row(tokens: &mut Tokens, key: &[u8], datum: Option<&State<Datum>>) -> io::Result<Row> {
+fn entry_row(tokens: &mut Draft<'_>, key: &[u8], datum: Option<&State<Datum>>) -> io::Result<Row> {
     let (form, parts, count) = key_tokens(key);
     let mut row = [form as u32, 0, 0, 0, 0, NONE];
     for (slot, token) in parts[..count].iter().enumerate() {
@@ -139,7 +139,10 @@ thread_local! {
 }
 
 /// The key and datum a row stands for.
-fn entry_of(row: &Row, tokens: &Tokens) -> io::Result<(Vec<u8>, Option<State<Datum>>)> {
+fn entry_of<T: TokenRead + ?Sized>(
+    row: &Row,
+    tokens: &T,
+) -> io::Result<(Vec<u8>, Option<State<Datum>>)> {
     let form = row[0] as u8;
     let token = |id: u32| {
         tokens
@@ -160,7 +163,7 @@ fn entry_of(row: &Row, tokens: &Tokens) -> io::Result<(Vec<u8>, Option<State<Dat
 /// node id when `child` knows one, else by a token of its hash.
 pub(crate) fn rows_of(
     node: &TreeNode,
-    tokens: &mut Tokens,
+    tokens: &mut Draft<'_>,
     child: impl Fn(&Blake3Hash) -> Option<u32>,
 ) -> io::Result<Rows> {
     match node.body() {
@@ -216,9 +219,9 @@ pub(crate) fn rows_of(
 /// one buffer for the node. No key is rebuilt, parsed or split again.
 /// `None` when a row does not fit its segment's schema, for the caller to
 /// build the segment from whole entries instead.
-fn segment_of(
+fn segment_of<T: TokenRead + ?Sized>(
     rows: &[Row],
-    tokens: &Tokens,
+    tokens: &T,
 ) -> io::Result<Option<PersistentSegment<State<Datum>>>> {
     let token = |id: u32| {
         tokens
@@ -365,9 +368,9 @@ fn datum_of(bytes: &[u8]) -> io::Result<State<Datum>> {
 /// The block `rows` stand for, built by the tree's own encoder under
 /// `manifest`. A child named by node id is named by its hash through
 /// `child`.
-pub(crate) fn realize(
+pub(crate) fn realize<T: TokenRead + ?Sized>(
     rows: &Rows,
-    tokens: &Tokens,
+    tokens: &T,
     manifest: &Manifest,
     child: impl Fn(u32) -> Option<Blake3Hash>,
 ) -> io::Result<Vec<u8>> {
@@ -480,7 +483,8 @@ mod profile {
         let (mut entries, mut nodes, mut realizing) = (0usize, 0usize, Duration::ZERO);
         let mut splitting = Duration::ZERO;
         let mut whole = Duration::ZERO;
-        let mut tokens = Tokens::default();
+        let index = crate::archive::Index::default();
+        let mut tokens = Draft::new(&index);
         for block in &blocks {
             let started = Instant::now();
             let Some(node) = tree_node(block) else {
@@ -557,7 +561,7 @@ mod profile {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::str::FromStr;
 
     use dialog_artifacts::history::{Edition, Origin, Version};
@@ -633,6 +637,24 @@ mod tests {
         Ok(body.as_bytes()?.to_vec())
     }
 
+    /// The manifest test segments are written under.
+    pub(crate) fn segment_manifest() -> Manifest {
+        spilling()
+    }
+
+    /// The block of a segment of facts about `name`, in the entity
+    /// ordering.
+    pub(crate) fn entity_segment(name: &str, manifest: &Manifest) -> anyhow::Result<Buffer> {
+        let keys = facts()?
+            .into_iter()
+            .map(|mut fact| {
+                fact.of = Entity::from_str(&format!("test:{name}"))?;
+                Ok(EntityKey::from_artifact(&fact, manifest).0)
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        Ok(Buffer::from(segment_block(keys, manifest)?))
+    }
+
     /// Splits the segment of `keys` into rows and realizes them again,
     /// asserting the columns came from the tokens and the block is the
     /// same, byte for byte.
@@ -640,7 +662,8 @@ mod tests {
         let manifest = spilling();
         let block = segment_block(keys, &manifest)?;
         let node = tree_node(&Buffer::from(block.clone())).expect("a tree node");
-        let mut tokens = Tokens::default();
+        let index = crate::archive::Index::default();
+        let mut tokens = Draft::new(&index);
         let rows = rows_of(&node, &mut tokens, |_| None)?;
         assert!(
             segment_of(&rows.sections[0], &tokens)?.is_some(),
