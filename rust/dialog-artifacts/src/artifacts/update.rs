@@ -138,13 +138,12 @@ impl PartialOrd for Standing {
 /// latter absent for a candidate no fact stands behind.
 pub type Contender<'a> = (&'a Value, Option<&'a Standing>);
 
-/// Whether `candidate` orders after `incumbent` by value alone: the
-/// values' own order where they have one, their encoding's otherwise.
+/// Whether `candidate` wins a tie `incumbent` stands equal in: the
+/// greater [`Value::tiebreak`], the hash of the value, not the value
+/// itself, so the outcome favours no value over another. Equal values
+/// never beat each other.
 pub(crate) fn value_beats(candidate: &Value, incumbent: &Value) -> bool {
-    match candidate.partial_cmp(incumbent) {
-        Some(ordering) => ordering.is_gt(),
-        None => encode_value_owned(candidate) > encode_value_owned(incumbent),
-    }
+    candidate.tiebreak() > incumbent.tiebreak()
 }
 
 impl Display for Pick {
@@ -211,8 +210,10 @@ impl Pick {
     }
 
     /// Whether `candidate` is the newer of two claims: the greater
-    /// standing, then the greater value. This is the whole of `last`,
-    /// and what every other pick falls back to among equals.
+    /// standing, then, between claims that stand equal (two values one
+    /// revision wrote under one cause), the greater hash of the value
+    /// ([`Value::tiebreak`]). This is the whole of `last`, and what every
+    /// other pick falls back to among equals.
     pub fn newer(candidate: Contender<'_>, incumbent: Contender<'_>) -> bool {
         candidate.1 > incumbent.1
             || (candidate.1 == incumbent.1 && value_beats(candidate.0, incumbent.0))
@@ -934,6 +935,48 @@ mod tests {
         assert!(!Pick::newer(
             (&triage, Some(&claim)),
             (&todo, Some(&successor))
+        ));
+    }
+
+    /// Between claims that stand equal, `last` elects by the hash of the
+    /// value, not by the value: of two values whose hashes order them the
+    /// other way round from their own order, the one with the greater
+    /// hash wins, whichever is folded first. One value held by two types
+    /// (the natural 3 and the float 3.0) is a tie neither wins.
+    #[dialog_common::test]
+    fn an_equal_standing_ties_by_the_hash_of_the_value() {
+        use super::{Cause, Edition, Pick, Standing, Value};
+        let standing = Standing::new(Some((Edition::new(3), [1; 32])), Cause([1; 32]));
+        let texts: Vec<Value> = (b'a'..=b'z')
+            .map(|letter| Value::String(char::from(letter).to_string()))
+            .collect();
+        let (lesser, greater) = texts
+            .iter()
+            .flat_map(|a| texts.iter().map(move |b| (a, b)))
+            .find(|(a, b)| a < b && a.tiebreak() > b.tiebreak())
+            .expect("two letters whose hashes order them the other way");
+        assert!(Pick::newer(
+            (lesser, Some(&standing)),
+            (greater, Some(&standing))
+        ));
+        assert!(!Pick::newer(
+            (greater, Some(&standing)),
+            (lesser, Some(&standing))
+        ));
+        let claims = [(greater, Some(&standing)), (lesser, Some(&standing))];
+        assert_eq!(Pick::Last.elect(claims), Some(1));
+        let claims = [(lesser, Some(&standing)), (greater, Some(&standing))];
+        assert_eq!(Pick::Last.elect(claims), Some(0));
+
+        let (natural, float) = (Value::UnsignedInt(3), Value::Float(3.0));
+        assert_eq!(natural.tiebreak(), float.tiebreak());
+        assert!(!Pick::newer(
+            (&natural, Some(&standing)),
+            (&float, Some(&standing))
+        ));
+        assert!(!Pick::newer(
+            (&float, Some(&standing)),
+            (&natural, Some(&standing))
         ));
     }
 
