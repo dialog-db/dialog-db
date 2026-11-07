@@ -86,6 +86,7 @@ use crate::{
     BlobArchive, Branch, ConnectedReplica, Ephemeral, Index, PublishError, RemoteSite, Repository,
     Revision, Select, SelectQuery, SnapshotError,
 };
+use crate::{CacheBudget, HeldCaches};
 use dialog_effects::MethodExt as _;
 
 pub mod codec;
@@ -214,8 +215,26 @@ impl<C: Principal> Repository<C> {
     /// was minted on to be present. Starts with cold caches; prefer
     /// [`Branch::snapshot`] when a branch handle at the revision is at
     /// hand, so its warm caches carry over.
+    ///
+    /// Its caches are its own, at the default sizes
+    /// ([`CacheBudget::default`](crate::CacheBudget)), whatever caches the
+    /// environment it is read through holds. To keep a snapshot to the
+    /// budget an environment's caches were built with, take it with
+    /// [`snapshot_in`](Self::snapshot_in).
     pub fn snapshot(&self, revision: Revision) -> Snapshot {
         Snapshot::new(self.subject(), revision)
+    }
+
+    /// A view at `revision`, starting cold like [`snapshot`](Self::snapshot),
+    /// with caches sized by the [`HeldCaches`](crate::HeldCaches) `env`
+    /// holds.
+    ///
+    /// It reads tree nodes, spilled values, rule content and plans through
+    /// those caches, so it holds no more of them than their budget allows;
+    /// its caches keyed by version start empty and remember at most the
+    /// budget's [`entries`](crate::CacheBudget::entries) each.
+    pub fn snapshot_in<Env: Holds + ?Sized>(&self, env: &Env, revision: Revision) -> Snapshot {
+        Snapshot::cold(self.subject(), revision, &HeldCaches::of(env))
     }
 }
 
@@ -271,7 +290,21 @@ impl Snapshot {
                 revision,
                 lineage: None,
             }),
-            caches: Caches::new(),
+            caches: Caches::sized(CacheBudget::default()),
+            overlay: Ephemeral::default(),
+        }
+    }
+
+    /// A view of `subject`'s repository at `revision`, with cold caches
+    /// sized by `held` and sharing what it addresses by content.
+    pub(crate) fn cold(subject: Subject, revision: Revision, held: &HeldCaches) -> Self {
+        Snapshot {
+            caches: held.cold(subject.did()),
+            subject,
+            head: RwLock::new(Head {
+                revision,
+                lineage: None,
+            }),
             overlay: Ephemeral::default(),
         }
     }

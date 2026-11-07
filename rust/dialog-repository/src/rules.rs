@@ -567,6 +567,30 @@ pub(crate) struct RuleContent {
     selecting: Cache<SelectingKey, Selecting>,
 }
 
+impl RuleContent {
+    /// Rule content remembering up to `capacity` entries of each kind:
+    /// heads, deductive bodies, inductive bodies and selecting rules.
+    pub(crate) fn with_capacity(capacity: usize) -> Self {
+        Self {
+            heads: Cache::with_capacity(capacity),
+            bodies: Cache::with_capacity(capacity),
+            inductive: Cache::with_capacity(capacity),
+            selecting: Cache::with_capacity(capacity),
+        }
+    }
+
+    /// How many entries it remembers now, of every kind.
+    pub(crate) fn len(&self) -> usize {
+        self.heads.len() + self.bodies.len() + self.inductive.len() + self.selecting.len()
+    }
+
+    /// How many entries of each kind this content may remember.
+    #[cfg(test)]
+    pub(crate) fn capacity(&self) -> usize {
+        self.heads.capacity()
+    }
+}
+
 /// How many spellings of one concept keep an assembled rule set each.
 const SPELLINGS: usize = 4;
 

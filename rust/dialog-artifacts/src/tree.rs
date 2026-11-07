@@ -158,6 +158,31 @@ impl SpillCache {
         }
     }
 
+    /// The most bytes the cache holds.
+    pub fn budget(&self) -> usize {
+        self.budget
+    }
+
+    /// The bytes the cache holds now.
+    pub fn bytes(&self) -> usize {
+        self.state.lock().expect("spill cache lock").bytes
+    }
+
+    /// How many blocks the cache holds now.
+    pub fn len(&self) -> usize {
+        self.state.lock().expect("spill cache lock").map.len()
+    }
+
+    /// Whether the cache holds nothing.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Lets every cached block go.
+    pub fn clear(&self) {
+        *self.state.lock().expect("spill cache lock") = SpillCacheState::default();
+    }
+
     /// The cached bytes for `key`, if present.
     pub fn get(&self, key: &Blake3Hash) -> Option<Vec<u8>> {
         let state = self.state.lock().expect("spill cache lock");

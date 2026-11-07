@@ -96,6 +96,106 @@ Why: a replica's history costs a file per block per version, which is
 most of what a replica weighs. Replaying 4096 Stack Exchange commits, the
 `fs` archive takes about 1.2 GiB and the file 13 MiB.
 
+### A file store's write lock is never taken by two writers at once
+
+[#741](https://github.com/dialog-db/dialog-db/pull/741), on [#723](https://github.com/dialog-db/dialog-db/pull/723)
+
+A native file store guards each cell's compare-and-swap with a lock file.
+It was a PID lock taken through `pidlock`, whose acquire creates the file
+and writes the PID after; a second writer arriving in between read no PID,
+removed the file as corrupt, and took the lock too. Both then compared
+against the same version and both wrote, so the later write replaced the
+earlier one and each reported success: a commit racing a pull of the same
+branch could vanish without an error. Two writers that both found a dead
+holder's lock could also both remove it and both take it.
+
+The lock is still a file, `{cell}.lock`, now holding `{pid} {token}`: the
+holder's process and a random token naming that one hold. A lock file is
+held unless proven otherwise, so one that is empty or does not read as
+`pid token` is held and never deleted; the one exception is a bare PID,
+the previous release's lock file, read as that PID with token `0`. A writer writes its content to a
+temporary file first and hard-links it into place, which fails if a lock
+file is there, so a lock file never exists without its content; on a
+filesystem without hard links it creates the file and writes it after,
+and a writer arriving in between is refused. A lock naming a process
+that is not running is recovered by exactly one writer, which first
+links it to `{cell}.lock.stale.{token}` (a name only one writer can
+create) and checks the file still names the gone holder before removing
+it.
+
+What this changes for you:
+
+- Concurrent writers of one store, in one process or several, no longer
+  lose a write to each other. A writer that finds the lock held is
+  refused with `FileSystemError::Lock` (`Concurrent write in progress`),
+  as before.
+- A crashed writer's lock is recovered by the next writer, once the
+  crashed process is gone. Whether it is gone is asked of the OS in the
+  writer's own PID namespace, so writers sharing one store must share a
+  PID namespace. If the crashed writer's PID has been given to another
+  process, its lock looks held until the lock file is deleted by hand;
+  so does a crashed writer's lock on a filesystem without hard links.
+- A lock file that is empty or does not read as `pid token` (or as a
+  bare PID) is held, whoever wrote it, and has to be deleted by hand if
+  no writer is running.
+- Lock files are removed on release, by the writer that holds them
+  only: a writer whose lock file now names another holder leaves it.
+- Cells whose names differ only in extension (`a.x`, `a.y`) get a lock
+  each, instead of sharing `a.lock`.
+- `pidlock` is no longer a dependency.
+
+Why: a write lock that two writers can hold at once does not guard the
+compare-and-swap, and the writes it loses are reported as successes, so
+nothing downstream can notice or repair them. The lock stays a file
+rather than an OS lock (`flock`), which errors or is not enforced on
+network and FUSE filesystems that stores live on.
+### An environment bounds every cache it holds, and spilled values share one budget
+
+[#742](https://github.com/dialog-db/dialog-db/pull/742)
+
+`HeldCaches::builder()` returns a `CacheBudget` that sets the size of
+every cache an environment holds for its repositories: tree nodes and
+spilled values in bytes, the rest in entries. Spilled values are now kept
+in one cache for the whole environment, under one byte budget, instead of
+one 8 MiB cache per repository. A snapshot taken through the environment
+and the caches a transaction batch keeps to itself take their sizes from
+the same budget. Nothing configured, every cache keeps the size it had.
+
+What this changes for you:
+
+- `HeldCaches::builder().nodes(bytes).spills(bytes).entries(n).rules(n)
+  .plans(n).formulas(n).build()` builds caches that keep to each cap.
+  `entries` bounds each repository's causal verdicts, contexts, revision
+  records and rewritten trees; `rules` bounds the shared rule content
+  (heads, bodies, selecting rules) and `plans` the query plans. `HeldCaches::new()` and
+  `with_budget(bytes)` are shorthands for the defaults
+  (`CacheBudget::default()`), and `HeldCaches::limits()` reads the budget
+  back.
+- Memory for spilled values no longer grows with the number of open
+  repositories: the default 8 MiB (`SPILL_CACHE_BUDGET`) is now the total.
+  `HeldCaches::release(repository)` no longer drops spilled values, since
+  one cache holds them for every repository by content; they age out under
+  the budget, and `clear()` drops them.
+- `HeldCaches::bytes()` now counts spilled values as well as tree nodes.
+  `spill_bytes()` reads the spilled share, and `entries()` counts what the
+  entry-bounded caches hold (a count, not bytes).
+- `Repository::snapshot_in(env, revision)` takes a cold snapshot sized by
+  the caches `env` holds, reading spilled values, rule content and plans
+  through them. `Repository::snapshot(revision)` keeps the default sizes.
+- A cache bounded by entries now holds at most the capacity it was given
+  on native targets, however small. Below 2048 entries a sharded cache
+  used to keep at least one entry per shard, up to 16, so a capacity under
+  16 held more than asked. The default sizes keep all 16 shards.
+- New accessors: `CausalityCache::with_capacity`, `ContextCache::with_capacity`,
+  `PlanCache::with_capacity` (with `PLAN_CACHE_CAPACITY`), `len` on these and
+  on `dialog_search_tree::Cache` (with `capacity` and the now public
+  `CACHE_CAPACITY`), and `budget`, `bytes`, `len` and `clear` on `SpillCache`.
+
+Why: an embedder running in a fixed memory limit, such as a Cloudflare
+Durable Object with 128 MB for everything, could bound only the tree
+nodes. The spill budget multiplied with each repository opened, and every
+other cache was fixed when it was made (#706).
+
 ### A repository an earlier release left opens, whatever layout its registry is in
 
 Opening or loading a repository that predates layout versioning carries
@@ -144,7 +244,6 @@ What this changes for you:
 
 Why: a dependency that can only ever be one version across a whole wasm
 module should not be pinned by a library that uses one call of it.
-
 
 ### A pull or a push that meets another revision under its own head's version is refused
 
@@ -1115,6 +1214,10 @@ has a tree to canonicalize even when the link itself wrote nothing.
 
 #### Compatibility and migration
 
+- Bounding the caches changes nothing stored or synced: caches hold only
+  what a replica can read again, nothing is rewritten on upgrade, and
+  releases on either side read what the other writes. Nothing for an
+  embedder to run.
 - Nothing stored or synced changes for trees reading through `Load`:
   blocks, nodes, spilled values and their hashes are the same bytes,
   `Get`'s wire shape is unchanged, nothing is rewritten on upgrade, and an
@@ -2079,6 +2182,18 @@ thread multiplies whatever it holds by the size of the thread pool.
 
 ### Compatibility and migration
 
+- Nothing stored or synced changes for the file store's lock; only the
+  lock files beside its cells do. A lock file the previous release left
+  behind holds a bare PID, which this release reads as a holder: one
+  left by a writer that crashed is recovered like any other, and one
+  whose writer is still running is held. Only a writer on the previous
+  release that is still running excludes nothing: it and a writer on
+  this release do not exclude each other while both write one store
+  during an upgrade, since the older one deletes a lock file it cannot
+  read as a PID as stale, and this release's is `pid token` (and for a
+  cell whose name has an extension, the two releases lock different
+  files). Stop writers on the previous release before starting ones on
+  this release.
 - A registry branch (`meta`) or host state branch an earlier release laid
   out is rewritten under the number band the first time this release
   writes it, as `Branch::migrate_storage` rewrites any branch: one pass

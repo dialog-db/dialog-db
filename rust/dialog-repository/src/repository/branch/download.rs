@@ -28,6 +28,7 @@ use dialog_effects::memory::{Publish, Resolve};
 use dialog_effects::peer::Connect;
 use futures_util::StreamExt as _;
 
+use crate::HeldCaches;
 use crate::repository::snapshot::Snapshot;
 use crate::{
     Branch, DownloadError, Pull, PullError, RemoteFallback, RemoteSite, Revision, Upstream,
@@ -146,7 +147,7 @@ impl Download<'_> {
         // The items themselves carry nothing the local store does not
         // already hold by the time they are yielded, so draining the
         // stream is the whole job.
-        let export = Snapshot::new(branch.subject(), revision)
+        let export = Snapshot::cold(branch.subject(), revision, &HeldCaches::of(env))
             .export()
             .download(remote);
         let export = match self.scope {
