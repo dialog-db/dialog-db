@@ -14,8 +14,8 @@ use dialog_artifacts::{
 };
 use dialog_common::{Blake3Hash, Buffer};
 use dialog_search_tree::{
-    Entry, Key as TreeKey, Link, Manifest, NodeBody, NoveltyBuffer, NoveltyEntry, NoveltyOp,
-    PersistentNode, PersistentNodeBody, PersistentSegment, Scale, Separator, into_owned,
+    Entry, Key as TreeKey, Link, MIXED_LAYOUT, Manifest, NodeBody, NoveltyBuffer, NoveltyEntry,
+    NoveltyOp, PersistentNode, PersistentNodeBody, PersistentSegment, Scale, Separator, into_owned,
 };
 
 use crate::rows::{DATUM, INDEX, NONE, Row, Rows, SEGMENT, SLOTS, invalid, slots_of};
@@ -151,15 +151,7 @@ fn entry_of(row: &Row, tokens: &Tokens) -> io::Result<(Vec<u8>, Option<State<Dat
         .collect::<io::Result<Vec<_>>>()?;
     let datum = match row[DATUM] {
         NONE => None,
-        id => {
-            let bytes = token(id)?;
-            let mut aligned = rkyv::util::AlignedVec::<16>::with_capacity(bytes.len());
-            aligned.extend_from_slice(bytes);
-            Some(
-                rkyv::from_bytes::<State<Datum>, rkyv::rancor::Error>(&aligned)
-                    .map_err(tree_error)?,
-            )
-        }
+        id => Some(datum_of(token(id)?)?),
     };
     Ok((key_from_tokens(form, &parts)?, datum))
 }
@@ -215,6 +207,159 @@ pub(crate) fn rows_of(
             })
         }
     }
+}
+
+/// The segment `rows` stand for, its keys' columns taken from the tokens
+/// themselves: a fact ordering's tokens are the slices its schema stores
+/// (the value token split into its type byte and payload), and a segment
+/// whose schema keeps whole keys gets each key once, laid side by side in
+/// one buffer for the node. No key is rebuilt, parsed or split again.
+/// `None` when a row does not fit its segment's schema, for the caller to
+/// build the segment from whole entries instead.
+fn segment_of(
+    rows: &[Row],
+    tokens: &Tokens,
+) -> io::Result<Option<PersistentSegment<State<Datum>>>> {
+    let token = |id: u32| {
+        tokens
+            .get(id)
+            .ok_or_else(|| invalid("a token the file lacks"))
+    };
+    // A key's layout is its first byte, which a split row keeps as its form.
+    let layout_of = |row: &Row| -> io::Result<u8> {
+        match row[0] as u8 {
+            FORM_OPAQUE => Ok(token(row[1])?.first().copied().unwrap_or(u8::MIN)),
+            form => Ok(form),
+        }
+    };
+    let Some(first) = rows.first() else {
+        return Ok(None);
+    };
+    let first = layout_of(first)?;
+    let mut uniform = true;
+    for row in rows {
+        if layout_of(row)? != first {
+            uniform = false;
+            break;
+        }
+    }
+    let layout = if uniform { first } else { MIXED_LAYOUT };
+    let values = rows
+        .iter()
+        .map(|row| match row[DATUM] {
+            NONE => Err(invalid("a segment entry with no value")),
+            id => datum_of(token(id)?),
+        })
+        .collect::<io::Result<Vec<_>>>()?;
+
+    let split = matches!(
+        layout,
+        ENTITY_KEY_TAG | ATTRIBUTE_KEY_TAG | VALUE_KEY_TAG | BLOB_KEY_TAG
+    );
+    if split {
+        let width = if layout == BLOB_KEY_TAG { 2 } else { 5 };
+        let mut columns: Vec<Vec<&[u8]>> =
+            (0..width).map(|_| Vec::with_capacity(rows.len())).collect();
+        for row in rows {
+            if row[0] as u8 != layout {
+                return Ok(None);
+            }
+            let tag = &FORMS[layout as usize..layout as usize + 1];
+            let parts: [&[u8]; 5] = if layout == BLOB_KEY_TAG {
+                [tag, token(row[1])?, &[], &[], &[]]
+            } else {
+                let (entity, attribute) = (token(row[1])?, token(row[2])?);
+                let value = token(row[3])?;
+                if value.is_empty() {
+                    return Ok(None);
+                }
+                let (kind, payload) = value.split_at(1);
+                match layout {
+                    ENTITY_KEY_TAG => [tag, entity, attribute, kind, payload],
+                    ATTRIBUTE_KEY_TAG => [tag, attribute, entity, kind, payload],
+                    _ => [tag, kind, payload, attribute, entity],
+                }
+            };
+            for (column, part) in columns.iter_mut().zip(parts) {
+                column.push(part);
+            }
+        }
+        return PersistentSegment::from_columns::<Key>(layout, &columns, values)
+            .map(Some)
+            .map_err(tree_error);
+    }
+    if layout != MIXED_LAYOUT && <Key as TreeKey>::schema(layout).len() != 1 {
+        return Ok(None);
+    }
+
+    // The schema keeps whole keys: an opaque row's one token is its key,
+    // and a split row's key is its tokens joined, in one buffer for the
+    // segment.
+    let mut joined = Vec::new();
+    let mut spans = Vec::with_capacity(rows.len());
+    for row in rows {
+        let form = row[0] as u8;
+        if form == FORM_OPAQUE {
+            spans.push(Err(row[1]));
+            continue;
+        }
+        let parts = (0..slots_of(form))
+            .map(|slot| token(row[1 + slot]))
+            .collect::<io::Result<Vec<_>>>()?;
+        let start = joined.len();
+        joined.push(form);
+        match (form, parts.as_slice()) {
+            (ENTITY_KEY_TAG, [entity, attribute, value]) => {
+                joined.extend_from_slice(entity);
+                joined.extend_from_slice(attribute);
+                joined.extend_from_slice(value);
+            }
+            (ATTRIBUTE_KEY_TAG, [entity, attribute, value]) => {
+                joined.extend_from_slice(attribute);
+                joined.extend_from_slice(entity);
+                joined.extend_from_slice(value);
+            }
+            (VALUE_KEY_TAG, [entity, attribute, value]) => {
+                joined.extend_from_slice(value);
+                joined.extend_from_slice(attribute);
+                joined.extend_from_slice(entity);
+            }
+            (_, parts) => parts.iter().for_each(|part| joined.extend_from_slice(part)),
+        }
+        spans.push(Ok(start..joined.len()));
+    }
+    let keys = spans
+        .into_iter()
+        .map(|span| match span {
+            Ok(range) => Ok(&joined[range]),
+            Err(id) => token(id),
+        })
+        .collect::<io::Result<Vec<_>>>()?;
+    PersistentSegment::from_columns::<Key>(layout, &[keys], values)
+        .map(Some)
+        .map_err(tree_error)
+}
+
+/// Every byte, so a form's one-byte slice can be taken from it.
+static FORMS: [u8; 256] = {
+    let mut forms = [0u8; 256];
+    let mut at = 0;
+    while at < 256 {
+        forms[at] = at as u8;
+        at += 1;
+    }
+    forms
+};
+
+/// The datum `bytes` archive, read where they are when they are aligned
+/// for it, as a token in the file is.
+fn datum_of(bytes: &[u8]) -> io::Result<State<Datum>> {
+    if (bytes.as_ptr() as usize).is_multiple_of(16) {
+        return rkyv::from_bytes::<State<Datum>, rkyv::rancor::Error>(bytes).map_err(tree_error);
+    }
+    let mut aligned = rkyv::util::AlignedVec::<16>::with_capacity(bytes.len());
+    aligned.extend_from_slice(bytes);
+    rkyv::from_bytes::<State<Datum>, rkyv::rancor::Error>(&aligned).map_err(tree_error)
 }
 
 /// The block `rows` stand for, built by the tree's own encoder under
@@ -282,23 +427,27 @@ pub(crate) fn realize(
         PersistentNodeBody::index_from_buffers(links, novelty, manifest.clone())
             .map_err(tree_error)?
     } else {
-        let entries = rows
+        let rows = rows
             .sections
             .first()
-            .ok_or_else(|| invalid("a segment frame has a section"))?
-            .iter()
-            .map(|row| {
-                let (key, datum) = entry_of(row, tokens)?;
-                Ok(Entry {
-                    key: <Key as TreeKey>::try_from_bytes(&key).map_err(tree_error)?,
-                    value: datum.ok_or_else(|| invalid("a segment entry with no value"))?,
-                })
-            })
-            .collect::<io::Result<Vec<_>>>()?;
-        PersistentNodeBody::from_segment(
-            PersistentSegment::from_entries::<Key>(entries).map_err(tree_error)?,
-            manifest.clone(),
-        )
+            .ok_or_else(|| invalid("a segment frame has a section"))?;
+        let segment = match segment_of(rows, tokens)? {
+            Some(segment) => segment,
+            None => {
+                let entries = rows
+                    .iter()
+                    .map(|row| {
+                        let (key, datum) = entry_of(row, tokens)?;
+                        Ok(Entry {
+                            key: <Key as TreeKey>::try_from_bytes(&key).map_err(tree_error)?,
+                            value: datum.ok_or_else(|| invalid("a segment entry with no value"))?,
+                        })
+                    })
+                    .collect::<io::Result<Vec<_>>>()?;
+                PersistentSegment::from_entries::<Key>(entries).map_err(tree_error)?
+            }
+        };
+        PersistentNodeBody::from_segment(segment, manifest.clone())
     };
     Ok(body.as_bytes().map_err(tree_error)?.to_vec())
 }
@@ -404,5 +553,147 @@ mod profile {
             per(realizing)
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::str::FromStr;
+
+    use dialog_artifacts::history::{Edition, Origin, Version};
+    use dialog_artifacts::{
+        Artifact, AttributeKey, BlobKey, Entity, EntityKey, Relation, Value, ValueKey,
+        coverage_key, history_key,
+    };
+
+    use super::*;
+
+    fn facts() -> anyhow::Result<Vec<Artifact>> {
+        let long = "a value long enough to spill out of its key ".repeat(40);
+        let values = [
+            Value::String("short".into()),
+            Value::String(long),
+            Value::Entity(Entity::from_str("test:other")?),
+            Value::Symbol(Relation::from_str("some/symbol")?),
+            Value::UnsignedInt(7),
+            Value::SignedInt(-7),
+            Value::Float(1.5),
+            Value::Boolean(true),
+            Value::Bytes(vec![0, 1, 2, 0xff]),
+            Value::Record(vec![9; 300]),
+        ];
+        let mut facts = Vec::new();
+        for (at, is) in values.into_iter().enumerate() {
+            facts.push(Artifact {
+                the: Relation::from_str(&format!("test/attribute-{}", at % 3))?,
+                of: Entity::from_str(&format!("test:entity-{}", at % 4))?,
+                is,
+                cause: None,
+            });
+        }
+        Ok(facts)
+    }
+
+    /// A manifest under which the long values spill out of their keys.
+    fn spilling() -> Manifest {
+        Manifest {
+            inline_n: 64,
+            spill_prefix: 32,
+            ..Manifest::default()
+        }
+    }
+
+    fn version(edition: u64) -> Version {
+        Version::new(Origin::from([7; 32]), Edition::new(edition))
+    }
+
+    /// The block of a segment holding `keys`, each with a datum.
+    fn segment_block(mut keys: Vec<Key>, manifest: &Manifest) -> anyhow::Result<Vec<u8>> {
+        keys.sort();
+        keys.dedup();
+        let entries = keys
+            .into_iter()
+            .enumerate()
+            .map(|(at, key)| Entry {
+                key,
+                value: State::Added(Datum {
+                    cause: None,
+                    blob: (at % 2 == 0).then(|| vec![at as u8; 3]),
+                    version: Some(version(at as u64)),
+                    collapsed: Vec::new(),
+                    supersedes: Vec::new(),
+                    retraction: false,
+                }),
+            })
+            .collect::<Vec<_>>();
+        let body = PersistentNodeBody::from_segment(
+            PersistentSegment::from_entries::<Key>(entries)?,
+            manifest.clone(),
+        );
+        Ok(body.as_bytes()?.to_vec())
+    }
+
+    /// Splits the segment of `keys` into rows and realizes them again,
+    /// asserting the columns came from the tokens and the block is the
+    /// same, byte for byte.
+    fn assert_realizes(keys: Vec<Key>) -> anyhow::Result<()> {
+        let manifest = spilling();
+        let block = segment_block(keys, &manifest)?;
+        let node = tree_node(&Buffer::from(block.clone())).expect("a tree node");
+        let mut tokens = Tokens::default();
+        let rows = rows_of(&node, &mut tokens, |_| None)?;
+        assert!(
+            segment_of(&rows.sections[0], &tokens)?.is_some(),
+            "the columns come from the tokens"
+        );
+        assert_eq!(realize(&rows, &tokens, &manifest, |_| None)?, block);
+        Ok(())
+    }
+
+    #[test]
+    fn it_realizes_each_layout_from_its_tokens() -> anyhow::Result<()> {
+        let manifest = spilling();
+        let facts = facts()?;
+        let keys = |key: &dyn Fn(&Artifact) -> Key| facts.iter().map(key).collect::<Vec<_>>();
+        // The long string spills: its keys carry its hash, not the string.
+        assert!(
+            ValueKey::from_artifact(&facts[1], &manifest)
+                .0
+                .as_ref()
+                .len()
+                < 200
+        );
+        assert_realizes(keys(&|fact| EntityKey::from_artifact(fact, &manifest).0))?;
+        assert_realizes(keys(&|fact| AttributeKey::from_artifact(fact, &manifest).0))?;
+        assert_realizes(keys(&|fact| ValueKey::from_artifact(fact, &manifest).0))?;
+        assert_realizes(keys(&|fact| {
+            history_key(&version(3), &fact.of, &fact.the, &fact.is, &manifest)
+        }))?;
+        assert_realizes(keys(&|fact| {
+            coverage_key(&version(4), &fact.of, &fact.the, &fact.is)
+        }))?;
+        assert_realizes((0..5u8).map(|at| BlobKey::new(&[at; 32]).0).collect())?;
+        Ok(())
+    }
+
+    #[test]
+    fn it_realizes_a_segment_of_mixed_layouts_from_its_tokens() -> anyhow::Result<()> {
+        let manifest = spilling();
+        let mut keys = Vec::new();
+        for fact in facts()? {
+            keys.push(EntityKey::from_artifact(&fact, &manifest).0);
+            keys.push(AttributeKey::from_artifact(&fact, &manifest).0);
+            keys.push(history_key(
+                &version(1),
+                &fact.of,
+                &fact.the,
+                &fact.is,
+                &manifest,
+            ));
+        }
+        keys.push(BlobKey::new(&[1; 32]).0);
+        // A key that splits into no parts, kept whole in its row.
+        keys.push(Key::from(vec![0xFD, 1, 2, 3]));
+        assert_realizes(keys)
     }
 }

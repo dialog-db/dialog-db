@@ -1752,6 +1752,40 @@ where
         })
     }
 
+    /// Encodes a segment from its keys already split into the columns of
+    /// `layout`'s schema, `columns[c]` holding every entry's component `c` in
+    /// entry order, and the entries' values: what [`from_entries`](Self::from_entries)
+    /// builds from the same keys, byte for byte, without the keys. For a
+    /// store that keeps a key's components apart and so has the columns in
+    /// hand. `layout` is [`MIXED_LAYOUT`] or a layout whose schema has as
+    /// many components as `columns` has columns; under the opaque schema the
+    /// one column is the whole keys.
+    pub fn from_columns<Key: self::Key>(
+        layout: u8,
+        columns: &[Vec<&[u8]>],
+        values: Vec<Value>,
+    ) -> Result<Self, DialogSearchTreeError> {
+        if values.is_empty() {
+            return Ok(Self::empty());
+        }
+        if columns.iter().any(|column| column.len() != values.len()) {
+            return Err(DialogSearchTreeError::Node(
+                "A column's length differs from the segment's entries".into(),
+            ));
+        }
+        let schema = if layout == MIXED_LAYOUT {
+            crate::Schema::opaque()
+        } else {
+            Key::schema(layout)
+        };
+        Ok(Self {
+            count: values.len() as u32,
+            layout,
+            columns: encode_column_values(&schema, columns)?,
+            values,
+        })
+    }
+
     /// The zero-entry segment: a tree node that carries the format manifest
     /// and nothing else. It was the empty tree's persisted representation
     /// before that became an index with no children (see
