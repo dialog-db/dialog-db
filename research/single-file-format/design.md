@@ -23,10 +23,12 @@ written against the frame it supersedes, with a whole frame every 32
 versions. There are no whole copies of hot nodes: a local read never needs
 the wire form, so keeping one buys nothing.
 
-The file is **append-only, always**. Nothing is overwritten, punched or
-compacted in place. One writer appends at a time; any number of readers,
-in any process, read the prefix that ends at a footer, which never changes
-again (see [Concurrency](#concurrency)).
+The file is **append-only**, but for two fixed slots at its head that say
+where the appended records end and where the index's root is. Nothing past
+the slots is overwritten, punched or compacted in place. One writer
+appends at a time; any number of readers, in any process, read the prefix
+a whole slot names, which never changes again (see
+[Concurrency](#concurrency)).
 
 ### What changed from the first version of this decision
 
@@ -108,27 +110,29 @@ on one lock.
 This file is WAL mode without the checkpoint, because nothing is ever
 copied back:
 
-- **Readers** take no lock, in the file or in memory. Everything before a
-  footer is complete and never changes, and the in-memory index is built
-  the same way: structures that only grow (slots that never move, and
-  lock-free maps for blocks, nodes and lineages), added to only once the
-  bytes they name are in the file, tokens before the frames that name
-  them and children before their parents. So whatever a reader finds stays
-  true, and a reader never waits on an append. A read that misses looks
+- **Readers** take no lock, in the file or in memory. A reader holds a
+  snapshot: a slot (the end of the records, the index's root) and a
+  mapping of the file. Everything before that end is complete and never
+  changes, and the index's nodes are records like any other, so a snapshot
+  stays true however much is appended after it. A process publishes a
+  newer snapshot with an atomic pointer swap once the bytes it names are in
+  the file; a reader never waits on an append. A read that misses looks
   for other processes' appends only when the file grew past what this
   process has read or is writing.
 - **Writers prepare outside their turn and take turns to write.** An
   append splits its blocks into rows and encodes its frames against the
-  index as it is, drafting new tokens and nodes with the next ids, with
-  no lock but the token id table's (which readers never use). Then it
+  snapshot it holds, naming new tokens and frames provisionally, above
+  every offset the snapshot holds, with no lock but the cache of tokens a
+  writer found (which readers never use). Then it
   takes its turn: the process's writer mutex and an exclusive lock on the
   file (`flock`, or a lock on a byte range past the end on platforms
   without it). In its turn it reads what other processes appended since
   its last, and reconciles: a token or node another writer appended first
-  takes theirs, the rest take the ids that are next, and frames whose ids
-  moved are renamed and encoded again. A node it framed that another
+  takes theirs, the rest take their places in the file, and frames are
+  renamed to those places and encoded. A node it framed that another
   appended whole is prepared again, in the turn. Then it writes its
-  records and a footer, publishes them, and releases the lock.
+  records and the index's new nodes, then the older slot, publishes the
+  snapshot, and releases the lock.
 - **What can conflict is not here.** Blocks are content-addressed, so two
   writers storing the same block store the same bytes, and the second skips
   it. The conflict that matters is two writers moving the same branch head,
@@ -156,27 +160,35 @@ node interface it needs is in `dialog-search-tree`.
 
 ## The file
 
-An append-only sequence of records, each `kind (u8) | length (u32) |
-crc32 | body`:
+The magic number (its last byte the format version, now 9), two slots of
+64 KiB, then an append-only sequence of records, each `kind (u8) | length
+(u32) | crc32 | body`:
 
 | record | body |
 |---|---|
-| block | a block's catalog and bytes: anything that is not a tree node, kept whole |
-| token | one token's bytes; its id is its order among tokens |
-| frame | the node's hash, kind, the node id it is written against (or none), and its sections as columnar rows |
-| checkpoint | the index state as of this record |
-| footer | the offset of the latest checkpoint; ends every append |
+| block | a block's catalog (by number), hash and bytes: anything that is not a tree node, kept whole |
+| tokens | an append's new tokens, each 16-aligned with its length in the four bytes before |
+| frame | at a 16-aligned offset: the node's hash, kind, depth, catalog, the frame it is written against (or none), its manifest token, then its sections as columnar rows |
+| index | a node of the index (below) |
 
-- **Node ids.** Every node gets a dense id when it lands. Frames name their
-  children and their predecessor by node id; the index maps an id to its
-  hash and its frame.
-- **Rows.** As in the spike: per leaf entry, the form and the token ids of
+A **slot** is the file's state as of an append: a sequence number, where
+the records end, the counts the archive reports, the catalogs' names, and
+the index's root. An append writes its records past the end, then the
+older slot; opening reads both and takes the newer whole one. So one slot
+is always whole, and an append cut short leaves records past its end,
+which the next writer drops.
+
+- **Names are places.** A token and a frame are named by where they start
+  divided by 16: 32 bits name 64 GiB. Frames name their children and
+  their predecessor this way, and a row names its tokens this way. Nothing
+  in memory says where a token or frame is.
+- **Rows.** As in the spike: per leaf entry, the form and the tokens of
   entity, attribute, value and datum; per index link, the separator, the
-  child's node id and the scale; per buffered op, an entry with no datum
-  for a retraction. Each column is zigzag-delta LEB128 varints
-  (two bytes up to 16,383, where most ids and deltas fall; bijou64 was
-  tried and took 6% more, see the journal); against a
-  predecessor a section is copy runs and literal rows.
+  child's frame and the scale; per buffered op, an entry with no datum for
+  a retraction. Each column is zigzag-delta LEB128 varints in runs (a
+  repeated value once with its count, as Automerge's columns do; bijou64
+  was tried and took 6% more, see the journal); against a predecessor a
+  section is copy runs and literal rows.
 - **Predecessor.** The latest node of the same kind that starts at the same
   first key. The store needs nothing from the tree to find it; on both
   datasets the frames come out the same size as with the tree's lineage.
@@ -201,14 +213,22 @@ block before it is appended; a node that does not round-trip (a legacy
 layout, say) is appended whole. Durability matches the `fs` provider: no
 fsync per append, and `sync` for a durable point.
 
-## Index, checkpoints, recovery
+## Index and recovery
 
-In memory: block fingerprint to node id and record; token id to offset
-(and token bytes to id, for the writer); the predecessor map. Every 16 MiB
-of appends a checkpoint record and a footer; opening reads the checkpoint
-the last footer names and the records after it; a file that does not end
-in a footer is read from the start and its torn tail is dropped. (Built:
-`rust/dialog-archive-file`.)
+The index is a hitchhiker tree in the file, a map from 64-bit keys to
+64-bit values, in three spaces: a block's key (a prefix of its hash and
+its catalog) to its frame or record, a token's key (a stable hash of its
+bytes, `src/hash.rs`) to its place, and a lineage's key (its catalog,
+kind and first row) to its latest frame. A collision costs a probe of the
+next key: every value is checked against what it stands for. Leaves hold
+64 entries, internal nodes 32 children and buffers of 256, and the root,
+which lives in the slot and is rewritten by every append, buffers 2048 and
+drains to half when full: an append writes about 64 bytes of index an
+entry over time. Nodes are fixed-width and read in place from the mapping.
+
+Opening reads the two slots and nothing else. A file longer than its
+newest whole slot says has a torn append past it, which the next writer
+truncates under the lock. (Built: `rust/dialog-archive-file`.)
 
 ## Not in this design
 
@@ -233,7 +253,7 @@ in a footer is read from the start and its torn tail is dropped. (Built:
 ## Build order
 
 1. **Done** (`rust/dialog-archive-file`). The file and its records: append,
-   checksum, footer, checkpoint, open and recover a torn tail.
+   checksum, slots, open and recover a torn tail.
 2. **Done.** The archive effects over the file with every block whole,
    opened from a space's `Location`. A repository commits, reopens and
    queries through it (`tests/repository.rs`).
@@ -379,8 +399,9 @@ What it says:
 The index maps every block's hash to where its record is, for every block
 the file holds (tree nodes, versions no tree reaches any more, spilled
 values, revision records). Two ideas carry over from Hyperbee whatever the
-layout: the root is at the tail (the footer names it, so opening reads the
-footer and nothing else), and a key can be a pointer to the record that
+layout: the root is in one small known place (Hyperbee's is the tail;
+this file's is a slot at its head), so opening reads that and nothing
+else, and a key can be a pointer to the record that
 holds it. From Hypercore: a tree's roots merge like a binary counter's
 carries, which is a schedule for merging sorted runs. From our own tree:
 hitchhiker buffers, which turn many small writes into few large ones.

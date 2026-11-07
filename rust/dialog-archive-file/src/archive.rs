@@ -361,16 +361,42 @@ fn storage_error(path: &Path, error: io::Error) -> ArchiveError {
     ArchiveError::Storage(format!("{}: {error}", path.display()))
 }
 
-/// Maps `file` and pairs the mapping with `slot`.
-fn snapshot(file: &File, slot: Slot) -> io::Result<Snapshot> {
+/// The least a mapping of the file reserves.
+const MAPPED: u64 = 64 << 20;
+
+/// Pairs `slot` with a mapping of `file` that reaches its end: `mapped`,
+/// the current snapshot's, when it does, else a new one reserving twice
+/// that. A mapping lasts while the file grows into it, so an append does
+/// not map the file again, and pages a read faulted in stay mapped for the
+/// next one; the file is mapped again only each time it doubles.
+fn snapshot(file: &File, slot: Slot, mapped: Option<&Arc<Mmap>>) -> io::Result<Snapshot> {
+    if let Some(map) = mapped
+        && map.len() as u64 >= slot.end
+    {
+        return Ok(Snapshot {
+            slot,
+            map: map.clone(),
+        });
+    }
+    // Past a file's end, a mapping on Unix reads nothing until the file
+    // grows there; on Windows it would grow the file, so there the mapping
+    // is the file as it is.
+    let reserve = if cfg!(unix) {
+        slot.end.saturating_mul(2).max(MAPPED)
+    } else {
+        file.metadata()?.len()
+    };
+    let len = usize::try_from(reserve).unwrap_or(usize::MAX);
     // SAFETY: the file is append-only past its slots. A process changes
     // bytes only past the newest slot's end, by an append under the file's
     // lock, or by dropping an append that did not finish; nothing a slot
-    // names lies there, and a snapshot reads only up to its slot's end.
-    // The slots themselves are read with plain reads, never through the
-    // mapping. Like any mapped file, changing it from outside dialog is not
-    // supported.
-    let map = unsafe { Mmap::map(file)? };
+    // names lies there, and a snapshot reads only up to its slot's end,
+    // which is never past the file's. So the mapping's reach past the end
+    // of the file, reserved for appends to come, is never read while
+    // nothing is there. The slots themselves are read with plain reads,
+    // never through the mapping. Like any mapped file, changing it from
+    // outside dialog is not supported.
+    let map = unsafe { memmap2::MmapOptions::new().len(len).map(file)? };
     Ok(Snapshot {
         slot,
         map: Arc::new(map),
@@ -572,7 +598,7 @@ impl FileArchive {
             .open(&path)
             .map_err(|error| storage_error(&path, error))?;
         let current = recover(&file)
-            .and_then(|slot| snapshot(&file, slot))
+            .and_then(|slot| snapshot(&file, slot, None))
             .map_err(|error| storage_error(&path, error))?;
         let inner = Arc::new(Inner {
             known: AtomicU64::new(current.slot.end),
@@ -775,7 +801,7 @@ impl FileArchive {
             return Ok(false);
         }
         self.know(slot.end);
-        self.publish(snapshot(&self.inner.file, slot)?);
+        self.publish(snapshot(&self.inner.file, slot, Some(&self.current().map))?);
         Ok(true)
     }
 
@@ -977,7 +1003,7 @@ impl FileArchive {
             // process may have written since, and drop any append cut short.
             let slot = newest(file, true)?;
             let snapshot = if slot.sequence > self.current().slot.sequence {
-                self.publish(snapshot(file, slot)?);
+                self.publish(snapshot(file, slot, Some(&self.current().map))?);
                 self.current()
             } else {
                 self.current()
@@ -1209,7 +1235,7 @@ impl FileArchive {
             self.inner.rows.put(at, (rows, manifest));
         }
         self.remember(&laid.tokens);
-        self.publish(snapshot(file, laid.slot)?);
+        self.publish(snapshot(file, laid.slot, Some(&self.current().map))?);
         Ok(())
     }
 
@@ -1375,6 +1401,59 @@ mod tests {
         Buffer::from(text.as_bytes().to_vec())
     }
 
+    /// A snapshot keeps the mapping it is given while the file grows into
+    /// it, and reads what was appended after the mapping was made; past
+    /// it, the file is mapped again, reserving room to grow.
+    #[cfg(unix)]
+    #[test]
+    fn it_maps_the_file_again_only_when_it_outgrows_the_mapping() -> io::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(directory.path().join("mapped"))?;
+        write_at(&file, 0, b"first")?;
+        let first = snapshot(
+            &file,
+            Slot {
+                end: 5,
+                ..Slot::default()
+            },
+            None,
+        )?;
+        assert_eq!(first.map.len() as u64, MAPPED);
+
+        write_at(&file, 5, b" and then")?;
+        let second = snapshot(
+            &file,
+            Slot {
+                sequence: 1,
+                end: 14,
+                ..Slot::default()
+            },
+            Some(&first.map),
+        )?;
+        assert!(Arc::ptr_eq(&first.map, &second.map));
+        assert_eq!(second.bytes(), b"first and then");
+
+        let past = MAPPED + 1;
+        file.set_len(past)?;
+        let third = snapshot(
+            &file,
+            Slot {
+                sequence: 2,
+                end: past,
+                ..Slot::default()
+            },
+            Some(&second.map),
+        )?;
+        assert!(!Arc::ptr_eq(&second.map, &third.map));
+        assert_eq!(third.map.len() as u64, 2 * past);
+        assert_eq!(&third.bytes()[..14], b"first and then");
+        Ok(())
+    }
     #[tokio::test]
     async fn it_returns_none_for_missing_content() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;

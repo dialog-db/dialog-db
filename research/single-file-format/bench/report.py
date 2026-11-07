@@ -6,7 +6,8 @@
 With a charts directory, it also writes `time.svg` (every store's time
 against the first, as grouped bars with a legend) and `storage.svg`.
 
-<runs dir> holds `<store>-<n>.json`, one per run, each the `report.json` a
+<runs dir> holds `<store>-<n>.json`, one per run (or `<build>-<n>.json`,
+reported as `<store> <build>`, to set builds of one store side by side), each the `report.json` a
 run of `tonk_bench` wrote. Runs of one store against one dataset are
 summarized together: a measure's value for a run is the median of its
 samples, and the report gives the median of those across runs and their
@@ -66,6 +67,10 @@ def load(directory):
         store = report["store"]
         if report.get("build") == "main":
             store = f"main/{store}"
+        # `v9-1.json`, a run of the store `file`, is the build `v9`'s file.
+        name = path.stem.rsplit("-", 1)[0]
+        if name not in (report["store"], store):
+            store = f"{store} {name}"
         runs[store].append(report["measures"])
     if len(datasets) != 1:
         sys.exit(f"runs name {len(datasets)} datasets: {sorted(datasets)}")

@@ -438,7 +438,7 @@ async fn main() -> anyhow::Result<()> {
             std::fs::copy(&file, Path::new(&keep).join(which.replace('/', "-")))?;
         }
         if file.exists() {
-            // A reader's open, from the checkpoint and the records after it.
+            // A reader's open: its slots, and the root of the index in them.
             let started = Instant::now();
             let reader = FileArchive::open(&file)?;
             let opened = started.elapsed();
