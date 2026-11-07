@@ -1,415 +1,338 @@
-//! The index of the file, read without a lock.
+//! The file as of an append, read without a lock: its slot and a mapping
+//! of everything up to the slot's end.
 //!
-//! Everything the file holds up to its end never changes: an append only
-//! adds. The index is built the same way. Each structure only grows, and an
-//! append adds to it only once its bytes are in the file, children before
-//! the nodes that name them and tokens before the frames that name them. So
-//! anything a reader finds stays true for as long as the file is open, and
-//! a reader takes no lock: it finds what was published before it looked,
-//! and nothing after. One writer at a time adds (the writer's turn), any
-//! number of readers read.
+//! Everything a snapshot reads was written before its slot, and nothing
+//! before a slot's end is written again, so a snapshot stays true for as
+//! long as anyone holds it. An append publishes a new snapshot; readers
+//! take whichever is current and never wait.
+//!
+//! The index is the tree in the file (see [`tree`](super::tree)), keyed by
+//! 64-bit keys in three spaces:
+//!
+//! - a block, by its catalog and hash: where its frame or whole record is;
+//! - a token, by the hash of its bytes: where it is, for a writer that
+//!   would otherwise write it again;
+//! - a lineage (a catalog, a kind and a node's first key): the latest
+//!   frame of it, for the next to be written against.
+//!
+//! Keys are hashes, so two blocks or tokens can share one: the second is
+//! filed at the next free key, and a lookup checks each value against the
+//! record it names, moving to the next key until it finds the one or a
+//! free key.
 
-use std::fs::File;
-use std::hash::BuildHasher as _;
+use std::borrow::Cow;
 use std::io;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
 
-use hashbrown::HashTable;
-use parking_lot::RwLock;
-use std::sync::{Arc, OnceLock};
-
-use arc_swap::ArcSwapOption;
 use dialog_common::Blake3Hash;
-use hashbrown::DefaultHashBuilder;
 use memmap2::Mmap;
 
-use super::{Extent, Lineage, Node, Place};
-use crate::tokens::TokenRead;
+use super::slot::Slot;
+use super::tree::Nodes;
+use crate::file::{HEADER, Kind};
+use crate::rows::{Reader, invalid, put_varint};
+use crate::tokens::{ALIGN, TokenRead, token_at};
 
-/// The first bucket's length; each next bucket is twice the one before.
-const FIRST: usize = 64;
+const SPACE: u32 = 62;
+const LOW: u64 = (1 << SPACE) - 1;
 
-/// Enough buckets for more than `u32::MAX` slots.
-const BUCKETS: usize = 27;
+/// The key spaces.
+const BLOCKS: u64 = 0;
+const TOKENS: u64 = 1;
+const LINEAGES: u64 = 2;
 
-/// A vector that only grows, read without a lock: one writer pushes at a
-/// time (callers hold the writer's turn), any number of readers read what
-/// was pushed before they looked. Slots never move: each bucket is
-/// allocated once and kept.
-pub(crate) struct Slots<T> {
-    buckets: [OnceLock<Box<[OnceLock<T>]>>; BUCKETS],
-    len: AtomicUsize,
+fn key(space: u64, hash: u64) -> u64 {
+    space << SPACE | (hash & LOW)
 }
 
-impl<T> Default for Slots<T> {
-    fn default() -> Self {
-        Self {
-            buckets: [const { OnceLock::new() }; BUCKETS],
-            len: AtomicUsize::new(0),
+/// The key after `key` in its space, for a value filed past a taken one.
+pub(crate) fn next(key: u64) -> u64 {
+    (key & !LOW) | (key.wrapping_add(1) & LOW)
+}
+
+/// The first key a block of `catalog` with `hash` is filed under.
+pub(crate) fn block_key(catalog: u16, hash: &Blake3Hash) -> u64 {
+    let prefix = u64::from_le_bytes(hash.as_bytes()[..8].try_into().expect("eight bytes"));
+    key(
+        BLOCKS,
+        prefix ^ (catalog as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15),
+    )
+}
+
+/// The first key a token whose bytes hash to `hash` is filed under.
+pub(crate) fn token_key(hash: u64) -> u64 {
+    key(TOKENS, hash)
+}
+
+/// The key of a lineage: the latest frame of it is filed there, and
+/// replaces the one before.
+pub(crate) fn lineage_key(catalog: u16, kind: u8, first: [u32; 4]) -> u64 {
+    let mut bytes = Vec::with_capacity(19);
+    bytes.extend_from_slice(&catalog.to_le_bytes());
+    bytes.push(kind);
+    for id in first {
+        bytes.extend_from_slice(&id.to_le_bytes());
+    }
+    key(LINEAGES, crate::hash::hash(&bytes))
+}
+
+/// How the file holds a block.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Place {
+    /// Whole, in the block record at this offset.
+    Block(u64),
+    /// As a frame, whose data starts at this offset divided by [`ALIGN`].
+    Frame(u32),
+}
+
+const FRAME: u64 = 1 << 63;
+
+impl Place {
+    pub fn value(self) -> u64 {
+        match self {
+            Place::Block(at) => at,
+            Place::Frame(at) => FRAME | at as u64,
+        }
+    }
+
+    fn of(value: u64) -> Self {
+        if value & FRAME != 0 {
+            Place::Frame((value & !FRAME) as u32)
+        } else {
+            Place::Block(value)
         }
     }
 }
 
-/// The bucket slot `at` is in, and where in it.
-fn locate(at: usize) -> (usize, usize) {
-    let shifted = at + FIRST;
-    let bit = (usize::BITS - 1 - shifted.leading_zeros()) as usize;
-    (bit - FIRST.trailing_zeros() as usize, shifted - (1 << bit))
+/// What a frame says ahead of its rows. Its data starts on an [`ALIGN`]
+/// boundary with the node's hash, so a parent read in place takes a
+/// child's hash from where the child's frame starts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct FrameHeader {
+    pub hash: Blake3Hash,
+    pub kind: u8,
+    /// How many frames its rows are written against, one after another.
+    pub depth: u8,
+    pub catalog: u16,
+    /// The frame it is written against, if any, by where it starts.
+    pub base: Option<u32>,
+    /// The token of the node's manifest.
+    pub manifest: u32,
 }
 
-impl<T> Slots<T> {
-    /// How many slots are published.
-    pub fn len(&self) -> usize {
-        self.len.load(Ordering::Acquire)
+impl FrameHeader {
+    pub fn put(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(self.hash.as_bytes());
+        out.push(self.kind);
+        out.push(self.depth);
+        put_varint(out, self.catalog as u64);
+        put_varint(out, self.base.map_or(0, |base| base as u64 + 1));
+        put_varint(out, self.manifest as u64);
     }
 
-    /// The slot `at`, if it is published.
-    pub fn get(&self, at: usize) -> Option<&T> {
-        if at >= self.len() {
-            return None;
-        }
-        let (bucket, offset) = locate(at);
-        self.buckets[bucket].get()?.get(offset)?.get()
-    }
-
-    /// Publishes `value` as the next slot, and returns where it is. Only the
-    /// holder of the writer's turn pushes.
-    pub fn push(&self, value: T) -> usize {
-        let at = self.len.load(Ordering::Relaxed);
-        let (bucket, offset) = locate(at);
-        let slots = self.buckets[bucket]
-            .get_or_init(|| (0..FIRST << bucket).map(|_| OnceLock::new()).collect());
-        let set = slots[offset].set(value);
-        debug_assert!(set.is_ok(), "one writer pushes at a time");
-        self.len.store(at + 1, Ordering::Release);
-        at
-    }
-
-    /// Every published slot, in order.
-    pub fn iter(&self) -> impl Iterator<Item = &T> {
-        (0..self.len()).filter_map(|at| self.get(at))
-    }
-
-    /// The memory the allocated buckets take.
-    pub fn footprint(&self) -> usize {
-        self.buckets
-            .iter()
-            .enumerate()
-            .filter(|(_, bucket)| bucket.get().is_some())
-            .map(|(at, _)| (FIRST << at) * size_of::<OnceLock<T>>())
-            .sum()
+    pub fn get(reader: &mut Reader) -> io::Result<Self> {
+        let hash = Blake3Hash::from(<[u8; 32]>::try_from(reader.take(32)?).expect("32 bytes"));
+        let kind = reader.byte()?;
+        let depth = reader.byte()?;
+        let catalog =
+            u16::try_from(reader.varint()?).map_err(|_| invalid("a catalog over 16 bits"))?;
+        let base = match reader.varint()? {
+            0 => None,
+            base => Some(u32::try_from(base - 1).map_err(|_| invalid("a frame past 64 GiB"))?),
+        };
+        let manifest = reader.u32()?;
+        Ok(Self {
+            hash,
+            kind,
+            depth,
+            catalog,
+            base,
+            manifest,
+        })
     }
 }
 
-/// A map read without a lock, hashed as `hashbrown` hashes: the keys are
-/// hashes, ids and short names, which need no defence against crafted
-/// collisions, and are looked up on every token a writer interns.
-pub(crate) type Map<K, V> = papaya::HashMap<K, V, DefaultHashBuilder>;
-
-/// The id table, held for reading: a writer holds it while it drafts an
-/// append, and lets it go before its turn.
-pub(crate) type Ids<'a> = parking_lot::RwLockReadGuard<'a, IdTable>;
-
-/// Each published token's id, found by its bytes' hash and compared
-/// against the token, so the table holds ids, not bytes, up to `indexed`
-/// tokens. A reader never needs it, and it is not read without a lock: a
-/// writer looks up every token of every node it splits, and a table
-/// probed in place is what keeps that cheap.
-#[derive(Default)]
-pub(crate) struct IdTable {
-    table: HashTable<u32>,
-    indexed: usize,
+/// The file as of an append.
+pub(crate) struct Snapshot {
+    pub slot: Slot,
+    /// The file, mapped at least to the slot's end.
+    pub map: Arc<Mmap>,
 }
 
-/// Where a token is in the file, and whether it was checked as an archived
-/// datum: a datum is checked once, the first time a node that holds it is
-/// read.
-pub(crate) struct Token {
-    pub offset: u64,
-    pub len: u32,
-    checked: AtomicBool,
-}
+impl Snapshot {
+    /// The file's bytes up to the slot's end.
+    pub fn bytes(&self) -> &[u8] {
+        let end = (self.slot.end as usize).min(self.map.len());
+        &self.map[..end]
+    }
 
-/// Everything the file holds, as where it is.
-#[derive(Default)]
-pub(crate) struct Index {
-    catalogs: Slots<String>,
-    catalog_ids: Map<String, u16>,
-    /// Every block, by catalog and hash.
-    blocks: Map<(u16, Blake3Hash), Place>,
-    /// Every frame, by node id.
-    nodes: Slots<Node>,
-    /// The latest node of each hash, for naming children.
-    node_ids: Map<Blake3Hash, u32>,
-    /// The latest node of each lineage, for the next to be written against.
-    lineages: Map<Lineage, u32>,
-    tokens: Slots<Token>,
-    /// A token's id by its bytes, for a writer to find a token it already
-    /// wrote. Built on a writer's first use; a reader never needs it.
-    ids: RwLock<IdTable>,
-    hasher: DefaultHashBuilder,
-    /// The file, mapped at least as far as every published token.
-    map: ArcSwapOption<Mmap>,
-    /// Bytes of whole blocks and frames, for the archive's stats.
-    block_bytes: AtomicU64,
-    frame_bytes: AtomicU64,
-}
+    /// The kind and body of the record at `at`.
+    pub fn record(&self, at: u64) -> io::Result<(Kind, &[u8])> {
+        let bytes = self.bytes();
+        let at = usize::try_from(at).map_err(|_| invalid("a record past the mapping"))?;
+        let header = bytes
+            .get(at..at + HEADER as usize)
+            .ok_or_else(|| invalid("a record past the file's end"))?;
+        let kind = Kind::from_tag(header[0]).ok_or_else(|| invalid("a record of no kind"))?;
+        let len = u32::from_le_bytes(header[1..5].try_into().expect("four bytes")) as usize;
+        let body = bytes
+            .get(at + HEADER as usize..at + HEADER as usize + len)
+            .ok_or_else(|| invalid("a record past the file's end"))?;
+        Ok((kind, body))
+    }
 
-impl Index {
-    /// The catalog `name`'s id, if the file holds anything in it.
     pub fn catalog_id(&self, name: &str) -> Option<u16> {
-        self.catalog_ids.pin().get(name).copied()
+        self.slot
+            .catalogs
+            .iter()
+            .position(|catalog| catalog == name)
+            .map(|at| at as u16)
     }
 
-    /// The catalog `id` names.
     pub fn catalog(&self, id: u16) -> Option<&str> {
-        self.catalogs.get(id as usize).map(String::as_str)
+        self.slot.catalogs.get(id as usize).map(String::as_str)
     }
 
-    pub fn catalogs(&self) -> impl Iterator<Item = &str> {
-        self.catalogs.iter().map(String::as_str)
+    /// The bytes of the frame whose data starts at `at` divided by
+    /// [`ALIGN`], up to the snapshot's end: its header, then its rows.
+    pub fn frame_bytes(&self, at: u32) -> io::Result<&[u8]> {
+        self.bytes()
+            .get(at as usize * ALIGN as usize..)
+            .filter(|bytes| !bytes.is_empty())
+            .ok_or_else(|| invalid("a frame past the file's end"))
+    }
+
+    pub fn frame(&self, at: u32) -> io::Result<FrameHeader> {
+        FrameHeader::get(&mut Reader::new(self.frame_bytes(at)?))
+    }
+
+    /// The hash a frame starts with.
+    pub fn frame_hash(&self, at: u32) -> Option<&[u8]> {
+        let start = at as usize * ALIGN as usize;
+        self.bytes().get(start..start + 32)
+    }
+
+    /// A whole block's catalog, hash and bytes, from its record.
+    pub fn block(&self, at: u64) -> io::Result<(u16, Blake3Hash, &[u8])> {
+        let (kind, body) = self.record(at)?;
+        if kind != Kind::Block {
+            return Err(invalid("not a block record"));
+        }
+        let mut reader = Reader::new(body);
+        let catalog =
+            u16::try_from(reader.varint()?).map_err(|_| invalid("a catalog over 16 bits"))?;
+        let hash = Blake3Hash::from(<[u8; 32]>::try_from(reader.take(32)?).expect("32 bytes"));
+        Ok((catalog, hash, &body[reader.position()..]))
     }
 
     /// How the file holds the block `hash` names in `catalog`.
-    pub fn place(&self, catalog: &str, hash: &Blake3Hash) -> Option<Place> {
-        let catalog = self.catalog_id(catalog)?;
-        self.blocks.pin().get(&(catalog, hash.clone())).copied()
+    pub fn place(&self, catalog: &str, hash: &Blake3Hash) -> io::Result<Option<Place>> {
+        let Some(catalog) = self.catalog_id(catalog) else {
+            return Ok(None);
+        };
+        Ok(self.probe_block(catalog, hash)?.0)
     }
 
-    /// Whether the file holds the block `hash` names in `catalog`.
-    pub fn held(&self, catalog: &str, hash: &Blake3Hash) -> bool {
-        self.place(catalog, hash).is_some()
+    /// How the file holds a block, and the first free key past the ones
+    /// its search met, where a new block that shares its key is filed.
+    pub fn probe_block(&self, catalog: u16, hash: &Blake3Hash) -> io::Result<(Option<Place>, u64)> {
+        let mut at = block_key(catalog, hash);
+        while let Some(value) = self.slot.root.get(self, at)? {
+            let place = Place::of(value);
+            let (held_catalog, held_hash) = match place {
+                Place::Frame(frame) => {
+                    let header = self.frame(frame)?;
+                    (header.catalog, header.hash)
+                }
+                Place::Block(record) => {
+                    let (catalog, hash, _) = self.block(record)?;
+                    (catalog, hash)
+                }
+            };
+            if held_catalog == catalog && &held_hash == hash {
+                return Ok((Some(place), at));
+            }
+            at = next(at);
+        }
+        Ok((None, at))
+    }
+
+    /// The token equal to `token` (whose bytes hash to `hash`), by where it
+    /// starts divided by [`ALIGN`], and the first free key past the ones
+    /// the search met.
+    pub fn probe_token(&self, hash: u64, token: &[u8]) -> io::Result<(Option<u32>, u64)> {
+        let mut at = token_key(hash);
+        while let Some(value) = self.slot.root.get(self, at)? {
+            let id = value as u32;
+            if self.get(id) == Some(token) {
+                return Ok((Some(id), at));
+            }
+            at = next(at);
+        }
+        Ok((None, at))
+    }
+
+    /// The latest frame of a lineage, by where it starts divided by
+    /// [`ALIGN`].
+    pub fn lineage(&self, key: u64) -> io::Result<Option<u32>> {
+        Ok(self.slot.root.get(self, key)?.map(|value| value as u32))
     }
 
     /// Every block, by catalog and hash, and how it is held.
-    pub fn blocks(&self) -> Vec<(u16, Blake3Hash, Place)> {
-        self.blocks
-            .pin()
-            .iter()
-            .map(|((catalog, hash), place)| (*catalog, hash.clone(), *place))
-            .collect()
-    }
-
-    pub fn block_count(&self) -> usize {
-        self.blocks.len()
-    }
-
-    pub fn node(&self, id: u32) -> Option<&Node> {
-        self.nodes.get(id as usize)
-    }
-
-    pub fn nodes(&self) -> &Slots<Node> {
-        &self.nodes
-    }
-
-    /// The latest node of `hash`.
-    pub fn node_id(&self, hash: &Blake3Hash) -> Option<u32> {
-        self.node_ids.pin().get(hash).copied()
-    }
-
-    /// The latest node of `lineage`.
-    pub fn lineage(&self, lineage: &Lineage) -> Option<u32> {
-        self.lineages.pin().get(lineage).copied()
-    }
-
-    pub fn tokens(&self) -> &Slots<Token> {
-        &self.tokens
-    }
-
-    /// Where token `id` is.
-    pub fn extent(&self, id: u32) -> Option<(u64, u32)> {
-        self.tokens
-            .get(id as usize)
-            .map(|token| (token.offset, token.len))
-    }
-
-    /// Whether token `id` passes `check`, checking it only the first time.
-    pub fn checked(&self, id: u32, bytes: &[u8], check: impl Fn(&[u8]) -> bool) -> bool {
-        let Some(token) = self.tokens.get(id as usize) else {
-            return false;
-        };
-        if token.checked.load(Ordering::Acquire) {
-            return true;
-        }
-        if !check(bytes) {
-            return false;
-        }
-        token.checked.store(true, Ordering::Release);
-        true
-    }
-
-    /// The tokens as they are now, read through the file's mapping. Take
-    /// it after finding the node or block that names them: everything a
-    /// published node names was published, and mapped, before it.
-    pub fn view(&self) -> View<'_> {
-        View {
-            index: self,
-            map: self.map.load_full(),
-        }
-    }
-
-    pub fn hash_of(&self, token: &[u8]) -> u64 {
-        self.hasher.hash_one(token)
-    }
-
-    /// The id table, held for reading.
-    pub fn ids(&self) -> Ids<'_> {
-        self.ids.read()
-    }
-
-    /// The id of a published token equal to `token`, whose bytes hash to
-    /// `hash`, if the id table knows it.
-    pub fn find(ids: &IdTable, view: &View<'_>, hash: u64, token: &[u8]) -> Option<u32> {
-        ids.table
-            .find(hash, |id| view.get(*id) == Some(token))
-            .copied()
-    }
-
-    /// Brings the id table up to every published token. A writer calls it
-    /// before it looks tokens up, so the first append of a process reads
-    /// every token once; later ones read only what other processes added.
-    /// A token written twice keeps its first id.
-    pub fn build_ids(&self) {
-        let to = self.tokens.len();
-        if self.ids.read().indexed >= to {
-            return;
-        }
-        let view = self.view();
-        let mut ids = self.ids.write();
-        for id in ids.indexed..to {
-            let Some(token) = view.get(id as u32) else {
+    pub fn blocks(&self) -> io::Result<Vec<(u16, Blake3Hash, Place)>> {
+        let mut out = Vec::new();
+        for (key, value) in self.slot.root.entries(self)? {
+            if key >> SPACE != BLOCKS {
                 continue;
+            }
+            let place = Place::of(value);
+            let (catalog, hash) = match place {
+                Place::Frame(frame) => {
+                    let header = self.frame(frame)?;
+                    (header.catalog, header.hash)
+                }
+                Place::Block(record) => {
+                    let (catalog, hash, _) = self.block(record)?;
+                    (catalog, hash)
+                }
             };
-            let hash = self.hash_of(token);
-            if Self::find(&ids, &view, hash, token).is_none() {
-                ids.table.insert_unique(hash, id as u32, |id| {
-                    self.hash_of(view.get(*id).expect("an indexed token"))
-                });
-            }
+            out.push((catalog, hash, place));
         }
-        ids.indexed = ids.indexed.max(to);
-    }
-
-    pub fn id_table_len(&self) -> usize {
-        self.ids.read().table.len()
-    }
-
-    pub fn lineage_count(&self) -> usize {
-        self.lineages.len()
-    }
-
-    pub fn block_bytes(&self) -> u64 {
-        self.block_bytes.load(Ordering::Relaxed)
-    }
-
-    pub fn frame_bytes(&self) -> u64 {
-        self.frame_bytes.load(Ordering::Relaxed)
-    }
-
-    /// Maps `file` again if the mapping does not reach `needed`. Called by
-    /// the writer before it publishes tokens past the mapping.
-    pub fn map(&self, file: &File, needed: u64) -> io::Result<()> {
-        let mapped = self.map.load().as_ref().map_or(0, |map| map.len() as u64);
-        if needed > mapped {
-            // SAFETY: the file is append-only. A process changes bytes only
-            // past the last footer, by an append under the file's lock, or by
-            // dropping an append that did not finish; nothing any process
-            // has indexed lies there. Everything read through this mapping
-            // was indexed from a record before a footer, or written by this
-            // process. Like any mapped file, changing it from outside dialog
-            // is not supported.
-            self.map.store(Some(Arc::new(unsafe { Mmap::map(file)? })));
-        }
-        Ok(())
-    }
-
-    /// The id of catalog `name`, adding it when it is new. Writer only.
-    pub fn add_catalog(&self, name: &str) -> u16 {
-        if let Some(id) = self.catalog_id(name) {
-            return id;
-        }
-        let id = self.catalogs.push(name.to_string()) as u16;
-        self.catalog_ids.pin().insert(name.to_string(), id);
-        id
-    }
-
-    /// Publishes a token at `offset`, `len` bytes long, whose bytes hash to
-    /// `hash` when the writer knows it. Writer only, once the mapping
-    /// reaches it.
-    pub fn add_token(&self, offset: u64, len: u32, hash: Option<u64>) -> u32 {
-        let id = self.tokens.push(Token {
-            offset,
-            len,
-            checked: AtomicBool::new(false),
-        }) as u32;
-        // A token the writer found new joins the id table at once, when the
-        // table is up to it.
-        if let Some(hash) = hash {
-            let mut ids = self.ids.write();
-            if ids.indexed == id as usize {
-                let view = self.view();
-                ids.table.insert_unique(hash, id, |id| {
-                    self.hash_of(view.get(*id).expect("an indexed token"))
-                });
-                ids.indexed += 1;
-            }
-        }
-        id
-    }
-
-    /// Publishes a whole block. Writer only.
-    pub fn add_block(&self, catalog: u16, hash: Blake3Hash, extent: Extent) {
-        self.block_bytes
-            .fetch_add(extent.len as u64, Ordering::Relaxed);
-        self.blocks
-            .pin()
-            .insert((catalog, hash), Place::Block(extent));
-    }
-
-    /// Publishes a frame, after the tokens and children it names. Writer
-    /// only.
-    pub fn add_node(&self, node: Node) -> u32 {
-        let (hash, catalog, kind, lineage, len) = (
-            node.hash.clone(),
-            node.catalog,
-            node.kind,
-            node.lineage,
-            node.extent.len,
-        );
-        let id = self.nodes.push(node) as u32;
-        self.frame_bytes.fetch_add(len as u64, Ordering::Relaxed);
-        if let Some(first) = lineage {
-            self.lineages.pin().insert((catalog, kind, first), id);
-        }
-        self.node_ids.pin().insert(hash.clone(), id);
-        self.blocks.pin().insert((catalog, hash), Place::Node(id));
-        id
+        Ok(out)
     }
 }
 
-/// The published tokens, read through one mapping of the file.
-pub(crate) struct View<'a> {
-    index: &'a Index,
-    map: Option<Arc<Mmap>>,
-}
-
-impl View<'_> {
-    pub fn mapping(&self) -> Option<Arc<Mmap>> {
-        self.map.clone()
-    }
-
-    /// How many tokens are published.
-    pub fn len(&self) -> u32 {
-        self.index.tokens.len() as u32
+impl Nodes for Snapshot {
+    fn read(&self, at: u64) -> io::Result<Cow<'_, [u8]>> {
+        let (kind, body) = self.record(at)?;
+        if kind != Kind::Index {
+            return Err(invalid("not an index record"));
+        }
+        Ok(Cow::Borrowed(body))
     }
 }
 
-impl TokenRead for View<'_> {
+impl TokenRead for Snapshot {
     fn get(&self, id: u32) -> Option<&[u8]> {
-        let (offset, len) = self.index.extent(id)?;
-        let start = usize::try_from(offset).ok()?;
-        self.map.as_deref()?.get(start..start + len as usize)
+        token_at(self.bytes(), id as u64 * ALIGN)
     }
+}
+
+/// The value of a token at `offset` in the file (its bytes' start) as rows
+/// name it.
+pub(crate) fn token_id(offset: u64) -> io::Result<u32> {
+    u32::try_from(offset / ALIGN).map_err(|_| invalid("a token past 64 GiB"))
+}
+
+/// Records `catalog` in `slot`, if it is new, and returns its number.
+pub(crate) fn catalog_in(slot: &mut Slot, name: &str) -> io::Result<u16> {
+    if let Some(at) = slot.catalogs.iter().position(|catalog| catalog == name) {
+        return Ok(at as u16);
+    }
+    let id =
+        u16::try_from(slot.catalogs.len()).map_err(|_| invalid("more than 65,536 catalogs"))?;
+    slot.catalogs.push(name.to_string());
+    Ok(id)
 }
 
 #[cfg(test)]
@@ -417,53 +340,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn it_reads_every_slot_it_pushed_across_buckets() {
-        let slots = Slots::default();
-        for at in 0..10_000usize {
-            assert_eq!(slots.push(at), at);
-        }
-        assert_eq!(slots.len(), 10_000);
-        for at in 0..10_000usize {
-            assert_eq!(slots.get(at), Some(&at));
-        }
-        assert_eq!(slots.get(10_000), None);
+    fn it_keeps_key_spaces_apart() {
+        let hash = Blake3Hash::hash(b"block");
+        assert_eq!(block_key(0, &hash) >> SPACE, BLOCKS);
+        assert_eq!(token_key(u64::MAX) >> SPACE, TOKENS);
+        assert_eq!(lineage_key(0, 0, [1, 2, 3, 4]) >> SPACE, LINEAGES);
+        assert_eq!(
+            next(token_key(u64::MAX)) >> SPACE,
+            TOKENS,
+            "the next key wraps in its space"
+        );
+        assert_ne!(
+            block_key(0, &hash),
+            block_key(1, &hash),
+            "catalogs file apart"
+        );
     }
 
     #[test]
-    fn it_locates_slots_bucket_by_bucket() {
-        assert_eq!(locate(0), (0, 0));
-        assert_eq!(locate(FIRST - 1), (0, FIRST - 1));
-        assert_eq!(locate(FIRST), (1, 0));
-        assert_eq!(locate(3 * FIRST - 1), (1, 2 * FIRST - 1));
-        assert_eq!(locate(3 * FIRST), (2, 0));
-        assert!(locate(u32::MAX as usize).0 < BUCKETS);
-    }
-
-    /// Readers on other threads see every slot pushed before they looked,
-    /// whole, while the writer keeps pushing.
-    #[test]
-    fn it_reads_while_one_writer_pushes() {
-        let slots = Arc::new(Slots::default());
-        let readers: Vec<_> = (0..4)
-            .map(|_| {
-                let slots = slots.clone();
-                std::thread::spawn(move || {
-                    let mut seen = 0;
-                    while seen < 50_000 {
-                        let len = slots.len();
-                        for at in seen..len {
-                            assert_eq!(slots.get(at), Some(&(at as u64 * 3)));
-                        }
-                        seen = len;
-                    }
-                })
-            })
-            .collect();
-        for at in 0..50_000u64 {
-            slots.push(at * 3);
-        }
-        for reader in readers {
-            reader.join().expect("a reader saw every slot whole");
-        }
+    fn it_reads_back_a_frame_header() -> io::Result<()> {
+        let header = FrameHeader {
+            hash: Blake3Hash::hash(b"node"),
+            kind: 1,
+            depth: 3,
+            catalog: 2,
+            base: Some(77),
+            manifest: 9,
+        };
+        let mut bytes = Vec::new();
+        header.put(&mut bytes);
+        assert_eq!(FrameHeader::get(&mut Reader::new(&bytes))?, header);
+        Ok(())
     }
 }

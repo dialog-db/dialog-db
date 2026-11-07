@@ -24,9 +24,10 @@ use dialog_search_tree::{
 use memmap2::Mmap;
 use zerocopy::FromBytes as _;
 
-use super::{FileArchive, Index, Place, View};
+use super::index::{Place, Snapshot};
+use super::{DATUMS_CHECKED, FileArchive};
 use crate::rows::{DATUM, INDEX, NONE, Row, Rows, SLOTS};
-use crate::tokens::TokenRead as _;
+use crate::tokens::{ALIGN, TokenRead as _};
 
 /// Every byte value, so a key's form byte is a slice that lives forever.
 static FORMS: [u8; 256] = {
@@ -95,16 +96,22 @@ fn is_datum(bytes: &[u8]) -> bool {
     rkyv::access::<rkyv::Archived<State<Datum>>, rkyv::rancor::Error>(bytes).is_ok()
 }
 
-/// Where token `id` is, if the file holds it within `mapped` bytes.
-fn part(index: &Index, id: u32, mapped: u64) -> Option<Part> {
-    let (offset, len) = index.extent(id)?;
-    (offset + len as u64 <= mapped).then_some(Part { offset, len })
+/// Where the token rows name `id` is: its bytes start at `id` times the
+/// alignment, and their length is in the four bytes before.
+fn part(snapshot: &Snapshot, id: u32) -> Option<Part> {
+    let token = snapshot.get(id)?;
+    Some(Part {
+        offset: id as u64 * ALIGN,
+        len: token.len() as u32,
+    })
 }
 
-/// An entry or operation row as where its key parts and value are.
-fn entry(index: &Index, view: &View<'_>, row: &Row, mapped: u64) -> Option<Entry> {
+/// An entry or operation row as where its key parts and value are. A
+/// datum is checked as an archive once, the first time a node that holds
+/// it is served.
+fn entry(archive: &FileArchive, snapshot: &Snapshot, row: &Row) -> Option<Entry> {
     let form = row[0] as u8;
-    let slot = |at: usize| part(index, row[at], mapped);
+    let slot = |at: usize| part(snapshot, row[at]);
     let (form, count, parts) = match form {
         ENTITY_KEY_TAG => (Some(form), 3, [slot(1)?, slot(2)?, slot(3)?, NO_PART]),
         ATTRIBUTE_KEY_TAG => (Some(form), 3, [slot(2)?, slot(1)?, slot(3)?, NO_PART]),
@@ -118,10 +125,17 @@ fn entry(index: &Index, view: &View<'_>, row: &Row, mapped: u64) -> Option<Entry
     let value = match row[DATUM] {
         NONE => None,
         id => {
-            if !index.checked(id, view.get(id)?, is_datum) {
-                return None;
+            let checked = archive.inner.checked.pin();
+            if !checked.contains(&id) {
+                if !is_datum(snapshot.get(id)?) {
+                    return None;
+                }
+                if checked.len() >= DATUMS_CHECKED {
+                    checked.clear();
+                }
+                checked.insert(id);
             }
-            Some(part(index, id, mapped)?)
+            Some(part(snapshot, id)?)
         }
     };
     Some(Entry {
@@ -138,20 +152,16 @@ impl FileArchive {
     /// at all.
     pub(crate) fn served(&self, catalog: &str, hash: &Blake3Hash) -> Option<FileNode> {
         let started = std::time::Instant::now();
-        let Place::Node(id) = self.place(catalog, hash).ok()?? else {
+        let (snapshot, Some(Place::Frame(at))) = self.place(catalog, hash).ok()? else {
             return None;
         };
-        let (rows, manifest) = self.rows(&std::collections::HashMap::new(), id).ok()?;
-        let index = &self.inner.index;
-        // The view is taken once the node is found: everything it names was
-        // published, and mapped, before it.
-        let view = index.view();
-        let manifest = self.manifest(&view, manifest)?;
-        let map = view.mapping()?;
-        let mapped = map.len() as u64;
+        let (rows, manifest) = self
+            .rows(&snapshot, &std::collections::HashMap::new(), at)
+            .ok()?;
+        let manifest = self.manifest(&snapshot, manifest)?;
         let mut node = FileNode {
             archive: self.clone(),
-            map,
+            map: snapshot.map.clone(),
             catalog: catalog.to_string(),
             hash: hash.clone(),
             manifest,
@@ -164,7 +174,7 @@ impl FileArchive {
             links: Vec::new(),
             buffers: Vec::new(),
         };
-        build(index, &view, &rows, mapped, &mut node)?;
+        build(self, &snapshot, &rows, &mut node)?;
         super::Timings::add(&self.inner.timings.serve, started);
         self.inner
             .timings
@@ -174,22 +184,21 @@ impl FileArchive {
     }
 
     /// The manifest token `id` decodes to, decoded once.
-    fn manifest(&self, view: &View<'_>, id: u32) -> Option<Arc<Manifest>> {
+    fn manifest(&self, snapshot: &Snapshot, id: u32) -> Option<Arc<Manifest>> {
         let manifests = self.inner.manifests.pin();
         if let Some(manifest) = manifests.get(&id) {
             return Some(manifest.clone());
         }
-        let manifest = Arc::new(Manifest::decode(view.get(id)?).ok()?);
+        let manifest = Arc::new(Manifest::decode(snapshot.get(id)?).ok()?);
         Some(manifests.get_or_insert(id, manifest).clone())
     }
 }
 
 /// Fills `node` with where each of its rows' parts is.
 fn build(
-    index: &Index,
-    view: &View<'_>,
+    archive: &FileArchive,
+    snapshot: &Snapshot,
     rows: &Rows,
-    mapped: u64,
     node: &mut FileNode,
 ) -> Option<()> {
     if rows.kind != INDEX {
@@ -197,7 +206,7 @@ fn build(
             .sections
             .first()?
             .iter()
-            .map(|row| entry(index, view, row, mapped))
+            .map(|row| entry(archive, snapshot, row))
             .collect::<Option<_>>()?;
         return Some(());
     }
@@ -209,19 +218,17 @@ fn build(
         .map(|row| {
             let child = match row[1] {
                 NONE => {
-                    let hash = part(index, row[3], mapped)?;
+                    let hash = part(snapshot, row[3])?;
                     (hash.len == 32).then_some(hash.offset)?
                 }
-                id => {
-                    let child = index.node(id)?;
-                    let catalog = index.catalog(child.catalog)?;
-                    // A frame's body starts with its catalog, then the hash.
-                    let at = child.extent.offset + 1 + catalog.len() as u64;
-                    (at + 32 <= mapped).then_some(at)?
+                // A frame's data starts with the node's hash.
+                at => {
+                    snapshot.frame_hash(at)?;
+                    at as u64 * ALIGN
                 }
             };
             Some(Link {
-                separator: part(index, row[0], mapped)?,
+                separator: part(snapshot, row[0])?,
                 child,
                 scale: row[2] as u8,
             })
@@ -229,7 +236,7 @@ fn build(
         .collect::<Option<_>>()?;
     node.entries = ops
         .iter()
-        .map(|row| entry(index, view, row, mapped))
+        .map(|row| entry(archive, snapshot, row))
         .collect::<Option<_>>()?;
     let mut next = 0;
     for buffer in buffers {

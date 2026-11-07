@@ -1,4 +1,5 @@
-//! The file: a magic number, then an append-only sequence of records.
+//! The file: a magic number, two slots (see the archive's `slot` module),
+//! then an append-only sequence of records.
 //!
 //! Every record is its kind (1 byte), its body's length (4 bytes, little
 //! endian), the crc32 of its kind and body (4 bytes, little endian), then
@@ -11,50 +12,42 @@ use std::io;
 
 /// The first bytes of every archive file. The last byte is the format
 /// version.
-pub(crate) const MAGIC: &[u8; 8] = b"DIALOGA\x07";
+pub(crate) const MAGIC: &[u8; 8] = b"DIALOGA\x08";
 
 /// The bytes of a record before its body.
 pub(crate) const HEADER: u64 = 1 + 4 + 4;
 
-/// The bytes of a whole footer record: a header and an 8-byte offset.
-pub(crate) const FOOTER: u64 = HEADER + 8;
-
 /// What a record holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Kind {
-    /// A block: its catalog (a length byte and the name), then its bytes.
+    /// A block kept whole: its catalog's number, its hash, then its bytes.
     Block,
-    /// The index as of this record: every block's catalog, hash and extent.
-    Checkpoint,
-    /// The offset of the latest checkpoint record, or 0 for none. Written
-    /// last by every append, so a file that ends in a footer ends whole.
-    Footer,
-    /// Tokens, each a length and its bytes. A token's id is its place among
-    /// all the tokens the file holds, in file order.
+    /// Tokens, each its length and its bytes, which start on an alignment
+    /// boundary: a token is named by where it starts.
     Tokens,
-    /// A tree node as rows of token ids, possibly written against the rows
-    /// of the node it supersedes.
+    /// A tree node as rows naming tokens and children by where they are,
+    /// possibly written against the rows of the node it supersedes.
     Frame,
+    /// A node of the file's index (see the archive's `tree` module).
+    Index,
 }
 
 impl Kind {
     fn tag(self) -> u8 {
         match self {
             Kind::Block => 1,
-            Kind::Checkpoint => 2,
-            Kind::Footer => 3,
             Kind::Tokens => 4,
             Kind::Frame => 5,
+            Kind::Index => 6,
         }
     }
 
-    fn from_tag(tag: u8) -> Option<Self> {
+    pub(crate) fn from_tag(tag: u8) -> Option<Self> {
         match tag {
             1 => Some(Kind::Block),
-            2 => Some(Kind::Checkpoint),
-            3 => Some(Kind::Footer),
             4 => Some(Kind::Tokens),
             5 => Some(Kind::Frame),
+            6 => Some(Kind::Index),
             _ => None,
         }
     }
@@ -79,7 +72,8 @@ pub(crate) fn put_record(out: &mut Vec<u8>, kind: Kind, body: &[u8]) -> io::Resu
     Ok(())
 }
 
-/// A whole record read back from the file.
+/// A whole record read back from the file, for tools that walk the file.
+#[cfg(test)]
 pub(crate) struct Record {
     /// Where the record starts.
     pub offset: u64,
@@ -87,6 +81,7 @@ pub(crate) struct Record {
     pub body: Vec<u8>,
 }
 
+#[cfg(test)]
 impl Record {
     /// Where the record's body starts.
     pub fn body_offset(&self) -> u64 {
@@ -101,6 +96,7 @@ impl Record {
 
 /// The record at `offset` in a file of `len` bytes, or `None` when the bytes
 /// there are not a whole, intact record of a known kind.
+#[cfg(test)]
 pub(crate) fn read_record(file: &File, offset: u64, len: u64) -> io::Result<Option<Record>> {
     if offset + HEADER > len {
         return Ok(None);
@@ -181,16 +177,16 @@ mod tests {
     fn it_reads_back_a_record_it_wrote() -> anyhow::Result<()> {
         let mut bytes = Vec::new();
         put_record(&mut bytes, Kind::Block, b"a body")?;
-        put_record(&mut bytes, Kind::Footer, &0u64.to_le_bytes())?;
+        put_record(&mut bytes, Kind::Index, &0u64.to_le_bytes())?;
         let (file, len) = file_with(&bytes)?;
 
         let first = read_record(file.as_file(), 0, len)?.expect("a whole record");
         assert_eq!(first.kind, Kind::Block);
         assert_eq!(first.body, b"a body");
         let second = read_record(file.as_file(), first.end(), len)?.expect("a whole record");
-        assert_eq!(second.kind, Kind::Footer);
+        assert_eq!(second.kind, Kind::Index);
         assert_eq!(second.end(), len);
-        assert_eq!(second.end() - second.offset, FOOTER);
+        assert_eq!(second.end() - second.offset, HEADER + 8);
         Ok(())
     }
 

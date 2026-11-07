@@ -8,43 +8,48 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Weak};
 use std::time::{Duration, Instant};
 
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use dialog_capability::{Capability, Provider};
 use dialog_common::{Blake3Hash, Buffer};
 use dialog_effects::archive::prelude::{GetExt, ImportExt, PutExt};
 use dialog_effects::archive::{ArchiveError, Get, Import, Put};
 use dialog_search_tree::{Manifest, NodeBody};
+use memmap2::Mmap;
 use parking_lot::Mutex;
 
-use crate::file::{FOOTER, HEADER, Kind, MAGIC, put_record, read_at, read_record, write_at};
+use crate::file::{HEADER, Kind, MAGIC, put_record, read_at, write_at};
 use crate::node::{TreeNode, realize, rows_of, tree_node};
 use crate::rows::{Reader, Rows, get_rows, invalid, put_rows, put_varint, rename};
-use crate::tokens::{Draft, TokenRead, read_token_record};
+use crate::tokens::{ALIGN, Draft, TokenRead};
 
 mod index;
 mod served;
+mod slot;
+mod tree;
 
-pub(crate) use index::{Ids, Index, Map, View};
+use index::{FrameHeader, Place, Snapshot, block_key, catalog_in, lineage_key, next, token_id};
+use slot::{DATA, Slot};
 
 /// The files this process has open, so a second open of one shares it.
 static OPEN: LazyLock<Mutex<HashMap<PathBuf, Weak<Inner>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
-
-/// Bytes appended between checkpoints, by default.
-pub const CHECKPOINT_EVERY: u64 = 16 * 1024 * 1024;
 
 /// The longest chain of frames, each written against the one before, a
 /// read decodes, by default: every this many versions of a node, a frame is
 /// written whole.
 pub const CHAIN: usize = 32;
 
+/// How many tokens a writer remembers where it found, so it looks each up
+/// in the index only once while it stays in use.
+const TOKENS_REMEMBERED: usize = 1 << 18;
+
+/// How many datum tokens a reader remembers having checked.
+const DATUMS_CHECKED: usize = 1 << 20;
+
 /// How a [`FileArchive`] writes its file.
 #[derive(Clone, Debug)]
 pub struct Options {
-    /// Bytes appended between checkpoints. Opening a file reads its latest
-    /// checkpoint, then every record after it, so this bounds what an open
-    /// reads beyond the checkpoint itself.
-    pub checkpoint_every: u64,
     /// Whether tree nodes are written as frames. Without, every block is
     /// written whole.
     pub frames: bool,
@@ -69,7 +74,6 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Self {
         Self {
-            checkpoint_every: CHECKPOINT_EVERY,
             frames: true,
             chain: CHAIN,
             rows_cached: 4096,
@@ -78,104 +82,12 @@ impl Default for Options {
     }
 }
 
-/// Where a block's bytes sit in the file.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct Extent {
-    offset: u64,
-    len: u32,
-}
-
-/// How the file holds a block: whole, or as a node's frame.
-#[derive(Clone, Copy, Debug)]
-pub(crate) enum Place {
-    Block(Extent),
-    Node(u32),
-}
-
-/// What a node is known by when the file looks for the node it supersedes:
-/// its catalog, its kind and its first key's token ids.
-type Lineage = (u16, u8, [u32; 4]);
-
-/// A node the file holds as a frame.
-pub(crate) struct Node {
-    hash: Blake3Hash,
-    /// The frame record's body.
-    extent: Extent,
-    /// How many frames its rows are written against, one after another.
-    depth: u8,
-    /// Its catalog, by its place in [`State::catalogs`].
-    catalog: u16,
-    kind: u8,
-    lineage: Option<[u32; 4]>,
-}
-
-/// What a frame record says ahead of its rows.
-struct FrameHeader {
-    catalog: String,
-    hash: Blake3Hash,
-    kind: u8,
-    base: Option<u32>,
-    manifest: u32,
-    lineage: Option<[u32; 4]>,
-}
-
-impl FrameHeader {
-    fn put(&self, out: &mut Vec<u8>) -> io::Result<()> {
-        put_catalog(out, &self.catalog)?;
-        out.extend_from_slice(self.hash.as_bytes());
-        out.push(self.kind);
-        put_varint(out, self.base.map_or(0, |base| base as u64 + 1));
-        put_varint(out, self.manifest as u64);
-        match self.lineage {
-            None => out.push(0),
-            Some(first) => {
-                out.push(1);
-                for id in first {
-                    put_varint(out, id as u64);
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn get(reader: &mut Reader) -> io::Result<Self> {
-        let catalog = get_catalog(reader)?;
-        let hash = Blake3Hash::from(<[u8; 32]>::try_from(reader.take(32)?).expect("32 bytes"));
-        let kind = reader.byte()?;
-        let base = match reader.varint()? {
-            0 => None,
-            base => Some(u32::try_from(base - 1).map_err(|_| invalid("a node id over 32 bits"))?),
-        };
-        let manifest = reader.u32()?;
-        let lineage = match reader.byte()? {
-            0 => None,
-            _ => Some([reader.u32()?, reader.u32()?, reader.u32()?, reader.u32()?]),
-        };
-        Ok(Self {
-            catalog,
-            hash,
-            kind,
-            base,
-            manifest,
-            lineage,
-        })
-    }
-}
-
-/// Where the next append goes, and what the last checkpoint covered.
-struct Writer {
-    end: u64,
-    /// The latest checkpoint record, or 0 for none.
-    checkpoint: u64,
-    /// Bytes appended since that checkpoint.
-    since: u64,
-}
-
-/// The decoded rows of the nodes read most recently, by node id. A read
-/// takes no lock; keeping one takes a short one, for the order they go in.
+/// The decoded rows of the frames read most recently, by where each
+/// starts. A read takes no lock; keeping one takes a short one, for the
+/// order they go in.
 struct RowsCache {
     capacity: usize,
-    rows: Map<u32, (Arc<Rows>, u32)>,
+    rows: papaya::HashMap<u32, (Arc<Rows>, u32)>,
     order: Mutex<VecDeque<u32>>,
 }
 
@@ -183,22 +95,22 @@ impl RowsCache {
     fn new(capacity: usize) -> Self {
         Self {
             capacity,
-            rows: Map::default(),
+            rows: papaya::HashMap::new(),
             order: Mutex::new(VecDeque::new()),
         }
     }
 
-    /// A node's rows and its manifest token.
-    fn get(&self, id: u32) -> Option<(Arc<Rows>, u32)> {
-        self.rows.pin().get(&id).cloned()
+    /// A frame's rows and its manifest token.
+    fn get(&self, at: u32) -> Option<(Arc<Rows>, u32)> {
+        self.rows.pin().get(&at).cloned()
     }
 
-    fn put(&self, id: u32, rows: (Arc<Rows>, u32)) {
-        if self.capacity == 0 || self.rows.pin().try_insert(id, rows).is_err() {
+    fn put(&self, at: u32, rows: (Arc<Rows>, u32)) {
+        if self.capacity == 0 || self.rows.pin().try_insert(at, rows).is_err() {
             return;
         }
         let mut order = self.order.lock();
-        order.push_back(id);
+        order.push_back(at);
         while order.len() > self.capacity {
             if let Some(evicted) = order.pop_front() {
                 self.rows.pin().remove(&evicted);
@@ -304,30 +216,28 @@ struct Inner {
     file: File,
     path: PathBuf,
     options: Options,
-    /// Where everything the file holds is, read without a lock.
-    index: Index,
+    /// The file as of its latest append this process has read, read
+    /// without a lock.
+    current: ArcSwap<Snapshot>,
     rows: RowsCache,
     /// Each manifest token, decoded, for the nodes served to trees.
-    manifests: Map<u32, Arc<Manifest>>,
-    /// The writer's turn in this process: where the next append goes.
-    writer: Mutex<Writer>,
+    manifests: papaya::HashMap<u32, Arc<Manifest>>,
+    /// The datum tokens checked as archives, so each is checked once.
+    checked: papaya::HashSet<u32>,
+    /// Where a writer found tokens, by the hash of their bytes: the index
+    /// is asked once for each while it stays here.
+    tokens: Mutex<HashMap<u64, u32>>,
+    /// The writer's turn in this process.
+    writer: Mutex<()>,
     /// The end of what this process has read of the file or is writing to
-    /// it, so a read that misses asks for another process's appends only
+    /// it, so a read that misses looks for another process's appends only
     /// when the file grew past it, and takes no lock otherwise.
     known: AtomicU64,
     /// Called by an append once its bytes are in the file, before it
     /// publishes them: for tests that read while an append is under way.
     #[cfg(test)]
     before_publish: Mutex<Option<Box<dyn FnMut() + Send>>>,
-    /// Called by an append after each step of publishing: for tests that
-    /// check every step leaves the index whole.
-    #[cfg(test)]
-    published: Mutex<Option<PublishedHook>>,
 }
-
-/// What a test runs after each step of publishing an append.
-#[cfg(test)]
-type PublishedHook = Box<dyn FnMut(&FileArchive) + Send>;
 
 /// What a [`FileArchive`] holds, and what holding it costs.
 #[derive(Clone, Debug, Default)]
@@ -380,30 +290,30 @@ pub struct Stats {
 /// any archive.
 ///
 /// A node of the artifact tree is kept as a **frame**: its entries, links
-/// and buffered operations as rows of ids into the file's **tokens**, each
-/// distinct entity, attribute, value and datum kept once. A frame is
-/// written against the rows of the node it supersedes (the latest node of
-/// its kind in its catalog that starts at the same key) as runs copied
-/// from them around what is new, and whole every [`Options::chain`]
-/// versions. A frame is only written once its rows read back and realize
-/// to the exact block it stands for; any block that does not, and anything
-/// that is not a tree node, is kept whole. A read of a frame realizes the
-/// block through the tree's own encoder.
+/// and buffered operations as rows naming the file's **tokens** (each
+/// distinct entity, attribute, value and datum, kept once) and its
+/// children by where they are in the file. A frame is written against the
+/// rows of the node it supersedes (the latest node of its kind in its
+/// catalog that starts at the same key) as runs copied from them around
+/// what is new, and whole every [`Options::chain`] versions. Anything that
+/// is not a tree node, or does not rebuild from its frame, is kept whole. A
+/// read of a frame realizes the block through the tree's own encoder.
 ///
-/// The file is a magic number, then records: blocks, tokens, frames,
-/// checkpoints of the index, and a footer that ends every append. Opening a
-/// file reads the checkpoint its footer names and then the records after
-/// it. A file that does not end in a footer was cut short; opening it
-/// reads every record from the start and drops the torn tail.
+/// The file is a magic number, two slots, then records: blocks, tokens,
+/// frames, and the nodes of the file's index, a tree whose root is in the
+/// slot. Every append writes its records past the end, then the older slot;
+/// opening reads the newer slot that is whole, and nothing else. An append
+/// cut short leaves the other slot whole and records past its end, which
+/// the next writer drops.
 ///
 /// One file is one space, as one directory is for the `fs` provider: the
 /// subject an effect names is not part of where a block is kept.
 ///
 /// Any number of processes open one file. Writers take turns holding an
-/// exclusive lock on it: a writer that takes the lock first reads what
-/// other processes appended since its last turn, then appends. Readers take
-/// no lock: everything up to a footer never changes, and a read that does
-/// not find a block reads the appends finished since ([`refresh`]).
+/// exclusive lock on it: a writer prepares its append before its turn,
+/// then, holding the lock, reads the newest slot and writes. Readers take
+/// no lock: a slot names records that never change, and a read that does
+/// not find a block reads the slot again if the file grew ([`refresh`]).
 /// Durability matches the `fs` provider: appends are not synced. Call
 /// [`FileArchive::sync`] for a point that is.
 ///
@@ -419,250 +329,20 @@ fn storage_error(path: &Path, error: io::Error) -> ArchiveError {
     ArchiveError::Storage(format!("{}: {error}", path.display()))
 }
 
-fn put_catalog(out: &mut Vec<u8>, catalog: &str) -> io::Result<()> {
-    let name = catalog.as_bytes();
-    let length = u8::try_from(name.len()).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("catalog name over 255 bytes: {catalog}"),
-        )
-    })?;
-    out.push(length);
-    out.extend_from_slice(name);
-    Ok(())
-}
-
-fn get_catalog(reader: &mut Reader) -> io::Result<String> {
-    let length = reader.byte()? as usize;
-    let name = reader.take(length)?;
-    Ok(std::str::from_utf8(name)
-        .map_err(|_| invalid("a catalog name is not UTF-8"))?
-        .to_string())
-}
-
-/// The body of a block record: its catalog, then its bytes.
-fn block_body(catalog: &str, bytes: &[u8]) -> io::Result<Vec<u8>> {
-    let mut body = Vec::with_capacity(1 + catalog.len() + bytes.len());
-    put_catalog(&mut body, catalog)?;
-    body.extend_from_slice(bytes);
-    Ok(body)
-}
-
-/// What a record adds to the index, read but not published yet.
-enum Indexed {
-    Tokens(Vec<(u64, u32)>),
-    Block {
-        catalog: String,
-        hash: Blake3Hash,
-        extent: Extent,
-    },
-    Frame {
-        header: FrameHeader,
-        extent: Extent,
-    },
-    Nothing,
-}
-
-/// What a record adds to the index. A checkpoint adds nothing: its index
-/// is already what the records before it added.
-fn read_indexed(kind: Kind, offset: u64, body: &[u8]) -> io::Result<Indexed> {
-    let body_offset = offset + HEADER;
-    Ok(match kind {
-        Kind::Block => {
-            let mut reader = Reader::new(body);
-            let catalog = get_catalog(&mut reader)?;
-            let start = 1 + catalog.len();
-            let bytes = &body[start..];
-            Indexed::Block {
-                hash: Blake3Hash::hash(bytes),
-                extent: Extent {
-                    offset: body_offset + start as u64,
-                    len: bytes.len() as u32,
-                },
-                catalog,
-            }
-        }
-        Kind::Tokens => Indexed::Tokens(read_token_record(body, body_offset)?),
-        Kind::Frame => Indexed::Frame {
-            header: FrameHeader::get(&mut Reader::new(body))?,
-            extent: Extent {
-                offset: body_offset,
-                len: body.len() as u32,
-            },
-        },
-        Kind::Checkpoint | Kind::Footer => Indexed::Nothing,
+/// Maps `file` and pairs the mapping with `slot`.
+fn snapshot(file: &File, slot: Slot) -> io::Result<Snapshot> {
+    // SAFETY: the file is append-only past its slots. A process changes
+    // bytes only past the newest slot's end, by an append under the file's
+    // lock, or by dropping an append that did not finish; nothing a slot
+    // names lies there, and a snapshot reads only up to its slot's end.
+    // The slots themselves are read with plain reads, never through the
+    // mapping. Like any mapped file, changing it from outside dialog is not
+    // supported.
+    let map = unsafe { Mmap::map(file)? };
+    Ok(Snapshot {
+        slot,
+        map: Arc::new(map),
     })
-}
-
-/// Publishes what a run of records adds, in the order the file holds it,
-/// once the run checks: every frame is written against a node the file
-/// holds or one the run adds before it. A run is published whole or not
-/// at all. The mapping must already reach the run's end.
-fn publish(index: &Index, run: Vec<Indexed>) -> io::Result<()> {
-    let mut nodes = index.nodes().len();
-    for item in &run {
-        if let Indexed::Frame { header, .. } = item {
-            if header.base.is_some_and(|base| base as usize >= nodes) {
-                return Err(invalid("a frame against a node the file lacks"));
-            }
-            nodes += 1;
-        }
-    }
-    for item in run {
-        match item {
-            Indexed::Tokens(tokens) => {
-                for (offset, len) in tokens {
-                    index.add_token(offset, len, None);
-                }
-            }
-            Indexed::Block {
-                catalog,
-                hash,
-                extent,
-            } => {
-                let catalog = index.add_catalog(&catalog);
-                index.add_block(catalog, hash, extent);
-            }
-            Indexed::Frame { header, extent } => {
-                let depth = header
-                    .base
-                    .and_then(|base| index.node(base))
-                    .map_or(0, |base| base.depth + 1);
-                let catalog = index.add_catalog(&header.catalog);
-                index.add_node(Node {
-                    hash: header.hash,
-                    extent,
-                    depth,
-                    catalog,
-                    kind: header.kind,
-                    lineage: header.lineage,
-                });
-            }
-            Indexed::Nothing => {}
-        }
-    }
-    Ok(())
-}
-
-/// The body of a checkpoint record: where every token is, every node, and
-/// every whole block.
-fn checkpoint_body(index: &Index) -> io::Result<Vec<u8>> {
-    let mut body = Vec::new();
-    let catalogs: Vec<&str> = index.catalogs().collect();
-    put_varint(&mut body, catalogs.len() as u64);
-    for catalog in &catalogs {
-        put_catalog(&mut body, catalog)?;
-    }
-    // Where every token is: tokens are written in id order, so each starts
-    // after the one before.
-    let tokens = index.tokens();
-    put_varint(&mut body, tokens.len() as u64);
-    let mut previous = 0;
-    for token in tokens.iter() {
-        put_varint(&mut body, token.offset - previous);
-        put_varint(&mut body, token.len as u64);
-        previous = token.offset;
-    }
-    let nodes = index.nodes();
-    put_varint(&mut body, nodes.len() as u64);
-    for node in nodes.iter() {
-        body.extend_from_slice(node.hash.as_bytes());
-        body.extend_from_slice(&node.extent.offset.to_le_bytes());
-        body.extend_from_slice(&node.extent.len.to_le_bytes());
-        body.push(node.depth);
-        put_varint(&mut body, node.catalog as u64);
-        body.push(node.kind);
-        match node.lineage {
-            None => body.push(0),
-            Some(first) => {
-                body.push(1);
-                for id in first {
-                    put_varint(&mut body, id as u64);
-                }
-            }
-        }
-    }
-    for (catalog, hash, place) in index.blocks() {
-        let Place::Block(extent) = place else {
-            continue;
-        };
-        let catalog = index
-            .catalog(catalog)
-            .ok_or_else(|| invalid("a block in a catalog the index lacks"))?;
-        put_catalog(&mut body, catalog)?;
-        body.extend_from_slice(hash.as_bytes());
-        body.extend_from_slice(&extent.offset.to_le_bytes());
-        body.extend_from_slice(&extent.len.to_le_bytes());
-    }
-    Ok(body)
-}
-
-/// Reads a checkpoint into `index`, which holds nothing yet.
-fn read_checkpoint(index: &Index, len: u64, body: &[u8]) -> io::Result<()> {
-    let mut reader = Reader::new(body);
-    let fixed =
-        |reader: &mut Reader, n: usize| -> io::Result<Vec<u8>> { Ok(reader.take(n)?.to_vec()) };
-    let u64_of = |bytes: Vec<u8>| u64::from_le_bytes(bytes.try_into().expect("8 bytes"));
-    let u32_of = |bytes: Vec<u8>| u32::from_le_bytes(bytes.try_into().expect("4 bytes"));
-    for _ in 0..reader.varint()? {
-        let catalog = get_catalog(&mut reader)?;
-        index.add_catalog(&catalog);
-    }
-    let mut offset = 0u64;
-    for _ in 0..reader.varint()? {
-        offset += reader.varint()?;
-        let size = reader.u32()?;
-        if offset + size as u64 > len {
-            return Err(invalid("a checkpoint names a token past the file's end"));
-        }
-        index.add_token(offset, size, None);
-    }
-    for _ in 0..reader.varint()? {
-        let hash = Blake3Hash::from(<[u8; 32]>::try_from(reader.take(32)?).expect("32 bytes"));
-        let offset = u64_of(fixed(&mut reader, 8)?);
-        let size = u32_of(fixed(&mut reader, 4)?);
-        let depth = reader.byte()?;
-        let catalog = u16::try_from(reader.varint()?).map_err(|_| invalid("a catalog index"))?;
-        let kind = reader.byte()?;
-        let lineage = match reader.byte()? {
-            0 => None,
-            _ => Some([reader.u32()?, reader.u32()?, reader.u32()?, reader.u32()?]),
-        };
-        if index.catalog(catalog).is_none() {
-            return Err(invalid("a node in a catalog the file lacks"));
-        }
-        index.add_node(Node {
-            hash,
-            extent: Extent { offset, len: size },
-            depth,
-            catalog,
-            kind,
-            lineage,
-        });
-    }
-    while !reader.is_empty() {
-        let catalog = get_catalog(&mut reader)?;
-        let hash = Blake3Hash::from(<[u8; 32]>::try_from(reader.take(32)?).expect("32 bytes"));
-        let offset = u64_of(fixed(&mut reader, 8)?);
-        let size = u32_of(fixed(&mut reader, 4)?);
-        let catalog = index.add_catalog(&catalog);
-        index.add_block(catalog, hash, Extent { offset, len: size });
-    }
-    Ok(())
-}
-
-/// The checkpoint the file's footer names, if the file ends in a whole
-/// footer: `Some(0)` for a footer that names none.
-fn footer(file: &File, len: u64) -> io::Result<Option<u64>> {
-    if len < MAGIC.len() as u64 + FOOTER {
-        return Ok(None);
-    }
-    match read_record(file, len - FOOTER, len)? {
-        Some(record) if record.kind == Kind::Footer && record.body.len() == 8 => Ok(Some(
-            u64::from_le_bytes(record.body[..].try_into().expect("8 bytes")),
-        )),
-        _ => Ok(None),
-    }
 }
 
 /// The exclusive lock on the file, which writers take turns holding: one
@@ -682,78 +362,32 @@ impl Drop for Exclusive<'_> {
     }
 }
 
-/// Publishes the records from `writer.end` up to `len` in `index`, and
-/// moves `writer.end` past them.
-///
-/// With `finished` set (another process may be appending), only appends
-/// that are whole are read: the records up to each footer, a run at a time.
-/// Holding the file's lock (`finished` unset), no append is under way, so
-/// every whole record is read: records past the last footer were left by
-/// an append that did not finish, and they hold whole blocks and frames
-/// whose tokens precede them.
-fn follow(
-    file: &File,
-    index: &Index,
-    writer: &mut Writer,
-    len: u64,
-    finished: bool,
-) -> io::Result<()> {
-    let mut at = writer.end;
-    let (mut checkpoint, mut since) = (writer.checkpoint, writer.since);
-    let mut run = Vec::new();
-    while at < len {
-        let Some(record) = read_record(file, at, len)? else {
-            break;
-        };
-        at = record.end();
-        if record.kind == Kind::Checkpoint {
-            checkpoint = record.offset;
-            since = 0;
-        } else {
-            since += record.end() - record.offset;
-        }
-        let footer = record.kind == Kind::Footer;
-        run.push(read_indexed(record.kind, record.offset, &record.body)?);
-        if footer || !finished {
-            index.map(file, at)?;
-            publish(index, std::mem::take(&mut run))?;
-            writer.end = at;
-            writer.checkpoint = checkpoint;
-            writer.since = since;
-        }
-    }
-    Ok(())
-}
-
-/// Brings `index` up to what the file holds, holding its lock: reads what
-/// other processes appended, and drops a tail an append left unfinished,
-/// so the next append follows whole records.
-fn catch_up(file: &File, index: &Index, writer: &mut Writer) -> io::Result<()> {
+/// The newest slot of `file` whose records are all in it. Holding the
+/// file's lock, a tail past it is an append that did not finish: it is
+/// dropped.
+fn newest(file: &File, locked: bool) -> io::Result<Slot> {
     let len = file.metadata()?.len();
-    if len > writer.end {
-        follow(file, index, writer, len, false)?;
-        if len > writer.end {
-            file.set_len(writer.end)?;
-        }
+    let slot = Slot::read(file)?
+        .into_iter()
+        .find(|slot| slot.end <= len)
+        .ok_or_else(|| invalid("no whole slot"))?;
+    if locked && len > slot.end {
+        file.set_len(slot.end)?;
     }
-    Ok(())
+    Ok(slot)
 }
 
-/// Reads the file into its index, creating it when it is empty: from the
-/// checkpoint its footer names, then every record after it. Holds the
-/// file's lock, so it never reads, or drops, an append under way.
-fn recover(file: &File) -> io::Result<(Index, Writer)> {
+/// Opens the file's state, creating it when it is empty. Holds the file's
+/// lock, so it never reads, or drops, an append under way.
+fn recover(file: &File) -> io::Result<Slot> {
     let _exclusive = Exclusive::take(file)?;
-    let index = Index::default();
     let len = file.metadata()?.len();
     if len == 0 {
         write_at(file, 0, MAGIC)?;
-        let writer = Writer {
-            end: MAGIC.len() as u64,
-            checkpoint: 0,
-            since: 0,
-        };
-        return Ok((index, writer));
+        file.set_len(DATA)?;
+        let slot = Slot::default();
+        slot.write(file)?;
+        return Ok(slot);
     }
     let mut magic = [0u8; 8];
     if len < MAGIC.len() as u64 || {
@@ -762,31 +396,11 @@ fn recover(file: &File) -> io::Result<(Index, Writer)> {
     } {
         return Err(invalid("not a dialog archive file"));
     }
-
-    // Start from the checkpoint the footer names; with no footer, or a
-    // checkpoint that does not read back, from the first record.
-    let mut writer = Writer {
-        end: MAGIC.len() as u64,
-        checkpoint: 0,
-        since: 0,
-    };
-    if let Some(named) = footer(file, len)?
-        && named != 0
-        && let Some(record) = read_record(file, named, len)?
-        && record.kind == Kind::Checkpoint
-    {
-        read_checkpoint(&index, len, &record.body)?;
-        writer.checkpoint = named;
-        writer.end = record.end();
-    }
-    index.map(file, writer.end)?;
-    catch_up(file, &index, &mut writer)?;
-    index.map(file, writer.end)?;
-    Ok((index, writer))
+    newest(file, true)
 }
 
 /// `nodes` ordered so every node comes after the children it links to
-/// among them, so a parent can name a child by the node id it was given.
+/// among them, so a parent can name a child by where it was put.
 fn children_first(nodes: Vec<(Buffer, TreeNode)>) -> Vec<(Buffer, TreeNode)> {
     let at: HashMap<Blake3Hash, usize> = nodes
         .iter()
@@ -826,50 +440,53 @@ fn children_first(nodes: Vec<(Buffer, TreeNode)>) -> Vec<(Buffer, TreeNode)> {
         .collect()
 }
 
-/// A node an append writes as a frame, before it is in the index.
-struct Staged {
-    hash: Blake3Hash,
-    rows: Arc<Rows>,
-    manifest: u32,
-}
-
-/// A node an append writes as a frame: its rows and manifest token, the
-/// node it is written against, its lineage and depth, and the frame
-/// record's body.
+/// A node an append frames, before its turn: its rows, manifest token,
+/// lineage and base as drafted (new tokens and frames by provisional
+/// ids), and its depth.
 struct Frame {
     rows: Arc<Rows>,
     manifest: u32,
     base: Option<u32>,
-    lineage: Option<[u32; 4]>,
     depth: u8,
-    body: Vec<u8>,
 }
 
 /// What an append writes for one block: the block whole, or the frame of
-/// the node it is, by node id.
+/// the node it is, by provisional id.
 enum Item {
     Block(Buffer),
     Frame(u32, Buffer, Frame),
 }
 
 /// An append worked out before its turn: the tokens it adds, and its
-/// blocks and frames, children before their parents.
+/// blocks and frames, children before their parents. New tokens and frames
+/// are named from `first` up.
 struct Prepared<'a> {
     catalog: &'a str,
-    draft: Draft<'a>,
-    /// The id its first frame was drafted with.
-    first_node: u32,
+    first: u32,
+    tokens: Draft<'a>,
     items: Vec<Item>,
 }
 
-/// An append as its turn writes it: the drafted tokens it adds (by the ids
-/// they were drafted with, in the order they take their ids), and its
-/// blocks and frames, named as they are written.
-struct Reconciled<'a> {
-    catalog_id: u16,
-    draft: Draft<'a>,
-    new: Vec<u32>,
-    items: Vec<Item>,
+/// An append laid out in its turn: its bytes, from `start`, the slot that
+/// names them, and what it adds to the caches once published.
+struct Laid {
+    start: u64,
+    bytes: Vec<u8>,
+    slot: Slot,
+    rows: Vec<(u32, Arc<Rows>, u32)>,
+    tokens: Vec<(u64, u32)>,
+}
+
+/// The first free key from `key` on, in `snapshot`'s index and among the
+/// keys an append took already.
+fn free(snapshot: &Snapshot, mut key: u64, taken: &mut HashSet<u64>) -> io::Result<u64> {
+    loop {
+        if !taken.contains(&key) && snapshot.slot.root.get(snapshot, key)?.is_none() {
+            taken.insert(key);
+            return Ok(key);
+        }
+        key = next(key);
+    }
 }
 
 impl FileArchive {
@@ -898,31 +515,26 @@ impl FileArchive {
             .truncate(false)
             .open(&path)
             .map_err(|error| storage_error(&path, error))?;
-        let (index, writer) = recover(&file).map_err(|error| storage_error(&path, error))?;
-        let known = AtomicU64::new(writer.end);
+        let current = recover(&file)
+            .and_then(|slot| snapshot(&file, slot))
+            .map_err(|error| storage_error(&path, error))?;
         let inner = Arc::new(Inner {
-            known,
+            known: AtomicU64::new(current.slot.end),
+            current: ArcSwap::from_pointee(current),
             timings: Timings::default(),
             file,
             path,
             rows: RowsCache::new(options.rows_cached),
-            manifests: Map::default(),
+            manifests: papaya::HashMap::new(),
+            checked: papaya::HashSet::new(),
+            tokens: Mutex::new(HashMap::new()),
             options,
-            index,
-            writer: Mutex::new(writer),
+            writer: Mutex::new(()),
             #[cfg(test)]
             before_publish: Mutex::new(None),
-            #[cfg(test)]
-            published: Mutex::new(None),
         });
         open.insert(key, Arc::downgrade(&inner));
         Ok(Self { inner })
-    }
-
-    /// The index, for tests that measure what it costs.
-    #[cfg(test)]
-    pub(crate) fn index(&self) -> &Index {
-        &self.inner.index
     }
 
     /// Where the file is.
@@ -930,25 +542,26 @@ impl FileArchive {
         &self.inner.path
     }
 
+    fn current(&self) -> Arc<Snapshot> {
+        self.inner.current.load_full()
+    }
+
+    /// Makes `snapshot` current, unless a newer one already is.
+    fn publish(&self, snapshot: Snapshot) {
+        let snapshot = Arc::new(snapshot);
+        self.inner.current.rcu(|current| {
+            if snapshot.slot.sequence > current.slot.sequence {
+                snapshot.clone()
+            } else {
+                current.clone()
+            }
+        });
+    }
+
     /// How many blocks the archive holds, in every catalog.
     pub fn len(&self) -> usize {
-        self.inner.index.block_count()
-    }
-
-    /// Whether the archive keeps the block `hash` names in `catalog` as a
-    /// frame (rather than whole, or not at all).
-    pub fn is_frame(&self, catalog: &str, hash: &Blake3Hash) -> bool {
-        matches!(self.inner.index.place(catalog, hash), Some(Place::Node(_)))
-    }
-
-    /// Every block the archive holds, by catalog and hash.
-    pub fn hashes(&self) -> Vec<(String, Blake3Hash)> {
-        let index = &self.inner.index;
-        index
-            .blocks()
-            .into_iter()
-            .filter_map(|(catalog, hash, _)| Some((index.catalog(catalog)?.to_string(), hash)))
-            .collect()
+        let counts = self.current().slot.counts;
+        (counts.blocks + counts.frames) as usize
     }
 
     /// Whether the archive holds no block.
@@ -956,31 +569,42 @@ impl FileArchive {
         self.len() == 0
     }
 
+    /// Whether the archive keeps the block `hash` names in `catalog` as a
+    /// frame (rather than whole, or not at all).
+    pub fn is_frame(&self, catalog: &str, hash: &Blake3Hash) -> bool {
+        matches!(
+            self.current().place(catalog, hash),
+            Ok(Some(Place::Frame(_)))
+        )
+    }
+
+    /// Every block the archive holds, by catalog and hash.
+    pub fn hashes(&self) -> Vec<(String, Blake3Hash)> {
+        let snapshot = self.current();
+        snapshot
+            .blocks()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(catalog, hash, _)| Some((snapshot.catalog(catalog)?.to_string(), hash)))
+            .collect()
+    }
+
     /// What the archive holds, and what holding it costs.
     pub fn stats(&self) -> Stats {
-        let index = &self.inner.index;
-        let places = index.blocks();
-        let whole = places
-            .iter()
-            .filter(|(_, _, place)| matches!(place, Place::Block(_)))
-            .count();
-        let nodes = index.nodes();
-        let tokens = index.tokens();
+        let snapshot = self.current();
+        let counts = snapshot.slot.counts;
         Stats {
-            file_bytes: self.inner.known.load(Ordering::Acquire),
-            blocks: whole,
-            block_bytes: index.block_bytes(),
-            frames: nodes.len(),
-            frames_against: nodes.iter().filter(|node| node.depth > 0).count(),
-            frame_bytes: index.frame_bytes(),
-            tokens: tokens.len(),
-            token_bytes: tokens.iter().map(|token| token.len as u64).sum(),
-            index_memory: tokens.footprint()
-                + nodes.footprint()
-                + places.len() * (2 + 32 + size_of::<Place>() + 8)
-                + nodes.len() * (32 + 4 + 8)
-                + index.lineage_count() * (size_of::<Lineage>() + 4 + 8)
-                + index.id_table_len() * (8 + 4 + 8),
+            file_bytes: snapshot.slot.end,
+            blocks: counts.blocks as usize,
+            block_bytes: counts.block_bytes,
+            frames: counts.frames as usize,
+            frames_against: counts.frames_against as usize,
+            frame_bytes: counts.frame_bytes,
+            tokens: counts.tokens as usize,
+            token_bytes: counts.token_bytes,
+            index_memory: snapshot.slot.root.encode().len()
+                + self.inner.tokens.lock().capacity() * (8 + 4 + 1)
+                + self.inner.checked.len() * (4 + 8),
             split: Timings::get(&self.inner.timings.split),
             encode: Timings::get(&self.inner.timings.encode),
             verify: Timings::get(&self.inner.timings.verify),
@@ -993,14 +617,25 @@ impl FileArchive {
         }
     }
 
-    /// Builds what a writer looks tokens up by (each token's id, by its
-    /// bytes), if it is not built yet, by reading every token through the
-    /// mapping: the first append of a process does this, so a writer can call
-    /// it ahead of time. Returns how long it took.
+    /// A draft over the tokens the file holds now, as a writer's split
+    /// finds them: for tests that measure it.
+    #[cfg(test)]
+    pub(crate) fn draft(&self) -> Draft<'_> {
+        let snapshot = self.current();
+        let finding = snapshot.clone();
+        let first = token_id(snapshot.slot.end).expect("a file under 64 GiB") + 1;
+        Draft::new(
+            snapshot,
+            Box::new(move |hash, token| self.find_token(&finding, hash, token)),
+            first,
+        )
+    }
+
+    /// Prepares this process to write. Nothing is loaded ahead of time any
+    /// more: a writer finds tokens through the file's index as it needs
+    /// them. Returns how long it took.
     pub fn prepare_writer(&self) -> Duration {
-        let started = Instant::now();
-        self.inner.index.build_ids();
-        started.elapsed()
+        Duration::ZERO
     }
 
     /// Forgets every node's decoded rows, so the next read of each decodes
@@ -1024,31 +659,36 @@ impl FileArchive {
             .map_err(|error| storage_error(&self.inner.path, error))
     }
 
-    /// How the file holds the block `hash` names in `catalog`, looking
-    /// again after reading what other processes appended when it is not
-    /// found.
-    fn place(&self, catalog: &str, hash: &Blake3Hash) -> io::Result<Option<Place>> {
-        if let Some(place) = self.inner.index.place(catalog, hash) {
-            return Ok(Some(place));
+    /// How the file holds the block `hash` names in `catalog`, and the
+    /// snapshot that says so, looking again after reading the slot when it
+    /// is not found and another process grew the file.
+    fn place(
+        &self,
+        catalog: &str,
+        hash: &Blake3Hash,
+    ) -> io::Result<(Arc<Snapshot>, Option<Place>)> {
+        let snapshot = self.current();
+        if let Some(place) = snapshot.place(catalog, hash)? {
+            return Ok((snapshot, Some(place)));
         }
-        self.reread()?;
-        Ok(self.inner.index.place(catalog, hash))
+        if !self.reread()? {
+            return Ok((snapshot, None));
+        }
+        let snapshot = self.current();
+        let place = snapshot.place(catalog, hash)?;
+        Ok((snapshot, place))
     }
 
     fn read(&self, catalog: &str, hash: &Blake3Hash) -> io::Result<Option<Vec<u8>>> {
-        let Some(place) = self.place(catalog, hash)? else {
+        let (snapshot, Some(place)) = self.place(catalog, hash)? else {
             return Ok(None);
         };
         match place {
-            Place::Block(extent) => {
-                let mut bytes = vec![0u8; extent.len as usize];
-                read_at(&self.inner.file, extent.offset, &mut bytes)?;
-                Ok(Some(bytes))
-            }
-            Place::Node(id) => {
-                let (rows, manifest) = self.rows(&HashMap::new(), id)?;
+            Place::Block(at) => Ok(Some(snapshot.block(at)?.2.to_vec())),
+            Place::Frame(at) => {
+                let (rows, manifest) = self.rows(&snapshot, &HashMap::new(), at)?;
                 let started = Instant::now();
-                let block = self.realize(&rows, manifest)?;
+                let block = self.realize(&snapshot, &rows, manifest)?;
                 Timings::add(&self.inner.timings.realize, started);
                 self.inner.timings.realized.fetch_add(1, Ordering::Relaxed);
                 Ok(Some(block))
@@ -1060,24 +700,27 @@ impl FileArchive {
     /// looked, if the file grew.
     pub fn refresh(&self) -> Result<(), ArchiveError> {
         self.reread()
+            .map(|_| ())
             .map_err(|error| storage_error(&self.inner.path, error))
     }
 
-    fn reread(&self) -> io::Result<()> {
+    /// Reads the slots again if another process grew the file, and
+    /// publishes what they say. Whether a newer snapshot is current.
+    fn reread(&self) -> io::Result<bool> {
         // Within what this process read or is writing, nothing is new to
         // read. An append of its own under way is not waited for: until it
         // finishes, the block is not there, and a miss says so.
         let len = self.inner.file.metadata()?.len();
         if len <= self.inner.known.load(Ordering::Acquire) {
-            return Ok(());
+            return Ok(false);
         }
-        let mut writer = self.inner.writer.lock();
-        if len <= writer.end {
-            return Ok(());
+        let slot = newest(&self.inner.file, false)?;
+        if slot.sequence <= self.current().slot.sequence {
+            return Ok(false);
         }
-        follow(&self.inner.file, &self.inner.index, &mut writer, len, true)?;
-        self.know(writer.end);
-        Ok(())
+        self.know(slot.end);
+        self.publish(snapshot(&self.inner.file, slot)?);
+        Ok(true)
     }
 
     /// Records that this process has read, or is writing, the file up to
@@ -1087,137 +730,114 @@ impl FileArchive {
     }
 
     /// The block a node's rows stand for.
-    fn realize(&self, rows: &Rows, manifest: u32) -> io::Result<Vec<u8>> {
-        let index = &self.inner.index;
-        let view = index.view();
+    fn realize(&self, snapshot: &Snapshot, rows: &Rows, manifest: u32) -> io::Result<Vec<u8>> {
         let manifest = Manifest::decode(
-            view.get(manifest)
+            snapshot
+                .get(manifest)
                 .ok_or_else(|| invalid("a manifest token the file lacks"))?,
         )
         .map_err(|error| invalid(&error.to_string()))?;
-        realize(rows, &view, &manifest, |id| {
-            index.node(id).map(|node| node.hash.clone())
+        realize(rows, snapshot, &manifest, |at| {
+            snapshot
+                .frame_hash(at)
+                .map(|hash| Blake3Hash::from(<[u8; 32]>::try_from(hash).expect("32 bytes")))
         })
     }
 
-    /// The rows of node `id` and its manifest token, decoded through the
-    /// frames it is written against. `staged` holds the rows of nodes an
-    /// append has not written yet.
-    fn rows(&self, staged: &HashMap<u32, Staged>, id: u32) -> io::Result<(Arc<Rows>, u32)> {
-        if let Some(staged) = staged.get(&id) {
-            return Ok((staged.rows.clone(), staged.manifest));
+    /// The rows of the frame starting at `at` (divided by [`ALIGN`]) and
+    /// its manifest token, decoded through the frames it is written
+    /// against. `staged` holds the rows of frames an append is laying out.
+    fn rows(
+        &self,
+        snapshot: &Snapshot,
+        staged: &HashMap<u32, (Arc<Rows>, u32)>,
+        at: u32,
+    ) -> io::Result<(Arc<Rows>, u32)> {
+        if let Some(found) = staged.get(&at) {
+            return Ok(found.clone());
         }
-        if let Some(found) = self.inner.rows.get(id) {
+        if let Some(found) = self.inner.rows.get(at) {
             return Ok(found);
         }
-        let node = self
-            .inner
-            .index
-            .node(id)
-            .ok_or_else(|| invalid("a node the file lacks"))?;
-        let mut body = vec![0u8; node.extent.len as usize];
-        read_at(&self.inner.file, node.extent.offset, &mut body)?;
-        let mut reader = Reader::new(&body);
+        let mut reader = Reader::new(snapshot.frame_bytes(at)?);
         let header = FrameHeader::get(&mut reader)?;
         let base = match header.base {
             None => None,
-            Some(base) => Some(self.rows(staged, base)?.0),
+            Some(base) => Some(self.rows(snapshot, staged, base)?.0),
         };
         let started = Instant::now();
         let rows = Arc::new(get_rows(&mut reader, header.kind, base.as_deref())?);
         Timings::add(&self.inner.timings.decode, started);
-        self.inner.rows.put(id, (rows.clone(), header.manifest));
+        self.inner.rows.put(at, (rows.clone(), header.manifest));
         Ok((rows, header.manifest))
     }
 
-    /// Appends the `blocks` the archive does not hold yet to `catalog`, then
-    /// a footer, and a checkpoint after when one is due.
+    /// The token equal to `token` the file holds as of `snapshot`, by the
+    /// value rows name it by: remembered, or found in the index.
+    fn find_token(&self, snapshot: &Snapshot, hash: u64, token: &[u8]) -> Option<u32> {
+        let remembered = self.inner.tokens.lock().get(&hash).copied();
+        if let Some(id) = remembered
+            && snapshot.get(id) == Some(token)
+        {
+            return Some(id);
+        }
+        let (found, _) = snapshot.probe_token(hash, token).ok()?;
+        if let Some(id) = found {
+            self.remember(&[(hash, id)]);
+        }
+        found
+    }
+
+    fn remember(&self, tokens: &[(u64, u32)]) {
+        let mut remembered = self.inner.tokens.lock();
+        if remembered.len() + tokens.len() > TOKENS_REMEMBERED {
+            remembered.clear();
+        }
+        remembered.extend(tokens.iter().copied());
+    }
+
+    /// Appends the `blocks` the archive does not hold yet to `catalog`, as
+    /// one append.
     pub fn append(&self, catalog: &str, blocks: &[Buffer]) -> Result<(), ArchiveError> {
         let started = Instant::now();
-        let appended = self.append_locked(catalog, blocks);
+        let error = |error| storage_error(&self.inner.path, error);
+        // The work an append can do without its turn, done before taking
+        // it: other writers append meanwhile.
+        let snapshot = self.current();
+        let appended = match self.prepare(snapshot, catalog, blocks).map_err(error)? {
+            Some(prepared) => self.flush(prepared, catalog, blocks),
+            None => Ok(()),
+        };
         Timings::add(&self.inner.timings.append, started);
         self.inner.timings.appends.fetch_add(1, Ordering::Relaxed);
         appended
     }
 
-    fn append_locked(&self, catalog: &str, blocks: &[Buffer]) -> Result<(), ArchiveError> {
-        // The work an append can do without its turn, done before taking
-        // it: other writers append meanwhile.
-        match self.prepare(catalog, blocks) {
-            Ok(Some(prepared)) => self.flush(prepared, catalog, blocks),
-            Ok(None) => Ok(()),
-            Err(error) => Err(storage_error(&self.inner.path, error)),
-        }
-    }
-
-    /// Takes the writer's turn and writes what `prepared` (of `blocks`)
-    /// reconciles to, preparing again in the turn if it does not.
-    fn flush(
-        &self,
-        prepared: Prepared<'_>,
-        catalog: &str,
-        blocks: &[Buffer],
-    ) -> Result<(), ArchiveError> {
-        let error = |error| storage_error(&self.inner.path, error);
-        let mut writer = self.inner.writer.lock();
-        let file = &self.inner.file;
-        let written = Exclusive::take(file).and_then(|_exclusive| {
-            // This process's turn: read what others appended since its
-            // last, then append after it.
-            catch_up(file, &self.inner.index, &mut writer)?;
-            self.know(writer.end);
-            let flushed = match self.reconcile(prepared)? {
-                Some(reconciled) => self.write(&mut writer, reconciled),
-                // What was prepared cannot be named as it was: prepare
-                // again, in the turn, where nothing moves.
-                None => match self.prepare(catalog, blocks)? {
-                    Some(prepared) => match self.reconcile(prepared)? {
-                        Some(reconciled) => self.write(&mut writer, reconciled),
-                        None => Err(invalid("an append prepared in its turn did not reconcile")),
-                    },
-                    None => Ok(()),
-                },
-            };
-            flushed.inspect_err(|_| {
-                // Drop what of the append reached the file past what was
-                // published: nothing reads it.
-                let _ = file.set_len(writer.end);
-            })
-        });
-        written.map_err(|failed| {
-            self.inner.known.store(writer.end, Ordering::Release);
-            error(failed)
-        })
-    }
-
     /// What an append of `blocks` to `catalog` writes, worked out without
-    /// the writer's turn, against the index as it is: the new tokens, each
-    /// tree node split into rows and encoded as a frame, and the blocks kept
-    /// whole. New tokens and nodes take the ids after those published now;
-    /// [`reconcile`](Self::reconcile) renames them if others appended
-    /// first. `None` when the file holds every block already.
+    /// the writer's turn, against `snapshot`: the new tokens, each tree
+    /// node split into rows, and the blocks kept whole. `None` when the
+    /// file holds every block already.
     fn prepare<'a>(
         &'a self,
+        snapshot: Arc<Snapshot>,
         catalog: &'a str,
         blocks: &[Buffer],
     ) -> io::Result<Option<Prepared<'a>>> {
-        let index = &self.inner.index;
         let mut seen = HashSet::new();
         self.inner
             .timings
             .offered
             .fetch_add(blocks.len() as u64, Ordering::Relaxed);
-        let fresh: Vec<&Buffer> = blocks
-            .iter()
-            .filter(|block| {
-                let hash = block.blake3_hash();
-                !index.held(catalog, hash) && seen.insert(hash.clone())
-            })
-            .collect();
+        let mut fresh = Vec::new();
+        for block in blocks {
+            let hash = block.blake3_hash();
+            if seen.insert(hash.clone()) && snapshot.place(catalog, hash)?.is_none() {
+                fresh.push(block);
+            }
+        }
         if fresh.is_empty() {
             return Ok(None);
         }
-
         let mut items = Vec::with_capacity(fresh.len());
         let mut nodes = Vec::new();
         for block in fresh {
@@ -1236,22 +856,26 @@ impl FileArchive {
             }
         }
 
-        index.build_ids();
-        // A catalog the file holds nothing in yet has no nodes to be
-        // written against: no lineage is found under an id no catalog has.
-        let catalog_id = index.catalog_id(catalog).unwrap_or(u16::MAX);
-        let mut draft = Draft::new(index);
-        let first_node = index.nodes().len() as u32;
-        // Nodes this append writes as frames: their ids, rows and bodies,
-        // and what they are known by, ahead of joining the index.
-        let mut staged: HashMap<u32, Staged> = HashMap::new();
+        // New tokens and frames are named above everything the snapshot
+        // holds, until the turn gives them their places.
+        let first = token_id(snapshot.slot.end)? + 1;
+        let finding = snapshot.clone();
+        let mut draft = Draft::new(
+            snapshot.clone(),
+            Box::new(move |hash, token| self.find_token(&finding, hash, token)),
+            first,
+        );
+        let catalog_id = snapshot.catalog_id(catalog);
+        let mut staged: HashMap<u32, (Arc<Rows>, u32, Blake3Hash)> = HashMap::new();
         let mut staged_ids: HashMap<Blake3Hash, u32> = HashMap::new();
-        let mut staged_lineages: HashMap<Lineage, u32> = HashMap::new();
+        let mut staged_lineages: HashMap<(u8, [u32; 4]), u32> = HashMap::new();
         let mut staged_depths: HashMap<u32, u8> = HashMap::new();
         for (block, node) in children_first(nodes) {
             let framed = self.frame(
+                &snapshot,
                 &mut draft,
                 &Staging {
+                    first,
                     rows: &staged,
                     ids: &staged_ids,
                     lineages: &staged_lineages,
@@ -1266,319 +890,297 @@ impl FileArchive {
                 items.push(Item::Block(block));
                 continue;
             };
-            let id = first_node + staged.len() as u32;
+            let id = first + staged.len() as u32;
             staged_ids.insert(block.blake3_hash().clone(), id);
-            if let Some(first) = frame.lineage {
-                staged_lineages.insert((catalog_id, frame.rows.kind, first), id);
+            if let Some(lineage) = frame.rows.lineage() {
+                staged_lineages.insert((frame.rows.kind, lineage), id);
             }
             staged_depths.insert(id, frame.depth);
             staged.insert(
                 id,
-                Staged {
-                    hash: block.blake3_hash().clone(),
-                    rows: frame.rows.clone(),
-                    manifest: frame.manifest,
-                },
+                (
+                    frame.rows.clone(),
+                    frame.manifest,
+                    block.blake3_hash().clone(),
+                ),
             );
             items.push(Item::Frame(id, block, frame));
         }
-        draft.release();
         Ok(Some(Prepared {
             catalog,
-            draft,
-            first_node,
+            first,
+            tokens: draft,
             items,
         }))
     }
 
-    /// `prepared` as this turn writes it, holding the turn: blocks others
-    /// appended since are dropped, and new tokens and nodes take the ids
-    /// that are next now. A drafted token another writer wrote first takes
-    /// its id. When no id moved, the frames are written as they were
-    /// encoded; when one did, their rows are renamed and encoded again.
-    /// `None` when a node this append framed is now held whole, so its
-    /// parents would have to name it by hash: prepare again.
-    fn reconcile<'a>(&'a self, prepared: Prepared<'a>) -> io::Result<Option<Reconciled<'a>>> {
-        let index = &self.inner.index;
+    /// Takes the writer's turn and writes `prepared` (of `blocks`), laid
+    /// out against the file as it is in the turn; prepares again in the
+    /// turn if it cannot be.
+    fn flush(
+        &self,
+        prepared: Prepared<'_>,
+        catalog: &str,
+        blocks: &[Buffer],
+    ) -> Result<(), ArchiveError> {
+        let error = |error| storage_error(&self.inner.path, error);
+        let _turn = self.inner.writer.lock();
+        let file = &self.inner.file;
+        let written = Exclusive::take(file).and_then(|_exclusive| {
+            // This process's turn: read the newest slot, which another
+            // process may have written since, and drop any append cut short.
+            let slot = newest(file, true)?;
+            let snapshot = if slot.sequence > self.current().slot.sequence {
+                self.publish(snapshot(file, slot)?);
+                self.current()
+            } else {
+                self.current()
+            };
+            self.know(snapshot.slot.end);
+            let laid = match self.lay_out(&snapshot, prepared)? {
+                Some(laid) => laid,
+                // What was prepared names a node another writer kept whole:
+                // prepare again, in the turn, where nothing moves.
+                None => match self.prepare(snapshot.clone(), catalog, blocks)? {
+                    Some(prepared) => self
+                        .lay_out(&snapshot, prepared)?
+                        .ok_or_else(|| invalid("an append prepared in its turn did not lay out"))?,
+                    None => return Ok(()),
+                },
+            };
+            self.commit(laid).inspect_err(|_| {
+                // Drop what of the append reached the file: no slot names it.
+                let _ = file.set_len(snapshot.slot.end);
+            })
+        });
+        written.map_err(|failed| {
+            self.inner
+                .known
+                .store(self.current().slot.end, Ordering::Release);
+            error(failed)
+        })
+    }
+
+    /// `prepared` laid out after `snapshot`'s end: blocks the file holds by
+    /// now dropped, new tokens and frames given their places, frames
+    /// renamed and encoded, and the index's new entries inserted. `None`
+    /// when a node the append framed is held whole by now.
+    fn lay_out(&self, snapshot: &Snapshot, prepared: Prepared<'_>) -> io::Result<Option<Laid>> {
         let Prepared {
             catalog,
-            draft,
-            first_node,
+            first,
+            tokens: draft,
             items,
         } = prepared;
-        index.build_ids();
-        let catalog_id = index.add_catalog(catalog);
-        let view = index.view();
-        let ids = index.ids();
+        let mut slot = snapshot.slot.clone();
+        slot.sequence += 1;
+        let catalog_id = catalog_in(&mut slot, catalog)?;
+        let start = slot.end;
 
-        // Tokens: a drafted one the file holds now takes its id; the rest
-        // follow every published token, in the order they were drafted.
-        let first_token = draft.first();
-        let next_token = view.len();
-        let mut tokens = Vec::with_capacity(draft.pending());
-        let mut new = Vec::new();
-        for id in first_token..first_token + draft.pending() as u32 {
-            let bytes = draft.get(id).expect("a drafted token");
-            let hash = draft.hash(id).expect("a drafted token's hash");
-            match Index::find(&ids, &view, hash, bytes) {
-                Some(held) => tokens.push(held),
-                None => {
-                    tokens.push(next_token + new.len() as u32);
-                    new.push(id);
-                }
-            }
-        }
-
-        // Nodes: a framed node someone appended since keeps their frame;
-        // the rest follow every published node.
-        let next_node = index.nodes().len() as u32;
+        // Blocks the file holds by now are not written again; a node it
+        // holds as a frame is named by that frame.
         let mut nodes: HashMap<u32, u32> = HashMap::new();
         let mut kept = Vec::with_capacity(items.len());
-        let mut kept_frames = 0;
         for item in items {
             let hash = match &item {
                 Item::Block(block) | Item::Frame(_, block, _) => block.blake3_hash().clone(),
             };
-            match (index.place(catalog, &hash), item) {
-                (None, Item::Frame(id, block, frame)) => {
-                    nodes.insert(id, next_node + kept_frames);
-                    kept_frames += 1;
-                    kept.push(Item::Frame(id, block, frame));
-                }
-                (None, block) => kept.push(block),
-                (Some(Place::Node(held)), Item::Frame(id, ..)) => {
-                    nodes.insert(id, held);
+            match (snapshot.probe_block(catalog_id, &hash)?.0, item) {
+                (None, item) => kept.push(item),
+                (Some(Place::Frame(at)), Item::Frame(id, ..)) => {
+                    nodes.insert(id, at);
                 }
                 (Some(Place::Block(_)), Item::Frame(..)) => return Ok(None),
                 (Some(_), Item::Block(_)) => {}
             }
         }
 
+        // Tokens: a drafted one the file holds by now is named as it is;
+        // the rest go into one record, first.
+        let mut bytes = Vec::new();
+        let mut tokens: Vec<u32> = Vec::with_capacity(draft.pending());
+        let mut new = Vec::new();
+        for id in first..first + draft.pending() as u32 {
+            let token = draft.get(id).expect("a drafted token");
+            let hash = draft.hash(id).expect("a drafted token's hash");
+            match self.find_token(snapshot, hash, token) {
+                Some(held) => tokens.push(held),
+                None => {
+                    tokens.push(0);
+                    new.push(id);
+                }
+            }
+        }
+        let mut taken = HashSet::new();
+        let mut entries = Vec::new();
+        let mut remembered = Vec::new();
+        if !new.is_empty() {
+            let body_offset = start + bytes.len() as u64 + HEADER;
+            let (body, places) = draft.record(body_offset, &new);
+            put_record(&mut bytes, Kind::Tokens, &body)?;
+            for (id, place) in new.iter().zip(places) {
+                let named = token_id(place)?;
+                tokens[(*id - first) as usize] = named;
+                let token = draft.get(*id).expect("a drafted token");
+                let hash = draft.hash(*id).expect("a drafted token's hash");
+                let (_, key) = snapshot.probe_token(hash, token)?;
+                entries.push((free(snapshot, key, &mut taken)?, named as u64));
+                remembered.push((hash, named));
+                slot.counts.tokens += 1;
+                slot.counts.token_bytes += token.len() as u64;
+            }
+        }
         let token = |id: u32| {
-            id.checked_sub(first_token)
-                .and_then(|at| tokens.get(at as usize).copied())
-                .unwrap_or(id)
-        };
-        let node = |id: u32| {
-            if id < first_node {
+            if id < first {
                 id
             } else {
-                nodes.get(&id).copied().unwrap_or(id)
+                tokens[(id - first) as usize]
             }
         };
-        let moved = new.len() != draft.pending()
-            || next_token != first_token
-            || next_node != first_node
-            || nodes.iter().any(|(drafted, renamed)| drafted != renamed);
 
-        // Frames as written: encoded again when an id moved, against their
-        // base's renamed rows.
-        let mut renamed: HashMap<u32, (Arc<Rows>, u8)> = HashMap::new();
-        let mut items = Vec::with_capacity(kept.len());
+        // Blocks and frames, children first, each frame renamed to where
+        // its tokens and children are, then encoded against its base.
+        let mut staged: HashMap<u32, (Arc<Rows>, u32)> = HashMap::new();
+        let mut depths: HashMap<u32, u8> = HashMap::new();
+        let mut rows_laid = Vec::new();
         for item in kept {
-            let Item::Frame(drafted, block, mut frame) = item else {
-                items.push(item);
-                continue;
-            };
-            let id = node(drafted);
-            if moved {
-                let rows = Arc::new(rename(&frame.rows, token, node));
-                let base = frame.base.map(node);
-                // The base's rows and depth: a frame of this append's, renamed
-                // already (bases come before what is written against them),
-                // or one the file holds.
-                let (base_rows, depth) = match base {
-                    Some(base) => match renamed.get(&base) {
-                        Some((rows, depth)) => (Some(rows.clone()), depth + 1),
-                        None => (
-                            Some(self.rows(&HashMap::new(), base)?.0),
-                            index.node(base).map_or(0, |base| base.depth + 1),
-                        ),
-                    },
-                    None => (None, 0),
-                };
-                let header = FrameHeader {
-                    catalog: catalog.to_string(),
-                    hash: block.blake3_hash().clone(),
-                    kind: rows.kind,
-                    base,
-                    manifest: token(frame.manifest),
-                    lineage: rows.lineage(),
-                };
-                let mut body = Vec::new();
-                header.put(&mut body)?;
-                put_rows(&mut body, &rows, base_rows.as_deref());
-                let mut reader = Reader::new(&body);
-                FrameHeader::get(&mut reader)?;
-                if get_rows(&mut reader, rows.kind, base_rows.as_deref())? != *rows {
-                    return Err(invalid("a frame did not read back once its ids moved"));
+            let record = start + bytes.len() as u64;
+            match item {
+                Item::Block(block) => {
+                    let mut body = Vec::with_capacity(block.as_ref().len() + 40);
+                    put_varint(&mut body, catalog_id as u64);
+                    body.extend_from_slice(block.blake3_hash().as_bytes());
+                    body.extend_from_slice(block.as_ref());
+                    put_record(&mut bytes, Kind::Block, &body)?;
+                    let key = block_key(catalog_id, block.blake3_hash());
+                    entries.push((
+                        free(snapshot, key, &mut taken)?,
+                        Place::Block(record).value(),
+                    ));
+                    slot.counts.blocks += 1;
+                    slot.counts.block_bytes += block.as_ref().len() as u64;
                 }
-                frame = Frame {
-                    rows: rows.clone(),
-                    manifest: header.manifest,
-                    base,
-                    lineage: header.lineage,
-                    depth,
-                    body,
-                };
-                renamed.insert(id, (rows, depth));
+                Item::Frame(id, block, frame) => {
+                    let started = Instant::now();
+                    let node = |id: u32| {
+                        if id < first {
+                            id
+                        } else {
+                            nodes.get(&id).copied().unwrap_or(id)
+                        }
+                    };
+                    let rows = Arc::new(rename(&frame.rows, token, node));
+                    let base = frame.base.map(node);
+                    let (base_rows, depth) = match base {
+                        Some(base) => {
+                            let depth = match depths.get(&base) {
+                                Some(depth) => depth + 1,
+                                None => snapshot.frame(base)?.depth + 1,
+                            };
+                            (Some(self.rows(snapshot, &staged, base)?.0), depth)
+                        }
+                        None => (None, 0),
+                    };
+                    let header = FrameHeader {
+                        hash: block.blake3_hash().clone(),
+                        kind: rows.kind,
+                        depth,
+                        catalog: catalog_id,
+                        base,
+                        manifest: token(frame.manifest),
+                    };
+                    let mut data = Vec::new();
+                    header.put(&mut data);
+                    put_rows(&mut data, &rows, base_rows.as_deref());
+                    Timings::add(&self.inner.timings.encode, started);
+                    // The frame reads back to the same rows.
+                    let started = Instant::now();
+                    let mut reader = Reader::new(&data);
+                    FrameHeader::get(&mut reader)?;
+                    let decoded = get_rows(&mut reader, rows.kind, base_rows.as_deref())?;
+                    Timings::add(&self.inner.timings.verify, started);
+                    if decoded != *rows {
+                        self.inner.timings.unread.fetch_add(1, Ordering::Relaxed);
+                        return Err(invalid("a frame did not read back to its rows"));
+                    }
+                    // The frame's data starts on the alignment, after a
+                    // byte saying how much padding comes first.
+                    let body_offset = record + HEADER;
+                    let pad = (ALIGN - (body_offset + 1) % ALIGN) % ALIGN;
+                    let mut body = Vec::with_capacity(1 + pad as usize + data.len());
+                    body.push(pad as u8);
+                    body.resize(1 + pad as usize, 0);
+                    body.extend_from_slice(&data);
+                    let at = token_id(body_offset + 1 + pad)?;
+                    put_record(&mut bytes, Kind::Frame, &body)?;
+                    nodes.insert(id, at);
+                    depths.insert(at, depth);
+                    staged.insert(at, (rows.clone(), header.manifest));
+                    rows_laid.push((at, rows.clone(), header.manifest));
+                    let key = block_key(catalog_id, block.blake3_hash());
+                    entries.push((free(snapshot, key, &mut taken)?, Place::Frame(at).value()));
+                    if let Some(lineage) = rows.lineage() {
+                        entries.push((lineage_key(catalog_id, rows.kind, lineage), at as u64));
+                    }
+                    slot.counts.frames += 1;
+                    slot.counts.frames_against += base.is_some() as u64;
+                    slot.counts.frame_bytes += body.len() as u64;
+                }
             }
-            items.push(Item::Frame(id, block, frame));
         }
-        Ok(Some(Reconciled {
-            catalog_id,
-            draft,
-            new,
-            items,
+
+        // The index's new entries, and the nodes they rewrite.
+        let root = std::mem::take(&mut slot.root);
+        slot.root = root.insert(snapshot, entries, &mut |node| {
+            let at = start + bytes.len() as u64;
+            put_record(&mut bytes, Kind::Index, node)?;
+            Ok(at)
+        })?;
+        slot.end = start + bytes.len() as u64;
+        Ok(Some(Laid {
+            start,
+            bytes,
+            slot,
+            rows: rows_laid,
+            tokens: remembered,
         }))
     }
 
-    /// Writes what an append reconciled in this turn, then publishes it.
-    fn write(&self, writer: &mut Writer, reconciled: Reconciled<'_>) -> io::Result<()> {
-        let index = &self.inner.index;
-        let Reconciled {
-            catalog_id,
-            draft,
-            new,
-            items,
-        } = reconciled;
-        let catalog = index
-            .catalog(catalog_id)
-            .ok_or_else(|| invalid("a catalog the index lacks"))?
-            .to_string();
-
-        // Lay the records out: the new tokens first, so every frame follows
-        // the tokens it names, then blocks and frames in order, then a
-        // footer.
-        let mut bytes = Vec::new();
-        let token_body = writer.end + HEADER;
-        let mut token_places = Vec::new();
-        if !new.is_empty() {
-            let (body, places) = draft.record(token_body, &new);
-            token_places = places;
-            put_record(&mut bytes, Kind::Tokens, &body)?;
-        }
-        let mut placed = Vec::with_capacity(items.len());
-        let mut kept_rows = Vec::new();
-        for item in items {
-            let record = writer.end + bytes.len() as u64;
-            match item {
-                Item::Block(block) => {
-                    let body = block_body(&catalog, block.as_ref())?;
-                    let start = 1 + catalog.len() as u64;
-                    let extent = Extent {
-                        offset: record + HEADER + start,
-                        len: (body.len() as u64 - start) as u32,
-                    };
-                    put_record(&mut bytes, Kind::Block, &body)?;
-                    placed.push(Placed::Block(block.blake3_hash().clone(), extent));
-                }
-                Item::Frame(id, block, frame) => {
-                    let extent = Extent {
-                        offset: record + HEADER,
-                        len: frame.body.len() as u32,
-                    };
-                    put_record(&mut bytes, Kind::Frame, &frame.body)?;
-                    kept_rows.push((id, frame.rows.clone(), frame.manifest));
-                    placed.push(Placed::Frame(
-                        id,
-                        Node {
-                            hash: block.blake3_hash().clone(),
-                            extent,
-                            depth: frame.depth,
-                            catalog: catalog_id,
-                            kind: frame.rows.kind,
-                            lineage: frame.lineage,
-                        },
-                    ));
-                }
-            }
-        }
-        put_record(&mut bytes, Kind::Footer, &writer.checkpoint.to_le_bytes())?;
-        let end = writer.end + bytes.len() as u64;
-        self.know(end);
+    /// Writes an append laid out in this turn, then its slot, then
+    /// publishes it.
+    fn commit(&self, laid: Laid) -> io::Result<()> {
+        let file = &self.inner.file;
+        self.know(laid.slot.end);
         let started = Instant::now();
-        write_at(&self.inner.file, writer.end, &bytes)?;
-        Timings::add(&self.inner.timings.write, started);
+        write_at(file, laid.start, &laid.bytes)?;
         #[cfg(test)]
         if let Some(hook) = self.inner.before_publish.lock().as_mut() {
             hook();
         }
-
-        // Publish what is now in the file: the mapping first, then the
-        // tokens, then blocks and frames, children before their parents, so
-        // a reader that finds anything finds everything it names.
-        index.map(&self.inner.file, end)?;
-        let next_token = index.tokens().len() as u32;
-        for (at, ((offset, len), drafted)) in token_places.into_iter().zip(&new).enumerate() {
-            let published = index.add_token(token_body + offset as u64, len, draft.hash(*drafted));
-            debug_assert_eq!(
-                published,
-                next_token + at as u32,
-                "tokens publish in the ids they were reconciled to"
-            );
-            self.published();
+        laid.slot.write(file)?;
+        Timings::add(&self.inner.timings.write, started);
+        for (at, rows, manifest) in laid.rows {
+            self.inner.rows.put(at, (rows, manifest));
         }
-        for item in placed {
-            match item {
-                Placed::Block(hash, extent) => index.add_block(catalog_id, hash, extent),
-                Placed::Frame(id, node) => {
-                    let published = index.add_node(node);
-                    debug_assert_eq!(
-                        published, id,
-                        "frames publish in the ids they were reconciled to"
-                    );
-                }
-            }
-            self.published();
-        }
-        for (id, rows, manifest) in kept_rows {
-            self.inner.rows.put(id, (rows, manifest));
-        }
-        writer.since += bytes.len() as u64;
-        writer.end = end;
-
-        // A checkpoint, when one is due, is an append of its own: what was
-        // published stays in the file if it does not land.
-        if writer.since >= self.inner.options.checkpoint_every {
-            let at = writer.end;
-            let mut tail = Vec::new();
-            put_record(&mut tail, Kind::Checkpoint, &checkpoint_body(index)?)?;
-            put_record(&mut tail, Kind::Footer, &at.to_le_bytes())?;
-            self.know(at + tail.len() as u64);
-            write_at(&self.inner.file, at, &tail)?;
-            writer.checkpoint = at;
-            writer.since = 0;
-            writer.end = at + tail.len() as u64;
-        }
+        self.remember(&laid.tokens);
+        self.publish(snapshot(file, laid.slot)?);
         Ok(())
     }
 
-    /// Calls the test hook for a step of publishing, if one is set.
-    fn published(&self) {
-        #[cfg(test)]
-        {
-            let hook = self.inner.published.lock().take();
-            if let Some(mut hook) = hook {
-                hook(self);
-                *self.inner.published.lock() = Some(hook);
-            }
-        }
-    }
-
-    /// The frame `node` is written as, if its rows read back and realize to
-    /// its exact `block`: its rows, the frame record's body, its depth and
-    /// lineage. `None` keeps the block whole.
+    /// The frame `node` is written as, if it splits into rows (and, when
+    /// verifying, they realize to its exact `block`): its rows, manifest
+    /// token, base and depth, as drafted. `None` keeps the block whole.
+    #[allow(clippy::too_many_arguments)]
     fn frame(
         &self,
+        snapshot: &Snapshot,
         draft: &mut Draft<'_>,
         staging: &Staging<'_>,
         catalog: &str,
-        catalog_id: u16,
+        catalog_id: Option<u16>,
         block: &Buffer,
         node: &TreeNode,
     ) -> io::Result<Option<Frame>> {
-        let index = &self.inner.index;
         // A node in another layout (an older release's) is not what the
         // current encoder makes, so its frame would not rebuild it: keep it
         // whole without splitting it.
@@ -1599,10 +1201,13 @@ impl FileArchive {
                 .ids
                 .get(hash)
                 .copied()
-                .or_else(|| index.node_id(hash))
+                .or_else(|| match snapshot.place(catalog, hash) {
+                    Ok(Some(Place::Frame(at))) => Some(at),
+                    _ => None,
+                })
         };
         // A node that does not split into rows (another tree's, say), or
-        // whose frame does not rebuild its block, is kept whole, and the
+        // whose rows do not rebuild its block, is kept whole, and the
         // tokens interned for it are dropped again: nothing names them.
         let mark = draft.pending();
         let started = Instant::now();
@@ -1612,69 +1217,53 @@ impl FileArchive {
             draft.roll_back(mark);
             return Ok(None);
         };
-        let started = Instant::now();
         let manifest_id = draft.intern(&manifest_bytes);
-        let lineage = rows.lineage();
-        let depth_of = |id: u32| {
-            staging
-                .depths
-                .get(&id)
-                .copied()
-                .or_else(|| index.node(id).map(|node| node.depth))
+        // The node it supersedes: the latest of its lineage, among this
+        // append's or the file's, while the chain stays short.
+        let depth_of = |id: u32| -> Option<u8> {
+            if id >= staging.first {
+                staging.depths.get(&id).copied()
+            } else {
+                snapshot.frame(id).ok().map(|header| header.depth)
+            }
         };
-        let base = lineage
+        let base = rows
+            .lineage()
             .and_then(|first| {
-                let key = (catalog_id, rows.kind, first);
                 staging
                     .lineages
-                    .get(&key)
+                    .get(&(rows.kind, first))
                     .copied()
-                    .or_else(|| index.lineage(&key))
+                    .or_else(|| {
+                        let catalog = catalog_id?;
+                        let found = snapshot
+                            .lineage(lineage_key(catalog, rows.kind, first))
+                            .ok()??;
+                        // A key two lineages share names another kind's
+                        // frame now and then: only a frame of this kind is
+                        // a base.
+                        (snapshot.frame(found).ok()?.kind == rows.kind).then_some(found)
+                    })
             })
             .filter(|base| {
                 depth_of(*base).is_some_and(|depth| (depth as usize) + 1 < self.inner.options.chain)
             });
-        let base_rows = match base {
-            Some(base) => Some(self.rows(staging.rows, base)?.0),
-            None => None,
-        };
-        let header = FrameHeader {
-            catalog: catalog.to_string(),
-            hash: block.blake3_hash().clone(),
-            kind: rows.kind,
-            base,
-            manifest: manifest_id,
-            lineage,
-        };
-        let mut body = Vec::new();
-        header.put(&mut body)?;
-        put_rows(&mut body, &rows, base_rows.as_deref());
-        Timings::add(&self.inner.timings.encode, started);
-
-        let started = Instant::now();
-        // The frame reads back to the same rows.
-        let mut reader = Reader::new(&body);
-        FrameHeader::get(&mut reader)?;
-        let decoded = get_rows(&mut reader, rows.kind, base_rows.as_deref())?;
-        if decoded != rows {
-            Timings::add(&self.inner.timings.verify, started);
-            self.inner.timings.unread.fetch_add(1, Ordering::Relaxed);
-            debug_assert!(false, "a frame did not read back to its rows");
-            draft.roll_back(mark);
-            return Ok(None);
-        }
-        // And, when verifying, the rows it reads back to rebuild the very
-        // block (see `Options::verify`).
+        let depth = base.and_then(depth_of).map_or(0, |depth| depth + 1);
+        // When verifying, the rows rebuild the very block (see
+        // `Options::verify`).
         if self.inner.options.verify {
-            let realized = realize(&decoded, &*draft, &manifest, |id| {
-                staging
-                    .rows
-                    .get(&id)
-                    .map(|staged| staged.hash.clone())
-                    .or_else(|| index.node(id).map(|node| node.hash.clone()))
+            let started = Instant::now();
+            let realized = realize(&rows, &*draft, &manifest, |id| {
+                if id >= staging.first {
+                    staging.rows.get(&id).map(|(_, _, hash)| hash.clone())
+                } else {
+                    snapshot
+                        .frame_hash(id)
+                        .map(|hash| Blake3Hash::from(<[u8; 32]>::try_from(hash).expect("32 bytes")))
+                }
             });
+            Timings::add(&self.inner.timings.verify, started);
             if realized.ok().as_deref() != Some(block.as_ref()) {
-                Timings::add(&self.inner.timings.verify, started);
                 self.inner
                     .timings
                     .unverified
@@ -1683,32 +1272,24 @@ impl FileArchive {
                 return Ok(None);
             }
         }
-        Timings::add(&self.inner.timings.verify, started);
-        let depth = base.and_then(depth_of).map_or(0, |depth| depth + 1);
         Ok(Some(Frame {
             rows: Arc::new(rows),
             manifest: manifest_id,
             base,
-            lineage,
             depth,
-            body,
         }))
     }
 }
 
-/// The nodes an append frames before any is in the index: their rows, ids,
-/// lineages and depths, for the next node to name or be written against.
+/// The nodes an append frames before any is in the file: their rows,
+/// ids, lineages and depths, for the next node to name or be written
+/// against. Ids from `first` up are this append's.
 struct Staging<'a> {
-    rows: &'a HashMap<u32, Staged>,
+    first: u32,
+    rows: &'a HashMap<u32, (Arc<Rows>, u32, Blake3Hash)>,
     ids: &'a HashMap<Blake3Hash, u32>,
-    lineages: &'a HashMap<Lineage, u32>,
+    lineages: &'a HashMap<(u8, [u32; 4]), u32>,
     depths: &'a HashMap<u32, u8>,
-}
-
-/// A block or frame an append wrote, where it is, before it is published.
-enum Placed {
-    Block(Blake3Hash, Extent),
-    Frame(u32, Node),
 }
 
 #[async_trait]
@@ -1849,15 +1430,7 @@ mod tests {
         let path = directory.path().join("archive");
         let blocks: Vec<Buffer> = (0..100).map(|n| block(&format!("block {n}"))).collect();
         {
-            // A checkpoint every few blocks, so the reopen starts from one
-            // and reads the records after it.
-            let archive = FileArchive::open_with(
-                &path,
-                Options {
-                    checkpoint_every: 256,
-                    ..Options::default()
-                },
-            )?;
+            let archive = FileArchive::open(&path)?;
             for chunk in blocks.chunks(7) {
                 archive.append("index", chunk)?;
             }
@@ -1906,8 +1479,10 @@ mod tests {
         Ok(())
     }
 
+    /// A slot whose bytes changed is not whole: opening takes the other,
+    /// and drops the append only the changed one named.
     #[tokio::test]
-    async fn it_stops_at_a_record_whose_bytes_changed() -> anyhow::Result<()> {
+    async fn it_opens_from_the_other_slot_when_one_changed() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("archive");
         let first = block("first");
@@ -1919,16 +1494,18 @@ mod tests {
             archive.append("index", std::slice::from_ref(&second))?;
             boundary
         };
-        // Flip a byte inside the second block's record: it and everything
-        // after it no longer read back as whole records.
+        // The second append is sequence 2, which writes the first slot:
+        // flip a byte inside it.
         let mut bytes = std::fs::read(&path)?;
-        bytes[boundary as usize + HEADER as usize + 3] ^= 0xFF;
+        let newest = MAGIC.len();
+        bytes[newest + 20] ^= 0xFF;
         std::fs::write(&path, &bytes)?;
 
         let archive = FileArchive::open(&path)?;
         assert_eq!(archive.len(), 1);
         assert!(archive.get("index", first.blake3_hash())?.is_some());
         assert!(archive.get("index", second.blake3_hash())?.is_none());
+        assert_eq!(std::fs::metadata(&path)?.len(), boundary);
         Ok(())
     }
 
@@ -2014,55 +1591,10 @@ mod tests {
         Ok(())
     }
 
-    /// After every step of publishing an append (each token, each block,
-    /// each frame), every block the index lists reads whole and every frame
-    /// is served in place: nothing is published before what it names.
-    #[test]
-    fn it_publishes_nothing_before_what_it_names() -> anyhow::Result<()> {
-        use crate::node::tests::{entity_segment, segment_manifest};
-
-        let directory = tempfile::tempdir()?;
-        let archive = FileArchive::open(directory.path().join("archive"))?;
-        let manifest = segment_manifest();
-        archive.append("index", &[entity_segment("first", &manifest)?])?;
-        let steps = Arc::new(AtomicU64::new(0));
-        let counted = steps.clone();
-        *archive.inner.published.lock() = Some(Box::new(move |archive: &FileArchive| {
-            counted.fetch_add(1, Ordering::Relaxed);
-            for (catalog, hash) in archive.hashes() {
-                let block = archive
-                    .get(&catalog, &hash)
-                    .expect("a listed block reads")
-                    .expect("a listed block is there");
-                assert_eq!(&Blake3Hash::hash(&block), &hash);
-                if archive.is_frame(&catalog, &hash) {
-                    assert!(
-                        archive.served(&catalog, &hash).is_some(),
-                        "a listed frame is served"
-                    );
-                }
-            }
-        }));
-        let batch = [
-            entity_segment("second", &manifest)?,
-            entity_segment("third", &manifest)?,
-            block("whole"),
-        ];
-        archive.append("index", &batch)?;
-        assert!(
-            steps.load(Ordering::Relaxed) > batch.len() as u64,
-            "every token and block is a step"
-        );
-        for content in &batch {
-            assert!(archive.get("index", content.blake3_hash())?.is_some());
-        }
-        Ok(())
-    }
-
-    /// An append prepared before another one lands takes the ids that are
-    /// next when its turn comes: a node the other appended is not written
-    /// again, tokens the other wrote first are not either, and every
-    /// block reads back, in this process and after reopening.
+    /// An append prepared before another one lands takes its places when
+    /// its turn comes: a node the other appended is not written again,
+    /// tokens the other wrote first are not either, and every block reads
+    /// back, in this process and after reopening.
     #[test]
     fn it_reconciles_an_append_prepared_before_another() -> anyhow::Result<()> {
         use crate::node::tests::{entity_segment, segment_manifest};
@@ -2084,7 +1616,7 @@ mod tests {
         let archive = FileArchive::open(&path)?;
         archive.append("index", &base)?;
         let prepared = archive
-            .prepare("index", &first)?
+            .prepare(archive.current(), "index", &first)?
             .expect("blocks the file lacks");
         archive.append("index", &second)?;
         archive.flush(prepared, "index", &first)?;
@@ -2159,7 +1691,7 @@ mod tests {
         )?;
 
         let prepared = archive
-            .prepare("index", &first)?
+            .prepare(archive.current(), "index", &first)?
             .expect("blocks the file lacks");
         other.append("index", std::slice::from_ref(&shared))?;
         archive.flush(prepared, "index", &first)?;
@@ -2200,13 +1732,7 @@ mod tests {
         use std::sync::atomic::AtomicBool;
 
         let directory = tempfile::tempdir()?;
-        let archive = FileArchive::open_with(
-            directory.path().join("archive"),
-            Options {
-                checkpoint_every: 4096,
-                ..Options::default()
-            },
-        )?;
+        let archive = FileArchive::open(directory.path().join("archive"))?;
         let manifest = segment_manifest();
         let done = Arc::new(AtomicBool::new(false));
         let readers: Vec<_> = (0..3)
@@ -2288,507 +1814,66 @@ mod tests {
 }
 
 #[cfg(test)]
-mod index_breakdown {
+mod breakdown {
     use super::*;
+    use crate::file::read_record;
+    use crate::tokens::read_token_record;
 
-    /// Prints what the in-memory index of the file named by
-    /// `DIALOG_ARCHIVE_INDEX` holds, structure by structure. Run by hand.
+    /// Prints what the file named by `DIALOG_ARCHIVE_INDEX` holds, record
+    /// kind by kind, what its tokens' records spend on lengths and
+    /// padding, and what the archive keeps in memory to read it. Run by
+    /// hand.
     #[test]
-    #[ignore = "breaks down the index of a file named by DIALOG_ARCHIVE_INDEX"]
-    fn index_breakdown() -> anyhow::Result<()> {
+    #[ignore = "breaks down the file named by DIALOG_ARCHIVE_INDEX"]
+    fn breakdown() -> anyhow::Result<()> {
         let Ok(path) = std::env::var("DIALOG_ARCHIVE_INDEX") else {
             return Ok(());
         };
         let archive = FileArchive::open(&path)?;
-        let index = &archive.inner.index;
-        let stats = archive.stats();
-        let kib = |bytes: usize| format!("{:.0} KiB", bytes as f64 / 1024.0);
-        println!("file {}", kib(stats.file_bytes as usize));
-        println!(
-            "blocks by catalog and hash: {} entries × ~{} B",
-            index.block_count(),
-            2 + 32 + size_of::<Place>() + 8
-        );
-        println!(
-            "nodes by id: {} × {} B, {} allocated",
-            index.nodes().len(),
-            size_of::<Node>(),
-            kib(index.nodes().footprint())
-        );
-        println!(
-            "latest node per lineage: {} entries × ~{} B",
-            index.lineage_count(),
-            size_of::<Lineage>() + 4 + 8
-        );
-        println!(
-            "tokens: {} tokens, where each is and whether it was checked: {}",
-            index.tokens().len(),
-            kib(index.tokens().footprint())
-        );
-        println!("the index in all: {}", kib(stats.index_memory));
-        println!(
-            "the file: {} tokens in {}, {} frames in {} ({} written against another), {} blocks whole in {}",
-            stats.tokens,
-            kib(stats.token_bytes as usize),
-            stats.frames,
-            kib(stats.frame_bytes as usize),
-            stats.frames_against,
-            stats.blocks,
-            kib(stats.block_bytes as usize)
-        );
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-mod live_breakdown {
-    use super::*;
-    use crate::rows::{DATUM, NONE, Section, sections_of, slots_of};
-
-    /// What the tree the file wrote last takes: the frames reachable from
-    /// its root and the distinct tokens they name, against the whole file,
-    /// which holds every version before it too. The root is the node,
-    /// among the last few thousand written, that nothing written after it
-    /// names and that reaches the most nodes. Run by hand on the file named
-    /// by `DIALOG_ARCHIVE_INDEX`.
-    #[test]
-    #[ignore = "measures the file named by DIALOG_ARCHIVE_INDEX"]
-    fn live_breakdown() -> anyhow::Result<()> {
-        let Ok(path) = std::env::var("DIALOG_ARCHIVE_INDEX") else {
-            return Ok(());
-        };
-        let archive = FileArchive::open(&path)?;
-        let index = &archive.inner.index;
-        let count = index.nodes().len() as u32;
-        if count == 0 {
-            return Ok(());
-        }
-        let children = |id: u32| -> anyhow::Result<Vec<u32>> {
-            let (rows, _) = archive.rows(&HashMap::new(), id)?;
-            Ok(if rows.kind == crate::rows::INDEX {
-                rows.sections[0]
-                    .iter()
-                    .filter(|row| row[1] != NONE)
-                    .map(|row| row[1])
-                    .collect()
-            } else {
-                Vec::new()
-            })
-        };
-        let recent = count.saturating_sub(4096)..count;
-        let mut named = HashSet::new();
-        for id in recent.clone() {
-            named.extend(children(id)?);
-        }
-        let reach = |from: u32| -> anyhow::Result<usize> {
-            let (mut seen, mut stack) = (HashSet::new(), vec![from]);
-            while let Some(id) = stack.pop() {
-                if seen.insert(id) {
-                    stack.extend(children(id)?);
-                }
-            }
-            Ok(seen.len())
-        };
-        let mut root = count - 1;
-        let mut most = 0;
-        for id in recent.rev().filter(|id| !named.contains(id)).take(64) {
-            let reached = reach(id)?;
-            if reached > most {
-                (root, most) = (id, reached);
-            }
-        }
-        let (mut seen, mut tokens) = (HashSet::new(), HashSet::new());
-        let (mut frames, mut whole, mut alone) = (0u64, 0u64, 0u64);
-        let mut stack = vec![root];
-        // A root the file keeps whole (one it could not frame) names its
-        // children by hash: the latest such block, when it reaches more
-        // than the latest frame does, is the root.
-        if let Some((catalog, hash, extent)) = index
-            .blocks()
-            .into_iter()
-            .filter_map(|(catalog, hash, place)| match place {
-                Place::Block(extent) => Some((catalog, hash, extent)),
-                Place::Node(_) => None,
-            })
-            .max_by_key(|(_, _, extent)| extent.offset)
-            && let Some(block) = archive.get(index.catalog(catalog).unwrap_or_default(), &hash)?
-            && let Some(node) = tree_node(&Buffer::from(block))
-            && let NodeBody::Index(links) = node.body()
-        {
-            let named: Vec<u32> = (0..links.len())
-                .filter_map(|at| links.hash_at(at).ok())
-                .filter_map(|hash| index.node_id(hash))
-                .collect();
-            let reached: usize = named.iter().map(|id| reach(*id).unwrap_or(0)).sum();
-            if reached > most {
-                whole += extent.len as u64;
-                stack = named;
-                println!(
-                    "the root is kept whole ({} KiB), its {} children frames",
-                    extent.len / 1024,
-                    stack.len()
-                );
-            }
-        }
-        while let Some(id) = stack.pop() {
-            if !seen.insert(id) {
-                continue;
-            }
-            frames += index.node(id).expect("a node").extent.len as u64;
-            let (rows, manifest) = archive.rows(&HashMap::new(), id)?;
-            // The node's rows written whole, as a file holding only this
-            // tree would hold them.
-            let mut body = Vec::new();
-            put_rows(&mut body, &rows, None);
-            alone += body.len() as u64;
-            tokens.insert(manifest);
-            for (section, rows) in sections_of(rows.kind).iter().zip(&rows.sections) {
-                for row in rows {
-                    match section {
-                        Section::Entries | Section::Ops => {
-                            tokens.extend(&row[1..=slots_of(row[0] as u8)]);
-                            if row[DATUM] != NONE {
-                                tokens.insert(row[DATUM]);
-                            }
-                        }
-                        Section::Links => {
-                            tokens.insert(row[0]);
-                            if row[1] != NONE {
-                                stack.push(row[1]);
-                            } else {
-                                tokens.insert(row[3]);
-                                let view = index.view();
-                                let hash = Blake3Hash::from(
-                                    <[u8; 32]>::try_from(view.get(row[3]).expect("a hash token"))
-                                        .expect("32 bytes"),
-                                );
-                                for catalog in index.catalogs() {
-                                    if let Some(Place::Block(extent)) = index.place(catalog, &hash)
-                                    {
-                                        whole += extent.len as u64;
-                                    }
-                                }
-                            }
-                        }
-                        Section::Buffers => {}
-                    }
-                }
-            }
-        }
-        let token_bytes: u64 = tokens
-            .iter()
-            .filter_map(|id| index.extent(*id))
-            .map(|(_, len)| len as u64)
-            .sum();
-        let mib = |bytes: u64| format!("{:.1} MiB", bytes as f64 / 1048576.0);
-        println!(
-            "the last tree: {} nodes in {} of frames ({} written whole), {} tokens in {}, \
-             {} of blocks kept whole; the file holds {} nodes",
-            seen.len(),
-            mib(frames),
-            mib(alone),
-            tokens.len(),
-            mib(token_bytes),
-            mib(whole),
-            index.nodes().len()
-        );
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-mod offsets_instead_of_ids {
-    use super::*;
-    use crate::rows::{NONE, Row, Section, sections_of};
-
-    /// What frames would take if rows named tokens and children by file
-    /// offset rather than dense id, written against the same predecessors;
-    /// and what checking every datum once costs. Run by hand on the file
-    /// named by `DIALOG_ARCHIVE_INDEX`.
-    #[test]
-    #[ignore = "measures the file named by DIALOG_ARCHIVE_INDEX"]
-    fn offsets_instead_of_ids() -> anyhow::Result<()> {
-        let Ok(path) = std::env::var("DIALOG_ARCHIVE_INDEX") else {
-            return Ok(());
-        };
-        let archive = FileArchive::open(&path)?;
-        let index = &archive.inner.index;
-        // A token's offset, divided by `unit`: every token starts on an
-        // `ALIGN` boundary, so dividing by it loses nothing.
-        let by_offset = |rows: &Rows, unit: u64| -> Vec<Vec<[u64; 6]>> {
-            let token = |id: u32| index.extent(id).map(|(offset, _)| offset / unit).unwrap();
-            sections_of(rows.kind)
-                .iter()
-                .zip(&rows.sections)
-                .map(|(section, rows)| {
-                    rows.iter()
-                        .map(|row| {
-                            let mut out = [0u64; 6];
-                            for field in 0..6 {
-                                out[field] = row[field] as u64;
-                            }
-                            let id = |value: u32| {
-                                if value == NONE {
-                                    u64::MAX
-                                } else {
-                                    token(value)
-                                }
-                            };
-                            match section {
-                                Section::Entries | Section::Ops => {
-                                    for slot in 1..=crate::rows::SLOTS {
-                                        if row[slot] != 0 || slot == 1 {
-                                            out[slot] = token(row[slot]);
-                                        }
-                                    }
-                                    out[crate::rows::DATUM] = id(row[crate::rows::DATUM]);
-                                }
-                                Section::Links => {
-                                    out[0] = token(row[0]);
-                                    out[1] = if row[1] == NONE {
-                                        u64::MAX
-                                    } else {
-                                        index.node(row[1]).unwrap().extent.offset
-                                    };
-                                    out[3] = id(row[3]);
-                                }
-                                Section::Buffers => {}
-                            }
-                            out
-                        })
-                        .collect()
-                })
-                .collect()
-        };
-        // Zigzag-delta varint bytes of every column of `rows`, written as
-        // literals: the width of the ids against the width of the offsets.
-        // Each column of `rows` as zigzag deltas, one varint a delta.
-        let leb = |value: u128| (128 - value.leading_zeros() as usize).max(1).div_ceil(7);
-        let deltas = |rows: &[Vec<[u64; 6]>]| -> Vec<Vec<u128>> {
-            let mut columns = Vec::new();
-            for section in rows {
-                for field in 0..6 {
-                    let mut previous = 0i128;
-                    let mut column = Vec::new();
-                    for row in section {
-                        if row[field] == u64::MAX {
-                            continue;
-                        }
-                        let delta = row[field] as i128 - previous;
-                        previous = row[field] as i128;
-                        column.push(((delta << 1) ^ (delta >> 127)) as u128);
-                    }
-                    columns.push(column);
-                }
-            }
-            columns
-        };
-        let width = |rows: &[Vec<[u64; 6]>]| -> usize {
-            deltas(rows).iter().flatten().map(|delta| leb(*delta)).sum()
-        };
-        // The same deltas run-length encoded as Automerge's columns are
-        // (hexane): a signed count, positive for a value repeated that
-        // many times, negative for that many values written one by one.
-        let run_width = |rows: &[Vec<[u64; 6]>]| -> usize {
-            let mut bytes = 0;
-            for column in deltas(rows) {
-                let mut literals = 0usize;
-                let mut at = 0;
-                let close = |literals: &mut usize, bytes: &mut usize| {
-                    if *literals > 0 {
-                        *bytes += leb((*literals as u128) << 1);
-                        *literals = 0;
-                    }
-                };
-                while at < column.len() {
-                    let mut end = at + 1;
-                    while end < column.len() && column[end] == column[at] {
-                        end += 1;
-                    }
-                    if end - at >= 2 {
-                        close(&mut literals, &mut bytes);
-                        bytes += leb(((end - at) as u128) << 1) + leb(column[at]);
-                    } else {
-                        literals += 1;
-                        bytes += leb(column[at]);
-                    }
-                    at = end;
-                }
-                close(&mut literals, &mut bytes);
-            }
-            bytes
-        };
-        let (mut ids, mut offsets, mut aligned, mut literal_rows, mut frames) =
-            (0, 0, 0, 0usize, 0usize);
-        let (mut ids_in_runs, mut aligned_in_runs) = (0, 0);
-        for id in 0..index.nodes().len() as u32 {
-            let (rows, _) = archive.rows(&HashMap::new(), id)?;
-            let node = index.node(id).unwrap();
-            frames += node.extent.len as usize;
-            // Only literal rows carry ids: a frame against a predecessor
-            // copies the rest. Count every row of whole frames, and the rows
-            // a frame against a predecessor does not share with it.
-            let literal: Rows = if node.depth == 0 {
-                (*rows).clone()
-            } else {
-                let mut body = vec![0u8; node.extent.len as usize];
-                read_at(&archive.inner.file, node.extent.offset, &mut body)?;
-                let header = FrameHeader::get(&mut Reader::new(&body))?;
-                let base = archive.rows(&HashMap::new(), header.base.unwrap())?.0;
-                Rows {
-                    kind: rows.kind,
-                    sections: rows
-                        .sections
-                        .iter()
-                        .zip(&base.sections)
-                        .map(|(ours, theirs)| {
-                            let known: HashSet<&Row> = theirs.iter().collect();
-                            ours.iter()
-                                .filter(|row| !known.contains(row))
-                                .copied()
-                                .collect()
-                        })
-                        .collect(),
-                }
-            };
-            literal_rows += literal.sections.iter().map(Vec::len).sum::<usize>();
-            let as_ids: Vec<Vec<[u64; 6]>> = literal
-                .sections
-                .iter()
-                .map(|section| {
-                    section
-                        .iter()
-                        .map(|row| {
-                            row.map(|value| {
-                                if value == NONE {
-                                    u64::MAX
-                                } else {
-                                    value as u64
-                                }
-                            })
-                        })
-                        .collect()
-                })
-                .collect();
-            // Only the fields a frame writes: a key's unused slots, and a
-            // buffer's or a link's spare ones, are not written at all.
-            let written = |columns: Vec<Vec<[u64; 6]>>| -> Vec<Vec<[u64; 6]>> {
-                sections_of(literal.kind)
-                    .iter()
-                    .zip(&literal.sections)
-                    .zip(columns)
-                    .map(|((section, rows), mut columns)| {
-                        for (row, column) in rows.iter().zip(&mut columns) {
-                            for (field, value) in column.iter_mut().enumerate() {
-                                let kept = match section {
-                                    Section::Entries | Section::Ops => {
-                                        field == 0
-                                            || field == crate::rows::DATUM
-                                            || field <= crate::rows::slots_of(row[0] as u8)
-                                    }
-                                    Section::Links => field < 4,
-                                    Section::Buffers => field < 2,
-                                };
-                                if !kept {
-                                    *value = u64::MAX;
-                                }
-                            }
-                        }
-                        columns
-                    })
-                    .collect()
-            };
-            let as_ids = written(as_ids);
-            let as_offsets = written(by_offset(&literal, 1));
-            let as_aligned = written(by_offset(&literal, crate::tokens::ALIGN));
-            ids += width(&as_ids);
-            ids_in_runs += run_width(&as_ids);
-            aligned_in_runs += run_width(&as_aligned);
-            offsets += width(&as_offsets);
-            aligned += width(&as_aligned);
-        }
-        println!(
-            "frames {} KiB; literal rows {literal_rows}: id columns {} KiB, offset columns {} KiB, \
-             offsets in units of the token alignment {} KiB",
-            frames / 1024,
-            ids / 1024,
-            offsets / 1024,
-            aligned / 1024
-        );
-        println!(
-            "run-length encoded as Automerge's columns: id columns {} KiB, aligned offset columns {} KiB",
-            ids_in_runs / 1024,
-            aligned_in_runs / 1024
-        );
-
-        let started = std::time::Instant::now();
-        let mut datums = 0;
-        let view = index.view();
-        for id in 0..index.tokens().len() as u32 {
-            let bytes = view.get(id).unwrap();
-            if rkyv::access::<
-                rkyv::Archived<dialog_artifacts::State<dialog_artifacts::Datum>>,
-                rkyv::rancor::Error,
-            >(bytes)
-            .is_ok()
-            {
-                datums += 1;
-            }
-        }
-        println!(
-            "checking every token as a datum: {datums} datums of {} tokens in {:?}",
-            index.tokens().len(),
-            started.elapsed()
-        );
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-mod record_breakdown {
-    use super::*;
-
-    /// Prints the bytes of the file named by `DIALOG_ARCHIVE_INDEX`, record
-    /// kind by record kind, headers included, with the padding and lengths
-    /// inside token records apart from the tokens. Run by hand.
-    #[test]
-    #[ignore = "breaks down the records of a file named by DIALOG_ARCHIVE_INDEX"]
-    fn record_breakdown() -> anyhow::Result<()> {
-        let Ok(path) = std::env::var("DIALOG_ARCHIVE_INDEX") else {
-            return Ok(());
-        };
-        let file = File::open(&path)?;
-        let len = file.metadata()?.len();
-        let mut at = MAGIC.len() as u64;
+        let snapshot = archive.current();
+        let file = &archive.inner.file;
+        let mib = |bytes: u64| format!("{:.2} MiB", bytes as f64 / 1048576.0);
         let mut totals: std::collections::BTreeMap<String, (u64, u64)> = Default::default();
-        let (mut token_bytes, mut token_count) = (0u64, 0u64);
-        while let Some(record) = read_record(&file, at, len)? {
-            let entry = totals.entry(format!("{:?}", record.kind)).or_default();
-            entry.0 += 1;
-            entry.1 += record.end() - record.offset;
+        let (mut token_bytes, mut tokens) = (0u64, 0u64);
+        let mut at = DATA;
+        while at < snapshot.slot.end {
+            let Some(record) = read_record(file, at, snapshot.slot.end)? else {
+                break;
+            };
+            let total = totals.entry(format!("{:?}", record.kind)).or_default();
+            total.0 += 1;
+            total.1 += record.end() - record.offset;
             if record.kind == Kind::Tokens {
-                let mut reader = Reader::new(&record.body);
-                for _ in 0..reader.varint()? {
-                    let size = reader.varint()? as usize;
-                    let pad = reader.byte()? as usize;
-                    reader.take(pad)?;
-                    reader.take(size)?;
-                    token_bytes += size as u64;
-                    token_count += 1;
+                for start in read_token_record(&record.body, record.body_offset())? {
+                    token_bytes += snapshot
+                        .get(token_id(start)?)
+                        .map_or(0, |token| token.len()) as u64;
+                    tokens += 1;
                 }
             }
             at = record.end();
         }
-        let mib = |bytes: u64| format!("{:.2} MiB", bytes as f64 / (1024.0 * 1024.0));
-        println!("file {} ({len} bytes)", mib(len));
+        println!(
+            "file {} ({} bytes), slots and magic {}",
+            mib(snapshot.slot.end),
+            snapshot.slot.end,
+            mib(DATA)
+        );
         for (kind, (count, bytes)) in &totals {
             println!("  {kind}: {count} records, {}", mib(*bytes));
         }
-        let tokens = totals.get("Tokens").map_or(0, |(_, bytes)| *bytes);
+        let records = totals.get("Tokens").map_or(0, |(_, bytes)| *bytes);
         println!(
-            "  of the token records: {} of token bytes ({token_count} tokens), {} of lengths, padding and headers",
+            "  of the token records: {} of token bytes ({tokens} tokens), {} of lengths, padding and headers",
             mib(token_bytes),
-            mib(tokens - token_bytes)
+            mib(records - token_bytes)
+        );
+        let stats = archive.stats();
+        println!(
+            "in memory to read it: the root {} B, rows kept {}, index memory {}",
+            snapshot.slot.root.encode().len(),
+            mib(stats.rows_memory as u64),
+            mib(stats.index_memory as u64)
         );
         Ok(())
     }

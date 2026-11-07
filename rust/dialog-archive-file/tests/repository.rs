@@ -144,15 +144,14 @@ async fn it_commits_and_selects_through_a_file_archive() -> anyhow::Result<()> {
         assert_eq!(&Blake3Hash::hash(&block), hash, "{catalog}");
     }
 
-    // Copied into another file a few blocks at a time, with a checkpoint
-    // every few appends, the blocks read back the same after a reopen,
-    // whether the open starts from a checkpoint or from the records after it.
+    // Copied into another file a block at a time, short chains of frames
+    // written against their predecessors, the blocks read back the same
+    // after a reopen, which reads the newest slot and nothing else.
     let copy = directory.path().join("copy.dialog");
     {
         let target = FileArchive::open_with(
             &copy,
             Options {
-                checkpoint_every: 4096,
                 chain: 4,
                 ..Options::default()
             },

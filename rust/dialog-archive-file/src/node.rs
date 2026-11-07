@@ -483,8 +483,7 @@ mod profile {
         let (mut entries, mut nodes, mut realizing) = (0usize, 0usize, Duration::ZERO);
         let mut splitting = Duration::ZERO;
         let mut whole = Duration::ZERO;
-        let index = crate::archive::Index::default();
-        let mut tokens = Draft::new(&index);
+        let mut tokens = Draft::detached();
         for block in &blocks {
             let started = Instant::now();
             let Some(node) = tree_node(block) else {
@@ -689,8 +688,7 @@ pub(crate) mod tests {
         let manifest = spilling();
         let block = segment_block(keys, &manifest)?;
         let node = tree_node(&Buffer::from(block.clone())).expect("a tree node");
-        let index = crate::archive::Index::default();
-        let mut tokens = Draft::new(&index);
+        let mut tokens = Draft::detached();
         let rows = rows_of(&node, &mut tokens, |_| None)?;
         assert!(
             segment_of(&rows.sections[0], &tokens)?.is_some(),
@@ -769,13 +767,11 @@ mod warm_split {
             blocks.push(Buffer::from(archive.get(&catalog, &hash)?.expect("listed")));
         }
         let nodes: Vec<_> = blocks.iter().filter_map(tree_node).collect();
-        archive.prepare_writer();
-        let index = archive.index();
         for round in 0..3 {
             let started = Instant::now();
             let mut new = 0;
             for node in &nodes {
-                let mut draft = Draft::new(index);
+                let mut draft = archive.draft();
                 rows_of(node, &mut draft, |_| None)?;
                 new += draft.pending();
             }

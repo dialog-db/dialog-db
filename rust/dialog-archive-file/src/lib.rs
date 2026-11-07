@@ -30,10 +30,11 @@
 
 mod archive;
 mod file;
+mod hash;
 mod node;
 mod resource;
 mod rows;
 mod tokens;
 
-pub use archive::{CHAIN, CHECKPOINT_EVERY, FileArchive, Options, Stats};
+pub use archive::{CHAIN, FileArchive, Options, Stats};
 pub use resource::{FILE_NAME, OpenError, file_at};

@@ -166,6 +166,7 @@ impl<'a> Reader<'a> {
         self.at
     }
 
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.at >= self.bytes.len()
     }
