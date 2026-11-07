@@ -460,7 +460,9 @@ impl ArtifactView {
     /// cannot separate (both unversioned, or both written by the same
     /// revision) fall to the older rule: the higher cause wins, a caused
     /// row beats an uncaused one, and equal (including absent) causes fall
-    /// to the value, the greater winning. This is the order
+    /// to the hash of the value ([`Value::tiebreak`](crate::Value::tiebreak)),
+    /// the greater winning, so the tie favours no value over another. This
+    /// is the order
     /// [`Pick::prefers`](crate::Pick::prefers) elects by under `last`,
     /// in the tree, in a commit's settlement and in a concept read, so
     /// every read of a cell under `last` returns the same claim. Every
@@ -483,7 +485,7 @@ impl ArtifactView {
             (Some(_), None) => self,
             (None, Some(_)) => challenger,
             _ => {
-                // Causes are equal: the value is the deterministic
+                // Causes are equal: the value's hash is the deterministic
                 // tiebreaker, as it is for every other election of the
                 // cell. The value needs materialization, which is where a
                 // corrupt stored row (`CorruptEntry`) surfaces — such a row
