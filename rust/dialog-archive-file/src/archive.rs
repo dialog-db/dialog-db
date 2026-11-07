@@ -24,6 +24,8 @@ use crate::rows::{Reader, Rows, get_rows, invalid, put_rows, put_varint, rename}
 use crate::tokens::{ALIGN, Draft, TokenRead};
 
 mod index;
+#[cfg(test)]
+mod model;
 mod served;
 mod slot;
 mod tree;

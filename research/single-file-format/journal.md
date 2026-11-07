@@ -1225,6 +1225,98 @@ against the predecessor's rows in order (both are sorted) would reuse
 their token ids without hashing or looking anything up, about half of what
 a split does now.
 
+## 2026-11-07: the index with its pages reused, modelled
+
+**Question.** The index is 95% node versions no root reaches (94 of 1,826
+MiB on MusicBrainz's file reached; 23 of 395 MiB on 100×'s). If its pages
+were written over once no root reaches them, what would it keep in the
+file, and does naming keys by their records' positions (no key bytes in
+the index at all) pay?
+
+**Method.** `index_layouts` (`src/archive/model.rs`) keeps each layout in
+pages of a fixed size, in memory, with a 16-byte header (the sequence that
+wrote it, a checksum). A page freed by an append is reused from the next
+one (`grace` appends later): the older slot's root stops reaching it once
+the next append's slot is written. A page born and freed in one append is
+reused at once. It replays the appends' shape (100×: 3,569 appends of 292
+frames and 118 tokens; MusicBrainz: 2,000 of 1,442 and 1,513), lineage
+entries left out, then looks up 20,000 keys it holds and 20,000 it does not.
+Layouts:
+
+- the hitchhiker tree with keys held (16 bytes an entry, as built);
+- the same with 4-byte fragments of the key's hash (8 bytes an entry); a
+  comparison reads a record only when two fragments tie;
+- the same with keys named by position (4 bytes an entry and pivot):
+  every comparison reads the record;
+- extendible hashing of positions alone: a directory (13 bits in the slot,
+  then pages) routes by the hash's bits, so no pivot or key is stored; a
+  bucket is positions placed by more of the hash's bits, and a probe reads
+  each record it passes; with or without a byte of the hash beside each.
+
+**Results.**
+
+| | MusicBrainz: % of data | an append writes (its data: 484 KiB) | lookup: pages + records, hit / miss | 100×, pages held 64 appends |
+|---|---|---|---|---|
+| as built (no reuse) | 193% | 913 KiB | 4–5 + 0 | 140% (nothing reused) |
+| keys held, 16 B | 14.3% | 749 KiB | 5.8 + 0 / 6.0 + 0 | 14.4% |
+| **4-byte fragments, 8 B** | **6.9%** | **344 KiB** | **5.8 + 0 / 6.0 + 0** | **7.1%** |
+| keys by position, tree | 3.8% | 156 KiB | 4.8 + 71 / 5.0 + 73 | 3.6% |
+| hashed, positions, 4 KiB | 4.8% | 8,094 KiB | 1.1 + 2.2 / 1.1 + 4.9 | 36.0% |
+| hashed, positions, 1 KiB | 5.6% | 4,444 KiB | 2.0 + 1.9 / 2.0 + 3.8 | 14.4% |
+| hashed, positions, 512 B | 5.3% | 2,474 KiB | 2.0 + 1.7 / 2.0 + 2.9 | 14.1% |
+| hashed, positions and a byte, 1 KiB | 8.1% | 4,649 KiB | 2.0 + 1.4 / 2.0 + 1.2 | 26.1% |
+
+![The index with its pages reused](results/charts/2026-11-07-index-reuse/index-reused.png)
+
+![What an append writes to the index](results/charts/2026-11-07-index-reuse/index-writes.png)
+
+(Pages: index pages below the root, which is in the slot. Records:
+records read to compare a key. A hit reads its record anyway; the
+positions tree's count includes the root buffer's binary search, 13 of
+its 71, which a reader could do once a snapshot.)
+
+- **Reuse is the change.** The tree as built, unchanged but for reuse,
+  goes from 193% of the data to 14%, with about 1 MiB of pages free at any
+  time. The free list is the pages of the last append or two.
+- **Fragments halve it and keep the reads.** 8 bytes an entry, 6.9% on
+  MusicBrainz, 6.3% at 100×, and a lookup reads no record but the one it
+  finds. A lookup reads about six pages; the root is in the slot and the
+  next levels are few and hot, so a warm lookup misses on a leaf or two.
+- **Positions in a tree are smallest and unusable**: a binary search reads
+  a record per step, about 70 records a lookup.
+- **Positions hashed** are small (5%) and read one or two pages, but an
+  append scatters its entries over the buckets and rewrites each one it
+  touches: 5–17× the append's own data. A miss, which is what every new
+  token and block is when a writer looks for it, reads 3–5 records, each a
+  random page. With pages held longer, the hashed layouts grow with what
+  they rewrite (14–36% at 64 appends); the trees barely move.
+- Fragments do repeat part of a hash: 4 of the 32 bytes of a block's, and
+  4 bytes derived from a token's. The layouts that repeat nothing pay for
+  it in reads (the tree) or in writes (hashing).
+
+**Readers and reuse.** A page reachable from a snapshot was written by an
+append no later than the snapshot's. Reuse writes a later sequence into
+the page's header, with a checksum over the page. So a reader that reads a
+page stamped later than its snapshot, or whose checksum fails, knows the
+page was reused under it: it takes the newest slot and repeats the lookup.
+Only index pages are ever written over; frames and tokens are not, so a
+served node stays valid. No reader table, nothing shared between processes
+but the file. Holding pages longer than one append (`grace`) only makes a
+retry rarer.
+
+**Crashes.** With nothing synced, an OS crash can keep a reused page and
+lose the slot that made it free; the older slot's tree then reaches a page
+stamped later than itself, which a reader detects. The index can be built
+again from the records (frame headers carry hash and catalog, token
+records list their tokens). The alternative is a sync of the slot before
+its freed pages are reused, as LMDB does.
+
+**Decision (proposed).** The hitchhiker tree in 4 KiB pages, 8-byte
+entries (a 4-byte fragment of the key's hash, a 4-byte position in units
+of 16), pages reused from the next append, each page stamped with its
+sequence and a checksum that readers check. Lineage entries leave the
+index for a writer's cache.
+
 ## How to reproduce
 
 ```sh
@@ -1258,6 +1350,10 @@ DIALOG_ARCHIVE_INDEX=path/to/archive.dialog cargo test --release \
 DIALOG_INDEX_APPENDS=2000 DIALOG_INDEX_FRAMES=1442 DIALOG_INDEX_TOKENS=1513 \
   DIALOG_INDEX_LINEAGES=53000 cargo test --release -p dialog-archive-file \
   --lib write_amplification_of_a_file -- --ignored --nocapture
+
+# the index's layouts with pages reused, in memory
+cargo test --release -p dialog-archive-file --lib index_layouts -- \
+  --ignored --nocapture
 
 # tonk-team as a dataset (outside the repository), then its workload
 cargo run --release -p dialog-baseline --example tonk_dataset -- \
