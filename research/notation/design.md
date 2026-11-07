@@ -26,12 +26,12 @@ flowchart LR
 | Term | Spelling |
 |---|---|
 | Variable | `?b`, `?status`. It belongs to the one rule or question it appears in. |
-| Text | `"triage"`, or `"""…"""` for text that holds `"` or spans lines |
+| Text | `"triage"` |
 | Number | `16`, `0.5` |
-| Keyword | `:done`, `:text`, `:last`. Types, picks, layers and enumerated values are keywords. A keyword names the entity it spells with the colon moved: `:now` is `now:`. |
+| Keyword | `:done`, `:text`, `:last`. A keyword is an entity: `:done` is `done:`, with the colon in front so it is not read as a label. Keywords serve where other languages use them: types, picks, layers and the cases of a variant. |
 | Entity | a URI: `id:notebook/scratch`, `did:key:z6Mk…`, `tonk:notebook/edge` |
 | Record | `{xyz.bug/title "Crash" xyz.bug/author "ada"}`, `{"N1" id:notebook/scratch/1}` |
-| Vector | `[:todo :done]`, which as a type is an enumeration: one of these values |
+| Variant | `[:todo :done]`, a type whose value is one of these cases |
 | Name | `notebook/block`, the name of a concept, view or event |
 
 `;` starts a comment.
@@ -48,22 +48,43 @@ A call names a concept and passes its parameters. Every definition has exactly o
 
 A call may leave out any parameter whose definition says how to derive it. Today only the primary has such a rule, under [Entities](#entities).
 
+`is:` is a call's result. A call written in an argument's place stands for its `is:` value, through a fresh variable:
+
+```clj
+(bug/report (id {…}) title: "hello world")
+
+; is short for
+(id {…} is: ?bug)
+(bug/report ?bug title: "hello world")
+```
+
 A `!` after the name makes the call a write: `(bug/status! bug:01 is: :done)`.
 
 ## Documents
 
-A document is a set of top-level forms evaluated as one tick. The order of its forms does not matter. Every premise and every question reads `now`, so nothing in a document sees that document's own writes. A chain, where one write depends on reading another, takes a second document.
+A document is a set of top-level forms evaluated as one tick. The order of its forms does not matter.
+
+A form without `!` belongs to `now`, for this document only: a concept or rule defined without `!`, and a ground call, which asserts its facts into `now`. A form with `!` goes to `next`: it changes the replica, and the document does not see it. Every premise and every question reads `now`, so a document sees what it asserts and derives, but never what it writes with `!`.
+
+```clj
+(concept (bug ?bug title: ?title) …)
+(bug title: "Hello world")        ; asserted into now
+(bug ?bug title: ?title)          ; finds the Hello world bug
+```
+
+Neither the concept nor the bug reaches `next`. Written `(bug! title: "Hello world")` instead, the bug would be in `next` and the question would not find it, and the concept still would not be in `next`. A chain, where one write depends on reading another, takes a second document.
 
 The top-level forms are:
 
-- **a question**, a bare call such as `(bug/status ?b is: :done)`;
-- **a write**, a bare call with `!`;
+- **a question**, a call with a variable, such as `(bug/status ?b is: :done)`;
+- **an assertion**, a ground call without `!`, which holds in `now` for this document;
+- **a write**, a call with `!`;
 - **a rule**, `(rule …)`;
-- **a definition**: `concept!`, `rule!`, `view!` or `event!`.
+- **a definition**: `concept`, `rule`, `view` or `event`, with `!` to install it.
 
 ## Questions
 
-A bare call at the top of a document is a question. Its answer is the rows of variable bindings that match `now`. A parameter the question leaves out matches any value.
+A call with a variable is a question. Its answer is the rows of variable bindings that match `now`. A parameter the question leaves out matches any value.
 
 ## Writes
 
@@ -75,9 +96,9 @@ A bare call with `!` writes into `next`. It must be ground, except for an entity
 
 A write means the same as a rule with one `assert!` head and no `when`, so that longer form is never written.
 
-**Proposed.** A write through a concept that leaves out a value parameter leaves that attribute as it is. `(notebook/block! id:b1 source: "x")` changes the block's source and keeps its notebook.
+A write through a concept passes every parameter. Leaving one out is a compile error, not "keep what is there": on an entity that does not exist yet it would make a partial one. To change one attribute, write through a concept over just that attribute, such as `(block/source! id:b1 is: "x")`.
 
-**Proposed.** A retract through a concept that leaves out a parameter retracts every value of it.
+Whether there is a way to say "keep this one" explicitly, such as `(notebook/block! id:b1 source: "x" notebook: .)`, is open, and so is how a retract says "every value".
 
 ## Rules
 
@@ -140,9 +161,9 @@ A body line that names a stored attribute declares it: the stored name, the prim
 
 **Proposed.** The line is a call on the stored name. It replaces the `(the xyz.tonk.notebook/title of: ?of …)` spelling, and is what every reader prompt used from R1 on. What tells such a line apart from a call on another concept is open.
 
-The types used so far are `:text`, `:entity`, `:bytes`, `:natural`, `:float`, sized numbers such as `(:float 64)`, enumerations such as `[:todo :done]`, and the collections `(:sequence T)` and `(:dictionary T)`. A collection value is written as a record from key to element: `(notebook/entry! id:notebook/scratch is: {"N1" id:notebook/scratch/1})`.
+The types used so far are `:text`, `:entity`, `:bytes`, `:natural`, `:float`, sized numbers such as `(:float 64)`, variants such as `[:todo :done]`, and the collections `(:sequence T)` and `(:dictionary T)`. A collection value is written as a record from key to element: `(notebook/entry! id:notebook/scratch is: {"N1" id:notebook/scratch/1})`.
 
-The picks are `:last`, which keeps the latest claim, `:all`, which keeps every claim, and `:top`, which keeps the highest-ranked value of an enumeration.
+The picks are `:last`, which keeps the latest claim, `:all`, which keeps every claim, and `:top`, which keeps the highest-ranked case of a variant.
 
 An attribute line may also carry `layer:` (see [Layers](#layers)) and `role:`, the palette slot that a command's field fills.
 
@@ -154,6 +175,17 @@ A composite concept's body is a conjunction of attribute lines, concept calls an
 (concept! (notebook/block ?block notebook: ?n source: ?s)
   (block/notebook ?block is: ?n)
   (block/source ?block is: ?s))
+```
+
+Every variable in a body appears in the head. A body cannot reach through an entity it does not name.
+
+A concept's primary need not be the entity of the attributes it reads. Read from the value's side, an attribute gives the reverse relation:
+
+```clj
+(concept! (list/todo ?list todo: ?todo)
+  (xyz.todo/list ?todo is: ?list))
+
+(list/todo list:home todo: ?t)    ; every to-do on list:home
 ```
 
 A concept body holds no formulas, so every concept can be read and written. Formulas belong in rule bodies. A concept may not contain itself.
@@ -183,11 +215,11 @@ A concept's identity is its set of attributes. An attribute's identity is its st
 A write says which entity its facts land on in one of three ways:
 
 ```clj
-(bug! bug:7f3a status: :done)                                        ; 1. an entity, used as is
-(bug! {xyz.bug/title "Crash on save" xyz.bug/author "ada"}            ; 2. a record: the entity
-      status: :todo)                                                  ;    that record identifies
-(report! title: "Crash on save" author: "ada" status: :todo)          ; 3. left out: the digest
-                                                                      ;    of everything written
+(bug/status! bug:7f3a is: :done)                            ; 1. an entity, used as is
+(bug! {xyz.bug/title "Crash on save" xyz.bug/author "ada"}   ; 2. a record: the entity
+      title: "Crash on save" author: "ada" status: :todo)    ;    that record identifies
+(report! title: "Crash on save" author: "ada" status: :todo) ; 3. left out: the digest
+                                                             ;    of everything written
 ```
 
 1. **An entity** is used as given. This is how an update names what it changes.
@@ -266,7 +298,7 @@ A conflict is never an error. It is elected, as concurrent writes are, comparing
 - A deductive rule's value under `:last` succeeds the claim its body read (dialog #724, fixed by #725), so `(rule (assert (bug/status ?b is: :todo)) (when (bug/status ?b is: :triage)))` rewrites the status instead of standing beside it.
 - A cycle of rewrites converges, with the rewrites as concurrent candidates. A counter (`?n + 1`) does not converge.
 
-A pick is a choice of merge, which Bloom^L would call a lattice. `:all` is a set union and needs no order. `:top` over a ranked enumeration only moves up the ranking, so two devices that never synced agree once they do. `:last` needs an order across devices, which seventeen of nineteen readers in R15 asked about.
+A pick is a choice of merge, which Bloom^L would call a lattice. `:all` is a set union and needs no order. `:top` over a variant's ranked cases only moves up the ranking, so two devices that never synced agree once they do. `:last` needs an order across devices, which seventeen of nineteen readers in R15 asked about.
 
 ## Views, events and routes
 
@@ -276,9 +308,7 @@ A view attaches templates to a concept by facet:
 
 ```clj
 (view! notebook/block
-  show: {:directory """
-    <div class="notebook-block-row" subject={this} data-source={source}></div>
-    """})
+  show: {:directory "<div class='notebook-block-row' subject={this} data-source={source}></div>"})
 ```
 
 An event says how a platform event fills a command. Its `where` keys name command parameters, and its values are paths into the event:
@@ -317,8 +347,9 @@ Comparing the design with [Bloom](http://bloom-lang.net) settled three of the ch
 
 ## Open
 
+- How text spans lines or holds `"`. The sketches still write templates as `"""…"""`, which is not part of the notation.
+- How to ask a yes-or-no question. A ground call asserts, so `(bug bug:7f3a status: :done)` cannot ask whether the bug is done; `(bug bug:7f3a status: ?s)` can.
 - What a rule head that names no entity lands on. In R16, four of five readers of this spec put a sent notice on the to-do's own entity because no example shows another way; the readers of the shorter documents left it out. The obvious answer is the one writes have: the digest of the head's facts.
-- Whether a partial write through a concept, `(todo! todo:9c1e state: :done)`, is agreed. Two R16 readers stalled because it is marked Proposed.
 - Whether a rule that creates should only create. The R16 rule that asserts `state: :open` on every add reopens a done to-do that is added again; `(unless (todo ?t))` in its `when` would stop that.
 - Whether writing a record in place of an entity also writes the record's fields. In R15, fourteen of sixteen readers repeated `title:` and `author:` beside the record, so they read it as identity only.
 - Whether a record may use short keys inside a concept call, resolved to stored names before hashing, or only stored names.

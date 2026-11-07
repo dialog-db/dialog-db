@@ -10,7 +10,8 @@ What we tried, what it measured, and what we decided, newest last. The [idea](..
 - **Measured:** 249 readers over 15 rounds. Without a visible word, readers do not see a derivation (R1 `default` line 0/3, R13's six brace shapes 0/18). With one paragraph of spec, they do (R14 5/5, R15 16/16).
 - **Rejected on design grounds, though readers got them:** `=` in a head (constraint elsewhere), the `{title author} ?b` head (construction does not belong in a concept).
 - **R16:** the revised design, read from four ways of writing its spec, scored 297 of 300 points; every document's median was 15 of 15. The style of the spec did not matter at this difficulty; the examples did.
-- **Next:** decide what a rule head that names no entity lands on, and whether a partial write is agreed; then a harder round, with tasks no example in the documents shows.
+- **Settled after R16:** a write through a concept passes every parameter, and leaving one out is a compile error; a ground call without `!` asserts into the document's `now`; a call in an argument's place stands for its `is:` value.
+- **Next:** decide what a rule head that names no entity lands on; then a harder round, with tasks no example in the documents shows.
 - **Open:** whether a record in the entity's place writes its fields; key spelling inside records; `:last` across devices; optional parameters.
 
 ## Datasets
@@ -301,6 +302,23 @@ The failure bar holds: no document beat the spec's median. But that is a ceiling
 The `tutorial` broke the plan's promise that every document states the same facts: it had no list of types. Its readers guessed `:entity` right.
 
 **Decision.** Keep one document: the spec, which did as well as anything shorter. Write its examples as the forms readers should copy, because they do, and show every form a reader will need, including a premise on a stored attribute. Two questions go to the maintainer: what a rule head that names no entity lands on, and whether a partial write through a concept is agreed. Telling documents apart takes harder tasks, with no worked example to copy.
+
+## 2026-11-07 — The maintainer's corrections to the design
+
+**Question.** Reading the revised design, what did the maintainer correct?
+
+**Method.** Review of `design.md`, not a measurement.
+
+**Results.**
+- `"""…"""` is not part of the notation. How text spans lines or holds `"` is open; the sketches still use it for templates.
+- A keyword is an entity, spelled with the colon in front (`:done` is `done:`) so it is not read as a label.
+- `[:todo :done]` is a variant type, not a vector.
+- `is:` is a call's result: `(bug/report (id {…}) title: "hello world")` is short for `(id {…} is: ?bug)` and `(bug/report ?bug title: "hello world")`.
+- A document sees what it asserts in `now`. A document-local concept and a ground call without `!` are facts of `now`, which the document's questions find; neither reaches `next`. A call with `!` reaches `next`, and the document's questions do not see it. The design had said a document never sees its own writes, which read as if it saw nothing it states.
+- A write through a concept that leaves out a parameter is a compile error, not "keep what is there". On an entity that does not exist yet it would make a partial one. A one-attribute change goes through a concept over that attribute; an explicit "keep" marker such as `notebook: .` is open.
+- Every variable in a concept's body appears in its head, and the design shows a reverse relation.
+
+**Decision.** All taken into the design. R16's item 5 expected the partial write `(todo! todo:9c1e state: :done)`, which is now a compile error; all 20 readers wrote it, so it is the spelling readers reach for, and the error is what will catch it. R16's scores stand as scored under its plan.
 
 ## How to reproduce
 
