@@ -14,6 +14,40 @@ says how to cut a release.
 
 ## Unreleased
 
+### Two claims that stand equal are told apart by the hash of their values
+
+[#PR](https://github.com/dialog-db/dialog-db/pull/PR)
+
+A cell read under `last` elects its newest claim: the greater standing
+(the version, then the cause, then the succession). Two claims stand
+equal when one revision wrote both under one cause, which is what two
+writes to one cell in one transaction are. Between those, the election
+fell to the values and the greater won. It now falls to the hash of each
+value's identity key (`Value::tiebreak`), the greater hash winning. Every
+place that elects does the same: the tree, a commit's settlement, a
+concept read, and `top` among values of one rank.
+
+What this changes for you:
+
+- Where one transaction writes two values to a cell under `last`, or
+  under `top` at one rank, the value a read returns may change: it is the
+  one whose hash is greater, not the greater value. Claims at different
+  standings, which is every concurrent edit between revisions, elect as
+  before.
+- `max` and `min` elect as before: by value, then between equal values
+  by standing. Equal values hash alike, so the hash never decides there.
+- Replicas on releases either side of this one can show different values
+  for such a cell. Nothing a replica stores is rewritten, and the claims
+  are the same on both; only which one a read returns differs.
+- `Value::tiebreak` is new.
+
+Why: a tie broken by value favours some values over others, so a writer
+can choose the value that wins (the greater number, `true` over `false`).
+The hash favours none, as the version's hash already does between
+concurrent revisions. It came up while designing record values, whose
+values all share one version, so every tie among them reaches this rule
+([#748](https://github.com/dialog-db/dialog-db/pull/748)).
+
 ### A file store's write lock is never taken by two writers at once
 
 [#741](https://github.com/dialog-db/dialog-db/pull/741), on [#723](https://github.com/dialog-db/dialog-db/pull/723)
@@ -1672,9 +1706,9 @@ Why: numbers are one band and a rule compiles against types; what the body can b
   see what a flagged cell should hold, replay its writes one per commit
   on a scratch branch and compare. One difference is not the bug: when a
   choosing write lands on a cell holding two claims of its own
-  transaction, the two stand equal and the greater value is elected, so
-  one transaction and one commit per write can end differently, before this
-  release and after it.
+  transaction, the two stand equal and the value with the greater hash
+  is elected, so one transaction and one commit per write can end
+  differently, before this release and after it.
 - Nothing a replica stores or syncs is rewritten. A stored rule that no longer compiles under the head check (one that wrote a possibly negative integer into a `natural:` field, or a float into an `integer:` field) is held inert by `Branch::commit`, as any rule that fails to hydrate is: it stops firing and does not fail commits. Re-evaluate such a rule with a guard or a rounding formula, or widen the field, to have it fire again.
 
 ### A number binds a typed rule variable as the variable's type reads it
