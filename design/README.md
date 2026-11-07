@@ -55,6 +55,7 @@ Backtracking moves a topic to an earlier phase and says so in its journal.
 
 ## Topics
 
-- [The tree reads nodes beside the capability system](tree-node-reads.md):
-  **Describing.** How a tree reads a node goes through a cache and a node
-  source taken from the environment's `Holds`, beside the `Load` command.
+- [The search tree's concerns are not expressed as capabilities](tree-node-reads.md):
+  **Delimiting.** The tree does a provider's work (finding a cache, decoding,
+  keeping nodes) beside the `Load` it performs, so caches go missing or are
+  skipped, and a store with its own node form needs a side channel.

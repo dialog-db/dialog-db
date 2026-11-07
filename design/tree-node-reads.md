@@ -1,6 +1,6 @@
-# The tree reads nodes beside the capability system
+# The search tree's concerns are not expressed as capabilities
 
-Phase: **Describing.** See the [design index](README.md) for what the
+Phase: **Delimiting.** See the [design index](README.md) for what the
 phases mean, and the [journal](tree-node-reads/journal.md) for where the
 topic stands.
 
@@ -38,14 +38,19 @@ engine's formula cache, the repository's caches and the network's routes.
 
 ## Problem
 
-*Draft, not yet accepted.* Whether a tree read is cached depends on code
-beside the read rather than on what answers it: the environment owns the
-node cache's memory, but the tree finds the cache itself, through a lookup
-that may come back empty, and fills it itself, and other code fills it
-again its own way. So a read can run against an environment that holds no
-cache without anything failing, a new read path can skip the cache by
-loading and decoding for itself, and a store that keeps nodes in a form of
-its own (the single file's rows) has no way to answer a read but beside it.
-Each new environment or read path has reopened one of these, and fixing
-them has kept falling to the maintainer.
+*Draft, not yet accepted.* The search tree was written before dialog's
+capability model and was only partly moved onto it, so what the tree needs
+from the world is not expressed as capabilities it invokes. It performs
+`Load` for bytes, then does a provider's work itself: finds a cache through
+a lookup that may come back empty, checks, decodes and keeps nodes, and
+other code keeps them again its own way. Concerns that belong to whoever
+answers a read (where a node is kept, in what form, whether it is
+remembered) are decided in the tree or beside it. So an environment can
+lack a cache without anything failing, a read path can skip the cache by
+loading for itself, and a store that keeps nodes in a form of its own (the
+single file's rows) can answer only through a side channel. Each new
+environment, read path or store has reopened one of these, and fixing them
+has kept falling to the maintainer.
 
+*Proposed scope:* the search tree's concerns. The formula cache and the
+repository's caches, kept through `Holds` the same way, are sibling topics.

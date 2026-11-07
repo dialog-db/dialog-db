@@ -4,8 +4,8 @@
 
 |  | Understanding | Activity |
 |---|---|---|
-| **Status** | *What do we know?* How a tree reads a node on main and on #733. The maintainer's objective: the environment is where every cache lives, so it can be passed, evicted and reused across sessions, and nothing caches or skips caching elsewhere. Main moved toward that in three steps (#730, #735, #742), but the cache is still optional (an environment that keeps nothing reads uncached, silently), and it is reached from two places (the tree's `Accessor`, the query session's `Load` provider) while `Load` itself is uncached. | *Where are we at?* Diagnosing: from the feature as asked to the problem underneath; the maintainer's account is backed by main's history. |
-| **Agenda** | *What do we need to know?* What "the environment is a cache" means: one cache, or the home of every cache (nodes, blocks, spilled values, rules, formulas). Whether a cache that is optional is the failure, or caching beside the capability that loads. Whether in-place reads are worth an interface at all (open hypothesis). | *Where are we going?* Delimiting: a problem statement with no remedy in it. |
+| **Status** | *What do we know?* How a tree reads a node on main and on #733. The maintainer's objective: the environment is where every cache lives, so it can be passed, evicted and reused across sessions, and nothing caches or skips caching elsewhere. Main moved toward that in three steps (#730, #735, #742), but the cache is still optional (an environment that keeps nothing reads uncached, silently), and it is reached from two places (the tree's `Accessor`, the query session's `Load` provider) while `Load` itself is uncached. | *Where are we at?* Delimiting: the cause is named (the tree predates the capability model and its transition is partial, so its concerns are not expressed as capabilities); the problem statement is being cut to scope. |
+| **Agenda** | *What do we need to know?* Which concerns are the tree's (to become capabilities it invokes) and which are a provider's; whether writes (persist) are in scope with reads; whether other partial transitions (formula cache, repository caches) are this topic or siblings. Open hypotheses: policies as requests, the per-read cost. | *Where are we going?* Delimiting, then Direction: use cases from the tree's concerns, and approaches to express them. |
 
 ## 2026-11-07, Describing: what reading a node involves today
 
@@ -75,4 +75,27 @@ measurable).
 
 **Decided.** Not decided. A problem statement is drafted in the top story
 for the maintainer to accept or cut.
+
+## 2026-11-07, Diagnosing to Delimiting: the cause, and the tree's concerns
+
+**Asked.** Does the drafted problem statement state the problem, and is it
+only about tree nodes? Answer as given: the whole design is an
+object-capability model and an effect system, all I/O through effects, the
+environment their provider. The original implementation predated the
+capability model, and the transition to it was not finished, so some code
+is designed for it and some around it. The point is separation of
+concerns: what is the tree's concern should be expressed as capabilities
+it invokes, and providers provide them.
+
+**Learned.** The cause is the unfinished transition, not caching as such:
+the cache problems are what a tree whose concerns are not expressed as
+capabilities looks like. Caching, decoding and the single file's rows land
+in the tree, or beside it, because the tree has no capability to ask for
+what it needs. The same partial transition shows elsewhere (formula cache,
+repository caches), which makes scope a question.
+
+**Decided.** The problem statement is rewritten around separation of
+concerns. Proposed scope, not yet accepted: this topic covers the search
+tree's concerns; the formula cache and the repository's caches are sibling
+topics that would follow its answer.
 
