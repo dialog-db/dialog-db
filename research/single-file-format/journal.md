@@ -1041,6 +1041,38 @@ names. The attributes counted from the fact log.
 
 **Decision.** Attributes stay one token.
 
+## 2026-11-07: frame headers, and where tokens sit
+
+**Question.** What do frame headers cost, and would keeping tokens
+together in a region of their own (rather than in a record with each
+append's frames) make a node's read touch fewer pages?
+
+**Method.** On the MusicBrainz file, every frame's header measured, and
+for every 97th node the 4 KiB pages its tokens sit on, where they are and
+if every token were packed in id order (aligned to 16), as a region of
+their own would hold them.
+
+**Results.**
+
+- Headers are 87 MiB of 473 MiB of frames, 53 bytes a frame: the catalog's
+  name (6), the node's hash (32), its kind, base, manifest token, and its
+  lineage (four token ids). The lineage is the first row's tokens, already
+  in the rows; the catalog could be a number; a manifest is the same for
+  every node of a tree. The hash stays: a parent read in place takes its
+  child's hash from the child's header.
+- A node's read touches about 498 pages of tokens where they are, 494
+  packed in id order: a region of their own changes nothing. A node's
+  tokens were first written across the whole history, and any order by
+  time keeps them apart. (Packed densely, offsets would be nearly as small
+  as ids, but an append-only file has no dense region to keep.)
+- 498 pages, about 2 MiB, for one node (these average 71 KB as blocks):
+  read through a page cache, as the web would, a cold read of a large node
+  costs that. Smaller nodes, or tokens ordered by what reads them together
+  (a rewrite, not an append), are what would change it.
+
+**Decision.** No token region. Frame headers lose the lineage, name the
+catalog by number, and the manifest by tree, in the format change.
+
 ## How to reproduce
 
 ```sh
