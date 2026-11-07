@@ -68,6 +68,7 @@ impl OpenBranch {
             induction,
             node_cache: caches.nodes,
             spill_cache: caches.spills,
+            cache_limits: caches.limits,
             rule_cache: caches.rules,
             plan_cache: caches.plans,
             causality_cache: caches.causality,

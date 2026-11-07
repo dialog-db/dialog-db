@@ -67,6 +67,52 @@ compare-and-swap, and the writes it loses are reported as successes, so
 nothing downstream can notice or repair them. The lock stays a file
 rather than an OS lock (`flock`), which errors or is not enforced on
 network and FUSE filesystems that stores live on.
+### An environment bounds every cache it holds, and spilled values share one budget
+
+[#742](https://github.com/dialog-db/dialog-db/pull/742)
+
+`HeldCaches::builder()` returns a `CacheBudget` that sets the size of
+every cache an environment holds for its repositories: tree nodes and
+spilled values in bytes, the rest in entries. Spilled values are now kept
+in one cache for the whole environment, under one byte budget, instead of
+one 8 MiB cache per repository. A snapshot taken through the environment
+and the caches a transaction batch keeps to itself take their sizes from
+the same budget. Nothing configured, every cache keeps the size it had.
+
+What this changes for you:
+
+- `HeldCaches::builder().nodes(bytes).spills(bytes).entries(n).rules(n)
+  .plans(n).formulas(n).build()` builds caches that keep to each cap.
+  `entries` bounds each repository's causal verdicts, contexts, revision
+  records and rewritten trees; `rules` bounds the shared rule content
+  (heads, bodies, selecting rules) and `plans` the query plans. `HeldCaches::new()` and
+  `with_budget(bytes)` are shorthands for the defaults
+  (`CacheBudget::default()`), and `HeldCaches::limits()` reads the budget
+  back.
+- Memory for spilled values no longer grows with the number of open
+  repositories: the default 8 MiB (`SPILL_CACHE_BUDGET`) is now the total.
+  `HeldCaches::release(repository)` no longer drops spilled values, since
+  one cache holds them for every repository by content; they age out under
+  the budget, and `clear()` drops them.
+- `HeldCaches::bytes()` now counts spilled values as well as tree nodes.
+  `spill_bytes()` reads the spilled share, and `entries()` counts what the
+  entry-bounded caches hold (a count, not bytes).
+- `Repository::snapshot_in(env, revision)` takes a cold snapshot sized by
+  the caches `env` holds, reading spilled values, rule content and plans
+  through them. `Repository::snapshot(revision)` keeps the default sizes.
+- A cache bounded by entries now holds at most the capacity it was given
+  on native targets, however small. Below 2048 entries a sharded cache
+  used to keep at least one entry per shard, up to 16, so a capacity under
+  16 held more than asked. The default sizes keep all 16 shards.
+- New accessors: `CausalityCache::with_capacity`, `ContextCache::with_capacity`,
+  `PlanCache::with_capacity` (with `PLAN_CACHE_CAPACITY`), `len` on these and
+  on `dialog_search_tree::Cache` (with `capacity` and the now public
+  `CACHE_CAPACITY`), and `budget`, `bytes`, `len` and `clear` on `SpillCache`.
+
+Why: an embedder running in a fixed memory limit, such as a Cloudflare
+Durable Object with 128 MB for everything, could bound only the tree
+nodes. The spill budget multiplied with each repository opened, and every
+other cache was fixed when it was made (#706).
 
 ### A repository an earlier release left opens, whatever layout its registry is in
 
@@ -116,7 +162,6 @@ What this changes for you:
 
 Why: a dependency that can only ever be one version across a whole wasm
 module should not be pinned by a library that uses one call of it.
-
 
 ### A pull or a push that meets another revision under its own head's version is refused
 
@@ -1087,6 +1132,10 @@ has a tree to canonicalize even when the link itself wrote nothing.
 
 #### Compatibility and migration
 
+- Bounding the caches changes nothing stored or synced: caches hold only
+  what a replica can read again, nothing is rewritten on upgrade, and
+  releases on either side read what the other writes. Nothing for an
+  embedder to run.
 - Nothing stored or synced changes for trees reading through `Load`:
   blocks, nodes, spilled values and their hashes are the same bytes,
   `Get`'s wire shape is unchanged, nothing is rewritten on upgrade, and an

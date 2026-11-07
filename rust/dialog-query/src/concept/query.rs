@@ -11,7 +11,7 @@ mod plan_cache;
 /// Per-concept rule management with adornment-keyed plan caching.
 pub mod rules;
 
-pub use plan_cache::PlanCache;
+pub use plan_cache::{PLAN_CACHE_CAPACITY, PlanCache};
 pub use rules::{ConceptRules, Exact, Installed};
 
 use std::fmt;

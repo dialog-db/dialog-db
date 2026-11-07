@@ -54,6 +54,25 @@ impl CausalityCache {
         Self::default()
     }
 
+    /// A fresh cache remembering up to `capacity` verdicts of each kind:
+    /// causality between claims, and common ancestors of versions.
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            claims: Cache::with_capacity(capacity),
+            ancestors: Cache::with_capacity(capacity),
+        }
+    }
+
+    /// How many verdicts the cache remembers now, of both kinds.
+    pub fn len(&self) -> usize {
+        self.claims.len() + self.ancestors.len()
+    }
+
+    /// Whether the cache remembers nothing.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     /// [`causality`], remembering the verdict: the first call for a pair
     /// of claims walks the DAG, every later call — in either argument
     /// order — answers from memory.
