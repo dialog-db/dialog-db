@@ -139,3 +139,23 @@ made; the `unsafe` contract (`NodeRows` vouching for its hash) goes. This
 rests on an open hypothesis, that the hashing is cheap next to a cold
 read; the bench measures it.
 
+## 2026-11-07, Delimiting: the invariant moves to the provider (reverses the last entry)
+
+**Asked.** No question asked; the maintainer reconsidered the last
+decision once hashing a rows node was shown to mean running the encoder on
+every miss: "we trust the provider, and then it's up to the provider to
+verify that what they serve corresponds."
+
+**Learned.** Two claims in the ledger now conflict: the type-only invariant
+and trusting the provider. The maintainer chose the second; the first is
+marked withdrawn.
+
+**Decided.** Reverses the last entry. The node type offers a constructor
+for providers that vouch for a node (today's `unsafe` `NodeRows`, kept);
+the provider that makes a node is responsible for having verified it.
+Proposed reading, to be confirmed by the maintainer: bytes from any store
+or remote are still hashed by the provider that decodes them; only a
+provider that keeps nodes in its own form (the single file, verifying at
+write and checksumming records) vouches without hashing at read time; what
+goes uncaught is the file changed on disk in a way its checksums miss.
+
