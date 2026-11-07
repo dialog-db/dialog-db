@@ -55,4 +55,6 @@ Backtracking moves a topic to an earlier phase and says so in its journal.
 
 ## Topics
 
-None yet.
+- [The tree reads nodes beside the capability system](tree-node-reads.md):
+  **Describing.** How a tree reads a node goes through a cache and a node
+  source taken from the environment's `Holds`, beside the `Load` command.
