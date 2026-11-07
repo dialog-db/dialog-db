@@ -5,7 +5,7 @@
 |  | Understanding | Activity |
 |---|---|---|
 | **Status** | *What do we know?* How a tree reads a node on main and on #733. The maintainer's objective: the environment is where every cache lives, so it can be passed, evicted and reused across sessions, and nothing caches or skips caching elsewhere. Main moved toward that in three steps (#730, #735, #742), but the cache is still optional (an environment that keeps nothing reads uncached, silently), and it is reached from two places (the tree's `Accessor`, the query session's `Load` provider) while `Load` itself is uncached. | *Where are we at?* Delimiting: the cause is named (the tree predates the capability model and its transition is partial, so its concerns are not expressed as capabilities); the problem statement is being cut to scope. |
-| **Agenda** | *What do we need to know?* Whether the tree's remaining dealings are its concerns or a provider's: memory-only reads, read-ahead, reads without hydration (5-7), and persist's blocks and kept nodes (8-9); whether the scope (the tree only) is accepted. Open hypotheses: policies as requests, the per-read cost, the `hash()` inventory, hashing a rows node on demand. For Design: the requested name and the actual hash as one type or two. | *Where are we going?* Delimiting, then Direction: use cases from the tree's concerns, and approaches to express them. |
+| **Agenda** | *What do we need to know?* Whether the tree's remaining dealings are its concerns or a provider's: memory-only reads, read-ahead, reads without hydration (5-7), and persist's blocks and kept nodes (8-9); whether the scope (the tree only) is accepted. Open hypotheses: policies as requests, the per-read cost, the `hash()` inventory, hashing a rows node on demand. For Design: the requested name and the actual hash as one type or two. Whether a mapped file's page cache, which the environment cannot own or evict, is an accepted exception to "the environment is the cache". | *Where are we going?* Delimiting, then Direction: use cases from the tree's concerns, and approaches to express them. |
 
 ## 2026-11-07, Describing: what reading a node involves today
 
@@ -254,4 +254,23 @@ a provider's caching and needs no request.
 **Decided.** Proposed, for the maintainer: the optimistic read is dropped;
 the two sites become a returned value and an ordinary read. Rests on an
 open hypothesis (verdicts unchanged, cost within the gate).
+
+## 2026-11-07, Delimiting: what "in memory" means for a mapped file
+
+**Asked.** With the single file memory-mapped, does a store answer "yes, I
+have it" or "no" to a memory-only read?
+
+**Learned.** Neither answer is grounded: rows are addressable at once, but
+touching them may page-fault, a synchronous wait the operating system
+decides and nothing reveals beforehand. "Yes for everything" makes the
+optimistic read a local read that may block on disk; "yes for what I built
+recently" makes it the store's bookkeeping. "In memory" is a property of a
+provider's storage that not even a mapping store fully knows, which
+supports dropping the request. And a mapping store keeps a cache the
+environment does not own: the page cache, outside its budget and its
+`release`, visible only in resident memory.
+
+**Decided.** Nothing new beyond the proposal to drop the optimistic read,
+which this strengthens. The page cache's place under "the environment is
+the cache" is on the agenda.
 
