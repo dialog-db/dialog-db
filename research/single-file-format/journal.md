@@ -561,6 +561,50 @@ what a commit, a pull and a push spend in the archive (splitting blocks
 into rows, encoding frames against predecessors, verifying them, and
 building blocks back for a push).
 
+## 2026-11-07 — Where the write side goes
+
+**Question.** Commands, pulls and pushes cost more on the file than on
+main. Where does the time go?
+
+**Method.** The archive times its phases and reports them when it closes
+(`DIALOG_ARCHIVE_TIMINGS`); one six-member run on the file, then call
+stacks of a sample of blocks built for `Get`, then the archive's
+`split_costs` profile over a member's file, then callgrind over it.
+
+**Results.**
+
+- Nodes were not served in place at all in `tonk_bench`: nothing
+  registered the node source. Registered, it served 30 nodes; the rest
+  of the 1,541 blocks built back for `Get`s came from a push's tree diff,
+  whose boundary side reads the local archive by `Get` on purpose (it
+  must be the archive's own word, never the cache or a remote). The node
+  source is the archive's own word, so that side now asks it first:
+  1,574 nodes served (12 µs each), 751 blocks still built, all of them a
+  push producing the bytes it uploads. The source also reads appends it
+  has not seen before declining a node, as a `Get` does.
+- Splitting a node into rows (per node, member 1's file): 153 µs, 57% of
+  it serializing each value with `rkyv::to_bytes`, a fresh buffer and
+  arena per value. One kept per thread: 74 µs. Same bytes.
+- Verifying a frame (decoding it back, rebuilding the block, comparing):
+  114 µs per node. Callgrind: the tree's own column encoder about 21%,
+  turning rows back into entries (keys joined from tokens, every value
+  deserialized to an owned copy) 25-30%, assembling the body about 9%.
+  It is the block encoded a second time. Validating datum tokens once
+  instead of each time changed nothing and was reverted.
+- An append, whole: 0.44 ms on average (1,925 appends, 3,003 blocks, for
+  member 1 over setup, join and the week), of which split 304 ms, verify
+  425 ms, encode 32 ms, write 7 ms; about 80 ms outside the phases.
+- Six members, three interleaved runs, one sitting
+  ([results](results/2026-11-07b-tonk-1x-main.md)): reads level with
+  main or better; per operation over main, a command +4.2 ms, a pull
+  +16.3 ms, a push +11.6 ms, close to the last sitting's deltas. `fs` on
+  the branch level with main throughout.
+
+**Decision.** Verify is now the largest write cost and a judgement call
+(what guarantees a frame gives), put to the maintainer.
+
+Commits: `9887124`, `b166bcb`, `805c792`.
+
 ## How to reproduce
 
 ```sh
