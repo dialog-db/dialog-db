@@ -526,6 +526,41 @@ step.
 
 Commits: `a17589b`.
 
+## 2026-11-07 — The team of six again, after the read-path fix
+
+**Question.** With the per-read lookup gone and the node back to main's
+size, where does the file stand against main on the six-member bench?
+
+**Method.** As on 2026-11-06, against origin/main `9b98395`; three runs
+of each of `main/fs`, `fs` and `file`, interleaved, one sitting; dataset
+`3ea7f49117155b92` (tonk-shaped 1×, generated from the schema fixture).
+[results/2026-11-07-tonk-1x-main.md](results/2026-11-07-tonk-1x-main.md).
+
+**Results** (median of three; ratios against main):
+
+| | main/fs | fs | file | file ÷ main |
+|---|---|---|---|---|
+| a member's replica after the week | 169.8 MiB | 169.8 MiB | 1.53 MiB | 1/111 |
+| `v2/issue`, warm | 36.3 ms | 38.3 ms | 37.4 ms | 1.03 |
+| `v2/issue`, cold (just joined) | 69.7 ms | 71.0 ms | 66.7 ms | 0.96 |
+| an issue's detail, cold | 2.69 ms | 2.55 ms | 2.04 ms | 0.76 |
+| a command, rules included | 13.5 ms | 14.3 ms | 16.4 ms | 1.22 |
+| pull, in a round | 40.2 ms | 44.0 ms | 56.9 ms | 1.41 |
+| push, in a round | 19.8 ms | 22.7 ms | 30.3 ms | 1.53 |
+| `v2/issue` poll after a pull | 19.0 ms | 19.6 ms | 20.8 ms | 1.10 |
+
+- `fs` on the branch is now within the run-to-run spread of main on reads
+  (it was 5-12% behind before the fix).
+- The file reads level with main or faster, cold reads of a replica that
+  just joined most of all.
+- What the file costs is all on the write side: a commit 1.22×, a pull
+  1.41×, a push 1.53×.
+
+**Decision.** Reads are done for now. The next work is the write path:
+what a commit, a pull and a push spend in the archive (splitting blocks
+into rows, encoding frames against predecessors, verifying them, and
+building blocks back for a push).
+
 ## How to reproduce
 
 ```sh
