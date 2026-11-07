@@ -1,10 +1,12 @@
 use dialog_artifacts::tree::{
     ArtifactNode, ArtifactNodeCache, ArtifactPreload, ArtifactRead, ArtifactWrite,
 };
+use dialog_artifacts::{Datum, Key as ArtifactKey, State};
 use dialog_effects::archive::ArchiveError;
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::blob::Load as BlobLoad;
 use dialog_search_tree::DialogSearchTreeError;
+use dialog_search_tree::nodes::{Ready, held_node};
 use std::any::{Any, type_name};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -391,6 +393,13 @@ fn write_nodes<P: CountedLoads>(env: &Counting<P>, write: ArtifactWrite) -> Writ
 
 fn load_blob<P: CountedLoads>(env: &Counting<P>, load: BlobLoad) -> LoadFuture<'_> {
     Box::pin(crate::load_blob_or_hydrate(env, load))
+}
+
+/// A node the env holds is at hand, uncounted: no block is read for it.
+impl<P: dialog_common::Holds> Ready<ArtifactKey, State<Datum>> for Counting<P> {
+    fn ready(&self, read: &ArtifactRead) -> Option<ArtifactNode> {
+        held_node(self, read)
+    }
 }
 
 impl<P: dialog_common::Holds> dialog_common::Holds for Counting<P> {

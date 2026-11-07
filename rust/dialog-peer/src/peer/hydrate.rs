@@ -27,7 +27,9 @@
 //! by priority (demand before speculative warming), then arrival. The
 //! readers keep no widths of their own.
 
+use dialog_artifacts::{Datum, Key as ArtifactKey, State};
 use dialog_effects::blob::Load as BlobLoad;
+use dialog_search_tree::nodes::{Ready, held_node};
 use std::sync::Arc;
 
 use dialog_capability::{Fork, Provider};
@@ -103,6 +105,13 @@ where
 // peer answers from the node cache it holds, its storage (the mounted
 // space's archive, in whatever form it keeps nodes), or a hydration from
 // the routes the subject's branches registered.
+/// A node the peer's cache holds is at hand.
+impl<S: Clone, M: Mode> Ready<ArtifactKey, State<Datum>> for Peer<S, M> {
+    fn ready(&self, read: &ArtifactRead) -> Option<ArtifactNode> {
+        held_node(self, read)
+    }
+}
+
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl<S, M: Mode> Provider<ArtifactRead> for Peer<S, M>

@@ -51,13 +51,13 @@ Three layers:
 
   | request | means | replaced |
   |---|---|---|
-  | `Read { catalog, name, priority, local }` | the node a name names, from anywhere (may hydrate), or from this replica only when `local` | `Accessor::load_node` / `get_node`, the free `load_node`, `Reading { local: true }` (`Load::locally`), the `Get` a difference's boundary side performed |
+  | `Read { catalog, name, priority, local }` | the node a name names, from anywhere (may hydrate), or from this replica only when `local`; what the environment holds already answers at once (`Ready`) | `Accessor::load_node` / `get_node`, the free `load_node`, `Reading { local: true }` (`Load::locally`), the `Get` a difference's boundary side performed, `Accessor::cached` |
   | `Preload { catalog, name, priority }` | make this node cheap to read soon; returns nothing | `Accessor::warm`, `Accessor::keeps` |
   | `Write { catalog, nodes }` | the nodes a persist made; the provider stores them and keeps them readable | the `NodeCache::of(..).insert` in persist, `Import` and `forget` in `archive::persist` |
 
   `Nodes<Key, Value>` is the bound a tree operation puts on its environment:
-  `Provider<Read> + Provider<Preload> + ConditionalSync`. `Holds`, `Load`
-  and `Get` have left every tree bound.
+  `Provider<Read> + Provider<Preload> + Ready + ConditionalSync`. `Holds`,
+  `Load` and `Get` have left every tree bound.
 
 **Who answers.** A store answers at the layer it keeps nodes in:
 `Volatile`, `FileSystem` and `IndexedDb` through the translation layer, in
@@ -87,10 +87,19 @@ every block a tree reads is still tallied.
 **Caching** is the environment's. The cache a tree used to look up is found
 by the environment's provider (`NodeCache::of(env, subject)`, a `Holds`
 lookup the environment makes of itself), once per node read rather than
-once per operation. The plan flagged this as the cost to measure before
-moving every caller; the journal records the measurement. Nothing outside
-the environment names a cache, so an environment without one reads
-uncached in exactly one place, its own provider, and the tree cannot tell.
+once per operation. Nothing outside the environment names a cache, so an
+environment without one reads uncached in exactly one place, its own
+provider, and the tree cannot tell.
+
+**Dispatch.** Performing a command through `Provider` boxes a future, which
+a node the environment already holds does not need. So a request's
+`perform` first asks the environment what it can answer at once
+(`nodes::Ready`: the node it holds in memory, or nothing) and performs the
+command only for the rest; a preload of a node already held does nothing.
+The tree still asks one way and awaits either way. The journal's two
+Building entries have the measurement before and after: without this, the
+point-read scenarios paid 2 to 4% for one boxed future and one cache lookup
+per node read; with it they are within 0.4% of main.
 
 **A node's hash** is still the hash of its block, and on main the two
 types the plan weighed (a served node and a verified node) are not needed:
@@ -207,8 +216,10 @@ environment's way to find its own cache.
 
 - Step 2, when #733 rebases: the enum, the lazy hash, the `hash()`
   inventory.
-- Whether the per-read cache lookup should become a field of the peer
-  (found once, at construction) rather than a `Holds` lookup; the
-  measurement says whether it is worth it.
+- Whether the per-read cache lookup (about 200 instructions, what a hit
+  costs now) should become a field of the peer, found once at
+  construction, rather than a `Holds` lookup. `HeldCaches::hold` can
+  replace the held cache after the peer is built, so the field would have
+  to be the source of truth.
 - A mapped file's page cache is a cache the environment cannot own or
   release; out of scope here and noted in the [claims](claims.md).

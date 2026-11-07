@@ -470,3 +470,67 @@ as a field found at construction instead of looking it up per read.
 hold its node cache as a field found at construction instead of looking it
 up per read.
 
+## 2026-11-07, Building: the dispatch cost, and what it was
+
+**Asked.** The maintainer: why exactly did the point reads regress, and
+can it be avoided?
+
+**Learned.** Not from reading more: every counter was unchanged. From how
+a read crossed the environment boundary. `read-point`, about 1,600 node
+reads, under callgrind:
+
+| per node read, roughly | instructions | cause |
+|---|--:|---|
+| allocate, move and free a boxed future | ~250 | `Provider::execute` is `async_trait`: every call heap-allocates a `Box<dyn Future>`, copies the state machine in and frees it. On a hit the future never suspends. A query's read crossed two such boundaries: the tree into `QueryEnv`, and `QueryEnv` into the erased `dyn Capabilities`. |
+| find the cache | ~200 | `NodeCache::of` per read: the `Holdings` mutex, a 45-byte key hashed, the map probed, the `Arc` cloned, the scope computed. The accessor did it once per operation. |
+| the dispatch layers | ~100 | `Metered`'s downcasts, the `through_*` nesting, drop glue. |
+
+On main a hit was a direct `get_cached` inside the tree's own future.
+The regression was the price of crossing an `async_trait` boundary per
+node, not of the separation: the design says what crosses (a node
+request), and `async_trait` plus `dyn` erasure decided how.
+
+**Decided.** The maintainer chose the first of the three ways out: a
+synchronous answer path on the request. `nodes::Ready` is what an
+environment can answer at once (a node it holds in memory, or nothing),
+and `Read::perform` asks it before performing the boxed command;
+`Preload::perform` asks it and does nothing for a node already held.
+The tree still asks one way and awaits either way, so this is not the
+optimistic read that was dropped: a miss changes nothing the tree does.
+Every environment answers: the peer, the walk, the metering and counting
+harnesses and the test environments from the cache they hold
+(`NodeCache::held_for`, which makes no cache); the query session for a
+wildcard read from each line in turn; the batch overlay with a staged
+node first; a store with nothing, a space with its archive's answer, a
+storage with its space's. The pre-check inside the translation layer
+stays for environments reached through `execute`.
+
+**Measured.** Same toolchain, same main sweep, callgrind:
+
+| scenario | main | branch | Δ |
+|---|--:|--:|--:|
+| commit-batch | 322,565,708 | 316,523,199 | -1.9% |
+| commit-hot-key | 197,194,160 | 196,030,823 | -0.6% |
+| commit-rows | 199,917,663 | 198,619,399 | -0.6% |
+| export-walk | 28,125,916 | 28,168,338 | +0.2% |
+| first-query | 1,858,567 | 1,904,851 | +2.5% |
+| number-point | 33,342,531 | 33,406,400 | +0.2% |
+| query-join | 76,793,183 | 76,828,338 | +0.0% |
+| read-point | 22,657,816 | 22,752,469 | +0.4% |
+| read-scan | 30,374,954 | 30,490,553 | +0.4% |
+| read-sibling | 30,098,475 | 30,098,403 | -0.0% |
+| rule-overlay | 263,576,069 | 263,750,430 | +0.1% |
+| rule-point | 52,296,615 | 52,228,008 | -0.1% |
+| rule-ranked | 59,624,369 | 59,889,737 | +0.4% |
+| subscribe-fanout | 39,533,736 | 39,717,715 | +0.5% |
+| subscribe-pulled | 39,372,584 | 39,324,790 | -0.1% |
+| transaction-reads | 303,657,543 | 302,074,629 | -0.5% |
+
+No regression against the gate. The point reads are within 0.4% of main,
+rule-point and read-sibling level, the writes 0.6% to 1.9% cheaper.
+`first-query` is 46k instructions over on a 1.9M phase, under the gate's
+absolute slack, and moves by about that between builds. What a hit costs
+now is the lookup of the cache the environment holds, about 200
+instructions; holding the cache as a field of the peer would take most of
+that and is still open.
+

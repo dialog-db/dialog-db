@@ -7,6 +7,9 @@
 //! measurement sees exactly what a commit or query moved, beneath every
 //! cache the branch keeps. Every other effect passes through untouched.
 
+use dialog_artifacts::tree::ArtifactNode;
+use dialog_artifacts::{Datum, Key as ArtifactKey, State};
+use dialog_search_tree::nodes::{Ready, held_node};
 use std::any::Any;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -85,6 +88,13 @@ impl<Env, M> Metered<Env, M> {
     /// The meter observing this operator.
     pub fn meter(&self) -> &M {
         &self.meter
+    }
+}
+
+/// A node the env holds is at hand, unmetered: no block is read for it.
+impl<Env: Holds, M> Ready<ArtifactKey, State<Datum>> for Metered<Env, M> {
+    fn ready(&self, read: &ArtifactRead) -> Option<ArtifactNode> {
+        held_node(self, read)
     }
 }
 

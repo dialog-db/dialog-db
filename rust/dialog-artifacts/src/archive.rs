@@ -15,7 +15,7 @@ use dialog_common::{Blake3Hash, Buffer, ConditionalSync, Held, Holds};
 use dialog_effects::archive::prelude::ArchiveScope;
 use dialog_effects::archive::{self, ArchiveError, Get};
 use dialog_effects::blob;
-use dialog_search_tree::nodes::{Preload, Read, Write};
+use dialog_search_tree::nodes::{Preload, Read, Ready, Write};
 use dialog_search_tree::{Delta, DialogSearchTreeError};
 
 use crate::tree::ArtifactNode;
@@ -199,6 +199,16 @@ where
     }
 }
 
+/// A staged node is at hand; any other is whatever the environment holds.
+impl<Env> Ready<Key, State<Datum>> for DeltaOverlay<'_, Env>
+where
+    Env: Ready<Key, State<Datum>> + ?Sized,
+{
+    fn ready(&self, read: &Read<Key, State<Datum>>) -> Option<ArtifactNode> {
+        self.delta.node(&read.name).or_else(|| self.env.ready(read))
+    }
+}
+
 /// A staged node answers its read as the node the seal produced.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -213,7 +223,7 @@ where
         if let Some(node) = self.delta.node(&read.name) {
             return Ok(Some(node));
         }
-        read.perform(self.env).await
+        self.env.execute(read).await
     }
 }
 
@@ -227,7 +237,7 @@ where
 {
     async fn execute(&self, preload: Preload<Key, State<Datum>>) {
         if self.delta.node(&preload.name).is_none() {
-            preload.perform(self.env).await
+            self.env.execute(preload).await
         }
     }
 }

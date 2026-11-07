@@ -432,6 +432,18 @@ impl<Key, Value> NodeCache<Key, Value> {
             .map(|cache| cache.scoped(scope_of(subject)))
     }
 
+    /// The node cache `env` holds, read through the scope of `subject`, if
+    /// it holds one, without making one: what an environment consults to
+    /// answer a read at once ([`nodes::Ready`](crate::nodes::Ready)).
+    pub fn held_for<Env>(env: &Env, subject: &Did) -> Option<Self>
+    where
+        Env: Holds + ?Sized,
+        Key: ConditionalSend + ConditionalSync + 'static,
+        Value: ConditionalSend + ConditionalSync + 'static,
+    {
+        Self::held_by(env).map(|cache| cache.scoped(scope_of(subject)))
+    }
+
     /// The node cache `env` holds, if it holds one, without making one: the
     /// handle an owner of `env`'s caches adopts rather than holding a second
     /// cache beside it.

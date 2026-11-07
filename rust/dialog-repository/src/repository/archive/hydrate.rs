@@ -162,7 +162,7 @@ where
         return Ok(Some(node));
     }
     let fetch = async |name: &Blake3Hash| {
-        if let Some(node) = read.clone().locally().perform(store).await? {
+        if let Some(node) = store.execute(read.clone().locally()).await? {
             return Ok(Some(node));
         }
         if read.local {

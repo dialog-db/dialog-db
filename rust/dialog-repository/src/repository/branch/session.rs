@@ -35,6 +35,7 @@ use dialog_query::source::SelectRules;
 use dialog_query::{Claim, DeductiveRule, Negation, Premise, Proposition};
 use dialog_search_tree::DialogSearchTreeError;
 use dialog_search_tree::Manifest;
+use dialog_search_tree::nodes::Ready;
 use futures_util::future::try_join_all;
 use futures_util::{TryStreamExt as _, stream};
 use std::sync::OnceLock;
@@ -1118,6 +1119,23 @@ impl<'a> Provider<ArchiveLoad> for QueryEnv<'a> {
 // holds for the line's repository, its store, or a hydration, so a resolver
 // join that re-resolves the same reference once per outer row reads the
 // node once. A read of one catalog's node is that catalog's.
+/// What the env holds for a line is at hand; a read anywhere the query
+/// reads is at hand if it is for any line.
+impl Ready<dialog_artifacts::Key, dialog_artifacts::State<dialog_artifacts::Datum>>
+    for QueryEnv<'_>
+{
+    fn ready(&self, read: &ArtifactRead) -> Option<ArtifactNode> {
+        if !anywhere(read.catalog.subject()) {
+            return self.env.ready(read);
+        }
+        self.sources.iter().find_map(|source| {
+            let mut line = read.clone();
+            line.catalog = source.as_ref().catalog();
+            self.env.ready(&line)
+        })
+    }
+}
+
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl<'a> Provider<ArtifactRead> for QueryEnv<'a> {

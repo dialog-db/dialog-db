@@ -72,9 +72,15 @@ What this changes for you:
   node read through it reaches the peer's cache. An integration opens its
   read-ahead window once per batch of pending changes instead of when a
   path misses the cache, since nothing outside the environment can tell.
-- The node cache is found by the environment's provider on every node
-  read (`NodeCache::of`), where the tree found it once per operation; the
-  design topic's journal records what that cost under `dialog-perf`.
+- A request's `perform` first asks the environment what it can answer at
+  once (`nodes::Ready`: a node it holds in memory), and performs the boxed
+  command only for the rest; a preload of a node already held does
+  nothing. An environment that answers the requests implements `Ready`
+  too (`nodes::held_node` answers it from the cache the environment holds;
+  the `reads_nodes_through_blocks!` macro includes it), and `Nodes` requires
+  it. Under `dialog-perf` the point-read scenarios are within 0.4% of
+  before and the commit scenarios 0.6% to 1.9% cheaper; the design topic's
+  journal has the table.
 
 Why: the tree was written before the capability model and only partly
 moved onto it, so what it needed from the world was not expressed as

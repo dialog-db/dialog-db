@@ -24,6 +24,12 @@
 //! [`NodeCache`] consults it before its blocks and keeps what it reads and
 //! writes. The tree performs no lookup of its own.
 //!
+//! A request's `perform` first asks the environment what it can answer at
+//! once ([`Ready`]) and performs the command only for the rest. Performing
+//! a command through [`Provider`] boxes a future, which a node the
+//! environment already holds does not need; an environment that cannot
+//! answer anything at once says so and every read goes the long way.
+//!
 //! The requests are commands, not effects, for the reason [`Load`] is: a
 //! node read may hydrate from a remote, which no one can do on another's
 //! behalf, and a node is never forked to a remote as itself; blocks are.
@@ -123,15 +129,44 @@ impl<Key, Value> Read<Key, Value> {
         if self.local { load.locally() } else { load }
     }
 
-    /// Perform this read on `env`.
+    /// Perform this read on `env`: what `env` can answer at once
+    /// ([`Ready`]), else the command performed.
     pub async fn perform<Env>(
         self,
         env: &Env,
     ) -> Result<Option<PersistentNode<Key, Value>>, DialogSearchTreeError>
     where
-        Env: Provider<Self> + ConditionalSync + ?Sized,
+        Env: Provider<Self> + Ready<Key, Value> + ConditionalSync + ?Sized,
     {
+        if let Some(node) = env.ready(&self) {
+            return Ok(Some(node));
+        }
         env.execute(self).await
+    }
+}
+
+/// What an environment can answer a node [`Read`] with at once, without
+/// waiting on anything: the node it holds in memory, or nothing.
+///
+/// The request's [`perform`](Read::perform) asks this first, so a node the
+/// environment holds costs a lookup and no boxed future; a read the
+/// environment cannot answer at once is performed as the command, which may
+/// wait on a store or a remote. The answer must be a node the environment
+/// would give the command too: an environment holds only what its archive
+/// has, so this is never a shortcut around what a read means, only around
+/// how it is dispatched.
+pub trait Ready<Key, Value> {
+    /// The node `read` names, if this environment holds it already.
+    fn ready(&self, read: &Read<Key, Value>) -> Option<PersistentNode<Key, Value>>;
+}
+
+/// A borrowed environment answers at once what the environment does.
+impl<T, Key, Value> Ready<Key, Value> for &T
+where
+    T: Ready<Key, Value> + ?Sized,
+{
+    fn ready(&self, read: &Read<Key, Value>) -> Option<PersistentNode<Key, Value>> {
+        (**self).ready(read)
     }
 }
 
@@ -303,11 +338,15 @@ impl<Key, Value> Preload<Key, Value> {
         Read::new(self.catalog.clone(), self.name.clone()).with_priority(self.priority)
     }
 
-    /// Perform this preload on `env`.
+    /// Perform this preload on `env`: nothing, for a node `env` already
+    /// holds ([`Ready`]), else the command performed.
     pub async fn perform<Env>(self, env: &Env)
     where
-        Env: Provider<Self> + ConditionalSync + ?Sized,
+        Env: Provider<Self> + Ready<Key, Value> + ConditionalSync + ?Sized,
     {
+        if env.ready(&self.read()).is_some() {
+            return;
+        }
         env.execute(self).await
     }
 }
@@ -450,21 +489,41 @@ impl<Key, Value> Write<Key, Value> {
 /// collapses the copies of tree code read through many environments into
 /// one.
 pub trait Nodes<Key, Value>:
-    Provider<Read<Key, Value>> + Provider<Preload<Key, Value>> + ConditionalSync
+    Provider<Read<Key, Value>> + Provider<Preload<Key, Value>> + Ready<Key, Value> + ConditionalSync
 {
 }
 
 impl<T, Key, Value> Nodes<Key, Value> for T where
-    T: Provider<Read<Key, Value>> + Provider<Preload<Key, Value>> + ConditionalSync + ?Sized
+    T: Provider<Read<Key, Value>>
+        + Provider<Preload<Key, Value>>
+        + Ready<Key, Value>
+        + ConditionalSync
+        + ?Sized
 {
+}
+
+/// The node `read` names if the cache `env` holds for the catalog's subject
+/// holds it ([`NodeCache::held_for`]): how an environment that keeps its
+/// cache in its handles answers [`Ready`].
+pub fn held_node<Env, Key, Value>(
+    env: &Env,
+    read: &Read<Key, Value>,
+) -> Option<PersistentNode<Key, Value>>
+where
+    Env: Holds + ?Sized,
+    Key: ConditionalSend + ConditionalSync + 'static,
+    Value: ConditionalSend + ConditionalSync + 'static,
+{
+    NodeCache::held_for(env, read.catalog.subject())?.get_cached(&read.name)
 }
 
 #[doc(hidden)]
 pub use rkyv as __rkyv;
 
 /// Makes a type that answers [`Load`] and holds handles ([`Holds`]) answer
-/// the node layer's reads ([`Read`], [`Preload`]) through the translation
-/// layer, with the node cache it holds for the catalog's subject.
+/// the node layer's reads ([`Read`], [`Preload`], [`Ready`]) through the
+/// translation layer, with the node cache it holds for the catalog's
+/// subject.
 ///
 /// For a non-generic environment: `reads_nodes_through_blocks!(MyEnv);`.
 /// For a generic one, its generics and where clause in brackets, each
@@ -501,6 +560,20 @@ macro_rules! reads_nodes_through_blocks {
             ) -> Result<Option<$crate::PersistentNode<Key, Value>>, $crate::DialogSearchTreeError>
             {
                 read.through_held_blocks(self).await
+            }
+        }
+
+        impl<$($g)* Key, Value> $crate::nodes::Ready<Key, Value> for $ty
+        where
+            Key: dialog_common::ConditionalSend + dialog_common::ConditionalSync + 'static,
+            Value: dialog_common::ConditionalSend + dialog_common::ConditionalSync + 'static,
+            $($w)*
+        {
+            fn ready(
+                &self,
+                read: &$crate::nodes::Read<Key, Value>,
+            ) -> Option<$crate::PersistentNode<Key, Value>> {
+                $crate::nodes::held_node(self, read)
             }
         }
 

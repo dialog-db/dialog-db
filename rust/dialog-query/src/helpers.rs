@@ -33,6 +33,7 @@ use dialog_artifacts::{
     Artifact, ArtifactSelector, ArtifactStream, DialogArtifactsError, Instruction,
     Relation as ArtifactsRelation, Select, Value,
 };
+use dialog_artifacts::{Datum, Key as ArtifactKey, State};
 use dialog_capability::{Fork, Provider, Subject};
 use dialog_common::Buffer;
 use dialog_common::{ConditionalSync, Held, Holdings, Holds};
@@ -54,6 +55,7 @@ use dialog_peer::{Peer, Session};
 use dialog_repository::{Branch, HeldCaches, PeersEnv, RemoteSite, Repository, RepositoryExt as _};
 use dialog_search_tree::DialogSearchTreeError;
 use dialog_search_tree::audit as tree_audit;
+use dialog_search_tree::nodes::Ready;
 
 use dialog_storage::Blake3Hash;
 use dialog_storage::dup_audit;
@@ -599,6 +601,14 @@ where
 
 // Node reads for the scans and resolver premises, through the same
 // counting store, in the branch's catalog.
+/// The bench env reads through a counting store made per read, which holds
+/// nothing yet: nothing is at hand.
+impl<Env> Ready<ArtifactKey, State<Datum>> for JoinEnv<'_, Env> {
+    fn ready(&self, _: &ArtifactRead) -> Option<ArtifactNode> {
+        None
+    }
+}
+
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<Env> Provider<ArtifactRead> for JoinEnv<'_, Env>

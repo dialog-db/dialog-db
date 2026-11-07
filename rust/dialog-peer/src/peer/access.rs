@@ -36,6 +36,7 @@ use super::{Grant, Local, Mode, Peer, PeerSpace};
 use dialog_artifacts::tree::{
     ArtifactNode, ArtifactPreload, ArtifactRead, ArtifactWrite, ArtifactWrites,
 };
+use dialog_artifacts::{Datum, Key as ArtifactKey, State};
 use dialog_capability::access::{
     Access, Authorize, AuthorizeError, Certificate as _, Export, Proof as _, Protocol, Prove,
     Retain, Scope as _, TimeRange,
@@ -52,6 +53,7 @@ use dialog_effects::blob::{BlobError, Import as BlobImport, Read as BlobRead, Wr
 use dialog_effects::memory::{Publish, Resolve};
 use dialog_repository::{Branch, RemoteSite};
 use dialog_search_tree::DialogSearchTreeError;
+use dialog_search_tree::nodes::{Ready, held_node};
 use dialog_storage::provider::storage::Storage;
 use dialog_ucan::{Ucan, UcanCertificate, UcanDelegation, UcanProof};
 use dialog_ucan_core::DelegationChain;
@@ -227,6 +229,13 @@ where
         load: ArchiveLoad,
     ) -> Result<Option<dialog_common::Buffer>, ArchiveError> {
         dialog_repository::load_or_hydrate(self, load).await
+    }
+}
+
+/// A node the operator's cache holds is at hand for the walk too.
+impl<S: Clone, M: Mode> Ready<ArtifactKey, State<Datum>> for AccessEnv<S, M> {
+    fn ready(&self, read: &ArtifactRead) -> Option<ArtifactNode> {
+        held_node(self, read)
     }
 }
 
