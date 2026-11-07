@@ -38,15 +38,28 @@ Columns:
 
 | criterion \ approach | Status quo | Doc as value | Changes as facts | Resource synced by Dialog | Template | Built in |
 |---|---|---|---|---|---|---|
-| concurrent edits converge, none lost | 🔴 one edit per field is lost | merge on the outer side | the library merges | the library merges | the library merges | ? |
-| peer to peer, offline, no server | yes | yes | yes | ? does "changes since" need a remote that understands the CRDT | 🟡 depends on the library's sync | ? |
-| storage and sync within 2× of a text CRDT library | ? | ? copies the whole document per change, plus a root node per commit | ? a root node per commit | ? | the library's own cost | ? |
-| changes to Dialog's core | none | 🟡 a lot; part of why it was shelved | ? | ? a resource kind and sync primitives | none | 🟡 likely the most |
-| knows which documents need syncing | 🟢 the tree differential | the tree differential | the tree differential | ? needs a version fact per document, as assets have a size fact | 🟡 the library's own sync | ? |
-| sync mechanisms the developer deals with | one | one | one | one; text outside the tree, as asset bytes are | 🟡 two | one |
-| needs the whole document on the editing peer | no | yes | ? | ? | yes | ? |
-| a query returns the current text (nice to have) | yes | ? | yes | yes | no, opaque key | ? |
-| no interleaving of concurrent runs (nice to have) | n/a | from the library | from the library | from the library | from the library | ? whole document per peer allows RGA or Fugue style order |
-| library agnostic (nice to have) | n/a | ? | ? | 🟡 deeper integration with one library | each library a template | n/a |
+| concurrent edits converge, none lost | 🔴 both values survive in the log, a read shows one, the next write that saw both supersedes both | reads merge the siblings (the spike's fold); storage converges on the next edit | the library merges | the library merges | the library merges | ? |
+| storage and sync within 2× of a text CRDT library | n/a | 🟡 a whole-document snapshot per commit, retained in the log; the spike committed per edit session, not per keystroke | 🔴 a commit per edit; a commit of a couple of facts writes ~120 to 160 KB today | ? one block per library change, plus a version fact per sync point | the library's own cost | 🔴 same commit cost as changes as facts, unless edits batch |
+| knows which documents need syncing | the tree differential | the tree differential; large values spill to blocks push already ships | the tree differential | ? a version fact per document, written at sync points, as assets have a size fact | 🟡 the library's own sync | the tree differential |
+| changes to Dialog's core | none | 🟡 the spike: a value type, a merge seam in winner selection, an edge crate; its spec says no storage or sync changes; shelved for core changes (maintainer) | ? | ? a resource kind, change blocks, a version fact, a "changes since" read | none | 🟡 likely the most |
+| peer to peer, offline, no server | yes | yes | yes | ? holds if the store can serve "changes since" from hashes and parent links; Automerge's change format allows it | 🟡 depends on the library's sync | yes |
+| sync mechanisms the developer deals with | one | one | one | one; change blocks outside the tree, as asset bytes are | 🟡 two | one |
+| needs the whole document on the editing peer | no | yes | ? | yes, to apply changes | yes | ? |
+| a query returns the current text (nice to have) | yes | 🟡 through decoding the snapshot | yes | ? Dialog materializes the text | no, opaque key | ? |
+| no interleaving of concurrent runs (nice to have) | n/a | from the library | from the library | from the library | from the library | ? whole document per peer allows a Fugue style order |
+| library agnostic (nice to have) | n/a | one format per edge crate | ? | 🟡 needs readable hashes and parents; Automerge yes, version-vector libraries no | each library a template | n/a |
 | rich text (nice to have) | no | from the library | from the library | from the library | from the library | ? |
-| book-chapter size (nice to have) | ? | 🟡 copy grows with size | ? | ? | from the library | ? |
+| book-chapter size (nice to have) | n/a | 🟡 snapshot grows with history | ? | from the library | from the library | ? |
+
+Reading the matrix today:
+
+- On napkin numbers (a hypothesis until text-write-cost runs), every
+  column that commits per edit through the tree misses the cost row by
+  orders of magnitude unless commits batch hard or the storage work lands
+  (single-file format, a durable novelty buffer). That is a property of
+  commits, not of any one column.
+- The columns that keep changes outside the tree avoid it, and the
+  "which documents need syncing" row brings back one small fact per
+  sync point, not per edit.
+- Template is the only column with no core change, and the only one with
+  two sync mechanisms.

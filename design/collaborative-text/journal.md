@@ -4,8 +4,8 @@
 
 |  | Understanding | Activity |
 |---|---|---|
-| **Status** | Problem stated. Requirements: converge without loss, no server, offline, paragraph size, within 2× of a text CRDT library on disk and sync bytes. Six columns, separated mostly by where changes travel. Cost per commit is a root node, not a path. | Directing; matrix mostly `?`. |
-| **Agenda** | Which pieces of Dialog a native text CRDT would reuse. How libraries serve "changes since a version" and what the remote must understand. Cost of per-edit commits against the 2× bar. | Survey (research/text-crdt-survey.md), then the cost measurement (research/text-write-cost.md), then fill the matrix. Next sitting opens with the reuse question. |
+| **Status** | Problem stated. A commit costs ~120 to 160 KB on disk today, so per-edit commits likely fail the 2× bar in any column. Automerge's change format lets a content-blind store serve "changes since". The doc-as-value spike is found and read. | Directing; matrix mostly filled. |
+| **Agenda** | Is "lost" the right word in the problem statement, given both values survive until the next write? Which core changes shelved the spike, when its spec claims none to storage or sync? Measure write cost to confirm the napkin. | Settle the two questions with the maintainer; then run text-write-cost. |
 
 ## 2026-11-06, Describing: opening the topic
 
@@ -147,3 +147,46 @@ replaced them. An asset is recognized by an ordinary fact
 bytes with that revision. The analogy for text is a version fact per
 document, not an index. The difference stands: an asset's fact is
 written once, a document's version fact is rewritten as it changes.
+
+## 2026-11-07, Directing: following the leads
+
+**Asked.** The maintainer asked for the leads to be followed and the
+tradeoffs evaluated.
+
+**Learned.**
+
+- The doc-as-value spike is closed PR #388 (closed 2026-08-10, "we have
+  reconsidered approach"). Its spec stores the document as one record
+  value, merges siblings at read time inside the existing winner
+  selection, and lets the next edit's replace converge storage. It
+  claims no storage, sync or on-disk changes; it commits per edit
+  session, and says plainly it does not compete with a library's delta
+  sync for live editing. The PR touched 88 files.
+- Commit cost is documented: six keys and a signed record per one-fact
+  commit, ~120 to 160 KB written to disk per small commit. On the
+  concurrent traces that puts per-keystroke commits in gigabytes. This
+  is a napkin hypothesis, but the gap is large enough that the cost row
+  is decided by commit frequency and the storage work under way, not by
+  which column.
+- "Last writer wins loses an edit" is imprecise: both values survive
+  sync in the log; a read shows one; the loss happens when a later write
+  that saw both supersedes them. The spike used exactly that window.
+- Automerge's change chunk puts dependency hashes before the operations
+  and its hash is computed from the bytes, so a store that does not run
+  Automerge can serve "changes since these heads". Sedimentree is prior
+  art for syncing such a graph through a content-blind server, chunked
+  so per-change blocks do not pile up. automerge-repo's own storage is
+  incremental chunks keyed by change hash, compacted into snapshots keyed
+  by heads.
+- Version-vector libraries need the library wherever "changes since" is
+  computed, so "resource synced by Dialog" is not library agnostic.
+
+**Contradiction raised, not resolved.** The maintainer shelved the spike
+for "the amount of changes required to the core". Its spec says storage,
+sync and format were untouched. Both can be true only if "core" means
+the value type and query engine. Ask.
+
+**Decided.** Not decided. The matrix now says the cost row is about
+commit frequency, which answers the earlier question (version fact per
+edit or per sync point) in favour of sync points, pending the
+measurement.

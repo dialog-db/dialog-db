@@ -30,3 +30,14 @@ every replica converges to the trace's final text.
 **Failure.** Beyond 2× on either, or any replica diverges.
 
 **The middle.** Within 2× on one and not the other: the maintainer judges.
+
+## Prior, before measuring
+
+Napkin, to be confirmed or refuted by the run: a commit of a couple of
+facts writes ~120 to 160 KB to disk today (`research/single-file-format.md`).
+The concurrent traces have ~26k edits for ~21 KB of final text, so one
+commit per edit is in gigabytes, and one per second still in hundreds of
+megabytes. If that holds, the question this topic answers shifts from
+"which column" to "how often can text commit", and the single-file
+format and a durable novelty buffer become dependencies of any in-tree
+column.
