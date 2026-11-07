@@ -217,44 +217,115 @@ impl<'a> Reader<'a> {
 }
 
 fn put_zigzag(out: &mut Vec<u8>, value: i64) {
-    put_varint(out, ((value << 1) ^ (value >> 63)) as u64);
+    put_varint(out, zigzag(value));
 }
 
-/// Writes rows column by column. Ids are zigzag deltas against the same
-/// column's previous row, so a sorted or repeating column (the entity of
-/// an EAV segment, the attribute of an AEV one) costs a byte a row.
+/// Writes `values` as runs, as Automerge's columns do: a signed count, then
+/// for a positive count one value repeated that many times, for a negative
+/// one that many values one by one. A column that repeats (a leaf's form,
+/// the entity of an EAV leaf, a sorted column's deltas) costs a run, not a
+/// byte a row.
+fn put_runs(out: &mut Vec<u8>, values: &[u64]) {
+    let mut at = 0;
+    let mut literals = 0..0;
+    let flush = |out: &mut Vec<u8>, literals: &std::ops::Range<usize>| {
+        if !literals.is_empty() {
+            put_zigzag(out, -(literals.len() as i64));
+            for value in &values[literals.clone()] {
+                put_varint(out, *value);
+            }
+        }
+    };
+    while at < values.len() {
+        let mut end = at + 1;
+        while end < values.len() && values[end] == values[at] {
+            end += 1;
+        }
+        if end - at >= 2 {
+            flush(out, &literals);
+            literals = end..end;
+            put_zigzag(out, (end - at) as i64);
+            put_varint(out, values[at]);
+        } else {
+            if literals.is_empty() {
+                literals = at..at;
+            }
+            literals.end = end;
+        }
+        at = end;
+    }
+    flush(out, &literals);
+}
+
+/// Reads `count` values written by [`put_runs`].
+fn get_runs(reader: &mut Reader, count: usize) -> io::Result<Vec<u64>> {
+    let mut values = Vec::with_capacity(count);
+    while values.len() < count {
+        let run = reader.zigzag()?;
+        let len = run.unsigned_abs() as usize;
+        if len == 0 || values.len() + len > count {
+            return Err(invalid("a run past its column"));
+        }
+        if run > 0 {
+            let value = reader.varint()?;
+            values.resize(values.len() + len, value);
+        } else {
+            for _ in 0..len {
+                values.push(reader.varint()?);
+            }
+        }
+    }
+    Ok(values)
+}
+
+fn zigzag(value: i64) -> u64 {
+    ((value << 1) ^ (value >> 63)) as u64
+}
+
+fn unzigzag(raw: u64) -> i64 {
+    ((raw >> 1) as i64) ^ -((raw & 1) as i64)
+}
+
+/// Writes rows column by column, each column in runs ([`put_runs`]). Ids
+/// are zigzag deltas against the same column's previous row, so a sorted
+/// or repeating column (the entity of an EAV segment, the attribute of an
+/// AEV one) costs little more than a run.
 fn put_columns(out: &mut Vec<u8>, section: Section, rows: &[&Row]) {
     let delta = |out: &mut Vec<u8>, field: usize, when: &dyn Fn(&Row) -> bool| {
         let mut previous = 0i64;
-        for row in rows.iter().filter(|row| when(row)) {
-            put_zigzag(out, row[field] as i64 - previous);
-            previous = row[field] as i64;
-        }
+        let values: Vec<u64> = rows
+            .iter()
+            .filter(|row| when(row))
+            .map(|row| {
+                let value = zigzag(row[field] as i64 - previous);
+                previous = row[field] as i64;
+                value
+            })
+            .collect();
+        put_runs(out, &values);
+    };
+    let plain = |out: &mut Vec<u8>, value: &dyn Fn(&Row) -> u64| {
+        let values: Vec<u64> = rows.iter().map(|row| value(row)).collect();
+        put_runs(out, &values);
     };
     match section {
         Section::Entries | Section::Ops => {
-            for row in rows {
-                out.push(row[0] as u8);
-            }
+            plain(out, &|row| row[0] as u64);
             for slot in 0..SLOTS {
                 delta(out, 1 + slot, &|row| slots_of(row[0] as u8) > slot);
             }
             if matches!(section, Section::Ops) {
-                for row in rows {
-                    out.push((row[DATUM] != NONE) as u8);
-                }
+                plain(out, &|row| (row[DATUM] != NONE) as u64);
             }
             delta(out, DATUM, &|row| row[DATUM] != NONE);
         }
         Section::Links => {
             delta(out, 0, &|_| true);
             // The scale and whether the file holds a frame of the child, as
-            // one varint (`scale << 1 | no frame`), ahead of the columns
+            // one value (`scale << 1 | no frame`), ahead of the columns
             // that depend on it. A scale takes all eight bits: a node over a
             // large tree has one of 128 or more.
-            for row in rows {
-                put_varint(out, (row[2] as u64) << 1 | (row[1] == NONE) as u64);
-            }
+            plain(out, &|row| (row[2] as u64) << 1 | (row[1] == NONE) as u64);
             delta(out, 1, &|row| row[1] != NONE);
             delta(out, 3, &|row| row[1] == NONE);
         }
@@ -275,19 +346,22 @@ fn get_columns(reader: &mut Reader, section: Section, count: usize) -> io::Resul
                  field: usize,
                  when: &dyn Fn(&Row) -> bool|
      -> io::Result<()> {
+        let count = rows.iter().filter(|row| when(row)).count();
+        let values = get_runs(reader, count)?;
         let mut previous = 0i64;
+        let mut values = values.into_iter();
         for row in rows.iter_mut() {
             if when(row) {
-                previous += reader.zigzag()?;
-                row[field] = previous as u32;
+                previous += unzigzag(values.next().expect("a value a row"));
+                row[field] = u32::try_from(previous).map_err(|_| invalid("an id over 32 bits"))?;
             }
         }
         Ok(())
     };
     match section {
         Section::Entries | Section::Ops => {
-            for row in rows.iter_mut() {
-                row[0] = reader.byte()? as u32;
+            for (row, form) in rows.iter_mut().zip(get_runs(reader, count)?) {
+                row[0] = u8::try_from(form).map_err(|_| invalid("a form over 8 bits"))? as u32;
             }
             for slot in 0..SLOTS {
                 delta(&mut rows, reader, 1 + slot, &|row| {
@@ -295,17 +369,16 @@ fn get_columns(reader: &mut Reader, section: Section, count: usize) -> io::Resul
                 })?;
             }
             if matches!(section, Section::Ops) {
-                for row in rows.iter_mut() {
+                for (row, asserted) in rows.iter_mut().zip(get_runs(reader, count)?) {
                     // Mark retractions; asserted datums are read next.
-                    row[DATUM] = if reader.byte()? == 1 { 0 } else { NONE };
+                    row[DATUM] = if asserted == 1 { 0 } else { NONE };
                 }
             }
             delta(&mut rows, reader, DATUM, &|row| row[DATUM] != NONE)?;
         }
         Section::Links => {
             delta(&mut rows, reader, 0, &|_| true)?;
-            for row in rows.iter_mut() {
-                let flag = reader.varint()?;
+            for (row, flag) in rows.iter_mut().zip(get_runs(reader, count)?) {
                 row[2] =
                     u8::try_from(flag >> 1).map_err(|_| invalid("a scale over 8 bits"))? as u32;
                 // A child is named by node id or by hash token, never both.
@@ -491,15 +564,26 @@ mod tests {
     #[test]
     fn it_reads_back_rows_written_whole_and_against_a_base() -> io::Result<()> {
         let form = dialog_artifacts::ENTITY_KEY_TAG as u32;
+        // Ids as a real leaf has them: an entity column that rises, the
+        // rest scattered, so the whole rows do not collapse into runs.
         let base = segment(
             (0..50)
-                .map(|n| [form, 1, n + 2, n * 3, 0, n + 100])
+                .map(|n| {
+                    [
+                        form,
+                        n + 2,
+                        (n * 37) % 101,
+                        (n * n * 7) % 211,
+                        0,
+                        (n * 13) % 997 + 100,
+                    ]
+                })
                 .collect(),
         );
         let mut changed = base.sections[0].clone();
         changed[10][DATUM] = 999;
         changed.remove(30);
-        changed.insert(40, [form, 1, 77, 5, 0, 200]);
+        changed.insert(40, [form, 41, 77, 5, 0, 200]);
         let rows = segment(changed);
 
         let mut whole = Vec::new();
@@ -536,6 +620,29 @@ mod tests {
         let mut bytes = Vec::new();
         put_rows(&mut bytes, &rows, None);
         assert_eq!(get_rows(&mut Reader::new(&bytes), INDEX, None)?, rows);
+        Ok(())
+    }
+
+    #[test]
+    fn it_reads_back_columns_written_in_runs() -> io::Result<()> {
+        let columns: [&[u64]; 6] = [
+            &[],
+            &[7],
+            &[3; 100],
+            &[1, 2, 1, 2, 1, 2],
+            &[5, 5, 9, 4, 4, 4, 0, u64::MAX, u64::MAX, 6],
+            &[0, 1, 2, 3, 3, 3, 3, 2, 1, 0],
+        ];
+        for column in columns {
+            let mut bytes = Vec::new();
+            put_runs(&mut bytes, column);
+            let mut reader = Reader::new(&bytes);
+            assert_eq!(get_runs(&mut reader, column.len())?, column);
+            assert!(reader.is_empty(), "a column reads to its end");
+        }
+        let mut long = Vec::new();
+        put_runs(&mut long, &[3; 100]);
+        assert!(long.len() <= 3, "a repeated value is one run");
         Ok(())
     }
 
