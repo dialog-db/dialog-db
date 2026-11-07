@@ -140,3 +140,10 @@ piece: as with blobs, sync must know which documents need syncing.
 while the bytes stay outside. Copying it for text keeps text outside the
 tree but puts a per-document version inside it, so some write per change
 returns, small, and its frequency is a design choice.
+
+**Corrected (later).** Blobs and the blob index are deprecated; assets
+replaced them. An asset is recognized by an ordinary fact
+(`dialog.asset/size`) in the revision that adds it, and push ships its
+bytes with that revision. The analogy for text is a version fact per
+document, not an index. The difference stands: an asset's fact is
+written once, a document's version fact is rewritten as it changes.
