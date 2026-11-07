@@ -309,6 +309,23 @@ impl Node {
         all(self, nodes)
     }
 
+    /// How many nodes below this one the tree reaches, and their bytes: the
+    /// index the root still uses, against all the file holds.
+    #[cfg(test)]
+    pub fn reachable(&self, nodes: &impl Nodes) -> io::Result<(usize, usize)> {
+        let Node::Internal { children, .. } = self else {
+            return Ok((0, 0));
+        };
+        let (mut count, mut bytes) = (0, 0);
+        for child in children {
+            let read = nodes.read(*child)?;
+            let (below, below_bytes) = Node::decode(&read)?.reachable(nodes)?;
+            count += 1 + below;
+            bytes += read.len() + below_bytes;
+        }
+        Ok((count, bytes))
+    }
+
     /// The tree with `entries` inserted (each shadowing any older entry for
     /// its key), as a new root. The nodes it rewrites are passed to
     /// `write`, which returns where each was put; the old root and every

@@ -1998,6 +1998,22 @@ mod breakdown {
             mib(token_bytes),
             mib(records - token_bytes)
         );
+        let (nodes, bytes) = snapshot.slot.root.reachable(&*snapshot)?;
+        let mut spaces = [0usize; 4];
+        for (key, _) in snapshot.slot.root.entries(&*snapshot)? {
+            spaces[(key >> 62) as usize] += 1;
+        }
+        println!(
+            "  the index the root reaches: {nodes} nodes, {} (plus a {} B header each); \
+             live entries: {} blocks, {} tokens, {} lineages, {} in all ({} at 16 B)",
+            mib(bytes as u64),
+            HEADER,
+            spaces[0],
+            spaces[1],
+            spaces[2],
+            spaces.iter().sum::<usize>(),
+            mib(16 * spaces.iter().sum::<usize>() as u64)
+        );
         let stats = archive.stats();
         println!(
             "in memory to read it: the root {} B, rows kept {}, index memory {}",
