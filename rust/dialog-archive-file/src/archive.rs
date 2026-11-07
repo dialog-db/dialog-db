@@ -2320,6 +2320,16 @@ mod index_breakdown {
             kib(index.tokens().footprint())
         );
         println!("the index in all: {}", kib(stats.index_memory));
+        println!(
+            "the file: {} tokens in {}, {} frames in {} ({} written against another), {} blocks whole in {}",
+            stats.tokens,
+            kib(stats.token_bytes as usize),
+            stats.frames,
+            kib(stats.frame_bytes as usize),
+            stats.frames_against,
+            stats.blocks,
+            kib(stats.block_bytes as usize)
+        );
         Ok(())
     }
 }

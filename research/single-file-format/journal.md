@@ -951,6 +951,53 @@ each, against the same deltas in Automerge's runs.
 **Decision.** Runs, with offsets in units of 16, for the next frame
 format, to confirm with offsets on a larger file.
 
+## 2026-11-07: larger files: tonk-shaped 10× and MusicBrainz
+
+**Datasets.** tonk-shaped 10× (`5f703d3c4bab3fe7`, from the schema
+fixture), replayed by the six-member bench. MusicBrainz (`865bbbcb0fe87ec0`):
+the first 20,000 records each of area, place, label, event and artist from
+the 2026-11-04 JSON dump (CC0), 100,000 entities and 4.47 million facts in
+2,000 commits of 50 entities, through `bench/musicbrainz.py`, replayed into
+the file alone. The MusicBrainz replay was stopped after 46 minutes, about
+1,250 commits in (one footer an append), at 2.36 GB, still accelerating;
+its file is whole up to its last footer.
+
+**Results.**
+
+| | tonk 10×, a member | MusicBrainz, ~1,250 commits |
+|---|---|---|
+| file | 8.1 MiB | 2,362 MiB |
+| tokens | 2.6 MiB (49,482) | 103 MiB (2.17 M) |
+| frames | 2.5 MiB (4,476) | 488 MiB (1.72 M) |
+| blocks kept whole | 2.9 MiB | 32 MiB |
+| checkpoints | none yet | **1,739 MiB (37 records)** |
+| the same nodes as whole blocks, as `fs` keeps them | about 268 MiB | about 116 GiB |
+| index in memory | 2.6 MiB | 439 MiB |
+
+- Checkpoints are three quarters of the MusicBrainz file. Each writes the
+  whole index, which grows with the file, every 16 MiB of appends: their
+  total grows as the square of the file. Without them the file is 623 MiB,
+  187× smaller than the same node versions as blocks; with them, 49×.
+- The index in memory is 439 MiB at this point: the bound memory needs is
+  real, not hypothetical.
+- Offsets and runs on these files:
+
+| | tonk 1× | tonk 10× | MusicBrainz |
+|---|---|---|---|
+| ids, as written | 505 KiB | 2,240 KiB | 357 MiB |
+| offsets in units of 16 | +16% | +7% | +16% |
+| ids in runs | 356 KiB | 1,509 KiB | 287 MiB |
+| offsets in units of 16, in runs | 437 KiB | 1,671 KiB | 343 MiB |
+| ids, with fixed-width tables in the file | about 166 KiB of tables | | about 54 MiB of tables |
+
+  At MusicBrainz's size, offsets in runs cost the frames 56 MiB more than
+  ids in runs; tables in the file would cost about 54 MiB. The two tie on
+  disk; offsets still read without a table and keep nothing in memory.
+
+**Decision.** The index goes into the file, and with it the checkpoint
+goes: a root the footer names replaces a copy of the whole index. Offsets
+in units of 16, in runs, for frames.
+
 ## How to reproduce
 
 ```sh
@@ -966,6 +1013,15 @@ DIALOG_CENSUS_ORDER=history DIALOG_CENSUS_FILE=out DIALOG_CENSUS_INDEX=1 \
 # a replica into the file
 cargo run --release -p dialog-migration --features archive-file \
   --bin dialog-migrate -- path/to/profile
+
+# MusicBrainz as a fact log (outside the repository), then its replay
+research/single-file-format/bench/musicbrainz-fetch.sh 20261104-001002 20000 mb
+python3 research/single-file-format/bench/musicbrainz.py mb-100k.csv 50 \
+  area=mb/area.jsonl place=mb/place.jsonl label=mb/label.jsonl \
+  event=mb/event.jsonl artist=mb/artist.jsonl
+DIALOG_SE_CSV=mb-100k.csv DIALOG_BENCH_COMMITS=2000 \
+  DIALOG_BENCH_STORES=file/frames DIALOG_BENCH_KEEP=kept \
+  cargo run --release -p dialog-baseline --example file_archive_bench
 
 # tonk-team as a dataset (outside the repository), then its workload
 cargo run --release -p dialog-baseline --example tonk_dataset -- \
