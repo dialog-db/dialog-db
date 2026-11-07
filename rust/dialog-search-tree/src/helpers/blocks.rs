@@ -7,13 +7,13 @@ use async_trait::async_trait;
 use dialog_capability::{Capability, Provider, Subject, did};
 use dialog_common::{Blake3Hash, Buffer, Held, Holdings, Holds};
 use dialog_effects::archive::prelude::{ArchiveScope, CatalogScope};
-use dialog_effects::archive::{ArchiveError, Get, Load};
+use dialog_effects::archive::{ArchiveError, Get, Import, Load};
 use dialog_effects::blob;
 use dialog_storage::provider::Volatile;
 use futures_util::FutureExt as _;
 use parking_lot::Mutex;
 
-use crate::{Delta, NodeCache};
+use crate::{Delta, NodeCache, PersistentNode};
 
 /// The catalog the trees of this crate's tests, benches and examples live
 /// in: the default catalog of a fixed test subject.
@@ -24,10 +24,11 @@ pub fn test_catalog() -> CatalogScope {
 /// Blocks of one catalog in a [`Volatile`] store: the archive the tests,
 /// benches and examples of this crate read their trees through.
 ///
-/// A tree reads the block its hash names in its catalog by performing
-/// [`Load`] on the environment; these answer it (and [`Get`]) from the
-/// volatile store, as a repository's storage would. They hold nothing, so
-/// every node read reaches the blocks; [`Holding`] gives them a node cache.
+/// A tree asks for its nodes ([`crate::nodes`]); these answer through the
+/// translation layer over the volatile store, as a bare store would, and
+/// answer [`Load`], [`Get`] and [`Import`] from it too. They hold nothing,
+/// so every node read reaches the blocks; [`Holding`] gives them a node
+/// cache.
 ///
 /// Writing is synchronous here for the tests' convenience: a volatile
 /// write completes the moment it is performed. Clones share the blocks.
@@ -77,9 +78,12 @@ impl Blocks {
             .expect("a volatile write does not fail");
     }
 
-    /// Keeps every block `delta` holds, emptying it.
-    pub fn flush(&self, delta: &mut Delta<Blake3Hash, Buffer>) {
-        let blocks: Vec<Buffer> = delta.flush().map(|(_, block)| block).collect();
+    /// Keeps the block of every node `delta` holds, emptying it.
+    pub fn flush<Key, Value>(&self, delta: &mut Delta<Blake3Hash, PersistentNode<Key, Value>>) {
+        let blocks: Vec<Buffer> = delta
+            .flush()
+            .map(|(_, node)| node.buffer().clone())
+            .collect();
         if blocks.is_empty() {
             return;
         }
@@ -128,6 +132,17 @@ impl Provider<Get> for Blocks {
     }
 }
 
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl Provider<Import> for Blocks {
+    async fn execute(&self, import: Capability<Import>) -> Result<(), ArchiveError> {
+        import.perform(&self.store).await
+    }
+}
+
+crate::reads_nodes_through_blocks!(Blocks);
+crate::writes_nodes_through_blocks!(Blocks);
+
 /// A spilled value is read from the volatile store's blobs, else from the
 /// catalog's blocks, where these keep a value written as a block.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -138,10 +153,10 @@ impl Provider<blob::Load> for Blocks {
     }
 }
 
-/// `env`, holding handles of its own: the node cache a tree read through
-/// it finds ([`NodeCache::of`]) is made on the first read and kept, so a
-/// node is checked once and read from memory after that, and a persist
-/// through it keeps the nodes it seals.
+/// `env`, holding handles of its own: the node cache it answers node reads
+/// from ([`NodeCache::of`]) is made on the first read and kept, so a node is
+/// checked once and read from memory after that, and a write through it
+/// ([`flush`](Self::flush)) keeps the nodes it stores.
 ///
 /// For a block store that holds nothing (tests, benches, tools). Clones
 /// share what is held.
@@ -181,6 +196,24 @@ impl<'a, Env: ?Sized> Holding<'a, Env> {
         Value: dialog_common::ConditionalSend + dialog_common::ConditionalSync + 'static,
     {
         NodeCache::of(self, test_catalog().subject()).expect("holdings keep what they are given")
+    }
+
+    /// Writes every node `delta` holds into [`test_catalog`] through this
+    /// ([`nodes::Write`](crate::nodes::Write)), emptying it: the nodes land
+    /// in the blocks underneath and in the cache this holds.
+    pub async fn flush<Key, Value>(
+        &self,
+        delta: &mut Delta<Blake3Hash, PersistentNode<Key, Value>>,
+    ) -> Result<(), crate::DialogSearchTreeError>
+    where
+        Key: crate::Key + dialog_common::ConditionalSend + dialog_common::ConditionalSync + 'static,
+        Value: crate::Value + dialog_common::ConditionalSync + 'static,
+        Env: Provider<Import> + dialog_common::ConditionalSync,
+    {
+        let nodes = delta.flush().map(|(_, node)| node).collect();
+        crate::nodes::Write::new(test_catalog(), nodes)
+            .perform(self)
+            .await
     }
 }
 
@@ -227,6 +260,26 @@ where
         self.env.execute(get).await
     }
 }
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<Env> Provider<Import> for Holding<'_, Env>
+where
+    Env: Provider<Import> + dialog_common::ConditionalSync + ?Sized,
+{
+    async fn execute(&self, import: Capability<Import>) -> Result<(), ArchiveError> {
+        self.env.execute(import).await
+    }
+}
+
+crate::reads_nodes_through_blocks!(
+    impl['a, Env,] Holding<'a, Env>
+    where [Env: Provider<Load> + dialog_common::ConditionalSync + ?Sized,]
+);
+crate::writes_nodes_through_blocks!(
+    impl['a, Env,] Holding<'a, Env>
+    where [Env: Provider<Import> + dialog_common::ConditionalSync + ?Sized,]
+);
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -287,8 +340,8 @@ impl JournaledBlocks {
         self.blocks.store(block);
     }
 
-    /// Keeps every block `delta` holds, emptying it.
-    pub fn flush(&self, delta: &mut Delta<Blake3Hash, Buffer>) {
+    /// Keeps the block of every node `delta` holds, emptying it.
+    pub fn flush<Key, Value>(&self, delta: &mut Delta<Blake3Hash, PersistentNode<Key, Value>>) {
         self.blocks.flush(delta);
     }
 
@@ -356,3 +409,5 @@ impl Provider<Get> for JournaledBlocks {
         get.perform(&self.blocks).await
     }
 }
+
+crate::reads_nodes_through_blocks!(JournaledBlocks);

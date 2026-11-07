@@ -1,24 +1,18 @@
-use dialog_capability::Provider;
-use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync, Holds, Priority};
-use dialog_effects::archive::Load;
+use dialog_common::{Blake3Hash, Priority};
 use dialog_effects::archive::prelude::CatalogScope;
-use dialog_storage::DialogStorageError;
-use rkyv::{
-    bytecheck::CheckBytes,
-    rancor::Strategy,
-    validation::{Validator, archive::ArchiveValidator, shared::SharedValidator},
-};
 
-use crate::{DialogSearchTreeError, Key, NodeCache, PersistentNode, Value};
+use crate::nodes::{Preload, Read};
+use crate::{DialogSearchTreeError, Nodes, PersistentNode};
 
-/// The node stored under `hash` in `catalog`, read through `env`: from the
-/// node cache `env` holds when it holds the node, else loaded and checked,
-/// then kept. `None` when `env` can reach no such block.
+/// The node stored under `hash` in `catalog`, read through `env`: the
+/// environment's answer to a node [`Read`]. `None` when `env` can reach no
+/// such node.
 ///
 /// This is how a tree reads a node, whatever the read: a point lookup, a
 /// range scan, a traversal, a difference, an edit loading the nodes it
 /// rewrites. Every one of them comes here (or to the [`Accessor`] an
-/// operation opens, which is this with the cache looked up once).
+/// operation opens, which is this with the catalog and the reading policy
+/// kept for the whole operation).
 ///
 /// ```no_run
 /// # use dialog_capability::{Subject, did};
@@ -39,22 +33,17 @@ pub async fn load_node<Key, Value, Env>(
     hash: &Blake3Hash,
 ) -> Result<Option<PersistentNode<Key, Value>>, DialogSearchTreeError>
 where
-    Key: self::Key + ConditionalSend + ConditionalSync + 'static,
-    Value: self::Value + ConditionalSend + ConditionalSync + 'static,
-    Value::Archived: for<'b> CheckBytes<
-        Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
-    >,
-    Env: Provider<Load> + Holds + ConditionalSync + ?Sized,
+    Env: Nodes<Key, Value> + ?Sized,
 {
     Accessor::new(env, catalog).load_node(hash).await
 }
 
-/// How a tree's reads load the nodes its environment's cache does not hold.
+/// How a tree's reads ask for the nodes they need.
 ///
-/// A read is a [`Load`] someone is waiting on unless told otherwise: a walk
+/// A read is a [`Read`] someone is waiting on unless told otherwise: a walk
 /// that warms ahead of demand ranks the hydrations it causes lower
 /// ([`priority`](Self::priority)), and a reader whose answer is what the
-/// local archive holds makes every load local ([`local`](Self::local)).
+/// local archive holds makes every read local ([`local`](Self::local)).
 /// Either way the read is the tree's own, performed on the environment;
 /// see [`PersistentTree::ranked`](crate::PersistentTree::ranked) and
 /// [`PersistentTree::locally`](crate::PersistentTree::locally).
@@ -76,81 +65,42 @@ impl Default for Reading {
 }
 
 impl Reading {
-    /// The load of the block `hash` names in `catalog`, read this way.
-    fn load(&self, catalog: &CatalogScope, hash: &Blake3Hash) -> Load {
-        let load = Load::new(catalog.clone(), hash.clone()).with_priority(self.priority);
-        if self.local { load.locally() } else { load }
+    /// The read of the node `hash` names in `catalog`, asked this way.
+    fn read<Key, Value>(&self, catalog: &CatalogScope, hash: &Blake3Hash) -> Read<Key, Value> {
+        let read = Read::new(catalog.clone(), hash.clone()).with_priority(self.priority);
+        if self.local { read.locally() } else { read }
     }
-}
 
-/// The node stored under `hash` in `catalog`, loaded through `env` and
-/// checked: the one place a tree performs [`Load`] for a node.
-///
-/// `Load` is the read that hydrates: an environment that knows where the
-/// catalog's subject keeps its blocks besides its local archive fetches a
-/// local miss from there. Bytes that do not hash to `hash` fail the read
-/// rather than reading as absent, so `None` means the block is genuinely
-/// not reachable.
-async fn fetch_node<Key, Value, Env>(
-    env: &Env,
-    catalog: &CatalogScope,
-    hash: &Blake3Hash,
-    reading: Reading,
-) -> Result<Option<PersistentNode<Key, Value>>, DialogSearchTreeError>
-where
-    Key: self::Key,
-    Value: self::Value,
-    Value::Archived: for<'b> CheckBytes<
-        Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
-    >,
-    Env: Provider<Load> + ConditionalSync + ?Sized,
-{
-    let block = reading
-        .load(catalog, hash)
-        .perform(env)
-        .await
-        .map_err(|error| DialogSearchTreeError::Storage(error.into()))?;
-    checked(block, hash)?
-        .map(PersistentNode::try_from)
-        .transpose()
-}
-
-/// `block` if it is the block `hash` names; a block of other bytes is a
-/// corrupt read, not an absent one.
-pub(crate) fn checked(
-    block: Option<dialog_common::Buffer>,
-    hash: &Blake3Hash,
-) -> Result<Option<dialog_common::Buffer>, DialogSearchTreeError> {
-    match block {
-        Some(block) if block.blake3_hash() != hash => Err(DialogSearchTreeError::Storage(
-            DialogStorageError::Verification(
-                "Retrieved bytes did not match the provided hash".to_string(),
-            ),
-        )),
-        block => Ok(block),
+    /// The preload of the node `hash` names in `catalog`, ranked as this
+    /// reads. A preload is never local: a read-ahead that may not hydrate
+    /// has nothing to make cheap.
+    fn preload<Key, Value>(
+        &self,
+        catalog: &CatalogScope,
+        hash: &Blake3Hash,
+    ) -> Preload<Key, Value> {
+        Preload::new(catalog.clone(), hash.clone()).with_priority(self.priority)
     }
 }
 
 /// A tree operation's reads: the environment it reads through, the catalog
-/// the tree's blocks live in, and the node cache the environment holds for
-/// that catalog's subject, looked up once for the whole operation.
+/// the tree's nodes live in, and how it asks for them.
 ///
-/// A node the cache holds is answered from memory; every other is loaded
-/// through the environment ([`Load`]), checked once and kept in the cache
-/// (if the environment holds one). What it adds is the tree's view of
-/// absence: a node a tree links to and the environment cannot reach is an
-/// error ([`get_node`](Self::get_node)).
+/// Every node is asked for by a [`Read`] performed on the environment,
+/// which answers it however it keeps nodes: from a cache it holds, from
+/// its store, or hydrated from a remote. What this adds is the tree's view
+/// of absence: a node a tree links to and the environment cannot reach is
+/// an error ([`get_node`](Self::get_node)).
 ///
 /// Unflushed nodes are never read here: in-flight edits live in a
-/// [`TransientTree`](crate::TransientTree)'s spine, and nodes a persist
-/// sealed are kept in the same cache before the flush. The accumulating
-/// delta is purely a persist-time output and is not consulted on the read
-/// path.
+/// [`TransientTree`](crate::TransientTree)'s spine, and the nodes a persist
+/// sealed are read back through whatever stages its delta until they are
+/// written.
 pub struct Accessor<'a, Key, Value, Env: ?Sized> {
     env: &'a Env,
     catalog: CatalogScope,
-    cache: Option<NodeCache<Key, Value>>,
     reading: Reading,
+    types: std::marker::PhantomData<fn() -> (Key, Value)>,
 }
 
 impl<Key, Value, Env: ?Sized> Clone for Accessor<'_, Key, Value, Env> {
@@ -158,112 +108,90 @@ impl<Key, Value, Env: ?Sized> Clone for Accessor<'_, Key, Value, Env> {
         Self {
             env: self.env,
             catalog: self.catalog.clone(),
-            cache: self.cache.clone(),
             reading: self.reading,
+            types: std::marker::PhantomData,
         }
     }
 }
 
-impl<'a, Key, Value, Env> Accessor<'a, Key, Value, Env>
-where
-    Key: ConditionalSend + ConditionalSync + 'static,
-    Value: ConditionalSend + ConditionalSync + 'static,
-    Env: Holds + ?Sized,
-{
-    /// Reads the blocks of `catalog` through `env`, answering from the node
-    /// cache `env` holds for the catalog's subject.
+impl<'a, Key, Value, Env: ?Sized> Accessor<'a, Key, Value, Env> {
+    /// Reads the nodes of `catalog` through `env`.
     pub fn new(env: &'a Env, catalog: &CatalogScope) -> Self {
         Self {
             env,
             catalog: catalog.clone(),
-            cache: NodeCache::of(env, catalog.subject()),
             reading: Reading::default(),
+            types: std::marker::PhantomData,
         }
     }
 
-    /// These reads, loading what the cache does not hold as `reading` says.
+    /// These reads, asking as `reading` says.
     pub fn reading(mut self, reading: Reading) -> Self {
         self.reading = reading;
         self
     }
-}
 
-impl<'a, Key, Value, Env> Accessor<'a, Key, Value, Env>
-where
-    Key: self::Key,
-    Value: self::Value,
-    Value::Archived: for<'b> CheckBytes<
-        Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
-    >,
-    Env: Provider<Load> + ConditionalSync + ?Sized,
-{
+    /// These reads, seeing only what this replica holds: every read is
+    /// [local](Read::locally), whatever this was asking before.
+    pub(crate) fn local(&self) -> Self {
+        let mut local = self.clone();
+        local.reading.local = true;
+        local
+    }
+
     /// The environment this reads through.
     pub fn env(&self) -> &'a Env {
         self.env
     }
 
-    /// The catalog this reads the blocks of.
+    /// The catalog this reads the nodes of.
     pub fn catalog(&self) -> &CatalogScope {
         &self.catalog
     }
+}
 
-    /// The node cache this answers from, if the environment holds one.
-    pub fn cache(&self) -> Option<&NodeCache<Key, Value>> {
-        self.cache.as_ref()
-    }
-
-    /// Whether the environment keeps the nodes read through it, so a
-    /// read-ahead ([`warm`](Self::warm)) has somewhere to land.
-    pub(crate) fn keeps(&self) -> bool {
-        self.cache.is_some()
-    }
-
-    /// The node at `hash`, checked once: from the cache when it holds the
-    /// node, else loaded and then kept. `None` when the environment can
-    /// reach no such block.
+impl<'a, Key, Value, Env> Accessor<'a, Key, Value, Env>
+where
+    Env: Nodes<Key, Value> + ?Sized,
+{
+    /// The node at `hash`: the environment's answer to its [`Read`]. `None`
+    /// when the environment can reach no such node.
     pub async fn load_node(
         &self,
         hash: &Blake3Hash,
     ) -> Result<Option<PersistentNode<Key, Value>>, DialogSearchTreeError> {
-        let fetch =
-            async |hash: &Blake3Hash| fetch_node(self.env, &self.catalog, hash, self.reading).await;
-        match &self.cache {
-            Some(cache) => cache.get_or_fetch(hash, fetch).await,
-            None => fetch(hash).await,
-        }
+        self.reading
+            .read(&self.catalog, hash)
+            .perform(self.env)
+            .await
     }
 
-    /// Loads the node at `hash` into the cache, without reporting what
-    /// happened, and resolves to the hash it loaded so that a queue of
-    /// these can tell which one finished.
+    /// Asks the environment to make the node at `hash` cheap to read
+    /// ([`Preload`]), without reporting what happened, and resolves to the
+    /// hash it asked for so that a queue of these can tell which one
+    /// finished.
     ///
-    /// This is a read nobody is waiting on: it makes the node local so that a
-    /// later [`get_node`](Self::get_node) is served from memory. It
-    /// advances only while its owner polls it, which is why a reader that
-    /// needs the node meanwhile fetches for itself rather than waiting: only
-    /// the owner can join it, by polling it to completion. Nothing observes
-    /// its outcome, so a node that is missing or fails to load is left to the
-    /// read that actually needs it. Over an environment that keeps nothing
-    /// it is a read whose result is dropped.
+    /// This is a read nobody is waiting on. It advances only while its
+    /// owner polls it, which is why a reader that needs the node meanwhile
+    /// reads for itself rather than waiting: only the owner can join it,
+    /// by polling it to completion. Nothing observes its outcome, so a
+    /// node that is missing or fails to load is left to the read that
+    /// actually needs it. An environment with nowhere to keep the node
+    /// does nothing.
     pub(crate) async fn warm(&self, hash: Blake3Hash) -> Blake3Hash {
-        let _ = self.load_node(&hash).await;
+        self.reading
+            .preload(&self.catalog, &hash)
+            .perform(self.env)
+            .await;
         hash
-    }
-
-    /// The node at `hash` if the cache holds it, with no IO: a way to reach
-    /// what a held node keeps with it (its piece summary, say) without
-    /// loading a node that is not already here.
-    pub(crate) fn cached(&self, hash: &Blake3Hash) -> Option<PersistentNode<Key, Value>> {
-        self.cache.as_ref()?.get_cached(hash)
     }
 
     /// Retrieves a node by its content hash.
     ///
-    /// Answers from the cache when it holds the node and from the
-    /// environment otherwise. Returns an error if the environment can reach
-    /// no such block. The read is this caller's own: it never waits on a
-    /// read of the same node that someone else has in flight, since only
-    /// that someone could drive it.
+    /// Returns an error if the environment can reach no such node. The
+    /// read is this caller's own: it never waits on a read of the same
+    /// node that someone else has in flight, since only that someone could
+    /// drive it.
     pub async fn get_node(
         &self,
         hash: &Blake3Hash,
@@ -290,7 +218,7 @@ mod tests {
 
     /// Concurrent misses on one node each read it: nothing waits on a read
     /// it cannot drive. The node lands once, and every read after that is
-    /// served from the cache.
+    /// served from the cache the environment holds.
     #[dialog_common::test]
     async fn it_reads_a_node_once_it_has_landed_from_the_cache() -> Result<()> {
         let backend = ObservingBlocks::new();
@@ -303,10 +231,8 @@ mod tests {
             .edit()
             .insert(1u32.to_be_bytes(), vec![1], &storage)
             .await?
-            .persist(&mut delta, &storage)?;
-        for (_, buffer) in delta.flush() {
-            storage.store(buffer);
-        }
+            .persist(&mut delta)?;
+        storage.flush(&mut delta);
         let hash = tree.root().clone();
 
         let store = crate::helpers::Holding::new(&storage);
@@ -375,6 +301,8 @@ mod tests {
         }
     }
 
+    crate::reads_nodes_through_blocks!(Answering);
+
     /// An environment handing back other bytes is a corrupt block, not an
     /// absent one: the read fails rather than reading as `None`.
     #[dialog_common::test]
@@ -417,15 +345,32 @@ mod tests {
     }
 
     /// An environment that holds nothing has no node cache: a tree read
-    /// through it reads every node from its blocks, and a read-ahead has
-    /// nowhere to land, rather than landing in a cache made for it alone.
+    /// through it reads every node from its blocks, and a preload has
+    /// nowhere to land, so it reads nothing.
     #[dialog_common::test]
-    fn it_finds_no_cache_on_an_environment_that_holds_nothing() {
-        let blocks = crate::helpers::Blocks::new();
-        let catalog = crate::helpers::test_catalog();
+    async fn it_preloads_nothing_into_an_environment_that_holds_nothing() -> Result<()> {
+        let backend = ObservingBlocks::new();
+        let mut delta = Delta::zero();
+        let tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_catalog())
+            .edit()
+            .insert(1u32.to_be_bytes(), vec![1], &backend)
+            .await?
+            .persist(&mut delta)?;
+        backend.flush(&mut delta);
+        backend.reset();
 
-        assert!(crate::NodeCache::<[u8; 4], Vec<u8>>::of(&blocks, catalog.subject()).is_none());
-        assert!(!Accessor::<[u8; 4], Vec<u8>, _>::new(&blocks, &catalog).keeps());
+        let accessor =
+            Accessor::<[u8; 4], Vec<u8>, _>::new(&backend, &crate::helpers::test_catalog());
+        accessor.warm(tree.root().clone()).await;
+        assert!(
+            backend.read_log().is_empty(),
+            "nowhere to land, nothing read"
+        );
+
+        let _ = accessor.get_node(tree.root()).await?;
+        let _ = accessor.get_node(tree.root()).await?;
+        assert_eq!(backend.read_log().len(), 2, "every read reaches the blocks");
+        Ok(())
     }
 
     /// An environment that holds handles is given one cache, found by every
@@ -446,8 +391,8 @@ mod tests {
             .edit()
             .insert(1u32.to_be_bytes(), vec![1], &env)
             .await?
-            .persist(&mut delta, &env)?;
-        blocks.flush(&mut delta);
+            .persist(&mut delta)?;
+        env.flush(&mut delta).await?;
 
         let mine = crate::NodeCache::<[u8; 4], Vec<u8>>::of(&env, catalog.subject())
             .expect("a holding environment holds a cache");
@@ -456,7 +401,7 @@ mod tests {
 
         assert!(
             mine.get_cached(tree.root()).is_some(),
-            "the persist kept the root it sealed, in the cache the env holds"
+            "the write kept the root it sealed, in the cache the env holds"
         );
         assert!(
             theirs.get_cached(tree.root()).is_none(),
@@ -493,6 +438,8 @@ mod tests {
         }
     }
 
+    crate::reads_nodes_through_blocks!(Asked);
+
     /// A tree's reading reaches every load it performs: a tree reads as a
     /// demand read that may hydrate, one ranked lower carries its priority
     /// to the env, and one made local asks for the local archive alone.
@@ -506,7 +453,7 @@ mod tests {
             .edit()
             .insert(1u32.to_be_bytes(), vec![1], &blocks)
             .await?
-            .persist(&mut delta, &blocks)?;
+            .persist(&mut delta)?;
         blocks.flush(&mut delta);
         let env = Asked {
             blocks,

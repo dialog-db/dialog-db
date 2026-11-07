@@ -80,7 +80,7 @@ pub async fn rekey_tree<S>(
     manifest: Manifest,
 ) -> Result<ArtifactTree, DialogArtifactsError>
 where
-    S: Provider<archive::Load> + Provider<blob::Load> + Holds + ConditionalSync + Clone,
+    S: ArtifactNodes + Provider<blob::Load> + ConditionalSync + Clone,
 {
     let value_encoding = manifest.value_encoding;
     let mut target = ArtifactTree::empty_with_manifest(source.catalog().clone(), manifest);
@@ -259,7 +259,7 @@ mod tests {
             .edit()
             .insert(key, state, &store)
             .await?
-            .persist(delta.blocks(), &store)?;
+            .persist(delta.nodes())?;
         delta.flush_into(&store);
 
         let upgraded = rekeyed(&legacy, &store, NUMBER_BAND).await?;

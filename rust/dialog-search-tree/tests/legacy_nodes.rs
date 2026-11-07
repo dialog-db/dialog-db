@@ -149,7 +149,7 @@ async fn it_edits_trees_written_in_the_legacy_layout() -> anyhow::Result<()> {
                         .insert(key.to_be_bytes(), key.to_be_bytes().to_vec(), &storage)
                         .await?;
                 }
-                edit.persist(&mut delta, &storage)?
+                edit.persist(&mut delta)?
             } else {
                 let mut edit = tree.edit();
                 for key in added {
@@ -157,7 +157,7 @@ async fn it_edits_trees_written_in_the_legacy_layout() -> anyhow::Result<()> {
                         .insert(key.to_be_bytes(), key.to_be_bytes().to_vec(), &storage)
                         .await?;
                 }
-                edit.persist(&mut delta, &storage)?.root().clone()
+                edit.persist(&mut delta)?.root().clone()
             };
             for (_hash, buffer) in delta.flush() {
                 assert_eq!(
@@ -166,7 +166,7 @@ async fn it_edits_trees_written_in_the_legacy_layout() -> anyhow::Result<()> {
                     "{}: an edit writes tagged nodes",
                     fixture.name
                 );
-                storage.store(buffer);
+                storage.store(buffer.buffer().clone());
             }
 
             let edited = Tree::at(dialog_search_tree::helpers::test_catalog(), root);

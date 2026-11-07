@@ -37,8 +37,12 @@
 //!   any not-yet-upgraded code path. A rerun after a partial failure
 //!   re-skips by content address and drains the remainder.
 
+use dialog_artifacts::tree::ArtifactNode;
+use dialog_artifacts::tree::{ArtifactPreload, ArtifactRead, ArtifactWrite};
+use dialog_artifacts::{Datum, Key as ArtifactKey, State};
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::blob::Load as BlobLoad;
+use dialog_search_tree::nodes::Ready;
 use std::collections::BTreeMap;
 
 use crate::RemoteSite;
@@ -97,6 +101,16 @@ struct MigrateEnv<S: Clone> {
     storage: Storage<S>,
     /// What the branch the migration opens keeps for its commits.
     holdings: Holdings,
+}
+
+/// Migration holds no nodes; its storage is asked.
+impl<S> Ready<ArtifactKey, State<Datum>> for MigrateEnv<S>
+where
+    S: Clone + Ready<ArtifactKey, State<Datum>>,
+{
+    fn ready(&self, read: &ArtifactRead) -> Option<ArtifactNode> {
+        self.storage.ready(read)
+    }
 }
 
 impl<S: Clone> Holds for MigrateEnv<S> {
@@ -168,6 +182,9 @@ migrate_storage!(
     BlobImport,
     ArchiveLoad,
     BlobLoad,
+    ArtifactRead,
+    ArtifactPreload,
+    ArtifactWrite,
 );
 migrate_authority!(Identify, Attest);
 
@@ -251,6 +268,10 @@ impl MigrateCertificates {
             + Provider<BlobRead>
             + Provider<BlobWrite>
             + Provider<BlobImport>
+            + Provider<ArtifactRead>
+            + Provider<ArtifactPreload>
+            + Provider<ArtifactWrite>
+            + Ready<ArtifactKey, State<Datum>>
             + Clone
             + 'static,
         Storage<S>: Provider<Export<Ucan>> + Provider<Forget<Ucan>> + ConditionalSync,

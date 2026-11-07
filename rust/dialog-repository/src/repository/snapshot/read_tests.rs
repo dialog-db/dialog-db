@@ -6,6 +6,8 @@ wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
 use anyhow::Result;
 use dialog_artifacts::history::History as _;
+use dialog_artifacts::tree::ArtifactNodes;
+use dialog_artifacts::tree::ArtifactWrites;
 use dialog_artifacts::{Artifact, ArtifactSelector, Changes, Entity, Value};
 use dialog_effects::blob::BlobError;
 use dialog_effects::blob::Read as BlobRead;
@@ -62,6 +64,8 @@ where
         + Provider<Put>
         + Provider<Resolve>
         + Provider<ArchiveLoad>
+        + ArtifactWrites
+        + ArtifactNodes
         + Provider<BlobLoad>
         + Provider<dialog_artifacts::Preload>
         + Provider<dialog_artifacts::Speculation>
@@ -104,6 +108,8 @@ where
         + Provider<Resolve>
         + Provider<Identify>
         + Provider<ArchiveLoad>
+        + ArtifactWrites
+        + ArtifactNodes
         + Provider<BlobLoad>
         + Provider<dialog_artifacts::Preload>
         + Provider<dialog_artifacts::Speculation>
@@ -131,6 +137,8 @@ where
         + Provider<Resolve>
         + Provider<Identify>
         + Provider<ArchiveLoad>
+        + ArtifactWrites
+        + ArtifactNodes
         + Provider<BlobLoad>
         + Provider<dialog_artifacts::Preload>
         + Provider<dialog_artifacts::Speculation>

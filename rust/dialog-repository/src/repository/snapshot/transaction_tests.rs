@@ -7,6 +7,8 @@ wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 use crate::repository::branch::context::head_context;
 use anyhow::Result;
 use dialog_artifacts::history::{History as _, Version};
+use dialog_artifacts::tree::ArtifactNodes;
+use dialog_artifacts::tree::ArtifactWrites;
 use dialog_artifacts::{Artifact, ArtifactSelector, Changes, Entity, Instruction, Value};
 use dialog_capability::{Fork, Provider};
 use dialog_common::{ConditionalSync, Holds};
@@ -38,6 +40,8 @@ where
         + Provider<Put>
         + Provider<Resolve>
         + Provider<ArchiveLoad>
+        + ArtifactWrites
+        + ArtifactNodes
         + Provider<BlobLoad>
         + Provider<dialog_artifacts::Preload>
         + Provider<dialog_artifacts::Speculation>
@@ -71,6 +75,8 @@ where
         + Provider<Put>
         + Provider<Resolve>
         + Provider<ArchiveLoad>
+        + ArtifactWrites
+        + ArtifactNodes
         + Provider<BlobLoad>
         + Provider<dialog_artifacts::Preload>
         + Provider<dialog_artifacts::Speculation>
@@ -104,6 +110,8 @@ where
         + Provider<Resolve>
         + Provider<Identify>
         + Provider<ArchiveLoad>
+        + ArtifactWrites
+        + ArtifactNodes
         + Provider<BlobLoad>
         + Provider<dialog_artifacts::Preload>
         + Provider<dialog_artifacts::Speculation>

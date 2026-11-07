@@ -158,14 +158,7 @@ pub fn blob_changes<'s, S>(
     store: S,
 ) -> impl Stream<Item = Result<BlobChange, DialogArtifactsError>> + 's + ConditionalSend
 where
-    S: Provider<archive::Load>
-        + Provider<archive::Get>
-        + Provider<blob::Load>
-        + Holds
-        + ConditionalSend
-        + ConditionalSync
-        + Clone
-        + 's,
+    S: ArtifactNodes + Provider<blob::Load> + ConditionalSend + ConditionalSync + Clone + 's,
 {
     let storage = store;
     try_stream! {
@@ -198,12 +191,7 @@ pub trait BlobIndexExt {
         hash: &Blake3Hash,
     ) -> Result<Option<BlobRecord>, DialogArtifactsError>
     where
-        S: Provider<archive::Load>
-            + Provider<blob::Load>
-            + Holds
-            + ConditionalSend
-            + ConditionalSync
-            + Clone;
+        S: ArtifactNodes + Provider<blob::Load> + ConditionalSend + ConditionalSync + Clone;
 
     /// The size of the content this tree vouches for under `hash`, by an
     /// asset's `dialog.asset/size` fact or, in a tree written before the
@@ -218,12 +206,7 @@ pub trait BlobIndexExt {
         hash: &Blake3Hash,
     ) -> Result<Option<u64>, DialogArtifactsError>
     where
-        S: Provider<archive::Load>
-            + Provider<blob::Load>
-            + Holds
-            + ConditionalSend
-            + ConditionalSync
-            + Clone;
+        S: ArtifactNodes + Provider<blob::Load> + ConditionalSend + ConditionalSync + Clone;
 
     /// The size an asset's `dialog.asset/size` fact records for `hash`, or
     /// `None` when this tree records no such asset. Unlike
@@ -235,22 +218,12 @@ pub trait BlobIndexExt {
         hash: &Blake3Hash,
     ) -> Result<Option<u64>, DialogArtifactsError>
     where
-        S: Provider<archive::Load>
-            + Provider<blob::Load>
-            + Holds
-            + ConditionalSend
-            + ConditionalSync
-            + Clone;
+        S: ArtifactNodes + Provider<blob::Load> + ConditionalSend + ConditionalSync + Clone;
 
     /// Whether the index references a blob.
     async fn has_blob<S>(&self, store: &S, hash: &Blake3Hash) -> Result<bool, DialogArtifactsError>
     where
-        S: Provider<archive::Load>
-            + Provider<blob::Load>
-            + Holds
-            + ConditionalSend
-            + ConditionalSync
-            + Clone,
+        S: ArtifactNodes + Provider<blob::Load> + ConditionalSend + ConditionalSync + Clone,
     {
         Ok(self.get_blob(store, hash).await?.is_some())
     }
@@ -265,13 +238,7 @@ pub trait BlobIndexExt {
     ) -> impl Stream<Item = Result<(Blake3Hash, BlobRecord), DialogArtifactsError>> + 's + ConditionalSend
     where
         Self: Sized,
-        S: Provider<archive::Load>
-            + Provider<blob::Load>
-            + Holds
-            + ConditionalSend
-            + ConditionalSync
-            + Clone
-            + 's;
+        S: ArtifactNodes + Provider<blob::Load> + ConditionalSend + ConditionalSync + Clone + 's;
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -283,12 +250,7 @@ impl BlobIndexExt for ArtifactTree {
         hash: &Blake3Hash,
     ) -> Result<Option<BlobRecord>, DialogArtifactsError>
     where
-        S: Provider<archive::Load>
-            + Provider<blob::Load>
-            + Holds
-            + ConditionalSend
-            + ConditionalSync
-            + Clone,
+        S: ArtifactNodes + Provider<blob::Load> + ConditionalSend + ConditionalSync + Clone,
     {
         let storage = store.clone();
         let key = BlobKey::new(hash).into_key();
@@ -304,12 +266,7 @@ impl BlobIndexExt for ArtifactTree {
         hash: &Blake3Hash,
     ) -> Result<Option<u64>, DialogArtifactsError>
     where
-        S: Provider<archive::Load>
-            + Provider<blob::Load>
-            + Holds
-            + ConditionalSend
-            + ConditionalSync
-            + Clone,
+        S: ArtifactNodes + Provider<blob::Load> + ConditionalSend + ConditionalSync + Clone,
     {
         if let Some(size) = self.asset_size(store, hash).await? {
             return Ok(Some(size));
@@ -323,12 +280,7 @@ impl BlobIndexExt for ArtifactTree {
         hash: &Blake3Hash,
     ) -> Result<Option<u64>, DialogArtifactsError>
     where
-        S: Provider<archive::Load>
-            + Provider<blob::Load>
-            + Holds
-            + ConditionalSend
-            + ConditionalSync
-            + Clone,
+        S: ArtifactNodes + Provider<blob::Load> + ConditionalSend + ConditionalSync + Clone,
     {
         let entity = Entity::from_blob(hash)?;
         let attribute: Relation = ASSET_SIZE.parse()?;
@@ -353,13 +305,7 @@ impl BlobIndexExt for ArtifactTree {
     ) -> impl Stream<Item = Result<(Blake3Hash, BlobRecord), DialogArtifactsError>> + 's + ConditionalSend
     where
         Self: Sized,
-        S: Provider<archive::Load>
-            + Provider<blob::Load>
-            + Holds
-            + ConditionalSend
-            + ConditionalSync
-            + Clone
-            + 's,
+        S: ArtifactNodes + Provider<blob::Load> + ConditionalSend + ConditionalSync + Clone + 's,
     {
         let tree: ArtifactTree = self;
         let storage = store;
@@ -425,7 +371,7 @@ mod tests {
     ) -> Result<(), DialogArtifactsError> {
         let mut delta = ArchiveDelta::zero();
         let transient = tree.edit().insert(key, state, store).await?;
-        *tree = transient.persist(delta.blocks(), store)?;
+        *tree = transient.persist(delta.nodes())?;
         delta.flush_into(store);
         Ok(())
     }

@@ -26,10 +26,14 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use dialog_artifacts::selector::Constrained;
+use dialog_artifacts::tree::{
+    ArtifactNode, ArtifactNodes, ArtifactPreload, ArtifactRead, ArtifactWrites,
+};
 use dialog_artifacts::{
     Artifact, ArtifactSelector, ArtifactStream, DialogArtifactsError, Instruction,
     Relation as ArtifactsRelation, Select, Value,
 };
+use dialog_artifacts::{Datum, Key as ArtifactKey, State};
 use dialog_capability::{Fork, Provider, Subject};
 use dialog_common::Buffer;
 use dialog_common::{ConditionalSync, Held, Holdings, Holds};
@@ -49,7 +53,9 @@ use dialog_peer::helpers::test_owned;
 use dialog_peer::helpers::{generate_data, open_peer, test_storage, unique_name};
 use dialog_peer::{Peer, Session};
 use dialog_repository::{Branch, HeldCaches, PeersEnv, RemoteSite, Repository, RepositoryExt as _};
+use dialog_search_tree::DialogSearchTreeError;
 use dialog_search_tree::audit as tree_audit;
+use dialog_search_tree::nodes::Ready;
 
 use dialog_storage::Blake3Hash;
 use dialog_storage::dup_audit;
@@ -411,6 +417,32 @@ where
     }
 }
 
+// A node read is answered through this store's own counted loads, into the
+// node cache it holds; a write goes through the backend's import and keeps
+// the nodes here.
+dialog_search_tree::reads_nodes_through_blocks!(
+    impl[Backend,] CountingStore<Backend>
+    where [Backend: Provider<ArchiveLoad> + ConditionalSync,]
+);
+dialog_search_tree::writes_nodes_through_blocks!(
+    impl[Backend,] CountingStore<Backend>
+    where [Backend: Provider<Import> + ConditionalSync,]
+);
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<Backend> Provider<Import> for CountingStore<Backend>
+where
+    Backend: Provider<Import> + ConditionalSync,
+{
+    async fn execute(
+        &self,
+        import: dialog_capability::Capability<Import>,
+    ) -> Result<(), ArchiveError> {
+        import.perform(&self.backend).await
+    }
+}
+
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<Backend> Provider<BlobLoad> for CountingStore<Backend>
@@ -477,6 +509,7 @@ where
         + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
+        + Provider<Import>
         + Provider<ArchiveLoad>
         + Provider<BlobLoad>
         + Provider<dialog_artifacts::Preload>
@@ -513,6 +546,7 @@ where
         + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
+        + Provider<Import>
         + Provider<ArchiveLoad>
         + Provider<BlobLoad>
         + Provider<dialog_artifacts::Preload>
@@ -562,6 +596,47 @@ where
         }
         .perform(&counting)
         .await
+    }
+}
+
+// Node reads for the scans and resolver premises, through the same
+// counting store, in the branch's catalog.
+/// The bench env reads through a counting store made per read, which holds
+/// nothing yet: nothing is at hand.
+impl<Env> Ready<ArtifactKey, State<Datum>> for JoinEnv<'_, Env> {
+    fn ready(&self, _: &ArtifactRead) -> Option<ArtifactNode> {
+        None
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<Env> Provider<ArtifactRead> for JoinEnv<'_, Env>
+where
+    Env: Provider<ArchiveLoad> + ConditionalSync,
+{
+    async fn execute(
+        &self,
+        read: ArtifactRead,
+    ) -> Result<Option<ArtifactNode>, DialogSearchTreeError> {
+        let counting = CountingStore::new(self.operator, self.journal.clone());
+        let mut line = read;
+        line.catalog = self.branch.archive().index();
+        line.perform(&counting).await
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<Env> Provider<ArtifactPreload> for JoinEnv<'_, Env>
+where
+    Env: Provider<ArchiveLoad> + ConditionalSync,
+{
+    async fn execute(&self, preload: ArtifactPreload) {
+        let counting = CountingStore::new(self.operator, self.journal.clone());
+        let mut line = preload;
+        line.catalog = self.branch.archive().index();
+        line.perform(&counting).await
     }
 }
 
@@ -698,6 +773,8 @@ where
         + Provider<List>
         + PeersEnv
         + Provider<ArchiveLoad>
+        + ArtifactNodes
+        + ArtifactWrites
         + Provider<BlobLoad>
         + Provider<dialog_artifacts::Preload>
         + Provider<dialog_artifacts::Speculation>
@@ -1820,6 +1897,8 @@ mod test {
             + Provider<List>
             + PeersEnv
             + Provider<ArchiveLoad>
+            + ArtifactNodes
+            + ArtifactWrites
             + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
@@ -1946,6 +2025,8 @@ mod test {
             + Provider<List>
             + PeersEnv
             + Provider<ArchiveLoad>
+            + ArtifactNodes
+            + ArtifactWrites
             + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
@@ -2082,6 +2163,8 @@ mod test {
             + Provider<List>
             + PeersEnv
             + Provider<ArchiveLoad>
+            + ArtifactNodes
+            + ArtifactWrites
             + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
@@ -2460,6 +2543,8 @@ where
         + Provider<List>
         + PeersEnv
         + Provider<ArchiveLoad>
+        + ArtifactNodes
+        + ArtifactWrites
         + Provider<BlobLoad>
         + Provider<dialog_artifacts::Preload>
         + Provider<dialog_artifacts::Speculation>

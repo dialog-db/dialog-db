@@ -65,6 +65,8 @@
 //!
 //! [`AnalyzedRule::is_entity_local`]: dialog_query::rule::analyzer::AnalyzedRule::is_entity_local
 
+use dialog_artifacts::tree::ArtifactNodes;
+use dialog_artifacts::tree::ArtifactWrites;
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::Read as BlobRead;
@@ -721,6 +723,8 @@ where
             + Provider<Resolve>
             + Provider<Identify>
             + Provider<ArchiveLoad>
+            + ArtifactWrites
+            + ArtifactNodes
             + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
@@ -836,6 +840,8 @@ where
             + Provider<Put>
             + Provider<Resolve>
             + Provider<ArchiveLoad>
+            + ArtifactWrites
+            + ArtifactNodes
             + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
@@ -977,6 +983,8 @@ where
             + Provider<Resolve>
             + Provider<Identify>
             + Provider<ArchiveLoad>
+            + ArtifactWrites
+            + ArtifactNodes
             + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
@@ -1186,6 +1194,8 @@ where
             + Provider<Resolve>
             + Provider<Identify>
             + Provider<ArchiveLoad>
+            + ArtifactWrites
+            + ArtifactNodes
             + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
@@ -1243,6 +1253,8 @@ where
             + Provider<Resolve>
             + Provider<Identify>
             + Provider<ArchiveLoad>
+            + ArtifactWrites
+            + ArtifactNodes
             + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
@@ -1286,8 +1298,11 @@ where
 
 #[cfg(test)]
 mod tests {
+    use dialog_artifacts::tree::ArtifactNode;
+    use dialog_artifacts::{Datum, Key as ArtifactKey, State};
     use dialog_effects::archive::Load as ArchiveLoad;
     use dialog_effects::blob::Load as BlobLoad;
+    use dialog_search_tree::nodes::Ready;
 
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
@@ -1296,6 +1311,9 @@ mod tests {
     use crate::helpers::test_repo;
     use crate::{Ephemeral, RemoteSite};
     use async_trait::async_trait;
+    use dialog_artifacts::tree::{
+        ArtifactNodes, ArtifactPreload, ArtifactRead, ArtifactWrite, ArtifactWrites,
+    };
     use dialog_artifacts::{ArtifactSelector, Changes, Entity, Value};
     use dialog_artifacts::{NameShape, Relation as ArtifactsRelation, Symbol};
     use dialog_capability::Command;
@@ -1384,6 +1402,8 @@ mod tests {
             + Provider<Resolve>
             + Provider<Identify>
             + Provider<ArchiveLoad>
+            + ArtifactWrites
+            + ArtifactNodes
             + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
@@ -5354,6 +5374,9 @@ mod tests {
     impl Fault for Resolve {}
     impl Fault for ArchiveLoad {}
     impl Fault for BlobLoad {}
+    impl Fault for ArtifactRead {}
+    impl Fault for ArtifactPreload {}
+    impl Fault for ArtifactWrite {}
     impl Fault for dialog_artifacts::Preload {}
     impl Fault for dialog_artifacts::Speculation {}
     impl Fault for Fork<RemoteSite, Resolve> {}
@@ -5394,6 +5417,17 @@ mod tests {
 
         fn held_or(&self, key: &str, make: &dyn Fn() -> Held) -> Held {
             self.inner.held_or(key, make)
+        }
+    }
+
+    /// What is at hand is at hand: a fault is injected only where a
+    /// command would run.
+    impl<P> Ready<ArtifactKey, State<Datum>> for Unreliable<P>
+    where
+        P: Ready<ArtifactKey, State<Datum>>,
+    {
+        fn ready(&self, read: &ArtifactRead) -> Option<ArtifactNode> {
+            self.inner.ready(read)
         }
     }
 

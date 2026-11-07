@@ -1,3 +1,5 @@
+use dialog_artifacts::tree::ArtifactNodes;
+use dialog_artifacts::tree::ArtifactWrites;
 use dialog_artifacts::tree::fetch_spilled;
 use dialog_artifacts::{
     Artifact, DialogArtifactsError, EntityKey, Exporter, Key, KeyViewConstruct, State,
@@ -37,6 +39,8 @@ impl<E: Exporter> Export<'_, E> {
             + Provider<Put>
             + Provider<Resolve>
             + Provider<ArchiveLoad>
+            + ArtifactWrites
+            + ArtifactNodes
             + Provider<BlobLoad>
             + Provider<Fork<RemoteSite, Resolve>>
             + dialog_common::Holds

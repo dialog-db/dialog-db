@@ -8,6 +8,8 @@
 //! map, so this resolves it once per head, from the branch's memo when it
 //! can, and remembers it there.
 
+use dialog_artifacts::tree::ArtifactNodes;
+use dialog_artifacts::tree::ArtifactWrites;
 use std::sync::Arc;
 
 use dialog_artifacts::history::{
@@ -48,7 +50,13 @@ pub(crate) async fn published_context<S>(
     store: &S,
 ) -> Result<Option<Arc<Context>>, DialogArtifactsError>
 where
-    S: Provider<ArchiveLoad> + Provider<BlobLoad> + Holds + ConditionalSync + Clone,
+    S: Provider<ArchiveLoad>
+        + ArtifactWrites
+        + ArtifactNodes
+        + Provider<BlobLoad>
+        + Holds
+        + ConditionalSync
+        + Clone,
 {
     let version = head.version();
     if let Some(context) = contexts.cached(&version).await {
@@ -115,7 +123,13 @@ pub(crate) async fn head_observes<S>(
     store: &S,
 ) -> Result<Option<bool>, DialogArtifactsError>
 where
-    S: Provider<ArchiveLoad> + Provider<BlobLoad> + Holds + ConditionalSync + Clone,
+    S: Provider<ArchiveLoad>
+        + ArtifactWrites
+        + ArtifactNodes
+        + Provider<BlobLoad>
+        + Holds
+        + ConditionalSync
+        + Clone,
 {
     if let Some(context) = contexts.cached(&head.version()).await {
         return Ok(Some(context.observes(version)));
@@ -154,7 +168,13 @@ pub(crate) async fn full_context<S, H>(
     history: &H,
 ) -> Result<Arc<Context>, DialogArtifactsError>
 where
-    S: Provider<ArchiveLoad> + Provider<BlobLoad> + Holds + ConditionalSync + Clone,
+    S: Provider<ArchiveLoad>
+        + ArtifactWrites
+        + ArtifactNodes
+        + Provider<BlobLoad>
+        + Holds
+        + ConditionalSync
+        + Clone,
     H: History,
 {
     match published_context(head, contexts, catalog, store).await? {
@@ -216,7 +236,13 @@ pub(crate) async fn successor<S, H>(
     history: impl FnOnce() -> H,
 ) -> Result<Successor, DialogArtifactsError>
 where
-    S: Provider<ArchiveLoad> + Provider<BlobLoad> + Holds + ConditionalSync + Clone,
+    S: Provider<ArchiveLoad>
+        + ArtifactWrites
+        + ArtifactNodes
+        + Provider<BlobLoad>
+        + Holds
+        + ConditionalSync
+        + Clone,
     H: History,
 {
     let Some(parent) = parent else {
@@ -298,7 +324,12 @@ pub(crate) async fn head_context<'a, Env>(
     env: &Env,
 ) -> Result<Arc<Context>, DialogArtifactsError>
 where
-    Env: Provider<ArchiveLoad> + Provider<BlobLoad> + Holds + ConditionalSync,
+    Env: Provider<ArchiveLoad>
+        + ArtifactWrites
+        + ArtifactNodes
+        + Provider<BlobLoad>
+        + Holds
+        + ConditionalSync,
 {
     let source = source.into();
     let head = source
@@ -327,7 +358,12 @@ pub(crate) async fn region_agrees<'a, Env>(
     what: &str,
 ) -> Result<(Context, Context), DialogArtifactsError>
 where
-    Env: Provider<ArchiveLoad> + Provider<BlobLoad> + Holds + ConditionalSync,
+    Env: Provider<ArchiveLoad>
+        + ArtifactWrites
+        + ArtifactNodes
+        + Provider<BlobLoad>
+        + Holds
+        + ConditionalSync,
 {
     let source = source.into();
     let head = source

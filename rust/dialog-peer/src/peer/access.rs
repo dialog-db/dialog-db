@@ -33,6 +33,10 @@
 //! up front with `Branch::download`.
 
 use super::{Grant, Local, Mode, Peer, PeerSpace};
+use dialog_artifacts::tree::{
+    ArtifactNode, ArtifactPreload, ArtifactRead, ArtifactWrite, ArtifactWrites,
+};
+use dialog_artifacts::{Datum, Key as ArtifactKey, State};
 use dialog_capability::access::{
     Access, Authorize, AuthorizeError, Certificate as _, Export, Proof as _, Protocol, Prove,
     Retain, Scope as _, TimeRange,
@@ -48,6 +52,8 @@ use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::{BlobError, Import as BlobImport, Read as BlobRead, Write as BlobWrite};
 use dialog_effects::memory::{Publish, Resolve};
 use dialog_repository::{Branch, RemoteSite};
+use dialog_search_tree::DialogSearchTreeError;
+use dialog_search_tree::nodes::{Ready, held_node};
 use dialog_storage::provider::storage::Storage;
 use dialog_ucan::{Ucan, UcanCertificate, UcanDelegation, UcanProof};
 use dialog_ucan_core::DelegationChain;
@@ -92,6 +98,7 @@ trait LocalEnv:
     Provider<Get>
     + Provider<Put>
     + Provider<Import>
+    + ArtifactWrites
     + Provider<Resolve>
     + Provider<Publish>
     + Provider<Identify>
@@ -106,6 +113,7 @@ impl<T> LocalEnv for T where
     T: Provider<Get>
         + Provider<Put>
         + Provider<Import>
+        + ArtifactWrites
         + Provider<Resolve>
         + Provider<Publish>
         + Provider<Identify>
@@ -221,6 +229,57 @@ where
         load: ArchiveLoad,
     ) -> Result<Option<dialog_common::Buffer>, ArchiveError> {
         dialog_repository::load_or_hydrate(self, load).await
+    }
+}
+
+/// A node the operator's cache holds is at hand for the walk too.
+impl<S: Clone, M: Mode> Ready<ArtifactKey, State<Datum>> for AccessEnv<S, M> {
+    fn ready(&self, read: &ArtifactRead) -> Option<ArtifactNode> {
+        held_node(self, read)
+    }
+}
+
+// The walk's node reads are the operator's storage's, hydrated through
+// the walk's own hydration above, and kept in the caches it holds.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<S, M: Mode> Provider<ArtifactRead> for AccessEnv<S, M>
+where
+    S: Clone + ConditionalSend + ConditionalSync + 'static,
+    Storage<S>: Provider<ArtifactRead> + ConditionalSync,
+    Self: Provider<dialog_repository::Hydrate> + ConditionalSync,
+{
+    async fn execute(
+        &self,
+        read: ArtifactRead,
+    ) -> Result<Option<ArtifactNode>, DialogSearchTreeError> {
+        dialog_repository::read_node_or_hydrate(self, self.operator.mounted(), read).await
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<S, M: Mode> Provider<ArtifactPreload> for AccessEnv<S, M>
+where
+    S: Clone + ConditionalSend + ConditionalSync + 'static,
+    Storage<S>: Provider<ArtifactRead> + ConditionalSync,
+    Self: Provider<dialog_repository::Hydrate> + ConditionalSync,
+{
+    async fn execute(&self, preload: ArtifactPreload) {
+        dialog_repository::preload_node_or_hydrate(self, self.operator.mounted(), preload).await
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<S, M: Mode> Provider<ArtifactWrite> for AccessEnv<S, M>
+where
+    S: Clone + ConditionalSend + ConditionalSync + 'static,
+    Storage<S>: Provider<ArtifactWrite> + ConditionalSync,
+    Self: ConditionalSync,
+{
+    async fn execute(&self, write: ArtifactWrite) -> Result<(), DialogSearchTreeError> {
+        dialog_repository::write_nodes(self, self.operator.mounted(), write).await
     }
 }
 
@@ -424,7 +483,12 @@ impl<S: Clone, M: Mode> Peer<S, M> {
     async fn refresh(&self)
     where
         Self: LocalEnv,
-        S: ConditionalSend + ConditionalSync + 'static,
+        S: ConditionalSend
+            + ConditionalSync
+            + Provider<ArtifactRead>
+            + Provider<ArtifactPreload>
+            + Provider<ArtifactWrite>
+            + 'static,
     {
         if let Err(error) = self.delegations().refresh(self).await {
             tracing::warn!(%error, "failed to refresh the access branch head");
@@ -436,7 +500,12 @@ impl<S: Clone, M: Mode> Peer<S, M> {
     async fn resolve(&self, claim: Prove<Ucan>) -> Result<UcanProof, AuthorizeError>
     where
         Self: LocalEnv,
-        S: ConditionalSend + ConditionalSync + 'static,
+        S: ConditionalSend
+            + ConditionalSync
+            + Provider<ArtifactRead>
+            + Provider<ArtifactPreload>
+            + Provider<ArtifactWrite>
+            + 'static,
     {
         self.refresh().await;
 
@@ -473,7 +542,12 @@ impl<S: Clone, M: Mode> Peer<S, M> {
     async fn prove_as_operator(&self, claim: &Prove<Ucan>) -> Result<UcanProof, AuthorizeError>
     where
         Self: LocalEnv,
-        S: ConditionalSend + ConditionalSync + 'static,
+        S: ConditionalSend
+            + ConditionalSync
+            + Provider<ArtifactRead>
+            + Provider<ArtifactPreload>
+            + Provider<ArtifactWrite>
+            + 'static,
     {
         // Every grant covering the claim is tried in turn: one whose
         // issuer cannot prove the claim does not hide one that can.
@@ -502,7 +576,12 @@ impl<S: Clone, M: Mode> Peer<S, M> {
     async fn prove_by(&self, grant: Grant, claim: &Prove<Ucan>) -> Result<UcanProof, AuthorizeError>
     where
         Self: LocalEnv,
-        S: ConditionalSend + ConditionalSync + 'static,
+        S: ConditionalSend
+            + ConditionalSync
+            + Provider<ArtifactRead>
+            + Provider<ArtifactPreload>
+            + Provider<ArtifactWrite>
+            + 'static,
     {
         let Grant {
             issuer,
@@ -530,7 +609,12 @@ impl<S: Clone, M: Mode> Peer<S, M> {
     async fn walk(&self, principal: Did, claim: &Prove<Ucan>) -> Result<UcanProof, AuthorizeError>
     where
         Self: LocalEnv,
-        S: ConditionalSend + ConditionalSync + 'static,
+        S: ConditionalSend
+            + ConditionalSync
+            + Provider<ArtifactRead>
+            + Provider<ArtifactPreload>
+            + Provider<ArtifactWrite>
+            + 'static,
     {
         if let UcanSubject::Specific(subject) = &claim.access.subject
             && *subject == principal
@@ -561,7 +645,13 @@ impl<S: Clone, M: Mode> Peer<S, M> {
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl<S, M: Mode> Provider<Prove<Ucan>> for Peer<S, M>
 where
-    S: Clone + ConditionalSend + ConditionalSync + 'static,
+    S: Clone
+        + ConditionalSend
+        + ConditionalSync
+        + Provider<ArtifactRead>
+        + Provider<ArtifactPreload>
+        + Provider<ArtifactWrite>
+        + 'static,
     Self: LocalEnv + ConditionalSend,
 {
     async fn execute(&self, input: Capability<Prove<Ucan>>) -> Result<UcanProof, AuthorizeError> {
@@ -576,7 +666,13 @@ where
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl<S, M: Mode> Provider<Retain<Ucan>> for Peer<S, M>
 where
-    S: Clone + ConditionalSend + ConditionalSync + 'static,
+    S: Clone
+        + ConditionalSend
+        + ConditionalSync
+        + Provider<ArtifactRead>
+        + Provider<ArtifactPreload>
+        + Provider<ArtifactWrite>
+        + 'static,
     Self: LocalEnv + ConditionalSend,
 {
     async fn execute(&self, input: Capability<Retain<Ucan>>) -> Result<(), AuthorizeError> {
@@ -848,7 +944,13 @@ impl<S: PeerSpace, M: Mode> Peer<S, M> {
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl<S, P, M: Mode> Provider<Export<P>> for Peer<S, M>
 where
-    S: Clone + ConditionalSend + ConditionalSync + 'static,
+    S: Clone
+        + ConditionalSend
+        + ConditionalSync
+        + Provider<ArtifactRead>
+        + Provider<ArtifactPreload>
+        + Provider<ArtifactWrite>
+        + 'static,
     P: Protocol,
     P::Certificate: ConditionalSend + ConditionalSync,
     Storage<S>: Provider<Export<P>>,
@@ -868,7 +970,13 @@ where
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl<S, M: Mode> Provider<Authorize<Ucan>> for Peer<S, M>
 where
-    S: Clone + ConditionalSend + ConditionalSync + 'static,
+    S: Clone
+        + ConditionalSend
+        + ConditionalSync
+        + Provider<ArtifactRead>
+        + Provider<ArtifactPreload>
+        + Provider<ArtifactWrite>
+        + 'static,
     Self: LocalEnv + ConditionalSend,
 {
     async fn execute(

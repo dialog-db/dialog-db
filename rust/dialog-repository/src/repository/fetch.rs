@@ -297,6 +297,8 @@ mod tests {
         }
     }
 
+    dialog_search_tree::reads_nodes_through_blocks!(Impostor);
+
     /// Persists a one-fact tree into `blocks` and returns its root.
     async fn persist(blocks: &Blocks, name: &str) -> Result<NodeHash> {
         let mut tree = Index::empty_in(blocks.catalog().clone());

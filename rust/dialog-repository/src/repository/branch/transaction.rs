@@ -21,6 +21,7 @@ use crate::repository::branch::asset::store_assets;
 use crate::repository::source::SourceRef;
 use crate::rules::{SharedRuleCache, TriggerFootprint, is_rule_attribute, on_attr, reads_attr};
 use crate::{Branch, CommitError, RemoteSite, Revision, Snapshot, Staged};
+use dialog_artifacts::tree::{ArtifactNodes, ArtifactWrites};
 use dialog_artifacts::{Changes, Statement};
 use dialog_capability::{Fork, Provider};
 use dialog_common::{ConditionalSync, Holds};
@@ -240,11 +241,14 @@ impl TransactionCommit<&Snapshot> {
             + Provider<BlobRead>
             + Provider<Put>
             + Provider<Import>
+            + ArtifactWrites
             + Provider<Resolve>
             + Provider<Publish>
             + Provider<Identify>
             + Provider<Attest>
             + Provider<ArchiveLoad>
+            + ArtifactWrites
+            + ArtifactNodes
             + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
@@ -372,11 +376,14 @@ impl Branch {
             + Provider<BlobRead>
             + Provider<Put>
             + Provider<Import>
+            + ArtifactWrites
             + Provider<Resolve>
             + Provider<Publish>
             + Provider<Identify>
             + Provider<Attest>
             + Provider<ArchiveLoad>
+            + ArtifactWrites
+            + ArtifactNodes
             + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>

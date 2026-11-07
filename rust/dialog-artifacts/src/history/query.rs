@@ -54,7 +54,7 @@ impl From<&Version> for HistorySelector {
 /// merging trees unions their histories.
 pub struct TreeHistory<S>
 where
-    S: Provider<archive::Load> + Provider<blob::Load> + Holds + ConditionalSync + Clone,
+    S: ArtifactNodes + Provider<blob::Load> + ConditionalSync + Clone,
 {
     tree: ArtifactTree,
     store: S,
@@ -73,7 +73,7 @@ where
 
 impl<S> TreeHistory<S>
 where
-    S: Provider<archive::Load> + Provider<blob::Load> + Holds + ConditionalSync + Clone,
+    S: ArtifactNodes + Provider<blob::Load> + ConditionalSync + Clone,
 {
     /// Read history from the given artifact tree
     pub fn new(tree: ArtifactTree, store: S) -> Self
@@ -208,12 +208,7 @@ where
 
 impl<S> History for TreeHistory<S>
 where
-    S: Provider<archive::Load>
-        + Provider<blob::Load>
-        + Holds
-        + ConditionalSend
-        + ConditionalSync
-        + Clone,
+    S: ArtifactNodes + Provider<blob::Load> + ConditionalSend + ConditionalSync + Clone,
 {
     async fn claims_at(
         &self,
