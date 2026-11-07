@@ -60,8 +60,7 @@ Decided, each in a journal entry:
   of a record already bound, and never scans. A record cannot stand where
   an entity is expected (`of` is typed `entity`).
 - **Fields are named by attributes**, which bring their pick and their
-  type, as a concept's fields do. `last` over several values elects the
-  greater, as it does between values one revision wrote.
+  type, as a concept's fields do.
 - **Equality follows tokens**, as key comparison does: records read over
   the same source compare by their token references, records from
   different sources resolve their tokens, and the wire carries the
@@ -96,6 +95,10 @@ Decided, each in a journal entry:
 
 ## Open
 
+- **`last` over a field holding several values.** `last` is decided by
+  version, and every value in a record shares the record's version, so it
+  cannot decide there. Fall back to the value (then `last` reads as `max`
+  does), refuse, or read it as `all`. Proposed: refuse.
 - **The type in destructuring** is inferred from the pick applying, and is
   to be confirmed.
 - **The surface of destructuring:** a pattern in the notation, a formula

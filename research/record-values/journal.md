@@ -26,10 +26,11 @@ statuses mean.
   - Repetition is expected mostly across records, and shared through the
     replica's tokens.
 - **Decided, continued:** in destructuring, a field is named by an
-  attribute, which brings its pick and its type. `last` over a field
-  holding several values elects as `last` does between values one
-  revision wrote: the greater value.
+  attribute, which brings its pick and its type.
 - **Open:**
+  - what `last` reads from a field holding several values: every value
+    of a record shares one version, so the version that decides `last`
+    cannot (fall back to the value, refuse, or read it as `all`);
   - the surface of destructuring: a pattern in the notation, a formula
     over a path, or both;
   - documents that grow (options in the third entry);
@@ -263,6 +264,37 @@ wire, allowed 25% over dag-cbor because attributes are full relation
 names, and a size bar in the file. They were proposed, never set, and no
 result has been seen, so nothing was moved after a result. They remain
 the maintainer's to set.
+
+Commits: this entry.
+
+## 2026-11-07 — `last` is decided by version, which a record's values share
+
+**Question.** Whether the previous entry's rule, `last` over several values
+in a record elects the greater, is right.
+
+**Method.** The maintainer objected that `last` resolves by version, not by
+value. Read `Pick::newer` and `Standing`'s order
+(`dialog-artifacts/src/artifacts/update.rs`).
+
+**Results.**
+
+- `last` is `Pick::newer`: the greater standing wins, and the value is
+  compared only when two standings are equal. A standing orders by the
+  version (edition, then the version's hash), then the cause, then the
+  succession. The version decides `last`; the value only breaks a tie
+  between values one revision wrote under one cause.
+- Every value in a record belongs to one claim and shares its version, so
+  inside a record the version never decides, and `last` always falls to
+  the value. The previous entry described the code correctly, but its
+  decision rested on electing "as queries do", and queries elect by a
+  version a record's values do not have.
+
+**Decision.** The previous entry's rule is withdrawn: what `last` reads
+from a field holding several values is open again. The options: fall back
+to the value (deterministic, but `last` then reads as `max` does), refuse
+(a reader wanting one value of a set says `max`, `min` or `top`), or read
+it as `all`. Attributes are read, not written, so whichever is chosen
+applies on read. Proposed: refuse.
 
 Commits: this entry.
 
