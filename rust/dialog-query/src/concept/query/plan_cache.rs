@@ -52,7 +52,7 @@ use std::{cell::RefCell, rc::Rc};
 /// eviction reclaims the coldest entry past this point. Content
 /// addressing means eviction only re-pays planning, never returns a
 /// wrong plan, so this is a memory bound, not an invalidation knob.
-const CAPACITY: usize = 4096;
+pub const PLAN_CACHE_CAPACITY: usize = 4096;
 
 type Key = (Entity, Vec<u8>, Adornment);
 
@@ -85,8 +85,25 @@ impl fmt::Debug for PlanCache {
 
 impl Default for PlanCache {
     fn default() -> Self {
-        // SAFETY: `SieveCache::new` only errors on a zero capacity.
-        let cache = SieveCache::new(CAPACITY).expect("non-zero plan-cache capacity");
+        Self::with_capacity(PLAN_CACHE_CAPACITY)
+    }
+}
+
+impl PlanCache {
+    /// A cache holding up to `capacity` plans.
+    pub fn with_capacity(capacity: usize) -> Self {
+        let capacity = capacity.max(1);
+        // A shard holds at least one entry, so a capacity below the
+        // shard count would hold more than asked: shards shrink with the
+        // capacity, as `dialog_search_tree::Cache` does, and the default
+        // keeps all sixteen.
+        // SAFETY: `SieveCache` only errors on a zero capacity or shard
+        // count; both are at least 1 here.
+        #[cfg(not(target_arch = "wasm32"))]
+        let cache = SieveCache::with_shards(capacity, (capacity / 128).clamp(1, 16))
+            .expect("non-zero plan-cache capacity");
+        #[cfg(target_arch = "wasm32")]
+        let cache = SieveCache::new(capacity).expect("non-zero plan-cache capacity");
         Self {
             #[cfg(not(target_arch = "wasm32"))]
             cache,
@@ -94,9 +111,30 @@ impl Default for PlanCache {
             cache: Rc::new(RefCell::new(cache)),
         }
     }
-}
 
-impl PlanCache {
+    /// How many plans the cache may hold.
+    pub fn capacity(&self) -> usize {
+        #[cfg(not(target_arch = "wasm32"))]
+        let capacity = self.cache.capacity();
+        #[cfg(target_arch = "wasm32")]
+        let capacity = self.cache.borrow().capacity();
+        capacity
+    }
+
+    /// How many plans the cache holds now.
+    pub fn len(&self) -> usize {
+        #[cfg(not(target_arch = "wasm32"))]
+        let len = self.cache.len();
+        #[cfg(target_arch = "wasm32")]
+        let len = self.cache.borrow().len();
+        len
+    }
+
+    /// Whether the cache holds no plan.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     /// The planned [`Conjunction`] for `rule` under `adornment`,
     /// computing and caching it on a miss. `plan` is only called on a
     /// miss, so the caller can build the scope lazily.
@@ -148,5 +186,23 @@ impl PlanCache {
         {
             self.cache.borrow_mut().insert(key, value);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    use super::{PLAN_CACHE_CAPACITY, PlanCache};
+
+    /// A cache holds exactly the capacity it was given, however small, and
+    /// the default holds [`PLAN_CACHE_CAPACITY`].
+    #[dialog_common::test]
+    fn it_holds_the_capacity_it_was_given() {
+        assert_eq!(PlanCache::with_capacity(2).capacity(), 2);
+        assert_eq!(PlanCache::with_capacity(0).capacity(), 1);
+        assert_eq!(PlanCache::default().capacity(), PLAN_CACHE_CAPACITY);
+        assert!(PlanCache::default().is_empty());
     }
 }

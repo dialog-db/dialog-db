@@ -1,6 +1,6 @@
 use super::memory::Cell;
 use crate::rules::SharedRuleCache;
-use crate::{Ephemeral, RemoteFallback, ResolveError, Revision};
+use crate::{CacheBudget, Ephemeral, RemoteFallback, ResolveError, Revision};
 use dialog_capability::Provider;
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::{ConditionalSync, Holds};
@@ -161,10 +161,13 @@ pub struct Branch {
     /// sharing across revisions safe.
     node_cache: ArtifactNodeCache,
     /// Shared cache of spilled value blocks, keyed by their 32-byte content
-    /// reference. Held by the environment for the repository and carried
+    /// reference. Held by the environment for every repository and carried
     /// into every select so a repeated read of the same large (spilled) value
     /// skips the store fetch. Content-addressed, so it never serves stale bytes.
     spill_cache: SpillCache,
+    /// How large the caches it was opened with may grow, and so the
+    /// caches of a transaction batch staged from it.
+    cache_limits: CacheBudget,
     /// Shared deductive-rule cache (discovery by head + hydrated bodies).
     /// Held by the environment for this branch and carried into every
     /// query's durable rule resolution, so the `dialog.rule/*` scan is paid
@@ -746,6 +749,7 @@ impl Branch {
             rewrites: self.rewrite_cache.clone(),
             spine: self.spine.clone(),
             metadata: self.layer_metadata_cache.clone(),
+            limits: self.cache_limits,
         }
     }
 

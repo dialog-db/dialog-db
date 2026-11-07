@@ -174,6 +174,12 @@ impl TransactionBatch {
         self.snapshot.revision()
     }
 
+    /// The caches the staged view reads and commits through.
+    #[cfg(test)]
+    pub(crate) fn caches(&self) -> &Caches {
+        self.snapshot.caches()
+    }
+
     /// The transient facts inductive rules concluded while this chain
     /// was staged: every transient head emitted in any induction round
     /// of any staged link. The transients the transactions dispatched
@@ -532,11 +538,13 @@ impl TransactionCommit<&Branch> {
 
         // Version-keyed memos are batch-local (see the field docs on
         // `TransactionBatch::snapshot`); content-keyed caches stay
-        // shared with the branch.
+        // shared with the branch. The batch-local ones are sized by the
+        // budget the branch's caches were built with.
+        let entries = branch.caches().limits.entry_capacity();
         let caches = Caches {
-            causality: CausalityCache::new(),
-            contexts: ContextCache::new(),
-            records: Cache::new(),
+            causality: CausalityCache::with_capacity(entries),
+            contexts: ContextCache::with_capacity(entries),
+            records: Cache::with_capacity(entries),
             ..branch.caches()
         };
 
