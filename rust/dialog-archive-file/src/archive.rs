@@ -248,6 +248,9 @@ struct Timings {
     /// did not rebuild the block when verified.
     other_layout: AtomicU64,
     unverified: AtomicU64,
+    /// Nodes kept whole because their frame did not read back to their
+    /// rows: an encoding bug, never expected.
+    unread: AtomicU64,
 }
 
 impl Timings {
@@ -274,7 +277,7 @@ impl Drop for Inner {
             "archive {}: split {:.1} ms (parse {:.1} ms), encode {:.1} ms, verify {:.1} ms, write {:.1} ms, \
              decode {:.1} ms, realize {:.1} ms ({} blocks built for gets), serve {:.1} ms \
              ({} nodes served), {} blocks offered to appends, {} appends taking {:.1} ms, \
-             kept whole: {} of another layout, {} not rebuilt when verified",
+             kept whole: {} of another layout, {} not rebuilt when verified, {} not read back",
             self.path.display(),
             ms(&timings.split),
             ms(&timings.parse),
@@ -291,6 +294,7 @@ impl Drop for Inner {
             ms(&timings.append),
             timings.other_layout.load(Ordering::Relaxed),
             timings.unverified.load(Ordering::Relaxed),
+            timings.unread.load(Ordering::Relaxed),
         );
     }
 }
@@ -1654,6 +1658,8 @@ impl FileArchive {
         let decoded = get_rows(&mut reader, rows.kind, base_rows.as_deref())?;
         if decoded != rows {
             Timings::add(&self.inner.timings.verify, started);
+            self.inner.timings.unread.fetch_add(1, Ordering::Relaxed);
+            debug_assert!(false, "a frame did not read back to its rows");
             draft.roll_back(mark);
             return Ok(None);
         }
@@ -2329,6 +2335,162 @@ mod index_breakdown {
             stats.frames_against,
             stats.blocks,
             kib(stats.block_bytes as usize)
+        );
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod live_breakdown {
+    use super::*;
+    use crate::rows::{DATUM, NONE, Section, sections_of, slots_of};
+
+    /// What the tree the file wrote last takes: the frames reachable from
+    /// its root and the distinct tokens they name, against the whole file,
+    /// which holds every version before it too. The root is the node,
+    /// among the last few thousand written, that nothing written after it
+    /// names and that reaches the most nodes. Run by hand on the file named
+    /// by `DIALOG_ARCHIVE_INDEX`.
+    #[test]
+    #[ignore = "measures the file named by DIALOG_ARCHIVE_INDEX"]
+    fn live_breakdown() -> anyhow::Result<()> {
+        let Ok(path) = std::env::var("DIALOG_ARCHIVE_INDEX") else {
+            return Ok(());
+        };
+        let archive = FileArchive::open(&path)?;
+        let index = &archive.inner.index;
+        let count = index.nodes().len() as u32;
+        if count == 0 {
+            return Ok(());
+        }
+        let children = |id: u32| -> anyhow::Result<Vec<u32>> {
+            let (rows, _) = archive.rows(&HashMap::new(), id)?;
+            Ok(if rows.kind == crate::rows::INDEX {
+                rows.sections[0]
+                    .iter()
+                    .filter(|row| row[1] != NONE)
+                    .map(|row| row[1])
+                    .collect()
+            } else {
+                Vec::new()
+            })
+        };
+        let recent = count.saturating_sub(4096)..count;
+        let mut named = HashSet::new();
+        for id in recent.clone() {
+            named.extend(children(id)?);
+        }
+        let reach = |from: u32| -> anyhow::Result<usize> {
+            let (mut seen, mut stack) = (HashSet::new(), vec![from]);
+            while let Some(id) = stack.pop() {
+                if seen.insert(id) {
+                    stack.extend(children(id)?);
+                }
+            }
+            Ok(seen.len())
+        };
+        let mut root = count - 1;
+        let mut most = 0;
+        for id in recent.rev().filter(|id| !named.contains(id)).take(64) {
+            let reached = reach(id)?;
+            if reached > most {
+                (root, most) = (id, reached);
+            }
+        }
+        let (mut seen, mut tokens) = (HashSet::new(), HashSet::new());
+        let (mut frames, mut whole, mut alone) = (0u64, 0u64, 0u64);
+        let mut stack = vec![root];
+        // A root the file keeps whole (one it could not frame) names its
+        // children by hash: the latest such block, when it reaches more
+        // than the latest frame does, is the root.
+        if let Some((catalog, hash, extent)) = index
+            .blocks()
+            .into_iter()
+            .filter_map(|(catalog, hash, place)| match place {
+                Place::Block(extent) => Some((catalog, hash, extent)),
+                Place::Node(_) => None,
+            })
+            .max_by_key(|(_, _, extent)| extent.offset)
+            && let Some(block) = archive.get(index.catalog(catalog).unwrap_or_default(), &hash)?
+            && let Some(node) = tree_node(&Buffer::from(block))
+            && let NodeBody::Index(links) = node.body()
+        {
+            let named: Vec<u32> = (0..links.len())
+                .filter_map(|at| links.hash_at(at).ok())
+                .filter_map(|hash| index.node_id(hash))
+                .collect();
+            let reached: usize = named.iter().map(|id| reach(*id).unwrap_or(0)).sum();
+            if reached > most {
+                whole += extent.len as u64;
+                stack = named;
+                println!(
+                    "the root is kept whole ({} KiB), its {} children frames",
+                    extent.len / 1024,
+                    stack.len()
+                );
+            }
+        }
+        while let Some(id) = stack.pop() {
+            if !seen.insert(id) {
+                continue;
+            }
+            frames += index.node(id).expect("a node").extent.len as u64;
+            let (rows, manifest) = archive.rows(&HashMap::new(), id)?;
+            // The node's rows written whole, as a file holding only this
+            // tree would hold them.
+            let mut body = Vec::new();
+            put_rows(&mut body, &rows, None);
+            alone += body.len() as u64;
+            tokens.insert(manifest);
+            for (section, rows) in sections_of(rows.kind).iter().zip(&rows.sections) {
+                for row in rows {
+                    match section {
+                        Section::Entries | Section::Ops => {
+                            tokens.extend(&row[1..=slots_of(row[0] as u8)]);
+                            if row[DATUM] != NONE {
+                                tokens.insert(row[DATUM]);
+                            }
+                        }
+                        Section::Links => {
+                            tokens.insert(row[0]);
+                            if row[1] != NONE {
+                                stack.push(row[1]);
+                            } else {
+                                tokens.insert(row[3]);
+                                let view = index.view();
+                                let hash = Blake3Hash::from(
+                                    <[u8; 32]>::try_from(view.get(row[3]).expect("a hash token"))
+                                        .expect("32 bytes"),
+                                );
+                                for catalog in index.catalogs() {
+                                    if let Some(Place::Block(extent)) = index.place(catalog, &hash)
+                                    {
+                                        whole += extent.len as u64;
+                                    }
+                                }
+                            }
+                        }
+                        Section::Buffers => {}
+                    }
+                }
+            }
+        }
+        let token_bytes: u64 = tokens
+            .iter()
+            .filter_map(|id| index.extent(*id))
+            .map(|(_, len)| len as u64)
+            .sum();
+        let mib = |bytes: u64| format!("{:.1} MiB", bytes as f64 / 1048576.0);
+        println!(
+            "the last tree: {} nodes in {} of frames ({} written whole), {} tokens in {}, \
+             {} of blocks kept whole; the file holds {} nodes",
+            seen.len(),
+            mib(frames),
+            mib(alone),
+            tokens.len(),
+            mib(token_bytes),
+            mib(whole),
+            index.nodes().len()
         );
         Ok(())
     }

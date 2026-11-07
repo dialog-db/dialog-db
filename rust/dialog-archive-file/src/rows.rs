@@ -248,10 +248,12 @@ fn put_columns(out: &mut Vec<u8>, section: Section, rows: &[&Row]) {
         }
         Section::Links => {
             delta(out, 0, &|_| true);
-            // The scale, with the top bit marking a child the file holds no
-            // frame of, ahead of the columns that depend on it.
+            // The scale and whether the file holds a frame of the child, as
+            // one varint (`scale << 1 | no frame`), ahead of the columns
+            // that depend on it. A scale takes all eight bits: a node over a
+            // large tree has one of 128 or more.
             for row in rows {
-                out.push(row[2] as u8 | (((row[1] == NONE) as u8) << 7));
+                put_varint(out, (row[2] as u64) << 1 | (row[1] == NONE) as u64);
             }
             delta(out, 1, &|row| row[1] != NONE);
             delta(out, 3, &|row| row[1] == NONE);
@@ -303,10 +305,11 @@ fn get_columns(reader: &mut Reader, section: Section, count: usize) -> io::Resul
         Section::Links => {
             delta(&mut rows, reader, 0, &|_| true)?;
             for row in rows.iter_mut() {
-                let flag = reader.byte()?;
-                row[2] = (flag & 0x7F) as u32;
+                let flag = reader.varint()?;
+                row[2] =
+                    u8::try_from(flag >> 1).map_err(|_| invalid("a scale over 8 bits"))? as u32;
                 // A child is named by node id or by hash token, never both.
-                if flag >> 7 == 1 {
+                if flag & 1 == 1 {
                     row[1] = NONE;
                 } else {
                     row[3] = NONE;
@@ -522,6 +525,9 @@ mod tests {
                     [3, 0, 1, NONE, 0, 0],
                     [5, NONE, 2, 40, 0, 0],
                     [9, 7, 0, NONE, 0, 0],
+                    // Scales of 128 and more, a node over a large tree's.
+                    [11, 8, 135, NONE, 0, 0],
+                    [13, NONE, 255, 41, 0, 0],
                 ],
                 vec![[0, 2, 0, 0, 0, 0]],
                 vec![[0xFE, 11, 0, 0, 0, 12], [0xFE, 13, 0, 0, 0, NONE]],
