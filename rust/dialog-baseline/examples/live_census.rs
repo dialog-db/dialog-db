@@ -99,7 +99,7 @@ where
         let size = visit.size;
         match visit.node.body() {
             NodeBody::Index(index) => {
-                if index.novelty.is_empty() {
+                if index.novelty_len() == 0 {
                     quiet.push(size);
                 } else {
                     buffered.push(size);

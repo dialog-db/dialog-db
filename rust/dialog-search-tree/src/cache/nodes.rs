@@ -744,8 +744,8 @@ mod tests {
         assert!(ours.get_cached(shared.hash()).is_some());
         assert_eq!(cache.len(), 1, "a node two scopes hold is kept once");
         assert_eq!(
-            read.buffer().as_ref().as_ptr(),
-            shared.buffer().as_ref().as_ptr(),
+            read.buffer()?.as_ref().as_ptr(),
+            shared.buffer()?.as_ref().as_ptr(),
             "the node the cache already had is the one handed back"
         );
         Ok(())
@@ -792,7 +792,11 @@ mod tests {
         assert_eq!(held.len(), cache.len());
         assert_eq!(
             held.iter()
-                .map(|node| node.buffer().as_ref().len())
+                .map(|node| node
+                    .buffer()
+                    .expect("a node read from its block")
+                    .as_ref()
+                    .len())
                 .sum::<usize>(),
             cache.bytes()
         );

@@ -1102,11 +1102,14 @@ impl<'a> Provider<ArchiveLoad> for QueryEnv<'a> {
         for source in &self.sources {
             let source = source.as_ref();
             let cache = ArtifactNodeCache::of(self.env, source.subject().did());
+            // A node read from rows answers with its block, built on first
+            // asking; one whose block cannot be built is loaded instead.
             if let Some(node) = cache
                 .as_ref()
                 .and_then(|cache| cache.get_cached(&load.digest))
+                && let Ok(buffer) = node.buffer()
             {
-                return Ok(Some(node.buffer().clone()));
+                return Ok(Some(buffer.clone()));
             }
             let line = ArchiveLoad {
                 catalog: source.catalog(),

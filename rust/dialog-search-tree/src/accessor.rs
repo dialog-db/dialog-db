@@ -9,7 +9,7 @@ use rkyv::{
     validation::{Validator, archive::ArchiveValidator, shared::SharedValidator},
 };
 
-use crate::{DialogSearchTreeError, Key, NodeCache, PersistentNode, Value};
+use crate::{DialogSearchTreeError, Key, NodeCache, NodeSource, PersistentNode, Value};
 
 /// The node stored under `hash` in `catalog`, read through `env`: from the
 /// node cache `env` holds when it holds the node, else loaded and checked,
@@ -47,6 +47,26 @@ where
     Env: Provider<Load> + Holds + ConditionalSync + ?Sized,
 {
     Accessor::new(env, catalog).load_node(hash).await
+}
+
+/// The node `hash` names, from the store's rows when `source` keeps it that
+/// way: read in place, with no block built, no hash computed and nothing
+/// validated again (the store vouches for its rows). `None` when there is
+/// no source, the source does not have the node as rows, or its rows hold
+/// values of another type than this tree's.
+fn from_source<Key, Value>(
+    source: Option<&std::sync::Arc<dyn NodeSource>>,
+    catalog: &CatalogScope,
+    hash: &Blake3Hash,
+) -> Option<PersistentNode<Key, Value>>
+where
+    Key: self::Key,
+    Value: self::Value,
+    Value::Archived: for<'b> CheckBytes<
+        Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
+    >,
+{
+    PersistentNode::from_rows(source?.node(catalog, hash)?)
 }
 
 /// How a tree's reads load the nodes its environment's cache does not hold.
@@ -150,7 +170,25 @@ pub struct Accessor<'a, Key, Value, Env: ?Sized> {
     env: &'a Env,
     catalog: CatalogScope,
     cache: Option<NodeCache<Key, Value>>,
+    /// The store that hands over nodes as rows, if the environment holds
+    /// one for the catalog's subject: asked before a block is loaded.
+    /// Looked up on the first node the cache does not hold, not when the
+    /// accessor is made: finding it formats a key, and most reads are
+    /// answered from the cache without ever needing it.
+    source: std::sync::OnceLock<Option<std::sync::Arc<dyn NodeSource>>>,
+    /// How [`source`](Self::source) is found in the environment.
+    find_source: Find<Env>,
     reading: Reading,
+}
+
+/// Finds the node source an environment holds for a catalog's subject.
+type Find<Env> = fn(&Env, &CatalogScope) -> Option<std::sync::Arc<dyn NodeSource>>;
+
+fn find_source<Env: Holds + ?Sized>(
+    env: &Env,
+    catalog: &CatalogScope,
+) -> Option<std::sync::Arc<dyn NodeSource>> {
+    <dyn NodeSource>::of(env, catalog.subject())
 }
 
 impl<Key, Value, Env: ?Sized> Clone for Accessor<'_, Key, Value, Env> {
@@ -159,6 +197,8 @@ impl<Key, Value, Env: ?Sized> Clone for Accessor<'_, Key, Value, Env> {
             env: self.env,
             catalog: self.catalog.clone(),
             cache: self.cache.clone(),
+            source: self.source.clone(),
+            find_source: self.find_source,
             reading: self.reading,
         }
     }
@@ -177,6 +217,8 @@ where
             env,
             catalog: catalog.clone(),
             cache: NodeCache::of(env, catalog.subject()),
+            source: std::sync::OnceLock::new(),
+            find_source: find_source::<Env>,
             reading: Reading::default(),
         }
     }
@@ -225,8 +267,15 @@ where
         &self,
         hash: &Blake3Hash,
     ) -> Result<Option<PersistentNode<Key, Value>>, DialogSearchTreeError> {
-        let fetch =
-            async |hash: &Blake3Hash| fetch_node(self.env, &self.catalog, hash, self.reading).await;
+        let fetch = async |hash: &Blake3Hash| {
+            let source = self
+                .source
+                .get_or_init(|| (self.find_source)(self.env, &self.catalog));
+            if let Some(node) = from_source(source.as_ref(), &self.catalog, hash) {
+                return Ok(Some(node));
+            }
+            fetch_node(self.env, &self.catalog, hash, self.reading).await
+        };
         match &self.cache {
             Some(cache) => cache.get_or_fetch(hash, fetch).await,
             None => fetch(hash).await,
@@ -248,6 +297,16 @@ where
     pub(crate) async fn warm(&self, hash: Blake3Hash) -> Blake3Hash {
         let _ = self.load_node(&hash).await;
         hash
+    }
+
+    /// The node at `hash` as rows, if the environment's store keeps it as
+    /// rows (its [`NodeSource`]): the store's own word that it holds the
+    /// node, read in place, with no cache consulted and nothing hydrated.
+    pub(crate) fn stored_rows(&self, hash: &Blake3Hash) -> Option<PersistentNode<Key, Value>> {
+        let source = self
+            .source
+            .get_or_init(|| (self.find_source)(self.env, &self.catalog));
+        from_source(source.as_ref(), &self.catalog, hash)
     }
 
     /// The node at `hash` if the cache holds it, with no IO: a way to reach

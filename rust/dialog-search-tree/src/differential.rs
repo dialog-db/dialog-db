@@ -113,8 +113,9 @@ where
 /// else through [`Load`], which hydrates a local miss from wherever the
 /// environment knows the subject's blocks live.
 ///
-/// A [`Boundary`](MissingBlocks::Boundary) side performs [`Get`] on the
-/// environment instead, past its node cache and past any hydration. That is
+/// A [`Boundary`](MissingBlocks::Boundary) side asks the local store
+/// instead, past the node cache and past any hydration: its node source, if
+/// it keeps nodes as rows, else [`Get`] on the environment. That is
 /// the one node read in this crate that neither consults the cache nor
 /// loads, on purpose: under that policy absence is the answer the walk is
 /// asking for (where local knowledge ends), so it must be the local
@@ -137,6 +138,11 @@ where
     match missing {
         MissingBlocks::Deny => storage.load_node(hash).await,
         MissingBlocks::Boundary => {
+            // A store that keeps nodes as rows answers for itself, in place,
+            // rather than building a block for the read to decode again.
+            if let Some(node) = storage.stored_rows(hash) {
+                return Ok(Some(node));
+            }
             let block = storage
                 .catalog()
                 .get(hash.clone())
@@ -3846,7 +3852,7 @@ mod tests {
             futures_util::pin_mut!(nodes);
             while let Some(node) = nodes.next().await {
                 let node = node?;
-                remote.store(node.buffer().clone());
+                remote.store(node.buffer()?.clone());
             }
         }
 
@@ -3857,7 +3863,7 @@ mod tests {
         let mut uploaded = 0;
         while let Some(node) = nodes.next().await {
             let node = node?;
-            remote.store(node.buffer().clone());
+            remote.store(node.buffer()?.clone());
             uploaded += 1;
         }
         assert!(uploaded > 0, "extension must produce novel nodes");
@@ -3961,7 +3967,7 @@ mod tests {
             while let Some(node) = nodes.next().await {
                 let node = node?;
                 minted.insert(node.hash().clone());
-                device.local.store(node.buffer().clone());
+                device.local.store(node.buffer()?.clone());
             }
         }
 
@@ -4038,7 +4044,7 @@ mod tests {
             while let Some(node) = nodes.next().await {
                 let node = node?;
                 minted.insert(node.hash().clone());
-                device.store(node.buffer().clone());
+                device.store(node.buffer()?.clone());
             }
         }
         assert!(!minted.is_empty(), "the extension must mint nodes");
@@ -4089,7 +4095,7 @@ mod tests {
             futures_util::pin_mut!(nodes);
             while let Some(node) = nodes.next().await {
                 let node = node?;
-                peer.store(node.buffer().clone());
+                peer.store(node.buffer()?.clone());
             }
         }
         for hash in &reported {
@@ -6661,7 +6667,7 @@ mod tests {
                 futures_util::pin_mut!(stream);
                 while let Some(node) = stream.next().await {
                     let node = node?;
-                    remote.store(node.buffer().clone());
+                    remote.store(node.buffer()?.clone());
                 }
             }
 
@@ -6673,7 +6679,7 @@ mod tests {
                 futures_util::pin_mut!(stream);
                 while let Some(node) = stream.next().await {
                     let node = node?;
-                    remote.store(node.buffer().clone());
+                    remote.store(node.buffer()?.clone());
                 }
             }
 
@@ -7831,7 +7837,7 @@ mod tests {
             let nodes = difference.novel_nodes();
             futures_util::pin_mut!(nodes);
             while let Some(node) = nodes.next().await {
-                remote.store(node?.buffer().clone());
+                remote.store(node?.buffer()?.clone());
             }
             let restored = TestTree::at(crate::helpers::test_catalog(), target.root().clone());
             for (at, value) in &target_values {
@@ -7882,7 +7888,7 @@ mod tests {
             let nodes = difference.novel_nodes();
             futures_util::pin_mut!(nodes);
             while let Some(node) = nodes.next().await {
-                remote.store(node?.buffer().clone());
+                remote.store(node?.buffer()?.clone());
             }
             for (at, value) in &target_values {
                 assert_eq!(

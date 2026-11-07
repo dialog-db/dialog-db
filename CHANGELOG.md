@@ -14,6 +14,88 @@ says how to cut a release.
 
 ## Unreleased
 
+### A tree reads a node from its block or from rows a store keeps it in
+
+[#733](https://github.com/dialog-db/dialog-db/pull/733),
+[design](./research/single-file-format/design.md)
+
+A node's body is now read through views, `IndexView` and `SegmentView`, that
+either a block or a store's rows back. A store that keeps nodes as rows
+implements `NodeRows`. An environment that holds a `NodeSource` for a
+subject (`NodeSource::serve`) makes every tree read of that subject ask it
+first. The node is then read in place: keys compare part by part, values
+are read as archives where the store keeps them, and no block is built,
+hashed or validated. `FileArchive` is such a source.
+
+What this changes for you:
+
+- `NodeBody::Index` and `NodeBody::Segment` hold `IndexView` and
+  `SegmentView` instead of `&ArchivedIndex` and `&ArchivedSegment`;
+  `PersistentNode::as_index` and `as_segment` return the views. The views
+  have the archived types' methods. `index.novelty` is `index.buffers()`,
+  a buffer's `child` is `child()`, its `count` is `count()`, and its
+  `polarity` is `is_assert(at)`.
+- `PersistentNode::buffer` returns `Result<&Buffer, _>`: a node read from
+  rows builds its block the first time it is asked, and that can fail.
+- A segment's `keys()` returns a `KeyCursor`, which has `next_key` as
+  `StreamingLeaf` does.
+- Nothing changes for a tree read through an environment with no node
+  source.
+
+Why: a store that keeps nodes compactly need not rebuild a block for every
+read. Read in place, the single-file archive's cold reads match the `fs`
+archive's, where rebuilding made them about 2× slower, and its cached nodes
+take about a third of the memory of cached blocks.
+
+### A space can keep its blocks in one file
+
+[#733](https://github.com/dialog-db/dialog-db/pull/733),
+[design](./research/single-file-format/design.md)
+
+The new `dialog-archive-file` crate adds `FileArchive`, an archive
+provider that keeps a space's blocks in one append-only file instead of a
+file per block. It answers `archive::Get`, `Put` and `Import` like the
+`fs` provider, and opens from a space's `Location` (`Resource<Location>`),
+so a `Space` can take it as its archive and keep memory, credentials and
+blobs where they were. A node of the artifact tree is kept as a frame:
+rows of ids into the file's tokens (each distinct entity, attribute, value
+and datum once, and each revision's version once, so a history record
+shares its fact's tokens), written against the node it supersedes. A frame is only
+written once it realizes to the exact block; anything else is kept whole.
+A read realizes the block. Native only.
+
+What this changes for you:
+
+- Nothing, unless you choose it: `Space<FileArchive, FileSystem,
+  FileSystem, FileSystem, FileSystem>` is a space whose blocks live in
+  `archive.dialog` in the space's directory. The tree, queries and sync
+  work through it unchanged.
+- Any number of processes can open one file. Writers take turns on an
+  exclusive lock on it and read what the others appended first; readers
+  take no lock. A file this process already has open is shared, not
+  opened twice.
+- Durability matches the `fs` provider: appends are not synced.
+  `FileArchive::sync` gives a point that is.
+- `Options::frames = false` keeps every block whole.
+- The new `dialog-migration` crate holds migrations an application runs
+  before it opens a replica, each behind a feature of its own, and the
+  `dialog-migrate` binary that runs them. A migration is a `Step` that finds
+  its work by looking at the replica, so it is safe to run on every start:
+  `Migrations::plan` says what the steps would do, `Migrations::run` does
+  it, and an interrupted run picks up where it stopped. The `archive-file`
+  step (`archive_file::ArchiveFile`) moves every space of a replica the
+  `fs` provider wrote into the `archive.dialog` a file-archive space reads,
+  writing it under another name and renaming it once complete; with
+  `remove_source` it deletes the `fs` archive after. It is a conversion an
+  application opts into, not an upgrade every replica needs. Every block
+  reads back as the bytes it was; nodes in an older layout are kept whole.
+  `dialog-migrate [--dry-run] [--step <id>] [--remove-source] <replica>`
+  runs the steps; `--source`, `--target` and `--catalog` move one store.
+
+Why: a replica's history costs a file per block per version, which is
+most of what a replica weighs. Replaying 4096 Stack Exchange commits, the
+`fs` archive takes about 1.2 GiB and the file 13 MiB.
+
 ### A file store's write lock is never taken by two writers at once
 
 [#741](https://github.com/dialog-db/dialog-db/pull/741), on [#723](https://github.com/dialog-db/dialog-db/pull/723)
@@ -2124,6 +2206,12 @@ thread multiplies whatever it holds by the size of the thread pool.
   one writes. An older release still takes a rival head as seen, so a
   write it races with one of this release under the same key can still
   be dropped there; upgrade every replica that shares a key.
+- Nothing an existing space holds changes or is read differently for the
+  single-file archive: it is a new provider a space opts into. A space
+  opened with `FileArchive` does not read an `fs` archive's directory of
+  blocks, and the reverse; moving a space between the two means copying
+  its blocks with `Import`. The blocks are the same bytes in both, so an
+  older release reads any block this one stores.
 - Positions already stored keep their bytes and their order: nothing is
   rewritten, and both releases read every position the other writes. Only
   newly derived positions differ. An older replica and this one derive

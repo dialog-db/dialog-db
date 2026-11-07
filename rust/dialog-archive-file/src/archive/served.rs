@@ -1,0 +1,359 @@
+//! The archive as a [`NodeSource`]: a node read where the file keeps it.
+//!
+//! A frame's rows name tokens by id; a node served to the tree turns them,
+//! once, into where each token sits in the file, and reads every key part,
+//! value and child hash there, through the file's mapping. Nothing a node
+//! holds is copied out of the file or deserialized: a value is read as its
+//! archived type in place (tokens are aligned for it, and each is checked
+//! once, the first time a node that holds it is served), and a key is
+//! compared part by part.
+
+use std::any::TypeId;
+use std::ops::Range;
+use std::sync::Arc;
+
+use dialog_artifacts::{
+    ATTRIBUTE_KEY_TAG, BLOB_KEY_TAG, COVERAGE_KEY_TAG, Datum, ENTITY_KEY_TAG, HISTORY_KEY_TAG,
+    State, VALUE_KEY_TAG,
+};
+use dialog_common::{Blake3Hash, Buffer};
+use dialog_effects::archive::prelude::CatalogScope;
+use dialog_search_tree::{
+    DialogSearchTreeError, KeyParts, Manifest, NodeRows, NodeSource, RowsKind,
+};
+use memmap2::Mmap;
+use zerocopy::FromBytes as _;
+
+use super::{FileArchive, Place, State as Index};
+use crate::rows::{DATUM, INDEX, NONE, Row, Rows, SLOTS};
+
+/// Every byte value, so a key's form byte is a slice that lives forever.
+static FORMS: [u8; 256] = {
+    let mut forms = [0u8; 256];
+    let mut at = 0;
+    while at < 256 {
+        forms[at] = at as u8;
+        at += 1;
+    }
+    forms
+};
+
+/// Where some bytes sit in the file.
+#[derive(Clone, Copy, Default)]
+struct Part {
+    offset: u64,
+    len: u32,
+}
+
+/// No part: a slot a key's form does not use.
+const NO_PART: Part = Part { offset: 0, len: 0 };
+
+/// An entry of a segment, or an operation an index buffers: its key's parts
+/// in key order and its value, each where the file keeps it.
+#[derive(Clone, Copy)]
+struct Entry {
+    /// The key's form byte, or none for a key kept whole.
+    form: Option<u8>,
+    count: u8,
+    parts: [Part; SLOTS],
+    /// The archived value, or none for a retraction.
+    value: Option<Part>,
+}
+
+/// A link of an index: its separator, where its child's hash is, its scale.
+#[derive(Clone, Copy)]
+struct Link {
+    separator: Part,
+    child: u64,
+    scale: u8,
+}
+
+/// A node the archive keeps as a frame, read through the file's mapping.
+pub(crate) struct FileNode {
+    archive: FileArchive,
+    map: Arc<Mmap>,
+    catalog: String,
+    hash: Blake3Hash,
+    manifest: Arc<Manifest>,
+    kind: RowsKind,
+    /// A segment's entries, or an index's buffered operations.
+    entries: Vec<Entry>,
+    links: Vec<Link>,
+    buffers: Vec<(u32, Range<usize>)>,
+}
+
+impl FileNode {
+    fn bytes(&self, part: Part) -> &[u8] {
+        let start = part.offset as usize;
+        &self.map[start..start + part.len as usize]
+    }
+}
+
+/// Whether `bytes` are a valid archive of a `State<Datum>`.
+fn is_datum(bytes: &[u8]) -> bool {
+    rkyv::access::<rkyv::Archived<State<Datum>>, rkyv::rancor::Error>(bytes).is_ok()
+}
+
+/// Where token `id` is, if the file holds it within `mapped` bytes.
+fn part(index: &Index, id: u32, mapped: u64) -> Option<Part> {
+    let (offset, len) = index.tokens.extent(id)?;
+    (offset + len as u64 <= mapped).then_some(Part { offset, len })
+}
+
+/// An entry or operation row as where its key parts and value are.
+fn entry(index: &Index, row: &Row, mapped: u64) -> Option<Entry> {
+    let form = row[0] as u8;
+    let slot = |at: usize| part(index, row[at], mapped);
+    let (form, count, parts) = match form {
+        ENTITY_KEY_TAG => (Some(form), 3, [slot(1)?, slot(2)?, slot(3)?, NO_PART]),
+        ATTRIBUTE_KEY_TAG => (Some(form), 3, [slot(2)?, slot(1)?, slot(3)?, NO_PART]),
+        VALUE_KEY_TAG => (Some(form), 3, [slot(3)?, slot(2)?, slot(1)?, NO_PART]),
+        HISTORY_KEY_TAG | COVERAGE_KEY_TAG => {
+            (Some(form), 4, [slot(1)?, slot(2)?, slot(3)?, slot(4)?])
+        }
+        BLOB_KEY_TAG => (Some(form), 1, [slot(1)?, NO_PART, NO_PART, NO_PART]),
+        _ => (None, 1, [slot(1)?, NO_PART, NO_PART, NO_PART]),
+    };
+    let value = match row[DATUM] {
+        NONE => None,
+        id => {
+            index.tokens.checked(id, is_datum)?;
+            Some(part(index, id, mapped)?)
+        }
+    };
+    Some(Entry {
+        form,
+        count,
+        parts,
+        value,
+    })
+}
+
+impl FileArchive {
+    /// The node `hash` names in `catalog`, as the archive serves it to a
+    /// tree: read in place. `None` when the archive keeps it whole, or not
+    /// at all.
+    pub(crate) fn served(&self, catalog: &str, hash: &Blake3Hash) -> Option<FileNode> {
+        let started = std::time::Instant::now();
+        let place = |index: &Index| {
+            index
+                .blocks
+                .get(catalog)
+                .and_then(|blocks| blocks.get(hash))
+                .copied()
+        };
+        let mut index = self.inner.state.read();
+        if place(&index).is_none() {
+            // Appended since this handle last looked, by another handle or
+            // another process: read what they finished, and look again, as
+            // a `Get` does.
+            drop(index);
+            self.reread().ok()?;
+            index = self.inner.state.read();
+        }
+        let Place::Node(id) = place(&index)? else {
+            return None;
+        };
+        let (rows, manifest) = self
+            .rows(&index, &std::collections::HashMap::new(), id)
+            .ok()?;
+        let manifest = self.manifest(&index, manifest)?;
+        let map = index.tokens.mapping()?;
+        let mapped = map.len() as u64;
+        let mut node = FileNode {
+            archive: self.clone(),
+            map,
+            catalog: catalog.to_string(),
+            hash: hash.clone(),
+            manifest,
+            kind: if rows.kind == INDEX {
+                RowsKind::Index
+            } else {
+                RowsKind::Segment
+            },
+            entries: Vec::new(),
+            links: Vec::new(),
+            buffers: Vec::new(),
+        };
+        build(&index, &rows, mapped, &mut node)?;
+        super::Timings::add(&self.inner.timings.serve, started);
+        self.inner
+            .timings
+            .served
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Some(node)
+    }
+
+    /// The manifest token `id` decodes to, decoded once.
+    fn manifest(&self, index: &Index, id: u32) -> Option<Arc<Manifest>> {
+        let mut manifests = self.inner.manifests.lock();
+        if let Some(manifest) = manifests.get(&id) {
+            return Some(manifest.clone());
+        }
+        let manifest = Arc::new(Manifest::decode(index.tokens.get(id)?).ok()?);
+        manifests.insert(id, manifest.clone());
+        Some(manifest)
+    }
+}
+
+/// Fills `node` with where each of its rows' parts is.
+fn build(index: &Index, rows: &Rows, mapped: u64, node: &mut FileNode) -> Option<()> {
+    if rows.kind != INDEX {
+        node.entries = rows
+            .sections
+            .first()?
+            .iter()
+            .map(|row| entry(index, row, mapped))
+            .collect::<Option<_>>()?;
+        return Some(());
+    }
+    let [links, buffers, ops] = rows.sections.as_slice() else {
+        return None;
+    };
+    node.links = links
+        .iter()
+        .map(|row| {
+            let child = match row[1] {
+                NONE => {
+                    let hash = part(index, row[3], mapped)?;
+                    (hash.len == 32).then_some(hash.offset)?
+                }
+                id => {
+                    let child = index.nodes.get(id as usize)?;
+                    let catalog = index.catalogs.get(child.catalog as usize)?;
+                    // A frame's body starts with its catalog, then the hash.
+                    let at = child.extent.offset + 1 + catalog.len() as u64;
+                    (at + 32 <= mapped).then_some(at)?
+                }
+            };
+            Some(Link {
+                separator: part(index, row[0], mapped)?,
+                child,
+                scale: row[2] as u8,
+            })
+        })
+        .collect::<Option<_>>()?;
+    node.entries = ops
+        .iter()
+        .map(|row| entry(index, row, mapped))
+        .collect::<Option<_>>()?;
+    let mut next = 0;
+    for buffer in buffers {
+        let len = buffer[1] as usize;
+        if next + len > node.entries.len() {
+            return None;
+        }
+        node.buffers.push((buffer[0], next..next + len));
+        next += len;
+    }
+    Some(())
+}
+
+// SAFETY: every value a `FileNode` hands out is a token the archive checked
+// as an archive of a `State<Datum>` (`is_datum`) before it served the node,
+// read through a mapping the node holds, at a file offset aligned to 16
+// (every token is), and the mapping is page aligned. The file is
+// append-only: nothing indexed is ever written again (see `Tokens::map`). A
+// frame was written only once its rows rebuilt the very block its hash
+// names.
+unsafe impl NodeRows for FileNode {
+    fn hash(&self) -> &Blake3Hash {
+        &self.hash
+    }
+
+    fn manifest(&self) -> &Manifest {
+        &self.manifest
+    }
+
+    fn values(&self) -> TypeId {
+        TypeId::of::<State<Datum>>()
+    }
+
+    fn kind(&self) -> RowsKind {
+        self.kind
+    }
+
+    fn len(&self) -> usize {
+        match self.kind {
+            RowsKind::Segment => self.entries.len(),
+            RowsKind::Index => self.links.len(),
+        }
+    }
+
+    fn key(&self, at: usize) -> KeyParts<'_> {
+        self.op_key(at)
+    }
+
+    fn value(&self, at: usize) -> &[u8] {
+        self.op_value(at).expect("a segment entry has a value")
+    }
+
+    fn separator(&self, at: usize) -> &[u8] {
+        self.bytes(self.links[at].separator)
+    }
+
+    fn child(&self, at: usize) -> &Blake3Hash {
+        let start = self.links[at].child as usize;
+        Blake3Hash::ref_from_bytes(&self.map[start..start + 32]).expect("32 bytes are a hash")
+    }
+
+    fn scale(&self, at: usize) -> u8 {
+        self.links[at].scale
+    }
+
+    fn buffers(&self) -> usize {
+        self.buffers.len()
+    }
+
+    fn buffer(&self, which: usize) -> (u32, Range<usize>) {
+        self.buffers[which].clone()
+    }
+
+    fn op_key(&self, at: usize) -> KeyParts<'_> {
+        let entry = &self.entries[at];
+        let mut parts: [&[u8]; 1 + SLOTS] = [&[]; 1 + SLOTS];
+        let mut count = 0;
+        if let Some(form) = entry.form {
+            parts[0] = &FORMS[form as usize..form as usize + 1];
+            count = 1;
+        }
+        for part in &entry.parts[..entry.count as usize] {
+            parts[count] = self.bytes(*part);
+            count += 1;
+        }
+        KeyParts::new(&parts[..count])
+    }
+
+    fn op_value(&self, at: usize) -> Option<&[u8]> {
+        self.entries[at].value.map(|value| self.bytes(value))
+    }
+
+    fn footprint(&self) -> usize {
+        size_of::<Self>()
+            + self.entries.capacity() * size_of::<Entry>()
+            + self.links.capacity() * size_of::<Link>()
+            + self.buffers.capacity() * size_of::<(u32, Range<usize>)>()
+            + self.catalog.capacity()
+    }
+
+    fn block(&self) -> Result<Buffer, DialogSearchTreeError> {
+        let block = self
+            .archive
+            .get(&self.catalog, &self.hash)
+            .map_err(|error| DialogSearchTreeError::Encoding(error.to_string()))?
+            .ok_or_else(|| {
+                DialogSearchTreeError::Node(format!("{} is not in the archive", self.hash))
+            })?;
+        Ok(Buffer::from(block))
+    }
+}
+
+/// The archive serves every node it keeps as a frame: a tree read through an
+/// environment that holds it ([`NodeSource::serve`]) reads such nodes in
+/// place, and loads the rest as blocks.
+impl NodeSource for FileArchive {
+    fn node(&self, catalog: &CatalogScope, hash: &Blake3Hash) -> Option<Arc<dyn NodeRows>> {
+        self.served(catalog.catalog_name(), hash)
+            .map(|node| Arc::new(node) as Arc<dyn NodeRows>)
+    }
+}

@@ -126,7 +126,7 @@ where
             .map(|node| async move {
                 let node = node?;
                 index
-                    .put(node.buffer().clone())
+                    .put(node.buffer()?.clone())
                     .perform(env)
                     .await
                     .map_err(UploadError::RemoteWrite)?;
