@@ -42,7 +42,7 @@ Columns:
 | peer to peer, offline, no server | yes | yes | yes | ? does "changes since" need a remote that understands the CRDT | 🟡 depends on the library's sync | ? |
 | storage and sync within 2× of a text CRDT library | ? | ? copies the whole document per change, plus a root node per commit | ? a root node per commit | ? | the library's own cost | ? |
 | changes to Dialog's core | none | 🟡 a lot; part of why it was shelved | ? | ? a resource kind and sync primitives | none | 🟡 likely the most |
-| sync engines the developer runs | one | one | one | one | 🟡 two | one |
+| moving parts: sync engines and stores beside the replicated tree | one engine, the tree | one engine, the tree | one engine, the tree | 🟡 one engine, a store beside the tree | 🟡 two engines, two stores | one engine, the tree |
 | needs the whole document on the editing peer | no | yes | ? | ? | yes | ? |
 | a query returns the current text (nice to have) | yes | ? | yes | yes | no, opaque key | ? |
 | no interleaving of concurrent runs (nice to have) | n/a | from the library | from the library | from the library | from the library | ? whole document per peer allows RGA or Fugue style order |

@@ -105,3 +105,15 @@ The candidate pieces are named at the level of capabilities, not code.
 **Decided.** Not decided. The hypothesis stays open until each candidate
 is tied to the Dialog code a text CRDT would call. No product names for
 the precedent.
+
+**Asked (later).** Why did the smaller primitive win for encryption?
+Fewer moving parts: keys need to sit next to the data and sync
+efficiently, and putting them in the tree that is already replicated
+makes that simpler.
+
+**Learned.** That reason is a criterion, not just a preference for
+building: count the moving parts each column adds. The "sync engines"
+row became "moving parts". It favours the columns that keep text in the
+replicated tree, which are the ones whose write cost is unmeasured. Keys
+change rarely; text changes per keystroke, so the precedent transfers
+only if that cost is within the bar.
