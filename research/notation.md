@@ -32,6 +32,10 @@ These were written after rounds 1 to 15 had run, from the scoring each round use
 
 Readers are `claude-haiku` subagents. Three per variant is the least; a difference of one reader in three is noise.
 
+## The second question: how to write it
+
+Added on 2026-11-07, before R16 ran. With the notation held fixed, which way of writing its spec lets the same reader write and predict correctly: the spec as it is, a reference card, a walkthrough, or a card with the mistakes earlier readers made? The hypothesis is that the spec's length, rationale and evidence get in a cheap reader's way, and that a short document with examples does better. The bars, the rubric and the four documents are in [`results/r16-plan.md`](notation/results/r16-plan.md), committed before any reader ran: a style wins with a median of at least 13 of 15 points and at least 2 above the spec's, and loses if none beats the spec's median by more than 1.
+
 ## Prior art
 
 - [Dedalus](https://www2.eecs.berkeley.edu/Pubs/TechRpts/2009/EECS-2009-173.html): now, next and async as rule timings.

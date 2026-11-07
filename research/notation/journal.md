@@ -9,7 +9,7 @@ What we tried, what it measured, and what we decided, newest last. The [idea](..
 - **Decided:** rules are heads and a `when`, with timing on the verb (`assert`, `assert!`, `retract!`, `ensue!`); lifetimes are layers on attributes, and a command is a concept in `:now`; a write names its entity, gives a record that identifies it, or leaves it out and gets the digest of what it writes; a derivation that must agree everywhere is a rule with `digest`.
 - **Measured:** 249 readers over 15 rounds. Without a visible word, readers do not see a derivation (R1 `default` line 0/3, R13's six brace shapes 0/18). With one paragraph of spec, they do (R14 5/5, R15 16/16).
 - **Rejected on design grounds, though readers got them:** `=` in a head (constraint elsewhere), the `{title author} ?b` head (construction does not belong in a concept).
-- **Next:** a round on the revised design as a whole: send a report, update a bug, send to a peer, with `ensue!` and `layer: :now` defined in a line each.
+- **Next:** R16, planned and not yet run: the revised design as a whole, read from four ways of writing its spec.
 - **Open:** whether a record in the entity's place writes its fields; key spelling inside records; `:last` across devices; optional parameters.
 
 ## Datasets
@@ -261,6 +261,16 @@ The control had no shared answer: one predicted two bugs, one made up `bug:crash
 **Results.** R7 was reported as 22/24 for any marker; it is 20/21 with a marker and 0/3 without. R10's `[:title :author] ?b` was reported 3/3; it is 2/3 (one reader made up ids). R15's worked-example readers rated clarity 4, 4, 4, 4, not 4, 3, ?, 4. R1 to R4 had no tally before. Ten of 249 readers called a tool they were told not to (listed under [hygiene](evaluation.md#hygiene)).
 
 **Decision.** Use the recounts. None changes a decision above.
+
+## 2026-11-07 — R16 planned: how should the spec be written?
+
+**Question.** With the notation fixed, does the way the spec is written change whether a cheap reader can write in it? This turns the topic from how the notation looks to how it is taught.
+
+**Method.** Four documents stating the same facts: `design.md` as it is (the baseline), a reference card, a walkthrough, and the card with a table of earlier readers' mistakes. Each is followed by the same tasks in a domain none of them uses: define a stored concept and a command, write the rule that derives a to-do's identity, write, update, query, send to a peer, and predict four outcomes. Five readers per document. The rubric (15 points) and the bars were committed before any reader ran: [r16-plan](results/r16-plan.md).
+
+**Results.** Not run yet.
+
+**Decision.** Not decided. A median of at least 13 of 15, 2 above the spec's, picks the style; a gain of 1 or less says the style is not the lever.
 
 ## How to reproduce
 
