@@ -159,3 +159,25 @@ provider that keeps nodes in its own form (the single file, verifying at
 write and checksumming records) vouches without hashing at read time; what
 goes uncaught is the file changed on disk in a way its checksums miss.
 
+## 2026-11-07, Delimiting: a truthful hash, and verifying as a choice
+
+**Asked.** Is the proposed reading of "trust the provider" right? Answer
+as given: somewhat. A persistent node must have a way to give its hash,
+and it must not be possible to lie to the node about what its hash is;
+asking for the hash means materializing the block, which is the cost of
+asking. So the tree can either trust the provider or verify.
+
+**Learned.** This replaces both earlier positions: the hash is always
+truthful (computed from content, never supplied), and verification is the
+consumer's choice and cost. A provider vouches only that the node it
+served is the one asked for, which the consumer may check. The cache
+already keys nodes by the requested hash, but the tree diff identifies
+loaded nodes by calling `hash()`, which would hash every rows node it
+loads: trusting stays cheap only if tree code uses the requested hash as a
+node's name and `hash()` only to verify.
+
+**Decided.** A node's hash is computed from its content, lazily for a rows
+node, and cannot be supplied: `NodeRows` no longer carries a hash the node
+believes. The tree trusts by default and verifies where it chooses. Rests
+on an open hypothesis: the inventory of `hash()` calls on loaded nodes.
+
