@@ -23,3 +23,10 @@ cache is open (see the journal's agenda).
 On main the node type holds it (the hash is computed from the bytes the
 node is made of). A node made from rows has no bytes until it encodes them.
 
+**name** (of a node): the hash a node was requested by, which the
+provider that served it vouches for. What tree code identifies a node by.
+
+**hash** (of a node): the hash of the node's block, computed from its
+content and never supplied. Asking for it may cost materializing the
+block (a node read from rows); comparing it with the name is verifying.
+

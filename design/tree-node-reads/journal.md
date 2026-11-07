@@ -5,7 +5,7 @@
 |  | Understanding | Activity |
 |---|---|---|
 | **Status** | *What do we know?* How a tree reads a node on main and on #733. The maintainer's objective: the environment is where every cache lives, so it can be passed, evicted and reused across sessions, and nothing caches or skips caching elsewhere. Main moved toward that in three steps (#730, #735, #742), but the cache is still optional (an environment that keeps nothing reads uncached, silently), and it is reached from two places (the tree's `Accessor`, the query session's `Load` provider) while `Load` itself is uncached. | *Where are we at?* Delimiting: the cause is named (the tree predates the capability model and its transition is partial, so its concerns are not expressed as capabilities); the problem statement is being cut to scope. |
-| **Agenda** | *What do we need to know?* Which concerns are the tree's (to become capabilities it invokes) and which are a provider's; whether writes (persist) are in scope with reads; whether other partial transitions (formula cache, repository caches) are this topic or siblings. Open hypotheses: policies as requests, the per-read cost. | *Where are we going?* Delimiting, then Direction: use cases from the tree's concerns, and approaches to express them. |
+| **Agenda** | *What do we need to know?* Whether the tree's remaining dealings are its concerns or a provider's: memory-only reads, read-ahead, reads without hydration (5-7), and persist's blocks and kept nodes (8-9); whether the scope (the tree only) is accepted. Open hypotheses: policies as requests, the per-read cost, the `hash()` inventory, hashing a rows node on demand. For Design: the requested name and the actual hash as one type or two. | *Where are we going?* Delimiting, then Direction: use cases from the tree's concerns, and approaches to express them. |
 
 ## 2026-11-07, Describing: what reading a node involves today
 
@@ -180,4 +180,21 @@ node's name and `hash()` only to verify.
 node, and cannot be supplied: `NodeRows` no longer carries a hash the node
 believes. The tree trusts by default and verifies where it chooses. Rests
 on an open hypothesis: the inventory of `hash()` calls on loaded nodes.
+
+## 2026-11-07, Delimiting: the requested name and the actual hash
+
+**Asked.** (Continuing the last entry.) The maintainer proposed a
+distinction, perhaps as another type: the thing a node was requested by,
+and a way to get what it actually is, so different consumers decide to
+trust or verify.
+
+**Learned.** It gives the last decision a shape the code can hold: a
+node's name (the hash it was requested under) and its hash (computed from
+its content) are two things. Two forms: one node type with both, or a
+served node and a verified node, the second obtained only by checking
+the first, so a function that needs verification says so in its types.
+
+**Decided.** The distinction is adopted; its form is an implementation
+decision for the Design phase (`design-node-identity.md`, when that phase
+comes). The question on reads 5-7 is still open.
 
