@@ -117,3 +117,18 @@ row became "moving parts". It favours the columns that keep text in the
 replicated tree, which are the ones whose write cost is unmeasured. Keys
 change rarely; text changes per keystroke, so the precedent transfers
 only if that cost is within the bar.
+
+**Asked (later).** If text in the tree comes back over 2×, switch or
+engineer it down? Neither matters: in or outside the tree is not a
+preference. The goal is a solution that is easy to maintain and
+integrates well; blobs outside the tree are a better solution for
+binary data, and the same may be true for text.
+
+**Learned.** The encryption precedent was not "in the tree", it was
+"fewer moving parts"; blobs show one sync mechanism can carry data
+outside the tree. The row is now "sync mechanisms the developer deals
+with", which no longer favours in-tree columns. "Easy to maintain" and
+"integrates well" are judgements, not criteria yet.
+
+**Decided.** Location of text follows the cost measurement: over 2× in
+the tree is a reason to go outside it, not to engineer the tree.
