@@ -10,7 +10,7 @@
   overflows; old nodes are never reclaimed) and the **payload copy** (a
   value holding a whole document is copied on every change).
 - **mutable resource**: a document Dialog can reference and read as text
-  whose content changes in place by merging, unlike a blob, which is
+  whose content changes in place by merging, unlike an asset, which is
   hash-addressed and immutable.
 - **transport**: where a resource's changes travel: Dialog's facts,
   Dialog's sync engine outside the tree, or another sync engine. Replaces
