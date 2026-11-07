@@ -49,6 +49,10 @@ runs, in the journal's "Where things stand"; they change together.
 - [Graph queries](graph-queries.md): **Proposed.** A concept's entity field
   names the concept it points to, so a concept describes a graph, a query
   returns it and a subscription follows changes anywhere in it.
+- [Record values](record-values.md): **Exploring**, on
+  [dialog-db/dialog-db#748](https://github.com/dialog-db/dialog-db/pull/748).
+  `Value::Record` as a typed, canonical value whose fields can be
+  destructured in queries, sharing the replica's tokens with its claims.
 - [Single-file format](single-file-format.md): **Building**, on
   [dialog-db/dialog-db#733](https://github.com/dialog-db/dialog-db/pull/733).
   A replica's blocks in one append-only file, every token stored once.
