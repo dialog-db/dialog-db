@@ -221,10 +221,11 @@ its catalog) to its frame or record, a token's key (a stable hash of its
 bytes, `src/hash.rs`) to its place, and a lineage's key (its catalog,
 kind and first row) to its latest frame. A collision costs a probe of the
 next key: every value is checked against what it stands for. Leaves hold
-64 entries, internal nodes 32 children and buffers of 256, and the root,
+64 entries, internal nodes 8 children and buffers of 512, and the root,
 which lives in the slot and is rewritten by every append, buffers 2048 and
-drains to half when full: an append writes about 64 bytes of index an
-entry over time. Nodes are fixed-width and read in place from the mapping.
+drains to half when full. Over tonk-shaped 100×'s appends that writes
+about 114 bytes of index an entry (16 bytes each), and the index is still
+the largest part of a large file: see the journal. Nodes are fixed-width and read in place from the mapping.
 
 Opening reads the two slots and nothing else. A file longer than its
 newest whole slot says has a torn append past it, which the next writer

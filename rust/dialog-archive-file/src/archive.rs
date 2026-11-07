@@ -1865,7 +1865,10 @@ mod tests {
                 let (archive, done) = (archive.clone(), done.clone());
                 std::thread::spawn(move || -> Result<usize, ArchiveError> {
                     let mut reads = 0;
-                    while !done.load(Ordering::Acquire) {
+                    // A pass at least once the writer is done, however late
+                    // this thread starts: it reads every block there is.
+                    loop {
+                        let last = done.load(Ordering::Acquire);
                         for (catalog, hash) in archive.hashes() {
                             let block =
                                 archive.get(&catalog, &hash)?.expect("a listed block reads");
@@ -1875,8 +1878,10 @@ mod tests {
                             }
                             reads += 1;
                         }
+                        if last {
+                            return Ok(reads);
+                        }
                     }
-                    Ok(reads)
                 })
             })
             .collect();
@@ -1892,7 +1897,7 @@ mod tests {
         done.store(true, Ordering::Release);
         for reader in readers {
             let reads = reader.join().expect("a reader read every block whole")?;
-            assert!(reads > 0);
+            assert!(reads >= 80, "the last pass reads all 80 blocks");
         }
         assert_eq!(archive.len(), 80);
         Ok(())

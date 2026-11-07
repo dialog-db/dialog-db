@@ -35,10 +35,14 @@ pub(crate) type Entry = (u64, u64);
 
 /// The most entries a leaf holds.
 pub(crate) const LEAF: usize = 64;
-/// The most children an internal node has.
-pub(crate) const FANOUT: usize = 32;
+/// The most children an internal node has. Few children and a deep buffer
+/// send each flush's entries down in large groups: over tonk-shaped 100×'s
+/// appends (`write_amplification_of_a_file`), 8 children and buffers of 512
+/// write 114 bytes an entry, 32 and 256 write 221. Over its 1.5 million
+/// entries a cold lookup reads about five levels, one more than at 32.
+pub(crate) const FANOUT: usize = 8;
 /// The most entries an internal node buffers.
-pub(crate) const BUFFER: usize = 256;
+pub(crate) const BUFFER: usize = 512;
 /// The most entries the root buffers. The root is not a record (it lives
 /// in the slot, rewritten by every append), so its buffer costs the file
 /// nothing, and a large one sends a flush's entries down in large groups.
@@ -629,6 +633,59 @@ mod tests {
                 root.encode().len()
             );
         }
+        Ok(())
+    }
+
+    /// Bytes written for each entry over appends shaped as a growing
+    /// file's are: each append files `DIALOG_INDEX_FRAMES` new frames (a new
+    /// block key, and its lineage's key overwritten, out of
+    /// `DIALOG_INDEX_LINEAGES`, none when it is 0) and `DIALOG_INDEX_TOKENS` new tokens, for
+    /// `DIALOG_INDEX_APPENDS` appends. The defaults are tonk-shaped 100×'s
+    /// owner: 3,569 appends of 292 frames and 118 tokens. Run by hand.
+    #[test]
+    #[ignore = "measures write amplification over a file's appends"]
+    fn write_amplification_of_a_file() -> io::Result<()> {
+        let var = |name: &str, default: u64| {
+            std::env::var(name)
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(default)
+        };
+        let appends = var("DIALOG_INDEX_APPENDS", 3569);
+        let frames = var("DIALOG_INDEX_FRAMES", 292);
+        let tokens = var("DIALOG_INDEX_TOKENS", 118);
+        let lineages = var("DIALOG_INDEX_LINEAGES", 50_000);
+        let memory = Memory::default();
+        let mut root = Node::default();
+        let (mut fresh, mut inserted) = (0u64, 0u64);
+        for append in 0..appends {
+            let mut entries = Vec::new();
+            for frame in 0..frames {
+                fresh += 1;
+                entries.push((key(fresh), fresh));
+                if lineages > 0 {
+                    let lineage = key(u64::MAX - key(append * frames + frame) % lineages);
+                    entries.push((lineage, fresh));
+                }
+            }
+            for _ in 0..tokens {
+                fresh += 1;
+                entries.push((key(fresh), fresh));
+            }
+            entries.sort_unstable();
+            entries.dedup_by_key(|(key, _)| *key);
+            inserted += entries.len() as u64;
+            root = root.insert(&memory, entries, &mut |bytes| memory.write(bytes))?;
+        }
+        let written = *memory.written.borrow();
+        println!(
+            "{inserted} entries in {appends} appends: {:.0} MiB written, {:.0} bytes an entry, \
+             {} nodes, root {} B",
+            written as f64 / 1048576.0,
+            written as f64 / inserted as f64,
+            memory.nodes.borrow().len(),
+            root.encode().len()
+        );
         Ok(())
     }
 
