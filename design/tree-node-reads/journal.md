@@ -198,3 +198,23 @@ the first, so a function that needs verification says so in its types.
 decision for the Design phase (`design-node-identity.md`, when that phase
 comes). The question on reads 5-7 is still open.
 
+## 2026-11-07, Delimiting: what a node request can say
+
+**Asked.** Should a node request be able to say "only if in memory",
+"read ahead" and "without hydrating", or leave all three to providers?
+Answer as given: we do want to express things: give me the node; preload
+the node; and something like an optimistic read, which the maintainer did
+not object to but asked what it is used for before deciding.
+
+**Learned.** The memory-only read is used only by writes, to keep an edit
+surgical: a neighbouring leaf's summary decides whether one leaf can be
+rewritten without moving a chunk boundary, and without it the tree takes
+the general path or loads later. It is an optimistic read with a fallback;
+nothing in it needs the word memory. What it reads is a value derived from
+the node (its summary), not only the node.
+
+**Decided.** Not yet: the optimistic read waits on the maintainer now that
+its use is known. "Without hydrating" (export, push's local read) is not
+yet answered. Noted for Design: whether derived values (a piece summary)
+ride with the node.
+
