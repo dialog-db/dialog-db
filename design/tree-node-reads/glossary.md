@@ -34,3 +34,12 @@ block (a node read from rows); comparing it with the name is verifying.
 edited in place until `persist` seals them. The environment keeps a
 branch's live spine between commits while a handle is open.
 
+**block layer**: what reads and writes blocks as bytes by digest: the `fs`
+store, remotes, the network (`archive::Get`, `Load`, `Import`).
+
+**translation layer**: what turns blocks into nodes (decoding) and nodes
+into blocks (encoding), between the block layer and the node layer.
+
+**node layer**: what the tree talks to: nodes by name. A store that keeps
+nodes in a form of its own (the single file) answers here directly.
+

@@ -329,3 +329,27 @@ spilled values' blob commands, and the commit's own order of writes
 `WriteNodes` with the caller ordering writes answer the writer's concern).
 It belongs to Direction once the problem is accepted.
 
+## 2026-11-07, Delimiting: blocks, translation, nodes
+
+**Asked.** (The maintainer, checking their understanding of `WriteNodes`.)
+Is the point a batch write rather than single block writes? Answered: no,
+main already imports a commit's blocks in one batch; the change is nodes
+rather than bytes handed over, and caching moved out of the tree. The
+maintainer then stated the structure underneath: a block layer that reads
+and writes bytes, which `fs`, the network and the rest need and keep; a
+layer above that translates (decodes, encodes); and a node layer the tree
+talks to. The single file can skip the translation and be a node layer
+itself.
+
+**Learned.** The single file skips translation only for node reads and
+writes. It still answers block requests (sync, push, serving a peer) by
+encoding, and a node it lacks arrives from a remote as a block, through
+translation, before it stores it as a node. So the layering holds for
+both stores; what differs is which layer a store answers at.
+
+**Decided.** The layering is the first candidate approach for Direction:
+node requests answered by a caching layer, then by a store's node layer
+where it has one (the single file) or by translation over the block layer
+(`fs`, remotes). Not yet decided: the problem statement is still a draft,
+and Direction starts from an accepted one.
+
