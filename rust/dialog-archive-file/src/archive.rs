@@ -50,6 +50,17 @@ pub struct Options {
     /// How many nodes' decoded rows are kept, so a read of a node written
     /// against another does not decode that one again.
     pub rows_cached: usize,
+    /// Whether every frame is checked by building its block again from the
+    /// rows it decodes to and comparing the bytes, keeping the block whole
+    /// if they differ. The tree's encoding is canonical (the same entries
+    /// under the same manifest make the same bytes, which replicas already
+    /// rely on to agree on hashes), so a frame of a node in the current
+    /// layout rebuilds its block by construction, and this re-tests that on
+    /// every block. On in debug builds, so the tests check it everywhere,
+    /// and when `DIALOG_ARCHIVE_VERIFY` is set; off otherwise. Every build
+    /// checks that a frame decodes back to its rows, and keeps a node of
+    /// another layout whole without framing it.
+    pub verify: bool,
 }
 
 impl Default for Options {
@@ -59,6 +70,7 @@ impl Default for Options {
             frames: true,
             chain: CHAIN,
             rows_cached: 4096,
+            verify: cfg!(debug_assertions) || std::env::var_os("DIALOG_ARCHIVE_VERIFY").is_some(),
         }
     }
 }
@@ -279,6 +291,10 @@ struct Timings {
     /// Whole appends, lock and catching up included, and how many.
     append: AtomicU64,
     appends: AtomicU64,
+    /// Nodes kept whole for being in another layout, and for a frame that
+    /// did not rebuild the block when verified.
+    other_layout: AtomicU64,
+    unverified: AtomicU64,
 }
 
 impl Timings {
@@ -304,7 +320,8 @@ impl Drop for Inner {
         eprintln!(
             "archive {}: split {:.1} ms (parse {:.1} ms), encode {:.1} ms, verify {:.1} ms, write {:.1} ms, \
              decode {:.1} ms, realize {:.1} ms ({} blocks built for gets), serve {:.1} ms \
-             ({} nodes served), {} blocks offered to appends, {} appends taking {:.1} ms",
+             ({} nodes served), {} blocks offered to appends, {} appends taking {:.1} ms, \
+             kept whole: {} of another layout, {} not rebuilt when verified",
             self.path.display(),
             ms(&timings.split),
             ms(&timings.parse),
@@ -319,6 +336,8 @@ impl Drop for Inner {
             timings.offered.load(Ordering::Relaxed),
             timings.appends.load(Ordering::Relaxed),
             ms(&timings.append),
+            timings.other_layout.load(Ordering::Relaxed),
+            timings.unverified.load(Ordering::Relaxed),
         );
     }
 }
@@ -1273,6 +1292,16 @@ impl FileArchive {
         block: &Buffer,
         node: &TreeNode,
     ) -> io::Result<Option<FrameOf>> {
+        // A node in another layout (an older release's) is not what the
+        // current encoder makes, so its frame would not rebuild it: keep it
+        // whole without splitting it.
+        if node.layout_version() != dialog_search_tree::TAGGED_LAYOUT {
+            self.inner
+                .timings
+                .other_layout
+                .fetch_add(1, Ordering::Relaxed);
+            return Ok(None);
+        }
         let Ok(manifest) = node.manifest() else {
             return Ok(None);
         };
@@ -1330,26 +1359,35 @@ impl FileArchive {
         Timings::add(&self.inner.timings.encode, started);
 
         let started = Instant::now();
-        // The checked conversion: the frame reads back to the same rows,
-        // and the rows realize to the very block.
+        // The frame reads back to the same rows.
         let mut reader = Reader::new(&body);
         FrameHeader::get(&mut reader)?;
         let decoded = get_rows(&mut reader, rows.kind, base_rows.as_deref())?;
         if decoded != rows {
+            Timings::add(&self.inner.timings.verify, started);
             state.tokens.roll_back(mark);
             return Ok(None);
         }
-        let realized = realize(&rows, &state.tokens, &manifest, |id| {
-            staged
-                .get(&id)
-                .map(|staged| staged.hash.clone())
-                .or_else(|| state.nodes.get(id as usize).map(|node| node.hash.clone()))
-        });
+        // And, when verifying, the rows it reads back to rebuild the very
+        // block (see `Options::verify`).
+        if self.inner.options.verify {
+            let realized = realize(&decoded, &state.tokens, &manifest, |id| {
+                staged
+                    .get(&id)
+                    .map(|staged| staged.hash.clone())
+                    .or_else(|| state.nodes.get(id as usize).map(|node| node.hash.clone()))
+            });
+            if realized.ok().as_deref() != Some(block.as_ref()) {
+                Timings::add(&self.inner.timings.verify, started);
+                self.inner
+                    .timings
+                    .unverified
+                    .fetch_add(1, Ordering::Relaxed);
+                state.tokens.roll_back(mark);
+                return Ok(None);
+            }
+        }
         Timings::add(&self.inner.timings.verify, started);
-        if realized.ok().as_deref() != Some(block.as_ref()) {
-            state.tokens.roll_back(mark);
-            return Ok(None);
-        }
         let depth = base.and_then(depth_of).map_or(0, |depth| depth + 1);
         Ok(Some((Arc::new(rows), manifest_id, body, depth, lineage)))
     }

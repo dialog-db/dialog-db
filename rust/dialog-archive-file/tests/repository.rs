@@ -459,3 +459,81 @@ async fn it_selects_through_nodes_served_in_place() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+/// A node in an older layout is kept whole even when frames are not checked
+/// by rebuilding their blocks (`Options::verify` off, as in a release
+/// build): its frame would rebuild it in the current layout, other bytes
+/// than were stored. The node is a real segment from a committed tree,
+/// archived again under the older layout's header.
+#[tokio::test]
+async fn it_keeps_a_node_of_another_layout_whole_unverified() -> anyhow::Result<()> {
+    use dialog_artifacts::{Datum, Key, State};
+    use dialog_search_tree::{
+        LEGACY_LAYOUT, LegacyManifest, LegacyNodeBody, LegacySegment, NodeBody, PersistentNode,
+        PersistentSegment, SegmentView,
+    };
+    let directory = tempfile::tempdir()?;
+    let at = Directory::At(directory.path().to_string_lossy().into_owned());
+    let (peer, name) = (unique_name("peer"), unique_name("repo"));
+    commit_facts(&at, &peer, &name).await?;
+    let source = FileArchive::open(directory.path().join(&name).join(FILE_NAME))?;
+
+    let mut legacy = None;
+    for (catalog, hash) in source.hashes() {
+        let Some(bytes) = source.get(&catalog, &hash)? else {
+            continue;
+        };
+        let Ok(node) = PersistentNode::<Key, State<Datum>>::try_from(Buffer::from(bytes)) else {
+            continue;
+        };
+        let NodeBody::Segment(SegmentView::Archived(segment)) = node.body() else {
+            continue;
+        };
+        if segment.count.to_native() == 0 {
+            continue;
+        }
+        let segment: PersistentSegment<State<Datum>> =
+            rkyv::deserialize::<_, rkyv::rancor::Error>(segment)?;
+        let manifest = node.manifest()?;
+        let body = LegacyNodeBody::Segment(LegacySegment {
+            header: LegacyManifest {
+                version: 1,
+                fanout_n: manifest.fanout_n,
+                max_separator: manifest.max_separator,
+                inline_n: manifest.inline_n,
+                spill_prefix: manifest.spill_prefix,
+                max_segment: manifest.max_segment,
+                frame_ceiling_factor: manifest.frame_ceiling_factor,
+                anchor_selector: manifest.anchor_selector,
+            },
+            count: segment.count,
+            layout: segment.layout,
+            columns: segment.columns,
+            values: segment.values,
+        });
+        legacy = Some((
+            catalog,
+            Buffer::from(rkyv::to_bytes::<rkyv::rancor::Error>(&body)?.to_vec()),
+        ));
+        break;
+    }
+    let (catalog, bytes) = legacy.ok_or_else(|| anyhow::anyhow!("no segment with entries"))?;
+    let node = PersistentNode::<Key, State<Datum>>::try_from(bytes.clone())?;
+    assert_eq!(node.layout_version(), LEGACY_LAYOUT);
+
+    let target = FileArchive::open_with(
+        directory.path().join("legacy.dialog"),
+        Options {
+            verify: false,
+            ..Options::default()
+        },
+    )?;
+    target.append(&catalog, std::slice::from_ref(&bytes))?;
+    assert_eq!(target.stats().frames, 0, "the older node is not framed");
+    assert_eq!(
+        target.get(&catalog, bytes.blake3_hash())?.as_deref(),
+        Some(bytes.as_ref()),
+        "it reads back as the bytes stored"
+    );
+    Ok(())
+}
