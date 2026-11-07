@@ -103,10 +103,39 @@ fn entry_row(tokens: &mut Tokens, key: &[u8], datum: Option<&State<Datum>>) -> i
         row[1 + slot] = tokens.intern(token);
     }
     if let Some(datum) = datum {
-        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(datum).map_err(tree_error)?;
-        row[DATUM] = tokens.intern(&bytes);
+        row[DATUM] = SCRATCH.with_borrow_mut(|scratch| -> io::Result<u32> {
+            Ok(tokens.intern(scratch.archive(datum)?))
+        })?;
     }
     Ok(row)
+}
+
+/// Where a datum is archived into its token's bytes: one output buffer and
+/// one scratch arena, kept across entries rather than allocated for each.
+/// The bytes are the same as `rkyv::to_bytes` makes.
+#[derive(Default)]
+struct Scratch {
+    bytes: rkyv::util::AlignedVec<16>,
+    arena: rkyv::ser::allocator::Arena,
+}
+
+impl Scratch {
+    /// `datum` as a standalone archive, in this scratch's buffer.
+    fn archive(&mut self, datum: &State<Datum>) -> io::Result<&[u8]> {
+        let mut bytes = std::mem::take(&mut self.bytes);
+        bytes.clear();
+        self.bytes = rkyv::api::high::to_bytes_in_with_alloc::<_, _, rkyv::rancor::Error>(
+            datum,
+            bytes,
+            self.arena.acquire(),
+        )
+        .map_err(tree_error)?;
+        Ok(self.bytes.as_slice())
+    }
+}
+
+thread_local! {
+    static SCRATCH: std::cell::RefCell<Scratch> = std::cell::RefCell::new(Scratch::default());
 }
 
 /// The key and datum a row stands for.
@@ -341,7 +370,8 @@ mod profile {
                     let value: State<Datum> = into_owned(segment.value_at(at)?)?;
                     owned += started.elapsed();
                     let started = Instant::now();
-                    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&value)?;
+                    let bytes = super::SCRATCH
+                        .with_borrow_mut(|scratch| scratch.archive(&value).map(<[u8]>::to_vec))?;
                     archived += started.elapsed();
                     let started = Instant::now();
                     for part in &parts {
