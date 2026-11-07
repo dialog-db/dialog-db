@@ -498,6 +498,34 @@ be brought under the line by folding the rows pointer into the node's
 existing fields. The six-member run should be repeated with this fix
 before its `fs` and `main/fs` numbers are compared again.
 
+## 2026-11-07 — The node is its block or its rows
+
+**Question.** After the per-read lookup was fixed, `subscribe-fanout` sat at
++3.0% against main, attributed to the pointer every node carried for the
+rows it might have come from. Does a node that is either its block or its
+rows clear it?
+
+**Method.** `PersistentNode` holds an enum: a block (its bytes and where
+its body sits, exactly main's two fields) or rows. A compile-time assertion
+keeps a block node at main's size. Every `dialog-perf` scenario on main
+(`9b98395`) and on the branch, one toolchain, callgrind instructions.
+
+**Results.** No regressions: every scenario within 0.1-2.8% of main, every
+counter unchanged. `subscribe-fanout` +1.6% (from +3.0%),
+`subscribe-pulled` +1.5%, `read-point` +2.5%, `first-query` +2.8%,
+`commit-batch` +1.6%; `commit-succeed` (volatile, not gated) -13%.
+
+**Decision.** Kept. The node-source lookup itself stays, on a cache miss
+only, until the tree reads nodes through capabilities
+([dialog-db/dialog-db#753](https://github.com/dialog-db/dialog-db/pull/753)
+plans it). A first try at carrying rows on `Load`'s answer instead was
+set aside: `Load` never reaches a store (the peer answers it with `Get`,
+which is routed to the space's archive and returns bytes that also cross
+the wire), so it is the routing question #753 leaves open, not a small
+step.
+
+Commits: `a17589b`.
+
 ## How to reproduce
 
 ```sh
