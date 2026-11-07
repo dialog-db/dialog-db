@@ -118,16 +118,17 @@ impl<'a> Draft<'a> {
         }
     }
 
-    /// The body of a token record holding the new tokens, for a record
-    /// whose body starts at `body_offset` in the file, and where each token
-    /// starts in it. Each token is its length, then padding to [`ALIGN`] (a
-    /// byte saying how much, then that many zeros), then its bytes.
-    pub fn record(&self, body_offset: u64) -> (Vec<u8>, Vec<(usize, u32)>) {
-        let mut body = Vec::with_capacity(self.bytes.len() + 20 * self.pending() + 8);
-        let mut places = Vec::with_capacity(self.pending());
-        put_bijou(&mut body, self.pending() as u64);
-        for id in self.first..self.first + self.pending() as u32 {
-            let token = self.get(id).expect("a new token");
+    /// The body of a token record holding the new tokens `ids` names, in
+    /// that order, for a record whose body starts at `body_offset` in the
+    /// file, and where each token starts in it. Each token is its length,
+    /// then padding to [`ALIGN`] (a byte saying how much, then that many
+    /// zeros), then its bytes.
+    pub fn record(&self, body_offset: u64, ids: &[u32]) -> (Vec<u8>, Vec<(usize, u32)>) {
+        let mut body = Vec::with_capacity(self.bytes.len() + 20 * ids.len() + 8);
+        let mut places = Vec::with_capacity(ids.len());
+        put_bijou(&mut body, ids.len() as u64);
+        for id in ids {
+            let token = self.get(*id).expect("a new token");
             put_bijou(&mut body, token.len() as u64);
             let after = body_offset + body.len() as u64 + 1;
             let pad = (ALIGN - after % ALIGN) % ALIGN;

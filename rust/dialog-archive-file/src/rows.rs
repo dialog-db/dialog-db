@@ -68,6 +68,38 @@ pub(crate) fn slots_of(form: u8) -> usize {
     }
 }
 
+/// `rows` with each token id renamed by `token` and each child's node id
+/// by `node`: for rows drafted before an append's turn, whose new tokens
+/// and nodes took other ids by the time it came.
+pub(crate) fn rename(rows: &Rows, token: impl Fn(u32) -> u32, node: impl Fn(u32) -> u32) -> Rows {
+    let mut renamed = rows.clone();
+    for (section, rows) in sections_of(rows.kind).iter().zip(&mut renamed.sections) {
+        for row in rows {
+            match section {
+                Section::Entries | Section::Ops => {
+                    for slot in 1..=slots_of(row[0] as u8) {
+                        row[slot] = token(row[slot]);
+                    }
+                    if row[DATUM] != NONE {
+                        row[DATUM] = token(row[DATUM]);
+                    }
+                }
+                Section::Links => {
+                    row[0] = token(row[0]);
+                    if row[1] != NONE {
+                        row[1] = node(row[1]);
+                    }
+                    if row[3] != NONE {
+                        row[3] = token(row[3]);
+                    }
+                }
+                Section::Buffers => {}
+            }
+        }
+    }
+    renamed
+}
+
 /// A node as columnar rows: its kind and its sections' rows.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Rows {

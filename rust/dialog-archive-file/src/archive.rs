@@ -18,7 +18,7 @@ use parking_lot::Mutex;
 
 use crate::file::{FOOTER, HEADER, Kind, MAGIC, put_record, read_at, read_record, write_at};
 use crate::node::{TreeNode, realize, rows_of, tree_node};
-use crate::rows::{Reader, Rows, get_rows, invalid, put_bijou, put_rows};
+use crate::rows::{Reader, Rows, get_rows, invalid, put_bijou, put_rows, rename};
 use crate::tokens::{Draft, TokenRead, read_token_record};
 
 mod index;
@@ -829,10 +829,43 @@ struct Staged {
     manifest: u32,
 }
 
-/// What an append writes for one block, before it knows where.
-enum Pending {
-    Block { hash: Blake3Hash, body: Vec<u8> },
-    Frame { node: Node, body: Vec<u8> },
+/// A node an append writes as a frame: its rows and manifest token, the
+/// node it is written against, its lineage and depth, and the frame
+/// record's body.
+struct Frame {
+    rows: Arc<Rows>,
+    manifest: u32,
+    base: Option<u32>,
+    lineage: Option<[u32; 4]>,
+    depth: u8,
+    body: Vec<u8>,
+}
+
+/// What an append writes for one block: the block whole, or the frame of
+/// the node it is, by node id.
+enum Item {
+    Block(Buffer),
+    Frame(u32, Buffer, Frame),
+}
+
+/// An append worked out before its turn: the tokens it adds, and its
+/// blocks and frames, children before their parents.
+struct Prepared<'a> {
+    catalog: &'a str,
+    draft: Draft<'a>,
+    /// The id its first frame was drafted with.
+    first_node: u32,
+    items: Vec<Item>,
+}
+
+/// An append as its turn writes it: the drafted tokens it adds (by the ids
+/// they were drafted with, in the order they take their ids), and its
+/// blocks and frames, named as they are written.
+struct Reconciled<'a> {
+    catalog_id: u16,
+    draft: Draft<'a>,
+    new: Vec<u32>,
+    items: Vec<Item>,
 }
 
 impl FileArchive {
@@ -1098,6 +1131,24 @@ impl FileArchive {
     }
 
     fn append_locked(&self, catalog: &str, blocks: &[Buffer]) -> Result<(), ArchiveError> {
+        // The work an append can do without its turn, done before taking
+        // it: other writers append meanwhile.
+        match self.prepare(catalog, blocks) {
+            Ok(Some(prepared)) => self.flush(prepared, catalog, blocks),
+            Ok(None) => Ok(()),
+            Err(error) => Err(storage_error(&self.inner.path, error)),
+        }
+    }
+
+    /// Takes the writer's turn and writes what `prepared` (of `blocks`)
+    /// reconciles to, preparing again in the turn if it does not.
+    fn flush(
+        &self,
+        prepared: Prepared<'_>,
+        catalog: &str,
+        blocks: &[Buffer],
+    ) -> Result<(), ArchiveError> {
+        let error = |error| storage_error(&self.inner.path, error);
         let mut writer = self.inner.writer.lock();
         let file = &self.inner.file;
         let written = Exclusive::take(file).and_then(|_exclusive| {
@@ -1105,19 +1156,41 @@ impl FileArchive {
             // last, then append after it.
             catch_up(file, &self.inner.index, &mut writer)?;
             self.know(writer.end);
-            self.write(&mut writer, catalog, blocks).inspect_err(|_| {
+            let flushed = match self.reconcile(prepared)? {
+                Some(reconciled) => self.write(&mut writer, reconciled),
+                // What was prepared cannot be named as it was: prepare
+                // again, in the turn, where nothing moves.
+                None => match self.prepare(catalog, blocks)? {
+                    Some(prepared) => match self.reconcile(prepared)? {
+                        Some(reconciled) => self.write(&mut writer, reconciled),
+                        None => Err(invalid("an append prepared in its turn did not reconcile")),
+                    },
+                    None => Ok(()),
+                },
+            };
+            flushed.inspect_err(|_| {
                 // Drop what of the append reached the file past what was
                 // published: nothing reads it.
                 let _ = file.set_len(writer.end);
             })
         });
-        written.map_err(|error| {
+        written.map_err(|failed| {
             self.inner.known.store(writer.end, Ordering::Release);
-            storage_error(&self.inner.path, error)
+            error(failed)
         })
     }
 
-    fn write(&self, writer: &mut Writer, catalog: &str, blocks: &[Buffer]) -> io::Result<()> {
+    /// What an append of `blocks` to `catalog` writes, worked out without
+    /// the writer's turn, against the index as it is: the new tokens, each
+    /// tree node split into rows and encoded as a frame, and the blocks kept
+    /// whole. New tokens and nodes take the ids after those published now;
+    /// [`reconcile`](Self::reconcile) renames them if others appended
+    /// first. `None` when the file holds every block already.
+    fn prepare<'a>(
+        &'a self,
+        catalog: &'a str,
+        blocks: &[Buffer],
+    ) -> io::Result<Option<Prepared<'a>>> {
         let index = &self.inner.index;
         let mut seen = HashSet::new();
         self.inner
@@ -1132,10 +1205,10 @@ impl FileArchive {
             })
             .collect();
         if fresh.is_empty() {
-            return Ok(());
+            return Ok(None);
         }
 
-        let mut pending = Vec::with_capacity(fresh.len());
+        let mut items = Vec::with_capacity(fresh.len());
         let mut nodes = Vec::new();
         for block in fresh {
             let started = Instant::now();
@@ -1149,17 +1222,16 @@ impl FileArchive {
             Timings::add(&self.inner.timings.parse, started);
             match node {
                 Some(node) => nodes.push((block.clone(), node)),
-                None => pending.push(Pending::Block {
-                    hash: block.blake3_hash().clone(),
-                    body: block_body(catalog, block.as_ref())?,
-                }),
+                None => items.push(Item::Block(block.clone())),
             }
         }
 
         index.build_ids();
-        let catalog_id = index.add_catalog(catalog);
+        // A catalog the file holds nothing in yet has no nodes to be
+        // written against: no lineage is found under an id no catalog has.
+        let catalog_id = index.catalog_id(catalog).unwrap_or(u16::MAX);
         let mut draft = Draft::new(index);
-        let first_id = index.nodes().len() as u32;
+        let first_node = index.nodes().len() as u32;
         // Nodes this append writes as frames: their ids, rows and bodies,
         // and what they are known by, ahead of joining the index.
         let mut staged: HashMap<u32, Staged> = HashMap::new();
@@ -1180,40 +1252,188 @@ impl FileArchive {
                 &block,
                 &node,
             )?;
-            match framed {
-                Some((rows, manifest, body, depth, lineage)) => {
-                    let id = first_id + staged.len() as u32;
-                    staged_ids.insert(block.blake3_hash().clone(), id);
-                    if let Some(first) = lineage {
-                        staged_lineages.insert((catalog_id, rows.kind, first), id);
-                    }
-                    staged_depths.insert(id, depth);
-                    pending.push(Pending::Frame {
-                        node: Node {
-                            hash: block.blake3_hash().clone(),
-                            extent: Extent { offset: 0, len: 0 },
-                            depth,
-                            catalog: catalog_id,
-                            kind: rows.kind,
-                            lineage,
-                        },
-                        body,
-                    });
-                    staged.insert(
-                        id,
-                        Staged {
-                            hash: block.blake3_hash().clone(),
-                            rows,
-                            manifest,
-                        },
-                    );
-                }
-                None => pending.push(Pending::Block {
+            let Some(frame) = framed else {
+                items.push(Item::Block(block));
+                continue;
+            };
+            let id = first_node + staged.len() as u32;
+            staged_ids.insert(block.blake3_hash().clone(), id);
+            if let Some(first) = frame.lineage {
+                staged_lineages.insert((catalog_id, frame.rows.kind, first), id);
+            }
+            staged_depths.insert(id, frame.depth);
+            staged.insert(
+                id,
+                Staged {
                     hash: block.blake3_hash().clone(),
-                    body: block_body(catalog, block.as_ref())?,
-                }),
+                    rows: frame.rows.clone(),
+                    manifest: frame.manifest,
+                },
+            );
+            items.push(Item::Frame(id, block, frame));
+        }
+        Ok(Some(Prepared {
+            catalog,
+            draft,
+            first_node,
+            items,
+        }))
+    }
+
+    /// `prepared` as this turn writes it, holding the turn: blocks others
+    /// appended since are dropped, and new tokens and nodes take the ids
+    /// that are next now. A drafted token another writer wrote first takes
+    /// its id. When no id moved, the frames are written as they were
+    /// encoded; when one did, their rows are renamed and encoded again.
+    /// `None` when a node this append framed is now held whole, so its
+    /// parents would have to name it by hash: prepare again.
+    fn reconcile<'a>(&'a self, prepared: Prepared<'a>) -> io::Result<Option<Reconciled<'a>>> {
+        let index = &self.inner.index;
+        let Prepared {
+            catalog,
+            draft,
+            first_node,
+            items,
+        } = prepared;
+        index.build_ids();
+        let catalog_id = index.add_catalog(catalog);
+        let view = index.view();
+
+        // Tokens: a drafted one the file holds now takes its id; the rest
+        // follow every published token, in the order they were drafted.
+        let first_token = draft.first();
+        let next_token = view.len();
+        let mut tokens = Vec::with_capacity(draft.pending());
+        let mut new = Vec::new();
+        for id in first_token..first_token + draft.pending() as u32 {
+            let bytes = draft.get(id).expect("a drafted token");
+            let hash = draft.hash(id).expect("a drafted token's hash");
+            match index.find(&view, hash, bytes) {
+                Some(held) => tokens.push(held),
+                None => {
+                    tokens.push(next_token + new.len() as u32);
+                    new.push(id);
+                }
             }
         }
+
+        // Nodes: a framed node someone appended since keeps their frame;
+        // the rest follow every published node.
+        let next_node = index.nodes().len() as u32;
+        let mut nodes: HashMap<u32, u32> = HashMap::new();
+        let mut kept = Vec::with_capacity(items.len());
+        let mut kept_frames = 0;
+        for item in items {
+            let hash = match &item {
+                Item::Block(block) | Item::Frame(_, block, _) => block.blake3_hash().clone(),
+            };
+            match (index.place(catalog, &hash), item) {
+                (None, Item::Frame(id, block, frame)) => {
+                    nodes.insert(id, next_node + kept_frames);
+                    kept_frames += 1;
+                    kept.push(Item::Frame(id, block, frame));
+                }
+                (None, block) => kept.push(block),
+                (Some(Place::Node(held)), Item::Frame(id, ..)) => {
+                    nodes.insert(id, held);
+                }
+                (Some(Place::Block(_)), Item::Frame(..)) => return Ok(None),
+                (Some(_), Item::Block(_)) => {}
+            }
+        }
+
+        let token = |id: u32| {
+            id.checked_sub(first_token)
+                .and_then(|at| tokens.get(at as usize).copied())
+                .unwrap_or(id)
+        };
+        let node = |id: u32| {
+            if id < first_node {
+                id
+            } else {
+                nodes.get(&id).copied().unwrap_or(id)
+            }
+        };
+        let moved = new.len() != draft.pending()
+            || next_token != first_token
+            || next_node != first_node
+            || nodes.iter().any(|(drafted, renamed)| drafted != renamed);
+
+        // Frames as written: encoded again when an id moved, against their
+        // base's renamed rows.
+        let mut renamed: HashMap<u32, (Arc<Rows>, u8)> = HashMap::new();
+        let mut items = Vec::with_capacity(kept.len());
+        for item in kept {
+            let Item::Frame(drafted, block, mut frame) = item else {
+                items.push(item);
+                continue;
+            };
+            let id = node(drafted);
+            if moved {
+                let rows = Arc::new(rename(&frame.rows, token, node));
+                let base = frame.base.map(node);
+                // The base's rows and depth: a frame of this append's, renamed
+                // already (bases come before what is written against them),
+                // or one the file holds.
+                let (base_rows, depth) = match base {
+                    Some(base) => match renamed.get(&base) {
+                        Some((rows, depth)) => (Some(rows.clone()), depth + 1),
+                        None => (
+                            Some(self.rows(&HashMap::new(), base)?.0),
+                            index.node(base).map_or(0, |base| base.depth + 1),
+                        ),
+                    },
+                    None => (None, 0),
+                };
+                let header = FrameHeader {
+                    catalog: catalog.to_string(),
+                    hash: block.blake3_hash().clone(),
+                    kind: rows.kind,
+                    base,
+                    manifest: token(frame.manifest),
+                    lineage: rows.lineage(),
+                };
+                let mut body = Vec::new();
+                header.put(&mut body)?;
+                put_rows(&mut body, &rows, base_rows.as_deref());
+                let mut reader = Reader::new(&body);
+                FrameHeader::get(&mut reader)?;
+                if get_rows(&mut reader, rows.kind, base_rows.as_deref())? != *rows {
+                    return Err(invalid("a frame did not read back once its ids moved"));
+                }
+                frame = Frame {
+                    rows: rows.clone(),
+                    manifest: header.manifest,
+                    base,
+                    lineage: header.lineage,
+                    depth,
+                    body,
+                };
+                renamed.insert(id, (rows, depth));
+            }
+            items.push(Item::Frame(id, block, frame));
+        }
+        Ok(Some(Reconciled {
+            catalog_id,
+            draft,
+            new,
+            items,
+        }))
+    }
+
+    /// Writes what an append reconciled in this turn, then publishes it.
+    fn write(&self, writer: &mut Writer, reconciled: Reconciled<'_>) -> io::Result<()> {
+        let index = &self.inner.index;
+        let Reconciled {
+            catalog_id,
+            draft,
+            new,
+            items,
+        } = reconciled;
+        let catalog = index
+            .catalog(catalog_id)
+            .ok_or_else(|| invalid("a catalog the index lacks"))?
+            .to_string();
 
         // Lay the records out: the new tokens first, so every frame follows
         // the tokens it names, then blocks and frames in order, then a
@@ -1221,31 +1441,44 @@ impl FileArchive {
         let mut bytes = Vec::new();
         let token_body = writer.end + HEADER;
         let mut token_places = Vec::new();
-        if draft.pending() > 0 {
-            let (body, places) = draft.record(token_body);
+        if !new.is_empty() {
+            let (body, places) = draft.record(token_body, &new);
             token_places = places;
             put_record(&mut bytes, Kind::Tokens, &body)?;
         }
-        let mut placed = Vec::with_capacity(pending.len());
-        for item in pending {
+        let mut placed = Vec::with_capacity(items.len());
+        let mut kept_rows = Vec::new();
+        for item in items {
             let record = writer.end + bytes.len() as u64;
             match item {
-                Pending::Block { hash, body } => {
+                Item::Block(block) => {
+                    let body = block_body(&catalog, block.as_ref())?;
                     let start = 1 + catalog.len() as u64;
                     let extent = Extent {
                         offset: record + HEADER + start,
                         len: (body.len() as u64 - start) as u32,
                     };
                     put_record(&mut bytes, Kind::Block, &body)?;
-                    placed.push(Placed::Block(hash, extent));
+                    placed.push(Placed::Block(block.blake3_hash().clone(), extent));
                 }
-                Pending::Frame { mut node, body } => {
-                    node.extent = Extent {
+                Item::Frame(id, block, frame) => {
+                    let extent = Extent {
                         offset: record + HEADER,
-                        len: body.len() as u32,
+                        len: frame.body.len() as u32,
                     };
-                    put_record(&mut bytes, Kind::Frame, &body)?;
-                    placed.push(Placed::Frame(node));
+                    put_record(&mut bytes, Kind::Frame, &frame.body)?;
+                    kept_rows.push((id, frame.rows.clone(), frame.manifest));
+                    placed.push(Placed::Frame(
+                        id,
+                        Node {
+                            hash: block.blake3_hash().clone(),
+                            extent,
+                            depth: frame.depth,
+                            catalog: catalog_id,
+                            kind: frame.rows.kind,
+                            lineage: frame.lineage,
+                        },
+                    ));
                 }
             }
         }
@@ -1264,26 +1497,31 @@ impl FileArchive {
         // tokens, then blocks and frames, children before their parents, so
         // a reader that finds anything finds everything it names.
         index.map(&self.inner.file, end)?;
-        for (at, (offset, len)) in token_places.into_iter().enumerate() {
-            let id = draft.first() + at as u32;
-            let published = index.add_token(token_body + offset as u64, len, draft.hash(id));
+        let next_token = index.tokens().len() as u32;
+        for (at, ((offset, len), drafted)) in token_places.into_iter().zip(&new).enumerate() {
+            let published = index.add_token(token_body + offset as u64, len, draft.hash(*drafted));
             debug_assert_eq!(
-                published, id,
-                "tokens publish in the ids they were drafted with"
+                published,
+                next_token + at as u32,
+                "tokens publish in the ids they were reconciled to"
             );
             self.published();
         }
         for item in placed {
             match item {
                 Placed::Block(hash, extent) => index.add_block(catalog_id, hash, extent),
-                Placed::Frame(node) => {
-                    index.add_node(node);
+                Placed::Frame(id, node) => {
+                    let published = index.add_node(node);
+                    debug_assert_eq!(
+                        published, id,
+                        "frames publish in the ids they were reconciled to"
+                    );
                 }
             }
             self.published();
         }
-        for (id, staged) in staged {
-            self.inner.rows.put(id, (staged.rows, staged.manifest));
+        for (id, rows, manifest) in kept_rows {
+            self.inner.rows.put(id, (rows, manifest));
         }
         writer.since += bytes.len() as u64;
         writer.end = end;
@@ -1327,7 +1565,7 @@ impl FileArchive {
         catalog_id: u16,
         block: &Buffer,
         node: &TreeNode,
-    ) -> io::Result<Option<FrameOf>> {
+    ) -> io::Result<Option<Frame>> {
         let index = &self.inner.index;
         // A node in another layout (an older release's) is not what the
         // current encoder makes, so its frame would not rebuild it: keep it
@@ -1433,7 +1671,14 @@ impl FileArchive {
         }
         Timings::add(&self.inner.timings.verify, started);
         let depth = base.and_then(depth_of).map_or(0, |depth| depth + 1);
-        Ok(Some((Arc::new(rows), manifest_id, body, depth, lineage)))
+        Ok(Some(Frame {
+            rows: Arc::new(rows),
+            manifest: manifest_id,
+            base,
+            lineage,
+            depth,
+            body,
+        }))
     }
 }
 
@@ -1449,12 +1694,8 @@ struct Staging<'a> {
 /// A block or frame an append wrote, where it is, before it is published.
 enum Placed {
     Block(Blake3Hash, Extent),
-    Frame(Node),
+    Frame(u32, Node),
 }
-
-/// A node's frame: its rows, its manifest token, the frame record's body,
-/// its depth and its lineage.
-type FrameOf = (Arc<Rows>, u32, Vec<u8>, u8, Option<[u32; 4]>);
 
 #[async_trait]
 impl Provider<Get> for FileArchive {
@@ -1800,6 +2041,138 @@ mod tests {
         );
         for content in &batch {
             assert!(archive.get("index", content.blake3_hash())?.is_some());
+        }
+        Ok(())
+    }
+
+    /// An append prepared before another one lands takes the ids that are
+    /// next when its turn comes: a node the other appended is not written
+    /// again, tokens the other wrote first are not either, and every
+    /// block reads back, in this process and after reopening.
+    #[test]
+    fn it_reconciles_an_append_prepared_before_another() -> anyhow::Result<()> {
+        use crate::node::tests::{entity_segment, segment_manifest};
+
+        let manifest = segment_manifest();
+        let base = [entity_segment("base", &manifest)?];
+        let first = [
+            entity_segment("shared", &manifest)?,
+            entity_segment("only-first", &manifest)?,
+            block("whole"),
+        ];
+        let second = [
+            entity_segment("shared", &manifest)?,
+            entity_segment("only-second", &manifest)?,
+        ];
+
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("archive");
+        let archive = FileArchive::open(&path)?;
+        archive.append("index", &base)?;
+        let prepared = archive
+            .prepare("index", &first)?
+            .expect("blocks the file lacks");
+        archive.append("index", &second)?;
+        archive.flush(prepared, "index", &first)?;
+
+        // The same appends one after another.
+        let control = FileArchive::open(directory.path().join("control"))?;
+        for batch in [&base[..], &second[..], &first[..]] {
+            control.append("index", batch)?;
+        }
+        assert_eq!(
+            archive.stats().tokens,
+            control.stats().tokens,
+            "no token written twice"
+        );
+        assert_eq!(
+            archive.stats().frames,
+            control.stats().frames,
+            "no node written twice"
+        );
+
+        let every: Vec<&Buffer> = base.iter().chain(&first).chain(&second).collect();
+        for content in &every {
+            let hash = content.blake3_hash();
+            assert_eq!(
+                archive.get("index", hash)?.as_deref(),
+                Some(content.as_ref())
+            );
+            if archive.is_frame("index", hash) {
+                assert!(archive.served("index", hash).is_some());
+            }
+        }
+        drop(archive);
+        let reopened = FileArchive::open(&path)?;
+        for content in &every {
+            assert_eq!(
+                reopened.get("index", content.blake3_hash())?.as_deref(),
+                Some(content.as_ref())
+            );
+        }
+        Ok(())
+    }
+
+    /// A node an append framed before its turn, which another writer
+    /// appended whole meanwhile, cannot be named by a frame of its own:
+    /// the append prepares again in its turn, and the node stays whole.
+    #[test]
+    fn it_prepares_again_when_a_framed_node_was_appended_whole() -> anyhow::Result<()> {
+        use crate::node::tests::{entity_segment, index_over, segment_manifest};
+
+        let manifest = segment_manifest();
+        let shared = entity_segment("shared", &manifest)?;
+        let only_first = entity_segment("only-first", &manifest)?;
+        // An index over both, so a frame of it names the shared node.
+        let parent = index_over(&[only_first.clone(), shared.clone()], &manifest)?;
+        let first = [shared.clone(), only_first, parent.clone()];
+
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("archive");
+        let archive = FileArchive::open(&path)?;
+        archive.append("index", &[entity_segment("base", &manifest)?])?;
+        // Another writer: the same file under another name, so it keeps an
+        // index of its own, as another process would, and keeps every block
+        // whole.
+        let other_path = directory.path().join("other");
+        std::fs::hard_link(&path, &other_path)?;
+        let other = FileArchive::open_with(
+            &other_path,
+            Options {
+                frames: false,
+                ..Options::default()
+            },
+        )?;
+
+        let prepared = archive
+            .prepare("index", &first)?
+            .expect("blocks the file lacks");
+        other.append("index", std::slice::from_ref(&shared))?;
+        archive.flush(prepared, "index", &first)?;
+
+        assert!(
+            !archive.is_frame("index", shared.blake3_hash()),
+            "the shared node stays whole"
+        );
+        assert!(archive.is_frame("index", first[1].blake3_hash()));
+        assert!(
+            archive.is_frame("index", parent.blake3_hash()),
+            "the index is a frame"
+        );
+        assert!(archive.served("index", parent.blake3_hash()).is_some());
+        for content in &first {
+            assert_eq!(
+                archive.get("index", content.blake3_hash())?.as_deref(),
+                Some(content.as_ref())
+            );
+        }
+        drop((archive, other));
+        let reopened = FileArchive::open(&path)?;
+        for content in &first {
+            assert_eq!(
+                reopened.get("index", content.blake3_hash())?.as_deref(),
+                Some(content.as_ref())
+            );
         }
         Ok(())
     }

@@ -655,6 +655,33 @@ pub(crate) mod tests {
         Ok(Buffer::from(segment_block(keys, manifest)?))
     }
 
+    /// The block of an index node linking to `children` (segments, in key
+    /// order), each under its first key.
+    pub(crate) fn index_over(children: &[Buffer], manifest: &Manifest) -> anyhow::Result<Buffer> {
+        let links = children
+            .iter()
+            .map(|child| {
+                let node = tree_node(child).expect("a tree node");
+                let NodeBody::Segment(segment) = node.body() else {
+                    anyhow::bail!("an index over segments");
+                };
+                let mut keys = segment.keys::<Key>()?;
+                let (_, first) = keys.next_key()?.expect("a segment with entries");
+                Ok(Link {
+                    separator: Separator::from(first.to_vec()),
+                    node: child.blake3_hash().clone(),
+                    scale: Scale::from_u8(1),
+                })
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let body = PersistentNodeBody::<State<Datum>>::index_from_buffers(
+            links,
+            Vec::new(),
+            manifest.clone(),
+        )?;
+        Ok(Buffer::from(body.as_bytes()?.to_vec()))
+    }
+
     /// Splits the segment of `keys` into rows and realizes them again,
     /// asserting the columns came from the tokens and the block is the
     /// same, byte for byte.
