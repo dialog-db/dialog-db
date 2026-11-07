@@ -875,6 +875,45 @@ six-member run: every integer by range, with what it costs in each.
 indexing into that list) would shrink frames under either encoding, and
 stay open.
 
+## 2026-11-07: rows name tokens by file offset, measured
+
+**Question.** Holding memory bounded means the index leaves memory. The
+node and token tables (id to where in the file) are most of it; frames
+could name tokens and children by file offset instead, and need no tables.
+What does that cost the file, against keeping ids and writing the tables
+into the file as fixed-width records?
+
+**Method.** `offsets_instead_of_ids` re-encodes every frame's literal rows
+(the rows it does not copy from its predecessor) with offsets in place of
+ids, as zigzag-delta varints per column, against the same predecessors.
+Tokens start on 16-byte boundaries, so it also measures offsets divided
+by 16. Two files: a member's file from the six-member run, and the local
+tonk-team replica migrated into the current format.
+
+**Results.**
+
+| | a member | tonk-team |
+|---|---|---|
+| file | 1,554 KiB | 4,667 KiB |
+| tokens, nodes | 9,913, 2,979 | 29,154, 688 |
+| literal rows' columns, ids | 578 KiB | 872 KiB |
+| offsets | 753 KiB (+30%) | 1,112 KiB (+28%) |
+| offsets in units of 16 | 657 KiB (+14%) | 947 KiB (+9%) |
+| what offsets in units of 16 add to the file | 79 KiB (5%) | 75 KiB (1.6%) |
+| ids, with fixed-width tables in the file instead | about 166 KiB | about 353 KiB |
+| the tables in memory today | about 600 KiB | about 840 KiB |
+
+- Offsets in units of the token alignment cost the file less than tables
+  would, need no lookup to reach a token, and take the two largest parts
+  of the index out of memory.
+- Offset deltas grow with the file, ids with the count of tokens, so the
+  gap is likely to widen in larger files. Not measured: there is no 10× or
+  100× file yet.
+
+**Decision.** Leaning towards offsets in units of 16, with the block index
+in the file (the hitchhiker tree, 2026-11-06) as the work that makes the
+index bounded. To confirm on a larger file before the format changes.
+
 ## How to reproduce
 
 ```sh

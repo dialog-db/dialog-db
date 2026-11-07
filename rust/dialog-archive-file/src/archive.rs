@@ -2341,8 +2341,10 @@ mod offsets_instead_of_ids {
         };
         let archive = FileArchive::open(&path)?;
         let index = &archive.inner.index;
-        let token = |id: u32| index.extent(id).map(|(offset, _)| offset).unwrap();
-        let by_offset = |rows: &Rows| -> Vec<Vec<[u64; 6]>> {
+        // A token's offset, divided by `unit`: every token starts on an
+        // `ALIGN` boundary, so dividing by it loses nothing.
+        let by_offset = |rows: &Rows, unit: u64| -> Vec<Vec<[u64; 6]>> {
+            let token = |id: u32| index.extent(id).map(|(offset, _)| offset / unit).unwrap();
             sections_of(rows.kind)
                 .iter()
                 .zip(&rows.sections)
@@ -2406,7 +2408,8 @@ mod offsets_instead_of_ids {
             }
             bytes
         };
-        let (mut ids, mut offsets, mut literal_rows, mut frames) = (0, 0, 0usize, 0usize);
+        let (mut ids, mut offsets, mut aligned, mut literal_rows, mut frames) =
+            (0, 0, 0, 0usize, 0usize);
         for id in 0..index.nodes().len() as u32 {
             let (rows, _) = archive.rows(&HashMap::new(), id)?;
             let node = index.node(id).unwrap();
@@ -2457,13 +2460,16 @@ mod offsets_instead_of_ids {
                 })
                 .collect();
             ids += width(&as_ids);
-            offsets += width(&by_offset(&literal));
+            offsets += width(&by_offset(&literal, 1));
+            aligned += width(&by_offset(&literal, crate::tokens::ALIGN));
         }
         println!(
-            "frames {} KiB; literal rows {literal_rows}: id columns {} KiB, offset columns {} KiB",
+            "frames {} KiB; literal rows {literal_rows}: id columns {} KiB, offset columns {} KiB, \
+             offsets in units of the token alignment {} KiB",
             frames / 1024,
             ids / 1024,
-            offsets / 1024
+            offsets / 1024,
+            aligned / 1024
         );
 
         let started = std::time::Instant::now();
