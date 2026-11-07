@@ -135,8 +135,23 @@ impl FileArchive {
     /// at all.
     pub(crate) fn served(&self, catalog: &str, hash: &Blake3Hash) -> Option<FileNode> {
         let started = std::time::Instant::now();
-        let index = self.inner.state.read();
-        let Place::Node(id) = *index.blocks.get(catalog)?.get(hash)? else {
+        let place = |index: &Index| {
+            index
+                .blocks
+                .get(catalog)
+                .and_then(|blocks| blocks.get(hash))
+                .copied()
+        };
+        let mut index = self.inner.state.read();
+        if place(&index).is_none() {
+            // Appended since this handle last looked, by another handle or
+            // another process: read what they finished, and look again, as
+            // a `Get` does.
+            drop(index);
+            self.reread().ok()?;
+            index = self.inner.state.read();
+        }
+        let Place::Node(id) = place(&index)? else {
             return None;
         };
         let (rows, manifest) = self

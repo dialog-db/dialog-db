@@ -299,6 +299,16 @@ where
         hash
     }
 
+    /// The node at `hash` as rows, if the environment's store keeps it as
+    /// rows (its [`NodeSource`]): the store's own word that it holds the
+    /// node, read in place, with no cache consulted and nothing hydrated.
+    pub(crate) fn stored_rows(&self, hash: &Blake3Hash) -> Option<PersistentNode<Key, Value>> {
+        let source = self
+            .source
+            .get_or_init(|| (self.find_source)(self.env, &self.catalog));
+        from_source(source.as_ref(), &self.catalog, hash)
+    }
+
     /// The node at `hash` if the cache holds it, with no IO: a way to reach
     /// what a held node keeps with it (its piece summary, say) without
     /// loading a node that is not already here.

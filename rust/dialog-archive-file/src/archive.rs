@@ -270,6 +270,12 @@ struct Timings {
     /// their parts are.
     served: AtomicU64,
     serve: AtomicU64,
+    /// Blocks built back from rows for a `Get`, and blocks offered to an
+    /// append (before those already held are skipped).
+    realized: AtomicU64,
+    offered: AtomicU64,
+    /// Of `split`, the part spent parsing a block into a node.
+    parse: AtomicU64,
 }
 
 impl Timings {
@@ -279,6 +285,36 @@ impl Timings {
 
     fn get(counter: &AtomicU64) -> Duration {
         Duration::from_nanos(counter.load(Ordering::Relaxed))
+    }
+}
+
+/// With `DIALOG_ARCHIVE_TIMINGS` set, an archive reports where its time
+/// went when the last handle to it closes: for profiling what an
+/// application's appends and reads spend in the file.
+impl Drop for Inner {
+    fn drop(&mut self) {
+        if std::env::var_os("DIALOG_ARCHIVE_TIMINGS").is_none() {
+            return;
+        }
+        let ms = |counter: &AtomicU64| Timings::get(counter).as_secs_f64() * 1e3;
+        let timings = &self.timings;
+        eprintln!(
+            "archive {}: split {:.1} ms (parse {:.1} ms), encode {:.1} ms, verify {:.1} ms, write {:.1} ms, \
+             decode {:.1} ms, realize {:.1} ms ({} blocks built for gets), serve {:.1} ms \
+             ({} nodes served), {} blocks offered to appends",
+            self.path.display(),
+            ms(&timings.split),
+            ms(&timings.parse),
+            ms(&timings.encode),
+            ms(&timings.verify),
+            ms(&timings.write),
+            ms(&timings.decode),
+            ms(&timings.realize),
+            timings.realized.load(Ordering::Relaxed),
+            ms(&timings.serve),
+            timings.served.load(Ordering::Relaxed),
+            timings.offered.load(Ordering::Relaxed),
+        );
     }
 }
 
@@ -946,6 +982,7 @@ impl FileArchive {
                 let started = Instant::now();
                 let block = self.realize(&state, &rows, manifest)?;
                 Timings::add(&self.inner.timings.realize, started);
+                self.inner.timings.realized.fetch_add(1, Ordering::Relaxed);
                 Ok(Some(block))
             }
         }
@@ -1057,6 +1094,10 @@ impl FileArchive {
         blocks: &[Buffer],
     ) -> io::Result<()> {
         let mut seen = HashSet::new();
+        self.inner
+            .timings
+            .offered
+            .fetch_add(blocks.len() as u64, Ordering::Relaxed);
         let fresh: Vec<&Buffer> = blocks
             .iter()
             .filter(|block| {
@@ -1079,6 +1120,7 @@ impl FileArchive {
                 .then(|| tree_node(block))
                 .flatten();
             Timings::add(&self.inner.timings.split, started);
+            Timings::add(&self.inner.timings.parse, started);
             match node {
                 Some(node) => nodes.push((block.clone(), node)),
                 None => pending.push(Pending::Block {
