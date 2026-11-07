@@ -191,9 +191,12 @@ def svg_bars(title, subtitle, groups, stores, values, unit, reference=None, labe
         cx = x0 + step * 0.4
         out.append(f'<text x="{cx:.1f}" y="{top + plot_h + 16}" text-anchor="end" '
                    f'transform="rotate(-30 {cx:.1f} {top + plot_h + 16})">{label}</text>')
-    lx = width - right - 130 * len(stores)
+    # Each legend entry as wide as its name (about 7 px a character at 12
+    # px), right-aligned under the plot.
+    widths = [18 + 7 * len(store) + 24 for store in stores]
+    lx = width - right - sum(widths)
     for s, store in enumerate(stores):
-        x = lx + s * 130
+        x = lx + sum(widths[:s])
         out.append(f'<rect x="{x}" y="{height - 24}" width="12" height="12" fill="{COLORS[s % len(COLORS)]}"/>')
         out.append(f'<text x="{x + 18}" y="{height - 14}">{store}</text>')
     out.append("</svg>")

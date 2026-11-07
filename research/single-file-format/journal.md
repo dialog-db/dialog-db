@@ -1073,6 +1073,158 @@ their own would hold them.
 **Decision.** No token region. Frame headers lose the lineage, name the
 catalog by number, and the manifest by tree, in the format change.
 
+## 2026-11-07: the index in the file, measured
+
+**Question.** With the index in the file (a hitchhiker tree rooted in two
+slots at the file's head), checkpoints gone, frames named by offset in
+runs and headers trimmed, what do the team of six, MusicBrainz and
+tonk-shaped 100× look like?
+
+**What changed (format 9).**
+
+- The file opens on two 64 KiB slots after the magic number. A slot is
+  the file's state as of an append: a sequence number, where the records
+  end, the counts, the catalogs' names, and the index's root. An append
+  writes its records, then the older slot; opening reads both and takes
+  the newer whole one, 128 KiB and nothing else.
+- The index is a hitchhiker tree of index records in the file: blocks by a
+  prefix of their hash and their catalog, tokens by a stable hash of their
+  bytes, lineages by their first row. A collision probes the next key, and
+  every value is checked against what it stands for. The root lives in the
+  slot and buffers 2048 entries, draining to half.
+- Checkpoints are gone, and with them the index in memory: a reader holds
+  a slot and a mapping of the file.
+- Headers name the catalog by number and drop the lineage.
+- The index's hash takes sixteen bytes per wide multiply (`src/hash.rs`):
+  a warm split goes from 149 to 119 µs a node.
+- A snapshot keeps the file's mapping while the file grows into it.
+  Mapping it again on every append cost 11,683 `mmap`/`munmap` calls and
+  222k more page faults than main in a six-member run (527k against 305k;
+  339k after).
+- The index has 8 children a node and buffers of 512 (was 32 and 256),
+  from the measurements below.
+
+**Method.**
+
+- The team of six on tonk-shaped 1× (`3ea7f49117155b92`), main's `fs`
+  against builds of this branch, interleaved, three runs each. Main itself
+  ran about 20% slower than in the morning's runs on this machine, so only
+  ratios compare across entries. Full tables in
+  [results/2026-11-07f-tonk-1x-main.md](results/2026-11-07f-tonk-1x-main.md)
+  and [results/2026-11-07g-tonk-1x-main.md](results/2026-11-07g-tonk-1x-main.md).
+- MusicBrainz (`865bbbcb0fe87ec0`), 2,000 commits of 50 entities, 4.47 M
+  facts, replayed into the file alone by `file_archive_bench`, this time to
+  the end.
+- Tonk-shaped 10× (`5f703d3c4bab3fe7`) by the six-member bench, and 100×
+  (`55e6bdf8f8fae9a0`) as far as it went (below).
+- `breakdown` sizes each file by record kind;
+  `write_amplification_of_a_file` replays an index's appends in memory,
+  shaped by a file's counts, to compare layouts.
+
+**Results: the team of six, 1×** (median of three runs; main's spread on
+cold queries is wide, 69–99 ms):
+
+| | main `fs` | format 9 | mapped once | mapped once, 8 children |
+|---|---|---|---|---|
+| pull, in a round | 40.0 ms | 55.7 | 51.3 | 50.5 (1.26×) |
+| push, in a round | 19.7 | 18.8 | 19.4 | 19.0 (0.97×) |
+| a command, rules included | 15.3 | 16.3 | 16.4 | 16.4 (1.07×) |
+| first command after a pull | 26.0 | 28.9 | 28.1 | 27.2 (1.05×) |
+| `v2/issue` poll after a pull | 22.1 | 23.7 | 23.6 | 24.1 (1.09×) |
+| `v2/issue`, warm | 43.8 | 45.1 | 45.4 | 44.8 (1.02×) |
+| a member's replica | 169.8 MiB | 2.12 MiB | 2.12 | 2.00 |
+
+![Time against main](results/charts/2026-11-07g-tonk-1x-main/time.png)
+
+- Against format 8 on the same machine (an earlier interleaved run,
+  [results/2026-11-07f-tonk-1x-main.md](results/2026-11-07f-tonk-1x-main.md)),
+  format 9 pulls 8% faster (54.5 against 59.0 ms) and a member's file is
+  25% smaller (2.12 against 2.82 MiB), from the root's larger buffer.
+- Mapping the file once takes pull from 55.7 to 51.3 ms. 8 children an
+  index node changes no time and takes a member's file from 2.12 to 2.00
+  MiB.
+- Pull is still 1.26× main's. The archive's own timers account for about
+  1.0 s of a member's appends and reads over the run (split 517 ms of it);
+  the gap to main over 150 pulls was about 2.2 s before the mapping fix and
+  is about 1.6 s after. The rest of it is not yet located.
+- An earlier batch had this build's push at 29–32 ms in two of three runs,
+  against 18.6 in the third; the next batch did not reproduce it. One
+  store can move 60% between batches on this machine, so one batch decides
+  nothing.
+
+**Results: large files.**
+
+| | tonk 1×, a member | tonk 10×, the owner | tonk 100×, the owner | MusicBrainz |
+|---|---|---|---|---|
+| commits | 39, then the week | the same, at 10× | 3,569 (setup only) | 2,000 |
+| file | 1.98 MiB | 24.3 MiB | 676 MiB | 2,771 MiB |
+| frames | 0.64 MiB (2,979) | 12.1 MiB (46,625) | 258 MiB (1.04 M) | 799 MiB (2.88 M) |
+| tokens | 0.80 MiB | 2.9 MiB | 23 MiB (420k) | 146 MiB (3.03 M) |
+| **index** | 0.41 MiB (21%) | 9.1 MiB (38%) | **395 MiB (58%)** | **1,826 MiB (66%)** |
+| slots | 0.13 MiB | 0.13 MiB | 0.13 MiB | 0.13 MiB |
+| index held in memory | the root | the root | 17 KB | 13 KB (was 439 MiB, format 7) |
+
+![What the file holds](results/charts/2026-11-07-composition/composition.png)
+
+- **Memory is bounded.** A reader holds the root (tens of KB) and maps
+  the file; reopening MusicBrainz's 2.7 GiB took no measurable time. The
+  last replay, with the index in memory, held 439 MiB by 1,250 commits.
+- **Checkpoints are gone, and the index took their place.** MusicBrainz,
+  run to the end this time (86 minutes, 2.6 s a commit, the file
+  growing a steady 32 MB a minute), holds 945 MiB of frames and tokens and 1,826 MiB of index. The
+  index's share grows with the file: 21% at 1×, 66% at MusicBrainz.
+- **Why.** Every key is a hash, so an append's entries scatter across the
+  whole tree, and each flush moves only the few entries bound for one
+  child into a node it rewrites whole. Replayed in memory with
+  MusicBrainz's counts, the layout as built writes 259 bytes for each
+  16-byte entry; the model gives 2,165 MiB against the real 1,826, close
+  enough to compare layouts by.
+- **Layouts.** Fewer children and deeper buffers send larger groups down;
+  dropping lineage entries removes a third of the entries, all of them
+  overwrites:
+
+  ![Index layouts](results/charts/2026-11-07-index-layouts/index-layouts.png)
+
+  On real files, 8 children and buffers of 512 take the 10× owner's index
+  from 9.1 to 6.4 MiB (−30%) and a member's from 3.2 to 2.5 MiB (−22%),
+  less than the model's −50% at MusicBrainz's size, as smaller files are
+  shallower. A cold lookup at 1.5 M entries reads about five levels
+  instead of four.
+- **Where MusicBrainz's time goes.** Of 5,143 s of commits: splitting
+  nodes into rows 1,845 s, realizing 3.0 M blocks the repository read back
+  through `Get` 594 s (this store is not the served one, whose reads skip
+  it), decoding rows 356 s, encoding frames 282 s, writing 1.1 s.
+- **100× did not finish here.** Its setup (3,569 commits) took 56 minutes;
+  the shared remote is a directory of whole blocks, 630 MB after setup,
+  and grew 40× over the week at 1×: more than this machine's disk. The
+  owner's file after setup is what the table shows.
+- **Measuring memory.** Before the mapping fix, a process's resident set
+  counted the file's pages once for each live mapping: the 100× run
+  reported 55 GiB on a 15 GiB machine. Resident sizes from those runs mean
+  nothing; `bench/peak.py` samples anonymous memory instead.
+
+**Decision.** Map the file once while it grows; 8 children an index node
+with buffers of 512. The index's structure stays open: at 66% of a large
+file it is the format's largest cost, and the options, with what each
+buys at MusicBrainz's size, are:
+
+1. **No lineage entries** (−25% of the index on top of 8 children). A
+   writer finds a node's predecessor through a bounded cache of recent
+   lineages instead, and writes a frame whole when the cache misses.
+2. **8-byte entries**: a 32-bit key fragment and a 32-bit value (an offset
+   in units of 16), checked against the record as every entry already is.
+   About half of every node.
+3. **Sorted runs merged in large steps** instead of a tree: the census
+   measured them smallest, at the cost of an append that now and then
+   rewrites much of the index; a background integrator could take that
+   off the writer's turn.
+
+Separately, for pull's time: splitting is about 60% of an append, and a
+node's entries are mostly its predecessor's. Walking the new node's keys
+against the predecessor's rows in order (both are sorted) would reuse
+their token ids without hashing or looking anything up, about half of what
+a split does now.
+
 ## How to reproduce
 
 ```sh
@@ -1097,6 +1249,15 @@ python3 research/single-file-format/bench/musicbrainz.py mb-100k.csv 50 \
 DIALOG_SE_CSV=mb-100k.csv DIALOG_BENCH_COMMITS=2000 \
   DIALOG_BENCH_STORES=file/frames DIALOG_BENCH_KEEP=kept \
   cargo run --release -p dialog-baseline --example file_archive_bench
+
+# a file, by record kind
+DIALOG_ARCHIVE_INDEX=path/to/archive.dialog cargo test --release \
+  -p dialog-archive-file --lib breakdown -- --ignored --nocapture
+
+# the index's writes over a file's appends, in memory
+DIALOG_INDEX_APPENDS=2000 DIALOG_INDEX_FRAMES=1442 DIALOG_INDEX_TOKENS=1513 \
+  DIALOG_INDEX_LINEAGES=53000 cargo test --release -p dialog-archive-file \
+  --lib write_amplification_of_a_file -- --ignored --nocapture
 
 # tonk-team as a dataset (outside the repository), then its workload
 cargo run --release -p dialog-baseline --example tonk_dataset -- \
