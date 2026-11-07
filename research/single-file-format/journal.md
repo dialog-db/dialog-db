@@ -998,6 +998,49 @@ its file is whole up to its last footer.
 goes: a root the footer names replaces a copy of the whole index. Offsets
 in units of 16, in runs, for frames.
 
+## 2026-11-07: MusicBrainz against its source; attributes as one token
+
+**Question.** How does the file compare with the data it was made from,
+and would an attribute's domain and name as tokens of their own share
+more than the whole attribute as one?
+
+**Method.** The source for the ~1,250 commits the replay finished (12,500
+records of each type, 3.11 M facts), as MusicBrainz's JSON, as the fact
+log, and the log under `xz -6`. `live_breakdown` walks the last tree from
+its root and sizes it alone: its frames encoded whole and the tokens it
+names. The attributes counted from the fact log.
+
+**Results.**
+
+| | size |
+|---|---|
+| MusicBrainz JSON for those entities | 1,268 MiB |
+| the fact log (`txn,at,the,of,as,is`) | 341 MiB |
+| the fact log, `xz -6` | 49 MiB |
+| the current tree alone: 53,201 nodes, 2.15 M tokens | about 190 MiB (85 MiB tokens, 15 MiB their lengths and padding, 90 MiB rows) |
+| the file without checkpoints: every version since the first commit | 623 MiB |
+| the file as written | 2,362 MiB |
+| the same versions as blocks (`fs`) | about 116 GiB |
+
+- The current tree is smaller than the fact log it holds, with every
+  fact in three orderings and history, because each entity, attribute and
+  value is a token once. xz does 4× better on the log, but is not
+  something a query reads.
+- History, as frames against predecessors, adds about 430 MiB over 1,250
+  commits of 50 entities each.
+- An attribute is one token, and a row names it by id. The fact log spells
+  attributes out 3.1 M times (76 MiB of text); the file holds the 527
+  distinct attributes once, 13.7 KiB in all. Split, the 5 domains and 383
+  names would take 7 KiB: 7 KiB saved, against a column more in every
+  row. The repetition is already gone; what is left is the attribute id in
+  each row, which the runs take care of where it repeats.
+- Every commit's root was kept whole (1,197 blocks, 31 MiB): a link's scale
+  shared a byte with a flag, so a scale of 128 or more, as a large tree's
+  root has, did not read back, and the frame was dropped for the whole
+  block. Fixed (`8b65f7de`), with a count of frames that do not read back.
+
+**Decision.** Attributes stay one token.
+
 ## How to reproduce
 
 ```sh
