@@ -26,11 +26,10 @@ statuses mean.
   - Repetition is expected mostly across records, and shared through the
     replica's tokens.
 - **Decided, continued:** in destructuring, a field is named by an
-  attribute, which brings its pick and its type.
+  attribute, which brings its pick and its type. `last` over a field
+  holding several values elects by the hash of each value, the tiebreak
+  every election should end on when the version cannot decide.
 - **Open:**
-  - what `last` reads from a field holding several values: every value
-    of a record shares one version, so the version that decides `last`
-    cannot (fall back to the value, refuse, or read it as `all`);
   - the surface of destructuring: a pattern in the notation, a formula
     over a path, or both;
   - documents that grow (options in the third entry);
@@ -295,6 +294,46 @@ to the value (deterministic, but `last` then reads as `max` does), refuse
 (a reader wanting one value of a set says `max`, `min` or `top`), or read
 it as `all`. Attributes are read, not written, so whichever is chosen
 applies on read. Proposed: refuse.
+
+Commits: this entry.
+
+## 2026-11-07 — When the version ties, the hash of the value decides
+
+**Question.** What `last` reads from a record field holding several
+values, given that they share one version.
+
+**Method.** Discussion. Read `Pick::newer` and `value_beats`
+(`dialog-artifacts/src/artifacts/update.rs`), `ArtifactView::elect`
+(`artifact.rs`), and the hashes a value already has
+(`artifacts/value.rs`).
+
+**Results.**
+
+- The maintainer: when everything else ties, an election should choose by
+  the hash of the value, not by the value. Today it chooses by the value,
+  the greater winning (`value_beats`). That is a defect in dialog, rarely
+  reached: it decides only between values one revision wrote under one
+  cause. It also lets a writer pick a value that wins such ties, which a
+  hash does not, as the version's hash already does not for concurrent
+  revisions.
+- Inside a record the version always ties, so `last` over several values
+  always reaches this tiebreak. Under the hash rule it elects one value
+  deterministically on every replica, without reading as `max`.
+- Which hash: `Value::to_reference` hashes the payload without its type,
+  so text and bytes of the same bytes tie. `Value::identity_key` is the
+  type byte and the bytes, every number in one band, which agrees with
+  value equality. Hashing it is proposed. For a record it is the hash of
+  the canonical form, never of token references.
+- The value tiebreak is reached from `elect` and `Pick::newer`, and from
+  `dialog-repository`'s transaction oracle and `dialog-query`'s concept
+  query, all through `value_beats`. Changing it changes which value a read
+  returns for such ties, so replicas on releases either side of the change
+  can show different values: a changelog entry under what changes for you.
+
+**Decision.** `last` over several values in a record elects by the hash
+of each value. The same tiebreak replaces the value order in dialog's
+elections; that change is separate from this topic. This replaces the
+proposal to refuse `last` over several values.
 
 Commits: this entry.
 
