@@ -16,7 +16,7 @@ says how to cut a release.
 
 ### Two claims that stand equal are told apart by the hash of their values
 
-[#PR](https://github.com/dialog-db/dialog-db/pull/PR)
+[#752](https://github.com/dialog-db/dialog-db/pull/752)
 
 A cell read under `last` elects its newest claim: the greater standing
 (the version, then the cause, then the succession). Two claims stand
