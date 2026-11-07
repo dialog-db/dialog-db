@@ -276,6 +276,9 @@ struct Timings {
     offered: AtomicU64,
     /// Of `split`, the part spent parsing a block into a node.
     parse: AtomicU64,
+    /// Whole appends, lock and catching up included, and how many.
+    append: AtomicU64,
+    appends: AtomicU64,
 }
 
 impl Timings {
@@ -301,7 +304,7 @@ impl Drop for Inner {
         eprintln!(
             "archive {}: split {:.1} ms (parse {:.1} ms), encode {:.1} ms, verify {:.1} ms, write {:.1} ms, \
              decode {:.1} ms, realize {:.1} ms ({} blocks built for gets), serve {:.1} ms \
-             ({} nodes served), {} blocks offered to appends",
+             ({} nodes served), {} blocks offered to appends, {} appends taking {:.1} ms",
             self.path.display(),
             ms(&timings.split),
             ms(&timings.parse),
@@ -314,6 +317,8 @@ impl Drop for Inner {
             ms(&timings.serve),
             timings.served.load(Ordering::Relaxed),
             timings.offered.load(Ordering::Relaxed),
+            timings.appends.load(Ordering::Relaxed),
+            ms(&timings.append),
         );
     }
 }
@@ -1060,6 +1065,14 @@ impl FileArchive {
     /// Appends the `blocks` the archive does not hold yet to `catalog`, then
     /// a footer, and a checkpoint first when one is due.
     pub fn append(&self, catalog: &str, blocks: &[Buffer]) -> Result<(), ArchiveError> {
+        let started = Instant::now();
+        let appended = self.append_locked(catalog, blocks);
+        Timings::add(&self.inner.timings.append, started);
+        self.inner.timings.appends.fetch_add(1, Ordering::Relaxed);
+        appended
+    }
+
+    fn append_locked(&self, catalog: &str, blocks: &[Buffer]) -> Result<(), ArchiveError> {
         let mut writer = self.inner.writer.lock();
         let mut state = self.inner.state.write();
         let file = &self.inner.file;
