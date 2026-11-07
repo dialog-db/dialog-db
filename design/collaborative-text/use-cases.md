@@ -9,6 +9,7 @@ text field loses one side.
 | two people edit the same plain text concurrently, online or offline, no server, and both edits survive | required | |
 | text the size of a paragraph or a code cell | required | |
 | storage and sync cost within 2× of a text CRDT library on the same edit history | required | |
+| sync knows which documents need syncing without asking about each one, as the blob index does for blobs | required | |
 | text the size of a book chapter | nice to have | |
 | rich text (bold, links) | nice to have | |
 | concurrent runs typed at one spot do not interleave | nice to have | |

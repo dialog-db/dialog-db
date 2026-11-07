@@ -42,6 +42,7 @@ Columns:
 | peer to peer, offline, no server | yes | yes | yes | ? does "changes since" need a remote that understands the CRDT | 🟡 depends on the library's sync | ? |
 | storage and sync within 2× of a text CRDT library | ? | ? copies the whole document per change, plus a root node per commit | ? a root node per commit | ? | the library's own cost | ? |
 | changes to Dialog's core | none | 🟡 a lot; part of why it was shelved | ? | ? a resource kind and sync primitives | none | 🟡 likely the most |
+| knows which documents need syncing | 🟢 the tree differential | the tree differential | the tree differential | ? needs an index in the tree, as blobs have | 🟡 the library's own sync | ? |
 | sync mechanisms the developer deals with | one | one | one | one; text outside the tree, as blobs are | 🟡 two | one |
 | needs the whole document on the editing peer | no | yes | ? | ? | yes | ? |
 | a query returns the current text (nice to have) | yes | ? | yes | yes | no, opaque key | ? |

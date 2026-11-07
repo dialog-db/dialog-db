@@ -132,3 +132,11 @@ with", which no longer favours in-tree columns. "Easy to maintain" and
 
 **Decided.** Location of text follows the cost measurement: over 2× in
 the tree is a reason to go outside it, not to engineer the tree.
+
+**Asked (later).** What does "integrates well" mean? First concrete
+piece: as with blobs, sync must know which documents need syncing.
+
+**Learned.** The blob design does this with an index inside the tree
+while the bytes stay outside. Copying it for text keeps text outside the
+tree but puts a per-document version inside it, so some write per change
+returns, small, and its frequency is a design choice.
