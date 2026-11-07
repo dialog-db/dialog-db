@@ -722,6 +722,56 @@ blocks in the futures that put them.
 
 Commits: `15f01e9`.
 
+## 2026-11-07: an upload's blocks built as tasks of their own
+
+**Hypothesis.** Push's gap is the upload holding up its own puts: each
+block is built inside the future that puts it, all polled on one thread,
+so while one block is built the puts in flight wait to be polled. Built
+in tasks of their own, the blocks are built several at once where there
+are threads and each goes out as soon as it is built, and push comes
+level with main. Streaming a block's bytes into its put would not help:
+a block is a few kilobytes, its columns need their dictionaries before
+its first byte, and a put of a content-addressed block wants it whole.
+
+**Method.** Upload is two stages: each node's buffer built in a task
+through `dialog_common::r#async::spawn` (tokio's pool on native, the
+browser's own executor on wasm, where it is awaited elsewhere), up to 16
+at once, then each block put as soon as it is built, up to 16 at once.
+A wave still lands whole before the next starts, so the order the remote
+sees is unchanged. Six members, three interleaved runs each, one
+sitting, four cores
+([results](results/2026-11-07e-tonk-1x-main.md)).
+
+**Results** (median of three; against main):
+
+| | main/fs | fs | file | file ÷ main |
+|---|---|---|---|---|
+| push, in a round | 16.1 ms | 15.9 ms | 14.0 ms (14.0–17.0) | 0.87 |
+| the first push, the whole space | 75.1 ms | 73.7 ms | 54.4 ms | 0.72 |
+| pull, in a round | 32.7 ms | 31.0 ms | 36.4 ms | 1.11 |
+| a command, rules included | 11.7 ms | 11.4 ms | 12.0 ms | 1.03 |
+| `v2/issue`, cold | 59.9 ms | 57.8 ms | 56.3 ms | 0.94 |
+| `v2/issue` poll after a pull | 17.5 ms | 17.1 ms | 18.5 ms | 1.06 |
+
+- Push went from 1.67× main to 0.87×. The puts and publish that read
+  slower against the same remote in the last entry were the same
+  stall: with nothing building on the poller, they are not slower.
+- fs on this branch is unchanged (15.9 against main's 16.1): its
+  buffers are already whole, so the extra task costs nothing visible.
+- `command/memo/post` reads 1.59 and `v2/activity` cold 1.12, each
+  with a run as fast as main's inside its spread: noise, to watch.
+- Pull is still behind, 1.11 here.
+
+**What this does not show.** The gain leans on threads: four cores
+build blocks side by side. In a browser there is one thread; the
+blocks are built one at a time between puts there, which takes the
+stall away but not the 3 ms of building. Not measured.
+
+**Decision.** Kept. Push is level with main or better on native. Pull
+is next: it is the one sync measure still behind.
+
+Commits: `3e39b31`.
+
 ## How to reproduce
 
 ```sh
