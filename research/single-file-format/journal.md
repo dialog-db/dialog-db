@@ -648,6 +648,80 @@ three interleaved runs each, one sitting
 
 Commits: `1c84661`.
 
+## 2026-11-07: a segment's columns from its tokens; push is not where we thought
+
+**Hypothesis.** Push is slow because the file builds every block it
+uploads from rows, and building one is about 114 µs: the key joined
+from its tokens, parsed and split again, each datum copied before it is
+read. A segment's key columns are exactly its tokens, so handing them to
+the tree's column encoder should take most of that away and bring push
+close to main.
+
+**Method.** `PersistentSegment::from_columns` takes a segment's keys
+already split into its schema's columns; `realize` fills them from the
+tokens (a value token split into its type byte and payload), joins whole
+keys once into one buffer for the segment when its schema keeps whole
+keys, and reads a datum in place when it is aligned, as a token in the
+file is. Rows that fit no schema take the old path. Two tests compare the
+block built this way with the original, byte for byte, over every layout,
+a mixed leaf, an opaque key and spilled values, and assert the columns
+came from the tokens; swapping the entity and attribute columns fails
+them. Realize per node timed by `split_costs` over a member's file, old
+and new path interleaved in one build. Then six members, three
+interleaved runs each, one sitting
+([results](results/2026-11-07d-tonk-1x-main.md)). Then, with temporary
+timers in push (not committed), where a push's time goes, one run each
+of fs and file.
+
+**Results.**
+
+- Realize per node: 118, 122, 121 µs before; 79, 72, 78 µs after
+  (about −37%).
+- Push did not move: 26.2 ms against main's 15.7 (1.67×; it was 1.60
+  in the last sitting).
+
+| | main/fs | file | file ÷ main |
+|---|---|---|---|
+| `v2/issue`, cold | 63.2 ms | 54.5 ms | 0.86 |
+| a command, rules included | 12.1 ms | 12.8 ms | 1.06 |
+| pull, in a round | 31.4 ms | 36.9 ms | 1.18 |
+| push, in a round | 15.7 ms | 26.2 ms | 1.67 |
+| `v2/issue` poll after a pull | 17.4 ms | 17.8 ms | 1.02 |
+
+- Pull reads 1.18 where the last sitting read 1.03: file's pull is the
+  same (36.9 against 36.7 ms) and main's ran faster (31.4 against
+  35.6). The gap between sittings is larger than the spread within one,
+  so the honest reading is that pull is between 3% and 18% behind main.
+- Where push goes (medians per push, one run each):
+
+  | | fs | file |
+  |---|---|---|
+  | to the end of the diff | 3.9 ms | 2.0 ms |
+  | upload | 6.8 ms | 18 ms |
+  | of which building blocks | 0 | 3.1 ms |
+  | publish | 1.0 ms | 2.3 ms |
+
+  The diff is faster on the file (nodes served in place). Upload is the
+  whole gap, and building blocks is a third of it. Upload builds each
+  block inside the future that puts it, up to 16 at once, all polled on
+  one thread while the remote's file writes run on the blocking pool: a
+  block being built holds up every put waiting to be polled. Built
+  first and put after, the file's push measured 21.6 ms against 25 ms.
+  The puts were still slower than fs's (11.8 against 9.5 ms) and so
+  was publish, against the same remote; that is not explained yet.
+
+**Decision.** Kept: realize is a third cheaper and its output is pinned
+byte for byte. The premise that realize is push's cost was wrong: it is
+about 3 ms of a 10 ms gap. Every block a push uploads is one this
+replica minted moments before and held whole when it wrote it; the file
+throws those bytes away and rebuilds them. Next is to find why the puts
+and publish are slower against the same remote, and to decide whether a
+just-written block is kept whole until it is pushed, which would be
+caching in the store, against the design, or the upload stops building
+blocks in the futures that put them.
+
+Commits: `15f01e9`.
+
 ## How to reproduce
 
 ```sh
