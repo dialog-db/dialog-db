@@ -18,3 +18,8 @@ keeps one; the tree consults it.
 **cache**: *not yet defined for this topic.* The maintainer said "the
 environment is a cache"; whether that means one cache or the home of every
 cache is open (see the journal's agenda).
+
+**hash invariant**: a node's content hash is the hash of its block's bytes.
+On main the node type holds it (the hash is computed from the bytes the
+node is made of). A node made from rows has no bytes until it encodes them.
+

@@ -99,3 +99,24 @@ concerns. Proposed scope, not yet accepted: this topic covers the search
 tree's concerns; the formula cache and the repository's caches are sibling
 topics that would follow its answer.
 
+## 2026-11-07, Delimiting: is checking a node the tree's concern?
+
+**Asked.** Which of the tree's nine dealings with the world are its
+concerns, and which a provider's; in particular checking a node. Answer as
+given: the check was meant to be (and was thought to be already) a type
+invariant: a persistent node cannot be made that does not match its hash,
+so the tree trusts no one; it only needs to receive that type.
+
+**Learned.** True on main: the hash is computed from the node's bytes and
+the block constructor validates the layout. A load still compares the
+node's hash with the one requested, which needs no trust. False on #733: a
+node built from rows carries the store's hash, held by the store's write-time
+check behind an `unsafe` trait, not by the type. Holding it by type for
+rows means encoding the block to hash it, which is the work reading in place
+avoids: the maintainer's invariant and in-place reads are in tension.
+
+**Decided.** Checking (2 in the list) is not a concern of anyone's at read
+time beyond comparing hashes: the node type holds it. Decoding (3) and
+caching (4) belong to providers; the rest not yet answered. Open: whether a
+store may establish the invariant under a contract, or only the type may.
+
