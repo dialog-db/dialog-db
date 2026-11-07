@@ -296,3 +296,36 @@ it; if not, a batch read over a run's pieces is the operation to add
 instead. Persist's two dealings (the blocks it hands over, the nodes it
 keeps) are next.
 
+## 2026-11-07, Delimiting: what each operation would replace (a sketch)
+
+**Asked.** The maintainer asked for exactly which operation replaces what,
+since the shapes were being described without the code they replace.
+
+**Learned.** A sketch, with placeholder names, each a command the tree
+performs on the environment and providers answer (a caching layer, the
+single file directly, or a decoding layer over `archive::Load` for stores
+that keep bytes):
+
+| today (main, and #733) | replaced by |
+|---|---|
+| `Accessor::load_node` / `get_node`: `NodeCache::of` through `Holds`; on a miss `archive::Load`, `checked`, `PersistentNode::try_from`, insert | `ReadNode { catalog, name }`, answered by providers |
+| `Accessor::reading(Reading { local: true })` (`Load::locally`): push's local read, export | `ReadNode` with `local: true` |
+| `Accessor::warm` and `keeps()`: the walker's read-ahead | `PreloadNode { catalog, names }`, returning nothing |
+| `accessor.cached()` in `forced_run_quiet` | nothing: `compressed_run_quiet` returns its summary |
+| `accessor.cached()` in `compressed_run_quiet`, pass 1 | the `ReadNode` pass 2 performs |
+| `NodeSource::of`, `from_source` (#733) | nothing: the single file answers `ReadNode` |
+| the query session's `ArchiveLoad` provider inserting into the cache | nothing: the caching layer answers `ReadNode` |
+| `TransientTree::persist` / `HitchhikerTree::persist`: seal, add blocks to `Delta`, insert into `NodeCache::of` | `persist` seals and returns the nodes |
+| `archive::persist` in dialog-repository: spilled values, blocks (`Import`), `forget` on failure | spilled values as today, then `WriteNodes { catalog, nodes }`; the provider stores and keeps them, forgetting on failure |
+
+Unchanged: `archive::Get`/`Load` for bytes (sync, push, serving a peer),
+spilled values' blob commands, and the commit's own order of writes
+(spilled values, nodes, then the head). Gone: `NodeCache::of` and every
+`Holds` lookup in the tree, the accessor's cache, the second cache filler,
+`NodeSource`.
+
+**Decided.** Not decided; this is the material for the next question
+(does the mapping match the maintainer's expectation, and does
+`WriteNodes` with the caller ordering writes answer the writer's concern).
+It belongs to Direction once the problem is accepted.
+
