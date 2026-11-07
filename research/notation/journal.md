@@ -9,7 +9,8 @@ What we tried, what it measured, and what we decided, newest last. The [idea](..
 - **Decided:** rules are heads and a `when`, with timing on the verb (`assert`, `assert!`, `retract!`, `ensue!`); lifetimes are layers on attributes, and a command is a concept in `:now`; a write names its entity, gives a record that identifies it, or leaves it out and gets the digest of what it writes; a derivation that must agree everywhere is a rule with `digest`.
 - **Measured:** 249 readers over 15 rounds. Without a visible word, readers do not see a derivation (R1 `default` line 0/3, R13's six brace shapes 0/18). With one paragraph of spec, they do (R14 5/5, R15 16/16).
 - **Rejected on design grounds, though readers got them:** `=` in a head (constraint elsewhere), the `{title author} ?b` head (construction does not belong in a concept).
-- **Next:** R16, planned and not yet run: the revised design as a whole, read from four ways of writing its spec.
+- **R16:** the revised design, read from four ways of writing its spec, scored 297 of 300 points; every document's median was 15 of 15. The style of the spec did not matter at this difficulty; the examples did.
+- **Next:** decide what a rule head that names no entity lands on, and whether a partial write is agreed; then a harder round, with tasks no example in the documents shows.
 - **Open:** whether a record in the entity's place writes its fields; key spelling inside records; `:last` across devices; optional parameters.
 
 ## Datasets
@@ -271,6 +272,35 @@ The control had no shared answer: one predicted two bugs, one made up `bug:crash
 **Results.** Not run yet.
 
 **Decision.** Not decided. A median of at least 13 of 15, 2 above the spec's, picks the style; a gain of 1 or less says the style is not the lever.
+
+## 2026-11-07 — R16: the way the spec is written makes no difference at this difficulty
+
+**Question.** The one planned above: does the way the spec is written change whether a cheap reader can write in it?
+
+**Method.** As planned in [r16-plan](results/r16-plan.md): four documents, five readers each, all started at once, scored by the committed rubric.
+
+**Results.** [r16](results/r16.md).
+
+```mermaid
+xychart-beta
+  title "R16: mean points of 15, by document (5 haiku readers each)"
+  x-axis ["spec", "card", "tutorial", "pitfalls"]
+  y-axis "points" 0 --> 15
+  bar [15, 14.4, 15, 15]
+```
+
+| document | lines | scores | median |
+|---|---|---|---|
+| `spec`, `design.md` as it is | 366 | 15, 15, 15, 15, 15 | 15 |
+| `card` | 104 | 13, 15, 15, 14, 15 | 15 |
+| `tutorial` | 146 | 15, 15, 15, 15, 15 | 15 |
+| `pitfalls` | 118 | 15, 15, 15, 15, 15 | 15 |
+
+The failure bar holds: no document beat the spec's median. But that is a ceiling, not a tie between equals: the tasks follow the documents' examples closely (a command, a rule that digests it, a send), so the round says the revised design reads (297 of 300 points), not that the way it is written can never matter. Where a task had no example, readers copied the nearest one. For task 7 the premises give the notice no entity: all 15 readers of the three short documents left it out, as their `ensue!` example does, and four of five `spec` readers put the notice on the to-do's own entity, as the spec's example binds one. Readers also named gaps more than style: the type of an entity-valued attribute (every `tutorial` reader, whose document left the type list out), a premise on a stored attribute (shown in no document), a partial write marked Proposed, and what a rule head that names no entity lands on. One reader found a real problem: a rule that asserts `state: :open` on every add reopens a done to-do when it is added again.
+
+The `tutorial` broke the plan's promise that every document states the same facts: it had no list of types. Its readers guessed `:entity` right.
+
+**Decision.** Keep one document: the spec, which did as well as anything shorter. Write its examples as the forms readers should copy, because they do, and show every form a reader will need, including a premise on a stored attribute. Two questions go to the maintainer: what a rule head that names no entity lands on, and whether a partial write through a concept is agreed. Telling documents apart takes harder tasks, with no worked example to copy.
 
 ## How to reproduce
 

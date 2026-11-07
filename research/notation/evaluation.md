@@ -24,7 +24,7 @@ Every round compares variants of one form against each other, with everything el
 | **Lifetime** | what is left of a command's facts a tick later (R3, R6) | readers who say they are gone | run, 0/9 and 2/3; the `layer: :now` design is not yet run |
 | **Timing** | which rules are computed, stored, and when they fire (R2, R4, R10) | readers who can say | run; the revised `rule` / `when` is not yet run |
 | **Sending** | send a command to a peer; what the peer sees | | not run |
-| **Documentation** | the same tasks after four ways of writing the spec (R16) | points of 15 per reader, per item per variant | planned: [r16-plan](results/r16-plan.md) |
+| **Documentation** | the same tasks after four ways of writing the spec (R16) | points of 15 per reader, per item per variant | run: every median 15 of 15, a ceiling; [r16](results/r16.md) |
 | **Clarity** | 1 to 5, the most confusing thing, and a spelling that would fix it | the rating, and what readers propose | run every round |
 
 Behavior and understanding are scored apart from R12 on: a reader who leaves the entity out because none was given has not read a derivation.

@@ -109,7 +109,7 @@ Several heads may share one `when`, so a body is written once:
 ```
 
 A premise in `when` is one of:
-- a call;
+- a call, on a concept or on a stored attribute, such as `(xyz.todo.list/owner-peer ?l is: ?peer)`;
 - `(unless call)`, which holds when the call has no match;
 - a formula, such as `(== ?a ?b)`, `(!= ?old ?key)`, `(digest {…} is: ?e)` or `(dialog/position ?b after: ?lo before: ?hi is: ?at)`.
 
@@ -317,6 +317,9 @@ Comparing the design with [Bloom](http://bloom-lang.net) settled three of the ch
 
 ## Open
 
+- What a rule head that names no entity lands on. In R16, four of five readers of this spec put a sent notice on the to-do's own entity because no example shows another way; the readers of the shorter documents left it out. The obvious answer is the one writes have: the digest of the head's facts.
+- Whether a partial write through a concept, `(todo! todo:9c1e state: :done)`, is agreed. Two R16 readers stalled because it is marked Proposed.
+- Whether a rule that creates should only create. The R16 rule that asserts `state: :open` on every add reopens a done to-do that is added again; `(unless (todo ?t))` in its `when` would stop that.
 - Whether writing a record in place of an entity also writes the record's fields. In R15, fourteen of sixteen readers repeated `title:` and `author:` beside the record, so they read it as identity only.
 - Whether a record may use short keys inside a concept call, resolved to stored names before hashing, or only stored names.
 - Whether the fields an identity is derived from may change. A renamed title gives a record that no longer finds its bug, and a new write with it makes a second one.
