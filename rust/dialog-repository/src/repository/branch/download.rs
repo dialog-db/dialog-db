@@ -15,6 +15,7 @@
 //! the two acts — adopt the upstream head, then materialize it.
 
 use core::ops::RangeInclusive;
+use dialog_artifacts::tree::{ArtifactNodes, ArtifactWrites};
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::blob::Load as BlobLoad;
 
@@ -114,6 +115,8 @@ impl Download<'_> {
             + Provider<BlobRead>
             + Provider<BlobImport>
             + Provider<ArchiveLoad>
+            + ArtifactWrites
+            + ArtifactNodes
             + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
@@ -206,6 +209,7 @@ impl<'a> PullDownload<'a> {
         Env: Provider<Get>
             + Provider<Put>
             + Provider<Import>
+            + ArtifactWrites
             + Provider<Resolve>
             + Provider<Publish>
             + Provider<Identify>
@@ -213,6 +217,8 @@ impl<'a> PullDownload<'a> {
             + Provider<BlobRead>
             + Provider<BlobImport>
             + Provider<ArchiveLoad>
+            + ArtifactWrites
+            + ArtifactNodes
             + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>

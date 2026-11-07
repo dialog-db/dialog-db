@@ -50,6 +50,8 @@
 //! query, not an optional composition.
 
 use dialog_artifacts::DialogArtifactsError;
+use dialog_artifacts::tree::ArtifactNodes;
+use dialog_artifacts::tree::ArtifactWrites;
 use dialog_capability::{Fork, Provider};
 use dialog_common::{ConditionalSync, Holds};
 use dialog_effects::archive::Load as ArchiveLoad;
@@ -125,6 +127,8 @@ impl<'a, Q: Application> TransactionSelectQuery<'a, Q> {
             + Provider<Resolve>
             + Provider<Identify>
             + Provider<ArchiveLoad>
+            + ArtifactWrites
+            + ArtifactNodes
             + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>

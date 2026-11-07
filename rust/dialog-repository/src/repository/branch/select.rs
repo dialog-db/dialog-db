@@ -1,6 +1,8 @@
 use base58::ToBase58;
 use dialog_artifacts::selector::Constrained;
+use dialog_artifacts::tree::ArtifactNodes;
 use dialog_artifacts::tree::ArtifactTreeExt as _;
+use dialog_artifacts::tree::ArtifactWrites;
 use dialog_artifacts::{
     Artifact, ArtifactSelector, ArtifactStream, ArtifactView, Datum, DialogArtifactsError, Key,
     State,
@@ -62,7 +64,7 @@ pub(crate) async fn line_manifest<Env>(
     env: &Env,
 ) -> Result<Manifest, DialogArtifactsError>
 where
-    Env: Provider<ArchiveLoad> + Holds + ConditionalSync + ?Sized,
+    Env: Provider<ArchiveLoad> + ArtifactWrites + ArtifactNodes + Holds + ConditionalSync + ?Sized,
 {
     Ok(source.tree().manifest(&env).await?)
 }
@@ -98,7 +100,13 @@ impl Select<'_> {
         env: &Env,
     ) -> Result<impl Stream<Item = Result<ArtifactView, DialogArtifactsError>>, DialogSearchTreeError>
     where
-        Env: Provider<Get> + Provider<ArchiveLoad> + Provider<BlobLoad> + Holds + ConditionalSync,
+        Env: Provider<Get>
+            + Provider<ArchiveLoad>
+            + ArtifactNodes
+            + ArtifactWrites
+            + Provider<BlobLoad>
+            + Holds
+            + ConditionalSync,
     {
         // A block missing locally hydrates through the env, from the
         // remotes the subject's open branches track. A remote that failed
@@ -111,7 +119,7 @@ impl Select<'_> {
     /// The tree this select scans, with its root block probed eagerly.
     async fn probed_tree<S>(&self, store: &S) -> Result<Index, DialogSearchTreeError>
     where
-        S: Provider<ArchiveLoad> + Holds + ConditionalSync,
+        S: Provider<ArchiveLoad> + ArtifactWrites + ArtifactNodes + Holds + ConditionalSync,
     {
         // Tree hydration is lazy (nodes load on demand during the scan),
         // but unreachable branches should fail here rather than midway
@@ -159,6 +167,8 @@ impl Select<'_> {
     >
     where
         S: Provider<ArchiveLoad>
+            + ArtifactWrites
+            + ArtifactNodes
             + Provider<BlobLoad>
             + Holds
             + ConditionalSend
@@ -184,6 +194,8 @@ impl Select<'_> {
     ) -> Result<ArtifactStream<'s>, DialogSearchTreeError>
     where
         S: Provider<ArchiveLoad>
+            + ArtifactWrites
+            + ArtifactNodes
             + Provider<BlobLoad>
             + Holds
             + ConditionalSend
@@ -203,7 +215,13 @@ impl Select<'_> {
     /// [`perform`](Self::perform) does. See [`estimate`](Self::estimate).
     pub async fn estimate_perform<Env>(self, env: &Env) -> Result<Option<u64>, DialogArtifactsError>
     where
-        Env: Provider<Get> + Provider<ArchiveLoad> + Provider<BlobLoad> + Holds + ConditionalSync,
+        Env: Provider<Get>
+            + Provider<ArchiveLoad>
+            + ArtifactNodes
+            + ArtifactWrites
+            + Provider<BlobLoad>
+            + Holds
+            + ConditionalSync,
     {
         self.estimate(erased(env)).await
     }
@@ -221,6 +239,8 @@ impl Select<'_> {
     pub async fn estimate<S>(self, store: S) -> Result<Option<u64>, DialogArtifactsError>
     where
         S: Provider<ArchiveLoad>
+            + ArtifactWrites
+            + ArtifactNodes
             + Provider<BlobLoad>
             + Holds
             + ConditionalSend
@@ -247,6 +267,8 @@ impl Select<'_> {
     >
     where
         S: Provider<ArchiveLoad>
+            + ArtifactWrites
+            + ArtifactNodes
             + Provider<BlobLoad>
             + Holds
             + ConditionalSend
@@ -283,7 +305,13 @@ impl SelectOwned<'_> {
         env: &Env,
     ) -> Result<impl Stream<Item = Result<Artifact, DialogArtifactsError>>, DialogSearchTreeError>
     where
-        Env: Provider<Get> + Provider<ArchiveLoad> + Provider<BlobLoad> + Holds + ConditionalSync,
+        Env: Provider<Get>
+            + Provider<ArchiveLoad>
+            + ArtifactNodes
+            + ArtifactWrites
+            + Provider<BlobLoad>
+            + Holds
+            + ConditionalSync,
     {
         self.execute(erased(env)).await
     }
@@ -299,6 +327,8 @@ impl SelectOwned<'_> {
     >
     where
         S: Provider<ArchiveLoad>
+            + ArtifactWrites
+            + ArtifactNodes
             + Provider<BlobLoad>
             + Holds
             + ConditionalSend

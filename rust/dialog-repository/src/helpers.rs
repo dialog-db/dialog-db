@@ -1,6 +1,10 @@
+use dialog_artifacts::tree::{
+    ArtifactNode, ArtifactNodeCache, ArtifactPreload, ArtifactRead, ArtifactWrite,
+};
 use dialog_effects::archive::ArchiveError;
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::blob::Load as BlobLoad;
+use dialog_search_tree::DialogSearchTreeError;
 use std::any::{Any, type_name};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -12,8 +16,8 @@ use std::task::Poll;
 
 use dialog_capability::{Command, Provider, Subject};
 use dialog_common::{Blake3Hash, Buffer, ConditionalSend, ConditionalSync};
-use dialog_effects::archive::Get;
 use dialog_effects::archive::prelude::ArchiveScope;
+use dialog_effects::archive::{Get, Import};
 use dialog_search_tree::{NodeBody, PersistentNode};
 use parking_lot::Mutex;
 use std::collections::HashSet;
@@ -169,8 +173,11 @@ where
         + Provider<Identify>
         + Provider<Attest>
         + Provider<Import>
+        + ArtifactWrites
         + Provider<Write>
         + Provider<ArchiveLoad>
+        + ArtifactWrites
+        + ArtifactNodes
         + Provider<BlobLoad>
         + Provider<Fork<Network, Resolve>>
         + dialog_common::Holds
@@ -226,9 +233,11 @@ where
 }
 
 #[cfg(test)]
+use dialog_artifacts::tree::{ArtifactNodes, ArtifactWrites};
+#[cfg(test)]
 use dialog_capability::Fork;
 #[cfg(test)]
-use dialog_effects::archive::{Import, Put};
+use dialog_effects::archive::Put;
 #[cfg(test)]
 use dialog_effects::authority::{Attest, Identify};
 #[cfg(test)]
@@ -291,7 +300,31 @@ type LoadFuture<'a> = Pin<Box<dyn Future<Output = Result<Option<Buffer>, Archive
 struct Loads<P> {
     block: for<'a> fn(&'a Counting<P>, ArchiveLoad) -> LoadFuture<'a>,
     blob: for<'a> fn(&'a Counting<P>, BlobLoad) -> LoadFuture<'a>,
+    read: for<'a> fn(&'a Counting<P>, ArtifactRead) -> ReadFuture<'a>,
+    preload: for<'a> fn(&'a Counting<P>, ArtifactPreload) -> PreloadFuture<'a>,
+    write: for<'a> fn(&'a Counting<P>, ArtifactWrite) -> WriteFuture<'a>,
 }
+
+/// A node read's answer, boxed.
+#[cfg(not(target_arch = "wasm32"))]
+type ReadFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<Option<ArtifactNode>, DialogSearchTreeError>> + Send + 'a>>;
+/// A node read's answer, boxed (single-threaded wasm form).
+#[cfg(target_arch = "wasm32")]
+type ReadFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<Option<ArtifactNode>, DialogSearchTreeError>> + 'a>>;
+/// A preload's completion, boxed.
+#[cfg(not(target_arch = "wasm32"))]
+type PreloadFuture<'a> = Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
+/// A preload's completion, boxed (single-threaded wasm form).
+#[cfg(target_arch = "wasm32")]
+type PreloadFuture<'a> = Pin<Box<dyn Future<Output = ()> + 'a>>;
+/// A node write's answer, boxed.
+#[cfg(not(target_arch = "wasm32"))]
+type WriteFuture<'a> = Pin<Box<dyn Future<Output = Result<(), DialogSearchTreeError>> + Send + 'a>>;
+/// A node write's answer, boxed (single-threaded wasm form).
+#[cfg(target_arch = "wasm32")]
+type WriteFuture<'a> = Pin<Box<dyn Future<Output = Result<(), DialogSearchTreeError>> + 'a>>;
 
 impl<P> Clone for Loads<P> {
     fn clone(&self) -> Self {
@@ -306,6 +339,7 @@ impl<P> Copy for Loads<P> {}
 /// itself.
 pub trait CountedLoads:
     Provider<Get>
+    + Provider<Import>
     + Provider<BlobRead>
     + Provider<crate::Hydrate>
     + dialog_common::Holds
@@ -316,6 +350,7 @@ pub trait CountedLoads:
 
 impl<T> CountedLoads for T where
     T: Provider<Get>
+        + Provider<Import>
         + Provider<BlobRead>
         + Provider<crate::Hydrate>
         + dialog_common::Holds
@@ -326,6 +361,32 @@ impl<T> CountedLoads for T where
 
 fn load_block<P: CountedLoads>(env: &Counting<P>, load: ArchiveLoad) -> LoadFuture<'_> {
     Box::pin(crate::load_or_hydrate(env, load))
+}
+
+// The node requests are answered through this env's own loads and
+// imports, so every block a node read or write touches is tallied as the
+// `Get`, `Hydrate` or `Import` it is.
+fn read_node<P: CountedLoads>(env: &Counting<P>, read: ArtifactRead) -> ReadFuture<'_> {
+    Box::pin(async move {
+        let cache = ArtifactNodeCache::of(env, read.catalog.subject());
+        read.through_loader(
+            async |load| crate::load_or_hydrate(env, load).await,
+            cache.as_ref(),
+        )
+        .await
+    })
+}
+
+fn preload_node<P: CountedLoads>(env: &Counting<P>, preload: ArtifactPreload) -> PreloadFuture<'_> {
+    Box::pin(async move {
+        if ArtifactNodeCache::of(env, preload.catalog.subject()).is_some() {
+            let _ = read_node(env, preload.read()).await;
+        }
+    })
+}
+
+fn write_nodes<P: CountedLoads>(env: &Counting<P>, write: ArtifactWrite) -> WriteFuture<'_> {
+    Box::pin(write.through_held_blocks(env))
 }
 
 fn load_blob<P: CountedLoads>(env: &Counting<P>, load: BlobLoad) -> LoadFuture<'_> {
@@ -384,6 +445,9 @@ impl<P: CountedLoads> Counting<P> {
             loads: Loads {
                 block: load_block::<P>,
                 blob: load_blob::<P>,
+                read: read_node::<P>,
+                preload: preload_node::<P>,
+                write: write_nodes::<P>,
             },
         }
     }
@@ -474,21 +538,32 @@ where
         // docs), and tallied by what it reads, not as itself.
         let mut input = Some(input);
         let slot = &mut input as &mut dyn Any;
-        let loaded = if let Some(load) = slot.downcast_mut::<Option<ArchiveLoad>>() {
-            let load = load.take().expect("the input is taken once");
-            Some((self.loads.block)(self, load).await)
-        } else if let Some(load) = slot.downcast_mut::<Option<BlobLoad>>() {
-            let load = load.take().expect("the input is taken once");
-            Some((self.loads.blob)(self, load).await)
-        } else {
-            None
-        };
-        if let Some(loaded) = loaded {
-            let mut output = Some(loaded);
-            return (&mut output as &mut dyn Any)
+        fn answered<C: Command>(output: impl Any) -> C::Output
+        where
+            C::Output: 'static,
+        {
+            let mut output = Some(output);
+            (&mut output as &mut dyn Any)
                 .downcast_mut::<Option<C::Output>>()
                 .and_then(Option::take)
-                .expect("a load answers with a load's output");
+                .expect("a request answers with its own output")
+        }
+        if let Some(load) = slot.downcast_mut::<Option<ArchiveLoad>>() {
+            let load = load.take().expect("the input is taken once");
+            return answered::<C>((self.loads.block)(self, load).await);
+        } else if let Some(load) = slot.downcast_mut::<Option<BlobLoad>>() {
+            let load = load.take().expect("the input is taken once");
+            return answered::<C>((self.loads.blob)(self, load).await);
+        } else if let Some(read) = slot.downcast_mut::<Option<ArtifactRead>>() {
+            let read = read.take().expect("the input is taken once");
+            return answered::<C>((self.loads.read)(self, read).await);
+        } else if let Some(preload) = slot.downcast_mut::<Option<ArtifactPreload>>() {
+            let preload = preload.take().expect("the input is taken once");
+            (self.loads.preload)(self, preload).await;
+            return answered::<C>(());
+        } else if let Some(write) = slot.downcast_mut::<Option<ArtifactWrite>>() {
+            let write = write.take().expect("the input is taken once");
+            return answered::<C>((self.loads.write)(self, write).await);
         }
         let input = input.expect("the input is taken only by a load");
         let name = type_name::<C>();

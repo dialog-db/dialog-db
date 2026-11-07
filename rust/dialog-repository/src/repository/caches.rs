@@ -706,6 +706,17 @@ mod tests {
         Fork<RemoteSite, Resolve>,
     );
 
+    // The node requests are answered through this env's own loads and
+    // imports, so a write meets the refusal.
+    dialog_search_tree::reads_nodes_through_blocks!(
+        impl[P,] RefusingImport<P>
+        where [P: Provider<ArchiveLoad> + Holds + ConditionalSync,]
+    );
+    dialog_search_tree::writes_nodes_through_blocks!(
+        impl[P,] RefusingImport<P>
+        where [P: Holds + ConditionalSync,]
+    );
+
     #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
     #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
     impl<P: ConditionalSync> Provider<Import> for RefusingImport<P> {

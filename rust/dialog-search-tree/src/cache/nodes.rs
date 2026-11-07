@@ -647,11 +647,8 @@ mod tests {
     fn node(fill: u8, size: usize) -> Result<Node> {
         let entries = vec![Entry::new([fill; 4], vec![fill; size]).into()];
         Ok(
-            TransientNode::Segment(TransientSegment::new(entries, Vec::new())).persist(
-                &mut Delta::zero(),
-                &Manifest::default(),
-                None,
-            )?,
+            TransientNode::Segment(TransientSegment::new(entries, Vec::new()))
+                .persist(&mut Delta::zero(), &Manifest::default())?,
         )
     }
 

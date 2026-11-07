@@ -21,6 +21,7 @@ pub(crate) mod test {
     use crate::recall::{BodyMemo, Memo};
     use crate::session::RuleRegistry;
     use dialog_artifacts::selector::Constrained;
+    use dialog_artifacts::tree::{ArtifactNode, ArtifactPreload, ArtifactRead};
     use dialog_artifacts::{ArtifactSelector, ArtifactStream, DialogArtifactsError, Select};
     use dialog_capability::Provider;
     use dialog_effects::archive::{self, ArchiveError};
@@ -145,6 +146,29 @@ pub(crate) mod test {
     }
 
     // Spilled-value loads for `tree/value`, from the branch's archive.
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl Provider<ArtifactRead> for TestEnv<'_> {
+        async fn execute(
+            &self,
+            read: ArtifactRead,
+        ) -> Result<Option<ArtifactNode>, dialog_search_tree::DialogSearchTreeError> {
+            let mut line = read;
+            line.catalog = self.branch.archive().index();
+            line.perform(self.operator).await
+        }
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl Provider<ArtifactPreload> for TestEnv<'_> {
+        async fn execute(&self, preload: ArtifactPreload) {
+            let mut line = preload;
+            line.catalog = self.branch.archive().index();
+            line.perform(self.operator).await
+        }
+    }
+
     #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
     #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
     impl Provider<blob::Load> for TestEnv<'_> {

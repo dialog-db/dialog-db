@@ -19,6 +19,7 @@
 //! ancestry includes, is measured by `context_cost_by_origins` the same
 //! way (`DIALOG_RA_MAX_ORIGINS` caps its sweep).
 
+use dialog_artifacts::tree::ArtifactNodes;
 use std::env;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -528,7 +529,7 @@ async fn measure_write_paths(depth: usize, batches: usize) -> Result<()> {
         .await?;
         deferred = next;
     }
-    let _ = deferred.canonicalize(&staged, delta.blocks()).await?;
+    let _ = deferred.canonicalize(&staged, delta.nodes()).await?;
     let deferred_ms = started.elapsed().as_millis();
     persist!(delta);
 
@@ -1159,7 +1160,7 @@ async fn attribute_block<Env>(
     hash: &Blake3Hash,
 ) -> Result<Option<FrameAttribution>>
 where
-    Env: Provider<Load> + Holds + ConditionalSync,
+    Env: Provider<Load> + ArtifactNodes + Holds + ConditionalSync,
 {
     let Some(buffer) = Load::new(catalog.clone(), hash.clone())
         .perform(store)

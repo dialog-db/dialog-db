@@ -986,6 +986,8 @@ async fn it_fetches_spilled_history_values_concurrently() -> Result<()> {
         }
     }
 
+    dialog_search_tree::reads_nodes_through_blocks!(Gauge);
+
     #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
     #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
     impl Provider<blob::Load> for Gauge {
@@ -1712,12 +1714,12 @@ async fn it_unions_contended_claim_versions_in_either_direction() -> Result<()> 
         .edit()
         .integrate(stream::iter(from_b.into_iter().map(Ok)), &storage)
         .await?
-        .persist(delta.blocks(), &storage)?;
+        .persist(delta.nodes())?;
     b = b
         .edit()
         .integrate(stream::iter(from_a.into_iter().map(Ok)), &storage)
         .await?
-        .persist(delta.blocks(), &storage)?;
+        .persist(delta.nodes())?;
     delta.flush_into(&store);
 
     assert_eq!(

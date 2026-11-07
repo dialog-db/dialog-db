@@ -32,6 +32,7 @@ use crate::{
 };
 use dialog_artifacts::history::{CausalityCache, Context, ContextCache, RevisionRecord, Version};
 use dialog_artifacts::tree::WriteScope;
+use dialog_artifacts::tree::{ArtifactNodes, ArtifactWrites};
 use dialog_artifacts::{
     Artifact, ArtifactSelector, Change, Changes, Entity, Statement, Update as _,
 };
@@ -420,11 +421,14 @@ impl TransactionPublish<&Branch> {
             + Provider<BlobRead>
             + Provider<Put>
             + Provider<Import>
+            + ArtifactWrites
             + Provider<Resolve>
             + Provider<Publish>
             + Provider<Identify>
             + Provider<Attest>
             + Provider<ArchiveLoad>
+            + ArtifactWrites
+            + ArtifactNodes
             + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
@@ -449,11 +453,14 @@ impl TransactionPublish<TransactionBatch> {
             + Provider<BlobRead>
             + Provider<Put>
             + Provider<Import>
+            + ArtifactWrites
             + Provider<Resolve>
             + Provider<Publish>
             + Provider<Identify>
             + Provider<Attest>
             + Provider<ArchiveLoad>
+            + ArtifactWrites
+            + ArtifactNodes
             + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
@@ -492,10 +499,13 @@ impl TransactionCommit<&Branch> {
             + Provider<BlobRead>
             + Provider<Put>
             + Provider<Import>
+            + ArtifactWrites
             + Provider<Resolve>
             + Provider<Identify>
             + Provider<Attest>
             + Provider<ArchiveLoad>
+            + ArtifactWrites
+            + ArtifactNodes
             + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
@@ -606,10 +616,13 @@ impl TransactionCommit<TransactionBatch> {
             + Provider<BlobRead>
             + Provider<Put>
             + Provider<Import>
+            + ArtifactWrites
             + Provider<Resolve>
             + Provider<Identify>
             + Provider<Attest>
             + Provider<ArchiveLoad>
+            + ArtifactWrites
+            + ArtifactNodes
             + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
@@ -722,10 +735,13 @@ where
         + Provider<BlobRead>
         + Provider<Put>
         + Provider<Import>
+        + ArtifactWrites
         + Provider<Resolve>
         + Provider<Identify>
         + Provider<Attest>
         + Provider<ArchiveLoad>
+        + ArtifactWrites
+        + ArtifactNodes
         + Provider<BlobLoad>
         + Provider<dialog_artifacts::Preload>
         + Provider<dialog_artifacts::Speculation>

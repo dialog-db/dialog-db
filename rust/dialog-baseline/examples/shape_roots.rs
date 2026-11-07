@@ -119,7 +119,7 @@ async fn main() -> anyhow::Result<()> {
         for key in batch {
             edit = edit.insert(key.clone(), rng.bytes(24), &storage).await?;
         }
-        tree = edit.persist(&mut delta, &storage)?;
+        tree = edit.persist(&mut delta)?;
         storage.flush(&mut delta);
     }
     println!("facts inserted      {}", hex(tree.root().as_bytes()));
@@ -134,7 +134,7 @@ async fn main() -> anyhow::Result<()> {
         for key in batch {
             edit = edit.delete(key, &storage).await?;
         }
-        tree = edit.persist(&mut delta, &storage)?;
+        tree = edit.persist(&mut delta)?;
         storage.flush(&mut delta);
     }
     println!("facts deleted       {}", hex(tree.root().as_bytes()));
@@ -152,7 +152,7 @@ async fn main() -> anyhow::Result<()> {
             .edit()
             .insert(cluster_key(*cluster, *member), rng.bytes(16), &storage)
             .await?
-            .persist(&mut delta, &storage)?;
+            .persist(&mut delta)?;
         storage.flush(&mut delta);
     }
     println!("clusters inserted   {}", hex(tree.root().as_bytes()));
@@ -162,7 +162,7 @@ async fn main() -> anyhow::Result<()> {
             .edit()
             .delete(&cluster_key(*cluster, *member), &storage)
             .await?
-            .persist(&mut delta, &storage)?;
+            .persist(&mut delta)?;
         storage.flush(&mut delta);
     }
     println!("clusters thinned    {}", hex(tree.root().as_bytes()));
@@ -174,7 +174,7 @@ async fn main() -> anyhow::Result<()> {
         for key in batch {
             edit = edit.insert(key.clone(), rng.bytes(8), &storage).await?;
         }
-        tree = edit.persist(&mut delta, &storage)?;
+        tree = edit.persist(&mut delta)?;
         storage.flush(&mut delta);
     }
     println!("long keys inserted  {}", hex(tree.root().as_bytes()));
@@ -196,7 +196,7 @@ async fn main() -> anyhow::Result<()> {
                 .insert(key.clone(), rng.bytes(20), &storage)
                 .await?;
         }
-        buffered_root = buffered.persist(&mut delta, &storage)?;
+        buffered_root = buffered.persist(&mut delta)?;
         storage.flush(&mut delta);
     }
     println!("buffered sealed     {}", hex(buffered_root.as_bytes()));

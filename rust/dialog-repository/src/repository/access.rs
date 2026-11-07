@@ -37,6 +37,7 @@
 //!   any not-yet-upgraded code path. A rerun after a partial failure
 //!   re-skips by content address and drains the remainder.
 
+use dialog_artifacts::tree::{ArtifactPreload, ArtifactRead, ArtifactWrite};
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::blob::Load as BlobLoad;
 use std::collections::BTreeMap;
@@ -168,6 +169,9 @@ migrate_storage!(
     BlobImport,
     ArchiveLoad,
     BlobLoad,
+    ArtifactRead,
+    ArtifactPreload,
+    ArtifactWrite,
 );
 migrate_authority!(Identify, Attest);
 
@@ -251,6 +255,9 @@ impl MigrateCertificates {
             + Provider<BlobRead>
             + Provider<BlobWrite>
             + Provider<BlobImport>
+            + Provider<ArtifactRead>
+            + Provider<ArtifactPreload>
+            + Provider<ArtifactWrite>
             + Clone
             + 'static,
         Storage<S>: Provider<Export<Ucan>> + Provider<Forget<Ucan>> + ConditionalSync,

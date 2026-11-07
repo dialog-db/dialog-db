@@ -14,6 +14,78 @@ says how to cut a release.
 
 ## Unreleased
 
+### A tree asks its environment for nodes, and the environment keeps them
+
+[design/tree-node-reads.md](./design/tree-node-reads.md), planned in
+[#753](https://github.com/dialog-db/dialog-db/pull/753).
+
+A search tree no longer reads blocks and decodes them, nor finds the node
+cache for itself. It performs three commands on the environment it is
+given, defined in `dialog_search_tree::nodes`: `Read` (the node a name
+names, from anywhere or from this replica alone), `Preload` (make a node
+cheap to read soon) and `Write` (the nodes a persist sealed, to store and
+keep readable). The environment answers however it keeps nodes. A store
+that keeps blocks (`Volatile`, `FileSystem`, `IndexedDb`) answers through
+the translation layer in the tree crate, which loads, checks and decodes;
+`Storage` routes a request to the space the catalog's subject is mounted
+as, and `Space` hands it to its archive; a peer answers from the node cache
+it holds, then its storage, then a hydration from the subject's routes, and
+keeps what it read or wrote. A store that keeps nodes in a form of its own
+implements the three commands and is reached the same way.
+
+What this changes for you:
+
+- A tree operation's environment bound is `Env: Nodes<Key, Value>`
+  (`Provider<nodes::Read<Key, Value>> + Provider<nodes::Preload<Key,
+  Value>> + ConditionalSync`) instead of `Provider<archive::Load> + Holds +
+  ConditionalSync` (and `+ Provider<archive::Get>` where a difference was
+  computed). `Holds`, `Load` and `Get` are no longer asked of a tree's
+  environment. An artifact tree's environment is `ArtifactNodes`, and one
+  that persists is `ArtifactWrites` too (`dialog_artifacts::tree`, with
+  `ArtifactRead`, `ArtifactPreload`, `ArtifactWrite` and `ArtifactNode` as
+  the concrete types).
+- `TransientTree::persist(delta)`, `HitchhikerTree::persist(delta)`,
+  `HitchhikerTree::persist_mut(delta)` and `Node::into_link(delta,
+  manifest)` take no environment and no cache, and the delta they fill is
+  a `Delta<Blake3Hash, PersistentNode<Key, Value>>`: the sealed nodes, not
+  their blocks. A persist keeps nothing in any cache; the environment keeps
+  the nodes when the commit performs `Write`. `ArchiveDelta::nodes()`
+  replaces `blocks()`, `node(hash)` and `flush_nodes()` are new, and
+  `block(hash)` and `flush_blocks()` still hand out blocks to a caller that
+  ships them. A batch that reads a node it sealed before the flush gets
+  the staged node back from its `DeltaOverlay`.
+- `Accessor::new(env, catalog)` asks nothing of the environment;
+  `Accessor::cache`, `cached` and `keeps` are gone, and `load_node` needs
+  `Env: Nodes<Key, Value>`.
+- An environment that answers `Load` and holds handles answers the node
+  requests through `dialog_search_tree::reads_nodes_through_blocks!` and
+  `writes_nodes_through_blocks!`; one with a store beneath it and a
+  hydration uses `dialog_repository::read_node_or_hydrate`,
+  `preload_node_or_hydrate` and `write_nodes`. `Peer`, `AccessEnv`, the
+  query session, `DeltaOverlay`, `Counting`, `Metered`, `Storage`, `Space`
+  and the three stores answer them; `PeerSpace` requires them of a space.
+- A difference's boundary side reads locally through the node layer
+  instead of performing `Get`: the environment's cache is consulted, which
+  changes no answer, since a scope's cache holds only what its archive has
+  produced or a successful write stored.
+- The query session no longer decodes and caches the blocks it loads; a
+  node read through it reaches the peer's cache. An integration opens its
+  read-ahead window once per batch of pending changes instead of when a
+  path misses the cache, since nothing outside the environment can tell.
+- The node cache is found by the environment's provider on every node
+  read (`NodeCache::of`), where the tree found it once per operation; the
+  design topic's journal records what that cost under `dialog-perf`.
+
+Why: the tree was written before the capability model and only partly
+moved onto it, so what it needed from the world was not expressed as
+capabilities. It performed `Load` for bytes and then did a provider's work
+itself: found a cache through a lookup that could come back empty,
+checked, decoded and kept nodes, while other code kept them again its own
+way. A store that keeps nodes in a form of its own (the single-file
+archive of #733) could only reach the tree through a side channel. With
+nodes as the tree's requests, each concern sits with whoever owns it, and
+a store's byte representation is not the tree's concern.
+
 ### A file store's write lock is never taken by two writers at once
 
 [#741](https://github.com/dialog-db/dialog-db/pull/741), on [#723](https://github.com/dialog-db/dialog-db/pull/723)

@@ -40,6 +40,7 @@
 
 use crate::rules::transient_attr;
 use crate::{Branch, CommitError, RemoteSite, Revision, Transient};
+use dialog_artifacts::tree::{ArtifactNodes, ArtifactWrites};
 use dialog_artifacts::{ArtifactSelector, Entity, Pick, Relation as ArtifactsRelation, Value};
 use dialog_capability::{Fork, Provider};
 use dialog_common::{ConditionalSync, Holds};
@@ -139,11 +140,14 @@ impl UpgradeRules<'_> {
             + Provider<BlobRead>
             + Provider<Put>
             + Provider<Import>
+            + ArtifactWrites
             + Provider<Resolve>
             + Provider<Publish>
             + Provider<Identify>
             + Provider<Attest>
             + Provider<ArchiveLoad>
+            + ArtifactWrites
+            + ArtifactNodes
             + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>

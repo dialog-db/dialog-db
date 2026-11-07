@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
+use dialog_artifacts::tree::{ArtifactPreload, ArtifactRead, ArtifactWrite};
 use dialog_capability::{Capability, Command, Provider};
 use dialog_common::{Buffer, ConditionalSend, ConditionalSync, Held, Holds};
 use dialog_effects::archive::prelude::{ImportExt as _, PutExt as _};
@@ -108,10 +109,37 @@ where
     C: Command + 'static,
     C::Input: ConditionalSend + 'static,
     C::Output: 'static,
-    Env: Provider<C> + ConditionalSync,
+    Env: Provider<C> + Provider<Load> + Provider<Import> + Holds + ConditionalSync,
     M: Meter,
 {
     async fn execute(&self, input: C::Input) -> C::Output {
+        // A node request is answered here, through this wrapper's own
+        // loads and imports, so every block a tree reads or writes is
+        // metered as the read or write it is.
+        let mut input = Some(input);
+        let slot = &mut input as &mut dyn Any;
+        fn answered<C: Command>(output: impl Any) -> C::Output
+        where
+            C::Output: 'static,
+        {
+            let mut output = Some(output);
+            (&mut output as &mut dyn Any)
+                .downcast_mut::<Option<C::Output>>()
+                .and_then(Option::take)
+                .expect("a request answers with its own output")
+        }
+        if let Some(read) = slot.downcast_mut::<Option<ArtifactRead>>() {
+            let read = read.take().expect("the input is taken once");
+            return answered::<C>(read.through_held_blocks(self).await);
+        } else if let Some(preload) = slot.downcast_mut::<Option<ArtifactPreload>>() {
+            let preload = preload.take().expect("the input is taken once");
+            preload.through_held_blocks(self).await;
+            return answered::<C>(());
+        } else if let Some(write) = slot.downcast_mut::<Option<ArtifactWrite>>() {
+            let write = write.take().expect("the input is taken once");
+            return answered::<C>(write.through_held_blocks(self).await);
+        }
+        let input = input.expect("the input is taken only by a node request");
         // Archive effects are told apart by type: the blanket impl is what
         // lets every other effect pass through, so the few this meters are
         // recognized at run time rather than by their own impls.
@@ -127,7 +155,7 @@ where
         // have it from wherever the env reaches it: the env answers that
         // beneath this wrapper, so the load is metered as its read.
         let reads = input_of.is::<Capability<Get>>() || input_of.is::<Load>();
-        let output = self.inner.execute(input).await;
+        let output = Provider::<C>::execute(&self.inner, input).await;
         if reads {
             let output_of = &output as &dyn Any;
             if let Some(Ok(Some(block))) =

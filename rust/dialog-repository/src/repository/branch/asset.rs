@@ -44,6 +44,8 @@ use crate::repository::archive::erased;
 use crate::repository::archive::write_blob;
 use crate::repository::source::SourceRef;
 use crate::{Branch, CommitError, Index, Snapshot};
+use dialog_artifacts::tree::ArtifactNodes;
+use dialog_artifacts::tree::ArtifactWrites;
 use dialog_artifacts::{Asset, AssetChange, BlobIndexExt as _, Instruction};
 use dialog_capability::Provider;
 use dialog_common::{Blake3Hash, Blake3Hash as NodeHash, ConditionalSend, ConditionalSync};
@@ -160,6 +162,8 @@ where
         + Provider<Put>
         + Provider<Resolve>
         + Provider<ArchiveLoad>
+        + ArtifactWrites
+        + ArtifactNodes
         + Provider<BlobLoad>
         + dialog_common::Holds
         + ConditionalSync
@@ -206,6 +210,8 @@ where
         + Provider<Put>
         + Provider<Resolve>
         + Provider<ArchiveLoad>
+        + ArtifactWrites
+        + ArtifactNodes
         + Provider<BlobLoad>
         + dialog_common::Holds
         + ConditionalSync
@@ -267,6 +273,8 @@ where
         + Provider<Put>
         + Provider<Resolve>
         + Provider<ArchiveLoad>
+        + ArtifactWrites
+        + ArtifactNodes
         + Provider<BlobLoad>
         + dialog_common::Holds
         + ConditionalSync

@@ -6,6 +6,8 @@
 #[cfg(target_arch = "wasm32")]
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 #[cfg(not(feature = "web-integration-tests"))]
+use dialog_artifacts::tree::{ArtifactPreload, ArtifactRead, ArtifactWrite};
+#[cfg(not(feature = "web-integration-tests"))]
 use dialog_effects::archive::Load as ArchiveLoad;
 #[cfg(not(feature = "web-integration-tests"))]
 use dialog_effects::archive::prelude::CatalogScope;
@@ -2529,6 +2531,9 @@ delegate_provider!(
     dialog_effects::blob::Import,
     ArchiveLoad,
     BlobLoad,
+    ArtifactRead,
+    ArtifactPreload,
+    ArtifactWrite,
     Fork<RemoteSite, dialog_effects::archive::Get>,
     Fork<RemoteSite, dialog_effects::archive::Put>,
     Fork<RemoteSite, dialog_effects::memory::Resolve>,

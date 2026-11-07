@@ -16,6 +16,7 @@
 
 use super::{Mode, Peer};
 use core::fmt::Display;
+use dialog_artifacts::tree::{ArtifactNodes, ArtifactWrites};
 use dialog_capability::{Capability, Fork, Policy, Provider, Subject};
 use dialog_common::Blake3Hash;
 use dialog_common::{ConditionalSend, ConditionalSync};
@@ -47,12 +48,15 @@ pub trait BranchEnv:
     + Provider<BlobImport>
     + Provider<Put>
     + Provider<Import>
+    + ArtifactWrites
     + Provider<Resolve>
     + Provider<Publish>
     + Provider<Retract>
     + Provider<Identify>
     + Provider<Attest>
     + Provider<ArchiveLoad>
+    + ArtifactWrites
+    + ArtifactNodes
     + Provider<BlobLoad>
     + Provider<dialog_artifacts::Preload>
     + Provider<dialog_artifacts::Speculation>
@@ -68,12 +72,15 @@ impl<T> BranchEnv for T where
         + Provider<BlobImport>
         + Provider<Put>
         + Provider<Import>
+        + ArtifactWrites
         + Provider<Resolve>
         + Provider<Publish>
         + Provider<Retract>
         + Provider<Identify>
         + Provider<Attest>
         + Provider<ArchiveLoad>
+        + ArtifactWrites
+        + ArtifactNodes
         + Provider<BlobLoad>
         + Provider<dialog_artifacts::Preload>
         + Provider<dialog_artifacts::Speculation>

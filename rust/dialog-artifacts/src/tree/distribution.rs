@@ -88,7 +88,7 @@ pub async fn capture<Env>(
     env: &Env,
 ) -> Result<Vec<NodeStat>, DialogArtifactsError>
 where
-    Env: Provider<archive::Load> + Holds + ConditionalSync,
+    Env: ArtifactNodes + ConditionalSync,
 {
     let mut stats: Vec<(usize, NodeStat)> = Vec::new();
     if root == dialog_common::NULL_BLAKE3_HASH.as_bytes() {
@@ -409,6 +409,8 @@ mod tests {
             load.perform(&self.blocks).await
         }
     }
+
+    dialog_search_tree::reads_nodes_through_blocks!(Impostor);
 
     /// A store that answers with a well-formed node that is not the one
     /// asked for is refused: capture measures the tree it was asked about
