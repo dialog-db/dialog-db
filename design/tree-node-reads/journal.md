@@ -218,3 +218,19 @@ its use is known. "Without hydrating" (export, push's local read) is not
 yet answered. Noted for Design: whether derived values (a piece summary)
 ride with the node.
 
+## 2026-11-07, Delimiting: three operations, and a fourth unaccounted for
+
+**Asked.** Should the optimistic read be a third thing a node request can
+say? Answer as given: the operations are read a local node, read a node
+from anywhere, and preload: three distinct operations, all needed.
+
+**Learned.** The maintainer's three cover hydrating reads, local reads and
+read-ahead. The optimistic read is not among them and is not a local read:
+a local read may wait on this replica's storage, the optimistic one must
+not wait at all. The three as stated and the optimistic read cannot both
+be the whole list: either it folds into one of them, is a fourth, or the
+write path stops using it.
+
+**Decided.** The three operations are adopted. The optimistic read is
+open, put to the maintainer.
+
