@@ -4,8 +4,8 @@
 
 |  | Understanding | Activity |
 |---|---|---|
-| **Status** | Problem stated: no-server, offline, converge without lost edits; last writer wins per field loses one side. Two earlier spikes known, one more said to exist in unmerged PRs. Write amplification is the cost that sank the first spike, and it applies beyond it. | Directing. |
-| **Agenda** | The bar for acceptable write amplification (was being answered: "a rough measure should be if..."). A second, different use case. The spikes in notes and unmerged PRs, and the tradeoff that sank each. Whether evaluators named text as the dealbreaker. | Set the bar, then decide whether amplification is a research topic. Fill the matrix from the spikes. |
+| **Status** | Problem stated. Requirements: converge without loss, no server, offline, paragraph size, within 2× of a text CRDT library on disk and sync bytes. Six columns, separated mostly by where changes travel. Cost per commit is a root node, not a path. | Directing; matrix mostly `?`. |
+| **Agenda** | Which pieces of Dialog a native text CRDT would reuse. How libraries serve "changes since a version" and what the remote must understand. Cost of per-edit commits against the 2× bar. | Survey (research/text-crdt-survey.md), then the cost measurement (research/text-write-cost.md), then fill the matrix. Next sitting opens with the reuse question. |
 
 ## 2026-11-06, Describing: opening the topic
 
@@ -60,3 +60,33 @@ have it" says unbuilt, not unworkable.
 **Decided.** Problem statement (top story). Do not name specific CRDT
 libraries. Not decided: the bar for acceptable growth, which a
 measurement needs before it starts.
+
+## 2026-11-06, Directing: bar, columns, challenges (by voice)
+
+**Asked.** What bar for growth? Within 2× of a text CRDT library on the
+same edit history, on disk and on sync bytes. Which history? Published
+editing traces, including concurrent ones, so merge correctness is checked
+too. Interleaving: nice to have. A third spike? No. Is a template with the
+library's own sync legitimate? Yes, though reusing Dialog's sync is
+preferable to two engines. Is the key plus side lane one idea? No: it
+split into where changes travel (Dialog facts, Dialog's sync outside the
+tree, another engine) and whether Dialog can read the text. Reading the
+current text through a query: nice to have. Library agnostic: nice to
+have; one library done well is enough. Built in: a hunch that Dialog
+already does much of what a CRDT does.
+
+**Learned.** My claim that each commit rewrites a spine was wrong: with
+the hitchhiker buffer a small commit writes the root and its buffer
+(`notes/novelty-buffer.md`); the single-file note's wording predates it.
+Doc as value was shelved for the core changes it needed as much as for
+cost, and shelved, not refuted. Partial replication holds per database,
+not per document: a peer may fetch a whole document first, which removes
+the reason ordered relations accepted interleaving. Evaluators were
+building collaborative editors, so text was the dealbreaker; that claim
+became a fact.
+
+**Decided.** Six columns (direction.md). Two research topics: a survey of
+text CRDT libraries and papers on the matrix's rows (the list is in
+research/text-crdt-survey.md); and
+the write-cost measurement against the 2× bar. Not decided: the
+direction; it waits on both.

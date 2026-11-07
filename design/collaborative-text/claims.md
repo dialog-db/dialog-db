@@ -3,16 +3,24 @@
 | claim | kind | backing | status |
 |---|---|---|---|
 | builders ask for collaborative text editing | fact | three apps: a Tonk document editor, an Obsidian-style notebook, an Observable-style playground (journal, 2026-11-06) | holds |
-| more developers evaluated Dialog and passed on it for lack of a text answer, picking a text CRDT library | opinion | maintainer, 2026-11-06; whether text was their stated dealbreaker, and whether text was core or one feature, is not known | - |
+| more developers evaluated Dialog and passed for lack of a text answer, picking a text CRDT library | fact | maintainer, 2026-11-06: they were building collaborative editors, so text was the whole product | holds |
 | some developers would use a text CRDT library together with Dialog if we said how | opinion | maintainer, 2026-11-06; no specific request cited yet | - |
 | concurrent writes to one text field resolve by last writer wins, losing one edit | fact | maintainer, 2026-11-06; ? link the code or a test | holds |
 | the conflict unit is one field; splitting text into per-paragraph fields limits the loss to one paragraph | fact | maintainer's playground design, 2026-11-06 | holds |
 | "dropped" (editor) and "overridden" (playground) are the same mechanism | hypothesis | confirmed if the editor also stores text in fields under last writer wins | open |
-| every commit supersedes a spine of search tree nodes and nothing reclaims the old ones | fact | `research/single-file-format.md`: replay ~9× live size; a Tonk replica ~2 GB after ~1000 commits | holds |
+| a small commit writes a new root with its buffer, not a whole path; deeper nodes are rewritten only when a buffer overflows | fact | `notes/novelty-buffer.md`, maintainer 2026-11-06 | holds |
+| every commit supersedes a spine of nodes | fact | `research/single-file-format.md` | refuted as worded: corrected by the hitchhiker buffer above; superseded nodes are still never reclaimed |
+| superseded nodes are never reclaimed, so a replica grows with commits | fact | `research/single-file-format.md`: a Tonk replica ~2 GB after ~1000 commits | holds |
 | a timer updating every tick grew a replica to gigabytes in a day or two | fact | maintainer, 2026-11-06, observed; ? link the case | holds |
-| a CRDT document stored as a value is copied whole on every edit | fact | by construction | holds |
-| storing a CRDT document as a value is too costly to be viable | opinion | maintainer, 2026-11-06, napkin math; worth measuring (maintainer) | - |
-| a built-in text CRDT writing each keystroke as facts pays the spine cost per keystroke too | hypothesis | follows if each edit is a commit; refuted if edits batch into fewer commits | open |
-| batching edits (per pause, per second) cuts write amplification enough to matter | hypothesis | measure growth per hour of typing with and without batching; bar not set | open |
-| key plus side lane is worth testing | opinion | maintainer, 2026-11-06; untested because the engineering is large and mostly outside Dialog's domain | - |
-| fractional-index ordered relations interleave concurrent runs, so are wrong for text | fact | `notes/ordered-relations.md`, "Out of scope / accepted tradeoffs" | holds |
+| a CRDT document stored as a value is copied whole on every change | fact | by construction | holds |
+| doc as value was shelved for the changes it needed in the core and its cost, to explore alternatives; not rejected | fact | maintainer, 2026-11-06 | holds |
+| doc as value is too costly to be viable | opinion | maintainer, 2026-11-06, napkin math; to be measured with the others | - |
+| a per-edit commit, through any column that routes changes through facts, lands within 2× of a text CRDT library | hypothesis | research/text-write-cost.md; refuted beyond 2× on disk or sync bytes | open |
+| batching edits (per pause, per second) cuts the cost enough to matter | hypothesis | same measurement, with and without batching | open |
+| "changes since a version" can be served by a remote that holds an opaque append-only log and does not understand the CRDT | hypothesis | research/text-crdt-survey.md: how each library computes and applies changes since a version | open |
+| Dialog already does enough of what a text CRDT does that a native one could reuse it | hypothesis | maintainer, 2026-11-06; needs the list of pieces it would reuse, then the survey to check each | open |
+| a database is always partial, but a peer may hold a whole document before editing it | fact | maintainer, 2026-11-06 | holds |
+| with a whole document per peer, a built-in can order text without fractional indexing's interleaving | hypothesis | follows from the line above and `notes/ordered-relations.md`; checked when the built-in column gets a design | open |
+| fractional-index ordered relations interleave concurrent runs; acceptable for lists, not text | fact | `notes/ordered-relations.md`, maintainer 2026-11-06 | holds |
+| supporting one library well is enough; library agnostic is nice to have | opinion | maintainer, 2026-11-06 | - |
+| a template with a separate sync engine is a legitimate option | opinion | maintainer, 2026-11-06; preferable to avoid two sync engines | - |

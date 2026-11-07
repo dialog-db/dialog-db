@@ -52,3 +52,9 @@ runs, in the journal's "Where things stand"; they change together.
 - [Single-file format](single-file-format.md): **Building**, on
   [dialog-db/dialog-db#733](https://github.com/dialog-db/dialog-db/pull/733).
   A replica's blocks in one append-only file, every token stored once.
+- [Text CRDT survey](text-crdt-survey.md): **Exploring.** What text CRDT
+  libraries do on sync, cost, server needs, interleaving and embedding,
+  for the collaborative text design topic.
+- [Text write cost](text-write-cost.md): **Proposed.** Disk and sync bytes
+  of committing text edits to Dialog, against a text CRDT library on the
+  same editing trace; the bar is 2×.

@@ -16,8 +16,11 @@ come to Dialog, and we cannot tell them how to do it.
   builder considering a text CRDT library alongside), and the
   maintainer's Observable-style playground (concurrent editors override
   each other).
-- Earlier spikes (some in notes, some in unmerged PRs) never landed;
-  the maintainer says the tradeoffs stacked up against them.
+- Those who passed were building collaborative editors: text was the
+  whole product, so the missing answer was the dealbreaker.
+- Two earlier spikes never landed: a CRDT document stored as a value,
+  shelved for cost and for how much it changed the core; and a key with
+  the document beside Dialog, never built.
 
 "Support" is open: compose with a text CRDT library, use one from within
 Dialog, or something built in.
@@ -30,6 +33,9 @@ losing anyone's edits. Dialog resolves concurrent writes to a text field
 by last writer wins, so one edit is lost. Apps can shrink the loss by
 splitting text into smaller fields, not remove it. So developers pick a
 text CRDT library instead of Dialog.
+
+Scope: Dialog replicates partially, so a database is always partial;
+a peer may hold a whole document before editing it.
 
 ## Approach
 

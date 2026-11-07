@@ -8,7 +8,10 @@ text field loses one side.
 |---|---|---|
 | two people edit the same plain text concurrently, online or offline, no server, and both edits survive | required | |
 | text the size of a paragraph or a code cell | required | |
+| storage and sync cost within 2× of a text CRDT library on the same edit history | required | |
 | text the size of a book chapter | nice to have | |
 | rich text (bold, links) | nice to have | |
-| query and join the text with other facts (search notes, link a paragraph) | nice to have | |
-| ? a second, different use case | open | |
+| concurrent runs typed at one spot do not interleave | nice to have | |
+| a query returns a document's current text as a value | nice to have | |
+| search or join inside the text (find a note, link a paragraph) | nice to have | |
+| bring whichever text CRDT library you use | nice to have | |
