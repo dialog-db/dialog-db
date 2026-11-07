@@ -120,3 +120,22 @@ time beyond comparing hashes: the node type holds it. Decoding (3) and
 caching (4) belong to providers; the rest not yet answered. Open: whether a
 store may establish the invariant under a contract, or only the type may.
 
+## 2026-11-07, Delimiting: the invariant held by the type, rows included
+
+**Asked.** May a store establish the hash invariant under a contract, or
+only the type? Answer as given: no decoding, not even for the single file;
+it has pointers to the tokens a node is made of and can hash the node by
+streaming its bytes as it reads them.
+
+**Learned.** The bytes a node's hash is over are the tree's encoding of it,
+not its tokens end to end, so streaming them is running the encoder into
+the hasher: no decoding, no allocation, the encoder's CPU on a miss. Making
+the hash cover tokens as stored would change node identity across
+replicas, out of scope.
+
+**Decided.** Only the type holds the hash invariant. A node made from rows
+gets its hash by streaming its encoding into the hasher, once, when it is
+made; the `unsafe` contract (`NodeRows` vouching for its hash) goes. This
+rests on an open hypothesis, that the hashing is cheap next to a cold
+read; the bench measures it.
+
