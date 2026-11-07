@@ -30,3 +30,7 @@ provider that served it vouches for. What tree code identifies a node by.
 content and never supplied. Asking for it may cost materializing the
 block (a node read from rows); comparing it with the name is verifying.
 
+**spine**: the nodes on the paths a write has opened, held in memory and
+edited in place until `persist` seals them. The environment keeps a
+branch's live spine between commits while a handle is open.
+

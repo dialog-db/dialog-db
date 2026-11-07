@@ -274,3 +274,25 @@ environment does not own: the page cache, outside its budget and its
 which this strengthens. The page cache's place under "the environment is
 the cache" is on the agenda.
 
+## 2026-11-07, Delimiting: the writer's spine, and the rule for the optimistic read
+
+**Asked.** (The maintainer, unsure what the writer does.) Something
+remembered: as nodes are built, the writer can tell which path was updated,
+and a node written again on the same path is replaced, so everything is
+flushed at once. And the rule: the write path must not get worse; drop the
+operation if that holds, reshape it if it does not.
+
+**Learned.** The memory is right and is a separate mechanism: the edit
+spine replaces nodes in place within a batch, `persist` adds only the
+nodes the batch created to the delta, flushed once; the environment holds
+a branch's live spine between commits; `persist` fills the node cache with
+what it seals. The memory-only reads sit inside the forced-run check and
+can go without touching the spine: one becomes a returned value (cheaper),
+the other an ordinary read (cost to measure).
+
+**Decided.** The optimistic read is dropped, conditionally: if the
+ordinary read keeps the write path within the perf gate, nothing replaces
+it; if not, a batch read over a run's pieces is the operation to add
+instead. Persist's two dealings (the blocks it hands over, the nodes it
+keeps) are next.
+
