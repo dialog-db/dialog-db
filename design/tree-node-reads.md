@@ -1,6 +1,6 @@
 # The search tree's concerns are not expressed as capabilities
 
-Phase: **Delimiting.** See the [design index](README.md) for what the
+Phase: **Building.** See the [design index](README.md) for what the
 phases mean, and the [journal](tree-node-reads/journal.md) for where the
 topic stands.
 
@@ -54,3 +54,30 @@ has kept falling to the maintainer.
 
 *Proposed scope:* the search tree's concerns. The formula cache and the
 repository's caches, kept through `Holds` the same way, are sibling topics.
+
+## Approach
+
+Decided by the maintainer, 2026-11-07, as the design the capability model
+always called for: the tree talks in nodes, through capabilities it
+performs on the environment, and every concern beside that belongs to the
+providers the environment is composed of.
+
+- **Layers.** A block layer reads and writes blocks as bytes (`fs`,
+  remotes, the network). A translation layer turns blocks into nodes and
+  nodes into blocks. The tree talks to a node layer. A store that keeps
+  nodes in a form of its own (the single file) answers at the node layer
+  directly, and still answers block requests by encoding; what it lacks
+  arrives from a remote as a block, through translation.
+- **Operations the tree performs:** read a node from anywhere; read a node
+  locally (never hydrated); preload nodes; write the nodes a persist made.
+  The memory-only reads go: one becomes a value the forced-run check
+  returns, the other an ordinary read (a batch read is added only if that
+  costs the write path).
+- **Caching** is a provider layer answering node reads and keeping written
+  nodes, forgetting them if writing fails. No `Holds` lookup in the tree,
+  no `NodeSource`.
+- **A node's hash** is computed from its content and never supplied; a
+  node read is named by the hash it was asked for, and the consumer
+  chooses to trust or verify.
+- **The commit** still orders its writes: spilled values, nodes, the head.
+

@@ -4,7 +4,7 @@
 
 |  | Understanding | Activity |
 |---|---|---|
-| **Status** | *What do we know?* How a tree reads a node on main and on #733. The maintainer's objective: the environment is where every cache lives, so it can be passed, evicted and reused across sessions, and nothing caches or skips caching elsewhere. Main moved toward that in three steps (#730, #735, #742), but the cache is still optional (an environment that keeps nothing reads uncached, silently), and it is reached from two places (the tree's `Accessor`, the query session's `Load` provider) while `Load` itself is uncached. | *Where are we at?* Delimiting: the cause is named (the tree predates the capability model and its transition is partial, so its concerns are not expressed as capabilities); the problem statement is being cut to scope. |
+| **Status** | *What do we know?* How a tree reads a node on main and on #733. The maintainer's objective: the environment is where every cache lives, so it can be passed, evicted and reused across sessions, and nothing caches or skips caching elsewhere. Main moved toward that in three steps (#730, #735, #742), but the cache is still optional (an environment that keeps nothing reads uncached, silently), and it is reached from two places (the tree's `Accessor`, the query session's `Load` provider) while `Load` itself is uncached. | *Where are we at?* Building (decided by the maintainer; see the last entry). Was Delimiting: the cause is named (the tree predates the capability model and its transition is partial, so its concerns are not expressed as capabilities); the problem statement is being cut to scope. |
 | **Agenda** | *What do we need to know?* Whether the tree's remaining dealings are its concerns or a provider's: memory-only reads, read-ahead, reads without hydration (5-7), and persist's blocks and kept nodes (8-9); whether the scope (the tree only) is accepted. Open hypotheses: policies as requests, the per-read cost, the `hash()` inventory, hashing a rows node on demand. For Design: the requested name and the actual hash as one type or two. Whether a mapped file's page cache, which the environment cannot own or evict, is an accepted exception to "the environment is the cache". | *Where are we going?* Delimiting, then Direction: use cases from the tree's concerns, and approaches to express them. |
 
 ## 2026-11-07, Describing: what reading a node involves today
@@ -352,4 +352,22 @@ node requests answered by a caching layer, then by a store's node layer
 where it has one (the single file) or by translation over the block layer
 (`fs`, remotes). Not yet decided: the problem statement is still a draft,
 and Direction starts from an accepted one.
+
+## 2026-11-07, Building: decided by the maintainer
+
+**Asked.** Whether the drafted problem statement and scope are accepted.
+Answer as given: the maintainer does not want the full design process for
+this: the design was always meant to be this way and did not end up so
+only because an implementation did not follow instructions; stop
+debating and build it as described.
+
+**Learned.** Nothing new about the problem.
+
+**Decided.** The approach in the top story, as the maintainer described
+it, is decided on the maintainer's judgement, not on a completed matrix:
+the problem statement stays a draft and no Direction matrix was made.
+Building starts now. Open hypotheses carried into the build: the
+`hash()` inventory, the ordinary read in the forced-run check (perf gate),
+hashing a rows node on demand. The page cache of a mapped file is left
+open.
 
