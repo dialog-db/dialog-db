@@ -161,7 +161,8 @@ crc32 | body`:
 - **Rows.** As in the spike: per leaf entry, the form and the token ids of
   entity, attribute, value and datum; per index link, the separator, the
   child's node id and the scale; per buffered op, an entry with no datum
-  for a retraction. Each column is zigzag-delta varints; against a
+  for a retraction. Each column is zigzag-delta bijou64 integers
+  (one encoding per number, as the tree's nodes use); against a
   predecessor a section is copy runs and literal rows.
 - **Predecessor.** The latest node of the same kind that starts at the same
   first key. The store needs nothing from the tree to find it; on both
@@ -246,7 +247,7 @@ What the tree reads, and where from, when the archive serves a node:
   holds it is served.
 - **Children** are named by hash, read from the child's frame header in
   the file, or from a hash token for a child the file holds no frame of.
-- **Rows** are not read in place. A frame's ids are varint columns written
+- **Rows** are not read in place. A frame's ids are bijou64 columns written
   against its predecessor, so serving a node decodes its rows once
   (through a cache of decoded rows) and records where each part is: about
   70 bytes an entry, the node's footprint in a node cache. Fixed-width rows

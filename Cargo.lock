@@ -1287,6 +1287,7 @@ version = "0.4.0-rc.7"
 dependencies = [
  "anyhow",
  "async-trait",
+ "bijoux",
  "crc32fast",
  "dialog-artifacts",
  "dialog-capability",

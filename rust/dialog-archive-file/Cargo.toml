@@ -21,6 +21,7 @@ dialog-common = { workspace = true }
 dialog-effects = { workspace = true }
 dialog-search-tree = { workspace = true }
 dialog-storage = { workspace = true }
+bijoux = { workspace = true }
 hashbrown = { workspace = true }
 memmap2 = { workspace = true }
 parking_lot = { workspace = true }

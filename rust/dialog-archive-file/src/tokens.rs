@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use hashbrown::{DefaultHashBuilder, HashTable};
 use memmap2::Mmap;
 
-use crate::rows::{Reader, invalid, put_varint};
+use crate::rows::{Reader, invalid, put_bijou};
 
 /// The alignment of every token's bytes in the file.
 pub(crate) const ALIGN: u64 = 16;
@@ -169,10 +169,10 @@ impl Tokens {
     pub fn take_pending(&self, body_offset: u64) -> (Vec<u8>, Vec<(usize, u32)>) {
         let mut body = Vec::with_capacity(self.pending.len() + 20 * self.pending() + 8);
         let mut places = Vec::with_capacity(self.pending());
-        put_varint(&mut body, self.pending() as u64);
+        put_bijou(&mut body, self.pending() as u64);
         for id in self.extents.len()..self.len() {
             let token = self.get(id as u32).expect("a pending token");
-            put_varint(&mut body, token.len() as u64);
+            put_bijou(&mut body, token.len() as u64);
             let after = body_offset + body.len() as u64 + 1;
             let pad = (ALIGN - after % ALIGN) % ALIGN;
             body.push(pad as u8);
@@ -207,9 +207,9 @@ impl Tokens {
     /// holds, in order.
     pub fn read_record(&mut self, body: &[u8], body_offset: u64) -> io::Result<()> {
         let mut reader = Reader::new(body);
-        let count = reader.varint()?;
+        let count = reader.bijou()?;
         for _ in 0..count {
-            let len = reader.varint()? as usize;
+            let len = reader.bijou()? as usize;
             let pad = reader.byte()? as usize;
             reader.take(pad)?;
             let at = reader.position();

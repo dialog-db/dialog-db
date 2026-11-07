@@ -18,7 +18,7 @@ use parking_lot::{Mutex, RwLock};
 
 use crate::file::{FOOTER, HEADER, Kind, MAGIC, put_record, read_at, read_record, write_at};
 use crate::node::{TreeNode, realize, rows_of, tree_node};
-use crate::rows::{Reader, Rows, get_rows, invalid, put_rows, put_varint};
+use crate::rows::{Reader, Rows, get_rows, invalid, put_bijou, put_rows};
 use crate::tokens::Tokens;
 
 mod served;
@@ -183,14 +183,14 @@ impl FrameHeader {
         put_catalog(out, &self.catalog)?;
         out.extend_from_slice(self.hash.as_bytes());
         out.push(self.kind);
-        put_varint(out, self.base.map_or(0, |base| base as u64 + 1));
-        put_varint(out, self.manifest as u64);
+        put_bijou(out, self.base.map_or(0, |base| base as u64 + 1));
+        put_bijou(out, self.manifest as u64);
         match self.lineage {
             None => out.push(0),
             Some(first) => {
                 out.push(1);
                 for id in first {
-                    put_varint(out, id as u64);
+                    put_bijou(out, id as u64);
                 }
             }
         }
@@ -201,7 +201,7 @@ impl FrameHeader {
         let catalog = get_catalog(reader)?;
         let hash = Blake3Hash::from(<[u8; 32]>::try_from(reader.take(32)?).expect("32 bytes"));
         let kind = reader.byte()?;
-        let base = match reader.varint()? {
+        let base = match reader.bijou()? {
             0 => None,
             base => Some(u32::try_from(base - 1).map_err(|_| invalid("a node id over 32 bits"))?),
         };
@@ -530,34 +530,34 @@ fn index_record(state: &mut State, kind: Kind, offset: u64, body: &[u8]) -> io::
 /// every whole block.
 fn checkpoint_body(state: &State) -> io::Result<Vec<u8>> {
     let mut body = Vec::new();
-    put_varint(&mut body, state.catalogs.len() as u64);
+    put_bijou(&mut body, state.catalogs.len() as u64);
     for catalog in &state.catalogs {
         put_catalog(&mut body, catalog)?;
     }
     // Where every token is: tokens are written in id order, so each starts
     // after the one before.
     let extents = state.tokens.extents();
-    put_varint(&mut body, extents.len() as u64);
+    put_bijou(&mut body, extents.len() as u64);
     let mut previous = 0;
     for (offset, len) in extents {
-        put_varint(&mut body, offset - previous);
-        put_varint(&mut body, *len as u64);
+        put_bijou(&mut body, offset - previous);
+        put_bijou(&mut body, *len as u64);
         previous = *offset;
     }
-    put_varint(&mut body, state.nodes.len() as u64);
+    put_bijou(&mut body, state.nodes.len() as u64);
     for node in &state.nodes {
         body.extend_from_slice(node.hash.as_bytes());
         body.extend_from_slice(&node.extent.offset.to_le_bytes());
         body.extend_from_slice(&node.extent.len.to_le_bytes());
         body.push(node.depth);
-        put_varint(&mut body, node.catalog as u64);
+        put_bijou(&mut body, node.catalog as u64);
         body.push(node.kind);
         match node.lineage {
             None => body.push(0),
             Some(first) => {
                 body.push(1);
                 for id in first {
-                    put_varint(&mut body, id as u64);
+                    put_bijou(&mut body, id as u64);
                 }
             }
         }
@@ -583,25 +583,25 @@ fn read_checkpoint(len: u64, body: &[u8]) -> io::Result<State> {
         |reader: &mut Reader, n: usize| -> io::Result<Vec<u8>> { Ok(reader.take(n)?.to_vec()) };
     let u64_of = |bytes: Vec<u8>| u64::from_le_bytes(bytes.try_into().expect("8 bytes"));
     let u32_of = |bytes: Vec<u8>| u32::from_le_bytes(bytes.try_into().expect("4 bytes"));
-    for _ in 0..reader.varint()? {
+    for _ in 0..reader.bijou()? {
         let catalog = get_catalog(&mut reader)?;
         state.catalogs.push(catalog);
     }
     let mut offset = 0u64;
-    for _ in 0..reader.varint()? {
-        offset += reader.varint()?;
+    for _ in 0..reader.bijou()? {
+        offset += reader.bijou()?;
         let size = reader.u32()?;
         if offset + size as u64 > len {
             return Err(invalid("a checkpoint names a token past the file's end"));
         }
         state.tokens.push(offset, size);
     }
-    for _ in 0..reader.varint()? {
+    for _ in 0..reader.bijou()? {
         let hash = Blake3Hash::from(<[u8; 32]>::try_from(reader.take(32)?).expect("32 bytes"));
         let offset = u64_of(fixed(&mut reader, 8)?);
         let size = u32_of(fixed(&mut reader, 4)?);
         let depth = reader.byte()?;
-        let catalog = u16::try_from(reader.varint()?).map_err(|_| invalid("a catalog index"))?;
+        let catalog = u16::try_from(reader.bijou()?).map_err(|_| invalid("a catalog index"))?;
         let kind = reader.byte()?;
         let lineage = match reader.byte()? {
             0 => None,
@@ -1746,7 +1746,7 @@ mod offsets_instead_of_ids {
                 })
                 .collect()
         };
-        // Zigzag-delta varint bytes of every column of `rows`, written as
+        // Zigzag-delta bijou64 bytes of every column of `rows`, written as
         // literals: the width of the ids against the width of the offsets.
         let width = |rows: &[Vec<[u64; 6]>]| -> usize {
             let mut bytes = 0;
@@ -1874,8 +1874,8 @@ mod record_breakdown {
             entry.1 += record.end() - record.offset;
             if record.kind == Kind::Tokens {
                 let mut reader = Reader::new(&record.body);
-                for _ in 0..reader.varint()? {
-                    let size = reader.varint()? as usize;
+                for _ in 0..reader.bijou()? {
+                    let size = reader.bijou()? as usize;
                     let pad = reader.byte()? as usize;
                     reader.take(pad)?;
                     reader.take(size)?;

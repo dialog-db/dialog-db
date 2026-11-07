@@ -772,6 +772,27 @@ is next: it is the one sync measure still behind.
 
 Commits: `3e39b31`.
 
+## 2026-11-07: the file's integers in bijou64
+
+**Change.** Every integer the file writes (row columns, token and frame
+records, checkpoints) is bijou64, through `bijoux`, as the tree's own
+nodes and manifest write theirs, in place of LEB128 varints: each number
+has exactly one encoding. Not bijou128: nothing the file writes is wider
+than 64 bits, and bijou128's one-byte range ends at 239 rather than 247.
+The magic number moves to `DIALOGA\x04`, so a file written before is
+refused rather than misread.
+
+**Results** (one run, six members): the file grows about 6%: member 0
+2.00 MiB against 1.88, member 1 1.62 against 1.53, the owner 0.98
+against 0.92. bijou64 spends three bytes from 504 where LEB128 spends two
+up to 16,383, and token ids live there. Against a main run in the same
+minutes, pull 1.08, push 0.88, a command 1.03: where they were. Not yet
+interleaved.
+
+**Decision.** Kept: one encoding per number, like the rest of dialog.
+The 6% is the price; ids could be made smaller (delta against a
+column's base, or dense per-node renumbering) if it matters.
+
 ## How to reproduce
 
 ```sh
