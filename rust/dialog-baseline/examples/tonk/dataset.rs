@@ -90,6 +90,9 @@ pub enum Phase {
     Writes,
     /// What another replica writes, for a run to pull.
     Remote,
+    /// One member's commands in a row once everyone has caught up, with no
+    /// pull between: what a command costs with its caches warm.
+    Steady,
 }
 
 /// One change a commit makes.

@@ -196,6 +196,7 @@ mod native {
         ];
         lines.extend(generator.space(&shape, scale)?);
         lines.extend(generator.week(&shape)?);
+        lines.extend(generator.steady(&shape)?);
         Ok(lines)
     }
 

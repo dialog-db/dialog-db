@@ -23,6 +23,8 @@ pub const MEMBERS: u32 = 6;
 
 /// How many commands the measured week holds.
 pub const WEEK: usize = 300;
+/// How many of each kind of command the steady phase sends.
+pub const STEADY: usize = 20;
 
 /// The concepts a dataset carries, by name, as descriptor JSON.
 pub type Concepts = BTreeMap<String, serde_json::Value>;
@@ -616,6 +618,36 @@ impl<'a> Generator<'a> {
         for _ in 0..shape.memos * scale {
             lines.push(self.memo(Phase::Setup, shape.mentions_per_memo)?);
         }
+        Ok(lines)
+    }
+
+    /// After the week, the first member's commands in a row: [`STEADY`]
+    /// of each kind, back to back, with no sync between.
+    pub fn steady(&mut self, shape: &Shape) -> anyhow::Result<Vec<Line>> {
+        let mut lines = Vec::new();
+        self.turn = Some(0);
+        for kind in [
+            "issue-create",
+            "set-status",
+            "add-label",
+            "set-assignee",
+            "comment",
+            "memo",
+        ] {
+            for _ in 0..STEADY {
+                let issue = self
+                    .pick(&self.made.issues.clone())
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("no issue to act on"))?;
+                lines.push(match kind {
+                    "issue-create" => self.issue(Phase::Steady)?.0,
+                    "comment" => self.comment(Phase::Steady, &issue, false)?,
+                    "memo" => self.memo(Phase::Steady, shape.mentions_per_memo.max(0.5))?,
+                    change => self.change(Phase::Steady, change, &issue)?,
+                });
+            }
+        }
+        self.turn = None;
         Ok(lines)
     }
 

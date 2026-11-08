@@ -736,6 +736,37 @@ mod native {
             report.count(&format!("bytes/member-{n}"), bytes_under(&member.home));
         }
         report.count("rows/v2/issue/end", expected as u64);
+
+        // Steady: one member's commands in a row, everyone caught up and no
+        // pull between, so its rules and caches are warm.
+        for line in lines {
+            if let Line::Command {
+                phase: Phase::Steady,
+                name,
+                author,
+                changes,
+                durable,
+            } = line
+            {
+                let member = &members[*author as usize];
+                let mut transaction = member.branch.transaction();
+                transaction = transaction.dispatch(profiles.command(changes)?);
+                if !durable.is_empty() {
+                    let mut batch = Changes::new();
+                    profiles.changes(durable, &mut batch)?;
+                    transaction = transaction.integrate(batch);
+                }
+                let started = Instant::now();
+                transaction
+                    .commit()
+                    .publish()
+                    .perform(&member.operator)
+                    .await?;
+                let took = started.elapsed();
+                report.time(&format!("steady/{name}"), took);
+                report.time("steady/all", took);
+            }
+        }
         report.count("bytes/remote", bytes_under(&remote));
         report.summary();
         Ok(report)
