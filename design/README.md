@@ -59,3 +59,7 @@ Backtracking moves a topic to an earlier phase and says so in its journal.
   **Building.** The tree talks in nodes through capabilities it performs on
   the environment; caching, decoding and storage form belong to providers.
   The [plan](tree-node-reads/plan.md) is for whoever builds it.
+- [The tree and the repository name their environment](effect-handlers.md):
+  **Describing.** Whether the tree and repository should perform effects a
+  handler resumes, decoupled from the environment's type, and whether that
+  can perform as well as `Provider::execute` returning `Resume`.
