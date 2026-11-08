@@ -178,7 +178,12 @@ A body line that names a stored attribute declares it: the stored name, the prim
 
 The types used so far are `:text`, `:entity`, `:bytes`, `:natural`, `:float`, sized numbers such as `(:float 64)`, variants such as `[:todo :done]`, and the collections `(:sequence T)` and `(:dictionary T)`. A collection value is written as a record from key to element: `(notebook/entry! id:notebook/scratch is: {"N1" id:notebook/scratch/1})`.
 
-The picks are `:last`, which keeps the latest claim, `:all`, which keeps every claim, and `:top`, which keeps the highest-ranked case of a variant.
+The picks are `:last`, `:all`, `:max`, `:min` and `:top`, the last of which ranks the cases of a variant. A pick is named by an entity (`last:`, `all:` …) and is part of the attribute's identity. In dialog today it is one ordering over a cell's claims, used both ways:
+
+- **On read**, the claims of one entity and attribute are elected by the ordering, and the winner is returned. `:all` returns every claim. A query over a one-valued attribute scans, then checks each candidate against the other claims of its cell, so the pick is a second select over the claims the scan found.
+- **On write**, the claim the ordering elects, the one a read would return, is retracted beside the new value. Under `:all` a write appends and retracts nothing. So under `:max`, writing 3 over a 5 replaces the 5: the pick decides which claim concurrent writes resolve to, not that values only grow.
+
+**Proposed.** User-defined picks are user-defined orderings: a preference over two claims, by value and then by standing, which the tree and the query already run through one function. Its definition is hashed into the attribute's identity, as `:top`'s list of cases already is. A pick elects one claim; something that computes a new value from several, a sum or a count, is a rule over an `:all` attribute. Every pick but `:all` retracts on write, so only `:all` only grows: rules over it never take a conclusion back.
 
 An attribute line may also carry `layer:` (see [Layers](#layers)) and `role:`, the palette slot that a command's field fills.
 
@@ -203,7 +208,7 @@ A concept's primary need not be the entity of the attributes it reads. Read from
 (list/todo list:home todo: ?t)    ; every to-do on list:home
 ```
 
-A concept body holds no one-way formulas, so every concept can be read and written (see [Domain calls](#domain-calls) for checks and formulas that run both ways). Formulas belong in rule bodies, and also at the top of a document: in a question, in an assertion, and in a write, as `(bug! (id {…}) …)` does. A concept may not contain itself.
+A concept body holds no formulas, only [constraints](#constraints), so every concept can be read and written. Formulas belong in rule bodies, and also at the top of a document: in a question, in an assertion, and in a write, as `(bug! (id {…}) …)` does. A concept may not contain itself.
 
 A concept says what facts make it up, not how its entity is made. Construction is the call's business (below) or a rule's.
 
@@ -215,7 +220,7 @@ A concept says what facts make it up, not how its entity is made. Construction i
 (xyz.tonk ?bug title: ?t assignee: ?a)   ; reads xyz.tonk/title and xyz.tonk/assignee
 ```
 
-With nothing more said, each attribute is taken as any type and `pick: :last`. Type and pick are part of an attribute's identity, so a different type or pick is not a narrower view of the same facts but another attribute: an `xyz.tonk/title` kept with `pick: :all` is not read by this call. To name one, write the attribute line, which says type and pick where they belong, on the attribute:
+Each attribute's type is inferred: from whatever narrows its variable, such as a constraint or another call it is passed to, and on a write from the value written. Its pick is `:last` unless something says otherwise. Type and pick are part of an attribute's identity, so a different type or pick is another attribute, not a narrower view of the same facts. A writer who means a particular attribute says so, with an attribute line or a declared concept; one who says neither gets whatever the values imply:
 
 ```clj
 (concept! (bug ?b title: ?t assignee: ?a)
@@ -223,9 +228,19 @@ With nothing more said, each attribute is taken as any type and `pick: :last`. T
   (xyz.tonk/assignee ?b is: ?a as: :entity pick: :last))
 ```
 
-A domain call that writes takes each attribute's type from the value written, so a value of an unexpected type lands on another attribute rather than failing. A rule's head can be a domain call, which gives a document's answer a concept without declaring one: `(rule (my.app.found ?b title: ?t) (when (bug ?b title: ?t)))`.
+A rule's head can be a domain call, which gives a document's answer a concept without declaring one: `(rule (my.app.found ?b title: ?t) (when (bug ?b title: ?t)))`.
 
-A concept body may hold checks, such as a type check, and formulas that run in both directions, since a concept is read and written through. A formula that runs one way, such as `id`, belongs in a rule. This is the line between a concept and a rule: a concept is a view every parameter of which maps back to one attribute, as an updatable view in SQL maps each column to one base column.
+### Constraints
+
+A concept body may hold constraints. A constraint computes nothing; it holds or it does not, so it works the same whether the concept is read or written through: on a read it filters, on a write it rejects. Formulas compute, and belong in rules. The constraints are:
+
+- **type**: a variable's value is text, an entity, a number, or a case of a variant;
+- **equality**: two variables are equal, or a variable equals a constant;
+- **comparison**: less than, greater than, within a range.
+
+Negation is not a constraint, since a write could not say what it enforces, and neither is arithmetic that runs both ways, since it computes.
+
+This is the line between a concept and a rule: a concept is a view whose every parameter maps back to one attribute, as an updatable view in SQL maps each column to one base column. A rule is any view.
 
 ### Optional parameters
 

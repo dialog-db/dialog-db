@@ -420,6 +420,16 @@ The `tutorial` broke the plan's promise that every document states the same fact
 
 **Decision.** Domain calls are Proposed in the design, with defaults, and attribute lines name a specific type and pick. A concept may hold checks and formulas that run both ways; one-way formulas such as `id` belong in rules.
 
+## 2026-11-08 — What a pick is in dialog today, and constraints
+
+**Question.** Can picks be user-defined? And what may a concept body hold besides attribute lines?
+
+**Method.** Read `dialog-artifacts` (`Pick`, `prefers`, `elect`, the tree's write) and `dialog-query` (`Cardinality`, the one-valued attribute query, the concept election) on main at `3b5835ad`. Prior art: Kleppmann's CRDTs as Datalog queries over a set of operations; Bloom^L's monotone lattices; Automerge's predecessors on each operation.
+
+**Results.** A pick is one ordering (`Pick::prefers`) over a cell's claims, by value and standing. A read elects the winner; a query over a one-valued attribute scans, then checks each candidate against the rest of its cell. A write retracts the claim the pick elects and adds the new one; only `:all` appends. So `:max` is not a grow-only maximum: writing 3 over a 5 replaces it. An earlier suggestion in conversation, that picks other than `:last` accumulate and differ only in how they are read, was wrong against the source. The pick tells the store what a write succeeds, which is why it is part of the attribute.
+
+**Decision.** Proposed: user-defined picks are user-defined orderings over claims, hashed into the attribute's identity as `:top`'s cases already are; aggregates that compute (sum, count) are rules over `:all`. Constraints, named apart from formulas, are what a concept body may hold: type, equality, comparison; no negation, no arithmetic. Domain calls infer each attribute's type from what narrows it or from the value written.
+
 ## How to reproduce
 
 1. Take a variant's prompt from its round's results file and save it as `<variant>.txt`.
