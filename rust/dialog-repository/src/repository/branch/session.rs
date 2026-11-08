@@ -2144,6 +2144,9 @@ impl Branch {
     }
 }
 
+#[cfg(test)]
+mod isolation_tests;
+
 /// Layered deductive-rule resolution — exhaustive coverage of the
 /// caching invariants. Each test isolates one behaviour the durable
 /// (committed, head-cached) and transient (overlay, fresh) layers must
