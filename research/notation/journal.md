@@ -380,6 +380,16 @@ The `tutorial` broke the plan's promise that every document states the same fact
 
 **Decision.** The design says so. It leaves a question: commands are written with `!` in every example, which under this framing puts them a tick late.
 
+## 2026-11-08 — `!` means retained
+
+**Question.** Is "into `now`" against "into `next`" the right way to say what `!` does?
+
+**Method.** Maintainer's correction of the previous entry.
+
+**Results.** No. The `!` says whether something is retained. Without it, an assertion, a concept or a rule holds for the tick and is not retained; with it, it is retained until retracted. A deductive rule does not retain its conclusions but keeps deducing them; an inductive rule retains them.
+
+**Decision.** The design says so, replacing the framing of the previous entry. The question about commands stands, and reads more plainly: a command is something not retained, so it is asserted without `!`.
+
 ## How to reproduce
 
 1. Take a variant's prompt from its round's results file and save it as `<variant>.txt`.

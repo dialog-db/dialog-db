@@ -64,7 +64,7 @@ A `!` after the name makes the call a write: `(bug/status! bug:01 is: :done)`.
 
 A document is a set of top-level forms evaluated as one tick. The order of its forms does not matter.
 
-Without `!`, a form deduces into `now`; with `!`, it derives into `next`. A ground call asserts its facts into `now`, and a concept or rule defined without `!` exists in `now`, for this document. A form with `!` goes to `next`: it changes the replica, and the document does not see it. Every premise and every question reads `now`, so a document sees what it asserts and deduces, but never what it writes with `!`.
+The `!` says whether something is retained. Without `!`, what a form asserts or defines holds for this document's tick and is not retained. With `!`, it is retained until it is retracted: it goes into `next`, and the document does not see it. Every premise and every question reads `now`, so a document sees what it asserts and deduces, but never what it writes with `!`.
 
 ```clj
 (concept (bug ?bug title: ?title) …)
@@ -74,7 +74,7 @@ Without `!`, a form deduces into `now`; with `!`, it derives into `next`. A grou
 
 Neither the concept nor the bug reaches `next`. Written `(bug! title: "Hello world")` instead, the bug would be in `next` and the question would not find it, and the concept still would not be in `next`. A chain, where one write depends on reading another, takes a second document.
 
-A ground call is a rule with no premises: `(bug title: "Hello world")` is `(rule (assert (bug title: "Hello world")))`, and `(bug! title: "Hello world")` is the same with `assert!`. So the `!` means the same on every form: into `next` rather than `now`. Installing a rule writes the rule into `next`, so it is in every later tick's replica; an installed deductive rule (`rule!` with `assert`) then deduces into each tick's `now`, which is why its deductions appear in every question. A written fact stays until it is retracted.
+A ground call is a rule with no premises: `(bug title: "Hello world")` is `(rule (assert (bug title: "Hello world")))`, and `(bug! title: "Hello world")` is the same with `assert!`. So the `!` means the same on every form: retained. A rule or concept defined with `!` is retained; without it, it is gone after the tick. The verb in a rule's head says the same of its conclusions: a deductive rule (`assert`) does not retain them but keeps deducing them while its premises hold, which is why an installed deductive rule's deductions appear in every question; an inductive rule (`assert!`) retains them.
 
 Installed rules read `now`, including what a document asserts there. An installed inductive rule (`rule!` with `assert!`) that matches a document's assertion writes into `next`, and that write is stored. An installed deductive rule that matches it deduces only in this tick, since the assertion is gone in the next. So an assertion without `!` persists nothing itself; only the inductive rules it triggers do.
 
