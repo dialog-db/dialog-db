@@ -5,7 +5,7 @@
 |  | Understanding | Activity |
 |---|---|---|
 | **Status** | What do we know? A write retires only the elected claim, and a read does not check causes, both confirmed in the source. The maintainer's direction is column D. `history::causality` reads "seen" from claim lineage, which would retire other origins' `all` values. | Where are we at? Directing: six approaches in a matrix, D stated, not decided. |
-| **Agenda** | What do we need to know? Whether revision causality tells "before" from "concurrent" where lineage cannot, and whether a partial replica holds what it needs (tests). What a write does when causality cannot be decided locally. | Where are we going? Settle the open hypotheses, decide the direction, then the first implementation decision: claim lineage or revision DAG for "concurrent". |
+| **Agenda** | What do we need to know? Whether revision causality tells "before" from "concurrent" where lineage cannot, and whether a partial replica holds what it needs (tests). What a write does when causality cannot be decided locally: [design-undecided](design-undecided.md), E stated. Whether fetching revision records on a write is cheap. | Where are we going? Settle the open hypotheses, decide the direction and the undecided case, then the first implementation decision: claim lineage or revision DAG for "concurrent". |
 
 ## 2026-11-08, Describing to Directing: from the max bug to a direction
 
@@ -31,3 +31,14 @@
 **Learned.** Not with two replicas, but with three it can (Irakli). A writes, B writes having seen it, A writes again succeeding B's write. C syncs with A, which no longer holds B's write live, then with B, and receives B's write after A's. On C it must read as succeeded, not concurrent. A's cause names B's write directly, so claim lineage finds it at the first tier: this case does not need revision causality. The description's earlier two-replica example of it was impossible and is replaced.
 
 **Decided.** The hypothesis is confirmed by the scenario; the test is still to write. The read filter and the retiring of claims that come back stay in column D. The remaining gate is what a write does when it cannot decide concurrency locally.
+
+## 2026-11-08, Designing: a write that cannot decide
+
+**Asked.** What does a write do when it cannot decide locally whether a live claim is concurrent with the elected one?
+
+**Learned.**
+- Whatever it does must converge (Irakli), and it should be able to decide offline (Irakli).
+- A write can make a decision durable only through the cause it records, so retiring an undecided claim without naming it would differ between replicas, and naming it would make a guess permanent.
+- Filling the gap by fetching revision records lets the write decide. When it cannot fetch, the honest result is to write the value as concurrent with the claim and let a later write settle it (Irakli).
+
+**Decided.** Not decided. E is stated: fetch when the records can be reached, otherwise stand concurrent. Its matrix is [design-undecided](design-undecided.md). It rests on two open hypotheses: that standing concurrent converges, and that fetching revision records costs little.

@@ -54,4 +54,4 @@ Not decided. The [direction](pick-succession/direction.md) matrix weighs six app
 - reads skip a claim that another present claim's cause names;
 - nothing is retired on merge.
 
-What "concurrent" is computed from, claim lineage or the revision DAG, is the first implementation decision, and the [claims](pick-succession/claims.md) show why the answer matters.
+What "concurrent" is computed from, claim lineage or the revision DAG, is the first implementation decision, and the [claims](pick-succession/claims.md) show why the answer matters. What a write does when it cannot decide is the second: [design-undecided](pick-succession/design-undecided.md), where the stated direction is to fetch the missing revision records when they can be reached, and otherwise to write the value as concurrent with the undecided claim.
