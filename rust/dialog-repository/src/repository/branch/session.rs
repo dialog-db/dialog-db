@@ -548,9 +548,16 @@ impl<'a> QueryEnv<'a> {
     /// Deductive-rule resolution is built in (a durable layer per line,
     /// its session overlay, and the per-query overlay as a transient
     /// layer), so the paths can never diverge on it.
+    ///
+    /// Every line is pinned to the revision it stands at here: one query
+    /// performs many selects, and each must read the tree the query
+    /// began with, not whatever a commit through another handle of the
+    /// branch has moved the head to since (dialog-db/dialog-db#757). A
+    /// line's session overlay is not pinned: it is read live, as every
+    /// read of the branch reads it.
     pub(crate) fn new(sources: Vec<Source>, overlay: Ephemeral, env: &'a Erased) -> Self {
         Self {
-            sources,
+            sources: sources.into_iter().map(Source::pinned).collect(),
             overlay,
             layers: Vec::new(),
             format: Arc::new(OnceCell::new()),

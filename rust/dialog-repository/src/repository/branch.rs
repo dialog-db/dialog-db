@@ -479,6 +479,19 @@ impl Branch {
         self.revision.content()
     }
 
+    /// A handle on this branch whose head stays where it is now: every
+    /// read through it names the same revision, however the branch's
+    /// other handles move the head meanwhile. Everything else (the
+    /// caches, the session overlay, the tracking) is shared as between
+    /// any two clones. What a query reads through, so that all of one
+    /// query reads one revision.
+    pub(crate) fn pinned(&self) -> Self {
+        Self {
+            revision: self.revision.detached(),
+            ..self.clone()
+        }
+    }
+
     /// The upstreams this branch pulls from, as last resolved: a bare
     /// [`pull`](Self::pull) takes from every one.
     pub fn pulls(&self) -> Upstreams {

@@ -14,6 +14,39 @@ says how to cut a release.
 
 ## Unreleased
 
+### A query reads one revision, the one its branch stood at when it began
+
+[#757](https://github.com/dialog-db/dialog-db/issues/757)
+
+A query performs many selects on its environment: a conjunction looks
+its second premise up per row of the first, a resolver re-reads a
+reference per outer row. Each select took its tree root from the
+branch's head cell as it stood at that moment, and that cell is shared by
+every handle of the branch, so a commit made through another handle
+while a query ran moved the root under it: the query read some of its
+premises at one revision and the rest at another, and could yield rows
+no revision held. A query environment now pins every line to the
+revision it stands at when the environment is built, and every select
+of that query reads that root. A query over a `Snapshot` was already
+pinned, and is unchanged.
+
+What this changes for you:
+
+- A `Branch::query()`, a transaction's query, a subscription's
+  evaluation and the induction and succession reads a commit makes each
+  see one revision throughout. A commit that lands on the branch while
+  one of them runs is seen by the next query, not by the rest of this
+  one.
+- The heads a read settlement records (`ReadObservation`) are the
+  revisions the query read, which were already what it meant.
+- A line's session overlay (`Branch::overlay`) is not pinned: it is
+  read live, as before.
+
+Why: a query's answer should be a function of one state of the branch.
+Reading each scan against whatever the head happened to be made the
+answer depend on the timing of unrelated commits, which no caller can
+reason about.
+
 ### Two claims that stand equal are told apart by the hash of their values
 
 [#752](https://github.com/dialog-db/dialog-db/pull/752)

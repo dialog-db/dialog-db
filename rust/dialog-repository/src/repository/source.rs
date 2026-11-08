@@ -44,6 +44,16 @@ pub(crate) enum Source {
 }
 
 impl Source {
+    /// This line with its head where it is now: a branch becomes a
+    /// handle whose revision no later commit moves (see
+    /// [`Branch::pinned`]); a snapshot already is one.
+    pub(crate) fn pinned(self) -> Self {
+        match self {
+            Source::Branch(branch) => Source::Branch(Arc::new(branch.pinned())),
+            Source::Snapshot(snapshot) => Source::Snapshot(snapshot),
+        }
+    }
+
     /// Borrow this line.
     pub(crate) fn as_ref(&self) -> SourceRef<'_> {
         match self {
