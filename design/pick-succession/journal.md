@@ -42,3 +42,17 @@
 - Filling the gap by fetching revision records lets the write decide. When it cannot fetch, the honest result is to write the value as concurrent with the claim and let a later write settle it (Irakli).
 
 **Decided.** Not decided. E is stated: fetch when the records can be reached, otherwise stand concurrent. Its matrix is [design-undecided](design-undecided.md). It rests on two open hypotheses: that standing concurrent converges, and that fetching revision records costs little.
+
+## 2026-11-08, Diagnosing and back to Directing: the second case does not arise
+
+**Asked.** Does the three-replica example hold, with A writing having seen B's claim?
+
+**Learned.**
+- It does not. If A had seen B's claim, C would have learned of it from A (Irakli). With A not having seen it, B's claim and A's are concurrent, which is correct and should stay. Irakli's sequence: 7 ← 5 from A, C writes 2 over 5, then 7 ← 3 from B; 3 and 2 are concurrent.
+- The merge already screens claims that come back (`merge.rs`): R1 never re-applies a live claim whose revision the receiver observed, and R3 removes a claim an incoming history record covers.
+- That contradicts the claim that a merge cannot retire: R3 does, from the records it receives. Read as "a merge applies coverage it is given but decides nothing", the two fit; the claims ledger asks which.
+- The goal is CRDT behavior from the operational index alone, without keeping every value and recomputing on read (Irakli). The problem statement now says so.
+
+**Decided.** The read filter and the retiring of what the elected claim succeeded leave column D. D is now: a write retires the elected claim and those concurrent with it, by revision.
+
+**Backtracked.** From Directing to Diagnosing for the second case, then back, once the merge screens explained it away.

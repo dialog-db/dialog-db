@@ -12,4 +12,4 @@
 | succeed | a claim succeeds another when its cause names the other's version: it was written having seen the other, and replaces it. |
 | retire | take a claim out of the operational index on a write. History still holds it. |
 | concurrent | of two claims, neither was written having seen the other. Whether "seen" is read from claim lineage or from the revision DAG is open; see the claims. |
-| come back | a claim that a write retired, but which a replica receives after the claim that succeeded it, through partial sync. |
+| come back | a claim that a write retired, received by a replica after the claim that succeeded it. The merge screens it out (R1, R3 in `merge.rs`). |
