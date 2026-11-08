@@ -1087,6 +1087,10 @@ fn bind_seed(
     }
 }
 
+/// What a head writes, as `emit_matches` tells two heads apart: its
+/// subject, then each field's attribute, value and pick.
+type WrittenHead = (Entity, Vec<(Relation, Value, Pick)>);
+
 /// Emit a rule's head for every produced match: transient heads into
 /// `transients`, durable heads (novelty-checked against the frozen
 /// view) into `novelty`.
@@ -1103,7 +1107,7 @@ async fn emit_matches<'a>(
     // evaluated once per stimulus row a premise names, so an event that
     // carries several of a premise's fields finds the same binding once
     // per field; the head it writes is written once.
-    let mut written: HashSet<(Entity, Vec<(Relation, Value, Pick)>)> = HashSet::new();
+    let mut written: HashSet<WrittenHead> = HashSet::new();
     for matched in matches {
         // The head subject. A rule whose premises leave `this` unbound
         // has no cell to write; skip the binding.
