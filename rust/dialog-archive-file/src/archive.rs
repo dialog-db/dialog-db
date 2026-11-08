@@ -2606,6 +2606,92 @@ mod breakdown {
         Ok(())
     }
 
+    /// What the tree `DIALOG_ARCHIVE_ROOT` names in the file
+    /// `DIALOG_ARCHIVE_INDEX` takes alone, as a file holding no history
+    /// would: every frame the root reaches written whole (against nothing)
+    /// and every token those frames name. Run by hand.
+    #[test]
+    #[ignore = "sizes the tree DIALOG_ARCHIVE_ROOT names in DIALOG_ARCHIVE_INDEX"]
+    fn live() -> anyhow::Result<()> {
+        use crate::rows::{INDEX, NONE, put_rows};
+
+        let (Ok(path), Ok(root)) = (
+            std::env::var("DIALOG_ARCHIVE_INDEX"),
+            std::env::var("DIALOG_ARCHIVE_ROOT"),
+        ) else {
+            return Ok(());
+        };
+        let archive = FileArchive::open(&path)?;
+        let snapshot = archive.current();
+        let mut start = None;
+        for (catalog, hash) in archive.hashes() {
+            if hash.to_string() == root
+                && let Some(Place::Frame(at)) = snapshot.place(&catalog, &hash)?
+            {
+                start = Some(at);
+            }
+        }
+        let start = start.ok_or_else(|| invalid("the root is not a frame in the file"))?;
+        let (mut frames, mut frame_bytes, mut entries) = (0u64, 0u64, 0u64);
+        let mut tokens = HashSet::new();
+        let mut seen = HashSet::new();
+        let mut stack = vec![start];
+        let token = |id: u32, tokens: &mut HashSet<u32>| {
+            if id != NONE && id != 0 {
+                tokens.insert(id);
+            }
+        };
+        while let Some(at) = stack.pop() {
+            if !seen.insert(at) {
+                continue;
+            }
+            let (rows, manifest) = archive.rows(&snapshot, &HashMap::new(), at)?;
+            token(manifest, &mut tokens);
+            let mut whole = Vec::new();
+            put_rows(&mut whole, &rows, None);
+            frames += 1;
+            // The header: the hash, kind, depth, catalog, base, manifest.
+            frame_bytes += whole.len() as u64 + 32 + 8;
+            if rows.kind == INDEX {
+                for link in &rows.sections[0] {
+                    token(link[0], &mut tokens);
+                    token(link[3], &mut tokens);
+                    if link[1] != NONE {
+                        stack.push(link[1]);
+                    }
+                }
+                for op in &rows.sections[2] {
+                    entries += 1;
+                    for id in &op[1..] {
+                        token(*id, &mut tokens);
+                    }
+                }
+            } else {
+                for entry in &rows.sections[0] {
+                    entries += 1;
+                    for id in &entry[1..] {
+                        token(*id, &mut tokens);
+                    }
+                }
+            }
+        }
+        let token_bytes: u64 = tokens
+            .iter()
+            .map(|id| snapshot.get(*id).map_or(0, |token| token.len() as u64))
+            .sum();
+        let mib = |bytes: u64| bytes as f64 / 1048576.0;
+        println!(
+            "the tree alone: {frames} nodes, {entries} entries, {:.1} MiB of frames written whole; \
+             {} tokens, {:.1} MiB of bytes ({:.1} MiB with lengths and alignment); {:.1} MiB in all",
+            mib(frame_bytes),
+            tokens.len(),
+            mib(token_bytes),
+            mib(token_bytes + tokens.len() as u64 * 12),
+            mib(frame_bytes + token_bytes + tokens.len() as u64 * 12),
+        );
+        Ok(())
+    }
+
     /// Prints what the file named by `DIALOG_ARCHIVE_INDEX` holds, record
     /// kind by kind, what its tokens' records spend on lengths and
     /// padding, and what the archive keeps in memory to read it. Run by

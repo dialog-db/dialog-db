@@ -4,8 +4,8 @@
 
 |  | Understanding | Activity |
 |---|---|---|
-| **Status** | What do we know? A replay of large commits writes about 1,440 node versions a commit, 54 times the tree it leaves; buffers flush past 256 ops or 64 KiB; within a commit a node is lifted and encoded once; a commit persists nothing until its stream ends. One commit of all 4.47 M facts did not fit in 15 GiB. Sealing replays leaf-bound ops one canonical edit each, except into an empty tree, which is planted bottom-up; a second commit of 447,000 facts ran over two hours in those edits. | Where are we at? **Describing**, with evidence for diagnosis gathering. |
-| **Agenda** | What do we need to know? Who writes large transactions and what they are trying to accomplish; how a commit's cost grows with its size against the buffers; what one large commit holds in memory. | Where are we going? **Diagnosing**: the open hypotheses in the ledger, measured on the MusicBrainz facts (1, 10, 100 and 2,000 commits; a one-commit import's memory). |
+| **Status** | What do we know? See the ledger: large commits overflow buffers to the leaves, seal by per-op edits (quadratic at hundreds of thousands of facts), and hold everything until seal; 100 commits of ~45,000 facts were the fastest way to write the replay's data. | Where are we at? **Dropped**: no one writes transactions this large. |
+| **Agenda** | What do we need to know? Nothing now. | Where are we going? Reopen when a real writer of large transactions appears. |
 
 ## 2026-11-08, Describing: the replay that wrote 54 times its tree
 
@@ -55,3 +55,17 @@ quadratic cost is a hypothesis in the ledger with its test.
 
 **Open question for the next sitting.** Still the one before: who writes
 transactions this large, and to accomplish what.
+
+## 2026-11-08, Dropped: no one writes them
+
+**Asked.** Who writes transactions this large, and to accomplish what?
+Irakli: no one, as far as we know; the question was how large the database
+would be without much history, and large commits came up on the way.
+
+**Learned.** The 100-commit and 2,000-commit replays' timers put the tree's
+seal at about a third of a 2,000-commit replay and the archive at the rest;
+the per-op seal is what makes very large commits fail.
+
+**Decided.** Dropped: there is no unmet objective to state a problem for.
+The findings stay in the ledger; the topic reopens when an importer, a
+migration or a sync path writes commits of tens of thousands of facts.

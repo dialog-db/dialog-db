@@ -57,7 +57,7 @@ Backtracking moves a topic to an earlier phase and says so in its journal.
 
 | topic | phase |
 |---|---|
-| [Large transactions](large-transactions.md) | Describing |
+| [Large transactions](large-transactions.md) | Dropped |
 
 The search tree's node reads are a topic on
 [dialog-db/dialog-db#753](https://github.com/dialog-db/dialog-db/pull/753).
