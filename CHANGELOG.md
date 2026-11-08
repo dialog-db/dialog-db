@@ -16,7 +16,7 @@ says how to cut a release.
 
 ### A rule seeded by several rows of one change writes its head once
 
-[#PR](https://github.com/dialog-db/dialog-db/pull/PR)
+[#761](https://github.com/dialog-db/dialog-db/pull/761)
 
 Commit-time induction evaluates a rule once for each changed row a
 premise names, with that row bound. A command whose event carries
