@@ -1481,6 +1481,108 @@ scale, against 193%. Open: splitting at scale (2,507 s against 1,845), the
 2-second sync timer for long commits, point reads at scale through the
 served store, and a small commit on a large database.
 
+## 2026-11-08: warm commands, against a 5 ms target
+
+**Question.** The target is a command (create an issue, post a memo, set an
+assignee) in at most 5 ms once caches are warm. Where do we stand, and
+where does a warm command's time go?
+
+**Method.** `tonk_bench` with a steady phase: after the week and the final
+pulls, one member runs each of six commands 20 times on its warm replica
+(`DIALOG_DATASET_STEADY`). Three interleaved runs each of main's fs store
+and the file (format 10), tonk-shaped 1×. Then 200 of each (1,200
+commands) on the file under callgrind, counters zeroed where the bench
+prints `steady phase starts` (`DIALOG_BENCH_WEEK=0`, dataset
+`e10724ba4dc8f0e5`). Callgrind counts instructions, not time. At about
+69 M instructions a command against 15.4 ms, the commands are CPU-bound,
+so the shares below should hold for time; stalls on memory are not
+weighed.
+
+**Results: warm medians**, the median of three runs, ms:
+
+| command | main | file |
+|---|---|---|
+| memo | 7.4 | 8.0 |
+| comment | 7.7 | 7.8 |
+| set assignee | 11.8 | 11.1 |
+| add label | 14.6 | 19.9 |
+| set status | 17.0 | 19.9 |
+| create issue | 17.9 | 25.7 |
+| all | 13.7 | 15.4 |
+
+No command meets 5 ms on either store, warm; the cheapest are 1.5× over
+it. The file adds about 1.7 ms to main's 13.7; the rest is shared.
+
+**Results: where a warm command's 69 M instructions go** (inclusive
+shares; the subtrees named do not overlap):
+
+| | share | per command |
+|---|---|---|
+| **firing rules** (`induce`) | **48%** | about 4 rules, 73 concept queries |
+| — estimating scan ranges to choose merge or fold | 14.4% | 181 estimates, each decoding about 50 keys of an edge leaf |
+| — reading attributes (`AttributeQueryOnly`) | 12.8% | |
+| — what succeeds what (`emit_matches`) | 7.3% | |
+| — planning rules (`InductiveRule::plan`) | 3.1% | 34 plans |
+| — identifying concept descriptors | 1.8% | 50 hashes, each into a fresh `OnceLock` |
+| **committing** (`Mint`) | **50%** | |
+| — sealing the tree (`BufferedBatch::seal`) | 26% | |
+| —— persisting nodes (encoding, then blake3 8.5%) | 13.7% | 8.6 nodes |
+| —— applying ops to transient nodes | about 12% | |
+| — the file's append | 17.6% | |
+| —— splitting nodes into rows (`frame`) | 13.7% | 10 nodes; `entry_row` 9%, decoding keys 2.5% |
+
+- Estimates are the largest single item. A conjunction chooses merge or
+  fold on its first row by estimating each scan's range
+  (`scans_balanced_for`), and `range_estimate` counts the keys of each edge
+  leaf by decoding it from the start. The comment there says estimating
+  per row would walk the tree about as much as the scan does; per
+  evaluation it still does, because a command evaluates about 60
+  conjunctions of about three scans, nearly all pinned to one entity.
+- Splitting nodes into rows is the file's own cost: the archive decodes the
+  node the tree has just encoded, to cut it into the rows it stores, where
+  main's store writes the bytes whole. It is most of the 1.7 ms the file
+  adds.
+- A small commit persists 8.6 nodes. Why that many, with buffers that
+  should absorb a few facts at the root, is not known.
+
+**Proposal.** Ordered by what each buys for what it costs; the shares are
+of the file's 15.4 ms.
+
+1. **Choose merge or fold without walking the tree** (about −13%). The
+   choice needs only whether one scan is much narrower than another. A
+   scan pinned to an entity, or to an entity and a one-valued attribute,
+   is narrow by its shape: decide those from the plan, and estimate only
+   scans the shape leaves open. Where an estimate is still needed, count
+   an edge leaf by its scale instead of decoding it. Confirmed if
+   estimates fall below 1% of a warm command with the planner's tests
+   choosing as before.
+2. **Plan a rule once per binding shape** (about −5%). 34 plans and 50
+   descriptor hashes a command, for a schema that does not change between
+   commands. Keep plans by rule and bound variables, and descriptor
+   identities with the schema.
+3. **Hand the archive a node's entries, not its bytes** (about −10%, the
+   file only). The tree has the entries in hand when it persists; the
+   archive decodes them again. This is the plan in
+   [dialog-db/dialog-db#753](https://github.com/dialog-db/dialog-db/pull/753)
+   (the tree talks in nodes); with it, skip the rows a node shares with its
+   predecessor.
+4. **Find out why a small commit persists 8.6 nodes** (up to −13.7%).
+   Measure which trees and levels a one-fact command rewrites, and how
+   large they are. If buffers absorb the commit, one root an ordering is
+   the floor; whatever is above it is work to remove before making the
+   hashing cheaper.
+5. **Count the rules each command fires and the queries each runs** (the
+   remaining 20% in reads and succession). About 4 rules and 73 concept
+   queries for one asserted fact is the number to question first: whether
+   every rule fired has a premise the change touched.
+
+Items 1–3 remove about 30% of the instructions: from 15.4 to about 10.5 ms
+on the file, about 11 on main. That is half the distance. 5 ms means
+removing about two thirds, so it needs items 4 and 5 as well: a warm
+command writing about one node an ordering and running only the rules its
+facts reach. Those are questions of how much work a command does, not how
+fast it does it, and they come first.
+
 ## How to reproduce
 
 ```sh
@@ -1538,4 +1640,11 @@ cargo run --release -p dialog-baseline --example tonk_dataset -- \
   export path/to/replica/data/main tonk-team.jsonl
 cargo run --release -p dialog-baseline --example tonk_bench -- \
   tonk-team.jsonl fs path/to/scratch
+
+# warm commands: the steady phase after the week (20 of each by default)
+DIALOG_DATASET_STEADY=20 cargo run --release -p dialog-baseline \
+  --example tonk_dataset -- generate rust/dialog-baseline/fixtures/tonk-team-schema.jsonl 1 \
+  tonk-1x.jsonl
+cargo run --release -p dialog-baseline --example tonk_bench -- \
+  tonk-1x.jsonl file path/to/scratch
 ```
