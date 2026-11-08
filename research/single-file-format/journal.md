@@ -1583,6 +1583,73 @@ command writing about one node an ordering and running only the rules its
 facts reach. Those are questions of how much work a command does, not how
 fast it does it, and they come first.
 
+## 2026-11-08: what a warm command writes, and why
+
+**Question.** Items 4 and 5 above: why does a small commit persist 8.6
+nodes, and how many rules and queries does each command run?
+
+**Method.** Counters by name (a probe module, not committed), taken after
+each steady command: facts written by attribute, entity and value; ops
+entering the tree by ordering; the root buffer's weight and what each flush
+sheds; nodes persisted by kind and size; rules fired; seeded evaluations;
+queries, estimates and plans. 20 commands of each kind, the file store,
+tonk-shaped 1×.
+
+**Results: a command writes each derived fact once per row of its event.**
+A `set assignee` event carries 8 `dom.event.detail/*` facts. Induction
+seeds each rule premise once per stimulus row it names, so the assignee
+rule and the activity rule are evaluated 8 times, all 8 match the same
+binding, and `emit_matches` writes the head each time: its novelty check is
+against the round's frozen view, not against what the round has already
+emitted. The commit then writes 60 facts, 8 copies each of one activity
+record and one assignee, same entity, same value. A memo post (5 detail
+facts) writes 5 copies of the memo. The copies are also the second round's
+stimulus, so every rule they reach is seeded 8 times over again.
+
+**Results: the copies are what fill the root buffer.** 177–198 ops enter
+the tree a command (each fact in three orderings, plus history), about 37 KB
+of weight, against a 64 KiB buffer that sheds down to half when it
+overflows. So nearly every command overflows, and each overflow rewrites
+the 7–12 leaves with the heaviest buffers, about 70 KB each, to move 13 ops
+apiece: the 8.6 nodes, 400–710 KB of leaves encoded, hashed and split into
+rows for a command that sets one value.
+
+| per command | memo | label | create | comment | assignee | status |
+|---|---|---|---|---|---|---|
+| rules fired | 3 | 4 | 10 | 1 | 3.8 | 3.6 |
+| seeded evaluations (plans) | 15 | 32 | 90 | 8 | 30 | 29 |
+| matches, distinct | 10, 7 | 16, 10 | 9, 9 | 8, 8 | 16, 10 | 16, 10 |
+| concept queries | 45 | 48 | 171 | 8 | 45 | 42 |
+| attribute reads | 115 | 176 | 477 | 64 | 214 | 205 |
+| range estimates | 70 | 176 | 396 | 64 | 200 | 192 |
+| keys decoded estimating | 3,016 | 8,075 | 23,022 | 2,851 | 8,826 | 7,748 |
+| ops into the tree | 86 | 177 | 198 | 177 | 178 | 176 |
+| leaves persisted | 2.6 | 10 | 6.5 | 10 | 10.4 | 9.1 |
+| leaf bytes persisted | 123 K | 691 K | 413 K | 641 K | 711 K | 617 K |
+
+**Experiment: each distinct head once per rule firing.** Behind a switch
+(`DIALOG_INDUCE_DEDUPE`, not committed), `emit_matches` skips a head whose
+instructions it has already emitted for this rule in this round, before
+resolving its succession. Identical copies are a no-op to apply, so this
+changes what is written only by the copies. Three interleaved runs each,
+warm medians, ms:
+
+| | off | on |
+|---|---|---|
+| memo | 8.3–8.9 | 5.9–7.9 |
+| add label | 12.4–19.3 | 6.5–9.0 |
+| create issue | 14.9–17.4 | 8.1–9.9 |
+| comment | 10.2–11.4 | 6.8–7.3 |
+| set assignee | 13.6–14.1 | 7.1–8.8 |
+| set status | 13.7–14.4 | 8.4–10.4 |
+| all | 12.7–14.1 | 7.1–9.2 |
+
+With it, 26–33 ops enter the tree a command, an overflow comes about every
+fifth command, leaves persisted fall to 4.2–4.6 a command on average
+(275–310 KB), seeded evaluations to 8–18 and concept queries to 8–45. The
+queries the bench checks after building and pulling return the same rows
+(812 activities, 301 issues, 170 issue labels, and the rest).
+
 ## How to reproduce
 
 ```sh
