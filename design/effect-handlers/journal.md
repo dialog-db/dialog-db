@@ -5,7 +5,7 @@
 |  | Understanding | Activity |
 |---|---|---|
 | **Status** | We know what the maintainer asked for (an inversion: the tree performs effects a handler resumes, without naming its environment), what exists (`Provider<C>::execute` returning `Resume`, statically bound), what one boxed future per command costs (2 to 4% on point reads, measured in the tree-node-reads topic), and that the maintainer's bar is "performs as good or better". | Describing. A branch and a topic file exist; nothing is diagnosed. |
-| **Agenda** | For each of the three things named (batching, introspection, a query that pauses at n results and resumes for the next page): what is in the way today, concretely, and whether the three share one cause or are three problems. Whether a query reads one revision throughout (asked by the maintainer; being checked). | Diagnose: one thing at a time, batching first. |
+| **Agenda** | For each of the three things named (batching, introspection, a query that pauses at n results and resumes for the next page): what is in the way today, concretely, and whether the three share one cause or are three problems. Which concrete requests the maintainer has watched go out one at a time (the batching question, asked and unanswered). | Diagnose: one thing at a time, batching first. |
 
 ## 2026-11-08, Describing: opening the topic
 
@@ -42,8 +42,14 @@ caller, which neither `Provider::execute` nor `Resume` gives: a query
 today is a stream the caller polls, so pausing between pages is already
 possible at the stream boundary, and what is not possible is pausing
 inside an operation's own descent. Whether these three are one problem
-or three is the next question. The revision question is being answered
-from the code and goes into the ledger as a fact either way.
+or three is the next question. The revision question is answered in the
+ledger: a query over a branch took each select's root live, so one query
+could read two revisions. The maintainer called it a bug; it is #757,
+reproduced and fixed on its own branch, outside this topic. What it
+leaves for this topic: a query paused between pages holds its pinned
+revision for as long as it is paused, which is the right behaviour and
+also a cost (the nodes of a superseded revision stay reachable while a
+page is open).
 
 **Decided.** Nothing. Use cases will be written from these three once
 each is understood as a problem rather than a wish.
