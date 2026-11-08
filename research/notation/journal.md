@@ -390,6 +390,16 @@ The `tutorial` broke the plan's promise that every document states the same fact
 
 **Decision.** The design says so, replacing the framing of the previous entry. The question about commands stands, and reads more plainly: a command is something not retained, so it is asserted without `!`.
 
+## 2026-11-08 — Top-level calls are sugar
+
+**Question.** What does a call at the top of a document stand for?
+
+**Method.** Maintainer's decision.
+
+**Results.** A call with no variables is `(assert form)`, or `(assert! form)` with `!`. A call with variables is `(query form)`. There is no inductive query, so a call with variables and `!` is an error.
+
+**Decision.** In the design. One case is marked Proposed: a variable bound by a nested call, as in `(bug! (id {…}) title: "x")`, should not turn a write into a forbidden inductive query.
+
 ## How to reproduce
 
 1. Take a variant's prompt from its round's results file and save it as `<variant>.txt`.
