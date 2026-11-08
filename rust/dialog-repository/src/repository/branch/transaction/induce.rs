@@ -33,7 +33,7 @@
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::Read as BlobRead;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{
@@ -1103,11 +1103,7 @@ async fn emit_matches<'a>(
     transients: &mut Changes,
 ) -> Result<(), CommitError> {
     let conclusion = rule.conclusion();
-    // The heads already written, by what they write. A seeded rule is
-    // evaluated once per stimulus row a premise names, so an event that
-    // carries several of a premise's fields finds the same binding once
-    // per field; the head it writes is written once.
-    let mut written: HashSet<WrittenHead> = HashSet::new();
+    let mut heads: Vec<WrittenHead> = Vec::with_capacity(matches.len());
     for matched in matches {
         // The head subject. A rule whose premises leave `this` unbound
         // has no cell to write; skip the binding.
@@ -1140,10 +1136,27 @@ async fn emit_matches<'a>(
             };
             cells.push((attribute, value, field.descriptor().pick().clone()));
         }
-        if !written.insert((this.clone(), cells.clone())) {
+        heads.push((this, cells));
+    }
+
+    // A seeded rule is evaluated once per stimulus row a premise names,
+    // so an event that carries several of a premise's fields finds the
+    // same binding once per field: each distinct head is written once,
+    // the first time it is found. The heads are compared where they
+    // stand, without a copy, and only when there are two to compare.
+    let mut first = vec![true; heads.len()];
+    if heads.len() > 1 {
+        let mut seen: hashbrown::HashSet<&WrittenHead> =
+            hashbrown::HashSet::with_capacity(heads.len());
+        for (at, head) in heads.iter().enumerate() {
+            first[at] = seen.insert(head);
+        }
+    }
+
+    for ((this, cells), first) in heads.into_iter().zip(first) {
+        if !first {
             continue;
         }
-
         let mut head = Changes::new();
         for (attribute, value, pick) in cells {
             match rule.polarity() {

@@ -214,3 +214,95 @@ async fn a_claim_succeeded_within_its_own_batch_leaves_no_standing_record() -> R
     );
     Ok(())
 }
+
+/// A batch carrying n identical copies of a head's instructions lands
+/// the same tree, root hash and history included, as a batch carrying
+/// one copy. Covers the three shapes an induced head takes after
+/// succession is resolved: an `all` assert, a retract followed by an
+/// `all` assert, and a lone retract.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn copies_of_a_head_land_the_same_tree() -> Result<()> {
+    let store = Blocks::new();
+    let entity = Entity::new()?;
+    let the: Relation = "issue/assignee".parse()?;
+    let fact = |value: u32| Artifact {
+        the: the.clone(),
+        of: entity.clone(),
+        is: Value::UnsignedInt(value.into()),
+        cause: None,
+    };
+    let assert_all = |value: u32| Instruction::Assert(fact(value), Pick::All);
+    let retract = |value: u32| Instruction::Retract(fact(value));
+    async fn records(tree: &ArtifactTree, store: &Blocks) -> Result<usize> {
+        let history = TreeHistory::new(tree.clone(), store.clone());
+        Ok(history
+            .select(HistorySelector::All)
+            .try_collect::<Vec<_>>()
+            .await?
+            .len())
+    }
+
+    let mut base = ArtifactTree::empty_in(test_catalog());
+    apply(&mut base, &store, version(0), vec![assert_all(1)]).await?;
+
+    // A set head over a cell holding nothing of the value.
+    let mut one = base.clone();
+    let mut many = base.clone();
+    apply(&mut one, &store, version(1), vec![assert_all(2)]).await?;
+    apply(
+        &mut many,
+        &store,
+        version(1),
+        vec![assert_all(2), assert_all(2), assert_all(2)],
+    )
+    .await?;
+    assert_eq!(one.root(), many.root(), "set head: three copies, one tree");
+    assert_eq!(
+        records(&one, &store).await?,
+        records(&many, &store).await?,
+        "set head: same history records"
+    );
+
+    // A `last` head resolved against the view: retract the elected
+    // claim, assert the value under `all`, once vs. twice.
+    let mut one = base.clone();
+    let mut many = base.clone();
+    apply(
+        &mut one,
+        &store,
+        version(1),
+        vec![retract(1), assert_all(3)],
+    )
+    .await?;
+    apply(
+        &mut many,
+        &store,
+        version(1),
+        vec![retract(1), assert_all(3), retract(1), assert_all(3)],
+    )
+    .await?;
+    assert_eq!(
+        one.root(),
+        many.root(),
+        "succession head: two copies, one tree"
+    );
+    assert_eq!(held(&one, &store, &entity, &the).await?, vec![3]);
+    assert_eq!(
+        records(&one, &store).await?,
+        records(&many, &store).await?,
+        "succession head: same history records"
+    );
+
+    // A retracting head.
+    let mut one = base.clone();
+    let mut many = base.clone();
+    apply(&mut one, &store, version(1), vec![retract(1)]).await?;
+    apply(&mut many, &store, version(1), vec![retract(1), retract(1)]).await?;
+    assert_eq!(
+        one.root(),
+        many.root(),
+        "retract head: two copies, one tree"
+    );
+    Ok(())
+}
