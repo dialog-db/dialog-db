@@ -615,14 +615,16 @@ a node is its hash whichever line holds it.
 Every counter is unchanged. The point reads are now under main: a hit
 costs the cache lookup and a `Resume` by value, no box and no second
 trait; `read-point` is 0.9% and `rule-point` 1.4% below, where the
-`Ready` path had left them level. `read-sibling` is 1.1% over on a
-scenario whose cross-CPU spread is under 1%, which is the scenario's
-read-ahead (preloads that now return a `Resume` through `Metered`'s
-`map`, one closure per preload); within the gate's 3%, and the one
-number worth a second look if the sibling walk is ever tuned. The writes
-are 1.1% to 1.8% cheaper than main. The sweep was taken before the
-read-ahead window's widening was restored (below); the commit scenarios
-are re-measured after it in the next entry.
+`Ready` path had left them level. The writes are 1.1% to 1.8% cheaper
+than main. `read-sibling` read 1.1% over in this sweep and 0.5% under in
+the next build of the same code, with identical counters: heap layout
+again, as with rule-point in the first entry. The sweep was taken before
+the read-ahead window's widening was restored (below); re-measured after
+it, the commit scenarios moved by at most 0.13% (`commit-batch`
+316,505,639, `commit-hot-key` 195,064,078, `commit-rows` 197,633,615,
+`transaction-reads` 301,956,679): a commit's integration opens one window
+either way. The pull request's own Perf gate and Replication gate both
+pass on this head.
 
 **Also decided.** The replication gate on the first head of #755 failed
 one row: `join-none`, phase `seeded`, 17 round trips to 37. The seeded
