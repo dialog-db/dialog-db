@@ -96,7 +96,7 @@ A bare call with `!` writes into `next`. It must be ground, except for an entity
 
 A write means the same as a rule with one `assert!` head and no `when`, so that longer form is never written.
 
-A write through a concept passes every parameter. Leaving one out is a compile error, not "keep what is there": on an entity that does not exist yet it would make a partial one. To change one attribute, write the attribute itself, `(xyz.tonk.notebook/source! id:b1 is: "x")`, or a concept over just that attribute, `(block/source! id:b1 is: "x")`. There is no marker for "keep this one". A partial entity is allowed, as long as it is meant: it comes from writing an attribute or a smaller concept, never from forgetting a parameter.
+A write through a concept passes every parameter. Leaving one out is a compile error, not "keep what is there", because it is more often a mistake than a choice. To change one attribute, write the attribute itself, `(xyz.tonk.notebook/source! id:b1 is: "x")`, or a concept over just that attribute, `(block/source! id:b1 is: "x")`. There is no marker for "keep this one". An entity is an identity over time, never partial; what can be partial is what is known about it, so that only some of a concept's facts hold. That is allowed when it is meant: it comes from writing an attribute or a smaller concept, never from forgetting a parameter.
 
 How a retract says "every value" is open.
 
@@ -235,6 +235,8 @@ An identity that must agree everywhere, such as "a bug is its title and author",
   (when (report title: ?t author: ?a status: ?s)
         (digest {xyz.bug/title ?t xyz.bug/author ?a} is: ?b)))
 ```
+
+`digest` is a formula. Its primary is a value, here a record, and its `is:` is the entity that value identifies: the one named by the hash of the value's canonical encoding. The same value gives the same entity on every replica. A write that leaves its entity out gets `digest` of a record of everything it writes, so all three ways above are one rule applied to different values.
 
 Writers send a report, and the rule picks the fields. `digest` runs one way, so the planner binds its record first. The keys are stored attribute names: R15's readers spelled the same identity three ways (short names, stored names, `title:` labels), and each spelling hashes to a different entity.
 

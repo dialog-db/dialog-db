@@ -340,6 +340,16 @@ The `tutorial` broke the plan's promise that every document states the same fact
 
 **Decision.** All in the design.
 
+## 2026-11-08 — Entities are never partial
+
+**Question.** Is "partial entity" the right term?
+
+**Method.** Maintainer's correction.
+
+**Results.** No. An entity is an identity over time, never partial. What can be partial is what is known about it: only some of a concept's facts hold. The entry above titled "partial entities" means that. The design also used `digest` without defining it.
+
+**Decision.** The design says "partial information about a concept", and defines `digest`: a formula from a value to the entity that value identifies, by the hash of its canonical encoding.
+
 ## How to reproduce
 
 1. Take a variant's prompt from its round's results file and save it as `<variant>.txt`.
