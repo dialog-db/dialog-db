@@ -534,3 +534,104 @@ now is the lookup of the cache the environment holds, about 200
 instructions; holding the cache as a field of the peer would take most of
 that and is still open.
 
+
+## 2026-11-08, Building: the answer at hand belongs in the provider
+
+**Asked.** The maintainer, on `nodes::Ready`: it "isn't exactly using
+capability model", which "smells again like a layering issue or flaw in
+capability system design". The intent was always an effect system in the
+manner of effing-mad, gozala/actor and Unison abilities, where a handler
+is sync or async without the caller caring, and `perform` stands in for
+`yield`. Could the capability system be rethought so a provider may be
+either?
+
+**Learned.** `Ready` was a symptom. `Provider::execute` under
+`async_trait` can only ever answer later, in a boxed future, so a
+provider holding the answer had no way to say so inside the model, and
+the fix went beside it: a second trait the request's `perform` asked
+first. Every environment then had to answer twice, and nothing in the
+types tied the two answers together. The cost it worked around was never
+the tree's: every provider in the workspace paid a box per call, hit or
+miss.
+
+What the maintainer asked for is a handler that may finish without
+suspending. In a coroutine-based effect system that is the handler not
+yielding; in Rust without coroutines on stable, it is a return type that
+is either the value or a future. So `Provider::execute` now returns
+`Resume<'_, Output>`: `Resume::now(value)` or `Resume::later(future)`,
+the latter boxed exactly as `async_trait` boxed before. `Resume` is a
+`Future`, so a caller awaits it and cannot tell which it got; a provider
+in front of another returns what it was handed, so a hit stays a hit
+through the storage, the overlay and the query session. An attribute,
+`#[dialog_capability::provider]`, writes the common case: an `async fn
+execute` whose body becomes the future, so the 299 impls that always wait
+changed one attribute pair for one attribute and nothing else. The
+`derive(Provider)` forwarding stopped boxing too.
+
+Three things were learned building it. `Resume` holds its output by
+value, so it is `Send` only when the output is: `async_trait`'s box hid
+that bound, and a generic provider that awaits another's answer now says
+`C::Output: ConditionalSend`. A `Future` impl that needs `T: 'a` (which a
+sentinel typed by `T` would) trips rustc's higher-ranked lifetime
+limitation wherever the answer is awaited inside a generic `async fn`
+(the fs remote's traffic shaping did), so `Resume` keeps the answer at
+hand in an `Option` behind a private enum and polls without any bound on
+`T`; `into_now` takes it apart for a provider that must look before it
+forwards. And a storage that hands out its space by value cannot pass a
+space's answer through unboxed: a read routed through `Storage` always
+waits, which costs nothing today (the peer answers its hits above the
+storage) and is the one place a native node store beneath `Storage`
+would still pay a box per hit.
+
+**Decided.** `nodes::Ready` is gone; `Nodes` is the two providers and
+`ConditionalSync`. The translation layer's `through_*`, the repository's
+`read_node_or_hydrate` and friends, and each request's `perform` return a
+`Resume`, answering a cached node, an empty write, a preload with nowhere
+to land or a staged node at once. The query session's wildcard read takes
+the lines answered at once before it waits on any, which is sound because
+a node is its hash whichever line holds it.
+
+**Measured.** Same toolchain, same main sweep, callgrind:
+
+| scenario | main | branch | Δ |
+|---|--:|--:|--:|
+| commit-batch | 322,565,708 | 316,906,545 | -1.8% |
+| commit-hot-key | 197,194,160 | 194,967,085 | -1.1% |
+| commit-rows | 199,917,663 | 197,596,530 | -1.2% |
+| export-walk | 28,125,916 | 28,171,371 | +0.2% |
+| first-query | 1,858,567 | 1,873,818 | +0.8% |
+| number-point | 33,342,531 | 33,472,313 | +0.4% |
+| query-join | 76,793,183 | 76,693,056 | -0.1% |
+| read-point | 22,657,816 | 22,457,161 | -0.9% |
+| read-scan | 30,374,954 | 30,322,064 | -0.2% |
+| read-sibling | 30,098,475 | 30,436,711 | +1.1% |
+| rule-overlay | 263,576,069 | 263,073,663 | -0.2% |
+| rule-point | 52,296,615 | 51,540,637 | -1.4% |
+| rule-ranked | 59,624,369 | 59,802,045 | +0.3% |
+| subscribe-fanout | 39,533,736 | 39,153,689 | -1.0% |
+| subscribe-pulled | 39,372,584 | 39,401,683 | +0.1% |
+| transaction-reads | 303,657,543 | 301,928,820 | -0.6% |
+
+Every counter is unchanged. The point reads are now under main: a hit
+costs the cache lookup and a `Resume` by value, no box and no second
+trait; `read-point` is 0.9% and `rule-point` 1.4% below, where the
+`Ready` path had left them level. `read-sibling` is 1.1% over on a
+scenario whose cross-CPU spread is under 1%, which is the scenario's
+read-ahead (preloads that now return a `Resume` through `Metered`'s
+`map`, one closure per preload); within the gate's 3%, and the one
+number worth a second look if the sibling walk is ever tuned. The writes
+are 1.1% to 1.8% cheaper than main. The sweep was taken before the
+read-ahead window's widening was restored (below); the commit scenarios
+are re-measured after it in the next entry.
+
+**Also decided.** The replication gate on the first head of #755 failed
+one row: `join-none`, phase `seeded`, 17 round trips to 37. The seeded
+replay is dense in key order, so a fixed window of 512 changes names one
+or two leaves and the integration read the remote tree leaf by leaf, the
+chain main's widening heuristic (`OPEN_WIDTH`) existed to break. The
+heuristic went with the cache peek it counted by. It is back, counting
+the distinct stored nodes the window names (where the spine hands a path
+to the environment), which needs no peek and is the same count on a cold
+tree. On a warm tree it stops widening sooner than main did, since nodes
+the environment holds count too; no gated scenario has that shape, and
+the gate will say if one appears.
