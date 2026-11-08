@@ -24,11 +24,11 @@
 //! [`NodeCache`] consults it before its blocks and keeps what it reads and
 //! writes. The tree performs no lookup of its own.
 //!
-//! A request's `perform` first asks the environment what it can answer at
-//! once ([`Ready`]) and performs the command only for the rest. Performing
-//! a command through [`Provider`] boxes a future, which a node the
-//! environment already holds does not need; an environment that cannot
-//! answer anything at once says so and every read goes the long way.
+//! A provider answers a request with a [`Resume`]: the node at once when
+//! it holds it ([`Resume::now`], nothing allocated), else the future that
+//! reads it ([`Resume::later`]). The tree awaits either the same way. The
+//! translation layer answers a cache hit at once, so an environment that
+//! answers through it pays for a boxed future only on a miss.
 //!
 //! The requests are commands, not effects, for the reason [`Load`] is: a
 //! node read may hydrate from a remote, which no one can do on another's
@@ -36,7 +36,7 @@
 
 use std::marker::PhantomData;
 
-use dialog_capability::{Command, Provider};
+use dialog_capability::{Command, Provider, Resume};
 use dialog_common::{Blake3Hash, Buffer, ConditionalSend, ConditionalSync, Holds, Priority};
 use dialog_effects::archive::prelude::CatalogScope;
 use dialog_effects::archive::{self, Import, Load};
@@ -129,44 +129,15 @@ impl<Key, Value> Read<Key, Value> {
         if self.local { load.locally() } else { load }
     }
 
-    /// Perform this read on `env`: what `env` can answer at once
-    /// ([`Ready`]), else the command performed.
-    pub async fn perform<Env>(
+    /// Perform this read on `env`.
+    pub fn perform<'a, Env>(
         self,
-        env: &Env,
-    ) -> Result<Option<PersistentNode<Key, Value>>, DialogSearchTreeError>
+        env: &'a Env,
+    ) -> Resume<'a, Result<Option<PersistentNode<Key, Value>>, DialogSearchTreeError>>
     where
-        Env: Provider<Self> + Ready<Key, Value> + ConditionalSync + ?Sized,
+        Env: Provider<Self> + ?Sized,
     {
-        if let Some(node) = env.ready(&self) {
-            return Ok(Some(node));
-        }
-        env.execute(self).await
-    }
-}
-
-/// What an environment can answer a node [`Read`] with at once, without
-/// waiting on anything: the node it holds in memory, or nothing.
-///
-/// The request's [`perform`](Read::perform) asks this first, so a node the
-/// environment holds costs a lookup and no boxed future; a read the
-/// environment cannot answer at once is performed as the command, which may
-/// wait on a store or a remote. The answer must be a node the environment
-/// would give the command too: an environment holds only what its archive
-/// has, so this is never a shortcut around what a read means, only around
-/// how it is dispatched.
-pub trait Ready<Key, Value> {
-    /// The node `read` names, if this environment holds it already.
-    fn ready(&self, read: &Read<Key, Value>) -> Option<PersistentNode<Key, Value>>;
-}
-
-/// A borrowed environment answers at once what the environment does.
-impl<T, Key, Value> Ready<Key, Value> for &T
-where
-    T: Ready<Key, Value> + ?Sized,
-{
-    fn ready(&self, read: &Read<Key, Value>) -> Option<PersistentNode<Key, Value>> {
-        (**self).ready(read)
+        env.execute(self)
     }
 }
 
@@ -188,67 +159,81 @@ where
     /// asks, checked against the name and decoded, then kept in `cache`.
     ///
     /// The translation layer's read, for an environment whose store keeps
-    /// bytes. Bytes that do not hash to the name fail the read rather than
-    /// reading as absent, so `None` means the block is genuinely not
-    /// reachable; bytes that do not decode as a node fail it too, and
-    /// neither is kept.
-    pub async fn through_blocks<Env>(
+    /// bytes. A node `cache` holds is answered at once ([`Resume::now`]);
+    /// only a miss builds the future that loads. Bytes that do not hash to
+    /// the name fail the read rather than reading as absent, so `None`
+    /// means the block is genuinely not reachable; bytes that do not
+    /// decode as a node fail it too, and neither is kept.
+    pub fn through_blocks<'a, Env>(
         self,
-        env: &Env,
-        cache: Option<&NodeCache<Key, Value>>,
-    ) -> Result<Option<PersistentNode<Key, Value>>, DialogSearchTreeError>
+        env: &'a Env,
+        cache: Option<&'a NodeCache<Key, Value>>,
+    ) -> Resume<'a, Result<Option<PersistentNode<Key, Value>>, DialogSearchTreeError>>
     where
         Env: Provider<Load> + ConditionalSync + ?Sized,
+        Key: ConditionalSend + ConditionalSync + 'a,
+        Value: ConditionalSend + ConditionalSync + 'a,
     {
-        self.through_loader(async |load| load.perform(env).await, cache)
-            .await
+        self.through_loader(move |load| load.perform(env), cache)
     }
 
     /// [`through_blocks`](Self::through_blocks), with the block read by
     /// `load` instead of by a [`Load`] performed on an environment: for an
     /// environment that answers loads some other way (a test harness
     /// tallying what it reads through its own hydration, say).
-    pub async fn through_loader<Loader>(
+    pub fn through_loader<'a, Loader, Loading>(
         self,
         load: Loader,
-        cache: Option<&NodeCache<Key, Value>>,
-    ) -> Result<Option<PersistentNode<Key, Value>>, DialogSearchTreeError>
+        cache: Option<&'a NodeCache<Key, Value>>,
+    ) -> Resume<'a, Result<Option<PersistentNode<Key, Value>>, DialogSearchTreeError>>
     where
-        Loader: AsyncFnOnce(Load) -> Result<Option<Buffer>, archive::ArchiveError>,
+        Loader: FnOnce(Load) -> Loading + ConditionalSend + 'a,
+        Loading: Future<Output = Result<Option<Buffer>, archive::ArchiveError>> + ConditionalSend,
+        Key: ConditionalSend + ConditionalSync + 'a,
+        Value: ConditionalSend + ConditionalSync + 'a,
     {
         // A hit answers before any of the loading machinery is set up: the
         // common case of a warm read costs the lookup and nothing else.
         if let Some(cache) = cache
             && let Some(node) = cache.get_cached(&self.name)
         {
-            return Ok(Some(node));
+            return Resume::now(Ok(Some(node)));
         }
-        let fetch = async |name: &Blake3Hash| {
-            let block = load(self.load())
-                .await
-                .map_err(|error| DialogSearchTreeError::Storage(error.into()))?;
-            block.map(|block| decode(block, name)).transpose()
-        };
-        match cache {
-            Some(cache) => cache.get_or_fetch(&self.name, fetch).await,
-            None => fetch(&self.name).await,
-        }
+        Resume::later(async move {
+            let fetch = async |name: &Blake3Hash| {
+                let block = load(self.load())
+                    .await
+                    .map_err(|error| DialogSearchTreeError::Storage(error.into()))?;
+                block.map(|block| decode(block, name)).transpose()
+            };
+            match cache {
+                Some(cache) => cache.get_or_fetch(&self.name, fetch).await,
+                None => fetch(&self.name).await,
+            }
+        })
     }
 
     /// [`through_blocks`](Self::through_blocks), with the node cache `env`
     /// holds for the catalog's subject ([`NodeCache::of`]), if it holds
     /// one.
-    pub async fn through_held_blocks<Env>(
+    pub fn through_held_blocks<'a, Env>(
         self,
-        env: &Env,
-    ) -> Result<Option<PersistentNode<Key, Value>>, DialogSearchTreeError>
+        env: &'a Env,
+    ) -> Resume<'a, Result<Option<PersistentNode<Key, Value>>, DialogSearchTreeError>>
     where
         Env: Provider<Load> + Holds + ConditionalSync + ?Sized,
         Key: ConditionalSend + ConditionalSync + 'static,
         Value: ConditionalSend + ConditionalSync + 'static,
     {
-        let cache = NodeCache::of(env, self.catalog.subject());
-        self.through_blocks(env, cache.as_ref()).await
+        match NodeCache::of(env, self.catalog.subject()) {
+            None => self.through_blocks(env, None),
+            Some(cache) => {
+                if let Some(node) = cache.get_cached(&self.name) {
+                    return Resume::now(Ok(Some(node)));
+                }
+                Resume::later(async move { self.through_blocks(env, Some(&cache)).await })
+            }
+        }
     }
 }
 
@@ -338,16 +323,12 @@ impl<Key, Value> Preload<Key, Value> {
         Read::new(self.catalog.clone(), self.name.clone()).with_priority(self.priority)
     }
 
-    /// Perform this preload on `env`: nothing, for a node `env` already
-    /// holds ([`Ready`]), else the command performed.
-    pub async fn perform<Env>(self, env: &Env)
+    /// Perform this preload on `env`.
+    pub fn perform<'a, Env>(self, env: &'a Env) -> Resume<'a, ()>
     where
-        Env: Provider<Self> + Ready<Key, Value> + ConditionalSync + ?Sized,
+        Env: Provider<Self> + ?Sized,
     {
-        if env.ready(&self.read()).is_some() {
-            return;
-        }
-        env.execute(self).await
+        env.execute(self)
     }
 }
 
@@ -366,26 +347,46 @@ where
 {
     /// Answers this preload over `env`'s blocks: reads the node into
     /// `cache` as [`Read::through_blocks`] would, dropping the result. With
-    /// no cache there is nowhere for the node to land, so nothing is read.
-    pub async fn through_blocks<Env>(self, env: &Env, cache: Option<&NodeCache<Key, Value>>)
+    /// no cache there is nowhere for the node to land, so nothing is read;
+    /// a node the cache holds already is done with at once.
+    pub fn through_blocks<'a, Env>(
+        self,
+        env: &'a Env,
+        cache: Option<&'a NodeCache<Key, Value>>,
+    ) -> Resume<'a, ()>
     where
         Env: Provider<Load> + ConditionalSync + ?Sized,
+        Key: ConditionalSend + ConditionalSync + 'a,
+        Value: ConditionalSend + ConditionalSync + 'a,
     {
-        if cache.is_some() {
-            let _ = self.read().through_blocks(env, cache).await;
+        let Some(cache) = cache else {
+            return Resume::now(());
+        };
+        match self.read().through_blocks(env, Some(cache)).into_now() {
+            Ok(_) => Resume::now(()),
+            Err(reading) => Resume::later(async move {
+                let _ = reading.await;
+            }),
         }
     }
 
     /// [`through_blocks`](Self::through_blocks), with the node cache `env`
     /// holds for the catalog's subject, if it holds one.
-    pub async fn through_held_blocks<Env>(self, env: &Env)
+    pub fn through_held_blocks<'a, Env>(self, env: &'a Env) -> Resume<'a, ()>
     where
         Env: Provider<Load> + Holds + ConditionalSync + ?Sized,
         Key: ConditionalSend + ConditionalSync + 'static,
         Value: ConditionalSend + ConditionalSync + 'static,
     {
-        let cache = NodeCache::of(env, self.catalog.subject());
-        self.through_blocks(env, cache.as_ref()).await
+        let Some(cache) = NodeCache::of(env, self.catalog.subject()) else {
+            return Resume::now(());
+        };
+        if cache.get_cached(&self.name).is_some() {
+            return Resume::now(());
+        }
+        Resume::later(async move {
+            let _ = self.read().through_blocks(env, Some(&cache)).await;
+        })
     }
 }
 
@@ -420,11 +421,11 @@ impl<Key, Value> Write<Key, Value> {
     }
 
     /// Perform this write on `env`.
-    pub async fn perform<Env>(self, env: &Env) -> Result<(), DialogSearchTreeError>
+    pub fn perform<'a, Env>(self, env: &'a Env) -> Resume<'a, Result<(), DialogSearchTreeError>>
     where
-        Env: Provider<Self> + ConditionalSync + ?Sized,
+        Env: Provider<Self> + ?Sized,
     {
-        env.execute(self).await
+        env.execute(self)
     }
 }
 
@@ -436,49 +437,59 @@ impl<Key, Value> Command for Write<Key, Value> {
 impl<Key, Value> Write<Key, Value> {
     /// Answers this write over `env`'s blocks: [imports](Import) each
     /// node's block into the catalog, then keeps the nodes in `cache`. A
-    /// failed import keeps nothing.
+    /// failed import keeps nothing; a write of no nodes is done at once.
     ///
     /// The translation layer's write, for an environment whose store keeps
     /// bytes.
-    pub async fn through_blocks<Env>(
+    pub fn through_blocks<'a, Env>(
         self,
-        env: &Env,
-        cache: Option<&NodeCache<Key, Value>>,
-    ) -> Result<(), DialogSearchTreeError>
+        env: &'a Env,
+        cache: Option<&'a NodeCache<Key, Value>>,
+    ) -> Resume<'a, Result<(), DialogSearchTreeError>>
     where
         Env: Provider<Import> + ConditionalSync + ?Sized,
+        Key: ConditionalSend + ConditionalSync + 'a,
+        Value: ConditionalSend + ConditionalSync + 'a,
     {
         let Self { catalog, nodes } = self;
         if nodes.is_empty() {
-            return Ok(());
+            return Resume::now(Ok(()));
         }
-        catalog
-            .import(nodes.iter().map(|node| node.buffer().clone()))
-            .perform(env)
-            .await
-            .map_err(|error| DialogSearchTreeError::Storage(error.into()))?;
-        if let Some(cache) = cache {
-            for node in nodes {
-                // A node the cache already holds under this hash is the
-                // same bytes with whatever it has derived since: it stays.
-                if cache.get_cached(node.hash()).is_none() {
-                    cache.insert(node.hash().clone(), node);
+        Resume::later(async move {
+            catalog
+                .import(nodes.iter().map(|node| node.buffer().clone()))
+                .perform(env)
+                .await
+                .map_err(|error| DialogSearchTreeError::Storage(error.into()))?;
+            if let Some(cache) = cache {
+                for node in nodes {
+                    // A node the cache already holds under this hash is the
+                    // same bytes with whatever it has derived since: it stays.
+                    if cache.get_cached(node.hash()).is_none() {
+                        cache.insert(node.hash().clone(), node);
+                    }
                 }
             }
-        }
-        Ok(())
+            Ok(())
+        })
     }
 
     /// [`through_blocks`](Self::through_blocks), with the node cache `env`
     /// holds for the catalog's subject, if it holds one.
-    pub async fn through_held_blocks<Env>(self, env: &Env) -> Result<(), DialogSearchTreeError>
+    pub fn through_held_blocks<'a, Env>(
+        self,
+        env: &'a Env,
+    ) -> Resume<'a, Result<(), DialogSearchTreeError>>
     where
         Env: Provider<Import> + Holds + ConditionalSync + ?Sized,
         Key: ConditionalSend + ConditionalSync + 'static,
         Value: ConditionalSend + ConditionalSync + 'static,
     {
+        if self.nodes.is_empty() {
+            return Resume::now(Ok(()));
+        }
         let cache = NodeCache::of(env, self.catalog.subject());
-        self.through_blocks(env, cache.as_ref()).await
+        Resume::later(async move { self.through_blocks(env, cache.as_ref()).await })
     }
 }
 
@@ -489,22 +500,19 @@ impl<Key, Value> Write<Key, Value> {
 /// collapses the copies of tree code read through many environments into
 /// one.
 pub trait Nodes<Key, Value>:
-    Provider<Read<Key, Value>> + Provider<Preload<Key, Value>> + Ready<Key, Value> + ConditionalSync
+    Provider<Read<Key, Value>> + Provider<Preload<Key, Value>> + ConditionalSync
 {
 }
 
 impl<T, Key, Value> Nodes<Key, Value> for T where
-    T: Provider<Read<Key, Value>>
-        + Provider<Preload<Key, Value>>
-        + Ready<Key, Value>
-        + ConditionalSync
-        + ?Sized
+    T: Provider<Read<Key, Value>> + Provider<Preload<Key, Value>> + ConditionalSync + ?Sized
 {
 }
 
 /// The node `read` names if the cache `env` holds for the catalog's subject
-/// holds it ([`NodeCache::held_for`]): how an environment that keeps its
-/// cache in its handles answers [`Ready`].
+/// holds it ([`NodeCache::held_for`]): what an environment that keeps its
+/// cache in its handles answers a read with at once ([`Resume::now`]),
+/// before it asks anything beneath it.
 pub fn held_node<Env, Key, Value>(
     env: &Env,
     read: &Read<Key, Value>,
@@ -521,9 +529,8 @@ where
 pub use rkyv as __rkyv;
 
 /// Makes a type that answers [`Load`] and holds handles ([`Holds`]) answer
-/// the node layer's reads ([`Read`], [`Preload`], [`Ready`]) through the
-/// translation layer, with the node cache it holds for the catalog's
-/// subject.
+/// the node layer's reads ([`Read`], [`Preload`]) through the translation
+/// layer, with the node cache it holds for the catalog's subject.
 ///
 /// For a non-generic environment: `reads_nodes_through_blocks!(MyEnv);`.
 /// For a generic one, its generics and where clause in brackets, each
@@ -535,8 +542,6 @@ macro_rules! reads_nodes_through_blocks {
         $crate::reads_nodes_through_blocks!(impl[] $ty where []);
     };
     (impl[$($g:tt)*] $ty:ty where [$($w:tt)*]) => {
-        #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-        #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
         impl<$($g)* Key, Value> dialog_capability::Provider<$crate::nodes::Read<Key, Value>>
             for $ty
         where
@@ -554,31 +559,17 @@ macro_rules! reads_nodes_through_blocks {
                 >,
             $($w)*
         {
-            async fn execute(
+            fn execute(
                 &self,
                 read: $crate::nodes::Read<Key, Value>,
-            ) -> Result<Option<$crate::PersistentNode<Key, Value>>, $crate::DialogSearchTreeError>
-            {
-                read.through_held_blocks(self).await
+            ) -> dialog_capability::Resume<
+                '_,
+                Result<Option<$crate::PersistentNode<Key, Value>>, $crate::DialogSearchTreeError>,
+            > {
+                read.through_held_blocks(self)
             }
         }
 
-        impl<$($g)* Key, Value> $crate::nodes::Ready<Key, Value> for $ty
-        where
-            Key: dialog_common::ConditionalSend + dialog_common::ConditionalSync + 'static,
-            Value: dialog_common::ConditionalSend + dialog_common::ConditionalSync + 'static,
-            $($w)*
-        {
-            fn ready(
-                &self,
-                read: &$crate::nodes::Read<Key, Value>,
-            ) -> Option<$crate::PersistentNode<Key, Value>> {
-                $crate::nodes::held_node(self, read)
-            }
-        }
-
-        #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-        #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
         impl<$($g)* Key, Value> dialog_capability::Provider<$crate::nodes::Preload<Key, Value>>
             for $ty
         where
@@ -596,8 +587,11 @@ macro_rules! reads_nodes_through_blocks {
                 >,
             $($w)*
         {
-            async fn execute(&self, preload: $crate::nodes::Preload<Key, Value>) {
-                preload.through_held_blocks(self).await
+            fn execute(
+                &self,
+                preload: $crate::nodes::Preload<Key, Value>,
+            ) -> dialog_capability::Resume<'_, ()> {
+                preload.through_held_blocks(self)
             }
         }
     };
@@ -613,8 +607,6 @@ macro_rules! writes_nodes_through_blocks {
         $crate::writes_nodes_through_blocks!(impl[] $ty where []);
     };
     (impl[$($g:tt)*] $ty:ty where [$($w:tt)*]) => {
-        #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-        #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
         impl<$($g)* Key, Value> dialog_capability::Provider<$crate::nodes::Write<Key, Value>>
             for $ty
         where
@@ -622,11 +614,11 @@ macro_rules! writes_nodes_through_blocks {
             Value: $crate::Value + dialog_common::ConditionalSync + 'static,
             $($w)*
         {
-            async fn execute(
+            fn execute(
                 &self,
                 write: $crate::nodes::Write<Key, Value>,
-            ) -> Result<(), $crate::DialogSearchTreeError> {
-                write.through_held_blocks(self).await
+            ) -> dialog_capability::Resume<'_, Result<(), $crate::DialogSearchTreeError>> {
+                write.through_held_blocks(self)
             }
         }
     };

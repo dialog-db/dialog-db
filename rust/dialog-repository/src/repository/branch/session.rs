@@ -17,7 +17,7 @@ use dialog_artifacts::{
     sort_key,
 };
 use dialog_artifacts::{Relation as ArtifactsRelation, Standing, Value};
-use dialog_capability::{Capability, Fork, Provider, Subject};
+use dialog_capability::{Capability, Fork, Provider, Resume, Subject};
 use dialog_common::{Blake3Hash, Buffer, ConditionalSync, Held, Holds};
 use dialog_effects::archive::{ArchiveError, Get, Put};
 use dialog_effects::authority::{Identify, Operator, OperatorExt as _};
@@ -35,7 +35,6 @@ use dialog_query::source::SelectRules;
 use dialog_query::{Claim, DeductiveRule, Negation, Premise, Proposition};
 use dialog_search_tree::DialogSearchTreeError;
 use dialog_search_tree::Manifest;
-use dialog_search_tree::nodes::Ready;
 use futures_util::future::try_join_all;
 use futures_util::{TryStreamExt as _, stream};
 use std::sync::OnceLock;
@@ -807,8 +806,7 @@ pub(crate) async fn select_from_source<'a>(
     Ok(select.execute_boxed(reads).await?)
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 // Deliberately implemented for the *same* lifetime on both sides
 // (`QueryEnv<'a>: Provider<Select<'a>>`), never a decoupled pair
 // (`impl<'a, 's> ... where 'a: 's`). Auto-trait (`Send`) checking of
@@ -1007,8 +1005,7 @@ impl<'a> Provider<Select<'a>> for QueryEnv<'a> {
 // on two lines counts twice — which is the safe direction for a "how
 // broad is this range" question. `None` from every line (all empty)
 // yields `None`.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<Estimate> for QueryEnv<'_> {
     async fn execute(
         &self,
@@ -1039,8 +1036,7 @@ impl Provider<Estimate> for QueryEnv<'_> {
 // hints, which also tells an evaluator to stop composing them: a
 // selection that hands each scan many rows otherwise queues a hint per
 // row only for it to be dropped.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<Preload> for QueryEnv<'_> {
     async fn execute(&self, input: PreloadRequest) -> bool {
         // Warming ahead of demand has something to do only for a line whose
@@ -1071,8 +1067,7 @@ fn anywhere(subject: &dialog_capability::Did) -> bool {
 // hydrating as a fact scan does). Spilled values are not nodes, so the
 // node cache is not consulted. A load of one archive's value is that
 // archive's, read through the env.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl<'a> Provider<BlobLoad> for QueryEnv<'a> {
     async fn execute(&self, load: BlobLoad) -> Result<Option<Buffer>, ArchiveError> {
         if !anywhere(load.archive.subject()) {
@@ -1094,8 +1089,7 @@ impl<'a> Provider<BlobLoad> for QueryEnv<'a> {
 // A load of a block anywhere the query reads (the resolver's wildcard
 // archive) is tried line by line, each line's catalog in turn; a load of
 // one catalog's block is that catalog's, read through the env.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl<'a> Provider<ArchiveLoad> for QueryEnv<'a> {
     async fn execute(&self, load: ArchiveLoad) -> Result<Option<Buffer>, ArchiveError> {
         if !anywhere(load.catalog.subject()) {
@@ -1119,65 +1113,70 @@ impl<'a> Provider<ArchiveLoad> for QueryEnv<'a> {
 // holds for the line's repository, its store, or a hydration, so a resolver
 // join that re-resolves the same reference once per outer row reads the
 // node once. A read of one catalog's node is that catalog's.
-/// What the env holds for a line is at hand; a read anywhere the query
-/// reads is at hand if it is for any line.
-impl Ready<dialog_artifacts::Key, dialog_artifacts::State<dialog_artifacts::Datum>>
-    for QueryEnv<'_>
-{
-    fn ready(&self, read: &ArtifactRead) -> Option<ArtifactNode> {
+/// A node is its hash, whichever line holds it, so the lines the env
+/// answers at once are taken first and the rest waited on only when none
+/// of those had it.
+impl<'a> Provider<ArtifactRead> for QueryEnv<'a> {
+    fn execute(
+        &self,
+        read: ArtifactRead,
+    ) -> Resume<'_, Result<Option<ArtifactNode>, DialogSearchTreeError>> {
         if !anywhere(read.catalog.subject()) {
-            return self.env.ready(read);
+            return read.perform(self.env);
         }
-        self.sources.iter().find_map(|source| {
+        let mut pending = Vec::new();
+        for source in &self.sources {
             let mut line = read.clone();
             line.catalog = source.as_ref().catalog();
-            self.env.ready(&line)
+            match line.perform(self.env).into_now() {
+                Ok(Ok(Some(node))) => return Resume::now(Ok(Some(node))),
+                Ok(Ok(None)) => {}
+                Ok(Err(error)) => return Resume::now(Err(error)),
+                Err(reading) => pending.push(reading),
+            }
+        }
+        if pending.is_empty() {
+            return Resume::now(Ok(None));
+        }
+        Resume::later(async move {
+            for reading in pending {
+                if let Some(node) = reading.await? {
+                    return Ok(Some(node));
+                }
+            }
+            Ok(None)
         })
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<'a> Provider<ArtifactRead> for QueryEnv<'a> {
-    async fn execute(
-        &self,
-        read: ArtifactRead,
-    ) -> Result<Option<ArtifactNode>, DialogSearchTreeError> {
-        if !anywhere(read.catalog.subject()) {
-            return read.perform(self.env).await;
-        }
-        for source in &self.sources {
-            let mut line = read.clone();
-            line.catalog = source.as_ref().catalog();
-            if let Some(node) = line.perform(self.env).await? {
-                return Ok(Some(node));
-            }
-        }
-        Ok(None)
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl<'a> Provider<ArtifactPreload> for QueryEnv<'a> {
-    async fn execute(&self, preload: ArtifactPreload) {
+    fn execute(&self, preload: ArtifactPreload) -> Resume<'_, ()> {
         if !anywhere(preload.catalog.subject()) {
-            return preload.perform(self.env).await;
+            return preload.perform(self.env);
         }
+        let mut pending = Vec::new();
         for source in &self.sources {
             let mut line = preload.clone();
             line.catalog = source.as_ref().catalog();
-            line.perform(self.env).await;
+            if let Err(preloading) = line.perform(self.env).into_now() {
+                pending.push(preloading);
+            }
         }
+        if pending.is_empty() {
+            return Resume::now(());
+        }
+        Resume::later(async move {
+            for preloading in pending {
+                preloading.await;
+            }
+        })
     }
 }
 
 // Nodes are written where the commit says, through the env.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl<'a> Provider<ArtifactWrite> for QueryEnv<'a> {
-    async fn execute(&self, write: ArtifactWrite) -> Result<(), DialogSearchTreeError> {
-        write.perform(self.env).await
+    fn execute(&self, write: ArtifactWrite) -> Resume<'_, Result<(), DialogSearchTreeError>> {
+        write.perform(self.env)
     }
 }
 
@@ -1434,8 +1433,7 @@ impl<'a> QueryEnv<'a> {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<SelectRules> for QueryEnv<'_> {
     /// Resolve a concept's deductive rules by unioning across layers:
     /// each line is a durable layer (committed `dialog.rule/*`, head-cached),

@@ -27,12 +27,10 @@
 //! by priority (demand before speculative warming), then arrival. The
 //! readers keep no widths of their own.
 
-use dialog_artifacts::{Datum, Key as ArtifactKey, State};
 use dialog_effects::blob::Load as BlobLoad;
-use dialog_search_tree::nodes::{Ready, held_node};
 use std::sync::Arc;
 
-use dialog_capability::{Fork, Provider};
+use dialog_capability::{Fork, Provider, Resume};
 use dialog_common::{Buffer, Holds};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_effects::archive::Load;
@@ -47,8 +45,7 @@ use dialog_artifacts::tree::{ArtifactNode, ArtifactPreload, ArtifactRead, Artifa
 use dialog_search_tree::DialogSearchTreeError;
 use dialog_storage::provider::storage::Storage;
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl<S, M: Mode> Provider<Hydrate> for Peer<S, M>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
@@ -89,8 +86,7 @@ where
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl<S, M: Mode> Provider<Load> for Peer<S, M>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
@@ -105,57 +101,44 @@ where
 // peer answers from the node cache it holds, its storage (the mounted
 // space's archive, in whatever form it keeps nodes), or a hydration from
 // the routes the subject's branches registered.
-/// A node the peer's cache holds is at hand.
-impl<S: Clone, M: Mode> Ready<ArtifactKey, State<Datum>> for Peer<S, M> {
-    fn ready(&self, read: &ArtifactRead) -> Option<ArtifactNode> {
-        held_node(self, read)
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+/// A node the peer's cache holds is answered at once.
 impl<S, M: Mode> Provider<ArtifactRead> for Peer<S, M>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
     Storage<S>: Provider<ArtifactRead> + ConditionalSync,
     Self: Provider<Hydrate> + Holds + ConditionalSync,
 {
-    async fn execute(
+    fn execute(
         &self,
         read: ArtifactRead,
-    ) -> Result<Option<ArtifactNode>, DialogSearchTreeError> {
-        dialog_repository::read_node_or_hydrate(self, &self.storage, read).await
+    ) -> Resume<'_, Result<Option<ArtifactNode>, DialogSearchTreeError>> {
+        dialog_repository::read_node_or_hydrate(self, &self.storage, read)
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl<S, M: Mode> Provider<ArtifactPreload> for Peer<S, M>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
     Storage<S>: Provider<ArtifactRead> + ConditionalSync,
     Self: Provider<Hydrate> + Holds + ConditionalSync,
 {
-    async fn execute(&self, preload: ArtifactPreload) {
-        dialog_repository::preload_node_or_hydrate(self, &self.storage, preload).await
+    fn execute(&self, preload: ArtifactPreload) -> Resume<'_, ()> {
+        dialog_repository::preload_node_or_hydrate(self, &self.storage, preload)
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl<S, M: Mode> Provider<ArtifactWrite> for Peer<S, M>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
     Storage<S>: Provider<ArtifactWrite> + ConditionalSync,
     Self: Holds + ConditionalSync,
 {
-    async fn execute(&self, write: ArtifactWrite) -> Result<(), DialogSearchTreeError> {
-        dialog_repository::write_nodes(self, &self.storage, write).await
+    fn execute(&self, write: ArtifactWrite) -> Resume<'_, Result<(), DialogSearchTreeError>> {
+        dialog_repository::write_nodes(self, &self.storage, write)
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl<S, M: Mode> Provider<BlobLoad> for Peer<S, M>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,

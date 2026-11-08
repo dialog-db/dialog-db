@@ -38,15 +38,34 @@ use rkyv::{
     validation::{Validator, archive::ArchiveValidator, shared::SharedValidator},
 };
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     marker::PhantomData,
     ops::{Bound, RangeBounds, RangeInclusive},
 };
 
 /// How many of [`TransientTree::integrate`]'s changes are held in memory so
 /// the paths still ahead of the applier can be opened together. Changes are
-/// small (a key and a value), so this is well under a megabyte.
+/// small (a key and a value), so this is well under a megabyte. The window
+/// grows past this, up to [`OPEN_LOOKAHEAD_MAX`], while the pending changes
+/// name fewer than [`OPEN_WIDTH`] stored nodes to open.
 const OPEN_LOOKAHEAD: usize = 512;
+
+/// The most changes [`TransientTree::integrate`] holds in memory while it
+/// looks for nodes to open together: a few megabytes at most.
+const OPEN_LOOKAHEAD_MAX: usize = 32_768;
+
+/// How many distinct stored nodes the opening pass looks ahead for before
+/// it goes out. Changes stream in key order, so a window of a fixed number
+/// of them can land in one leaf when leaves hold hundreds of entries, and a
+/// pass that names one node reads the tree leaf by leaf, one round trip
+/// each: the serial chain a seeded device's first sync showed between its
+/// head reads and its download. Looking ahead until the window spans this
+/// many nodes makes the chain the tree's depth again, whatever the leaf
+/// size. The nodes are counted where the transient spine hands a path to
+/// the environment, whether or not the environment holds them: which it
+/// holds is its business, and a node it holds answers at once when the
+/// window opens.
+const OPEN_WIDTH: usize = 32;
 
 /// How many levels one opening pass walks before handing back to the
 /// descent. Each level is one concurrent batch, so a deeper descent unlocks
@@ -701,6 +720,35 @@ where
             // every window is opened; a node the environment holds answers
             // at once.
             if opened == 0 {
+                // Widen the window until it names enough distinct stored
+                // nodes to be worth a round trip, the changes run out, or
+                // the window hits its ceiling. Nothing is read meanwhile,
+                // so the stops found so far stay valid and only the
+                // changes just pulled in need routing.
+                let mut stops: HashSet<Blake3Hash> = HashSet::new();
+                let mut routed = 0;
+                loop {
+                    for change in std::iter::once(&change).chain(pending.iter()).skip(routed) {
+                        if let Some(stop) = self.stored_on_path(change.key()) {
+                            stops.insert(stop);
+                        }
+                    }
+                    routed = pending.len() + 1;
+                    if stops.len() >= OPEN_WIDTH || exhausted || pending.len() >= OPEN_LOOKAHEAD_MAX
+                    {
+                        break;
+                    }
+                    let target = (pending.len() + OPEN_LOOKAHEAD).min(OPEN_LOOKAHEAD_MAX);
+                    while pending.len() < target {
+                        match changes.next().await {
+                            Some(change) => pending.push_back(change?),
+                            None => {
+                                exhausted = true;
+                                break;
+                            }
+                        }
+                    }
+                }
                 self.open_pending(std::iter::once(&change).chain(pending.iter()), storage)
                     .await;
                 opened = pending.len() + 1;
@@ -787,7 +835,9 @@ where
     /// changes is read once. The set of blocks an integration reads is
     /// therefore unchanged -- only when they are read -- so partial
     /// replication is preserved exactly. Each path is followed at most
-    /// `OPEN_LEVELS` nodes deep per opening.
+    /// `OPEN_LEVELS` nodes deep per opening. The caller decides how many
+    /// changes it hands over: enough that they name `OPEN_WIDTH` stored
+    /// nodes, or all of them when the stream is short.
     ///
     /// Advisory: the reads are the environment's ordinary node reads, so an
     /// environment that keeps nodes has them when the `lift` that follows

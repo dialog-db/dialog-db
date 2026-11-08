@@ -2809,7 +2809,6 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
     use anyhow::Result;
-    use async_trait::async_trait;
     use dialog_capability::Provider;
     use dialog_common::Blake3Hash;
     use futures_util::StreamExt;
@@ -2898,8 +2897,7 @@ mod tests {
         fn hold(&self, _key: String, _handle: dialog_common::Held) {}
     }
 
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[dialog_capability::provider]
     impl Provider<Load> for CountingBackend {
         async fn execute(
             &self,
@@ -2911,8 +2909,7 @@ mod tests {
     }
 
     /// A [`Get`] is a read of the block too, and counts as one.
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[dialog_capability::provider]
     impl Provider<Get> for CountingBackend {
         async fn execute(
             &self,
@@ -3620,8 +3617,7 @@ mod tests {
             fn hold(&self, _key: String, _handle: dialog_common::Held) {}
         }
 
-        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        #[dialog_capability::provider]
         impl Provider<Load> for GaugeBackend {
             async fn execute(
                 &self,
@@ -3636,8 +3632,7 @@ mod tests {
             }
         }
 
-        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        #[dialog_capability::provider]
         impl Provider<Get> for GaugeBackend {
             async fn execute(
                 &self,
@@ -3885,8 +3880,7 @@ mod tests {
     /// A load reads the local blocks, else fetches from the origin; a
     /// [local](Load::locally) load reads the local blocks and nothing else,
     /// as every provider answers it.
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[dialog_capability::provider]
     impl Provider<Load> for Hydrating {
         async fn execute(
             &self,
@@ -3907,8 +3901,7 @@ mod tests {
     }
 
     /// A get reads the local blocks and nothing else.
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[dialog_capability::provider]
     impl Provider<Get> for Hydrating {
         async fn execute(
             &self,

@@ -8,7 +8,7 @@
 //! archive. A store that keeps nodes in a form of its own implements these
 //! itself, in place of the translation.
 
-use dialog_capability::{Provider, StorageError};
+use dialog_capability::{Provider, Resume, StorageError};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_effects::archive::ArchiveError;
 use dialog_storage::provider::{Space, Storage, Volatile};
@@ -18,57 +18,46 @@ use rkyv::{
     validation::{Validator, archive::ArchiveValidator, shared::SharedValidator},
 };
 
-use super::{Preload, Read, Ready, Write};
+use super::{Preload, Read, Write};
 use crate::{DialogSearchTreeError, PersistentNode};
 
 /// A store answers the node requests through the translation layer, over
 /// the blocks it holds.
 macro_rules! translates {
     ($store:ty) => {
-        #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-        #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
         impl<Key, Value> Provider<Read<Key, Value>> for $store
         where
             Key: crate::Key + ConditionalSend + ConditionalSync + 'static,
-            Value: crate::Value + ConditionalSync + 'static,
+            Value: crate::Value + ConditionalSend + ConditionalSync + 'static,
             Value::Archived: for<'a> CheckBytes<
                 Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
             >,
         {
-            async fn execute(
+            fn execute(
                 &self,
                 read: Read<Key, Value>,
-            ) -> Result<Option<PersistentNode<Key, Value>>, DialogSearchTreeError> {
-                read.through_blocks(self, None).await
+            ) -> Resume<'_, Result<Option<PersistentNode<Key, Value>>, DialogSearchTreeError>> {
+                read.through_blocks(self, None)
             }
         }
 
-        /// A store holds no nodes in memory: nothing is answered at once.
-        impl<Key, Value> Ready<Key, Value> for $store {
-            fn ready(&self, _: &Read<Key, Value>) -> Option<PersistentNode<Key, Value>> {
-                None
+        /// A store holds no cache for a node to land in: nothing to do.
+        impl<Key, Value> Provider<Preload<Key, Value>> for $store {
+            fn execute(&self, _: Preload<Key, Value>) -> Resume<'_, ()> {
+                Resume::now(())
             }
         }
 
-        #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-        #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-        impl<Key, Value> Provider<Preload<Key, Value>> for $store
-        where
-            Key: crate::Key + ConditionalSend + ConditionalSync + 'static,
-            Value: crate::Value + ConditionalSync + 'static,
-        {
-            async fn execute(&self, _: Preload<Key, Value>) {}
-        }
-
-        #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-        #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
         impl<Key, Value> Provider<Write<Key, Value>> for $store
         where
             Key: crate::Key + ConditionalSend + ConditionalSync + 'static,
-            Value: crate::Value + ConditionalSync + 'static,
+            Value: crate::Value + ConditionalSend + ConditionalSync + 'static,
         {
-            async fn execute(&self, write: Write<Key, Value>) -> Result<(), DialogSearchTreeError> {
-                write.through_blocks(self, None).await
+            fn execute(
+                &self,
+                write: Write<Key, Value>,
+            ) -> Resume<'_, Result<(), DialogSearchTreeError>> {
+                write.through_blocks(self, None)
             }
         }
     };
@@ -82,23 +71,15 @@ translates!(dialog_storage::provider::IndexedDb);
 /// A space hands a node request to its archive.
 macro_rules! space_forwards {
     ($request:ident) => {
-        #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-        #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
         impl<Key, Value, A, M, C, D, B> Provider<$request<Key, Value>> for Space<A, M, C, D, B>
         where
-            Key: crate::Key + ConditionalSend + ConditionalSync + 'static,
-            Value: crate::Value + ConditionalSync + 'static,
-            A: Provider<$request<Key, Value>> + ConditionalSync,
-            M: ConditionalSend + ConditionalSync,
-            C: ConditionalSend + ConditionalSync,
-            D: ConditionalSend + ConditionalSync,
-            B: ConditionalSend + ConditionalSync,
+            A: Provider<$request<Key, Value>>,
         {
-            async fn execute(
+            fn execute(
                 &self,
                 request: $request<Key, Value>,
-            ) -> <$request<Key, Value> as dialog_capability::Command>::Output {
-                self.archive.execute(request).await
+            ) -> Resume<'_, <$request<Key, Value> as dialog_capability::Command>::Output> {
+                self.archive.execute(request)
             }
         }
     };
@@ -108,49 +89,30 @@ space_forwards!(Read);
 space_forwards!(Preload);
 space_forwards!(Write);
 
-/// A space answers at once what its archive does.
-impl<Key, Value, A, M, C, D, B> Ready<Key, Value> for Space<A, M, C, D, B>
-where
-    A: Ready<Key, Value>,
-{
-    fn ready(&self, read: &Read<Key, Value>) -> Option<PersistentNode<Key, Value>> {
-        self.archive.ready(read)
-    }
-}
-
-/// A storage answers at once what the subject's space does.
-impl<Key, Value, S> Ready<Key, Value> for Storage<S>
-where
-    S: Ready<Key, Value> + Clone,
-{
-    fn ready(&self, read: &Read<Key, Value>) -> Option<PersistentNode<Key, Value>> {
-        self.space(read.catalog.subject())?.ready(read)
-    }
-}
-
 /// A storage routes a node request to the space the catalog's subject is
 /// mounted as. A subject this storage does not serve is not a backend
 /// failure, and reports as its own condition.
+///
+/// The space is handed out owned, so the answer waits in a future that
+/// owns it, even when the space would have answered at once.
 macro_rules! storage_routes {
     ($request:ident, $missing:ident) => {
-        #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-        #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
         impl<Key, Value, S> Provider<$request<Key, Value>> for Storage<S>
         where
             Key: crate::Key + ConditionalSend + ConditionalSync + 'static,
-            Value: crate::Value + ConditionalSync + 'static,
-            S: Provider<$request<Key, Value>> + Clone + ConditionalSend + ConditionalSync,
+            Value: crate::Value + ConditionalSend + ConditionalSync + 'static,
+            S: Provider<$request<Key, Value>> + Clone + ConditionalSend + ConditionalSync + 'static,
         {
-            async fn execute(
+            fn execute(
                 &self,
                 request: $request<Key, Value>,
-            ) -> <$request<Key, Value> as dialog_capability::Command>::Output {
+            ) -> Resume<'_, <$request<Key, Value> as dialog_capability::Command>::Output> {
                 let subject = request.catalog.subject();
                 match self.space(subject) {
-                    Some(space) => space.execute(request).await,
-                    None => $missing(StorageError::SubjectNotFound {
+                    Some(space) => Resume::later(async move { space.execute(request).await }),
+                    None => Resume::now($missing(StorageError::SubjectNotFound {
                         subject: subject.clone(),
-                    }),
+                    })),
                 }
             }
         }
@@ -170,12 +132,3 @@ fn nothing(_: StorageError) {}
 storage_routes!(Read, unserved);
 storage_routes!(Preload, nothing);
 storage_routes!(Write, unserved);
-
-/// The temporary file store of the test helpers provides every command its
-/// file store does; it holds nothing in memory either.
-#[cfg(feature = "helpers")]
-impl<Key, Value> Ready<Key, Value> for dialog_storage::TempFileSystem {
-    fn ready(&self, _: &Read<Key, Value>) -> Option<PersistentNode<Key, Value>> {
-        None
-    }
-}

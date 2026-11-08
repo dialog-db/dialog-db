@@ -51,12 +51,12 @@ Three layers:
 
   | request | means | replaced |
   |---|---|---|
-  | `Read { catalog, name, priority, local }` | the node a name names, from anywhere (may hydrate), or from this replica only when `local`; what the environment holds already answers at once (`Ready`) | `Accessor::load_node` / `get_node`, the free `load_node`, `Reading { local: true }` (`Load::locally`), the `Get` a difference's boundary side performed, `Accessor::cached` |
+  | `Read { catalog, name, priority, local }` | the node a name names, from anywhere (may hydrate), or from this replica only when `local`; a node the environment holds is answered at once (`Resume::now`) | `Accessor::load_node` / `get_node`, the free `load_node`, `Reading { local: true }` (`Load::locally`), the `Get` a difference's boundary side performed, `Accessor::cached` |
   | `Preload { catalog, name, priority }` | make this node cheap to read soon; returns nothing | `Accessor::warm`, `Accessor::keeps` |
   | `Write { catalog, nodes }` | the nodes a persist made; the provider stores them and keeps them readable | the `NodeCache::of(..).insert` in persist, `Import` and `forget` in `archive::persist` |
 
   `Nodes<Key, Value>` is the bound a tree operation puts on its environment:
-  `Provider<Read> + Provider<Preload> + Ready + ConditionalSync`. `Holds`,
+  `Provider<Read> + Provider<Preload> + ConditionalSync`. `Holds`,
   `Load` and `Get` have left every tree bound.
 
 **Who answers.** A store answers at the layer it keeps nodes in:
@@ -91,15 +91,22 @@ once per operation. Nothing outside the environment names a cache, so an
 environment without one reads uncached in exactly one place, its own
 provider, and the tree cannot tell.
 
-**Dispatch.** Performing a command through `Provider` boxes a future, which
-a node the environment already holds does not need. So a request's
-`perform` first asks the environment what it can answer at once
-(`nodes::Ready`: the node it holds in memory, or nothing) and performs the
-command only for the rest; a preload of a node already held does nothing.
-The tree still asks one way and awaits either way. The journal's two
-Building entries have the measurement before and after: without this, the
-point-read scenarios paid 2 to 4% for one boxed future and one cache lookup
-per node read; with it they are within 0.4% of main.
+**Dispatch.** `Provider::execute` answers with a `Resume`: the output at
+once (`Resume::now`, nothing allocated) or a future that produces it
+(`Resume::later`, one boxed future, as `async_trait` always made). This is
+a change to the capability crate, not to the tree: every provider in the
+workspace answers this way, and `#[dialog_capability::provider]` writes
+the common case (an `async fn execute` whose body is the future). A
+provider that holds the answer returns it at once, and one standing in
+front of another hands back what it was handed, so an answer at hand stays
+at hand through the storage, the overlay and the query session. The tree
+awaits either the same way. The journal's Building entries have the
+measurement at each step: with every answer boxed, the point-read
+scenarios paid 2 to 4% for one boxed future and one cache lookup per node
+read; with a hit answered at once they are within 0.4% of main. A
+side-door trait on the request (`nodes::Ready`) did this first and was
+replaced: it answered outside the capability model, and the cost it
+worked around was the model's, not the tree's.
 
 **A node's hash** is still the hash of its block, and on main the two
 types the plan weighed (a served node and a verified node) are not needed:
@@ -155,13 +162,17 @@ Built as planned. The two memory-only reads went as the plan said:
 
 The integration's read-ahead (`open_pending`) could no longer ask which
 nodes were in memory, so it no longer opens a window only when a change's
-path misses: it opens a window of pending changes once per lookahead batch
-(`OPEN_LOOKAHEAD`), reading the first stored node on each path and then
-each path's next node as its read lands, deduplicating by hash. A node the
-environment holds answers at once, so the cost of a warm window is reads
-that hit. The widening heuristic (`OPEN_WIDTH`, `OPEN_LOOKAHEAD_MAX`) went
-with the peeking it depended on. The replication gate decides whether that
-costs round trips.
+path misses: it opens every window of pending changes, reading the first
+stored node on each path and then each path's next node as its read lands,
+deduplicating by hash. A node the environment holds answers at once, so
+the cost of a warm window is reads that hit. The widening heuristic
+(`OPEN_WIDTH`, `OPEN_LOOKAHEAD_MAX`) stays, counting the distinct stored
+nodes the window names rather than the ones not in memory: the replication
+gate showed what a fixed window costs (a seeded device's replay went from
+17 round trips to 37, one per leaf), and the count of stored nodes needs
+no peek. The difference from main is a warm window that names 32 stored
+nodes of which few miss, which goes out with fewer misses than main would
+have gathered; no gated scenario has that shape.
 
 ### 5. Writes move onto the write request
 

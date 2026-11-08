@@ -434,7 +434,7 @@ impl<Key, Value> NodeCache<Key, Value> {
 
     /// The node cache `env` holds, read through the scope of `subject`, if
     /// it holds one, without making one: what an environment consults to
-    /// answer a read at once ([`nodes::Ready`](crate::nodes::Ready)).
+    /// answer a read at once ([`Resume::now`](dialog_capability::Resume::now)).
     pub fn held_for<Env>(env: &Env, subject: &Did) -> Option<Self>
     where
         Env: Holds + ?Sized,

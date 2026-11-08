@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use crate::RemoteSite;
 use dialog_capability::Fork;
-use dialog_capability::Provider;
+use dialog_capability::{Provider, Resume};
 use dialog_common::{Blake3Hash, Buffer, ConditionalSync, Priority};
 use dialog_effects::archive::prelude::ArchiveExt;
 use dialog_effects::archive::{ArchiveError, Get, Put};
@@ -145,85 +145,100 @@ where
 /// written back into the local archive by the hydration and decoded here. A
 /// [local](dialog_search_tree::nodes::Read::locally) read is answered from
 /// the cache and the store alone.
-pub async fn read_node_or_hydrate<Env, Store>(
-    env: &Env,
-    store: &Store,
+pub fn read_node_or_hydrate<'a, Env, Store>(
+    env: &'a Env,
+    store: &'a Store,
     read: ArtifactRead,
-) -> Result<Option<ArtifactNode>, DialogSearchTreeError>
+) -> Resume<'a, Result<Option<ArtifactNode>, DialogSearchTreeError>>
 where
     Env: Provider<Hydrate> + Holds + ConditionalSync + ?Sized,
     Store: Provider<ArtifactRead> + ConditionalSync + ?Sized,
 {
     let cache = ArtifactNodeCache::of(env, read.catalog.subject());
-    // A hit answers before any of the hydrating machinery is set up.
+    // A hit answers at once, before any of the hydrating machinery is set
+    // up: nothing is allocated for it.
     if let Some(cache) = &cache
         && let Some(node) = cache.get_cached(&read.name)
     {
-        return Ok(Some(node));
+        return Resume::now(Ok(Some(node)));
     }
-    let fetch = async |name: &Blake3Hash| {
-        if let Some(node) = store.execute(read.clone().locally()).await? {
-            return Ok(Some(node));
+    Resume::later(async move {
+        let fetch = async |name: &Blake3Hash| {
+            if let Some(node) = store.execute(read.clone().locally()).await? {
+                return Ok(Some(node));
+            }
+            if read.local {
+                return Ok(None);
+            }
+            let block = hydrate_through(
+                env,
+                read.catalog.clone(),
+                name.clone(),
+                HydrationLane::Block,
+                read.priority,
+            )
+            .await
+            .map_err(|error| DialogSearchTreeError::Storage(error.into()))?;
+            block.map(|block| decode_node(block, name)).transpose()
+        };
+        match cache {
+            Some(cache) => cache.get_or_fetch(&read.name, fetch).await,
+            None => fetch(&read.name).await,
         }
-        if read.local {
-            return Ok(None);
-        }
-        let block = hydrate_through(
-            env,
-            read.catalog.clone(),
-            name.clone(),
-            HydrationLane::Block,
-            read.priority,
-        )
-        .await
-        .map_err(|error| DialogSearchTreeError::Storage(error.into()))?;
-        block.map(|block| decode_node(block, name)).transpose()
-    };
-    match cache {
-        Some(cache) => cache.get_or_fetch(&read.name, fetch).await,
-        None => fetch(&read.name).await,
-    }
+    })
 }
 
 /// Makes the node `preload` names cheap to read: reads it as
 /// [`read_node_or_hydrate`] would, into the cache `env` holds, dropping the
 /// result. An environment holding no cache has nowhere for it to land, so
-/// nothing is read.
-pub async fn preload_node_or_hydrate<Env, Store>(env: &Env, store: &Store, preload: ArtifactPreload)
+/// nothing is read; a node the cache holds is done with at once.
+pub fn preload_node_or_hydrate<'a, Env, Store>(
+    env: &'a Env,
+    store: &'a Store,
+    preload: ArtifactPreload,
+) -> Resume<'a, ()>
 where
     Env: Provider<Hydrate> + Holds + ConditionalSync + ?Sized,
     Store: Provider<ArtifactRead> + ConditionalSync + ?Sized,
 {
-    if ArtifactNodeCache::of(env, preload.catalog.subject()).is_some() {
-        let _ = read_node_or_hydrate(env, store, preload.read()).await;
+    if ArtifactNodeCache::of(env, preload.catalog.subject()).is_none() {
+        return Resume::now(());
+    }
+    match read_node_or_hydrate(env, store, preload.read()).into_now() {
+        Ok(_) => Resume::now(()),
+        Err(reading) => Resume::later(async move {
+            let _ = reading.await;
+        }),
     }
 }
 
 /// Writes the nodes `write` carries through `store`, then keeps them in the
 /// node cache `env` holds for the catalog's subject, so the next edit opens
 /// them without reading them back. A write that fails keeps nothing.
-pub async fn write_nodes<Env, Store>(
-    env: &Env,
-    store: &Store,
+pub fn write_nodes<'a, Env, Store>(
+    env: &'a Env,
+    store: &'a Store,
     write: ArtifactWrite,
-) -> Result<(), DialogSearchTreeError>
+) -> Resume<'a, Result<(), DialogSearchTreeError>>
 where
     Env: Holds + ?Sized,
     Store: Provider<ArtifactWrite> + ConditionalSync + ?Sized,
 {
     let cache = ArtifactNodeCache::of(env, write.catalog.subject());
     let nodes = write.nodes.clone();
-    write.perform(store).await?;
-    if let Some(cache) = cache {
-        for node in nodes {
-            // A node the cache already holds under this hash is the same
-            // bytes with whatever it has derived since: it stays.
-            if cache.get_cached(node.hash()).is_none() {
-                cache.insert(node.hash().clone(), node);
+    write.perform(store).map(move |written| {
+        written?;
+        if let Some(cache) = cache {
+            for node in nodes {
+                // A node the cache already holds under this hash is the same
+                // bytes with whatever it has derived since: it stays.
+                if cache.get_cached(node.hash()).is_none() {
+                    cache.insert(node.hash().clone(), node);
+                }
             }
         }
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 /// The spilled value `load` names: from `env`'s local blob store (or the
@@ -556,8 +571,7 @@ mod tests {
         }
     }
 
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    #[dialog_capability::provider]
     impl<P> Provider<Get> for Recording<P>
     where
         P: Provider<Get> + ConditionalSync,
@@ -567,8 +581,7 @@ mod tests {
         }
     }
 
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    #[dialog_capability::provider]
     impl<P> Provider<Hydrate> for Recording<P>
     where
         P: ConditionalSend + ConditionalSync,
@@ -579,8 +592,7 @@ mod tests {
         }
     }
 
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    #[dialog_capability::provider]
     impl<P> Provider<Load> for Recording<P>
     where
         P: Provider<Get> + Holds + ConditionalSend + ConditionalSync,

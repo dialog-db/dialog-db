@@ -1298,11 +1298,8 @@ where
 
 #[cfg(test)]
 mod tests {
-    use dialog_artifacts::tree::ArtifactNode;
-    use dialog_artifacts::{Datum, Key as ArtifactKey, State};
     use dialog_effects::archive::Load as ArchiveLoad;
     use dialog_effects::blob::Load as BlobLoad;
-    use dialog_search_tree::nodes::Ready;
 
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
@@ -1310,7 +1307,6 @@ mod tests {
     use super::Delta;
     use crate::helpers::test_repo;
     use crate::{Ephemeral, RemoteSite};
-    use async_trait::async_trait;
     use dialog_artifacts::tree::{
         ArtifactNodes, ArtifactPreload, ArtifactRead, ArtifactWrite, ArtifactWrites,
     };
@@ -5420,23 +5416,12 @@ mod tests {
         }
     }
 
-    /// What is at hand is at hand: a fault is injected only where a
-    /// command would run.
-    impl<P> Ready<ArtifactKey, State<Datum>> for Unreliable<P>
-    where
-        P: Ready<ArtifactKey, State<Datum>>,
-    {
-        fn ready(&self, read: &ArtifactRead) -> Option<ArtifactNode> {
-            self.inner.ready(read)
-        }
-    }
-
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[dialog_capability::provider]
     impl<C, P> Provider<C> for Unreliable<P>
     where
         C: Fault + 'static,
         C::Input: ConditionalSend,
+        C::Output: ConditionalSend,
         P: Provider<C> + ConditionalSync,
     {
         async fn execute(&self, input: C::Input) -> C::Output {

@@ -72,13 +72,10 @@ What this changes for you:
   node read through it reaches the peer's cache. An integration opens its
   read-ahead window once per batch of pending changes instead of when a
   path misses the cache, since nothing outside the environment can tell.
-- A request's `perform` first asks the environment what it can answer at
-  once (`nodes::Ready`: a node it holds in memory), and performs the boxed
-  command only for the rest; a preload of a node already held does
-  nothing. An environment that answers the requests implements `Ready`
-  too (`nodes::held_node` answers it from the cache the environment holds;
-  the `reads_nodes_through_blocks!` macro includes it), and `Nodes` requires
-  it. Under `dialog-perf` the point-read scenarios are within 0.4% of
+- A node the environment holds is answered at once, with nothing
+  allocated: the translation layer, `read_node_or_hydrate`, the overlay
+  and the query session return `Resume::now` on a hit (see the entry
+  below). Under `dialog-perf` the point-read scenarios are within 0.4% of
   before and the commit scenarios 0.6% to 1.9% cheaper; the design topic's
   journal has the table.
 
@@ -91,6 +88,60 @@ way. A store that keeps nodes in a form of its own (the single-file
 archive of #733) could only reach the tree through a side channel. With
 nodes as the tree's requests, each concern sits with whoever owns it, and
 a store's byte representation is not the tree's concern.
+
+### A provider answers at once or later, and a caller cannot tell
+
+[#755](https://github.com/dialog-db/dialog-db/pull/755), argued in the
+journal of [design/tree-node-reads.md](./design/tree-node-reads.md).
+
+`Provider::execute` is no longer an `async fn` under `async_trait`. It
+returns a `Resume<'_, Output>`: either the output at once
+(`Resume::now`), or a future that produces it (`Resume::later`). A caller
+awaits either one the same way, so the change is invisible where a
+command is performed; what it changes is that a provider holding the
+answer (a cache that has the value, a check that fails before any I/O)
+hands it back without allocating a future, and a provider standing in
+front of another hands back what it was handed.
+
+What this changes for you:
+
+- A `Provider<C>` impl is written one of two ways. Under
+  `#[dialog_capability::provider]`, `async fn execute(&self, input) ->
+  Output` as before: the attribute replaces the `async_trait` pair, and
+  the body becomes the future. Without it, `fn execute(&self, input) ->
+  Resume<'_, Output>`, returning `Resume::now` on the paths that have the
+  answer and `Resume::later(async move { .. })` on the rest. A forwarding
+  impl returns what the inner provider returned, boxing nothing.
+- `#[derive(Provider)]` forwards without boxing, and no longer asks
+  `ConditionalSend` of the command's input or `ConditionalSync` of the
+  struct.
+- `Resume` implements `Future` and `Unpin`, and offers `is_now`,
+  `into_now` (the answer, or the future that waits for it) and `map`.
+  `dialog_capability::Pending<'a, T>` names the boxed future.
+- A generic provider whose future awaits another `execute` and holds its
+  output needs `C::Output: ConditionalSend`, since a `Resume` is `Send`
+  only when its output is; `async_trait` hid that bound inside the box.
+- `nodes::Ready` and `nodes::held_node`'s role as its answer are gone from
+  `dialog_search_tree`; `Nodes<Key, Value>` is `Provider<Read> +
+  Provider<Preload> + ConditionalSync`. `Read::through_blocks`,
+  `through_loader` and `through_held_blocks`, `Preload::through_blocks`
+  and `through_held_blocks`, `Write::through_blocks` and
+  `through_held_blocks`, every request's `perform`, and
+  `dialog_repository::read_node_or_hydrate`, `preload_node_or_hydrate`
+  and `write_nodes` return a `Resume` instead of being `async fn`;
+  `through_loader` takes an `FnOnce(Load) -> impl Future` instead of an
+  `AsyncFnOnce`.
+- `dialog_common::provider` (the test provisioning attribute) is
+  unchanged; in `dialog-macros` it is now `provision`.
+
+Why: the cost of crossing a provider boundary was a boxed future per
+call, paid even when the provider had the answer in hand. The first fix
+for the tree's node reads was a side door beside the capability model,
+which was a symptom of the model: a provider could only ever answer
+later. Answering now or later in the one trait keeps every answer inside
+the model, with sync and async providers written against the same
+signature, and takes the box off every hit in the workspace, not just the
+tree's.
 
 ### Two claims that stand equal are told apart by the hash of their values
 

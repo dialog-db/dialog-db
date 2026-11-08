@@ -1,14 +1,12 @@
 //! Archive capability provider for volatile storage.
 
 use super::{ArchiveKey, Volatile};
-use async_trait::async_trait;
 use base58::ToBase58;
 use dialog_capability::{Capability, Provider};
 use dialog_effects::archive::prelude::{GetExt, ImportExt, PutExt};
 use dialog_effects::archive::{ArchiveError, Get, Import, Put};
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<Get> for Volatile {
     async fn execute(&self, effect: Capability<Get>) -> Result<Option<Vec<u8>>, ArchiveError> {
         let subject = effect.subject().into();
@@ -24,8 +22,7 @@ impl Provider<Get> for Volatile {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<Put> for Volatile {
     async fn execute(&self, effect: Capability<Put>) -> Result<(), ArchiveError> {
         let subject = effect.subject().into();
@@ -47,8 +44,7 @@ impl Provider<Put> for Volatile {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<Import> for Volatile {
     async fn execute(&self, effect: Capability<Import>) -> Result<(), ArchiveError> {
         let subject = effect.subject().into();

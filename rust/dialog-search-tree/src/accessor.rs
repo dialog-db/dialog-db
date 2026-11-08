@@ -290,8 +290,7 @@ mod tests {
         fn hold(&self, _key: String, _handle: dialog_common::Held) {}
     }
 
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    #[dialog_capability::provider]
     impl dialog_capability::Provider<dialog_effects::archive::Load> for Answering {
         async fn execute(
             &self,
@@ -426,8 +425,7 @@ mod tests {
         fn hold(&self, _key: String, _handle: dialog_common::Held) {}
     }
 
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    #[dialog_capability::provider]
     impl dialog_capability::Provider<dialog_effects::archive::Load> for Asked {
         async fn execute(
             &self,

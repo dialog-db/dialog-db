@@ -8,14 +8,12 @@
 //! the catalog's archive, read through [`blob::Load`] ([`load_spill`]). A
 //! batch stages what it writes in an [`ArchiveDelta`] that keeps the two
 //! lanes apart, and its commit writes each lane where that lane belongs.
-
-use async_trait::async_trait;
-use dialog_capability::{Capability, Provider};
+use dialog_capability::{Capability, Provider, Resume};
 use dialog_common::{Blake3Hash, Buffer, ConditionalSync, Held, Holds};
 use dialog_effects::archive::prelude::ArchiveScope;
 use dialog_effects::archive::{self, ArchiveError, Get};
 use dialog_effects::blob;
-use dialog_search_tree::nodes::{Preload, Read, Ready, Write};
+use dialog_search_tree::nodes::{Preload, Read, Write};
 use dialog_search_tree::{Delta, DialogSearchTreeError};
 
 use crate::tree::ArtifactNode;
@@ -185,8 +183,7 @@ impl<Env: Holds + ?Sized> Holds for DeltaOverlay<'_, Env> {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl<Env> Provider<archive::Load> for DeltaOverlay<'_, Env>
 where
     Env: Provider<archive::Load> + ConditionalSync + ?Sized,
@@ -199,66 +196,54 @@ where
     }
 }
 
-/// A staged node is at hand; any other is whatever the environment holds.
-impl<Env> Ready<Key, State<Datum>> for DeltaOverlay<'_, Env>
-where
-    Env: Ready<Key, State<Datum>> + ?Sized,
-{
-    fn ready(&self, read: &Read<Key, State<Datum>>) -> Option<ArtifactNode> {
-        self.delta.node(&read.name).or_else(|| self.env.ready(read))
-    }
-}
-
-/// A staged node answers its read as the node the seal produced.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+/// A staged node answers its read at once, as the node the seal produced;
+/// any other read is the environment's.
 impl<Env> Provider<Read<Key, State<Datum>>> for DeltaOverlay<'_, Env>
 where
-    Env: Provider<Read<Key, State<Datum>>> + ConditionalSync + ?Sized,
+    Env: Provider<Read<Key, State<Datum>>> + ?Sized,
 {
-    async fn execute(
+    fn execute(
         &self,
         read: Read<Key, State<Datum>>,
-    ) -> Result<Option<ArtifactNode>, DialogSearchTreeError> {
+    ) -> Resume<'_, Result<Option<ArtifactNode>, DialogSearchTreeError>> {
         if let Some(node) = self.delta.node(&read.name) {
-            return Ok(Some(node));
+            return Resume::now(Ok(Some(node)));
         }
-        self.env.execute(read).await
+        self.env.execute(read)
     }
 }
 
 /// A staged node is already as cheap to read as it gets; any other
 /// preload is the environment's.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<Env> Provider<Preload<Key, State<Datum>>> for DeltaOverlay<'_, Env>
 where
-    Env: Provider<Preload<Key, State<Datum>>> + ConditionalSync + ?Sized,
+    Env: Provider<Preload<Key, State<Datum>>> + ?Sized,
 {
-    async fn execute(&self, preload: Preload<Key, State<Datum>>) {
-        if self.delta.node(&preload.name).is_none() {
-            self.env.execute(preload).await
+    fn execute(&self, preload: Preload<Key, State<Datum>>) -> Resume<'_, ()> {
+        if self.delta.node(&preload.name).is_some() {
+            return Resume::now(());
         }
+        self.env.execute(preload)
     }
 }
 
 /// A write through the overlay is the environment's: nothing is staged by
 /// writing.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<Env> Provider<Write<Key, State<Datum>>> for DeltaOverlay<'_, Env>
 where
-    Env: Provider<Write<Key, State<Datum>>> + ConditionalSync + ?Sized,
+    Env: Provider<Write<Key, State<Datum>>> + ?Sized,
 {
-    async fn execute(&self, write: Write<Key, State<Datum>>) -> Result<(), DialogSearchTreeError> {
-        write.perform(self.env).await
+    fn execute(
+        &self,
+        write: Write<Key, State<Datum>>,
+    ) -> Resume<'_, Result<(), DialogSearchTreeError>> {
+        write.perform(self.env)
     }
 }
 
 /// A staged block is one the replica minted, so a local-only read finds it
 /// as it finds what the local archive holds.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl<Env> Provider<Get> for DeltaOverlay<'_, Env>
 where
     Env: Provider<Get> + ConditionalSync + ?Sized,
@@ -272,8 +257,7 @@ where
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl<Env> Provider<blob::Load> for DeltaOverlay<'_, Env>
 where
     Env: Provider<blob::Load> + ConditionalSync + ?Sized,

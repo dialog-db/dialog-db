@@ -399,8 +399,7 @@ mod tests {
         fn hold(&self, _key: String, _handle: Held) {}
     }
 
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    #[dialog_capability::provider]
     impl Provider<Load> for Impostor {
         async fn execute(&self, load: Load) -> Result<Option<Buffer>, ArchiveError> {
             if load.digest == self.asked {

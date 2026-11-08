@@ -548,8 +548,7 @@ impl ObservingBlocks {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<Load> for ObservingBlocks {
     async fn execute(
         &self,
@@ -561,8 +560,7 @@ impl Provider<Load> for ObservingBlocks {
 
 crate::reads_nodes_through_blocks!(ObservingBlocks);
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<Get> for ObservingBlocks {
     async fn execute(
         &self,
@@ -578,8 +576,7 @@ impl Provider<Get> for ObservingBlocks {
 
 /// A spilled value read is observed like a block read: these keep a value
 /// as a block of their catalog.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<dialog_effects::blob::Load> for ObservingBlocks {
     async fn execute(
         &self,

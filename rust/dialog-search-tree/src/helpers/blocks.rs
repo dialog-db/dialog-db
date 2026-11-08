@@ -1,9 +1,3 @@
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
-
-use async_trait::async_trait;
 use dialog_capability::{Capability, Provider, Subject, did};
 use dialog_common::{Blake3Hash, Buffer, Held, Holdings, Holds};
 use dialog_effects::archive::prelude::{ArchiveScope, CatalogScope};
@@ -12,6 +6,10 @@ use dialog_effects::blob;
 use dialog_storage::provider::Volatile;
 use futures_util::FutureExt as _;
 use parking_lot::Mutex;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 use crate::{Delta, NodeCache, PersistentNode};
 
@@ -116,24 +114,21 @@ impl Holds for Blocks {
     fn hold(&self, _key: String, _handle: Held) {}
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<Load> for Blocks {
     async fn execute(&self, load: Load) -> Result<Option<Buffer>, ArchiveError> {
         load.perform(&self.store).await
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<Get> for Blocks {
     async fn execute(&self, get: Capability<Get>) -> Result<Option<Vec<u8>>, ArchiveError> {
         get.perform(&self.store).await
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<Import> for Blocks {
     async fn execute(&self, import: Capability<Import>) -> Result<(), ArchiveError> {
         import.perform(&self.store).await
@@ -145,8 +140,7 @@ crate::writes_nodes_through_blocks!(Blocks);
 
 /// A spilled value is read from the volatile store's blobs, else from the
 /// catalog's blocks, where these keep a value written as a block.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<blob::Load> for Blocks {
     async fn execute(&self, load: blob::Load) -> Result<Option<Buffer>, ArchiveError> {
         load.perform(&self.store).await
@@ -239,8 +233,7 @@ impl<Env: ?Sized> Holds for Holding<'_, Env> {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl<Env> Provider<Load> for Holding<'_, Env>
 where
     Env: Provider<Load> + dialog_common::ConditionalSync + ?Sized,
@@ -250,8 +243,7 @@ where
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl<Env> Provider<Get> for Holding<'_, Env>
 where
     Env: Provider<Get> + dialog_common::ConditionalSync + ?Sized,
@@ -261,8 +253,7 @@ where
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl<Env> Provider<Import> for Holding<'_, Env>
 where
     Env: Provider<Import> + dialog_common::ConditionalSync + ?Sized,
@@ -281,8 +272,7 @@ crate::writes_nodes_through_blocks!(
     where [Env: Provider<Import> + dialog_common::ConditionalSync + ?Sized,]
 );
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl<Env> Provider<blob::Load> for Holding<'_, Env>
 where
     Env: Provider<blob::Load> + dialog_common::ConditionalSync + ?Sized,
@@ -391,8 +381,7 @@ impl Holds for JournaledBlocks {
     fn hold(&self, _key: String, _handle: Held) {}
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<Load> for JournaledBlocks {
     async fn execute(&self, load: Load) -> Result<Option<Buffer>, ArchiveError> {
         self.journal(&load.digest);
@@ -400,8 +389,7 @@ impl Provider<Load> for JournaledBlocks {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<Get> for JournaledBlocks {
     async fn execute(&self, get: Capability<Get>) -> Result<Option<Vec<u8>>, ArchiveError> {
         use dialog_effects::archive::prelude::GetExt as _;

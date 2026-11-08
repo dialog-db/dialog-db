@@ -238,23 +238,21 @@ mod tests {
     use super::*;
     use crate::RepositoryExt as _;
     use crate::helpers::{Counting, connect};
+    use dialog_artifacts::tree::ArtifactNodeCache;
     use dialog_artifacts::tree::ArtifactTreeExt as _;
     use dialog_artifacts::{
         ArchiveDelta, Artifact, Datum, Entity, Instruction, Key, Preload, PreloadRequest,
         Speculation, State, Value,
     };
+    use dialog_capability::Provider;
     use dialog_capability::{Capability, Subject};
+    use dialog_common::{Held, Holdings, Holds};
+    use dialog_effects::archive::Get;
+    use dialog_query::query::Output as _;
     use dialog_search_tree::helpers::Blocks;
     use dialog_storage::DialogStorageError;
     use dialog_varsig::did;
     use futures_util::stream;
-
-    use async_trait::async_trait;
-    use dialog_artifacts::tree::ArtifactNodeCache;
-    use dialog_capability::Provider;
-    use dialog_common::{Held, Holdings, Holds};
-    use dialog_effects::archive::Get;
-    use dialog_query::query::Output as _;
 
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
@@ -278,16 +276,14 @@ mod tests {
         }
     }
 
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[dialog_capability::provider]
     impl Provider<Get> for Impostor {
         async fn execute(&self, _: Capability<Get>) -> Result<Option<Vec<u8>>, ArchiveError> {
             Ok(Some(self.0.clone()))
         }
     }
 
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[dialog_capability::provider]
     impl Provider<ArchiveLoad> for Impostor {
         async fn execute(
             &self,

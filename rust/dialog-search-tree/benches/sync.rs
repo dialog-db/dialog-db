@@ -30,12 +30,6 @@
 //! overflow, per the algorithm. The structural counts are printed once at
 //! startup; criterion then times the differential walk itself.
 
-use std::sync::{
-    Arc,
-    atomic::{AtomicU64, Ordering},
-};
-
-use async_trait::async_trait;
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use dialog_capability::{Capability, Provider};
 use dialog_common::{Blake3Hash, helpers::BenchData};
@@ -43,6 +37,10 @@ use dialog_effects::archive::{ArchiveError, Get, Load};
 use dialog_search_tree::helpers::Blocks;
 use dialog_search_tree::{Buffer, Delta, FlushPolicy, HitchhikerTree, PersistentTree};
 use futures_util::StreamExt;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 
 const BENCH_SEED: u64 = 42;
 
@@ -110,8 +108,7 @@ impl dialog_common::Holds for CountingBackend {
     fn hold(&self, _key: String, _handle: dialog_common::Held) {}
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<Load> for CountingBackend {
     async fn execute(&self, load: Load) -> Result<Option<Buffer>, ArchiveError> {
         Ok(self.count(&load.digest))
@@ -119,8 +116,7 @@ impl Provider<Load> for CountingBackend {
 }
 
 /// A local-only read counts as a read of the block too.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<Get> for CountingBackend {
     async fn execute(&self, get: Capability<Get>) -> Result<Option<Vec<u8>>, ArchiveError> {
         use dialog_effects::archive::prelude::GetExt as _;

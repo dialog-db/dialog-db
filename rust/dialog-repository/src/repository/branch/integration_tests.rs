@@ -18,8 +18,6 @@ use dialog_effects::archive::prelude::CatalogScope;
 #[cfg(not(feature = "web-integration-tests"))]
 use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::storage::Location;
-#[cfg(not(feature = "web-integration-tests"))]
-use dialog_search_tree::nodes::Ready;
 
 use dialog_effects::MethodExt as _;
 use dialog_effects::archive::prelude::{ArchiveExt as _, ArchiveScope};
@@ -2477,17 +2475,16 @@ async fn it_bridges_foreign_bulk_to_a_second_remote(s3: S3Address) -> Result<()>
 macro_rules! delegate_provider {
     ($($command:ty),+ $(,)?) => {
         $(
-            #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-            #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
             impl<P> Provider<$command> for AbortOnRemoteBlobImport<P>
             where
-                P: Provider<$command> + dialog_common::ConditionalSync,
+                P: Provider<$command>,
             {
-                async fn execute(
+                fn execute(
                     &self,
                     input: <$command as dialog_capability::Command>::Input,
-                ) -> <$command as dialog_capability::Command>::Output {
-                    self.inner.execute(input).await
+                ) -> dialog_capability::Resume<'_, <$command as dialog_capability::Command>::Output>
+                {
+                    self.inner.execute(input)
                 }
             }
         )+
@@ -2548,18 +2545,7 @@ delegate_provider!(
 );
 
 #[cfg(not(feature = "web-integration-tests"))]
-impl<P> Ready<ArtifactKey, State<Datum>> for AbortOnRemoteBlobImport<P>
-where
-    P: Ready<ArtifactKey, State<Datum>>,
-{
-    fn ready(&self, read: &ArtifactRead) -> Option<ArtifactNode> {
-        self.inner.ready(read)
-    }
-}
-
-#[cfg(not(feature = "web-integration-tests"))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl<P> Provider<Fork<RemoteSite, BlobImportEffect>> for AbortOnRemoteBlobImport<P>
 where
     P: dialog_common::ConditionalSync,

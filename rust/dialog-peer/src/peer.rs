@@ -129,8 +129,7 @@ pub(crate) fn default_discovery() -> Arc<dyn Discovery> {
     Arc::new(CachingResolver::new(WebResolver::new()))
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl<S: Clone + ConditionalSend + ConditionalSync, M: Mode> Provider<Discover> for Peer<S, M> {
     async fn execute(&self, input: Discover) -> Result<Vec<Service>, ResolveError> {
         self.inner.discovery.execute(input).await

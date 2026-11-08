@@ -24,7 +24,6 @@
 // own lib under the `dialog_query` name (its extern prelude), so bare
 // `dialog_query::…` resolves to the real crate in both.
 use anyhow::Result;
-use async_trait::async_trait;
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::tree::{
     ArtifactNode, ArtifactNodes, ArtifactPreload, ArtifactRead, ArtifactWrites,
@@ -33,7 +32,6 @@ use dialog_artifacts::{
     Artifact, ArtifactSelector, ArtifactStream, DialogArtifactsError, Instruction,
     Relation as ArtifactsRelation, Select, Value,
 };
-use dialog_artifacts::{Datum, Key as ArtifactKey, State};
 use dialog_capability::{Fork, Provider, Subject};
 use dialog_common::Buffer;
 use dialog_common::{ConditionalSync, Held, Holdings, Holds};
@@ -55,7 +53,6 @@ use dialog_peer::{Peer, Session};
 use dialog_repository::{Branch, HeldCaches, PeersEnv, RemoteSite, Repository, RepositoryExt as _};
 use dialog_search_tree::DialogSearchTreeError;
 use dialog_search_tree::audit as tree_audit;
-use dialog_search_tree::nodes::Ready;
 
 use dialog_storage::Blake3Hash;
 use dialog_storage::dup_audit;
@@ -401,8 +398,7 @@ impl<Backend> Holds for CountingStore<Backend> {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl<Backend> Provider<ArchiveLoad> for CountingStore<Backend>
 where
     Backend: Provider<ArchiveLoad> + ConditionalSync,
@@ -429,8 +425,7 @@ dialog_search_tree::writes_nodes_through_blocks!(
     where [Backend: Provider<Import> + ConditionalSync,]
 );
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl<Backend> Provider<Import> for CountingStore<Backend>
 where
     Backend: Provider<Import> + ConditionalSync,
@@ -443,8 +438,7 @@ where
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl<Backend> Provider<BlobLoad> for CountingStore<Backend>
 where
     Backend: Provider<BlobLoad> + ConditionalSync,
@@ -501,8 +495,7 @@ impl<'a, Env> JoinEnv<'a, Env> {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl<'a, Env> Provider<Select<'a>> for JoinEnv<'a, Env>
 where
     Env: Provider<BlobRead>
@@ -530,16 +523,14 @@ where
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl<Env: ConditionalSync> Provider<SelectRules> for JoinEnv<'_, Env> {
     async fn execute(&self, input: ConceptDescriptor) -> Result<ConceptRules, EvaluationError> {
         self.rules.acquire(&input)
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl<Env> Provider<dialog_artifacts::Estimate> for JoinEnv<'_, Env>
 where
     Env: Provider<BlobRead>
@@ -570,8 +561,7 @@ where
 
 // Preload hints have no listener in the bench env: refuse them so the
 // measured read counts stay exactly the demand reads.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl<Env: ConditionalSync> Provider<dialog_artifacts::Preload> for JoinEnv<'_, Env> {
     async fn execute(&self, _input: dialog_artifacts::PreloadRequest) -> bool {
         false
@@ -582,8 +572,7 @@ impl<Env: ConditionalSync> Provider<dialog_artifacts::Preload> for JoinEnv<'_, E
 // the query reads: read the branch's archive catalog through the same
 // counting store scans use, so resolver block reads land in the shared
 // read journal too.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl<Env> Provider<ArchiveLoad> for JoinEnv<'_, Env>
 where
     Env: Provider<ArchiveLoad> + ConditionalSync,
@@ -601,16 +590,7 @@ where
 
 // Node reads for the scans and resolver premises, through the same
 // counting store, in the branch's catalog.
-/// The bench env reads through a counting store made per read, which holds
-/// nothing yet: nothing is at hand.
-impl<Env> Ready<ArtifactKey, State<Datum>> for JoinEnv<'_, Env> {
-    fn ready(&self, _: &ArtifactRead) -> Option<ArtifactNode> {
-        None
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl<Env> Provider<ArtifactRead> for JoinEnv<'_, Env>
 where
     Env: Provider<ArchiveLoad> + ConditionalSync,
@@ -626,8 +606,7 @@ where
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl<Env> Provider<ArtifactPreload> for JoinEnv<'_, Env>
 where
     Env: Provider<ArchiveLoad> + ConditionalSync,
@@ -641,8 +620,7 @@ where
 }
 
 // Spilled-value loads for `tree/value`, through the same counting store.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl<Env> Provider<BlobLoad> for JoinEnv<'_, Env>
 where
     Env: Provider<BlobLoad> + ConditionalSync,

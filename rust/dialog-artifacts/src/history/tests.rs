@@ -978,8 +978,7 @@ async fn it_fetches_spilled_history_values_concurrently() -> Result<()> {
         fn hold(&self, _key: String, _handle: dialog_common::Held) {}
     }
 
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    #[dialog_capability::provider]
     impl Provider<archive::Load> for Gauge {
         async fn execute(&self, load: archive::Load) -> Result<Option<Buffer>, ArchiveError> {
             Ok(self.read(&load.digest).await)
@@ -988,8 +987,7 @@ async fn it_fetches_spilled_history_values_concurrently() -> Result<()> {
 
     dialog_search_tree::reads_nodes_through_blocks!(Gauge);
 
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    #[dialog_capability::provider]
     impl Provider<blob::Load> for Gauge {
         async fn execute(&self, load: blob::Load) -> Result<Option<Buffer>, ArchiveError> {
             Ok(self.read(&load.digest).await)
