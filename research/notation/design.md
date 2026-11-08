@@ -203,9 +203,29 @@ A concept's primary need not be the entity of the attributes it reads. Read from
 (list/todo list:home todo: ?t)    ; every to-do on list:home
 ```
 
-A concept body holds no formulas, so every concept can be read and written. Formulas belong in rule bodies, and also at the top of a document: in a question, in an assertion, and in a write, as `(bug! (id {…}) …)` does. A concept may not contain itself.
+A concept body holds no one-way formulas, so every concept can be read and written (see [Domain calls](#domain-calls) for checks and formulas that run both ways). Formulas belong in rule bodies, and also at the top of a document: in a question, in an assertion, and in a write, as `(bug! (id {…}) …)` does. A concept may not contain itself.
 
 A concept says what facts make it up, not how its entity is made. Construction is the call's business (below) or a rule's.
+
+### Domain calls
+
+**Proposed.** A call on a domain is a concept that is never declared. Each label names the attribute of that name in the domain:
+
+```clj
+(xyz.tonk ?bug title: ?t assignee: ?a)   ; reads xyz.tonk/title and xyz.tonk/assignee
+```
+
+With nothing more said, each attribute is taken as any type and `pick: :last`. Type and pick are part of an attribute's identity, so a different type or pick is not a narrower view of the same facts but another attribute: an `xyz.tonk/title` kept with `pick: :all` is not read by this call. To name one, write the attribute line, which says type and pick where they belong, on the attribute:
+
+```clj
+(concept! (bug ?b title: ?t assignee: ?a)
+  (xyz.tonk/title ?b is: ?t as: :text pick: :last)
+  (xyz.tonk/assignee ?b is: ?a as: :entity pick: :last))
+```
+
+A domain call that writes takes each attribute's type from the value written, so a value of an unexpected type lands on another attribute rather than failing. A rule's head can be a domain call, which gives a document's answer a concept without declaring one: `(rule (my.app.found ?b title: ?t) (when (bug ?b title: ?t)))`.
+
+A concept body may hold checks, such as a type check, and formulas that run in both directions, since a concept is read and written through. A formula that runs one way, such as `id`, belongs in a rule. This is the line between a concept and a rule: a concept is a view every parameter of which maps back to one attribute, as an updatable view in SQL maps each column to one base column.
 
 ### Optional parameters
 

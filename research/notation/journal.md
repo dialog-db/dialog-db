@@ -410,6 +410,16 @@ The `tutorial` broke the plan's promise that every document states the same fact
 
 **Decision.** Proposed in the design: a top-level call may nest formulas over ground arguments; anything that reads facts takes a rule.
 
+## 2026-11-08 — Domain calls, and pick is part of the attribute
+
+**Question.** Can a domain be queried as a concept nobody declared, and where do type and pick go?
+
+**Method.** Maintainer's proposal, discussed in conversation.
+
+**Results.** `(xyz.tonk ?bug title: ?t assignee: ?a)` reads `xyz.tonk/title` and `xyz.tonk/assignee`, defaulting to any type and `pick: :last`. Type and pick constraints on variables, `(.type ?t is: :text)` or `(?t as: :text pick: :last)`, attach to a value, which can come from two attributes; they belong on the attribute. Pick is part of an attribute's identity, so choosing another pick reads another attribute, not a narrower view. A type check runs both ways (it filters on read and validates on write), so it does not break the rule against one-way formulas in concepts.
+
+**Decision.** Domain calls are Proposed in the design, with defaults, and attribute lines name a specific type and pick. A concept may hold checks and formulas that run both ways; one-way formulas such as `id` belong in rules.
+
 ## How to reproduce
 
 1. Take a variant's prompt from its round's results file and save it as `<variant>.txt`.
