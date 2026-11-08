@@ -36,7 +36,7 @@ use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::time::{Duration, Instant};
 
 use dialog_archive_file::{FILE_NAME, FileArchive, Options};
-use dialog_artifacts::{Artifact, ArtifactSelector, Entity, Instruction, Relation};
+use dialog_artifacts::{Artifact, ArtifactSelector, Entity, Instruction, Pick, Relation, Value};
 use dialog_baseline::se::{SeLog, se_instructions};
 use dialog_capability::Subject;
 use dialog_effects::storage::{Directory, Location};
@@ -102,6 +102,9 @@ struct Run {
     /// The nodes the node cache held after the scans, and what it charged
     /// for them.
     cached: (usize, u64),
+    /// Small commits on the built database (five facts on an entity it
+    /// holds, one commit each), their median and slowest time.
+    small: (Duration, Duration),
     detail: String,
 }
 
@@ -286,6 +289,40 @@ macro_rules! run {
             (_, run.warm_points, _) = reads!(operator, branch, &[] as &[String], $entities);
             run.points_heap = ALLOCATED.load(Relaxed).saturating_sub(opened);
         }
+        {
+            // Small commits on the database as built: what an application's
+            // edit costs once the data is there.
+            let _entropy = Seed::new(734).entropy();
+            let (operator, branch) = open!($space, at, "peer", "repo", false);
+            serve!($serve, $directory, operator, branch);
+            let mut times = Vec::new();
+            for (n, entity) in $entities.iter().cycle().take(100).enumerate() {
+                let instructions: Vec<Instruction> = (0..5)
+                    .map(|field| -> anyhow::Result<Instruction> {
+                        Ok(Instruction::Assert(
+                            Artifact {
+                                the: Relation::from_str(&format!("bench/small-{field}"))?,
+                                of: Entity::from_str(entity)?,
+                                is: Value::String(format!("edit {n}")),
+                                cause: None,
+                            },
+                            Pick::Last,
+                        ))
+                    })
+                    .collect::<anyhow::Result<_>>()?;
+                let started = Instant::now();
+                branch
+                    .transaction()
+                    .integrate(instructions.into_iter().collect())
+                    .commit()
+                    .publish()
+                    .perform(&operator)
+                    .await?;
+                times.push(started.elapsed());
+            }
+            times.sort();
+            run.small = (times[times.len() / 2], times[times.len() - 1]);
+        }
         run
     }};
 }
@@ -446,6 +483,12 @@ async fn main() -> anyhow::Result<()> {
             mib(run.points_heap),
             run.cached.0,
             mib(run.cached.1),
+        );
+        println!(
+            "{:<12} small commits on the built database: median {:.1} ms, slowest {:.1} ms",
+            "",
+            run.small.0.as_secs_f64() * 1e3,
+            run.small.1.as_secs_f64() * 1e3
         );
         println!("{:<12} root {}", "", run.root);
         if !run.detail.is_empty() {
