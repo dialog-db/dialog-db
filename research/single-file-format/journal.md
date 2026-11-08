@@ -1676,6 +1676,19 @@ the duplicates gone, the proposal above stands in the same order for
 what remains: estimates first, then the root buffer every commit
 rewrites, then handing the archive entries.
 
+**Follow-up: seeding once per entity, as a candidate.** Rows of one
+entity bind into one evaluation when each is this commit's own, binds
+one distinct field, and that field is a single attribute read under
+`last`; any other row seeds alone
+([dialog-db/dialog-db#763](https://github.com/dialog-db/dialog-db/pull/763),
+a draft on top of #761). Five alternating runs each, warm medians:
+5.0–5.7 ms with both, against 7.0–9.2 with #761 alone. Comment 3.8–4.9,
+create issue 5.5–7.2. The bench's queries return the same rows. Whether
+the equivalence holds, in particular whether `last` always elects this
+commit's own write over a merged concurrent claim, is
+[dialog-db/dialog-db#762](https://github.com/dialog-db/dialog-db/issues/762),
+open.
+
 ## How to reproduce
 
 ```sh
