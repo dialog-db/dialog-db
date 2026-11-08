@@ -8,7 +8,24 @@ Two replicas write the same cell under `max`, one 5 and the other 7, without see
 
 The write retracted the claim the pick elected, 7, and left 5 live. Under `min` and `top` it goes the same way. Under `last` the read comes out right, but the losing claim stays live, and the cell never returns to one claim.
 
-A second case came up while working through the first. Replica A writes 5, then 7 under `min`, and 7 succeeds 5. Replica B receives 7, and later receives 5 through a partial sync. On B, a `min` read returns 5, the value 7 replaced.
+A second case came up while working through the first, and it takes three replicas. A writes, B writes having seen it, then A writes again having seen B's write, which succeeds it. C syncs with A first, and gets A's last write without B's, which A had retired. Then C syncs with B, and B's write arrives after the write that succeeded it. On C it should read as succeeded, not as concurrent; under `min` or `max` today it can win the read.
+
+```mermaid
+sequenceDiagram
+  participant A as Replica A
+  participant B as Replica B
+  participant C as Replica C
+  A->>A: write 5 (min)
+  A-->>B: sync
+  B->>B: write 3 (min): succeeds 5
+  B-->>A: sync
+  A->>A: write 7 (min): succeeds 3
+  A-->>C: sync brings 7
+  B-->>C: sync brings 3, after 7
+  Note over C: live: 7, 3. 7's cause names 3.<br/>min read today: 3. It should read 7.
+```
+
+With two replicas this cannot happen: each sync brings the other's writes in order.
 
 ```mermaid
 sequenceDiagram

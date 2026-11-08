@@ -5,7 +5,7 @@
 |  | Understanding | Activity |
 |---|---|---|
 | **Status** | What do we know? A write retires only the elected claim, and a read does not check causes, both confirmed in the source. The maintainer's direction is column D. `history::causality` reads "seen" from claim lineage, which would retire other origins' `all` values. | Where are we at? Directing: six approaches in a matrix, D stated, not decided. |
-| **Agenda** | What do we need to know? Whether partial sync can deliver a claim after its successor (a test). Whether revision causality tells "before" from "concurrent" where lineage cannot, and whether a partial replica holds what it needs (tests). What a write does when causality cannot be decided locally. | Where are we going? Settle the open hypotheses, decide the direction, then the first implementation decision: claim lineage or revision DAG for "concurrent". |
+| **Agenda** | What do we need to know? Whether revision causality tells "before" from "concurrent" where lineage cannot, and whether a partial replica holds what it needs (tests). What a write does when causality cannot be decided locally. | Where are we going? Settle the open hypotheses, decide the direction, then the first implementation decision: claim lineage or revision DAG for "concurrent". |
 
 ## 2026-11-08, Describing to Directing: from the max bug to a direction
 
@@ -23,3 +23,11 @@
 - A claim that comes back has to be both skipped on read and retired on the next write. Retiring only the elected claim would let it resurface once its successor is gone.
 
 **Decided.** Not decided. Column D is the maintainer's stated direction and rests on three opinions and two open hypotheses in the claims: that partial sync can deliver a claim after its successor, and that revision causality is available and right at write. E and F are out of scope, on the maintainer's opinions.
+
+## 2026-11-08, Directing: can a claim arrive after its successor?
+
+**Asked.** Can partial sync deliver a claim after the claim that succeeded it?
+
+**Learned.** Not with two replicas, but with three it can (Irakli). A writes, B writes having seen it, A writes again succeeding B's write. C syncs with A, which no longer holds B's write live, then with B, and receives B's write after A's. On C it must read as succeeded, not concurrent. A's cause names B's write directly, so claim lineage finds it at the first tier: this case does not need revision causality. The description's earlier two-replica example of it was impossible and is replaced.
+
+**Decided.** The hypothesis is confirmed by the scenario; the test is still to write. The read filter and the retiring of claims that come back stay in column D. The remaining gate is what a write does when it cannot decide concurrency locally.
