@@ -634,4 +634,9 @@ the distinct stored nodes the window names (where the spine hands a path
 to the environment), which needs no peek and is the same count on a cold
 tree. On a warm tree it stops widening sooner than main did, since nodes
 the environment holds count too; no gated scenario has that shape, and
-the gate will say if one appears.
+the gate will say if one appears. Measured locally with the soak's `join`
+scenario over the `none` network: the seeded phase is 16 round trips
+against the baseline's 17 (every window is opened now, so the one the
+first change's miss used to trigger goes out with the rest), with the
+same 63 requests and bytes; every other phase matches the baseline row
+for row.
