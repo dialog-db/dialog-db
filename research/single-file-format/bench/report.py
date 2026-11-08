@@ -19,6 +19,7 @@ Its numbers are in the table under it.
 """
 
 import json
+import re
 import statistics
 import sys
 from collections import defaultdict
@@ -74,7 +75,10 @@ def load(directory):
         runs[store].append(report["measures"])
     if len(datasets) != 1:
         sys.exit(f"runs name {len(datasets)} datasets: {sorted(datasets)}")
-    stores = sorted(runs, key=lambda s: (ORDER.index(s) if s in ORDER else len(ORDER), s))
+    # Numbers in names sort as numbers: "file 9" before "file 10".
+    natural = lambda name: [int(part) if part.isdigit() else part
+                            for part in re.split(r"(\d+)", name)]
+    stores = sorted(runs, key=lambda s: (ORDER.index(s) if s in ORDER else len(ORDER), natural(s)))
     return datasets.pop(), stores, runs
 
 

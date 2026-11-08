@@ -70,3 +70,12 @@ per_append = 944.8 * 1024 / 2000
     [row[0] for row in REUSED], ["index writes ÷ data"],
     [[(row[4] / per_append,) * 3] for row in REUSED], "× the append's data", reference=1,
     labels=True))
+
+# MusicBrainz's file, format 9 against format 10 (`breakdown`, 2026-11-07
+# and 2026-11-08), MiB: frames, tokens, index.
+FORMATS = [("frames", 798.84, 790.66), ("tokens", 145.91, 145.91), ("index", 1826.12, 68.43)]
+(out / "musicbrainz-formats.svg").write_text(svg_bars(
+    "MusicBrainz's file, format 9 against format 10",
+    "MiB by record kind, 2,000 commits of 4.47 M facts; format 10 writes the index's pages over",
+    [name for name, _, _ in FORMATS], ["format 9 (2,771 MiB)", "format 10 (1,005 MiB)"],
+    [[(a, a, a), (b, b, b)] for _, a, b in FORMATS], "MiB", labels=True))

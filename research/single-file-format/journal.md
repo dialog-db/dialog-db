@@ -1378,6 +1378,109 @@ loss loses at most the appends since the last sync, the steady cost is one
 sync a batch, and it closes the hole the format already has. Rebuilding
 stays as a tool (it is a scan of the file), not a recovery path.
 
+## 2026-11-08: format 10 measured: the index's pages written over
+
+**Question.** With the index in 4 KiB pages of 8-byte entries, written over
+once a sync point frees them (format 10), what do MusicBrainz and the team
+of six cost, and how does the database look at MusicBrainz's scale?
+
+**What changed (format 10).** Index pages are stamped with the append that
+wrote them and a checksum; a parent names a child by page and append; a
+reader that finds a page written over looks again from a newer slot. A
+third, durable slot is written at sync points (every 64 appends, 2,048
+freed pages or 2 seconds, and `FileArchive::sync`); freed pages are reused
+only after one, and opening in a later boot checks what came after the
+durable slot. Blocks kept whole are frames of a whole kind. A process keeps
+the index pages it checked, and a writer remembers where it found tokens in
+two generations of a million each.
+
+**Method.** MusicBrainz (`865bbbcb0fe87ec0`) by `file_archive_bench`, as
+2,000 commits and, with `DIALOG_BENCH_GROUP`, as 100, 10 and 1; the team of
+six on tonk-shaped 1× (`3ea7f49117155b92`) against main, three interleaved
+runs ([results/2026-11-08-tonk-1x-main.md](results/2026-11-08-tonk-1x-main.md)).
+`breakdown`, `breakdown::live` and `breakdown::rebuild` on the files. The
+machine restarted once (one run lost); main ran about 20% slower than the
+day before, so only ratios compare across days.
+
+**Results: MusicBrainz's file.**
+
+![MusicBrainz's file by format](results/charts/2026-11-08-format-10/musicbrainz-formats.png)
+
+| | format 9 | format 10 |
+|---|---|---|
+| file | 2,771 MiB | 1,005 MiB |
+| index | 1,826 MiB (193% of frames and tokens) | 68 MiB (7.2%) |
+| index pages the root reaches; free | | 17,193 (67 MiB); 202 |
+| commit time, 2,000 commits | 5,143 s | 6,562 s (best of three runs) |
+| sync points | | 1,533–1,688, 13 s in all |
+
+- The model predicted 6.9%; the index's live entries take 46 MiB, so its
+  pages are about 68% full.
+- Commits are slower than format 9's. Over the best run's 6,562 s, the
+  archive took about 4,125 s (appends 2,975, of which splitting nodes into
+  rows 2,507 against format 9's 1,845; rebuilding blocks for the
+  repository's reads 1,150, which a store serving nodes in place skips) and
+  the tree and repository the rest. Splitting is slower because each token
+  the writer looks up descends through checked pages: a warm split of a
+  MusicBrainz node took 2,250 µs with no page kept, 1,500 with 4,096 kept,
+  1,070 with all kept, and 440–460 once the writer remembered tokens in two
+  generations instead of clearing 262,144 at a time; in the replay that
+  last change took splitting from 3,951 to 2,507 s.
+- A sync point every 2 seconds fires on most MusicBrainz commits, which
+  take longer; at about 8 ms each here they cost nothing that shows.
+
+**Results: commit size** (the same facts):
+
+| commits | facts each | commits took | node versions | file | heap the commits held |
+|---|---|---|---|---|---|
+| 2,000 | ~2,234 | 6,562–7,808 s | 2.88 M | 1,003 MiB | 2.6 GiB |
+| 100 | ~44,700 | 2,616–2,791 s | 1.01 M | 530 MiB | 4.9 GiB |
+| 10 | ~447,000 | the second ran over two hours, stopped | | | 6.8 GB and rising |
+| 1 | 4.47 M | killed for memory at 116 s | | | over 8 GiB |
+
+Why large commits fail is the tree's, not the file's: a commit holds every
+new node until it seals, and sealing into a non-empty tree applies its ops
+one canonical edit each. It is a design topic of its own,
+[dialog-db/dialog-db#756](https://github.com/dialog-db/dialog-db/pull/756).
+
+**Results: the database at this scale.**
+
+- The tree the 2,000 commits leave is 77,808 nodes in three levels: a root
+  of 169 children, 169 index nodes of about 459, and 77,638 leaves of about
+  224 entries (17.4 M entries for 4.47 M facts: three orderings and the
+  history). Written whole with the 3.0 M tokens it names, about 250 MiB,
+  against 1.8 GiB of JSON and 488 MiB as a fact log.
+- Scans scale linearly: every fact of every attribute in 12–14 s, about 3
+  µs a fact, against about 4 at Stack Exchange's 9,915 facts.
+- Point reads do not: 256 entities in 310–341 ms, about 1.3 ms each,
+  against about 80 µs at Stack Exchange, and warm no faster than cold. Three
+  nodes a read, the top 170 of which stay cached; this store rebuilds each
+  leaf's block on every read, and 77,638 leaves do not fit a node cache of
+  about 3,300. Not measured yet: the store serving nodes in place at this
+  scale, and a small commit on a database this size.
+- Building the index again from the records takes 1.8–3.4 s for the 2.7 GiB
+  format-9 file (`breakdown::rebuild`).
+
+**Results: the team of six, 1×.**
+
+![Time against main](results/charts/2026-11-08-tonk-1x-main/time.png)
+
+| | main | format 9 | format 10 | 10 ÷ main |
+|---|---|---|---|---|
+| pull | 48.1 ms | 62.3 | 62.0 | 1.29 |
+| push | 22.3 | 22.3 | 21.2 | 0.95 |
+| a command | 18.4 | 19.4 | 18.9 | 1.03 |
+| `v2/issue`, cold | 77.6 | 80.5 | 83.1 | 1.07 |
+| a member's replica | 169.8 MiB | 2.01 MiB | 2.03 MiB | |
+
+At 1× the index is small, so writing its pages over saves little and the
+third slot adds 64 KiB; format 10 is level with format 9.
+
+**Decision.** Format 10 stays: the index is 7% of the data at MusicBrainz's
+scale, against 193%. Open: splitting at scale (2,507 s against 1,845), the
+2-second sync timer for long commits, point reads at scale through the
+served store, and a small commit on a large database.
+
 ## How to reproduce
 
 ```sh
@@ -1419,6 +1522,16 @@ cargo test --release -p dialog-archive-file --lib index_layouts -- \
 # building a file's index again from its records
 DIALOG_ARCHIVE_INDEX=path/to/archive.dialog cargo test --release \
   -p dialog-archive-file --lib breakdown::rebuild -- --ignored --nocapture
+
+# a tree a root names, alone, and its levels
+DIALOG_ARCHIVE_INDEX=path/to/archive.dialog DIALOG_ARCHIVE_ROOT=blake3#... \
+  cargo test --release -p dialog-archive-file --lib breakdown::live -- \
+  --ignored --nocapture
+
+# MusicBrainz as fewer, larger commits (every k transactions as one)
+DIALOG_BENCH_GROUP=20 DIALOG_SE_CSV=mb-100k.csv DIALOG_BENCH_COMMITS=2000 \
+  DIALOG_BENCH_STORES=file/frames \
+  cargo run --release -p dialog-baseline --example file_archive_bench
 
 # tonk-team as a dataset (outside the repository), then its workload
 cargo run --release -p dialog-baseline --example tonk_dataset -- \
