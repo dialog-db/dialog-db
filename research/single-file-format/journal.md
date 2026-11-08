@@ -1650,6 +1650,32 @@ fifth command, leaves persisted fall to 4.2–4.6 a command on average
 queries the bench checks after building and pulling return the same rows
 (812 activities, 301 issues, 170 issue labels, and the rest).
 
+Profiled again with it (callgrind, the same 1,200 commands): about 40 M
+instructions a command, against 69 M. What is left splits about evenly:
+
+| | share | against before |
+|---|---|---|
+| firing rules | 48% | 48% |
+| — estimating scan ranges | 13% | 14.4% |
+| — planning rules | 3.1% | 3.1% |
+| — writing heads (`emit_matches`) | 3.2% | 7.3% |
+| — identifying concept descriptors | 0.4% | 1.8% |
+| committing | 50% | 50% |
+| — sealing the tree | 29% | 26% |
+| —— persisting nodes (blake3 8.7%) | 11.4% | 13.7% |
+| — the file's append | 17% | 17.6% |
+| —— splitting nodes into rows | 12.6% | 13.7% |
+
+**Decision.** Writing each distinct head once goes to main on its own
+(it is the repository's, not the file's):
+[dialog-db/dialog-db#761](https://github.com/dialog-db/dialog-db/pull/761).
+Seeding once per entity instead of once per row would also cut the
+evaluations, but whether it gives the same matches depends on the
+premise's picks, so it is a question for the rule semantics, open. With
+the duplicates gone, the proposal above stands in the same order for
+what remains: estimates first, then the root buffer every commit
+rewrites, then handing the archive entries.
+
 ## How to reproduce
 
 ```sh
