@@ -1951,6 +1951,99 @@ mod breakdown {
     use crate::file::read_record;
     use crate::tokens::read_token_record;
 
+    /// What building the index again from the records costs, on the file
+    /// named by `DIALOG_ARCHIVE_INDEX`: a pass over every record through
+    /// the mapping, checking each one's checksum, the keys of every block,
+    /// frame and token, sorting them, and writing the tree in one batch
+    /// (in memory). Run by hand.
+    #[test]
+    #[ignore = "rebuilds the index of the file named by DIALOG_ARCHIVE_INDEX"]
+    fn rebuild() -> anyhow::Result<()> {
+        use crate::archive::tree::{Node, Nodes};
+        use std::borrow::Cow;
+        use std::cell::RefCell;
+
+        let Ok(path) = std::env::var("DIALOG_ARCHIVE_INDEX") else {
+            return Ok(());
+        };
+        let archive = FileArchive::open(&path)?;
+        let snapshot = archive.current();
+        let bytes = snapshot.bytes();
+        let started = Instant::now();
+        let (mut entries, mut records, mut read) = (Vec::new(), 0u64, 0u64);
+        let mut at = DATA as usize;
+        while at < bytes.len() {
+            let header = &bytes[at..at + HEADER as usize];
+            let kind = Kind::from_tag(header[0]).ok_or_else(|| invalid("a record of no kind"))?;
+            let len = u32::from_le_bytes(header[1..5].try_into()?) as usize;
+            let body_at = at + HEADER as usize;
+            let body = &bytes[body_at..body_at + len];
+            if crate::file::checksum(header[0], body)
+                != u32::from_le_bytes(header[5..9].try_into()?)
+            {
+                return Err(invalid("a record whose checksum fails").into());
+            }
+            records += 1;
+            read += (HEADER as usize + len) as u64;
+            match kind {
+                Kind::Frame => {
+                    let pad = body[0] as usize;
+                    let frame = ((body_at + 1 + pad) as u64 / ALIGN) as u32;
+                    let header = snapshot.frame(frame)?;
+                    entries.push((
+                        block_key(header.catalog, &header.hash),
+                        Place::Frame(frame).value(),
+                    ));
+                }
+                Kind::Block => {
+                    let (catalog, hash, _) = snapshot.block(at as u64)?;
+                    entries.push((block_key(catalog, &hash), Place::Block(at as u64).value()));
+                }
+                Kind::Tokens => {
+                    for start in read_token_record(body, body_at as u64)? {
+                        let id = token_id(start)?;
+                        let token = snapshot.get(id).ok_or_else(|| invalid("a token"))?;
+                        entries.push((index::token_key(crate::hash::hash(token)), id as u64));
+                    }
+                }
+                Kind::Index => {}
+            }
+            at = body_at + len;
+        }
+        let scanned = started.elapsed();
+        let started = Instant::now();
+        entries.sort_unstable_by_key(|(key, _)| *key);
+        let sorted = started.elapsed();
+
+        #[derive(Default)]
+        struct Memory(RefCell<Vec<Vec<u8>>>, RefCell<usize>);
+        impl Nodes for Memory {
+            fn read(&self, at: u64) -> io::Result<Cow<'_, [u8]>> {
+                Ok(Cow::Owned(self.0.borrow()[at as usize].clone()))
+            }
+        }
+        let memory = Memory::default();
+        let started = Instant::now();
+        let count = entries.len();
+        let root = Node::default().insert(&memory, entries, &mut |node| {
+            *memory.1.borrow_mut() += node.len();
+            memory.0.borrow_mut().push(node.to_vec());
+            Ok(memory.0.borrow().len() as u64 - 1)
+        })?;
+        let built = started.elapsed();
+        println!(
+            "{records} records, {:.0} MiB, read and checked with their keys in {:.1} s; \
+             {count} entries sorted in {:.1} s, the tree written ({:.0} MiB, root {} B) in {:.1} s",
+            read as f64 / 1048576.0,
+            scanned.as_secs_f64(),
+            sorted.as_secs_f64(),
+            *memory.1.borrow() as f64 / 1048576.0,
+            root.encode().len(),
+            built.as_secs_f64(),
+        );
+        Ok(())
+    }
+
     /// Prints what the file named by `DIALOG_ARCHIVE_INDEX` holds, record
     /// kind by kind, what its tokens' records spend on lengths and
     /// padding, and what the archive keeps in memory to read it. Run by

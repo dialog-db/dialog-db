@@ -53,7 +53,7 @@ impl Kind {
     }
 }
 
-fn checksum(kind: u8, body: &[u8]) -> u32 {
+pub(crate) fn checksum(kind: u8, body: &[u8]) -> u32 {
     let mut hasher = crc32fast::Hasher::new();
     hasher.update(&[kind]);
     hasher.update(body);

@@ -1317,6 +1317,67 @@ of 16), pages reused from the next append, each page stamped with its
 sequence and a checksum that readers check. Lineage entries leave the
 index for a writer's cache.
 
+## 2026-11-08: syncing, against building the index again
+
+**Question.** With index pages reused, what does a crash cost, and does
+syncing cost less than building the index again?
+
+**What a crash can do.** A process that dies leaves everything it wrote in
+the operating system's cache, in order: the next writer drops a torn tail,
+and nothing needs repair, reuse or not. Only an operating system crash or
+power loss can keep some writes and lose others, in any order. That is
+already a hole without reuse: an append writes its records, then its slot,
+nothing synced, so the slot can survive and the records it names not. With
+reuse, it can also keep a page written over and lose the slot that freed
+it, and the slots a reader would fall back to then reach a page stamped
+later than themselves.
+
+**Measured** (this machine: a virtual disk the host caches, so both are
+best cases; dropping the guest's cache still read 2.7 GiB in 0.9 s):
+
+| | |
+|---|---|
+| an append (484 KiB and a 32 KiB slot), nothing synced | 0.16 ms |
+| the same, one `fdatasync` | 1.1 ms median, 41 ms at worst of 100 |
+| the same, records synced, then the slot synced | 1.0 ms median, 3 ms at worst |
+| building MusicBrainz's index again: every record read and checked, its keys, sorted, the tree written | 1.8–3.4 s for 2.7 GiB (93 MiB of tree), over two runs |
+| the same for 100×'s owner | 3.9 s for 676 MiB, read from disk |
+
+On real disks `fdatasync` costs from about 0.1 ms (NVMe) to several ms
+(SATA), and a durable sync on macOS (`F_FULLFSYNC`) 5–20 ms, against a
+commit of about 16 ms. A rebuild reads the file once: about a second a GiB
+on an SSD, several on a spinning disk; with pages reused, MusicBrainz's
+file would be about 1 GiB.
+
+**Three ways.**
+
+1. **Never sync; detect and rebuild.** Nothing in the steady state. After
+   a power loss, the index is suspect wherever a page's stamp or checksum
+   fails, and the records too: a rebuild has to scan for the last intact
+   record and drop what follows, which can lose more than the last
+   appends, since writes reach the disk in no particular order. Frames are
+   read in place without their checksum, so a damaged one is not caught
+   where it is read.
+2. **Sync every append** (records, then slot, as LMDB does by default):
+   1–20 ms an append, nothing ever lost or rebuilt.
+3. **Sync now and then; reuse only what a sync has made safe.** A third
+   slot, written only at a sync point (records synced, then it), names the
+   last durable state. A page freed by an append is reused only after the
+   next sync point, so nothing the durable slot reaches is ever written
+   over. On opening, the records and the index pages written since that
+   slot are checked (their checksums and stamps): a bounded tail, the
+   appends since the last sync. If anything fails, the file goes back to
+   the durable slot and drops the rest. One sync per batch (every N
+   appends, a few seconds, or `FileArchive::sync`), and the free list holds
+   the pages of a batch: 64 appends cost 7.1% of the data against 6.3% in
+   the model. SQLite's `synchronous=NORMAL` in WAL mode makes the same
+   trade.
+
+**Decision (proposed).** The third: no rebuild is ever needed, a power
+loss loses at most the appends since the last sync, the steady cost is one
+sync a batch, and it closes the hole the format already has. Rebuilding
+stays as a tool (it is a scan of the file), not a recovery path.
+
 ## How to reproduce
 
 ```sh
@@ -1354,6 +1415,10 @@ DIALOG_INDEX_APPENDS=2000 DIALOG_INDEX_FRAMES=1442 DIALOG_INDEX_TOKENS=1513 \
 # the index's layouts with pages reused, in memory
 cargo test --release -p dialog-archive-file --lib index_layouts -- \
   --ignored --nocapture
+
+# building a file's index again from its records
+DIALOG_ARCHIVE_INDEX=path/to/archive.dialog cargo test --release \
+  -p dialog-archive-file --lib breakdown::rebuild -- --ignored --nocapture
 
 # tonk-team as a dataset (outside the repository), then its workload
 cargo run --release -p dialog-baseline --example tonk_dataset -- \
