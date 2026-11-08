@@ -320,6 +320,16 @@ The `tutorial` broke the plan's promise that every document states the same fact
 
 **Decision.** All taken into the design. R16's item 5 expected the partial write `(todo! todo:9c1e state: :done)`, which is now a compile error; all 20 readers wrote it, so it is the spelling readers reach for, and the error is what will catch it. R16's scores stand as scored under its plan.
 
+## 2026-11-08 — No "keep" marker
+
+**Question.** Should a write through a concept have a marker for "leave this parameter as it is", such as `notebook: .`?
+
+**Method.** Maintainer's decision.
+
+**Results.** No. A one-attribute change writes the attribute itself or a concept over just that attribute.
+
+**Decision.** Dropped from the design's open questions.
+
 ## How to reproduce
 
 1. Take a variant's prompt from its round's results file and save it as `<variant>.txt`.

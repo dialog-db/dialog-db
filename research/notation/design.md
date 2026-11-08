@@ -96,9 +96,9 @@ A bare call with `!` writes into `next`. It must be ground, except for an entity
 
 A write means the same as a rule with one `assert!` head and no `when`, so that longer form is never written.
 
-A write through a concept passes every parameter. Leaving one out is a compile error, not "keep what is there": on an entity that does not exist yet it would make a partial one. To change one attribute, write through a concept over just that attribute, such as `(block/source! id:b1 is: "x")`.
+A write through a concept passes every parameter. Leaving one out is a compile error, not "keep what is there": on an entity that does not exist yet it would make a partial one. To change one attribute, write the attribute itself, `(xyz.tonk.notebook/source! id:b1 is: "x")`, or a concept over just that attribute, `(block/source! id:b1 is: "x")`. There is no marker for "keep this one".
 
-Whether there is a way to say "keep this one" explicitly, such as `(notebook/block! id:b1 source: "x" notebook: .)`, is open, and so is how a retract says "every value".
+How a retract says "every value" is open.
 
 ## Rules
 
