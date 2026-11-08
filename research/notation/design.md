@@ -350,7 +350,7 @@ Comparing the design with [Bloom](http://bloom-lang.net) settled three of the ch
 
 ## Open
 
-- Whether a command is asserted or written. With `!` meaning "into `next`", `(report! …)` puts the report into the next tick, where installed rules see it a tick late, and its `layer: :now` attributes would have to mean "drop after that tick". Asserted without `!`, `(report …)` is in this tick's `now`, installed inductive rules store the bug at once, and nothing stores the report; `layer: :now` then only keeps anyone from writing it with `!`.
+- Whether a command is asserted rather than written. A command is something not retained, so `(report title: …)` without `!` fits: installed inductive rules match it in this tick and retain the bug, and nothing retains the report. Every example here writes it with `!`, which retains it. If commands are asserted, `layer: :now` only keeps anyone from retaining one by writing it with `!`.
 - How text spans lines or holds `"`. The sketches still write templates as `"""…"""`, which is not part of the notation.
 - What a rule head that names no entity lands on. In R16, four of five readers of this spec put a sent notice on the to-do's own entity because no example shows another way; the readers of the shorter documents left it out. The obvious answer is the one writes have: the `id` of the head's facts.
 - Whether a rule that creates should only create. The R16 rule that asserts `state: :open` on every add reopens a done to-do that is added again; `(unless (todo ?t))` in its `when` would stop that.
