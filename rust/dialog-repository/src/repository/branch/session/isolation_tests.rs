@@ -16,7 +16,7 @@ use dialog_artifacts::{ArtifactSelector, Entity, Relation};
 use dialog_capability::Provider;
 use dialog_effects::authority::Identify;
 use dialog_peer::helpers::test_session_with_peer;
-use dialog_query::Attribute;
+use dialog_query::{Attribute, Concept, Query};
 use futures_util::TryStreamExt as _;
 
 use super::{QueryEnv, Source};
@@ -81,6 +81,91 @@ async fn a_query_reads_the_revision_it_started_at() -> anyhow::Result<()> {
         second.len(),
         first.len(),
         "the query's second select read a revision its first did not"
+    );
+    Ok(())
+}
+
+/// Someone with a name: what the subscription below stands over.
+#[derive(Concept, Debug, Clone, PartialEq)]
+pub struct Named {
+    /// The entity.
+    pub this: Entity,
+    /// Their name.
+    pub name: Name,
+}
+
+/// Pinning is per evaluation, not per subscription: a standing query
+/// reads one revision within a poll and the branch's current revision
+/// at the next, so a commit through another handle of the branch is
+/// picked up by the poll after it.
+#[dialog_common::test]
+async fn a_subscription_follows_the_branch_across_polls() -> anyhow::Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    let report: Entity = "id:report".parse()?;
+    branch
+        .transaction()
+        .assert(Name::of(report.clone()).is("Robin".to_string()))
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+
+    let mut standing = branch.subscribe(Query::<Named>::default());
+    let first = standing
+        .poll(&operator)
+        .await?
+        .expect("the first poll evaluates");
+    assert_eq!(
+        first
+            .asserted
+            .iter()
+            .map(|row| row.name.0.as_str())
+            .collect::<Vec<_>>(),
+        ["Robin"]
+    );
+    assert!(
+        standing.poll(&operator).await?.is_none(),
+        "nothing moved, so nothing is re-evaluated"
+    );
+
+    // Another handle of the branch moves its head.
+    branch
+        .clone()
+        .transaction()
+        .retract(Name::of(report.clone()).is("Robin".to_string()))
+        .assert(Name::of(report).is("Sam".to_string()))
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+
+    let second = standing.poll(&operator).await?.expect("the head moved");
+    assert_eq!(
+        second
+            .asserted
+            .iter()
+            .map(|row| row.name.0.as_str())
+            .collect::<Vec<_>>(),
+        ["Sam"]
+    );
+    assert_eq!(
+        second
+            .retracted
+            .iter()
+            .map(|row| row.name.0.as_str())
+            .collect::<Vec<_>>(),
+        ["Robin"]
+    );
+    assert_eq!(
+        standing
+            .results()
+            .iter()
+            .map(|row| row.name.0.as_str())
+            .collect::<Vec<_>>(),
+        ["Sam"],
+        "the subscription stands at the branch's current revision"
     );
     Ok(())
 }
