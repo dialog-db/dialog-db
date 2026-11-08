@@ -33,7 +33,7 @@
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::Read as BlobRead;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{
@@ -108,6 +108,10 @@ where
     // missed one is caught up.
     let mut stimulus: Vec<Instruction> = changes.clone().into_instructions();
     stimulus.extend(transients.clone().into_instructions());
+    // The rows ahead of `own` are this commit's: its own writes and its
+    // dispatched transients. The lag after them are claims other
+    // commits made, which a read may not elect.
+    let mut own = stimulus.len();
     stimulus.extend(lag_delta(source, env).await?);
     let mut induced = Changes::new();
     if stimulus.is_empty() {
@@ -145,12 +149,14 @@ where
         // removal can newly enable a rule only through `unless`, which
         // a seed cannot express).
         let mut assert_rows: Vec<Artifact> = Vec::new();
+        let mut own_rows: Vec<bool> = Vec::new();
         let mut retract_attrs: BTreeSet<Relation> = BTreeSet::new();
         let mut replace_attrs: BTreeSet<Relation> = BTreeSet::new();
-        for instruction in &stimulus {
+        for (at, instruction) in stimulus.iter().enumerate() {
             match instruction {
                 Instruction::Assert(a, policy) => {
                     assert_rows.push(a.clone());
+                    own_rows.push(at < own);
                     if policy.elects() {
                         replace_attrs.insert(a.the.clone());
                     }
@@ -294,6 +300,7 @@ where
                     &rule,
                     transient_head,
                     &assert_rows,
+                    &own_rows,
                     &view,
                     &mut novelty,
                     &mut emitted_transients,
@@ -308,6 +315,7 @@ where
         // there is no sweep.
         stimulus = novelty.clone().into_instructions();
         stimulus.extend(emitted_transients.clone().into_instructions());
+        own = stimulus.len();
         novelty.assert(changes);
         emitted_transients.clone().assert(&mut induced);
         transient_overlay = emitted_transients;
@@ -972,18 +980,23 @@ fn premise_reach(rule: &InductiveRule) -> (BTreeSet<Reach>, BTreeSet<Reach>) {
     (positive, unless)
 }
 
-/// Delta-restricted firing: bind each stimulus row into every positive
-/// concept premise that names its attribute, then evaluate the body
+/// Delta-restricted firing: bind stimulus rows into every positive
+/// concept premise that names their attributes, then evaluate the body
 /// with those bindings fixed — the remaining premises join against the
 /// frozen view through the planner as usual. Every new match this
 /// round must bind at least one new row into at least one positive
 /// premise (removal-enabled and derived-premise firings take the
 /// full-body path instead), so seeding is complete for this candidate
 /// class while costing the delta's join fan-out, not relation size.
+///
+/// A row seeds alone, except where several rows of one entity can seed
+/// together (see [`seed_groups`]): those bind into one evaluation, which
+/// finds exactly the matches each would find alone.
 async fn fire_seeded<'a>(
     rule: &InductiveRule,
     transient_head: bool,
     rows: &[Artifact],
+    own: &[bool],
     view: &QueryEnv<'a>,
     novelty: &mut Changes,
     transients: &mut Changes,
@@ -995,54 +1008,10 @@ async fn fire_seeded<'a>(
         let Premise::Assert(Proposition::Concept(query)) = premise else {
             continue;
         };
-        for row in rows {
-            // The premise fields this row's attribute matches — the
-            // row's value binds there, its subject binds `this`.
-            let mut matched = Match::new();
-            let mut scope = Environment::new();
-            let mut seeded = false;
-            let mut compatible = true;
-            for (name, field) in query.predicate.with().iter() {
-                let relation = field.descriptor().the();
-                if !Reach::of(relation).covers(&row.the) {
-                    continue;
-                }
-                if !bind_seed(
-                    &mut matched,
-                    &mut scope,
-                    query.terms.get(name),
-                    row.is.clone(),
-                ) {
-                    compatible = false;
-                    break;
-                }
-                // A collection premise binds the entry's key too: the
-                // name half of the row's attribute.
-                if relation.attribute().is_none()
-                    && !bind_seed(
-                        &mut matched,
-                        &mut scope,
-                        query.terms.get(&The::key_operand(name)),
-                        Value::String(row.the.name().to_owned()),
-                    )
-                {
-                    compatible = false;
-                    break;
-                }
-                seeded = true;
-            }
-            if !seeded || !compatible {
+        for group in seed_groups(query, rows, own) {
+            let Some((matched, scope)) = seed(query, group.iter().map(|&at| &rows[at])) else {
                 continue;
-            }
-            if !bind_seed(
-                &mut matched,
-                &mut scope,
-                query.terms.get("this"),
-                Value::Entity(row.of.clone()),
-            ) {
-                continue;
-            }
-
+            };
             let plan = rule.plan(&scope);
             let seeded_matches: Vec<Match> = plan
                 .evaluate(matched.seed(), view)
@@ -1056,6 +1025,122 @@ async fn fire_seeded<'a>(
         return Ok(());
     }
     emit_matches(rule, transient_head, matches, view, novelty, transients).await
+}
+
+/// The rows of `rows` that seed `query` in one evaluation each: every
+/// row alone, except that the rows of one entity bind together when
+/// each of them could not bind any other value than its own.
+///
+/// Rows seeded alone find the union of what each finds with its field
+/// bound and the others free. Bound together they find the matches
+/// where every field holds its row's value. The two agree when every
+/// field a row binds can hold no other value in the round view, which
+/// is so when, for each row of the group:
+///
+/// - it is this commit's own write or dispatched transient, not a claim
+///   the watermark lag carried in, which a read may not elect;
+/// - it binds exactly one field of the premise, a single attribute (not
+///   a collection's half, whose key varies by row) read under `last`,
+///   which elects the newest claim, and this commit's claim is newest;
+/// - no other row of the entity binds the same field, which would make
+///   two claims of one cell at one standing.
+///
+/// A group that breaks any of these seeds row by row, as before.
+fn seed_groups(
+    query: &dialog_query::ConceptQuery,
+    rows: &[Artifact],
+    own: &[bool],
+) -> Vec<Vec<usize>> {
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    let mut together: BTreeMap<&Entity, (Vec<usize>, BTreeSet<&str>, bool)> = BTreeMap::new();
+    for (at, row) in rows.iter().enumerate() {
+        let fields: Vec<_> = query
+            .predicate
+            .with()
+            .iter()
+            .filter(|(_, field)| Reach::of(field.descriptor().the()).covers(&row.the))
+            .collect();
+        let [(name, field)] = fields.as_slice() else {
+            // Binds no field (nothing to seed) or several: alone.
+            if !fields.is_empty() {
+                groups.push(vec![at]);
+            }
+            continue;
+        };
+        let combinable = own.get(at).copied().unwrap_or(false)
+            && field.descriptor().the().attribute().is_some()
+            && matches!(field.descriptor().pick(), Pick::Last);
+        if !combinable {
+            groups.push(vec![at]);
+            continue;
+        }
+        let (members, names, whole) = together.entry(&row.of).or_default();
+        if !names.insert(name) {
+            *whole = true;
+        }
+        members.push(at);
+    }
+    for (_, (members, _, broken)) in together {
+        if broken {
+            groups.extend(members.into_iter().map(|at| vec![at]));
+        } else {
+            groups.push(members);
+        }
+    }
+    groups
+}
+
+/// Binds `rows` into `query`: each row's value where its attribute
+/// matches a field, the key too for a collection field, and its subject
+/// as `this`. `None` when a row matches no field or contradicts a
+/// binding (a constant it does not read as, or another row's value).
+fn seed<'r>(
+    query: &dialog_query::ConceptQuery,
+    rows: impl IntoIterator<Item = &'r Artifact>,
+) -> Option<(Match, Environment)> {
+    let mut matched = Match::new();
+    let mut scope = Environment::new();
+    for row in rows {
+        let mut seeded = false;
+        for (name, field) in query.predicate.with().iter() {
+            let relation = field.descriptor().the();
+            if !Reach::of(relation).covers(&row.the) {
+                continue;
+            }
+            if !bind_seed(
+                &mut matched,
+                &mut scope,
+                query.terms.get(name),
+                row.is.clone(),
+            ) {
+                return None;
+            }
+            // A collection premise binds the entry's key too: the
+            // name half of the row's attribute.
+            if relation.attribute().is_none()
+                && !bind_seed(
+                    &mut matched,
+                    &mut scope,
+                    query.terms.get(&The::key_operand(name)),
+                    Value::String(row.the.name().to_owned()),
+                )
+            {
+                return None;
+            }
+            seeded = true;
+        }
+        if !seeded
+            || !bind_seed(
+                &mut matched,
+                &mut scope,
+                query.terms.get("this"),
+                Value::Entity(row.of.clone()),
+            )
+        {
+            return None;
+        }
+    }
+    Some((matched, scope))
 }
 
 /// Bind a seed value into a premise term: a named variable binds (and
@@ -1225,7 +1310,7 @@ mod tests {
     use crate::rules::Transient;
     use crate::{Branch, CommitError, RemoteSite, Revision};
     use anyhow::Result;
-    use dialog_artifacts::{ArtifactSelector, Changes, Entity, Instruction, Value};
+    use dialog_artifacts::{Artifact, ArtifactSelector, Changes, Entity, Instruction, Value};
     use dialog_capability::{Fork, Provider};
     use dialog_common::ConditionalSync;
     use dialog_effects::archive::{Get, Put};
@@ -3474,6 +3559,167 @@ mod tests {
                 Value::String("member-0".to_string())
             )],
             "three seeds of one binding write its head once"
+        );
+        Ok(())
+    }
+
+    /// The first positive concept premise of `rule`.
+    fn first_premise(rule: &InductiveRule) -> dialog_query::ConceptQuery {
+        use dialog_query::{Premise, Proposition};
+        rule.analysis()
+            .premises
+            .iter()
+            .find_map(|premise| match premise {
+                Premise::Assert(Proposition::Concept(query)) => Some(query.clone()),
+                _ => None,
+            })
+            .expect("the rule has a concept premise")
+    }
+
+    /// Rows of one entity seed together only where none could bind
+    /// another value than its own: this commit's rows, one each to a
+    /// distinct single attribute read under `last`. A set field, a row
+    /// the lag carried in, and two rows to one field each seed alone.
+    #[dialog_common::test]
+    fn it_groups_only_the_rows_that_bind_no_other_value() -> Result<()> {
+        let rule: InductiveRule = serde_json::from_value(json!({
+            "assert!": {
+                "with": { "seen": { "the": "seen/who", "as": "text:", "pick": "all:" } }
+            },
+            "when": [
+                {
+                    "assert": {
+                        "with": {
+                            "issue": { "the": "cmd.assign/issue", "as": "entity:" },
+                            "who": { "the": "cmd.assign/who", "as": "text:" },
+                            "tag": { "the": "cmd.assign/tag", "as": "text:", "pick": "all:" }
+                        }
+                    },
+                    "where": {
+                        "issue": { "?": { "name": "this" } },
+                        "who": { "?": { "name": "seen" } },
+                        "tag": { "?": { "name": "tag" } }
+                    }
+                }
+            ]
+        }))?;
+        let query = first_premise(&rule);
+        let row = |the: &str, of: &str, is: Value| -> Result<Artifact> {
+            Ok(Artifact {
+                the: the.parse()?,
+                of: of.parse()?,
+                is,
+                cause: None,
+            })
+        };
+        let text = |value: &str| Value::String(value.to_string());
+        let rows = vec![
+            row(
+                "cmd.assign/issue",
+                "cmd:1",
+                Value::Entity("issue:1".parse()?),
+            )?,
+            row("cmd.assign/who", "cmd:1", text("member-0"))?,
+            row("cmd.assign/tag", "cmd:1", text("urgent"))?,
+            row("cmd.assign/who", "cmd:2", text("member-1"))?,
+            row("cmd.assign/who", "cmd:3", text("member-2"))?,
+            row("cmd.assign/who", "cmd:3", text("member-3"))?,
+            row("unrelated/name", "cmd:1", text("ignored"))?,
+        ];
+        let own = vec![true, true, true, false, true, true, true];
+
+        let mut groups = super::seed_groups(&query, &rows, &own);
+        groups.sort();
+        assert_eq!(
+            groups,
+            vec![vec![0, 1], vec![2], vec![3], vec![4], vec![5]],
+            "cmd:1's `last` rows seed together; its set row, the lag's row \\
+             and cmd:3's two writes to one field seed alone; a row naming no \\
+             field seeds nothing"
+        );
+        Ok(())
+    }
+
+    /// A set field shows every value it holds, not only the one this
+    /// commit adds, so a row binding it never seeds with the others:
+    /// the title row, seeded alone, still finds the tag the branch
+    /// already held.
+    #[dialog_common::test]
+    async fn it_finds_older_values_of_a_set_field_a_row_leaves_free() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let rule: InductiveRule = serde_json::from_value(json!({
+            "description": "Record each tag a titled document holds",
+            "assert!": {
+                "with": { "tag": { "the": "seen/tag", "as": "text:", "pick": "all:" } }
+            },
+            "when": [
+                {
+                    "assert": {
+                        "with": {
+                            "tag": { "the": "doc/tag", "as": "text:", "pick": "all:" },
+                            "title": { "the": "doc/title", "as": "text:" }
+                        }
+                    },
+                    "where": {
+                        "this": { "?": { "name": "this" } },
+                        "tag": { "?": { "name": "tag" } },
+                        "title": { "?": { "name": "title" } }
+                    }
+                }
+            ]
+        }))?;
+        let doc: Entity = "doc:1".parse()?;
+        branch
+            .transaction()
+            .assert(
+                dialog_query::the!("doc/tag")
+                    .of(doc.clone())
+                    .is("old".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+        branch
+            .transaction()
+            .assert(rule)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        branch
+            .transaction()
+            .assert(
+                dialog_query::the!("doc/tag")
+                    .of(doc.clone())
+                    .is("new".to_string()),
+            )
+            .assert(
+                dialog_query::the!("doc/title")
+                    .of(doc.clone())
+                    .is("Title".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        let mut tags = values(&branch, &operator, "seen/tag", &doc).await?;
+        tags.sort_by_key(|value| format!("{value:?}"));
+        assert_eq!(
+            tags,
+            vec![
+                Value::String("new".to_string()),
+                Value::String("old".to_string())
+            ],
+            "the title's seed reaches the tag the branch already held"
         );
         Ok(())
     }

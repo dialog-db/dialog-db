@@ -14,6 +14,32 @@ says how to cut a release.
 
 ## Unreleased
 
+### A rule seeded by several rows of one entity evaluates once where they bind no other value
+
+[#PR](https://github.com/dialog-db/dialog-db/pull/PR), [#762](https://github.com/dialog-db/dialog-db/issues/762)
+
+Commit-time induction evaluated a seeded rule once per changed row a
+premise names. Rows of one entity now bind into one evaluation when none
+of them could bind another value than its own: each is this commit's own
+write or dispatched transient (not a claim the watermark lag carried
+in), binds exactly one premise field, a single attribute read under
+`last`, and no other row of the entity binds the same field. Any other
+row seeds alone, as before.
+
+What this changes for you:
+
+- What induction derives is meant to be unchanged: a combined seed finds
+  the matches where every field holds its row's value, which is every
+  match the rows find alone when no field can hold another value.
+  [#762](https://github.com/dialog-db/dialog-db/issues/762) lists what
+  that rests on.
+- A command whose event names several fields of a premise evaluates the
+  rule once. On a tonk-shaped replica, a warm command's median fell from
+  7.0–9.2 ms to 5.0–5.7 ms.
+
+Why: an event's fields are one binding; evaluating it once per field
+repeated the same joins.
+
 ### A rule seeded by several rows of one change writes its head once
 
 [#761](https://github.com/dialog-db/dialog-db/pull/761)
