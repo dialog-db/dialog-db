@@ -55,9 +55,8 @@ Backtracking moves a topic to an earlier phase and says so in its journal.
 
 ## Topics
 
-| topic | phase |
-|---|---|
-| [Large transactions](large-transactions.md) | Dropped |
+Bringing a large dataset into a replica (large transactions) is a topic on
+its own branch, `worker/design-large-transactions`.
 
 The search tree's node reads are a topic on
 [dialog-db/dialog-db#753](https://github.com/dialog-db/dialog-db/pull/753).
