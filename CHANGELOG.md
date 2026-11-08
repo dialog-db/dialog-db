@@ -16,7 +16,7 @@ says how to cut a release.
 
 ### A rule seeded by several rows of one entity evaluates once where they bind no other value
 
-[#PR](https://github.com/dialog-db/dialog-db/pull/PR), [#762](https://github.com/dialog-db/dialog-db/issues/762)
+[#763](https://github.com/dialog-db/dialog-db/pull/763), [#762](https://github.com/dialog-db/dialog-db/issues/762)
 
 Commit-time induction evaluated a seeded rule once per changed row a
 premise names. Rows of one entity now bind into one evaluation when none
