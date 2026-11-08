@@ -740,7 +740,9 @@ mod native {
         report.count("rows/v2/issue/end", expected as u64);
 
         // Steady: one member's commands in a row, everyone caught up and no
-        // pull between, so its rules and caches are warm.
+        // pull between, so its rules and caches are warm. The line on stderr
+        // marks where it starts, for a profiler to collect from there.
+        eprintln!("steady phase starts");
         for line in lines {
             if let Line::Command {
                 phase: Phase::Steady,
@@ -762,8 +764,7 @@ mod native {
     }
 
     /// One steady command: dispatched, its durable changes integrated,
-    /// committed and published. Its own function so a profiler can collect
-    /// it alone (`valgrind --toggle-collect='*steady_command*'`).
+    /// committed and published.
     async fn steady_command<S: PeerSpace>(
         member: &Member<S>,
         profiles: &Profiles,
