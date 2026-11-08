@@ -1,17 +1,27 @@
-//! The two slots after the magic number: where the file says what it
+//! The three slots after the magic number: where the file says what it
 //! holds.
 //!
 //! A slot is the file's state as of an append: a sequence number, where
 //! the appended records end, the counts the archive reports, the catalogs'
-//! names, and the root of the index. Every append writes its records past
-//! the end, then the older of the two slots; opening reads both and takes
-//! the newer one that is whole. So one slot is always whole: an append cut
-//! short leaves the other, and records past its end, which the next writer
-//! drops. Nothing else in the file is ever written twice.
+//! names, the root of the index, and the index's free pages. Every append
+//! writes its records past the end and its index pages, then the older of
+//! the two rolling slots; opening reads both and takes the newer one that
+//! is whole. So one rolling slot is always whole: an append cut short
+//! leaves the other, and records past its end, which the next writer
+//! drops.
+//!
+//! The third slot is durable: it is written only at a sync point, once
+//! everything before it is on the disk, and synced itself. The index's
+//! pages are written over only once a sync point has made that safe (see
+//! the archive's sync), so nothing the durable slot reaches is ever written
+//! over, and after a power loss the file can always go back to it.
 //!
 //! A slot is its body's length (u32), the crc32 of the body, then the body:
-//! sequence and end (u64 each), the counts (u64 each), the catalogs (a
-//! count, then each name as a length byte and its bytes), the root.
+//! sequence, end, the last sync point's sequence and the boot it was
+//! written in (u64 each), the counts (u64 each), the catalogs (a count,
+//! then each name as a length byte and its bytes), the root (its length,
+//! u32, then its bytes), then the pages free to write over and the pages
+//! freed since the last sync point (each a count, then u32 each).
 
 use std::fs::File;
 use std::io;
@@ -23,8 +33,11 @@ use crate::rows::{Reader, invalid, put_varint};
 /// The bytes a slot may take.
 pub(crate) const SLOT: u64 = 64 * 1024;
 
-/// Where the first record goes: after the magic number and the two slots.
-pub(crate) const DATA: u64 = MAGIC.len() as u64 + 2 * SLOT;
+/// Where the durable slot is.
+const DURABLE: u64 = MAGIC.len() as u64 + 2 * SLOT;
+
+/// Where the first record goes: after the magic number and the slots.
+pub(crate) const DATA: u64 = MAGIC.len() as u64 + 3 * SLOT;
 
 /// What the archive reports holding, kept in the slot so a reopened file
 /// reports it without reading everything.
@@ -81,10 +94,19 @@ pub(crate) struct Slot {
     pub sequence: u64,
     /// Where the appended records end.
     pub end: u64,
+    /// The sequence of the last sync point: the durable slot's.
+    pub durable: u64,
+    /// The boot this slot was written in (0 when the platform does not
+    /// say): one written in this boot was not cut short by a power loss.
+    pub boot: u64,
     pub counts: Counts,
     /// The catalogs' names, by the number records name them by.
     pub catalogs: Vec<String>,
     pub root: tree::Node,
+    /// Index pages no root reaches since a sync point: free to write over.
+    pub reusable: Vec<u32>,
+    /// Index pages freed since the last sync point: free once the next is.
+    pub pending: Vec<u32>,
 }
 
 impl Default for Slot {
@@ -92,9 +114,13 @@ impl Default for Slot {
         Self {
             sequence: 0,
             end: DATA,
+            durable: 0,
+            boot: 0,
             counts: Counts::default(),
             catalogs: Vec::new(),
             root: tree::Node::default(),
+            reusable: Vec::new(),
+            pending: Vec::new(),
         }
     }
 }
@@ -102,8 +128,9 @@ impl Default for Slot {
 impl Slot {
     fn encode(&self) -> io::Result<Vec<u8>> {
         let mut body = Vec::new();
-        body.extend_from_slice(&self.sequence.to_le_bytes());
-        body.extend_from_slice(&self.end.to_le_bytes());
+        for field in [self.sequence, self.end, self.durable, self.boot] {
+            body.extend_from_slice(&field.to_le_bytes());
+        }
         for field in self.counts.fields() {
             body.extend_from_slice(&field.to_le_bytes());
         }
@@ -115,7 +142,15 @@ impl Slot {
             );
             body.extend_from_slice(name);
         }
-        body.extend_from_slice(&self.root.encode());
+        let root = self.root.encode();
+        body.extend_from_slice(&(root.len() as u32).to_le_bytes());
+        body.extend_from_slice(&root);
+        for pages in [&self.reusable, &self.pending] {
+            put_varint(&mut body, pages.len() as u64);
+            for page in pages {
+                body.extend_from_slice(&page.to_le_bytes());
+            }
+        }
         let mut out = Vec::with_capacity(8 + body.len());
         out.extend_from_slice(&(body.len() as u32).to_le_bytes());
         out.extend_from_slice(&crc32fast::hash(&body).to_le_bytes());
@@ -137,8 +172,13 @@ impl Slot {
         let u64_of = |reader: &mut Reader| -> Option<u64> {
             Some(u64::from_le_bytes(reader.take(8).ok()?.try_into().ok()?))
         };
+        let u32_of = |reader: &mut Reader| -> Option<u32> {
+            Some(u32::from_le_bytes(reader.take(4).ok()?.try_into().ok()?))
+        };
         let sequence = u64_of(&mut reader)?;
         let end = u64_of(&mut reader)?;
+        let durable = u64_of(&mut reader)?;
+        let boot = u64_of(&mut reader)?;
         let mut fields = [0u64; 7];
         for field in &mut fields {
             *field = u64_of(&mut reader)?;
@@ -148,17 +188,29 @@ impl Slot {
             let len = reader.byte().ok()? as usize;
             catalogs.push(String::from_utf8(reader.take(len).ok()?.to_vec()).ok()?);
         }
-        let root = tree::Node::decode(&body[reader.position()..]).ok()?;
+        let root_len = u32_of(&mut reader)? as usize;
+        let root = tree::Node::decode(reader.take(root_len).ok()?).ok()?;
+        let mut lists = [Vec::new(), Vec::new()];
+        for list in &mut lists {
+            for _ in 0..reader.varint().ok()? {
+                list.push(u32_of(&mut reader)?);
+            }
+        }
+        let [reusable, pending] = lists;
         Some(Self {
             sequence,
             end,
+            durable,
+            boot,
             counts: Counts::from_fields(fields),
             catalogs,
             root,
+            reusable,
+            pending,
         })
     }
 
-    /// Writes this slot over the older of the two: the one its sequence
+    /// Writes this slot over the older rolling slot: the one its sequence
     /// number picks.
     pub fn write(&self, file: &File) -> io::Result<()> {
         write_at(
@@ -168,24 +220,48 @@ impl Slot {
         )
     }
 
-    /// The slots of `file` that are whole, newest first.
+    /// Writes this slot as the durable one.
+    pub fn write_durable(&self, file: &File) -> io::Result<()> {
+        write_at(file, DURABLE, &self.encode()?)
+    }
+
+    fn read_at(file: &File, offset: u64, len: u64) -> io::Result<Option<Slot>> {
+        if offset >= len {
+            return Ok(None);
+        }
+        let mut bytes = vec![0u8; SLOT.min(len - offset) as usize];
+        read_at(file, offset, &mut bytes)?;
+        Ok(Self::decode(&bytes))
+    }
+
+    /// The rolling slots of `file` that are whole, newest first.
     pub fn read(file: &File) -> io::Result<Vec<Slot>> {
-        let mut slots = Vec::new();
         let len = file.metadata()?.len();
+        let mut slots = Vec::new();
         for at in 0..2 {
-            let offset = MAGIC.len() as u64 + at * SLOT;
-            if offset >= len {
-                continue;
-            }
-            let mut bytes = vec![0u8; SLOT.min(len - offset) as usize];
-            read_at(file, offset, &mut bytes)?;
-            if let Some(slot) = Self::decode(&bytes) {
+            if let Some(slot) = Self::read_at(file, MAGIC.len() as u64 + at * SLOT, len)? {
                 slots.push(slot);
             }
         }
         slots.sort_by_key(|slot| std::cmp::Reverse(slot.sequence));
         Ok(slots)
     }
+
+    /// The durable slot, if it is whole.
+    pub fn read_durable(file: &File) -> io::Result<Option<Slot>> {
+        Self::read_at(file, DURABLE, file.metadata()?.len())
+    }
+}
+
+/// This boot, as a number (0 where the platform does not say): a slot
+/// written in this boot was not cut short by a power loss or a crash of
+/// the operating system, which end a boot.
+pub(crate) fn boot() -> u64 {
+    #[cfg(target_os = "linux")]
+    if let Ok(id) = std::fs::read("/proc/sys/kernel/random/boot_id") {
+        return crate::hash::hash(&id).max(1);
+    }
+    0
 }
 
 #[cfg(test)]
@@ -206,6 +282,10 @@ mod tests {
             sequence: 1,
             end: DATA + 100,
             catalogs: vec!["index".into()],
+            reusable: vec![3, 4],
+            pending: vec![5],
+            boot: 9,
+            durable: 1,
             ..Slot::default()
         };
         let second = Slot {
@@ -220,7 +300,16 @@ mod tests {
         // A slot cut short or overwritten in part is not whole: the other
         // one is read. The newer one is the one sequence 2 picks, slot 0.
         write_at(&file, MAGIC.len() as u64 + 12, &[0xFF; 4])?;
-        assert_eq!(Slot::read(&file)?, vec![first]);
+        assert_eq!(Slot::read(&file)?, vec![first.clone()]);
+
+        assert_eq!(Slot::read_durable(&file)?, None);
+        first.write_durable(&file)?;
+        assert_eq!(Slot::read_durable(&file)?, Some(first.clone()));
+        assert_eq!(
+            Slot::read(&file)?,
+            vec![first],
+            "the durable slot is not a rolling one"
+        );
         Ok(())
     }
 }

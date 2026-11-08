@@ -2,14 +2,20 @@
 //! of everything up to the slot's end.
 //!
 //! Everything a snapshot reads was written before its slot, and nothing
-//! before a slot's end is written again, so a snapshot stays true for as
-//! long as anyone holds it. An append publishes a new snapshot; readers
+//! before a slot's end is written again but the index's pages, which a
+//! reader checks as it reads them (see [`tree`](super::tree)): a frame or
+//! token a snapshot reads stays true for as long as anyone holds it, and
+//! an index page written over since reads as stale, for the reader to look
+//! again from a newer snapshot. An append publishes a new snapshot; readers
 //! take whichever is current and never wait.
 //!
-//! The index is the tree in the file (see [`tree`](super::tree)), keyed by
-//! 64-bit keys in three spaces:
+//! The index is the tree in the file, keyed by 32-bit keys (two bits of
+//! space, thirty of a hash) in three spaces, each value a place in the file
+//! divided by [`ALIGN`]:
 //!
-//! - a block, by its catalog and hash: where its frame or whole record is;
+//! - a block, by its catalog and hash: where its frame is (a block kept
+//!   whole is a frame of the [whole](WHOLE) kind, its bytes after the
+//!   header);
 //! - a token, by the hash of its bytes: where it is, for a writer that
 //!   would otherwise write it again;
 //! - a lineage (a catalog, a kind and a node's first key): the latest
@@ -28,30 +34,32 @@ use dialog_common::Blake3Hash;
 use memmap2::Mmap;
 
 use super::slot::Slot;
-use super::tree::Nodes;
-use crate::file::{HEADER, Kind};
+use super::tree::{Child, Nodes, PAGE, check};
 use crate::rows::{Reader, invalid, put_varint};
 use crate::tokens::{ALIGN, TokenRead, token_at};
 
-const SPACE: u32 = 62;
-const LOW: u64 = (1 << SPACE) - 1;
+const SPACE: u32 = 30;
+const LOW: u32 = (1 << SPACE) - 1;
 
 /// The key spaces.
-const BLOCKS: u64 = 0;
-const TOKENS: u64 = 1;
-const LINEAGES: u64 = 2;
+const BLOCKS: u32 = 0;
+const TOKENS: u32 = 1;
+const LINEAGES: u32 = 2;
 
-fn key(space: u64, hash: u64) -> u64 {
-    space << SPACE | (hash & LOW)
+/// A frame's kind when it holds a block whole: its bytes follow the header.
+pub(crate) const WHOLE: u8 = 0xFF;
+
+fn key(space: u32, hash: u64) -> u32 {
+    space << SPACE | (hash as u32 & LOW)
 }
 
 /// The key after `key` in its space, for a value filed past a taken one.
-pub(crate) fn next(key: u64) -> u64 {
+pub(crate) fn next(key: u32) -> u32 {
     (key & !LOW) | (key.wrapping_add(1) & LOW)
 }
 
 /// The first key a block of `catalog` with `hash` is filed under.
-pub(crate) fn block_key(catalog: u16, hash: &Blake3Hash) -> u64 {
+pub(crate) fn block_key(catalog: u16, hash: &Blake3Hash) -> u32 {
     let prefix = u64::from_le_bytes(hash.as_bytes()[..8].try_into().expect("eight bytes"));
     key(
         BLOCKS,
@@ -60,13 +68,13 @@ pub(crate) fn block_key(catalog: u16, hash: &Blake3Hash) -> u64 {
 }
 
 /// The first key a token whose bytes hash to `hash` is filed under.
-pub(crate) fn token_key(hash: u64) -> u64 {
+pub(crate) fn token_key(hash: u64) -> u32 {
     key(TOKENS, hash)
 }
 
 /// The key of a lineage: the latest frame of it is filed there, and
 /// replaces the one before.
-pub(crate) fn lineage_key(catalog: u16, kind: u8, first: [u32; 4]) -> u64 {
+pub(crate) fn lineage_key(catalog: u16, kind: u8, first: [u32; 4]) -> u32 {
     let mut bytes = Vec::with_capacity(19);
     bytes.extend_from_slice(&catalog.to_le_bytes());
     bytes.push(kind);
@@ -76,30 +84,28 @@ pub(crate) fn lineage_key(catalog: u16, kind: u8, first: [u32; 4]) -> u64 {
     key(LINEAGES, crate::hash::hash(&bytes))
 }
 
-/// How the file holds a block.
+/// How the file holds a block: in the frame whose data starts at this
+/// offset divided by [`ALIGN`], whole or as rows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Place {
-    /// Whole, in the block record at this offset.
-    Block(u64),
-    /// As a frame, whose data starts at this offset divided by [`ALIGN`].
+    /// Whole, its bytes after the frame's header.
+    Block(u32),
+    /// As rows.
     Frame(u32),
 }
 
-const FRAME: u64 = 1 << 63;
-
 impl Place {
-    pub fn value(self) -> u64 {
+    pub fn value(self) -> u32 {
         match self {
-            Place::Block(at) => at,
-            Place::Frame(at) => FRAME | at as u64,
+            Place::Block(at) | Place::Frame(at) => at,
         }
     }
 
-    fn of(value: u64) -> Self {
-        if value & FRAME != 0 {
-            Place::Frame((value & !FRAME) as u32)
+    fn of(at: u32, header: &FrameHeader) -> Self {
+        if header.kind == WHOLE {
+            Place::Block(at)
         } else {
-            Place::Block(value)
+            Place::Frame(at)
         }
     }
 }
@@ -166,21 +172,6 @@ impl Snapshot {
         &self.map[..end]
     }
 
-    /// The kind and body of the record at `at`.
-    pub fn record(&self, at: u64) -> io::Result<(Kind, &[u8])> {
-        let bytes = self.bytes();
-        let at = usize::try_from(at).map_err(|_| invalid("a record past the mapping"))?;
-        let header = bytes
-            .get(at..at + HEADER as usize)
-            .ok_or_else(|| invalid("a record past the file's end"))?;
-        let kind = Kind::from_tag(header[0]).ok_or_else(|| invalid("a record of no kind"))?;
-        let len = u32::from_le_bytes(header[1..5].try_into().expect("four bytes")) as usize;
-        let body = bytes
-            .get(at + HEADER as usize..at + HEADER as usize + len)
-            .ok_or_else(|| invalid("a record past the file's end"))?;
-        Ok((kind, body))
-    }
-
     pub fn catalog_id(&self, name: &str) -> Option<u16> {
         self.slot
             .catalogs
@@ -212,17 +203,19 @@ impl Snapshot {
         self.bytes().get(start..start + 32)
     }
 
-    /// A whole block's catalog, hash and bytes, from its record.
-    pub fn block(&self, at: u64) -> io::Result<(u16, Blake3Hash, &[u8])> {
-        let (kind, body) = self.record(at)?;
-        if kind != Kind::Block {
-            return Err(invalid("not a block record"));
+    /// A whole block's bytes, after its frame's header.
+    pub fn block(&self, at: u32) -> io::Result<&[u8]> {
+        let bytes = self.frame_bytes(at)?;
+        let mut reader = Reader::new(bytes);
+        let header = FrameHeader::get(&mut reader)?;
+        if header.kind != WHOLE {
+            return Err(invalid("not a block kept whole"));
         }
-        let mut reader = Reader::new(body);
-        let catalog =
-            u16::try_from(reader.varint()?).map_err(|_| invalid("a catalog over 16 bits"))?;
-        let hash = Blake3Hash::from(<[u8; 32]>::try_from(reader.take(32)?).expect("32 bytes"));
-        Ok((catalog, hash, &body[reader.position()..]))
+        let len = reader.varint()? as usize;
+        let start = reader.position();
+        bytes
+            .get(start..start + len)
+            .ok_or_else(|| invalid("a block past the file's end"))
     }
 
     /// How the file holds the block `hash` names in `catalog`.
@@ -235,22 +228,12 @@ impl Snapshot {
 
     /// How the file holds a block, and the first free key past the ones
     /// its search met, where a new block that shares its key is filed.
-    pub fn probe_block(&self, catalog: u16, hash: &Blake3Hash) -> io::Result<(Option<Place>, u64)> {
+    pub fn probe_block(&self, catalog: u16, hash: &Blake3Hash) -> io::Result<(Option<Place>, u32)> {
         let mut at = block_key(catalog, hash);
         while let Some(value) = self.slot.root.get(self, at)? {
-            let place = Place::of(value);
-            let (held_catalog, held_hash) = match place {
-                Place::Frame(frame) => {
-                    let header = self.frame(frame)?;
-                    (header.catalog, header.hash)
-                }
-                Place::Block(record) => {
-                    let (catalog, hash, _) = self.block(record)?;
-                    (catalog, hash)
-                }
-            };
-            if held_catalog == catalog && &held_hash == hash {
-                return Ok((Some(place), at));
+            let header = self.frame(value)?;
+            if header.catalog == catalog && &header.hash == hash {
+                return Ok((Some(Place::of(value, &header)), at));
             }
             at = next(at);
         }
@@ -260,10 +243,9 @@ impl Snapshot {
     /// The token equal to `token` (whose bytes hash to `hash`), by where it
     /// starts divided by [`ALIGN`], and the first free key past the ones
     /// the search met.
-    pub fn probe_token(&self, hash: u64, token: &[u8]) -> io::Result<(Option<u32>, u64)> {
+    pub fn probe_token(&self, hash: u64, token: &[u8]) -> io::Result<(Option<u32>, u32)> {
         let mut at = token_key(hash);
-        while let Some(value) = self.slot.root.get(self, at)? {
-            let id = value as u32;
+        while let Some(id) = self.slot.root.get(self, at)? {
             if self.get(id) == Some(token) {
                 return Ok((Some(id), at));
             }
@@ -274,8 +256,8 @@ impl Snapshot {
 
     /// The latest frame of a lineage, by where it starts divided by
     /// [`ALIGN`].
-    pub fn lineage(&self, key: u64) -> io::Result<Option<u32>> {
-        Ok(self.slot.root.get(self, key)?.map(|value| value as u32))
+    pub fn lineage(&self, key: u32) -> io::Result<Option<u32>> {
+        self.slot.root.get(self, key)
     }
 
     /// Every block, by catalog and hash, and how it is held.
@@ -285,30 +267,29 @@ impl Snapshot {
             if key >> SPACE != BLOCKS {
                 continue;
             }
-            let place = Place::of(value);
-            let (catalog, hash) = match place {
-                Place::Frame(frame) => {
-                    let header = self.frame(frame)?;
-                    (header.catalog, header.hash)
-                }
-                Place::Block(record) => {
-                    let (catalog, hash, _) = self.block(record)?;
-                    (catalog, hash)
-                }
-            };
-            out.push((catalog, hash, place));
+            let header = self.frame(value)?;
+            out.push((
+                header.catalog,
+                header.hash.clone(),
+                Place::of(value, &header),
+            ));
         }
         Ok(out)
     }
 }
 
 impl Nodes for Snapshot {
-    fn read(&self, at: u64) -> io::Result<Cow<'_, [u8]>> {
-        let (kind, body) = self.record(at)?;
-        if kind != Kind::Index {
-            return Err(invalid("not an index record"));
-        }
-        Ok(Cow::Borrowed(body))
+    /// The page, copied out of the mapping before it is checked: another
+    /// writer may be writing over it as it is read.
+    fn read(&self, child: Child) -> io::Result<Cow<'_, [u8]>> {
+        let start = child.page as usize * PAGE;
+        let bytes = self
+            .bytes()
+            .get(start..start + PAGE)
+            .ok_or_else(|| invalid("an index page past the file's end"))?
+            .to_vec();
+        check(&bytes, child)?;
+        Ok(Cow::Owned(bytes))
     }
 }
 

@@ -18,7 +18,7 @@ use dialog_search_tree::{Manifest, NodeBody};
 use memmap2::Mmap;
 use parking_lot::Mutex;
 
-use crate::file::{HEADER, Kind, MAGIC, put_record, read_at, write_at};
+use crate::file::{HEADER, Kind, MAGIC, put_record, read_at, record_in, write_at};
 use crate::node::{TreeNode, realize, rows_of, tree_node};
 use crate::rows::{Reader, Rows, get_rows, invalid, put_rows, put_varint, rename};
 use crate::tokens::{ALIGN, Draft, TokenRead};
@@ -30,8 +30,11 @@ mod served;
 mod slot;
 mod tree;
 
-use index::{FrameHeader, Place, Snapshot, block_key, catalog_in, lineage_key, next, token_id};
-use slot::{DATA, Slot};
+use index::{
+    FrameHeader, Place, Snapshot, WHOLE, block_key, catalog_in, lineage_key, next, token_id,
+};
+use slot::{DATA, SLOT, Slot, boot};
+use tree::{Child, Nodes, PAGE, Pages, check, is_stale};
 
 /// The files this process has open, so a second open of one shares it.
 static OPEN: LazyLock<Mutex<HashMap<PathBuf, Weak<Inner>>>> =
@@ -48,6 +51,14 @@ const TOKENS_REMEMBERED: usize = 1 << 18;
 
 /// How many datum tokens a reader remembers having checked.
 const DATUMS_CHECKED: usize = 1 << 20;
+
+/// A sync point follows an append once this many appends came since the
+/// last, once this many index pages wait on one to be written over, or
+/// once this long has passed: a power loss loses at most what came after
+/// the last sync point, and the index's freed pages wait at most this long.
+const SYNC_APPENDS: u64 = 64;
+const SYNC_PAGES: usize = 2048;
+const SYNC_AFTER: Duration = Duration::from_secs(2);
 
 /// Keys that are hashes already: hashed by taking them as they are.
 #[derive(Clone, Copy, Default)]
@@ -197,6 +208,11 @@ struct Timings {
     /// Nodes kept whole because their frame did not read back to their
     /// rows: an encoding bug, never expected.
     unread: AtomicU64,
+    /// Sync points, and the time they took.
+    sync: AtomicU64,
+    syncs: AtomicU64,
+    /// Index pages written over where they were.
+    reused: AtomicU64,
 }
 
 impl Timings {
@@ -223,7 +239,8 @@ impl Drop for Inner {
             "archive {}: split {:.1} ms (parse {:.1} ms), encode {:.1} ms, verify {:.1} ms, write {:.1} ms, \
              decode {:.1} ms, realize {:.1} ms ({} blocks built for gets), serve {:.1} ms \
              ({} nodes served), {} blocks offered to appends, {} appends taking {:.1} ms, \
-             kept whole: {} of another layout, {} not rebuilt when verified, {} not read back",
+             kept whole: {} of another layout, {} not rebuilt when verified, {} not read back; \
+             {} sync points taking {:.1} ms",
             self.path.display(),
             ms(&timings.split),
             ms(&timings.parse),
@@ -241,6 +258,8 @@ impl Drop for Inner {
             timings.other_layout.load(Ordering::Relaxed),
             timings.unverified.load(Ordering::Relaxed),
             timings.unread.load(Ordering::Relaxed),
+            timings.syncs.load(Ordering::Relaxed),
+            ms(&timings.sync),
         );
     }
 }
@@ -261,8 +280,10 @@ struct Inner {
     /// Where a writer found tokens, by the hash of their bytes: the index
     /// is asked once for each while it stays here.
     tokens: Mutex<HashMap<u64, u32, Hashed>>,
-    /// The writer's turn in this process.
+    /// The writer's turn in this process, and when this process last made
+    /// a sync point.
     writer: Mutex<()>,
+    synced: Mutex<Instant>,
     /// The end of what this process has read of the file or is writing to
     /// it, so a read that misses looks for another process's appends only
     /// when the file grew past it, and takes no lock otherwise.
@@ -333,12 +354,21 @@ pub struct Stats {
 /// is not a tree node, or does not rebuild from its frame, is kept whole. A
 /// read of a frame realizes the block through the tree's own encoder.
 ///
-/// The file is a magic number, two slots, then records: blocks, tokens,
-/// frames, and the nodes of the file's index, a tree whose root is in the
-/// slot. Every append writes its records past the end, then the older slot;
-/// opening reads the newer slot that is whole, and nothing else. An append
-/// cut short leaves the other slot whole and records past its end, which
-/// the next writer drops.
+/// The file is a magic number, three slots, then records: tokens, frames
+/// (blocks kept whole among them), and pages of the file's index, a tree
+/// whose root is in the slot. Every append writes its records past the end
+/// and its index pages, then the older of two rolling slots; opening reads
+/// the newer one that is whole, and nothing else. An append cut short
+/// leaves the other slot whole and records past its end, which the next
+/// writer drops.
+///
+/// Only the index's pages are written over, once no root reaches them,
+/// and only after a **sync point** has made that safe: the file synced,
+/// the third, durable slot written and synced. A sync point follows an
+/// append every 64 appends, every 2,048 freed pages or every 2 seconds,
+/// and [`FileArchive::sync`] makes one. A power loss loses at most what
+/// came after the last: opening in a later boot checks what was written
+/// since the durable slot and goes back to the newest state that is whole.
 ///
 /// One file is one space, as one directory is for the `fs` provider: the
 /// subject an effect names is not part of where a block is kept.
@@ -346,10 +376,11 @@ pub struct Stats {
 /// Any number of processes open one file. Writers take turns holding an
 /// exclusive lock on it: a writer prepares its append before its turn,
 /// then, holding the lock, reads the newest slot and writes. Readers take
-/// no lock: a slot names records that never change, and a read that does
-/// not find a block reads the slot again if the file grew ([`refresh`]).
-/// Durability matches the `fs` provider: appends are not synced. Call
-/// [`FileArchive::sync`] for a point that is.
+/// no lock: a slot names frames and tokens that never change, an index page
+/// written over since a reader's slot reads as stale (its append and
+/// checksum say so) and the reader looks again from a newer slot, and a
+/// read that does not find a block reads the slot again if the file grew
+/// ([`refresh`]).
 ///
 /// [`refresh`]: FileArchive::refresh
 ///
@@ -439,14 +470,29 @@ fn newest(file: &File, locked: bool) -> io::Result<Slot> {
 
 /// Opens the file's state, creating it when it is empty. Holds the file's
 /// lock, so it never reads, or drops, an append under way.
+///
+/// A rolling slot written in this boot is taken as it is: a process that
+/// died left what it wrote with the operating system, in order. One
+/// written in another boot (or where the platform does not say) may have
+/// been cut short by a power loss that kept some of what came before it
+/// and lost the rest, in any order. Then everything written since the
+/// durable slot is checked: every record whole, every index page the slot
+/// reaches and was written since. The newest rolling slot that passes is
+/// taken; if none does, the file goes back to the durable slot, which
+/// nothing since was allowed to write over.
 fn recover(file: &File) -> io::Result<Slot> {
     let _exclusive = Exclusive::take(file)?;
     let len = file.metadata()?.len();
     if len == 0 {
         write_at(file, 0, MAGIC)?;
         file.set_len(DATA)?;
-        let slot = Slot::default();
+        let slot = Slot {
+            boot: boot(),
+            ..Slot::default()
+        };
         slot.write(file)?;
+        slot.write_durable(file)?;
+        file.sync_data()?;
         return Ok(slot);
     }
     let mut magic = [0u8; 8];
@@ -456,7 +502,68 @@ fn recover(file: &File) -> io::Result<Slot> {
     } {
         return Err(invalid("not a dialog archive file"));
     }
-    newest(file, true)
+    let durable = Slot::read_durable(file)?.ok_or_else(|| invalid("no whole durable slot"))?;
+    let candidates: Vec<Slot> = Slot::read(file)?
+        .into_iter()
+        .filter(|slot| slot.end <= len && slot.sequence >= durable.sequence)
+        .collect();
+    let this_boot = boot();
+    let chosen = match candidates.first() {
+        Some(newest) if this_boot != 0 && newest.boot == this_boot => Some(newest.clone()),
+        _ => {
+            let mut chosen = None;
+            for candidate in candidates {
+                if whole_since(file, &durable, &candidate)? {
+                    chosen = Some(candidate);
+                    break;
+                }
+            }
+            chosen
+        }
+    };
+    let slot = match chosen {
+        Some(slot) => slot,
+        None => {
+            // Back to the durable slot: the rolling slots past it are
+            // dropped, so no later open takes one of them.
+            for at in 0..2u64 {
+                write_at(file, MAGIC.len() as u64 + at * SLOT, &[0; 8])?;
+            }
+            durable.write(file)?;
+            file.set_len(durable.end)?;
+            file.sync_data()?;
+            durable
+        }
+    };
+    if len > slot.end {
+        file.set_len(slot.end)?;
+    }
+    Ok(slot)
+}
+
+/// Whether everything `slot` names that was written since the `durable`
+/// slot is whole: its records, each by its checksum, and the index pages it
+/// reaches that were written since, each by its own.
+fn whole_since(file: &File, durable: &Slot, slot: &Slot) -> io::Result<bool> {
+    let view = snapshot(file, slot.clone(), None)?;
+    let bytes = view.bytes();
+    let mut at = durable.end as usize;
+    while at < slot.end as usize {
+        match record_in(bytes, at) {
+            Some((_, _, end)) => at = end,
+            None => return Ok(false),
+        }
+    }
+    if at != slot.end as usize {
+        return Ok(false);
+    }
+    // A page that fails its check, or does not read as a node, is not
+    // whole.
+    let mut pages = Vec::new();
+    Ok(slot
+        .root
+        .pages_since(&view, Some(durable.sequence as u32), &mut pages)
+        .is_ok())
 }
 
 /// `nodes` ordered so every node comes after the children it links to
@@ -532,6 +639,8 @@ struct Prepared<'a> {
 struct Laid {
     start: u64,
     bytes: Vec<u8>,
+    /// Index pages written over where they are, by page.
+    pages: Vec<(u32, Vec<u8>)>,
     slot: Slot,
     rows: Vec<(u32, Arc<Rows>, u32)>,
     tokens: Vec<(u64, u32)>,
@@ -539,7 +648,7 @@ struct Laid {
 
 /// The first free key from `key` on, in `snapshot`'s index and among the
 /// keys an append took already.
-fn free(snapshot: &Snapshot, mut key: u64, taken: &mut HashSet<u64>) -> io::Result<u64> {
+fn free(snapshot: &Snapshot, mut key: u32, taken: &mut HashSet<u32>) -> io::Result<u32> {
     loop {
         if !taken.contains(&key) && snapshot.slot.root.get(snapshot, key)?.is_none() {
             taken.insert(key);
@@ -547,6 +656,77 @@ fn free(snapshot: &Snapshot, mut key: u64, taken: &mut HashSet<u64>) -> io::Resu
         }
         key = next(key);
     }
+}
+
+/// Where an append's index pages go: pages free to write over first, then
+/// new pages after the append's records. It reads the pages it wrote as
+/// well as the snapshot's.
+struct Writer<'a> {
+    snapshot: &'a Snapshot,
+    sequence: u32,
+    reusable: Vec<u32>,
+    pending: Vec<u32>,
+    /// The pages this append wrote, and their bytes.
+    written: HashMap<u32, Vec<u8>>,
+    /// Pages this append wrote and then freed again: never reached by a
+    /// root, so free at once.
+    unused: Vec<u32>,
+    /// The first page past the append's records, and the next new one.
+    first: u32,
+    next: u32,
+}
+
+impl Nodes for Writer<'_> {
+    fn read(&self, child: Child) -> io::Result<std::borrow::Cow<'_, [u8]>> {
+        match self.written.get(&child.page) {
+            Some(bytes) => {
+                check(bytes, child)?;
+                Ok(std::borrow::Cow::Borrowed(bytes))
+            }
+            None => self.snapshot.read(child),
+        }
+    }
+}
+
+impl Pages for Writer<'_> {
+    fn write(&mut self, node: &tree::Node) -> io::Result<Child> {
+        let bytes = node.page(self.sequence)?;
+        let page = match self.unused.pop().or_else(|| self.reusable.pop()) {
+            Some(page) => page,
+            None => {
+                self.next += 1;
+                self.next - 1
+            }
+        };
+        self.written.insert(page, bytes);
+        Ok(Child {
+            page,
+            sequence: self.sequence,
+        })
+    }
+
+    fn free(&mut self, child: Child) {
+        if self.written.remove(&child.page).is_some() {
+            self.unused.push(child.page);
+        } else {
+            self.pending.push(child.page);
+        }
+    }
+}
+
+/// Appends to `bytes` (the append's, from `start` in the file) a frame
+/// record holding `data`, which starts on the alignment after a byte
+/// saying how much padding comes first. Returns where the data starts,
+/// divided by [`ALIGN`].
+fn put_frame(bytes: &mut Vec<u8>, start: u64, data: &[u8]) -> io::Result<u32> {
+    let body_offset = start + bytes.len() as u64 + HEADER;
+    let pad = (ALIGN - (body_offset + 1) % ALIGN) % ALIGN;
+    let mut body = Vec::with_capacity(1 + pad as usize + data.len());
+    body.push(pad as u8);
+    body.resize(1 + pad as usize, 0);
+    body.extend_from_slice(data);
+    put_record(bytes, Kind::Frame, &body)?;
+    token_id(body_offset + 1 + pad)
 }
 
 /// The token equal to `token` the file holds as of `snapshot`, by the
@@ -614,6 +794,7 @@ impl FileArchive {
             tokens: Mutex::new(HashMap::default()),
             options,
             writer: Mutex::new(()),
+            synced: Mutex::new(Instant::now()),
             #[cfg(test)]
             before_publish: Mutex::new(None),
         });
@@ -656,18 +837,15 @@ impl FileArchive {
     /// Whether the archive keeps the block `hash` names in `catalog` as a
     /// frame (rather than whole, or not at all).
     pub fn is_frame(&self, catalog: &str, hash: &Blake3Hash) -> bool {
-        matches!(
-            self.current().place(catalog, hash),
-            Ok(Some(Place::Frame(_)))
-        )
+        matches!(self.place(catalog, hash), Ok((_, Some(Place::Frame(_)))))
     }
 
     /// Every block the archive holds, by catalog and hash.
     pub fn hashes(&self) -> Vec<(String, Blake3Hash)> {
-        let snapshot = self.current();
-        snapshot
-            .blocks()
-            .unwrap_or_default()
+        let Ok((snapshot, blocks)) = self.look(|snapshot| snapshot.blocks()) else {
+            return Vec::new();
+        };
+        blocks
             .into_iter()
             .filter_map(|(catalog, hash, _)| Some((snapshot.catalog(catalog)?.to_string(), hash)))
             .collect()
@@ -728,12 +906,23 @@ impl FileArchive {
         self.inner.rows.clear();
     }
 
-    /// Makes everything appended so far durable.
+    /// Makes everything appended so far durable: a sync point (see
+    /// [`FileArchive`]).
     pub fn sync(&self) -> Result<(), ArchiveError> {
-        let _writer = self.inner.writer.lock();
-        self.inner
-            .file
-            .sync_data()
+        let _turn = self.inner.writer.lock();
+        let file = &self.inner.file;
+        Exclusive::take(file)
+            .and_then(|_exclusive| {
+                let slot = newest(file, true)?;
+                let slot = if slot.sequence > self.current().slot.sequence {
+                    slot
+                } else {
+                    self.current().slot.clone()
+                };
+                let slot = self.sync_point(slot)?;
+                self.publish(snapshot(file, slot, Some(&self.current().map))?);
+                Ok(())
+            })
             .map_err(|error| storage_error(&self.inner.path, error))
     }
 
@@ -751,16 +940,43 @@ impl FileArchive {
         catalog: &str,
         hash: &Blake3Hash,
     ) -> io::Result<(Arc<Snapshot>, Option<Place>)> {
-        let snapshot = self.current();
-        if let Some(place) = snapshot.place(catalog, hash)? {
-            return Ok((snapshot, Some(place)));
+        let (snapshot, place) = self.look(|snapshot| snapshot.place(catalog, hash))?;
+        if place.is_some() || !self.reread()? {
+            return Ok((snapshot, place));
         }
-        if !self.reread()? {
-            return Ok((snapshot, None));
+        self.look(|snapshot| snapshot.place(catalog, hash))
+    }
+
+    /// `find` over the current snapshot, again over a newer one while an
+    /// index page it reads was written over since its root was read.
+    fn look<T>(&self, find: impl Fn(&Snapshot) -> io::Result<T>) -> io::Result<(Arc<Snapshot>, T)> {
+        loop {
+            let snapshot = self.current();
+            match find(&snapshot) {
+                Err(error) if is_stale(&error) => self.newer(&snapshot)?,
+                found => return found.map(|found| (snapshot, found)),
+            }
         }
-        let snapshot = self.current();
-        let place = snapshot.place(catalog, hash)?;
-        Ok((snapshot, place))
+    }
+
+    /// Makes a snapshot newer than `than` current, reading the slots if no
+    /// newer one is: an index page written over since `than`'s root was
+    /// read means another append came since. A page the newest root names
+    /// that fails its check is damage, not a race.
+    fn newer(&self, than: &Snapshot) -> io::Result<()> {
+        if self.current().slot.sequence <= than.slot.sequence {
+            let slot = newest(&self.inner.file, false)?;
+            if slot.sequence > self.current().slot.sequence {
+                self.know(slot.end);
+                self.publish(snapshot(&self.inner.file, slot, Some(&self.current().map))?);
+            }
+        }
+        if self.current().slot.sequence <= than.slot.sequence {
+            return Err(invalid(
+                "an index page the newest slot names fails its check",
+            ));
+        }
+        Ok(())
     }
 
     fn read(&self, catalog: &str, hash: &Blake3Hash) -> io::Result<Option<Vec<u8>>> {
@@ -768,7 +984,7 @@ impl FileArchive {
             return Ok(None);
         };
         match place {
-            Place::Block(at) => Ok(Some(snapshot.block(at)?.2.to_vec())),
+            Place::Block(at) => Ok(Some(snapshot.block(at)?.to_vec())),
             Place::Frame(at) => {
                 let (rows, manifest) = self.rows(&snapshot, &HashMap::new(), at)?;
                 let started = Instant::now();
@@ -877,8 +1093,14 @@ impl FileArchive {
         let error = |error| storage_error(&self.inner.path, error);
         // The work an append can do without its turn, done before taking
         // it: other writers append meanwhile.
-        let snapshot = self.current();
-        let appended = match self.prepare(snapshot, catalog, blocks).map_err(error)? {
+        let prepared = loop {
+            let snapshot = self.current();
+            match self.prepare(snapshot.clone(), catalog, blocks) {
+                Err(failed) if is_stale(&failed) => self.newer(&snapshot).map_err(error)?,
+                prepared => break prepared.map_err(error)?,
+            }
+        };
+        let appended = match prepared {
             Some(prepared) => self.flush(prepared, catalog, blocks),
             None => Ok(()),
         };
@@ -1098,7 +1320,7 @@ impl FileArchive {
                 let token = draft.get(*id).expect("a drafted token");
                 let hash = draft.hash(*id).expect("a drafted token's hash");
                 let (_, key) = snapshot.probe_token(hash, token)?;
-                entries.push((free(snapshot, key, &mut taken)?, named as u64));
+                entries.push((free(snapshot, key, &mut taken)?, named));
                 remembered.push((hash, named));
                 slot.counts.tokens += 1;
                 slot.counts.token_bytes += token.len() as u64;
@@ -1118,19 +1340,25 @@ impl FileArchive {
         let mut depths: HashMap<u32, u8> = HashMap::new();
         let mut rows_laid = Vec::new();
         for item in kept {
-            let record = start + bytes.len() as u64;
             match item {
                 Item::Block(block) => {
-                    let mut body = Vec::with_capacity(block.as_ref().len() + 40);
-                    put_varint(&mut body, catalog_id as u64);
-                    body.extend_from_slice(block.blake3_hash().as_bytes());
-                    body.extend_from_slice(block.as_ref());
-                    put_record(&mut bytes, Kind::Block, &body)?;
+                    // A block kept whole: a frame of the whole kind, its
+                    // length and bytes after the header.
+                    let mut data = Vec::with_capacity(block.as_ref().len() + 48);
+                    FrameHeader {
+                        hash: block.blake3_hash().clone(),
+                        kind: WHOLE,
+                        depth: 0,
+                        catalog: catalog_id,
+                        base: None,
+                        manifest: 0,
+                    }
+                    .put(&mut data);
+                    put_varint(&mut data, block.as_ref().len() as u64);
+                    data.extend_from_slice(block.as_ref());
+                    let at = put_frame(&mut bytes, start, &data)?;
                     let key = block_key(catalog_id, block.blake3_hash());
-                    entries.push((
-                        free(snapshot, key, &mut taken)?,
-                        Place::Block(record).value(),
-                    ));
+                    entries.push((free(snapshot, key, &mut taken)?, Place::Block(at).value()));
                     slot.counts.blocks += 1;
                     slot.counts.block_bytes += block.as_ref().len() as u64;
                 }
@@ -1177,16 +1405,8 @@ impl FileArchive {
                         self.inner.timings.unread.fetch_add(1, Ordering::Relaxed);
                         return Err(invalid("a frame did not read back to its rows"));
                     }
-                    // The frame's data starts on the alignment, after a
-                    // byte saying how much padding comes first.
-                    let body_offset = record + HEADER;
-                    let pad = (ALIGN - (body_offset + 1) % ALIGN) % ALIGN;
-                    let mut body = Vec::with_capacity(1 + pad as usize + data.len());
-                    body.push(pad as u8);
-                    body.resize(1 + pad as usize, 0);
-                    body.extend_from_slice(&data);
-                    let at = token_id(body_offset + 1 + pad)?;
-                    put_record(&mut bytes, Kind::Frame, &body)?;
+                    let record = bytes.len();
+                    let at = put_frame(&mut bytes, start, &data)?;
                     nodes.insert(id, at);
                     depths.insert(at, depth);
                     staged.insert(at, (rows.clone(), header.manifest));
@@ -1194,26 +1414,60 @@ impl FileArchive {
                     let key = block_key(catalog_id, block.blake3_hash());
                     entries.push((free(snapshot, key, &mut taken)?, Place::Frame(at).value()));
                     if let Some(lineage) = rows.lineage() {
-                        entries.push((lineage_key(catalog_id, rows.kind, lineage), at as u64));
+                        entries.push((lineage_key(catalog_id, rows.kind, lineage), at));
                     }
                     slot.counts.frames += 1;
                     slot.counts.frames_against += base.is_some() as u64;
-                    slot.counts.frame_bytes += body.len() as u64;
+                    slot.counts.frame_bytes += (bytes.len() - record) as u64;
                 }
             }
         }
 
-        // The index's new entries, and the nodes they rewrite.
+        // The index's new entries, and the pages they rewrite: pages free to
+        // write over first, then new ones in a record of their own, each on
+        // a page boundary.
+        let body = start + bytes.len() as u64 + HEADER;
+        let first = (body + 2).div_ceil(PAGE as u64);
+        let mut writer = Writer {
+            snapshot,
+            sequence: slot.sequence as u32,
+            reusable: std::mem::take(&mut slot.reusable),
+            pending: std::mem::take(&mut slot.pending),
+            written: HashMap::new(),
+            unused: Vec::new(),
+            first: u32::try_from(first).map_err(|_| invalid("an index page past 16 TiB"))?,
+            next: first as u32,
+        };
         let root = std::mem::take(&mut slot.root);
-        slot.root = root.insert(snapshot, entries, &mut |node| {
-            let at = start + bytes.len() as u64;
-            put_record(&mut bytes, Kind::Index, node)?;
-            Ok(at)
-        })?;
+        slot.root = root.insert(&mut writer, entries)?;
+        let mut pages = Vec::new();
+        let mut written = std::mem::take(&mut writer.written);
+        if writer.next > writer.first {
+            let pad = (first * PAGE as u64 - body - 2) as usize;
+            let mut record =
+                Vec::with_capacity(2 + pad + (writer.next - writer.first) as usize * PAGE);
+            record.extend_from_slice(&(pad as u16).to_le_bytes());
+            record.resize(2 + pad, 0);
+            for page in writer.first..writer.next {
+                match written.remove(&page) {
+                    Some(bytes) => record.extend_from_slice(&bytes),
+                    None => {
+                        // Written and freed again in this append: free.
+                        record.resize(record.len() + PAGE, 0);
+                    }
+                }
+            }
+            put_record(&mut bytes, Kind::Pages, &record)?;
+        }
+        pages.extend(written);
+        slot.reusable = writer.reusable;
+        slot.reusable.append(&mut writer.unused);
+        slot.pending = writer.pending;
         slot.end = start + bytes.len() as u64;
         Ok(Some(Laid {
             start,
             bytes,
+            pages,
             slot,
             rows: rows_laid,
             tokens: remembered,
@@ -1227,18 +1481,56 @@ impl FileArchive {
         self.know(laid.slot.end);
         let started = Instant::now();
         write_at(file, laid.start, &laid.bytes)?;
+        for (page, bytes) in &laid.pages {
+            write_at(file, *page as u64 * PAGE as u64, bytes)?;
+        }
+        self.inner
+            .timings
+            .reused
+            .fetch_add(laid.pages.len() as u64, Ordering::Relaxed);
         #[cfg(test)]
         if let Some(hook) = self.inner.before_publish.lock().as_mut() {
             hook();
         }
-        laid.slot.write(file)?;
+        let mut slot = laid.slot;
+        slot.boot = boot();
+        slot.write(file)?;
         Timings::add(&self.inner.timings.write, started);
+        if slot.pending.len() >= SYNC_PAGES
+            || slot.sequence - slot.durable >= SYNC_APPENDS
+            || self.inner.synced.lock().elapsed() >= SYNC_AFTER
+        {
+            slot = self.sync_point(slot)?;
+        }
         for (at, rows, manifest) in laid.rows {
             self.inner.rows.put(at, (rows, manifest));
         }
         self.remember(&laid.tokens);
-        self.publish(snapshot(file, laid.slot, Some(&self.current().map))?);
+        self.publish(snapshot(file, slot, Some(&self.current().map))?);
         Ok(())
+    }
+
+    /// Makes everything `slot` names durable, in the writer's turn: the
+    /// file synced, then the durable slot written as `slot` and synced,
+    /// then the next rolling slot written with the pages freed until now
+    /// free to write over, since the durable slot reaches none of them.
+    /// Returns that next slot.
+    fn sync_point(&self, slot: Slot) -> io::Result<Slot> {
+        let file = &self.inner.file;
+        let started = Instant::now();
+        file.sync_data()?;
+        let mut durable = slot;
+        durable.reusable.append(&mut durable.pending);
+        durable.durable = durable.sequence;
+        durable.write_durable(file)?;
+        file.sync_data()?;
+        let mut next = durable;
+        next.sequence += 1;
+        next.write(file)?;
+        *self.inner.synced.lock() = Instant::now();
+        Timings::add(&self.inner.timings.sync, started);
+        self.inner.timings.syncs.fetch_add(1, Ordering::Relaxed);
+        Ok(next)
     }
 
     /// The frame `node` is written as, if it splits into rows (and, when
@@ -1850,6 +2142,261 @@ mod tests {
         Ok(())
     }
 
+    /// Appends `appends` batches of 40 whole blocks to `archive`, named
+    /// from `from` on.
+    fn appended(archive: &FileArchive, from: usize, appends: usize) -> anyhow::Result<Vec<Buffer>> {
+        let blocks: Vec<Buffer> = (from..from + appends * 40)
+            .map(|n| block(&format!("paged {n}")))
+            .collect();
+        for batch in blocks.chunks(40) {
+            archive.append("index", batch)?;
+        }
+        Ok(blocks)
+    }
+
+    /// The pages in `archive`'s pages records.
+    fn pages_in_file(archive: &FileArchive) -> usize {
+        let snapshot = archive.current();
+        let bytes = snapshot.bytes();
+        let (mut at, mut pages) = (DATA as usize, 0);
+        while let Some((kind, body, end)) = record_in(bytes, at) {
+            if kind == Kind::Pages {
+                let pad = u16::from_le_bytes([bytes[body], bytes[body + 1]]) as usize;
+                pages += (end - body - 2 - pad) / PAGE;
+            }
+            at = end;
+        }
+        pages
+    }
+
+    /// Once a sync point has made it safe, an append writes index pages
+    /// over where they were: every page in the file is one the root
+    /// reaches or one free to write over, and the file holds fewer pages
+    /// than were written.
+    #[test]
+    fn it_writes_index_pages_over_once_a_sync_point_frees_them() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let archive = FileArchive::open(directory.path().join("archive"))?;
+        let blocks = appended(&archive, 0, 1500)?;
+        let reused = archive.inner.timings.reused.load(Ordering::Relaxed);
+        assert!(reused > 0, "pages were written over");
+        let snapshot = archive.current();
+        let mut reached = Vec::new();
+        snapshot.slot.root.pages(&*snapshot, &mut reached)?;
+        let in_file = pages_in_file(&archive);
+        assert_eq!(
+            reached.len() + snapshot.slot.reusable.len() + snapshot.slot.pending.len(),
+            in_file,
+            "every page is reached or free"
+        );
+        assert!(
+            in_file < reached.len() * 2,
+            "{in_file} pages for {} reached",
+            reached.len()
+        );
+        for block in &blocks {
+            assert_eq!(
+                archive.get("index", block.blake3_hash())?.as_deref(),
+                Some(block.as_ref())
+            );
+        }
+        Ok(())
+    }
+
+    /// A snapshot held across appends that wrote over the index's pages
+    /// finds them stale rather than reading another node's entries, and a
+    /// read through the archive looks again from a newer one.
+    #[test]
+    fn it_finds_a_page_written_over_stale_and_reads_on() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let archive = FileArchive::open(directory.path().join("archive"))?;
+        let first = appended(&archive, 0, 1500)?;
+        let old = archive.current();
+        let later = appended(&archive, 60_000, 1500)?;
+        assert!(archive.inner.timings.reused.load(Ordering::Relaxed) > 0);
+        let mut stale = 0;
+        for block in &first {
+            match old.place("index", block.blake3_hash()) {
+                Ok(found) => assert!(found.is_some(), "an old snapshot finds what it held"),
+                Err(error) if is_stale(&error) => stale += 1,
+                Err(error) => return Err(error.into()),
+            }
+        }
+        assert!(stale > 0, "the old snapshot reaches pages written over");
+        for block in first.iter().chain(&later) {
+            assert_eq!(
+                archive.get("index", block.blake3_hash())?.as_deref(),
+                Some(block.as_ref())
+            );
+        }
+        Ok(())
+    }
+
+    /// Readers on other threads read every block they hold while a writer
+    /// writes the index's pages over: each read is the block, whether its
+    /// snapshot's pages were still there or it looked again.
+    #[test]
+    fn it_reads_every_block_while_pages_are_written_over() -> anyhow::Result<()> {
+        use std::sync::atomic::AtomicBool;
+
+        let directory = tempfile::tempdir()?;
+        let archive = FileArchive::open(directory.path().join("archive"))?;
+        let held = Arc::new(appended(&archive, 0, 100)?);
+        let done = Arc::new(AtomicBool::new(false));
+        let readers: Vec<_> = (0..3)
+            .map(|_| {
+                let (archive, held, done) = (archive.clone(), held.clone(), done.clone());
+                std::thread::spawn(move || -> Result<usize, ArchiveError> {
+                    let mut reads = 0;
+                    loop {
+                        let last = done.load(Ordering::Acquire);
+                        for block in held.iter() {
+                            let read = archive.get("index", block.blake3_hash())?;
+                            assert_eq!(read.as_deref(), Some(block.as_ref()));
+                            reads += 1;
+                        }
+                        if last {
+                            return Ok(reads);
+                        }
+                    }
+                })
+            })
+            .collect();
+        appended(&archive, 100_000, 1500)?;
+        done.store(true, Ordering::Release);
+        assert!(archive.inner.timings.reused.load(Ordering::Relaxed) > 0);
+        for reader in readers {
+            let reads = reader.join().expect("every read is the block")?;
+            assert!(reads >= held.len());
+        }
+        Ok(())
+    }
+
+    /// `sync` makes a sync point: the durable slot is the file as it was,
+    /// and every page freed until then is free to write over.
+    #[test]
+    fn it_makes_a_sync_point() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let archive = FileArchive::open(directory.path().join("archive"))?;
+        appended(&archive, 0, 200)?;
+        archive.sync()?;
+        let current = archive.current();
+        let durable = Slot::read_durable(&archive.inner.file)?.expect("a durable slot");
+        assert_eq!(durable.sequence + 1, current.slot.sequence);
+        assert_eq!(current.slot.durable, durable.sequence);
+        assert_eq!(durable.end, current.slot.end);
+        assert!(current.slot.pending.is_empty());
+        Ok(())
+    }
+
+    /// Rewrites `path`'s rolling slots as written in another boot, as a
+    /// power loss leaves them.
+    fn as_if_rebooted(path: &Path) -> anyhow::Result<()> {
+        let file = OpenOptions::new().read(true).write(true).open(path)?;
+        for mut slot in Slot::read(&file)? {
+            slot.boot = boot().wrapping_add(1);
+            slot.write(&file)?;
+        }
+        Ok(())
+    }
+
+    /// After a power loss that kept a slot but lost a record it names,
+    /// opening checks what was written since the durable slot, finds the
+    /// record damaged, and goes back to the newest state that is whole: no
+    /// block it holds is damaged, and every block synced before is there.
+    #[test]
+    fn it_goes_back_to_what_is_whole_after_a_power_loss() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("archive");
+        let archive = FileArchive::open(&path)?;
+        let synced = appended(&archive, 0, 20)?;
+        archive.sync()?;
+        let durable = Slot::read_durable(&archive.inner.file)?.expect("a durable slot");
+        let unsynced: Vec<Buffer> = (0..10).map(|n| block(&format!("unsynced {n}"))).collect();
+        for block in &unsynced {
+            archive.append("index", std::slice::from_ref(block))?;
+        }
+        let end = archive.current().slot.end;
+        assert!(end > durable.end, "appends came after the sync point");
+        drop(archive);
+
+        // The power loss: the last record's bytes never reached the disk.
+        let file = OpenOptions::new().read(true).write(true).open(&path)?;
+        write_at(&file, end - 4, &[0; 4])?;
+        drop(file);
+        as_if_rebooted(&path)?;
+
+        let reopened = FileArchive::open(&path)?;
+        let slot = reopened.current().slot.clone();
+        assert!(slot.sequence >= durable.sequence && slot.end < end);
+        assert_eq!(
+            std::fs::metadata(&path)?.len(),
+            slot.end,
+            "the rest is dropped"
+        );
+        for block in &synced {
+            assert_eq!(
+                reopened.get("index", block.blake3_hash())?.as_deref(),
+                Some(block.as_ref())
+            );
+        }
+        for block in &unsynced {
+            if let Some(read) = reopened.get("index", block.blake3_hash())? {
+                assert_eq!(read, block.as_ref(), "nothing it holds is damaged");
+            }
+        }
+        // And it takes appends again.
+        reopened.append("index", &[block("after")])?;
+        assert!(
+            reopened
+                .get("index", block("after").blake3_hash())?
+                .is_some()
+        );
+        Ok(())
+    }
+
+    /// An index page written since the durable slot that a power loss
+    /// lost (the page there is still the one it wrote over) fails its
+    /// check when the file is opened in the next boot, and the file goes
+    /// back to the durable slot, whose pages nothing wrote over.
+    #[test]
+    fn it_goes_back_to_the_durable_slot_when_a_page_did_not_reach_the_disk() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("archive");
+        let archive = FileArchive::open(&path)?;
+        let synced = appended(&archive, 0, 1500)?;
+        archive.sync()?;
+        let durable = Slot::read_durable(&archive.inner.file)?.expect("a durable slot");
+        appended(&archive, 60_000, 40)?;
+        let current = archive.current();
+        let mut since = Vec::new();
+        current
+            .slot
+            .root
+            .pages_since(&*current, Some(durable.sequence as u32), &mut since)?;
+        let lost = *since
+            .first()
+            .expect("an index page written since the sync point");
+        drop(current);
+        drop(archive);
+
+        let file = OpenOptions::new().read(true).write(true).open(&path)?;
+        write_at(&file, lost.page as u64 * PAGE as u64, &[0; 8])?;
+        drop(file);
+        as_if_rebooted(&path)?;
+
+        let reopened = FileArchive::open(&path)?;
+        assert_eq!(reopened.current().slot.sequence, durable.sequence);
+        assert_eq!(reopened.current().slot.end, durable.end);
+        for block in &synced {
+            assert_eq!(
+                reopened.get("index", block.blake3_hash())?.as_deref(),
+                Some(block.as_ref())
+            );
+        }
+        Ok(())
+    }
+
     /// Readers on other threads read every block they find while one writer
     /// keeps appending frames and whole blocks: whatever a reader finds, it
     /// reads whole, and its bytes hash to its name.
@@ -1959,9 +2506,7 @@ mod breakdown {
     #[test]
     #[ignore = "rebuilds the index of the file named by DIALOG_ARCHIVE_INDEX"]
     fn rebuild() -> anyhow::Result<()> {
-        use crate::archive::tree::{Node, Nodes};
-        use std::borrow::Cow;
-        use std::cell::RefCell;
+        use crate::archive::tree::{Node, tests::Memory};
 
         let Ok(path) = std::env::var("DIALOG_ARCHIVE_INDEX") else {
             return Ok(());
@@ -1973,63 +2518,38 @@ mod breakdown {
         let (mut entries, mut records, mut read) = (Vec::new(), 0u64, 0u64);
         let mut at = DATA as usize;
         while at < bytes.len() {
-            let header = &bytes[at..at + HEADER as usize];
-            let kind = Kind::from_tag(header[0]).ok_or_else(|| invalid("a record of no kind"))?;
-            let len = u32::from_le_bytes(header[1..5].try_into()?) as usize;
-            let body_at = at + HEADER as usize;
-            let body = &bytes[body_at..body_at + len];
-            if crate::file::checksum(header[0], body)
-                != u32::from_le_bytes(header[5..9].try_into()?)
-            {
-                return Err(invalid("a record whose checksum fails").into());
-            }
+            let (kind, body_at, end) =
+                record_in(bytes, at).ok_or_else(|| invalid("a record that is not whole"))?;
+            let body = &bytes[body_at..end];
             records += 1;
-            read += (HEADER as usize + len) as u64;
+            read += (end - at) as u64;
             match kind {
                 Kind::Frame => {
                     let pad = body[0] as usize;
                     let frame = ((body_at + 1 + pad) as u64 / ALIGN) as u32;
                     let header = snapshot.frame(frame)?;
-                    entries.push((
-                        block_key(header.catalog, &header.hash),
-                        Place::Frame(frame).value(),
-                    ));
-                }
-                Kind::Block => {
-                    let (catalog, hash, _) = snapshot.block(at as u64)?;
-                    entries.push((block_key(catalog, &hash), Place::Block(at as u64).value()));
+                    entries.push((block_key(header.catalog, &header.hash), frame));
                 }
                 Kind::Tokens => {
                     for start in read_token_record(body, body_at as u64)? {
                         let id = token_id(start)?;
                         let token = snapshot.get(id).ok_or_else(|| invalid("a token"))?;
-                        entries.push((index::token_key(crate::hash::hash(token)), id as u64));
+                        entries.push((index::token_key(crate::hash::hash(token)), id));
                     }
                 }
-                Kind::Index => {}
+                Kind::Pages => {}
             }
-            at = body_at + len;
+            at = end;
         }
         let scanned = started.elapsed();
         let started = Instant::now();
         entries.sort_unstable_by_key(|(key, _)| *key);
         let sorted = started.elapsed();
 
-        #[derive(Default)]
-        struct Memory(RefCell<Vec<Vec<u8>>>, RefCell<usize>);
-        impl Nodes for Memory {
-            fn read(&self, at: u64) -> io::Result<Cow<'_, [u8]>> {
-                Ok(Cow::Owned(self.0.borrow()[at as usize].clone()))
-            }
-        }
-        let memory = Memory::default();
+        let mut memory = Memory::default();
         let started = Instant::now();
         let count = entries.len();
-        let root = Node::default().insert(&memory, entries, &mut |node| {
-            *memory.1.borrow_mut() += node.len();
-            memory.0.borrow_mut().push(node.to_vec());
-            Ok(memory.0.borrow().len() as u64 - 1)
-        })?;
+        let root = Node::default().insert(&mut memory, entries)?;
         let built = started.elapsed();
         println!(
             "{records} records, {:.0} MiB, read and checked with their keys in {:.1} s; \
@@ -2037,7 +2557,7 @@ mod breakdown {
             read as f64 / 1048576.0,
             scanned.as_secs_f64(),
             sorted.as_secs_f64(),
-            *memory.1.borrow() as f64 / 1048576.0,
+            memory.written as f64 / 1048576.0,
             root.encode().len(),
             built.as_secs_f64(),
         );
@@ -2093,21 +2613,23 @@ mod breakdown {
             mib(token_bytes),
             mib(records - token_bytes)
         );
-        let (nodes, bytes) = snapshot.slot.root.reachable(&*snapshot)?;
+        let mut reached = Vec::new();
+        snapshot.slot.root.pages(&*snapshot, &mut reached)?;
         let mut spaces = [0usize; 4];
         for (key, _) in snapshot.slot.root.entries(&*snapshot)? {
-            spaces[(key >> 62) as usize] += 1;
+            spaces[(key >> 30) as usize] += 1;
         }
         println!(
-            "  the index the root reaches: {nodes} nodes, {} (plus a {} B header each); \
-             live entries: {} blocks, {} tokens, {} lineages, {} in all ({} at 16 B)",
-            mib(bytes as u64),
-            HEADER,
+            "  the index: {} pages the root reaches ({}), {} free to write over, {} freed since \
+             the last sync point; live entries: {} blocks, {} tokens, {} lineages ({} at 8 B)",
+            reached.len(),
+            mib((reached.len() * PAGE) as u64),
+            snapshot.slot.reusable.len(),
+            snapshot.slot.pending.len(),
             spaces[0],
             spaces[1],
             spaces[2],
-            spaces.iter().sum::<usize>(),
-            mib(16 * spaces.iter().sum::<usize>() as u64)
+            mib(8 * spaces.iter().sum::<usize>() as u64)
         );
         let stats = archive.stats();
         println!(

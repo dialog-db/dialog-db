@@ -1,18 +1,22 @@
-//! The file: a magic number, two slots (see the archive's `slot` module),
-//! then an append-only sequence of records.
+//! The file: a magic number, three slots (see the archive's `slot`
+//! module), then a sequence of records, appended.
 //!
 //! Every record is its kind (1 byte), its body's length (4 bytes, little
 //! endian), the crc32 of its kind and body (4 bytes, little endian), then
 //! its body, so a reader can walk the file record by record and tell a whole record
 //! from a torn one: a record whose length runs past the end of the file, or
 //! whose checksum does not match, ends the file there.
+//!
+//! A [pages](Kind::Pages) record is the exception: its pages are the
+//! index's, written over once no root reaches them, so its checksum holds
+//! only until the first is. Each page carries a checksum of its own.
 
 use std::fs::File;
 use std::io;
 
 /// The first bytes of every archive file. The last byte is the format
 /// version.
-pub(crate) const MAGIC: &[u8; 8] = b"DIALOGA\x09";
+pub(crate) const MAGIC: &[u8; 8] = b"DIALOGA\x0a";
 
 /// The bytes of a record before its body.
 pub(crate) const HEADER: u64 = 1 + 4 + 4;
@@ -20,34 +24,33 @@ pub(crate) const HEADER: u64 = 1 + 4 + 4;
 /// What a record holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Kind {
-    /// A block kept whole: its catalog's number, its hash, then its bytes.
-    Block,
     /// Tokens, each its length and its bytes, which start on an alignment
     /// boundary: a token is named by where it starts.
     Tokens,
     /// A tree node as rows naming tokens and children by where they are,
-    /// possibly written against the rows of the node it supersedes.
+    /// possibly written against the rows of the node it supersedes; or a
+    /// block kept whole, after the same header.
     Frame,
-    /// A node of the file's index (see the archive's `tree` module).
-    Index,
+    /// Pages of the file's index (see the archive's `tree` module): the
+    /// padding's length (u16) and the padding, then pages, each on a page
+    /// boundary of the file.
+    Pages,
 }
 
 impl Kind {
     fn tag(self) -> u8 {
         match self {
-            Kind::Block => 1,
             Kind::Tokens => 4,
             Kind::Frame => 5,
-            Kind::Index => 6,
+            Kind::Pages => 7,
         }
     }
 
     pub(crate) fn from_tag(tag: u8) -> Option<Self> {
         match tag {
-            1 => Some(Kind::Block),
             4 => Some(Kind::Tokens),
             5 => Some(Kind::Frame),
-            6 => Some(Kind::Index),
+            7 => Some(Kind::Pages),
             _ => None,
         }
     }
@@ -113,10 +116,28 @@ pub(crate) fn read_record(file: &File, offset: u64, len: u64) -> io::Result<Opti
     }
     let mut body = vec![0u8; length as usize];
     read_at(file, offset + HEADER, &mut body)?;
-    if checksum(header[0], &body) != expected {
+    if kind != Kind::Pages && checksum(header[0], &body) != expected {
         return Ok(None);
     }
     Ok(Some(Record { offset, kind, body }))
+}
+
+/// The record at `at` in `bytes` (the file, mapped): its kind, where its
+/// body starts and where it ends. `None` when the bytes there are not a
+/// whole, intact record of a known kind; a [pages](Kind::Pages) record's
+/// checksum is not checked, as its pages may be written over.
+pub(crate) fn record_in(bytes: &[u8], at: usize) -> Option<(Kind, usize, usize)> {
+    let header = bytes.get(at..at + HEADER as usize)?;
+    let kind = Kind::from_tag(header[0])?;
+    let len = u32::from_le_bytes(header[1..5].try_into().ok()?) as usize;
+    let start = at + HEADER as usize;
+    let body = bytes.get(start..start + len)?;
+    if kind != Kind::Pages
+        && checksum(header[0], body) != u32::from_le_bytes(header[5..9].try_into().ok()?)
+    {
+        return None;
+    }
+    Some((kind, start, start + len))
 }
 
 /// Fills `buffer` from `offset`, without moving any shared cursor.
@@ -176,15 +197,15 @@ mod tests {
     #[test]
     fn it_reads_back_a_record_it_wrote() -> anyhow::Result<()> {
         let mut bytes = Vec::new();
-        put_record(&mut bytes, Kind::Block, b"a body")?;
-        put_record(&mut bytes, Kind::Index, &0u64.to_le_bytes())?;
+        put_record(&mut bytes, Kind::Tokens, b"a body")?;
+        put_record(&mut bytes, Kind::Frame, &0u64.to_le_bytes())?;
         let (file, len) = file_with(&bytes)?;
 
         let first = read_record(file.as_file(), 0, len)?.expect("a whole record");
-        assert_eq!(first.kind, Kind::Block);
+        assert_eq!(first.kind, Kind::Tokens);
         assert_eq!(first.body, b"a body");
         let second = read_record(file.as_file(), first.end(), len)?.expect("a whole record");
-        assert_eq!(second.kind, Kind::Index);
+        assert_eq!(second.kind, Kind::Frame);
         assert_eq!(second.end(), len);
         assert_eq!(second.end() - second.offset, HEADER + 8);
         Ok(())
@@ -193,7 +214,7 @@ mod tests {
     #[test]
     fn it_refuses_a_record_cut_short() -> anyhow::Result<()> {
         let mut bytes = Vec::new();
-        put_record(&mut bytes, Kind::Block, b"a body")?;
+        put_record(&mut bytes, Kind::Tokens, b"a body")?;
         bytes.pop();
         let (file, len) = file_with(&bytes)?;
         assert!(read_record(file.as_file(), 0, len)?.is_none());
@@ -203,7 +224,7 @@ mod tests {
     #[test]
     fn it_refuses_a_record_whose_body_changed() -> anyhow::Result<()> {
         let mut bytes = Vec::new();
-        put_record(&mut bytes, Kind::Block, b"a body")?;
+        put_record(&mut bytes, Kind::Tokens, b"a body")?;
         let last = bytes.len() - 1;
         bytes[last] ^= 1;
         let (file, len) = file_with(&bytes)?;
@@ -214,7 +235,7 @@ mod tests {
     #[test]
     fn it_refuses_an_unknown_kind() -> anyhow::Result<()> {
         let mut bytes = Vec::new();
-        put_record(&mut bytes, Kind::Block, b"a body")?;
+        put_record(&mut bytes, Kind::Tokens, b"a body")?;
         bytes[0] = 0xEE;
         let (file, len) = file_with(&bytes)?;
         assert!(read_record(file.as_file(), 0, len)?.is_none());
