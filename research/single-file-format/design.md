@@ -23,11 +23,12 @@ written against the frame it supersedes, with a whole frame every 32
 versions. There are no whole copies of hot nodes: a local read never needs
 the wire form, so keeping one buys nothing.
 
-The file is **append-only**, but for two fixed slots at its head that say
-where the appended records end and where the index's root is. Nothing past
-the slots is overwritten, punched or compacted in place. One writer
-appends at a time; any number of readers, in any process, read the prefix
-a whole slot names, which never changes again (see
+The file is **appended to**, but for three fixed slots at its head that
+say where the records end and where the index's root is, and the index's
+own pages, which are written over once no root reaches them and a sync
+point has made that safe. Frames and tokens are never written over,
+punched or compacted. One writer appends at a time; any number of
+readers, in any process, read what a whole slot names (see
 [Concurrency](#concurrency)).
 
 ### What changed from the first version of this decision
@@ -160,23 +161,23 @@ node interface it needs is in `dialog-search-tree`.
 
 ## The file
 
-The magic number (its last byte the format version, now 9), two slots of
-64 KiB, then an append-only sequence of records, each `kind (u8) | length
-(u32) | crc32 | body`:
+The magic number (its last byte the format version, now 10), three slots
+of 64 KiB, then records, each `kind (u8) | length (u32) | crc32 | body`:
 
 | record | body |
 |---|---|
-| block | a block's catalog (by number), hash and bytes: anything that is not a tree node, kept whole |
 | tokens | an append's new tokens, each 16-aligned with its length in the four bytes before |
-| frame | at a 16-aligned offset: the node's hash, kind, depth, catalog, the frame it is written against (or none), its manifest token, then its sections as columnar rows |
-| index | a node of the index (below) |
+| frame | at a 16-aligned offset: the node's hash, kind, depth, catalog, the frame it is written against (or none), its manifest token, then its sections as columnar rows; or, of the whole kind, a block that is not a tree node, its length and bytes |
+| pages | new pages of the index (below), each on a 4 KiB boundary; its checksum holds until the first is written over, and each page has its own |
 
 A **slot** is the file's state as of an append: a sequence number, where
-the records end, the counts the archive reports, the catalogs' names, and
-the index's root. An append writes its records past the end, then the
-older slot; opening reads both and takes the newer whole one. So one slot
-is always whole, and an append cut short leaves records past its end,
-which the next writer drops.
+the records end, the counts the archive reports, the catalogs' names, the
+index's root, its free pages, the last sync point's sequence and the boot
+it was written in. An append writes its records past the end and its
+index pages, then the older of two rolling slots; opening reads both and
+takes the newer whole one. So one is always whole, and an append cut short
+leaves records past its end, which the next writer drops. The third slot
+is durable: see [recovery](#index-and-recovery).
 
 - **Names are places.** A token and a frame are named by where they start
   divided by 16: 32 bits name 64 GiB. Frames name their children and
@@ -213,23 +214,41 @@ block before it is appended; a node that does not round-trip (a legacy
 layout, say) is appended whole. Durability matches the `fs` provider: no
 fsync per append, and `sync` for a durable point.
 
-## Index and recovery
+The index is a hitchhiker tree in the file, a map from 32-bit keys (two
+bits of space, thirty of a hash) to 32-bit places (in units of 16), in
+three spaces: a block's key (a prefix of its hash and its catalog) to its
+frame, a token's key (a stable hash of its bytes, `src/hash.rs`) to its
+place, and a lineage's key (its catalog, kind and first row) to its latest
+frame. A collision costs a probe of the next key: every value is checked
+against what it stands for. Its nodes are 4 KiB pages: leaves of 510
+entries, internal nodes of 8 children and buffers of 498. The root lives
+in the slot, buffers 2048 and drains to half when full.
 
-The index is a hitchhiker tree in the file, a map from 64-bit keys to
-64-bit values, in three spaces: a block's key (a prefix of its hash and
-its catalog) to its frame or record, a token's key (a stable hash of its
-bytes, `src/hash.rs`) to its place, and a lineage's key (its catalog,
-kind and first row) to its latest frame. A collision costs a probe of the
-next key: every value is checked against what it stands for. Leaves hold
-64 entries, internal nodes 8 children and buffers of 512, and the root,
-which lives in the slot and is rewritten by every append, buffers 2048 and
-drains to half when full. Over tonk-shaped 100×'s appends that writes
-about 114 bytes of index an entry (16 bytes each), and the index is still
-the largest part of a large file: see the journal. Nodes are fixed-width and read in place from the mapping.
+**Pages are written over.** A rewrite frees the page it replaces. A freed
+page waits for the next sync point, then the next append that needs a page
+writes over it. Each page carries the low bits of the sequence of the
+append that wrote it and a checksum, and a parent names a child by page
+and sequence. A reader holding an older slot that reads a page written
+over since (another sequence, or caught half written) gets a stale page
+and looks again from a newer slot; frames and tokens never change, so
+anything it already read stays true.
 
-Opening reads the two slots and nothing else. A file longer than its
-newest whole slot says has a torn append past it, which the next writer
-truncates under the lock. (Built: `rust/dialog-archive-file`.)
+**Sync points.** After an append, every 64 appends, 2,048 freed pages or 2
+seconds, and on `FileArchive::sync`: sync the file, write the durable slot
+(the current one, its freed pages now free), sync it, then write the next
+rolling slot. Nothing the durable slot reaches is ever written over, since
+pages become free only after it. This is SQLite's `synchronous=NORMAL` in
+WAL mode: a power loss loses at most what came after the last sync point
+and never corrupts the file.
+
+**Recovery.** Opening reads the slots and nothing else when the newest
+rolling slot was written in this boot (Linux's `boot_id`): a process that
+died left what it wrote with the operating system, in order. Otherwise
+(another boot, or a platform that does not say) it checks what was written
+since the durable slot: every record by its checksum, and every index page
+the slot reaches that was written since, by its own. It takes the newest
+rolling slot that passes, or goes back to the durable slot, and drops the
+rest. (Built: `rust/dialog-archive-file`.)
 
 ## Not in this design
 

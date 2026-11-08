@@ -26,7 +26,6 @@
 //! record it names, moving to the next key until it finds the one or a
 //! free key.
 
-use std::borrow::Cow;
 use std::io;
 use std::sync::Arc;
 
@@ -34,7 +33,7 @@ use dialog_common::Blake3Hash;
 use memmap2::Mmap;
 
 use super::slot::Slot;
-use super::tree::{Child, Nodes, PAGE, check};
+use super::tree::{Child, Nodes, PAGE, Page, check};
 use crate::rows::{Reader, invalid, put_varint};
 use crate::tokens::{ALIGN, TokenRead, token_at};
 
@@ -158,11 +157,22 @@ impl FrameHeader {
     }
 }
 
+/// How many checked index pages a process keeps.
+const PAGES_KEPT: usize = 4096;
+
+/// Index pages read and checked, by the child that names each: a page an
+/// append wrote never changes while that child names it (a page written
+/// over is another append's), so one checked stays good for every
+/// snapshot of the file.
+pub(crate) type PagesKept = papaya::HashMap<Child, Arc<[u8]>>;
+
 /// The file as of an append.
 pub(crate) struct Snapshot {
     pub slot: Slot,
     /// The file, mapped at least to the slot's end.
     pub map: Arc<Mmap>,
+    /// The index pages this process checked, shared by its snapshots.
+    pub pages: Arc<PagesKept>,
 }
 
 impl Snapshot {
@@ -281,15 +291,23 @@ impl Snapshot {
 impl Nodes for Snapshot {
     /// The page, copied out of the mapping before it is checked: another
     /// writer may be writing over it as it is read.
-    fn read(&self, child: Child) -> io::Result<Cow<'_, [u8]>> {
+    fn read(&self, child: Child) -> io::Result<Page<'_>> {
+        let kept = self.pages.pin();
+        if let Some(bytes) = kept.get(&child) {
+            return Ok(Page::Shared(bytes.clone()));
+        }
         let start = child.page as usize * PAGE;
-        let bytes = self
+        let bytes: Arc<[u8]> = self
             .bytes()
             .get(start..start + PAGE)
             .ok_or_else(|| invalid("an index page past the file's end"))?
-            .to_vec();
+            .into();
         check(&bytes, child)?;
-        Ok(Cow::Owned(bytes))
+        if kept.len() >= PAGES_KEPT {
+            kept.clear();
+        }
+        kept.insert(child, bytes.clone());
+        Ok(Page::Shared(bytes))
     }
 }
 

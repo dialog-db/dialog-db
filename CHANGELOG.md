@@ -74,14 +74,15 @@ What this changes for you:
   exclusive lock on it and read what the others appended first; readers
   take no lock. A file this process already has open is shared, not
   opened twice.
-- Durability matches the `fs` provider: appends are not synced.
-  `FileArchive::sync` gives a point that is.
-- Opening reads two small slots at the head of the file and nothing else.
+- The file syncs itself every 64 appends or 2 seconds, and on
+  `FileArchive::sync`. A power loss loses at most the appends since, and
+  never leaves the file damaged: opening goes back to the newest state
+  that is whole.
+- Opening reads small slots at the head of the file and nothing else.
   The file's index is in the file, so a reader holds a few tens of KB,
-  not an index that grows with the file. At MusicBrainz's size (4.5 M
-  facts, 2,000 commits) that index is two thirds of a 2.7 GiB file; the
-  format is still changing, and a file written now may not open in the
-  release.
+  not an index that grows with the file; its pages are written over once
+  nothing reads them. The format is still changing, and a file written
+  now may not open in the release.
 - `Options::frames = false` keeps every block whole.
 - The new `dialog-migration` crate holds migrations an application runs
   before it opens a replica, each behind a feature of its own, and the

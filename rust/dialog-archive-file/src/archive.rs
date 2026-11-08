@@ -15,7 +15,6 @@ use dialog_common::{Blake3Hash, Buffer};
 use dialog_effects::archive::prelude::{GetExt, ImportExt, PutExt};
 use dialog_effects::archive::{ArchiveError, Get, Import, Put};
 use dialog_search_tree::{Manifest, NodeBody};
-use memmap2::Mmap;
 use parking_lot::Mutex;
 
 use crate::file::{HEADER, Kind, MAGIC, put_record, read_at, record_in, write_at};
@@ -397,18 +396,21 @@ fn storage_error(path: &Path, error: io::Error) -> ArchiveError {
 /// The least a mapping of the file reserves.
 const MAPPED: u64 = 64 << 20;
 
-/// Pairs `slot` with a mapping of `file` that reaches its end: `mapped`,
-/// the current snapshot's, when it does, else a new one reserving twice
+/// Pairs `slot` with a mapping of `file` that reaches its end: the
+/// `previous` snapshot's, when it does, else a new one reserving twice
 /// that. A mapping lasts while the file grows into it, so an append does
 /// not map the file again, and pages a read faulted in stay mapped for the
-/// next one; the file is mapped again only each time it doubles.
-fn snapshot(file: &File, slot: Slot, mapped: Option<&Arc<Mmap>>) -> io::Result<Snapshot> {
-    if let Some(map) = mapped
-        && map.len() as u64 >= slot.end
+/// next one; the file is mapped again only each time it doubles. The index
+/// pages checked so far carry over too.
+fn snapshot(file: &File, slot: Slot, previous: Option<&Snapshot>) -> io::Result<Snapshot> {
+    let pages = previous.map_or_else(Default::default, |previous| previous.pages.clone());
+    if let Some(previous) = previous
+        && previous.map.len() as u64 >= slot.end
     {
         return Ok(Snapshot {
             slot,
-            map: map.clone(),
+            map: previous.map.clone(),
+            pages,
         });
     }
     // Past a file's end, a mapping on Unix reads nothing until the file
@@ -420,19 +422,23 @@ fn snapshot(file: &File, slot: Slot, mapped: Option<&Arc<Mmap>>) -> io::Result<S
         file.metadata()?.len()
     };
     let len = usize::try_from(reserve).unwrap_or(usize::MAX);
-    // SAFETY: the file is append-only past its slots. A process changes
-    // bytes only past the newest slot's end, by an append under the file's
-    // lock, or by dropping an append that did not finish; nothing a slot
-    // names lies there, and a snapshot reads only up to its slot's end,
-    // which is never past the file's. So the mapping's reach past the end
-    // of the file, reserved for appends to come, is never read while
-    // nothing is there. The slots themselves are read with plain reads,
-    // never through the mapping. Like any mapped file, changing it from
-    // outside dialog is not supported.
+    // SAFETY: frames and tokens are never written again once a slot names
+    // them, and a snapshot reads only up to its slot's end, never past the
+    // file's, so the mapping's reach past the end of the file, reserved
+    // for appends to come, is never read while nothing is there. The slots
+    // are read with plain reads, never through the mapping. The index's
+    // pages are the exception: a writer, in this process or another, may
+    // write one over while a reader holding an older slot reads it. Such a
+    // reader copies the page out of the mapping before anything else and
+    // checks the copy (`tree::check`), so a page changed under it is found
+    // stale, never trusted; the bytes it copied are plain bytes, whatever
+    // they turn out to be. Like any mapped file, changing it from outside
+    // dialog is not supported.
     let map = unsafe { memmap2::MmapOptions::new().len(len).map(file)? };
     Ok(Snapshot {
         slot,
         map: Arc::new(map),
+        pages,
     })
 }
 
@@ -677,11 +683,11 @@ struct Writer<'a> {
 }
 
 impl Nodes for Writer<'_> {
-    fn read(&self, child: Child) -> io::Result<std::borrow::Cow<'_, [u8]>> {
+    fn read(&self, child: Child) -> io::Result<tree::Page<'_>> {
         match self.written.get(&child.page) {
             Some(bytes) => {
                 check(bytes, child)?;
-                Ok(std::borrow::Cow::Borrowed(bytes))
+                Ok(tree::Page::Borrowed(bytes))
             }
             None => self.snapshot.read(child),
         }
@@ -920,7 +926,7 @@ impl FileArchive {
                     self.current().slot.clone()
                 };
                 let slot = self.sync_point(slot)?;
-                self.publish(snapshot(file, slot, Some(&self.current().map))?);
+                self.publish(snapshot(file, slot, Some(&self.current()))?);
                 Ok(())
             })
             .map_err(|error| storage_error(&self.inner.path, error))
@@ -968,7 +974,7 @@ impl FileArchive {
             let slot = newest(&self.inner.file, false)?;
             if slot.sequence > self.current().slot.sequence {
                 self.know(slot.end);
-                self.publish(snapshot(&self.inner.file, slot, Some(&self.current().map))?);
+                self.publish(snapshot(&self.inner.file, slot, Some(&self.current()))?);
             }
         }
         if self.current().slot.sequence <= than.slot.sequence {
@@ -1019,7 +1025,7 @@ impl FileArchive {
             return Ok(false);
         }
         self.know(slot.end);
-        self.publish(snapshot(&self.inner.file, slot, Some(&self.current().map))?);
+        self.publish(snapshot(&self.inner.file, slot, Some(&self.current()))?);
         Ok(true)
     }
 
@@ -1227,7 +1233,7 @@ impl FileArchive {
             // process may have written since, and drop any append cut short.
             let slot = newest(file, true)?;
             let snapshot = if slot.sequence > self.current().slot.sequence {
-                self.publish(snapshot(file, slot, Some(&self.current().map))?);
+                self.publish(snapshot(file, slot, Some(&self.current()))?);
                 self.current()
             } else {
                 self.current()
@@ -1506,7 +1512,7 @@ impl FileArchive {
             self.inner.rows.put(at, (rows, manifest));
         }
         self.remember(&laid.tokens);
-        self.publish(snapshot(file, slot, Some(&self.current().map))?);
+        self.publish(snapshot(file, slot, Some(&self.current()))?);
         Ok(())
     }
 
@@ -1727,7 +1733,7 @@ mod tests {
                 end: 14,
                 ..Slot::default()
             },
-            Some(&first.map),
+            Some(&first),
         )?;
         assert!(Arc::ptr_eq(&first.map, &second.map));
         assert_eq!(second.bytes(), b"first and then");
@@ -1741,13 +1747,14 @@ mod tests {
                 end: past,
                 ..Slot::default()
             },
-            Some(&second.map),
+            Some(&second),
         )?;
         assert!(!Arc::ptr_eq(&second.map, &third.map));
         assert_eq!(third.map.len() as u64, 2 * past);
         assert_eq!(&third.bytes()[..14], b"first and then");
         Ok(())
     }
+
     #[tokio::test]
     async fn it_returns_none_for_missing_content() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
@@ -2204,7 +2211,8 @@ mod tests {
     }
 
     /// A snapshot held across appends that wrote over the index's pages
-    /// finds them stale rather than reading another node's entries, and a
+    /// finds them stale rather than reading another node's entries (or
+    /// reads them as they were, from the pages this process kept), and a
     /// read through the archive looks again from a newer one.
     #[test]
     fn it_finds_a_page_written_over_stale_and_reads_on() -> anyhow::Result<()> {
@@ -2214,6 +2222,10 @@ mod tests {
         let old = archive.current();
         let later = appended(&archive, 60_000, 1500)?;
         assert!(archive.inner.timings.reused.load(Ordering::Relaxed) > 0);
+        // A page this process checked is kept, by the child that names it,
+        // and reads as it was for the old snapshot; one it reads from the
+        // file afresh is the one written over.
+        old.pages.pin().clear();
         let mut stale = 0;
         for block in &first {
             match old.place("index", block.blake3_hash()) {

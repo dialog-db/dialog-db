@@ -34,9 +34,10 @@
 //! four unused. All little-endian, fixed width, so a lookup binary-searches
 //! a page as it reads it.
 
-use std::borrow::Cow;
 use std::fmt;
 use std::io;
+use std::ops::Deref;
+use std::sync::Arc;
 
 use crate::rows::invalid;
 
@@ -69,10 +70,28 @@ pub(crate) struct Child {
     pub sequence: u32,
 }
 
+/// A page's bytes, borrowed or shared.
+#[derive(Debug)]
+pub(crate) enum Page<'a> {
+    Borrowed(&'a [u8]),
+    Shared(Arc<[u8]>),
+}
+
+impl Deref for Page<'_> {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        match self {
+            Page::Borrowed(bytes) => bytes,
+            Page::Shared(bytes) => bytes,
+        }
+    }
+}
+
 /// Where the tree's pages are read from.
 pub(crate) trait Nodes {
     /// The page `child` names, [checked](check).
-    fn read(&self, child: Child) -> io::Result<Cow<'_, [u8]>>;
+    fn read(&self, child: Child) -> io::Result<Page<'_>>;
 }
 
 /// Where a rewrite puts its pages.
@@ -703,13 +722,13 @@ pub(crate) mod tests {
     }
 
     impl Nodes for Memory {
-        fn read(&self, child: Child) -> io::Result<Cow<'_, [u8]>> {
+        fn read(&self, child: Child) -> io::Result<Page<'_>> {
             let bytes = self
                 .pages
                 .get(child.page as usize)
                 .ok_or_else(|| invalid("no such page"))?;
             check(bytes, child)?;
-            Ok(Cow::Borrowed(bytes))
+            Ok(Page::Borrowed(bytes))
         }
     }
 
