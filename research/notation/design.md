@@ -83,7 +83,7 @@ A call at the top of a document is short for a form:
 | `(bug ?b title: ?t)`, with variables | `(query (bug ?b title: ?t))` |
 | `(bug! ?b title: ?t)`, with variables | an error: there is no inductive query |
 
-**Proposed.** A variable that a nested call binds, as in `(bug! (id {…}) title: "x")`, does not make the call a question: it is short for `(rule (assert! (bug ?b title: "x")) (when (id {…} is: ?b)))`.
+**Proposed.** At the top of a document, a call may nest a formula whose arguments are ground, as in `(bug! (id {…}) title: "x")`. A formula over ground arguments has exactly one result and reads no facts, so the call is still ground once it is computed, and it is still an assertion or a write. It means the same as `(rule (assert! (bug ?b title: "x")) (when (id {…} is: ?b)))`. A nested concept call reads facts and can match many rows, which would make an assertion a query in disguise; that takes a rule, written out.
 
 So the `!` means the same on every form: retained. A rule or concept defined with `!` is retained; without it, it is gone after the tick. The verb in a rule's head says the same of its conclusions: a deductive rule (`assert`) does not retain them but keeps deducing them while its premises hold, which is why an installed deductive rule's deductions appear in every question; an inductive rule (`assert!`) retains them.
 

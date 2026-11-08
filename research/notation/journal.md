@@ -400,6 +400,16 @@ The `tutorial` broke the plan's promise that every document states the same fact
 
 **Decision.** In the design. One case is marked Proposed: a variable bound by a nested call, as in `(bug! (id {…}) title: "x")`, should not turn a write into a forbidden inductive query.
 
+## 2026-11-08 — Formulas may feed an assertion, queries may not
+
+**Question.** Does nesting `(id {…})` in a write break "no variables means assertion"?
+
+**Method.** Maintainer's review of the previous entry's Proposed case.
+
+**Results.** Variables flowing from a query into an assertion were refused earlier because evaluation order became unclear and assertions and queries stopped being distinguishable, not on principle; a rule says the same thing. A formula over ground arguments keeps both clear: it has one result and reads no facts. A concept call does neither.
+
+**Decision.** Proposed in the design: a top-level call may nest formulas over ground arguments; anything that reads facts takes a rule.
+
 ## How to reproduce
 
 1. Take a variant's prompt from its round's results file and save it as `<variant>.txt`.
