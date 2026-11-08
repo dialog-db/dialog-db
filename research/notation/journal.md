@@ -430,6 +430,16 @@ The `tutorial` broke the plan's promise that every document states the same fact
 
 **Decision.** Proposed: user-defined picks are user-defined orderings over claims, hashed into the attribute's identity as `:top`'s cases already are; aggregates that compute (sum, count) are rules over `:all`. Constraints, named apart from formulas, are what a concept body may hold: type, equality, comparison; no negation, no arithmetic. Domain calls infer each attribute's type from what narrows it or from the value written.
 
+## 2026-11-08 — The write is the index, and a bug in it
+
+**Question.** Do picks use an index shortcut, and what happens to concurrent claims?
+
+**Method.** Maintainer's correction, checked against `tree.rs`, `instruction.rs` and `it_succeeds_the_claim_the_succession_elects` on main at `3b5835ad`.
+
+**Results.** The write is the shortcut: it keeps the operational index at the claim a read would return, so a read elects among several claims only after concurrent writes merge. Ties fall back to standing and then the value's hash, so every election is deterministic. But a write succeeds only the elected claim: after concurrent writes of 5 and 7 under `max`, a write of 3 leaves 5 live, and the next read returns 5. Filed as [#759](https://github.com/dialog-db/dialog-db/issues/759), with the fix: succeed every live claim the writer holds.
+
+**Decision.** User-defined picks stay orderings, which run at write and so keep the shortcut; the design says so and links #759.
+
 ## How to reproduce
 
 1. Take a variant's prompt from its round's results file and save it as `<variant>.txt`.
