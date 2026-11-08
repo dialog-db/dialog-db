@@ -2635,16 +2635,23 @@ mod breakdown {
         let (mut frames, mut frame_bytes, mut entries) = (0u64, 0u64, 0u64);
         let mut tokens = HashSet::new();
         let mut seen = HashSet::new();
-        let mut stack = vec![start];
+        // By level from the root: nodes, their children, their entries
+        // (a leaf's, or an index node's buffered ops).
+        let mut levels: Vec<(u64, u64, u64)> = Vec::new();
+        let mut stack = vec![(start, 0usize)];
         let token = |id: u32, tokens: &mut HashSet<u32>| {
             if id != NONE && id != 0 {
                 tokens.insert(id);
             }
         };
-        while let Some(at) = stack.pop() {
+        while let Some((at, level)) = stack.pop() {
             if !seen.insert(at) {
                 continue;
             }
+            if levels.len() <= level {
+                levels.resize(level + 1, (0, 0, 0));
+            }
+            levels[level].0 += 1;
             let (rows, manifest) = archive.rows(&snapshot, &HashMap::new(), at)?;
             token(manifest, &mut tokens);
             let mut whole = Vec::new();
@@ -2656,12 +2663,14 @@ mod breakdown {
                 for link in &rows.sections[0] {
                     token(link[0], &mut tokens);
                     token(link[3], &mut tokens);
+                    levels[level].1 += 1;
                     if link[1] != NONE {
-                        stack.push(link[1]);
+                        stack.push((link[1], level + 1));
                     }
                 }
                 for op in &rows.sections[2] {
                     entries += 1;
+                    levels[level].2 += 1;
                     for id in &op[1..] {
                         token(*id, &mut tokens);
                     }
@@ -2669,6 +2678,7 @@ mod breakdown {
             } else {
                 for entry in &rows.sections[0] {
                     entries += 1;
+                    levels[level].2 += 1;
                     for id in &entry[1..] {
                         token(*id, &mut tokens);
                     }
@@ -2689,6 +2699,13 @@ mod breakdown {
             mib(token_bytes + tokens.len() as u64 * 12),
             mib(frame_bytes + token_bytes + tokens.len() as u64 * 12),
         );
+        for (level, (nodes, children, entries)) in levels.iter().enumerate() {
+            println!(
+                "  level {level}: {nodes} nodes, {:.1} children and {:.1} entries a node",
+                *children as f64 / *nodes as f64,
+                *entries as f64 / *nodes as f64
+            );
+        }
         Ok(())
     }
 
