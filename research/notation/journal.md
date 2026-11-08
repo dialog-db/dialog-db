@@ -370,6 +370,16 @@ The `tutorial` broke the plan's promise that every document states the same fact
 
 **Decision.** Records in the entity's place are dropped, and with them the question of whether a record supplies its parameters and how its keys are spelled in a call. The formula is named `id`, not `digest`. The design says a ground call is a rule with no premises. Record types for formulas stay open.
 
+## 2026-11-08 — `!` means into next
+
+**Question.** How should the `!` be framed?
+
+**Method.** Maintainer's review.
+
+**Results.** Without `!` a form deduces into `now`; with `!` it derives into `next`. An installed deductive rule keeps deducing into each tick's `now`, which is why its deductions appear in every question. An assertion without `!` that matches an installed inductive rule gets that rule's write stored; deductions from it last only the tick.
+
+**Decision.** The design says so. It leaves a question: commands are written with `!` in every example, which under this framing puts them a tick late.
+
 ## How to reproduce
 
 1. Take a variant's prompt from its round's results file and save it as `<variant>.txt`.

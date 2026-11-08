@@ -64,7 +64,7 @@ A `!` after the name makes the call a write: `(bug/status! bug:01 is: :done)`.
 
 A document is a set of top-level forms evaluated as one tick. The order of its forms does not matter.
 
-A form without `!` belongs to `now`, for this document only: a concept or rule defined without `!`, and a ground call, which asserts its facts into `now`. A form with `!` goes to `next`: it changes the replica, and the document does not see it. Every premise and every question reads `now`, so a document sees what it asserts and derives, but never what it writes with `!`.
+Without `!`, a form deduces into `now`; with `!`, it derives into `next`. A ground call asserts its facts into `now`, and a concept or rule defined without `!` exists in `now`, for this document. A form with `!` goes to `next`: it changes the replica, and the document does not see it. Every premise and every question reads `now`, so a document sees what it asserts and deduces, but never what it writes with `!`.
 
 ```clj
 (concept (bug ?bug title: ?title) …)
@@ -74,7 +74,9 @@ A form without `!` belongs to `now`, for this document only: a concept or rule d
 
 Neither the concept nor the bug reaches `next`. Written `(bug! title: "Hello world")` instead, the bug would be in `next` and the question would not find it, and the concept still would not be in `next`. A chain, where one write depends on reading another, takes a second document.
 
-A ground call is a rule with no premises: `(bug title: "Hello world")` is `(rule (assert (bug title: "Hello world")))`, and `(bug! title: "Hello world")` is the same with `assert!`. So the `!` on a form says where it lives, the same way for every form: without it, in this document; with it, in the replica. What lasts in the replica differs by kind. A written fact stays until it is retracted. An installed deductive rule (`rule!` with `assert`) is derived again every tick, and its conclusion holds only while its premises do.
+A ground call is a rule with no premises: `(bug title: "Hello world")` is `(rule (assert (bug title: "Hello world")))`, and `(bug! title: "Hello world")` is the same with `assert!`. So the `!` means the same on every form: into `next` rather than `now`. Installing a rule writes the rule into `next`, so it is in every later tick's replica; an installed deductive rule (`rule!` with `assert`) then deduces into each tick's `now`, which is why its deductions appear in every question. A written fact stays until it is retracted.
+
+Installed rules read `now`, including what a document asserts there. An installed inductive rule (`rule!` with `assert!`) that matches a document's assertion writes into `next`, and that write is stored. An installed deductive rule that matches it deduces only in this tick, since the assertion is gone in the next. So an assertion without `!` persists nothing itself; only the inductive rules it triggers do.
 
 The top-level forms are:
 
@@ -142,11 +144,11 @@ The `!` moved from the head's call to the verb because readers could not tell wh
 
 ## Installing
 
-A `!` on a definition's keyword installs it in the replica: `concept!`, `rule!`, `view!`, `event!`. That is the same `!` a write has, since installing writes the definition into `next`. Without the `!`, the definition belongs to the document it is written in.
+A `!` on a definition's keyword installs it in the replica: `concept!`, `rule!`, `view!`, `event!`. That is the same `!` a write has: the definition goes into `next`. Without the `!`, the definition belongs to the document it is written in.
 
 An installed inductive rule fires whenever its premises match, which is how a command takes effect.
 
-**Proposed.** Installed rules induce after the document's tick, so the document's questions do not see what they induce. Their edits appear in the report and in the commit.
+Installed inductive rules write into `next`, so the document's questions do not see what they induce. Their edits appear in the report and in the commit. A document's own `!` writes reach installed rules a tick later, when `next` has become `now`.
 
 ## Concepts
 
@@ -348,6 +350,7 @@ Comparing the design with [Bloom](http://bloom-lang.net) settled three of the ch
 
 ## Open
 
+- Whether a command is asserted or written. With `!` meaning "into `next`", `(report! …)` puts the report into the next tick, where installed rules see it a tick late, and its `layer: :now` attributes would have to mean "drop after that tick". Asserted without `!`, `(report …)` is in this tick's `now`, installed inductive rules store the bug at once, and nothing stores the report; `layer: :now` then only keeps anyone from writing it with `!`.
 - How text spans lines or holds `"`. The sketches still write templates as `"""…"""`, which is not part of the notation.
 - What a rule head that names no entity lands on. In R16, four of five readers of this spec put a sent notice on the to-do's own entity because no example shows another way; the readers of the shorter documents left it out. The obvious answer is the one writes have: the `id` of the head's facts.
 - Whether a rule that creates should only create. The R16 rule that asserts `state: :open` on every add reopens a done to-do that is added again; `(unless (todo ?t))` in its `when` would stop that.
