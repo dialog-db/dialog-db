@@ -6,11 +6,11 @@ What we tried, what it measured, and what we decided, newest last. The [idea](..
 
 **Status: Exploring.** See the [research index](../README.md) for what the statuses mean.
 
-- **Decided:** rules are heads and a `when`, with timing on the verb (`assert`, `assert!`, `retract!`, `ensue!`); lifetimes are layers on attributes, and a command is a concept in `:now`; a write names its entity, gives a record that identifies it, or leaves it out and gets the digest of what it writes; a derivation that must agree everywhere is a rule with `digest`.
+- **Decided:** rules are heads and a `when`, with timing on the verb (`assert`, `assert!`, `retract!`, `ensue!`); lifetimes are layers on attributes, and a command is a concept in `:now`; a write names its entity (directly or as `(id {…})`) or leaves the primary out and creates, getting the `id` of what it writes; a derivation that must agree everywhere is a rule with `id`.
 - **Measured:** 249 readers over 15 rounds. Without a visible word, readers do not see a derivation (R1 `default` line 0/3, R13's six brace shapes 0/18). With one paragraph of spec, they do (R14 5/5, R15 16/16).
 - **Rejected on design grounds, though readers got them:** `=` in a head (constraint elsewhere), the `{title author} ?b` head (construction does not belong in a concept).
 - **R16:** the revised design, read from four ways of writing its spec, scored 297 of 300 points; every document's median was 15 of 15. The style of the spec did not matter at this difficulty; the examples did.
-- **Settled after R16:** a write through a concept passes every parameter, and leaving one out is a compile error; a ground call without `!` asserts into the document's `now`; a call in an argument's place stands for its `is:` value.
+- **Settled after R16:** a write through a concept passes every parameter, and leaving one out is a compile error; a ground call is a rule with no premises, and the `!` on any form says whether it lives in the document or the replica; a call in an argument's place stands for its `is:` value.
 - **Next:** decide what a rule head that names no entity lands on; then a harder round, with tasks no example in the documents shows.
 - **Open:** whether a record in the entity's place writes its fields; key spelling inside records; `:last` across devices; optional parameters.
 
@@ -359,6 +359,16 @@ The `tutorial` broke the plan's promise that every document states the same fact
 **Results.** Three things stand against dropping it. An explicit call needs formulas outside rules, which the notation should support anyway and now says so. A formula that takes a record needs a record type, which does not exist yet. And creating a concept would state the identifying fields twice. The third weighs most, but the record form doubles them too unless a record also supplies the parameters it names.
 
 **Decision.** The record rule stays. Formulas are allowed in questions, assertions and writes. Record types and whether a record supplies its parameters are open; the second is what ends the doubling.
+
+## 2026-11-08 — Records are not entities; a ground call is a rule
+
+**Question.** Does the notation need "a record in place of an entity", and is a ground call without `!` consistent with deductive rules?
+
+**Method.** Maintainer's review, in conversation.
+
+**Results.** Leaving the primary out already creates: given every other parameter, the write makes a new instance and its entity. Naming a particular identity takes the `id` formula in the primary's place, `(bug! (id {…}) …)`, so the record form adds nothing. The identifying record and the facts written need not correspond: an identity is fixed when it is made, and the facts can change after. A ground call looked inconsistent with deductive rules, one lasting a tick and the other forever; it is a rule with no premises, and in both the `!` says where the form lives. A written fact stays until retracted; an installed deductive rule's conclusion holds while its premises do.
+
+**Decision.** Records in the entity's place are dropped, and with them the question of whether a record supplies its parameters and how its keys are spelled in a call. The formula is named `id`, not `digest`. The design says a ground call is a rule with no premises. Record types for formulas stay open.
 
 ## How to reproduce
 

@@ -74,6 +74,8 @@ A form without `!` belongs to `now`, for this document only: a concept or rule d
 
 Neither the concept nor the bug reaches `next`. Written `(bug! title: "Hello world")` instead, the bug would be in `next` and the question would not find it, and the concept still would not be in `next`. A chain, where one write depends on reading another, takes a second document.
 
+A ground call is a rule with no premises: `(bug title: "Hello world")` is `(rule (assert (bug title: "Hello world")))`, and `(bug! title: "Hello world")` is the same with `assert!`. So the `!` on a form says where it lives, the same way for every form: without it, in this document; with it, in the replica. What lasts in the replica differs by kind. A written fact stays until it is retracted. An installed deductive rule (`rule!` with `assert`) is derived again every tick, and its conclusion holds only while its premises do.
+
 The top-level forms are:
 
 - **a question**, a call with a variable, such as `(bug/status ?b is: :done)`;
@@ -132,7 +134,7 @@ Several heads may share one `when`, so a body is written once:
 A premise in `when` is one of:
 - a call, on a concept or on a stored attribute, such as `(xyz.todo.list/owner-peer ?l is: ?peer)`;
 - `(unless call)`, which holds when the call has no match;
-- a formula, such as `(== ?a ?b)`, `(!= ?old ?key)`, `(digest {…} is: ?e)` or `(dialog/position ?b after: ?lo before: ?hi is: ?at)`.
+- a formula, such as `(== ?a ?b)`, `(!= ?old ?key)`, `(id {…} is: ?e)` or `(dialog/position ?b after: ?lo before: ?hi is: ?at)`.
 
 Every variable in a head must be bound by the premises.
 
@@ -188,7 +190,7 @@ A concept's primary need not be the entity of the attributes it reads. Read from
 (list/todo list:home todo: ?t)    ; every to-do on list:home
 ```
 
-A concept body holds no formulas, so every concept can be read and written. Formulas belong in rule bodies, and also at the top of a document: in a question, in an assertion, and in a write, as `(bug! (digest {…}) …)` does. A concept may not contain itself.
+A concept body holds no formulas, so every concept can be read and written. Formulas belong in rule bodies, and also at the top of a document: in a question, in an assertion, and in a write, as `(bug! (id {…}) …)` does. A concept may not contain itself.
 
 A concept says what facts make it up, not how its entity is made. Construction is the call's business (below) or a rule's.
 
@@ -212,33 +214,30 @@ A concept's identity is its set of attributes. An attribute's identity is its st
 
 ## Entities
 
-A write says which entity its facts land on in one of three ways:
+A write either names its entity or leaves it out:
 
 ```clj
-(bug/status! bug:7f3a is: :done)                            ; 1. an entity, used as is
-(bug! {xyz.bug/title "Crash on save" xyz.bug/author "ada"}   ; 2. a record: the entity
-      title: "Crash on save" author: "ada" status: :todo)    ;    that record identifies
-(report! title: "Crash on save" author: "ada" status: :todo) ; 3. left out: the digest
-                                                             ;    of everything written
+(bug/status! bug:7f3a is: :done)                             ; names it
+(bug! (id {xyz.bug/title "Crash" xyz.bug/author "ada"})       ; names it, by id
+      title: "Crash on save" author: "ada" status: :todo)
+(report! title: "Crash on save" author: "ada" status: :todo)  ; leaves it out
 ```
 
-1. **An entity** is used as given. This is how an update names what it changes.
-2. **A record** in place of an entity is a structural identifier: the entity is the one that record identifies, so equal records name the same entity on every device. Keys are resolved to stored attribute names before hashing. It is the same entity `(digest {…})` gives, without spelling the call.
-3. **Left out**, the entity is the digest of every attribute and value the write states. Two writes of the same facts are one entity, and two writes that differ in any fact are two.
+**Leaving the primary out creates.** When every other parameter is given and the primary is not, the write makes a new instance of the concept, and its entity is the `id` of every attribute and value the write states. Two writes of the same facts are one entity, and two writes that differ in any fact are two.
 
-In R15, sixteen of sixteen readers given any wording of rule 2 used a record of title and author as the bug's identity and predicted one bug after two devices saved it. Without the rule, three readers had no shared answer: one predicted two bugs, and one made up `bug:crash-on-save-ada`.
+**Naming it** uses an entity, or the `id` formula in the primary's place. `id`'s primary is a value, usually a record, and its `is:` is the entity that value identifies: the one named by the hash of the value's canonical encoding, the same on every replica. The record that names an entity and the facts written about it are separate things: an identity is fixed when it is made, and the facts can change after.
+
+A record in the entity's place is not an entity. R15 showed readers will take one as an identifier when the spec says so (sixteen of sixteen), but `(id {…})` says it outright, and in R9 readers read `(id {…})` as a derived entity five of five times, a bare record none of five.
 
 An identity that must agree everywhere, such as "a bug is its title and author", belongs in a rule that every replica runs, not in each writer's choice of fields:
 
 ```clj
 (rule! (assert! (bug ?b title: ?t author: ?a status: ?s))
   (when (report title: ?t author: ?a status: ?s)
-        (digest {xyz.bug/title ?t xyz.bug/author ?a} is: ?b)))
+        (id {xyz.bug/title ?t xyz.bug/author ?a} is: ?b)))
 ```
 
-`digest` is a formula. Its primary is a value, here a record, and its `is:` is the entity that value identifies: the one named by the hash of the value's canonical encoding. The same value gives the same entity on every replica. A write that leaves its entity out gets `digest` of a record of everything it writes, so all three ways above are one rule applied to different values.
-
-Writers send a report, and the rule picks the fields. `digest` runs one way, so the planner binds its record first. The keys are stored attribute names: R15's readers spelled the same identity three ways (short names, stored names, `title:` labels), and each spelling hashes to a different entity.
+Writers send a report, and the rule picks the fields. `id` runs one way, so the planner binds its record first. The keys are stored attribute names: R15's readers spelled the same identity three ways (short names, stored names, `title:` labels), and each spelling hashes to a different entity.
 
 Entities with the same content are the same entity. That is the point for value-like things such as routes. For things that must stay distinct even when their content is equal, a rule can lend them another entity, or the write adds a field that tells them apart, such as the event's time. In `notebook.clj`, each new block takes the entity of the insert command that made it.
 
@@ -274,7 +273,7 @@ A command is a concept whose attributes are in `:now`. There is no `command` for
 (tonk/rename-repository! repository: did:key:z6Mk… name: "Plans")
 ```
 
-The command's write leaves its entity out, so the entity is the digest of its fields. Two commands in one tick never share an entity, so their fields never mix. A shared placeholder entity such as `:new` mixes them: in R3, three of three readers predicted that two `(bug! :new …)` writes in one document leave one entity with two titles.
+The command's write leaves its entity out, so the entity is the `id` of its fields. Two commands in one tick never share an entity, so their fields never mix. A shared placeholder entity such as `:new` mixes them: in R3, three of three readers predicted that two `(bug! :new …)` writes in one document leave one entity with two titles.
 
 Whether only rules may write a stored concept, so that its command is the only way in, is a matter of authorization, not notation: a capability that lets a writer into `:now` but not into the stored attributes.
 
@@ -343,19 +342,16 @@ Comparing the design with [Bloom](http://bloom-lang.net) settled three of the ch
 | The merge operator says when a rule takes effect: `<=` now, `<+` next, `<-` delete next, `<~` later. | The head's verb: `assert`, `assert!`, `retract!`, `ensue!`. |
 | An input is a `scratch` row; `interface input` only labels who writes it. | A command is a concept in `:now`; `command` and `transient:` are gone. Who may write what is authorization. |
 | A `channel` is a scratch with one column marked `@` for the destination. | `to:` is a field of the sent fact, not a parameter of `ensue!`. |
-| A row's fields stay together because a row is one tuple. | A fact's fields stay together only on a shared entity, so each command needs its own: the digest of its write. |
+| A row's fields stay together because a row is one tuple. | A fact's fields stay together only on a shared entity, so each command needs its own: the `id` of its write. |
 | A key is the declared columns, and a row with other key values is another row. | A derived entity is fixed when it is made. That keeps it stable when its title changes, and is why the identity fields are open below. |
 | Bloom^L lattices merge without coordination. | Picks are merges; `:last` is the one that needs a clock. |
 
 ## Open
 
 - How text spans lines or holds `"`. The sketches still write templates as `"""…"""`, which is not part of the notation.
-- What a rule head that names no entity lands on. In R16, four of five readers of this spec put a sent notice on the to-do's own entity because no example shows another way; the readers of the shorter documents left it out. The obvious answer is the one writes have: the digest of the head's facts.
+- What a rule head that names no entity lands on. In R16, four of five readers of this spec put a sent notice on the to-do's own entity because no example shows another way; the readers of the shorter documents left it out. The obvious answer is the one writes have: the `id` of the head's facts.
 - Whether a rule that creates should only create. The R16 rule that asserts `state: :open` on every add reopens a done to-do that is added again; `(unless (todo ?t))` in its `when` would stop that.
-- Whether a record in place of an entity also supplies the parameters whose attributes it names. Without that, creating a bug states its title and author twice, once to identify it and once as facts, since a write must pass every parameter: `(bug! {xyz.bug/title "Crash" xyz.bug/author "ada"} title: "Crash" author: "ada" status: :todo)`. With it, `(bug! {xyz.bug/title "Crash" xyz.bug/author "ada"} status: :todo)` is complete, and a label that disagrees with the record is an error. In R15, fourteen of sixteen readers repeated the fields, so they read the record as identity only; the two who saw this form in an example wrote it. Writing `(digest {…})` explicitly has the same doubling, which is why the record rule stays.
-- Record types: a formula such as `digest` takes a record, and there is no type for one yet.
-- Whether a record may use short keys inside a concept call, resolved to stored names before hashing, or only stored names.
-- Whether the fields an identity is derived from may change. A renamed title gives a record that no longer finds its bug, and a new write with it makes a second one.
+- Record types: a formula such as `id` takes a record, and there is no type for one yet.
 - How `:last` orders writes from devices that had not synced.
 - Optional parameters: `(option …)` read correctly once in six.
 - Which layers exist beyond `:now` and stored, and their names.
