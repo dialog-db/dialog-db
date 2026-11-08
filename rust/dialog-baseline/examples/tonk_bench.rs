@@ -647,10 +647,12 @@ mod native {
             subscriptions.push((view, subscription));
         }
 
-        // The week.
+        // The week, unless `DIALOG_BENCH_WEEK=0` skips it (to profile the
+        // steady phase alone).
+        let week = std::env::var("DIALOG_BENCH_WEEK").map_or(true, |week| week != "0");
         let mut caught_up = vec![true; members.len()];
         let mut round = 0usize;
-        for line in lines {
+        for line in lines.iter().filter(|_| week) {
             match line {
                 Line::Command {
                     phase: Phase::Writes,
@@ -749,20 +751,7 @@ mod native {
             } = line
             {
                 let member = &members[*author as usize];
-                let mut transaction = member.branch.transaction();
-                transaction = transaction.dispatch(profiles.command(changes)?);
-                if !durable.is_empty() {
-                    let mut batch = Changes::new();
-                    profiles.changes(durable, &mut batch)?;
-                    transaction = transaction.integrate(batch);
-                }
-                let started = Instant::now();
-                transaction
-                    .commit()
-                    .publish()
-                    .perform(&member.operator)
-                    .await?;
-                let took = started.elapsed();
+                let took = steady_command(member, &profiles, changes, durable).await?;
                 report.time(&format!("steady/{name}"), took);
                 report.time("steady/all", took);
             }
@@ -770,6 +759,31 @@ mod native {
         report.count("bytes/remote", bytes_under(&remote));
         report.summary();
         Ok(report)
+    }
+
+    /// One steady command: dispatched, its durable changes integrated,
+    /// committed and published. Its own function so a profiler can collect
+    /// it alone (`valgrind --toggle-collect='*steady_command*'`).
+    async fn steady_command<S: PeerSpace>(
+        member: &Member<S>,
+        profiles: &Profiles,
+        changes: &[Change],
+        durable: &[Change],
+    ) -> anyhow::Result<Duration> {
+        let mut transaction = member.branch.transaction();
+        transaction = transaction.dispatch(profiles.command(changes)?);
+        if !durable.is_empty() {
+            let mut batch = Changes::new();
+            profiles.changes(durable, &mut batch)?;
+            transaction = transaction.integrate(batch);
+        }
+        let started = Instant::now();
+        transaction
+            .commit()
+            .publish()
+            .perform(&member.operator)
+            .await?;
+        Ok(started.elapsed())
     }
 
     /// Commits `commands`, each dispatched, in one transaction.

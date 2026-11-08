@@ -23,7 +23,9 @@ pub const MEMBERS: u32 = 6;
 
 /// How many commands the measured week holds.
 pub const WEEK: usize = 300;
-/// How many of each kind of command the steady phase sends.
+/// How many of each kind of command the steady phase sends, unless
+/// `DIALOG_DATASET_STEADY` says otherwise (for a dataset to profile
+/// commands with).
 pub const STEADY: usize = 20;
 
 /// The concepts a dataset carries, by name, as descriptor JSON.
@@ -625,6 +627,10 @@ impl<'a> Generator<'a> {
     /// of each kind, back to back, with no sync between.
     pub fn steady(&mut self, shape: &Shape) -> anyhow::Result<Vec<Line>> {
         let mut lines = Vec::new();
+        let count = std::env::var("DIALOG_DATASET_STEADY")
+            .ok()
+            .and_then(|count| count.parse().ok())
+            .unwrap_or(STEADY);
         self.turn = Some(0);
         for kind in [
             "issue-create",
@@ -634,7 +640,7 @@ impl<'a> Generator<'a> {
             "comment",
             "memo",
         ] {
-            for _ in 0..STEADY {
+            for _ in 0..count {
                 let issue = self
                     .pick(&self.made.issues.clone())
                     .cloned()
