@@ -22,7 +22,10 @@
 //!
 //! Run it with `DIALOG_SE_CSV=path/to/retro-facts.csv
 //! DIALOG_BENCH_COMMITS=4096 cargo run --release -p dialog-baseline
-//! --example file_archive_bench`.
+//! --example file_archive_bench`. `DIALOG_BENCH_GROUP=k` commits every `k`
+//! transactions of the log as one, to see what a commit's size costs; the
+//! peak heap the commits reach, above the heap before the first, is
+//! reported with the commit time.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::BTreeSet;
@@ -49,10 +52,14 @@ struct Counting;
 
 static ALLOCATED: AtomicU64 = AtomicU64::new(0);
 
+/// The most `ALLOCATED` reached since it was last reset.
+static PEAK: AtomicU64 = AtomicU64::new(0);
+
 // SAFETY: forwards to the system allocator, only counting.
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ALLOCATED.fetch_add(layout.size() as u64, Relaxed);
+        let now = ALLOCATED.fetch_add(layout.size() as u64, Relaxed) + layout.size() as u64;
+        PEAK.fetch_max(now, Relaxed);
         // SAFETY: the caller upholds `alloc`'s contract.
         unsafe { System.alloc(layout) }
     }
@@ -76,6 +83,8 @@ struct Run {
     /// The tree the last commit left, which every store must agree on.
     root: String,
     commit: Duration,
+    /// The most heap the commits held above what was held before them.
+    commit_heap: u64,
     disk: u64,
     allocated: u64,
     blocks: usize,
@@ -216,16 +225,28 @@ macro_rules! run {
             let (operator, branch) = open!($space, at, "peer", "repo", true);
             serve!($serve, $directory, operator, branch);
             let started = Instant::now();
-            for commit in $commits {
+            let before = ALLOCATED.load(Relaxed);
+            PEAK.store(before, Relaxed);
+            let group = std::env::var("DIALOG_BENCH_GROUP")
+                .ok()
+                .and_then(|group| group.parse::<usize>().ok())
+                .unwrap_or(1)
+                .max(1);
+            for commits in $commits.chunks(group) {
+                let mut instructions = Vec::new();
+                for commit in commits {
+                    instructions.extend(se_instructions(commit)?);
+                }
                 branch
                     .transaction()
-                    .integrate(se_instructions(commit)?.into_iter().collect())
+                    .integrate(instructions.into_iter().collect())
                     .commit()
                     .publish()
                     .perform(&operator)
                     .await?;
             }
             run.commit = started.elapsed();
+            run.commit_heap = PEAK.load(Relaxed).saturating_sub(before);
             run.root = branch
                 .revision()
                 .map(|revision| dialog_common::Blake3Hash::from(*revision.tree.hash()).to_string())
@@ -404,13 +425,14 @@ async fn main() -> anyhow::Result<()> {
             ),
         };
         println!(
-            "{:<12} commit {:>9} ({:.2} ms/commit)  disk {:>10} (allocated {:>10}, {} files)  \
+            "{:<12} commit {:>9} ({:.2} ms/transaction, peak heap {})  disk {:>10} (allocated {:>10}, {} files)  \
              cold scan {:>8}  warm scan {:>8}  ({} facts)  cold points {:>8}  warm points {:>8}  \
              heap: open {:>9}, held by scans {:>9}, by points {:>9}; \
              node cache after scans: {} nodes, charged {}",
             run.name,
             ms(run.commit),
             run.commit.as_secs_f64() * 1000.0 / commits.len() as f64,
+            mib(run.commit_heap),
             mib(run.disk),
             mib(run.allocated),
             run.blocks,
