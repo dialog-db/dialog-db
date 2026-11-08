@@ -350,6 +350,16 @@ The `tutorial` broke the plan's promise that every document states the same fact
 
 **Decision.** The design says "partial information about a concept", and defines `digest`: a formula from a value to the entity that value identifies, by the hash of its canonical encoding.
 
+## 2026-11-08 — The record rule stays
+
+**Question.** Should "a record in place of an entity" be dropped for an explicit `(digest {…})` in that place?
+
+**Method.** Maintainer's review of the proposal.
+
+**Results.** Three things stand against dropping it. An explicit call needs formulas outside rules, which the notation should support anyway and now says so. A formula that takes a record needs a record type, which does not exist yet. And creating a concept would state the identifying fields twice. The third weighs most, but the record form doubles them too unless a record also supplies the parameters it names.
+
+**Decision.** The record rule stays. Formulas are allowed in questions, assertions and writes. Record types and whether a record supplies its parameters are open; the second is what ends the doubling.
+
 ## How to reproduce
 
 1. Take a variant's prompt from its round's results file and save it as `<variant>.txt`.

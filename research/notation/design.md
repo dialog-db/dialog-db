@@ -188,7 +188,7 @@ A concept's primary need not be the entity of the attributes it reads. Read from
 (list/todo list:home todo: ?t)    ; every to-do on list:home
 ```
 
-A concept body holds no formulas, so every concept can be read and written. Formulas belong in rule bodies. A concept may not contain itself.
+A concept body holds no formulas, so every concept can be read and written. Formulas belong in rule bodies, and also at the top of a document: in a question, in an assertion, and in a write, as `(bug! (digest {…}) …)` does. A concept may not contain itself.
 
 A concept says what facts make it up, not how its entity is made. Construction is the call's business (below) or a rule's.
 
@@ -223,7 +223,7 @@ A write says which entity its facts land on in one of three ways:
 ```
 
 1. **An entity** is used as given. This is how an update names what it changes.
-2. **A record** in place of an entity is a structural identifier: the entity is the one that record identifies, so equal records name the same entity on every device. Keys are resolved to stored attribute names before hashing.
+2. **A record** in place of an entity is a structural identifier: the entity is the one that record identifies, so equal records name the same entity on every device. Keys are resolved to stored attribute names before hashing. It is the same entity `(digest {…})` gives, without spelling the call.
 3. **Left out**, the entity is the digest of every attribute and value the write states. Two writes of the same facts are one entity, and two writes that differ in any fact are two.
 
 In R15, sixteen of sixteen readers given any wording of rule 2 used a record of title and author as the bug's identity and predicted one bug after two devices saved it. Without the rule, three readers had no shared answer: one predicted two bugs, and one made up `bug:crash-on-save-ada`.
@@ -352,7 +352,8 @@ Comparing the design with [Bloom](http://bloom-lang.net) settled three of the ch
 - How text spans lines or holds `"`. The sketches still write templates as `"""…"""`, which is not part of the notation.
 - What a rule head that names no entity lands on. In R16, four of five readers of this spec put a sent notice on the to-do's own entity because no example shows another way; the readers of the shorter documents left it out. The obvious answer is the one writes have: the digest of the head's facts.
 - Whether a rule that creates should only create. The R16 rule that asserts `state: :open` on every add reopens a done to-do that is added again; `(unless (todo ?t))` in its `when` would stop that.
-- Whether writing a record in place of an entity also writes the record's fields. In R15, fourteen of sixteen readers repeated `title:` and `author:` beside the record, so they read it as identity only.
+- Whether a record in place of an entity also supplies the parameters whose attributes it names. Without that, creating a bug states its title and author twice, once to identify it and once as facts, since a write must pass every parameter: `(bug! {xyz.bug/title "Crash" xyz.bug/author "ada"} title: "Crash" author: "ada" status: :todo)`. With it, `(bug! {xyz.bug/title "Crash" xyz.bug/author "ada"} status: :todo)` is complete, and a label that disagrees with the record is an error. In R15, fourteen of sixteen readers repeated the fields, so they read the record as identity only; the two who saw this form in an example wrote it. Writing `(digest {…})` explicitly has the same doubling, which is why the record rule stays.
+- Record types: a formula such as `digest` takes a record, and there is no type for one yet.
 - Whether a record may use short keys inside a concept call, resolved to stored names before hashing, or only stored names.
 - Whether the fields an identity is derived from may change. A renamed title gives a record that no longer finds its bug, and a new write with it makes a second one.
 - How `:last` orders writes from devices that had not synced.
