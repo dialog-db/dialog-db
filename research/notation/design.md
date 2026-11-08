@@ -48,7 +48,7 @@ A call names a concept and passes its parameters. Every definition has exactly o
 
 A call may leave out any parameter whose definition says how to derive it. Today only the primary has such a rule, under [Entities](#entities).
 
-`is:` is a call's result. A call written in an argument's place stands for its `is:` value, through a fresh variable:
+`is:` is a call's result. A call written in any argument's place stands for its `is:` value, through a fresh variable, when that variable would only wire the two calls together:
 
 ```clj
 (bug/report (id {…}) title: "hello world")
@@ -84,7 +84,7 @@ The top-level forms are:
 
 ## Questions
 
-A call with a variable is a question. Its answer is the rows of variable bindings that match `now`. A parameter the question leaves out matches any value.
+A call with a variable is a question. Its answer is the rows of variable bindings that match `now`. A parameter the question leaves out matches any value. There are no yes-or-no questions: a call with no variable is an assertion, as a ground atom is a fact in a Datalog program.
 
 ## Writes
 
@@ -96,7 +96,7 @@ A bare call with `!` writes into `next`. It must be ground, except for an entity
 
 A write means the same as a rule with one `assert!` head and no `when`, so that longer form is never written.
 
-A write through a concept passes every parameter. Leaving one out is a compile error, not "keep what is there": on an entity that does not exist yet it would make a partial one. To change one attribute, write the attribute itself, `(xyz.tonk.notebook/source! id:b1 is: "x")`, or a concept over just that attribute, `(block/source! id:b1 is: "x")`. There is no marker for "keep this one".
+A write through a concept passes every parameter. Leaving one out is a compile error, not "keep what is there": on an entity that does not exist yet it would make a partial one. To change one attribute, write the attribute itself, `(xyz.tonk.notebook/source! id:b1 is: "x")`, or a concept over just that attribute, `(block/source! id:b1 is: "x")`. There is no marker for "keep this one". A partial entity is allowed, as long as it is meant: it comes from writing an attribute or a smaller concept, never from forgetting a parameter.
 
 How a retract says "every value" is open.
 
@@ -177,7 +177,7 @@ A composite concept's body is a conjunction of attribute lines, concept calls an
   (block/source ?block is: ?s))
 ```
 
-Every variable in a body appears in the head. A body cannot reach through an entity it does not name.
+Every variable in a body appears in the head. A body cannot reach through an entity it does not name, because a write through the concept could not construct that entity. A rule can reach through one.
 
 A concept's primary need not be the entity of the attributes it reads. Read from the value's side, an attribute gives the reverse relation:
 
@@ -348,7 +348,6 @@ Comparing the design with [Bloom](http://bloom-lang.net) settled three of the ch
 ## Open
 
 - How text spans lines or holds `"`. The sketches still write templates as `"""…"""`, which is not part of the notation.
-- How to ask a yes-or-no question. A ground call asserts, so `(bug bug:7f3a status: :done)` cannot ask whether the bug is done; `(bug bug:7f3a status: ?s)` can.
 - What a rule head that names no entity lands on. In R16, four of five readers of this spec put a sent notice on the to-do's own entity because no example shows another way; the readers of the shorter documents left it out. The obvious answer is the one writes have: the digest of the head's facts.
 - Whether a rule that creates should only create. The R16 rule that asserts `state: :open` on every add reopens a done to-do that is added again; `(unless (todo ?t))` in its `when` would stop that.
 - Whether writing a record in place of an entity also writes the record's fields. In R15, fourteen of sixteen readers repeated `title:` and `author:` beside the record, so they read it as identity only.

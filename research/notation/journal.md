@@ -330,6 +330,16 @@ The `tutorial` broke the plan's promise that every document states the same fact
 
 **Decision.** Dropped from the design's open questions.
 
+## 2026-11-08 — Assertions, partial entities, intermediates
+
+**Question.** Follow-ups to the corrections: is a ground call that asserts a trap, are partial entities allowed, why can a concept not reach through an intermediate?
+
+**Method.** Maintainer's decisions.
+
+**Results.** A ground call is an assertion, as a ground atom is a fact in a Datalog program; there are no yes-or-no questions. Partial entities are allowed when meant, through an attribute or a smaller concept; the compile error is only for a forgotten parameter. A concept cannot reach through an intermediate because a write through it could not construct one; rules can. The `is:` shortcut applies to any parameter, when the variable would only wire two calls.
+
+**Decision.** All in the design.
+
 ## How to reproduce
 
 1. Take a variant's prompt from its round's results file and save it as `<variant>.txt`.
