@@ -1,11 +1,11 @@
-# Journal: bringing a large dataset into a replica
+# Journal: importing a large dataset into dialog
 
 ## Reflective inquiry
 
 |  | Understanding | Activity |
 |---|---|---|
-| **Status** | What do we know? Large commits fail two ways: one commit holds every new node until it seals (over 8 GiB for 4.47 M facts), and sealing into a non-empty tree applies its leaf-bound ops one canonical edit each (over two hours for 447,000 facts); small commits rewrite the same nodes again and again (37 versions a node over 2,000 commits). Commits of about 45,000 facts were fastest. The tree is 77,808 nodes in three levels. | Where are we at? **Delimiting**: a problem statement is proposed, not yet confirmed. |
-| **Agenda** | What do we need to know? Whether the objective in the proposed statement is Irakli's (bringing a dataset in: an import, or a replica's current state into a new file), and whether there is a second one; whether the per-op seal is quadratic (ledger). | Where are we going? Confirm or rewrite the problem statement, then **Directing**: use cases, then the strategy matrix with the side file, the bottom-up build and the batched seal as columns. |
+| **Status** | What do we know? Large commits fail two ways: one commit holds every new node until it seals (over 8 GiB for 4.47 M facts), and sealing into a non-empty tree applies its leaf-bound ops one canonical edit each (over two hours for 447,000 facts); small commits rewrite the same nodes again and again (37 versions a node over 2,000 commits). Commits of about 45,000 facts were fastest. The tree is 77,808 nodes in three levels. | Where are we at? **Delimiting**: the objective is confirmed (importing a large dataset); its bounds are not stated. |
+| **Agenda** | What do we need to know? How large a dataset an import must take, on what machine, within what memory and time; whether the per-op seal is quadratic (ledger). | Where are we going? The bounds into the problem statement, then **Directing**: use cases, then the strategy matrix with the side file, the bottom-up build and the batched seal as columns. |
 
 ## 2026-11-08, Describing: the replay that wrote 54 times its tree
 
@@ -112,3 +112,23 @@ the next sitting asks first.
 exists into a replica the objective, in both forms (records from another
 system, a replica's current state into a new file)? And think of a second
 one: is there anyone else who would write a commit this large?
+
+## 2026-11-08, Delimiting: the objective is importing
+
+**Asked.** Is bringing a dataset that already exists into a replica the
+objective? Irakli: importing a large dataset into dialog is a problem to
+design a solution for, even if no one is doing it now.
+
+**Learned.** The objective is importing. The other form proposed, a
+replica's current state written into a new file, was not named; it is a
+different objective (Irakli's state-snapshot tool), and the hypothesis that
+such a tool is a large transaction stays in the ledger for when it is taken
+up.
+
+**Decided.** The problem statement is about importing, confirmed as the
+objective; the title follows it. Not taken on here: writing a replica's
+state into a new file. Not decided: how large, within what memory and time.
+
+**Open question for the next sitting.** How large a dataset must an import
+take, on what machine, and within what memory: MusicBrainz's sample (4.47 M
+facts) on a laptop, its whole dump, in a browser?

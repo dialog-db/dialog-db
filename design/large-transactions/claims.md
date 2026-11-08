@@ -1,4 +1,4 @@
-# Claims: bringing a large dataset into a replica
+# Claims: importing a large dataset into dialog
 
 The measurements were made on the single-file archive of
 [dialog-db/dialog-db#733](https://github.com/dialog-db/dialog-db/pull/733)
@@ -27,6 +27,7 @@ one); the numbers and their method are in that branch's
 | With buffers about as large as a node's fan-out (256 against about 459 children a level below the root), a flush moves one or two ops into each child it rewrites | hypothesis | ops moved per child rewrite, counted over the replay; the `FlushTrigger::Capacity` doc says the same of scattered keys | open |
 | A tool that writes a replica's current state into a new file writes a whole tree at once, so it is a large transaction | hypothesis | confirmed if such a tool goes through the commit path; refuted if it copies nodes the heads reach without committing them | open |
 | No one is known to write transactions this large today | opinion | Irakli, 2026-11-08 | - |
+| Importing a large dataset into dialog is a problem to design a solution for, even though no one does it now | opinion | Irakli, 2026-11-08 | - |
 | The replay is a pathological case for the tree implementation | opinion | Irakli, 2026-11-08 | - |
 | A tool offering just a replica's state, without its history, would be useful | opinion | Irakli, 2026-11-08 | - |
 | Writing a transaction's nodes to a side file and copying the ones still reachable at commit would handle large transactions | opinion | Irakli, 2026-11-08 | - |

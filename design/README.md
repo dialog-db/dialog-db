@@ -57,4 +57,4 @@ Backtracking moves a topic to an earlier phase and says so in its journal.
 
 | topic | phase |
 |---|---|
-| [Bringing a large dataset into a replica](large-transactions.md) | Delimiting |
+| [Importing a large dataset into dialog](large-transactions.md) | Delimiting |

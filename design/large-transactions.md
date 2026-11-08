@@ -1,4 +1,4 @@
-# Bringing a large dataset into a replica
+# Importing a large dataset into dialog
 
 **Phase:** Delimiting
 
@@ -26,18 +26,16 @@ would be useful.
 
 ## Problem
 
-*Proposed, to be confirmed with Irakli.*
+Someone importing a large existing dataset into dialog cannot. As one
+commit, the import holds every new node in memory until the commit seals,
+and a commit into a tree that is not empty applies the ops its buffers
+send toward the leaves one canonical edit at a time: 4.47 million facts
+did not fit in 15 GiB, and a commit of 447,000 facts ran for over two
+hours. As many smaller commits, each commit rewrites the nodes its ops
+reach, so the same nodes are written again and again: 2,000 commits wrote
+37 node versions for every node of the tree they left.
 
-Someone bringing an existing dataset into a replica, records imported from
-another system or a replica's current state written into a new file,
-cannot do it once the dataset is large. As one commit, the load holds
-every new node in memory until the commit seals, and a commit into a tree
-that is not empty applies the ops its buffers send toward the leaves one
-canonical edit at a time: 4.47 million facts did not fit in 15 GiB, and a
-commit of 447,000 facts ran for over two hours. As many smaller commits,
-each commit rewrites the nodes its ops reach, so the same nodes are
-written again and again: 2,000 commits wrote 37 node versions for every
-node of the tree they left.
+*How large a dataset, within what memory and time, is not stated yet.*
 
 ## Approach
 
