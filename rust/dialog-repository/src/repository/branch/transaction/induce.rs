@@ -794,10 +794,10 @@ where
     use dialog_common::Blake3Hash as NodeHash;
     use dialog_search_tree::Change as TreeChange;
 
-    let SourceRef::Branch(branch) = source else {
+    let (SourceRef::Branch(branch) | SourceRef::Pinned(branch, _)) = source else {
         return Ok(Vec::new());
     };
-    let Some(head) = branch.revision() else {
+    let Some(head) = source.revision() else {
         return Ok(Vec::new());
     };
     let cell = branch.induction_cell();

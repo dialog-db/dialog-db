@@ -17,10 +17,10 @@ use dialog_artifacts::{Statement, Update};
 use dialog_capability::{Capability, Did};
 use dialog_effects::authority::{Operator, OperatorExt as _};
 
-use crate::Branch;
 use crate::schema::Branch as BranchConcept;
 use crate::schema::branch::{Edition, Revision as RevisionEntity, Tree};
 use crate::schema::{BranchRevision, Replica};
+use crate::{Branch, Revision};
 
 /// The schema-shaped metadata for a single branch.
 ///
@@ -70,8 +70,17 @@ impl Branch {
     /// [`Identify`](dialog_effects::authority::Identify)) carries both
     /// the profile and operator DIDs.
     pub fn metadata(&self, operator: &Capability<Operator>) -> BranchMetadata {
+        self.metadata_at(operator, self.revision())
+    }
+
+    /// [`metadata`](Self::metadata) as of `revision` rather than the
+    /// head: what a read pinned to a revision folds in.
+    pub(crate) fn metadata_at(
+        &self,
+        operator: &Capability<Operator>,
+        revision: Option<Revision>,
+    ) -> BranchMetadata {
         let profile = operator.profile();
-        let revision = self.revision();
         let mut cache = self
             .metadata_cache
             .lock()
@@ -82,16 +91,17 @@ impl Branch {
         {
             return metadata.clone();
         }
-        let metadata = self.derive_metadata(profile);
+        let metadata = self.derive_metadata(profile, revision.as_ref());
         *cache = Some((profile.clone(), revision, metadata.clone()));
         metadata
     }
 
-    /// Derive the metadata [`metadata`](Self::metadata) memoizes.
-    fn derive_metadata(&self, profile: &Did) -> BranchMetadata {
+    /// Derive the metadata [`metadata`](Self::metadata) memoizes, as of
+    /// `revision`.
+    fn derive_metadata(&self, profile: &Did, revision: Option<&Revision>) -> BranchMetadata {
         let replica = Replica::new(profile.clone(), self.of().clone());
         let branch = BranchConcept::new(&replica, self.name());
-        let revision = self.revision().map(|revision| {
+        let revision = revision.map(|revision| {
             let tree_bytes: &[u8] = revision.tree.hash();
             BranchRevision {
                 this: branch.this.clone(),

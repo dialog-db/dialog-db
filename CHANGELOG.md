@@ -25,10 +25,10 @@ branch's head cell as it stood at that moment, and that cell is shared by
 every handle of the branch, so a commit made through another handle
 while a query ran moved the root under it: the query read some of its
 premises at one revision and the rest at another, and could yield rows
-no revision held. A query environment now pins every line to the
-revision it stands at when the environment is built, and every select
-of that query reads that root. A query over a `Snapshot` was already
-pinned, and is unchanged.
+no revision held. A query's lines are now pinned to the revision they
+stand at when the query is built, and every select of that query reads
+that root. A query over a `Snapshot` was already pinned, and is
+unchanged.
 
 What this changes for you:
 

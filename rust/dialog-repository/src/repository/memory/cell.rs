@@ -256,20 +256,6 @@ impl<T, Codec: Clone> Cell<T, Codec>
 where
     T: Clone,
 {
-    /// A copy of this cell that holds what the cell holds now and no
-    /// longer follows it: a publish or resolve through either side does
-    /// not reach the other. For a reader that must see one value for as
-    /// long as it reads, whatever the cell's other handles do meanwhile.
-    pub fn detached(&self) -> Self {
-        Self {
-            capability: self.capability.clone(),
-            cache: Cache {
-                codec: self.cache.codec.clone(),
-                state: Arc::new(RwLock::new(self.cache.state.read().clone())),
-            },
-        }
-    }
-
     /// Read the cached value without hitting env.
     /// Returns `None` if the cell has not been resolved or published yet.
     pub fn content(&self) -> Option<T> {

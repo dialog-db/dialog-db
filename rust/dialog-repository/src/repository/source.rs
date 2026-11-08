@@ -24,6 +24,7 @@ use dialog_search_tree::Cache;
 use dialog_storage::Blake3Hash;
 use std::sync::Arc;
 
+use crate::repository::branch::BranchMetadata;
 use crate::repository::branch::LayerMetadataMemo;
 use crate::repository::caches::CacheBudget;
 use crate::rules::{RuleCache, RuleContent, SharedRuleCache};
@@ -35,29 +36,27 @@ use crate::{Branch, Ephemeral, Index, Revision, Snapshot};
 /// capability environment's. The line sits behind an [`Arc`]: a query
 /// hands one to every scan it runs, and cloning the line itself copies
 /// its identifiers and cell handles each time.
+///
+/// An owned line is pinned: a branch's head is taken when the source is
+/// made and every read through the source names that revision, however
+/// a commit through another handle of the branch moves the head
+/// meanwhile (dialog-db/dialog-db#757). Everything else of the branch
+/// (its caches, its session overlay, its tracking) is read live, as
+/// between any two clones.
 #[derive(Debug, Clone)]
 pub(crate) enum Source {
-    /// A named line whose head lives in a memory cell.
-    Branch(Arc<Branch>),
+    /// A named line, and the head it stood at when this source was made
+    /// (`None` for a branch with no commits yet).
+    Branch(Arc<Branch>, Option<Revision>),
     /// A detached line whose head is held by value.
     Snapshot(Arc<Snapshot>),
 }
 
 impl Source {
-    /// This line with its head where it is now: a branch becomes a
-    /// handle whose revision no later commit moves (see
-    /// [`Branch::pinned`]); a snapshot already is one.
-    pub(crate) fn pinned(self) -> Self {
-        match self {
-            Source::Branch(branch) => Source::Branch(Arc::new(branch.pinned())),
-            Source::Snapshot(snapshot) => Source::Snapshot(snapshot),
-        }
-    }
-
     /// Borrow this line.
     pub(crate) fn as_ref(&self) -> SourceRef<'_> {
         match self {
-            Source::Branch(branch) => SourceRef::Branch(branch),
+            Source::Branch(branch, revision) => SourceRef::Pinned(branch, revision.as_ref()),
             Source::Snapshot(snapshot) => SourceRef::Snapshot(snapshot),
         }
     }
@@ -65,7 +64,8 @@ impl Source {
 
 impl From<Branch> for Source {
     fn from(branch: Branch) -> Self {
-        Source::Branch(Arc::new(branch))
+        let revision = branch.revision();
+        Source::Branch(Arc::new(branch), revision)
     }
 }
 
@@ -79,8 +79,11 @@ impl From<Snapshot> for Source {
 /// as cheap to pass around as the `&Branch` they used to hold.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum SourceRef<'a> {
-    /// A named line whose head lives in a memory cell.
+    /// A named line whose head lives in a memory cell, read live.
     Branch(&'a Branch),
+    /// A named line read at the head it stood at when its [`Source`]
+    /// was made (`None` for a branch with no commits yet).
+    Pinned(&'a Branch, Option<&'a Revision>),
     /// A detached line whose head is held by value.
     Snapshot(&'a Snapshot),
 }
@@ -104,10 +107,16 @@ impl<'a> From<&'a Source> for SourceRef<'a> {
 }
 
 impl<'a> SourceRef<'a> {
-    /// An owned handle to the same line.
+    /// An owned handle to the same line, pinned to the head it names
+    /// now (see [`Source`]).
     pub(crate) fn to_source(self) -> Source {
         match self {
-            SourceRef::Branch(branch) => Source::Branch(Arc::new(branch.clone())),
+            SourceRef::Branch(branch) => {
+                Source::Branch(Arc::new(branch.clone()), branch.revision())
+            }
+            SourceRef::Pinned(branch, revision) => {
+                Source::Branch(Arc::new(branch.clone()), revision.cloned())
+            }
             SourceRef::Snapshot(snapshot) => Source::Snapshot(Arc::new(snapshot.clone())),
         }
     }
@@ -115,7 +124,7 @@ impl<'a> SourceRef<'a> {
     /// The repository this line lives in.
     pub(crate) fn subject(self) -> Subject {
         match self {
-            SourceRef::Branch(branch) => branch.subject(),
+            SourceRef::Branch(branch) | SourceRef::Pinned(branch, _) => branch.subject(),
             SourceRef::Snapshot(snapshot) => snapshot.subject(),
         }
     }
@@ -125,12 +134,26 @@ impl<'a> SourceRef<'a> {
         ArchiveScope::new(self.subject())
     }
 
-    /// The revision this line currently names, or `None` for a branch
-    /// with no commits yet. A snapshot always has one.
+    /// The revision this line names: a branch's current head, a pinned
+    /// line's pin, a snapshot's revision. `None` for a branch with no
+    /// commits yet.
     pub(crate) fn revision(self) -> Option<Revision> {
         match self {
             SourceRef::Branch(branch) => branch.revision(),
+            SourceRef::Pinned(_, revision) => revision.cloned(),
             SourceRef::Snapshot(snapshot) => Some(snapshot.revision()),
+        }
+    }
+
+    /// The branch's metadata as of the revision this line names, for a
+    /// line that is a branch; a snapshot has none.
+    pub(crate) fn branch_metadata(self, operator: &Capability<Operator>) -> Option<BranchMetadata> {
+        match self {
+            SourceRef::Branch(branch) => Some(branch.metadata(operator)),
+            SourceRef::Pinned(branch, revision) => {
+                Some(branch.metadata_at(operator, revision.cloned()))
+            }
+            SourceRef::Snapshot(_) => None,
         }
     }
 
@@ -158,7 +181,7 @@ impl<'a> SourceRef<'a> {
     /// The shared spilled-value block cache.
     pub(crate) fn spill_cache(self) -> SpillCache {
         match self {
-            SourceRef::Branch(branch) => branch.spill_cache(),
+            SourceRef::Branch(branch) | SourceRef::Pinned(branch, _) => branch.spill_cache(),
             SourceRef::Snapshot(snapshot) => snapshot.caches().spills.clone(),
         }
     }
@@ -166,7 +189,7 @@ impl<'a> SourceRef<'a> {
     /// The shared deductive-rule cache.
     pub(crate) fn rule_cache(self) -> SharedRuleCache {
         match self {
-            SourceRef::Branch(branch) => branch.rule_cache(),
+            SourceRef::Branch(branch) | SourceRef::Pinned(branch, _) => branch.rule_cache(),
             SourceRef::Snapshot(snapshot) => snapshot.caches().rules.clone(),
         }
     }
@@ -174,7 +197,7 @@ impl<'a> SourceRef<'a> {
     /// The shared query-plan cache.
     pub(crate) fn plan_cache(self) -> PlanCache {
         match self {
-            SourceRef::Branch(branch) => branch.plan_cache(),
+            SourceRef::Branch(branch) | SourceRef::Pinned(branch, _) => branch.plan_cache(),
             SourceRef::Snapshot(snapshot) => snapshot.caches().plans.clone(),
         }
     }
@@ -182,7 +205,7 @@ impl<'a> SourceRef<'a> {
     /// The shared verified-record memo.
     pub(crate) fn records(self) -> Cache<Version, RevisionRecord> {
         match self {
-            SourceRef::Branch(branch) => branch.records(),
+            SourceRef::Branch(branch) | SourceRef::Pinned(branch, _) => branch.records(),
             SourceRef::Snapshot(snapshot) => snapshot.caches().records.clone(),
         }
     }
@@ -190,7 +213,7 @@ impl<'a> SourceRef<'a> {
     /// The shared causal-context memo.
     pub(crate) fn contexts(self) -> ContextCache {
         match self {
-            SourceRef::Branch(branch) => branch.contexts(),
+            SourceRef::Branch(branch) | SourceRef::Pinned(branch, _) => branch.contexts(),
             SourceRef::Snapshot(snapshot) => snapshot.caches().contexts.clone(),
         }
     }
@@ -198,7 +221,7 @@ impl<'a> SourceRef<'a> {
     /// The live-spine slot commits on this line reuse.
     pub(crate) fn spine(self) -> &'a SpineSlot {
         match self {
-            SourceRef::Branch(branch) => branch.spine(),
+            SourceRef::Branch(branch) | SourceRef::Pinned(branch, _) => branch.spine(),
             SourceRef::Snapshot(snapshot) => &snapshot.caches().spine,
         }
     }
@@ -206,7 +229,7 @@ impl<'a> SourceRef<'a> {
     /// The transient session overlay every read of this line folds in.
     pub(crate) fn overlay(self) -> &'a Ephemeral {
         match self {
-            SourceRef::Branch(branch) => branch.overlay(),
+            SourceRef::Branch(branch) | SourceRef::Pinned(branch, _) => branch.overlay(),
             SourceRef::Snapshot(snapshot) => snapshot.overlay(),
         }
     }
@@ -231,8 +254,10 @@ impl<'a> SourceRef<'a> {
         heads: &mut Changes,
     ) -> Option<Entity> {
         match self {
-            SourceRef::Branch(branch) => {
-                let metadata = branch.metadata(operator);
+            SourceRef::Branch(..) | SourceRef::Pinned(..) => {
+                let metadata = self
+                    .branch_metadata(operator)
+                    .expect("a branch line has metadata");
                 let entity = metadata.branch.this.clone();
                 metadata.replica.assert(changes);
                 metadata.branch.assert(changes);

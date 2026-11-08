@@ -129,7 +129,7 @@ impl<'a> BlobArchive<'a> {
     /// it; a snapshot's archive refuses them.
     fn branch(&self) -> Result<&'a Branch, CommitError> {
         match self.source {
-            SourceRef::Branch(branch) => Ok(branch),
+            SourceRef::Branch(branch) | SourceRef::Pinned(branch, _) => Ok(branch),
             SourceRef::Snapshot(_) => Err(CommitError::Detached),
         }
     }
@@ -363,7 +363,7 @@ impl ReadBlob<'_> {
         // has none: its reads are local). Asked only now, on the miss: a
         // read the local blob store answers never works out the route.
         let route = match line {
-            SourceRef::Branch(branch) => branch.fallback(),
+            SourceRef::Branch(branch) | SourceRef::Pinned(branch, _) => branch.fallback(),
             SourceRef::Snapshot(_) => RemoteFallback::None,
         };
         let remote = match route {
