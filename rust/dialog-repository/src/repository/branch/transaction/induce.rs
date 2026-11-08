@@ -33,11 +33,11 @@
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::Read as BlobRead;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{
-    Artifact, ArtifactSelector, Change, Changes, DialogArtifactsError, Entity, Instruction,
+    Artifact, ArtifactSelector, Change, Changes, DialogArtifactsError, Entity, Instruction, Pick,
     Relation, Select, Statement, Value,
 };
 use dialog_capability::{Fork, Provider};
@@ -1099,6 +1099,11 @@ async fn emit_matches<'a>(
     transients: &mut Changes,
 ) -> Result<(), CommitError> {
     let conclusion = rule.conclusion();
+    // The heads already written, by what they write. A seeded rule is
+    // evaluated once per stimulus row a premise names, so an event that
+    // carries several of a premise's fields finds the same binding once
+    // per field; the head it writes is written once.
+    let mut written: HashSet<(Entity, Vec<(Relation, Value, Pick)>)> = HashSet::new();
     for matched in matches {
         // The head subject. A rule whose premises leave `this` unbound
         // has no cell to write; skip the binding.
@@ -1107,7 +1112,7 @@ async fn emit_matches<'a>(
             _ => continue,
         };
 
-        let mut head = Changes::new();
+        let mut cells = Vec::new();
         for (name, field) in conclusion.with().iter() {
             let Ok(Binding::Present(value)) = matched.lookup(&Term::<Any>::var(name)) else {
                 // Optional head fields the frame didn't bind emit
@@ -1129,6 +1134,14 @@ async fn emit_matches<'a>(
                     })?
                 }
             };
+            cells.push((attribute, value, field.descriptor().pick().clone()));
+        }
+        if !written.insert((this.clone(), cells.clone())) {
+            continue;
+        }
+
+        let mut head = Changes::new();
+        for (attribute, value, pick) in cells {
             match rule.polarity() {
                 // A retracting head dissociates the exact bound
                 // triple, cardinality-independent.
@@ -1144,7 +1157,7 @@ async fn emit_matches<'a>(
                         attribute,
                         this.clone(),
                         value,
-                        field.descriptor().pick().clone(),
+                        pick,
                     );
                 }
             }
@@ -1204,6 +1217,7 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use crate::helpers::test_repo;
+    use crate::repository::source::SourceRef;
     use crate::rules::Transient;
     use crate::{Branch, CommitError, RemoteSite, Revision};
     use anyhow::Result;
@@ -3375,6 +3389,88 @@ mod tests {
             "the key is a position: {key}"
         );
         assert_eq!(value, &Value::Entity(item));
+        Ok(())
+    }
+
+    /// A command naming every field of a premise seeds the rule once per
+    /// field, and each evaluation finds the same binding. Induction writes
+    /// the head once, not once per seed: the head here is a set, which
+    /// keeps every copy written to it.
+    #[dialog_common::test]
+    async fn it_writes_a_head_once_however_many_rows_seed_it() -> Result<()> {
+        use dialog_artifacts::Statement;
+
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let rule: InductiveRule = serde_json::from_value(json!({
+            "description": "Record who an assign command names",
+            "assert!": {
+                "with": {
+                    "assignee": { "the": "issue/assignee", "as": "text:", "pick": "all:" }
+                }
+            },
+            "when": [
+                {
+                    "assert": {
+                        "with": {
+                            "issue": { "the": "cmd.assign/issue", "as": "entity:" },
+                            "who": { "the": "cmd.assign/who", "as": "text:" },
+                            "note": { "the": "cmd.assign/note", "as": "text:" }
+                        }
+                    },
+                    "where": {
+                        "issue": { "?": { "name": "this" } },
+                        "who": { "?": { "name": "assignee" } },
+                        "note": { "?": { "name": "note" } }
+                    }
+                }
+            ]
+        }))?;
+        branch
+            .transaction()
+            .assert(rule)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        let command: Entity = "cmd:1".parse()?;
+        let issue: Entity = "issue:1".parse()?;
+        let mut transients = Changes::new();
+        dialog_query::the!("cmd.assign/issue")
+            .of(command.clone())
+            .is(issue.clone())
+            .assert(&mut transients);
+        dialog_query::the!("cmd.assign/who")
+            .of(command.clone())
+            .is("member-0".to_string())
+            .assert(&mut transients);
+        dialog_query::the!("cmd.assign/note")
+            .of(command)
+            .is("from the board".to_string())
+            .assert(&mut transients);
+
+        let mut changes = Changes::new();
+        super::induce(
+            SourceRef::from(&branch),
+            &mut changes,
+            transients,
+            &operator,
+        )
+        .await?;
+
+        assert_eq!(
+            asserted(&changes),
+            vec![(
+                "issue/assignee".to_string(),
+                issue,
+                Value::String("member-0".to_string())
+            )],
+            "three seeds of one binding write its head once"
+        );
         Ok(())
     }
 

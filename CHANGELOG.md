@@ -14,6 +14,30 @@ says how to cut a release.
 
 ## Unreleased
 
+### A rule seeded by several rows of one change writes its head once
+
+[#PR](https://github.com/dialog-db/dialog-db/pull/PR)
+
+Commit-time induction evaluates a rule once for each changed row a
+premise names, with that row bound. A command whose event carries
+several of a premise's fields seeds the rule once per field, and every
+evaluation finds the same binding. Each wrote the rule's head again: a
+`set assignee` event of eight fields wrote its assignee and its activity
+record eight times over, and each copy seeded the next round's rules
+again. A firing now writes each distinct head once.
+
+What this changes for you:
+
+- What a commit stores is unchanged: the copies were the same claims,
+  and a set holds a claim once.
+- A commit that fires rules writes fewer ops into the tree. On a
+  tonk-shaped replica, a warm command wrote 177–198 ops before and 26–33
+  now, and its median time fell from 12.7–14.1 ms to 7.1–9.2 ms.
+
+Why: the copies were most of what a warm command wrote, so they filled
+the tree's root buffer on nearly every commit, and each overflow
+rewrote the leaves it sheds into.
+
 ### Two claims that stand equal are told apart by the hash of their values
 
 [#752](https://github.com/dialog-db/dialog-db/pull/752)
