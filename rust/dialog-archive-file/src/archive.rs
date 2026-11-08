@@ -44,9 +44,10 @@ static OPEN: LazyLock<Mutex<HashMap<PathBuf, Weak<Inner>>>> =
 /// written whole.
 pub const CHAIN: usize = 32;
 
-/// How many tokens a writer remembers where it found, so it looks each up
-/// in the index only once while it stays in use.
-const TOKENS_REMEMBERED: usize = 1 << 18;
+/// How many tokens a writer remembers where it found in each of two
+/// generations, so it looks each up in the index only once while it stays
+/// in use.
+const TOKENS_REMEMBERED: usize = 1 << 20;
 
 /// How many datum tokens a reader remembers having checked.
 const DATUMS_CHECKED: usize = 1 << 20;
@@ -278,7 +279,7 @@ struct Inner {
     checked: papaya::HashSet<u32>,
     /// Where a writer found tokens, by the hash of their bytes: the index
     /// is asked once for each while it stays here.
-    tokens: Mutex<HashMap<u64, u32, Hashed>>,
+    tokens: Mutex<Remembered>,
     /// The writer's turn in this process, and when this process last made
     /// a sync point.
     writer: Mutex<()>,
@@ -735,25 +736,55 @@ fn put_frame(bytes: &mut Vec<u8>, start: u64, data: &[u8]) -> io::Result<u32> {
     token_id(body_offset + 1 + pad)
 }
 
+/// Where a writer found tokens, by the hash of their bytes, in two
+/// generations: once the newer holds [`TOKENS_REMEMBERED`], it becomes the
+/// older and the older is dropped, and a token found in the older moves to
+/// the newer. So what a writer keeps using stays, in bounded memory.
+#[derive(Default)]
+struct Remembered {
+    newer: HashMap<u64, u32, Hashed>,
+    older: HashMap<u64, u32, Hashed>,
+}
+
+impl Remembered {
+    fn get(&mut self, hash: u64) -> Option<u32> {
+        if let Some(id) = self.newer.get(&hash) {
+            return Some(*id);
+        }
+        let id = self.older.remove(&hash)?;
+        self.insert(hash, id);
+        Some(id)
+    }
+
+    fn insert(&mut self, hash: u64, id: u32) {
+        if self.newer.len() >= TOKENS_REMEMBERED {
+            self.older = std::mem::take(&mut self.newer);
+        }
+        self.newer.insert(hash, id);
+    }
+
+    /// The memory the two generations take.
+    fn footprint(&self) -> usize {
+        (self.newer.capacity() + self.older.capacity()) * (8 + 4 + 1)
+    }
+}
+
 /// The token equal to `token` the file holds as of `snapshot`, by the
 /// value rows name it by: in `remembered`, or found in the index and
 /// remembered there.
 fn find_in(
-    remembered: &mut HashMap<u64, u32, Hashed>,
+    remembered: &mut Remembered,
     snapshot: &Snapshot,
     hash: u64,
     token: &[u8],
 ) -> Option<u32> {
-    if let Some(id) = remembered.get(&hash).copied()
+    if let Some(id) = remembered.get(hash)
         && snapshot.get(id) == Some(token)
     {
         return Some(id);
     }
     let (found, _) = snapshot.probe_token(hash, token).ok()?;
     if let Some(id) = found {
-        if remembered.len() >= TOKENS_REMEMBERED {
-            remembered.clear();
-        }
         remembered.insert(hash, id);
     }
     found
@@ -797,7 +828,7 @@ impl FileArchive {
             rows: RowsCache::new(options.rows_cached),
             manifests: papaya::HashMap::new(),
             checked: papaya::HashSet::new(),
-            tokens: Mutex::new(HashMap::default()),
+            tokens: Mutex::new(Remembered::default()),
             options,
             writer: Mutex::new(()),
             synced: Mutex::new(Instant::now()),
@@ -871,7 +902,7 @@ impl FileArchive {
             tokens: counts.tokens as usize,
             token_bytes: counts.token_bytes,
             index_memory: snapshot.slot.root.encode().len()
-                + self.inner.tokens.lock().capacity() * (8 + 4 + 1)
+                + self.inner.tokens.lock().footprint()
                 + self.inner.checked.len() * (4 + 8),
             split: Timings::get(&self.inner.timings.split),
             encode: Timings::get(&self.inner.timings.encode),
@@ -1086,10 +1117,9 @@ impl FileArchive {
 
     fn remember(&self, tokens: &[(u64, u32)]) {
         let mut remembered = self.inner.tokens.lock();
-        if remembered.len() + tokens.len() > TOKENS_REMEMBERED {
-            remembered.clear();
+        for (hash, id) in tokens {
+            remembered.insert(*hash, *id);
         }
-        remembered.extend(tokens.iter().copied());
     }
 
     /// Appends the `blocks` the archive does not hold yet to `catalog`, as

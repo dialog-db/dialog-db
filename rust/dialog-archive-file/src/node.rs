@@ -762,8 +762,19 @@ mod warm_split {
             return Ok(());
         };
         let archive = crate::FileArchive::open(&path)?;
+        // `DIALOG_ARCHIVE_PROFILE_NODES` takes every so many of a large
+        // file's blocks, up to that many.
+        let limit = std::env::var("DIALOG_ARCHIVE_PROFILE_NODES")
+            .ok()
+            .and_then(|limit| limit.parse::<usize>().ok());
+        let hashes = archive.hashes();
+        let step = limit.map_or(1, |limit| (hashes.len() / limit).max(1));
         let mut blocks = Vec::new();
-        for (catalog, hash) in archive.hashes() {
+        for (catalog, hash) in hashes
+            .into_iter()
+            .step_by(step)
+            .take(limit.unwrap_or(usize::MAX))
+        {
             blocks.push(Buffer::from(archive.get(&catalog, &hash)?.expect("listed")));
         }
         let nodes: Vec<_> = blocks.iter().filter_map(tree_node).collect();
