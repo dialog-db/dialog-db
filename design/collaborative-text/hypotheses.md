@@ -31,6 +31,13 @@ one signed revision covers many changes.
 
 ## H1. Text changes in their own region of the tree
 
+**Scoped (2026-11-09).** Commits already write region entries without
+claim records (`with_entries`, as the context and blob regions do).
+Gap: the replay, screened and lost-race merges diff only the history and
+data scopes and would silently drop a new tag; an older release would
+drop text and still count it seen, so it needs a format gate. Estimate
+8 to 10 files, ~400 lines plus tests. Cost numbers wait on E1.
+
 A reserved key range `tag ‖ document ‖ origin ‖ sequence → change`,
 beside the history, coverage and context regions. The tree differential
 already syncs only the entries a peer lacks, so Dialog's sync is the
@@ -61,6 +68,13 @@ order. Their ids `(peer, counter)` have the shape of Dialog's
 
 ## H3. Text changes as entries in the history region
 
+**Refuted (2026-11-09).** Mechanically possible: a batch is many records
+under one revision, and a record covering nothing skips screening. But
+history is keyed `origin ‖ edition`, so one document's changes scatter
+across every revision that touched it; opening it needs a
+document-to-versions index, and partial replicas skip history.
+[results](../../research/text-write-cost/results/2026-11-09-regions.md)
+
 Instead of a new region, a text change is a claim record. History is
 already origin-first, append-only and synced.
 
@@ -76,6 +90,11 @@ My prior: H1 over H3. History records describe facts; a text change is
 not a fact.
 
 ## H4. A region can be replicated whole while the rest stays partial
+
+**Confirmed (2026-11-09).** Opening one document of 500 changes reads 4
+to 7 blocks, ~190 to 260 KB, flat from 100 to 10 000 documents (tree
+9 MiB to 893 MiB). `Download::within(ranges)` already fetches chosen
+ranges eagerly. Overhead: ~172 bytes per stored entry, ~5× its payload.
 
 A partial replica fetches the range `tag ‖ document` in full when a
 document is opened, and nothing else from the region.

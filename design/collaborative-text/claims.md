@@ -57,3 +57,8 @@
 | an accreting resource (change blocks outside the tree, a heads pointer inside it) avoids the duplicates | hypothesis | maintainer, 2026-11-09; measured by text-write-cost | open |
 | concurrent heads pointers need no winner: their union names the merged version | hypothesis | follows from heads naming a set of changes; refuted if a reader can see a pointer before the blocks it names | open |
 | an accreting resource never forgets deleted text | fact | grow-only by construction; same as the claim log (`notes/version-control.md`, content erasure) | holds |
+| text changes as history entries cannot be read per document without a second index | fact | `history_claim_range` needs the version; keys are `origin ‖ edition` (regions report) | holds |
+| commits can write region entries without claim records | fact | `Commit::with_entries`, used by the context and blob regions (regions report) | holds |
+| the replay, screened and lost-race merges would drop entries of an unknown region | fact | `pull.rs` and `branch/merge.rs` diff only history and data scopes (regions report) | holds |
+| opening one document's range costs the same at 100 or 10 000 documents | fact | E3: 4 to 7 blocks per document (results/2026-11-09-regions.md) | holds |
+| a region entry costs ~5× its payload in today's encoding | fact | E3 harness, ~172 bytes per 20 to 50 byte change; cause (key column, value wrapper) is an inference | holds |
