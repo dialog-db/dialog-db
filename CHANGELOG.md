@@ -14,28 +14,29 @@ says how to cut a release.
 
 ## Unreleased
 
-### A rule seeded by several rows of one entity evaluates once where they bind no other value
+### A rule seeded by several rows of one entity is evaluated once when they agree
 
 [#763](https://github.com/dialog-db/dialog-db/pull/763), [#762](https://github.com/dialog-db/dialog-db/issues/762)
 
 Commit-time induction evaluated a seeded rule once per changed row a
-premise names. Rows of one entity now bind into one evaluation when none
-of them could bind another value than its own: each is this commit's own
-write or dispatched transient (not a claim the watermark lag carried
-in), binds exactly one premise field, a single attribute read under
-`last`, and no other row of the entity binds the same field. Any other
-row seeds alone, as before.
+premise names. Rows of one entity that each bind one distinct field of
+the premise, a single attribute read under `last`, are now bound into
+one evaluation first. When it finds any match, it finds every match the
+rows find one by one: a seeded read yields a row's value only when the
+round view elects it, so every field then reads its row's value either
+way. When it finds none (an overlay row, a derived candidate or another
+claim stands above one of the rows, or the rest of the body fails), the
+rows are seeded one by one, as before. Every other row seeds alone.
 
 What this changes for you:
 
-- What induction derives is meant to be unchanged: a combined seed finds
-  the matches where every field holds its row's value, which is every
-  match the rows find alone when no field can hold another value.
-  [#762](https://github.com/dialog-db/dialog-db/issues/762) lists what
-  that rests on.
+- What induction derives is unchanged. In this crate's tests every
+  seeded firing also seeds its rows one by one and checks that the heads
+  are the same.
 - A command whose event names several fields of a premise evaluates the
   rule once. On a tonk-shaped replica, a warm command's median fell from
-  7.0–9.2 ms to 5.0–5.7 ms.
+  6.9–8.7 ms to 4.7–5.9 ms; 1,861 of 1,900 groups found their match
+  together while building and pulling, 200 of 220 in warm commands.
 
 Why: an event's fields are one binding; evaluating it once per field
 repeated the same joins.
