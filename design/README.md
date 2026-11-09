@@ -55,4 +55,4 @@ Backtracking moves a topic to an earlier phase and says so in its journal.
 
 ## Topics
 
-None yet.
+- [A write under an electing pick must replace every claim it means to replace](pick-succession.md): **Directing**, [#759](https://github.com/dialog-db/dialog-db/issues/759).
