@@ -8,8 +8,6 @@ wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 #[cfg(not(feature = "web-integration-tests"))]
 use dialog_artifacts::tree::CorpusNode;
 #[cfg(not(feature = "web-integration-tests"))]
-use dialog_common::ConditionalSync;
-#[cfg(not(feature = "web-integration-tests"))]
 use dialog_effects::archive::Load as ArchiveLoad;
 #[cfg(not(feature = "web-integration-tests"))]
 use dialog_effects::archive::prelude::CatalogScope;
