@@ -16,6 +16,8 @@ use dialog_capability::{Capability, Command, Provider};
 use dialog_common::{Buffer, ConditionalSend, ConditionalSync, Held, Holds};
 use dialog_effects::archive::prelude::{ImportExt as _, PutExt as _};
 use dialog_effects::archive::{ArchiveError, Get, Import, Load, Put};
+use dialog_effects::blob::Import as BlobImport;
+use dialog_effects::blob::prelude::BlobImportExt as _;
 
 /// Observes the archive blocks an operator moves.
 pub trait Meter: ConditionalSend + ConditionalSync {
@@ -23,6 +25,10 @@ pub trait Meter: ConditionalSend + ConditionalSync {
     fn wrote(&self, block: &[u8]);
     /// A block was read.
     fn read(&self, block: &[u8]);
+    /// A blob of `size` bytes was imported under `digest` (a spilled value
+    /// or a revision record a commit writes beside the tree's nodes). The
+    /// default ignores it, so a meter of tree blocks alone stays as it was.
+    fn imported_blob(&self, _digest: &dialog_common::Blake3Hash, _size: u64) {}
 }
 
 /// Counts blocks and bytes in each direction. Clones share the counts.
@@ -122,6 +128,8 @@ where
             for block in import.blocks() {
                 self.meter.wrote(block.as_ref());
             }
+        } else if let Some(import) = input_of.downcast_ref::<Capability<BlobImport>>() {
+            self.meter.imported_blob(import.digest(), import.size());
         }
         // A block is read by a `Get`, or by the `Load` a reader performs to
         // have it from wherever the env reaches it: the env answers that
