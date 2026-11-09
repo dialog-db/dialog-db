@@ -158,6 +158,36 @@ positional summaries does not matter.
 - **Experiment:** E4: time to load the concurrent traces' final state
   from their changes, per library (H2) and for a native Eg-walker.
 
+## H7. Compacting a document's changes reaches library snapshot size
+
+Library snapshots (33 to 70 KB) are 5 to 7× smaller than the raw trace,
+yet Automerge, Loro and Diamond Types keep full history in them: the gap
+is cross-change compression, not dropped history. Periodically replace a
+document's settled change entries with one chunk entry holding their
+library-encoded batch (automerge-repo compacts this way; Sedimentree
+chunks by hash boundaries so replicas compact alike).
+
+- **Confirm:** a compacted region is within 2× of the library snapshot,
+  and two replicas that compacted independently converge to the same
+  entries (otherwise sync ships both).
+- **Refute:** chunk boundaries differ between replicas and compaction
+  multiplies sync bytes.
+- **Experiment:** E5, on the E1 harness.
+
+## H8. Live delivery and durability can be separate paths
+
+Collaborators expect keystrokes in well under a second; the per-flush
+floor (~10 KB) forbids durable flushes that often. Send changes live over
+an ephemeral channel (bounded logs, per-peer offsets, resync; #522) and
+flush them into the region at pauses. A peer that misses the live path
+catches up from the region.
+
+- **Confirm:** a change seen live and later flushed is applied once (the
+  library deduplicates by id); live bytes ≈ the per-change stream.
+- **Refute:** ephemeral channels are in-process only, or flushing races
+  live delivery so peers diverge.
+- **Experiment:** read #522's channel code first; then a two-peer run.
+
 ## Not hypotheses yet
 
 - Which library: decided by H2 and E1, not up front.

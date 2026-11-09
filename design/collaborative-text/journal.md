@@ -279,3 +279,26 @@ order; H4 confirmed.
 
 **Decided.** Not decided. The bar's reading decides more than any
 remaining run.
+
+## 2026-11-09, Directing: the agent's read
+
+**Asked.** What is the read after the research, and the recommendation?
+
+**Learned.** The agent's recommendation, an opinion until H0 for the
+region, H7 and H8 are measured:
+
+```
+keystroke ──▶ library (merge engine) ──▶ ephemeral channel ──▶ peers (live)
+                     │
+                     └─ at pauses ──▶ text region  tag ‖ doc ‖ origin ‖ seq
+                                         │  tree differential = sync
+                                         └─ compaction into chunks (H7)
+open ──▶ Download::within(doc range) ──▶ rebuild positional index locally
+```
+
+Out: changes as facts, doc as value, history region, a template with two
+syncs. Undecided: region versus accreting resource (H5 unmeasured; the
+region wins on moving parts unless H5 is much cheaper); Yrs versus
+Diamond Types at main (pending).
+
+**Decided.** Not decided; the maintainer decides.
