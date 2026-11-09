@@ -21,16 +21,20 @@ document saved on disk and its updates as sent between peers.
 (the traces text CRDT libraries benchmark against). Named in every
 result by file hash; not committed.
 
-**Variants.**
+**Experiments.** Hypotheses H0 to H6 live in
+`design/collaborative-text/hypotheses.md`.
 
-1. A text CRDT library alone: the bar.
-2. Doc as value: a whole document per commit.
-3. Accreting resource: change blocks outside the tree, a heads pointer
-   fact per commit.
-4. Changes as facts: one fact per change.
+- **E1.** Replay a concurrent trace; flush every edit, every second, on
+  each pause. Layouts: library alone (the bar); a text region (H1); an
+  accreting resource (H5); a whole document per commit. Measure bytes on
+  disk and bytes moved by the differential.
+- **E2.** Per library: export one change, import out of order (H2).
+- **E3.** Block reads to open one document among 1, 100 and 10 000 (H4).
+- **E4.** Time to rebuild the final text from changes (H6).
 
-Each committed per edit, per second and per pause. Same trace, same
-library for 1 to 3.
+The first E1 run stores the trace's own `(parent, position, text)`
+operations, encoded compactly, as region entries. It needs no library
+and isolates Dialog's overhead.
 
 **Success.** Within 2× of the library on both disk and sync bytes, and
 every replica converges to the trace's final text.

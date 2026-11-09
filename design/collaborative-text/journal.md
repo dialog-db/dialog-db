@@ -4,8 +4,8 @@
 
 |  | Understanding | Activity |
 |---|---|---|
-| **Status** | Problem stated. A commit costs ~120 to 160 KB on disk today, so per-edit commits likely fail the 2× bar in any column. Automerge's change format lets a content-blind store serve "changes since". The doc-as-value spike is found and read. | Directing; matrix mostly filled. |
-| **Agenda** | Is "lost" the right word in the problem statement, given both values survive until the next write? Which core changes shelved the spike, when its spec claims none to storage or sync? Measure write cost to confirm the napkin. | Settle the two questions with the maintainer; then run text-write-cost. |
+| **Status** | Survey done. Seven testable hypotheses (hypotheses.md). Commit frequency (H0) decides more than where text lives. | Directing; moving to measurement. |
+| **Agenda** | E1 first: Dialog's overhead per text change at each flush interval, with no library. | Build the E1 harness on the tree crate. |
 
 ## 2026-11-06, Describing: opening the topic
 
@@ -245,3 +245,19 @@ forever.
 **Decided.** The column is now "accreting resource plus heads pointer".
 Next: numbers (text-write-cost), starting with this column against doc
 as value.
+
+## 2026-11-09, Directing: from questions to hypotheses
+
+**Asked.** The maintainer wants a library that fits what Dialog offers,
+ideas transplanted where they help, synergy with DeltaDB. Two new ideas:
+a tree region replicated whole while the rest is partial, or text
+changes in the history region. And: the agent should bring hypotheses to
+test, not ask for each idea to be justified.
+
+**Learned.** Fair. The method asks the agent to add columns once the
+maintainer has given his; I kept asking instead. Writing the hypotheses
+out corrected one of my own claims: version-vector libraries fit if
+Dialog's differential does the sync (H2).
+
+**Decided.** Hypotheses H0 to H6 and experiments E1 to E4. E1 first,
+with no library.
