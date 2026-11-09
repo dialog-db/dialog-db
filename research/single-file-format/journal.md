@@ -1872,6 +1872,66 @@ rebuilt as leaves are walked, the tree's write buffer copied as it is
 edited, and the query engine's own bookkeeping, not values copied out
 to results.
 
+## 2026-11-09: where every change stands, and what reads lost
+
+**Question.** With the head dedupe and grouped seeding (#761, #763), the
+estimate change (no pull request yet) and this branch, how far is a warm
+command from 5 ms? And did any of them cost something elsewhere?
+
+**Runs.** The team of six, 1×, 120 warm commands. Each variant ran 5
+rounds, alternated, medians of the round medians, in ms. "main" and
+"main + fixes" use the fs store; this branch uses the file store.
+
+| | main | main + fixes | this branch | this branch + fixes |
+|---|--:|--:|--:|--:|
+| steady, all commands | 17.13 | 6.69 | 11.67 | 4.89 |
+| — memo | 9.88 | 7.07 | 8.48 | 4.99 |
+| — add label | 19.06 | 6.52 | 11.56 | 4.84 |
+| — create issue | 18.85 | 7.04 | 15.16 | 6.14 |
+| — comment | 15.63 | 6.15 | 9.69 | 3.55 |
+| — assignee | 18.48 | 5.78 | 12.21 | 4.77 |
+| — status | 16.95 | 6.98 | 11.40 | 4.89 |
+| steady, p95 | 23.3 | 23.6 | 19.5 | 15.9 |
+| query v2/activity, cold | 97 | 158 | 96 | 152 |
+| query v2/issue, warm | 42 | 67 | 43 | 58 |
+
+The median command meets 5 ms only with everything together, and
+creating an issue does not. The p95 is three times the target.
+
+**Reads got slower.** Every variant returns the same rows. Splitting
+the fixes (5 rounds each, fs store):
+
+| | main | + #761/#763 | + estimate |
+|---|--:|--:|--:|
+| steady, all commands | 17.20 | 6.59 | 16.43 |
+| query v2/activity, cold | 98 | 196 | 108 |
+| query v2/issue, warm | 42 | 82 | 43 |
+
+The estimate change costs reads nothing; the induce fixes double them.
+
+**Why.** Callgrind over the query phase alone, main against main +
+#761/#763: 8.36 G instructions against 15.43 G.
+- `fetch::warm_source` is 5.0 G of main's 8.4 G. A member with an
+  upstream walks the tree over a scan's range before the scan, to fetch
+  ahead of it, and does so for every scan: 18.5 K walks here. Every
+  block is already local. The only guard is whether a remote exists.
+- The walk decodes the write buffer of every link it considers outside
+  the range, to see whether a buffered op falls inside it. With the
+  fixes it decodes 924 K buffers against 333 K, at the same cost each
+  (about 2.9 K instructions). The walks are 19% more, and each meets
+  2.8 times as many buffered links. Fewer duplicate ops reach the tree,
+  so buffers overflow less often, and more nodes hold ops in their
+  buffers.
+- The steady phase does not walk: a command's reads are unaffected.
+
+So the fixes did not slow the read itself. They made a walk that reads
+did not need more expensive, and that walk was already most of a read.
+
+**What follows.** Skip the walk when it has nothing to fetch: remember
+that a walk over a root and a range found every node present, and skip
+later walks over the same root within that range. Failing that, decide
+whether a buffer holds an in-range key without decoding all of it.
+
 ## How to reproduce
 
 ```sh
