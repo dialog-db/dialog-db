@@ -17,6 +17,12 @@ unless noted. Ordered by how much one answer decides.
 
 ## H0. A text change does not need to be a commit
 
+**Refuted for changes as facts (2026-11-09).** Each fact costs ~585 B
+live (four regions), 56× the raw floor even as one commit; per second
+writes ~1.5 GB, per edit ~11 GB (extrapolated). A one-fact commit writes
+~169 KB. Batching helps less than the interval grows: bigger commits
+rewrite more. [results](../../research/text-write-cost/results/2026-11-09-e1.md)
+
 Text changes accumulate locally (an append-only log, like DeltaDB's
 writer thread or the novelty buffer) and enter the tree at sync points;
 one signed revision covers many changes.
@@ -30,6 +36,13 @@ one signed revision covers many changes.
   in-tree option passes until the storage work lands.
 
 ## H1. Text changes in their own region of the tree
+
+**Measured (2026-11-09).** Entries cost 1.8× the raw floor when written
+directly to the tree (E1), but each flush costs ~8 to 12 KB fixed: per
+edit 746× raw with the buffer, per second 150 to 240×, a 2 s pause 10
+to 12×, a 5 s pause ~3×. The regions harness measured ~5× payload per
+entry through the artifact tree's key and value encoding: the encoding,
+not the region, decides.
 
 **Scoped (2026-11-09).** Commits already write region entries without
 claim records (`with_entries`, as the context and blob regions do).
@@ -115,6 +128,9 @@ document is opened, and nothing else from the region.
   10 000.
 
 ## H5. An accreting resource outside the tree beats a region
+
+**Not measured.** Inferred: a heads pointer committed through today's
+path costs ~45 to 80 KB median per flush, the same per-flush floor.
 
 Change blocks by hash outside the tree, a heads pointer fact inside it.
 

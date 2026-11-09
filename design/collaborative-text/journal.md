@@ -4,8 +4,8 @@
 
 |  | Understanding | Activity |
 |---|---|---|
-| **Status** | Survey done. Seven testable hypotheses (hypotheses.md). Commit frequency (H0) decides more than where text lives. | Directing; moving to measurement. |
-| **Agenda** | E1 first: Dialog's overhead per text change at each flush interval, with no library. | Build the E1 harness on the tree crate. |
+| **Status** | Changes as facts is out (56× raw before commit cost). A text region stores at 1.8× raw but pays ~10 KB per flush. Libraries' snapshots are 5 to 7× smaller than raw. H2 holds; Yrs fits best on numbers. H3 refuted, H4 confirmed. | Directing; first measurements in. |
+| **Agenda** | Which reading of the 2× bar: against library snapshots (disk) or per-change streams (sync)? Can the per-flush floor drop (H0 for the region, H5)? | Settle the bar; then measure region sync between replicas and H5 outside a commit. |
 
 ## 2026-11-06, Describing: opening the topic
 
@@ -261,3 +261,21 @@ Dialog's differential does the sync (H2).
 
 **Decided.** Hypotheses H0 to H6 and experiments E1 to E4. E1 first,
 with no library.
+
+## 2026-11-09, Directing: first numbers
+
+**Asked.** Run the experiments, in parallel.
+
+**Learned.** Three runs (results under research/text-write-cost/results).
+Changes as facts costs 56× the raw trace before any per-commit cost and
+is out. A text region is cheap per entry (1.8× raw) but pays ~10 KB per
+flush, so only pause-length flushes come near. Libraries store a snapshot
+5 to 7× smaller than the raw trace, which makes "within 2× of a library"
+ambiguous: against snapshots nothing in Dialog passes; against the
+per-change stream Dialog would sync, a region at a pause interval does.
+H2 confirmed for three libraries; Yrs is cheapest per change and the
+only one that rebuilds from changes under 100 ms. H3 refuted on key
+order; H4 confirmed.
+
+**Decided.** Not decided. The bar's reading decides more than any
+remaining run.

@@ -38,7 +38,7 @@
 | a one-fact commit touches six keys (three data orderings, a claim record, the revision record's two orderings) plus a signed record; costs are per commit, so batching amortizes them | fact | `notes/version-control.md`, write amplification and commit cost | holds |
 | claim records keep value bytes in the log indefinitely | fact | `notes/version-control.md`, content erasure | holds |
 | values above the inline threshold spill to content-addressed blocks outside tree nodes, which push ships beside the novel nodes | fact | `rust/dialog-artifacts/src/spill.rs` | holds |
-| per-keystroke commits on the concurrent editing traces (~26k edits, ~21 KB final text) would write gigabytes; per-second batching still hundreds of megabytes | hypothesis | napkin: edits × ~140 KB; settled by research/text-write-cost.md | open |
+| per-keystroke commits on the concurrent editing traces (~26k edits, ~21 KB final text) would write gigabytes; per-second batching still hundreds of megabytes | hypothesis | napkin: edits × ~140 KB | per edit confirmed (~11 GB); per second refuted, it is worse (~1.5 GB), both extrapolated (E1) |
 | the doc-as-value spike committed snapshots per edit session, not per keystroke, and said it does not compete with a library's delta sync for live editing | fact | closed PR #388, `notes/automerge-integration-rationale.md` step 15 on that branch | holds |
 | the doc-as-value spike changed no storage, sync or on-disk format, only the value type, winner selection and an edge crate | fact | closed PR #388 spec, "the shape of the result"; the PR itself touched 88 files, much of it query engine work | holds |
 | Automerge change chunks store dependency hashes before the operations, and a change's hash is computed from its bytes, so both are readable without decoding operations | fact | Automerge binary format spec, change chunk and change hash (survey.md) | holds |
@@ -66,3 +66,9 @@
 | splitting history into single changes costs 30 to 47× the batch for Automerge, Loro and Diamond Types, 1.7 to 1.8× for Yrs | fact | same | holds |
 | importing Automerge changes one call each is quadratic as the document grows | fact | same, 0.56 ms per change at start, 11 ms by change 24 000 | holds |
 | Yrs is the best fit for Dialog storing and syncing individual changes | hypothesis | library agent, 2026-11-09, from per-change size and rebuild time; costs: own sequence numbers, some interleaving, snapshot drops history | open |
+| a one-fact commit writes ~169 KB on average (median 66 KB) | fact | E1 | holds |
+| a text fact costs ~585 B live, ~147 B in each of four regions | fact | E1 | holds |
+| text-region entries written directly to the tree cost 1.8× the raw trace encoding; each flush adds ~8 to 12 KB | fact | E1 | holds |
+| doc as value grows without bound: at one commit per transaction a fresh replica downloads 342 MB for a 21 KB text | fact | E1, extrapolated from a 5000-transaction prefix | holds |
+| on the concurrent traces, library snapshots are 33 to 70 KB, 0.14 to 0.26× the raw trace encoding (~274 KB) | fact | libraries and E1 results | holds |
+| perf and soak numbers taken through `Metered` under-report writes of values large enough to spill | fact | E1 found `blob::Import` uncounted; fixed on research/text-e1 only | holds |
