@@ -21,8 +21,16 @@ document saved on disk and its updates as sent between peers.
 (the traces text CRDT libraries benchmark against). Named in every
 result by file hash; not committed.
 
-**Variants.** Doc as value; changes as facts, one commit per edit;
-changes as facts, batched (per pause, per second).
+**Variants.**
+
+1. A text CRDT library alone: the bar.
+2. Doc as value: a whole document per commit.
+3. Accreting resource: change blocks outside the tree, a heads pointer
+   fact per commit.
+4. Changes as facts: one fact per change.
+
+Each committed per edit, per second and per pause. Same trace, same
+library for 1 to 3.
 
 **Success.** Within 2× of the library on both disk and sync bytes, and
 every replica converges to the trace's final text.

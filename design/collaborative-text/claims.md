@@ -51,3 +51,9 @@
 | what Dialog already has that DeltaDB built: persistent structurally shared trees, ancestry walks with logarithmic skip links, diff-based sync of only what is missing | fact | `notes/version-control.md` (skip links, tree differential); delta.dev posts | holds |
 | a delta does not have to be a commit; DeltaDB persists per keystroke without a signed revision per delta | fact | delta.dev posts | holds |
 | Dialog's watermark is a per-origin map that never shrinks, the cost DeltaDB rejected version vectors for | fact | `notes/version-control.md`, "Where the watermark lives" | holds |
+| merging two versions of a CRDT document already retains every change from both | fact | how change-graph CRDTs merge (union of changes); maintainer, 2026-11-09 | holds |
+| storing pre-merged whole copies in Dialog, as the doc-as-value spike did, duplicates what the document already holds | fact | maintainer, 2026-11-09; each snapshot is a superset of the ones before it | holds |
+| the duplicates are pure waste | opinion | maintainer, 2026-11-09; they also buy a value readable alone, without fetching the change graph, which a partial replica and a cold load use | - |
+| an accreting resource (change blocks outside the tree, a heads pointer inside it) avoids the duplicates | hypothesis | maintainer, 2026-11-09; measured by text-write-cost | open |
+| concurrent heads pointers need no winner: their union names the merged version | hypothesis | follows from heads naming a set of changes; refuted if a reader can see a pointer before the blocks it names | open |
+| an accreting resource never forgets deleted text | fact | grow-only by construction; same as the claim log (`notes/version-control.md`, content erasure) | holds |

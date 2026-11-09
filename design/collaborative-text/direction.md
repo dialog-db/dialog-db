@@ -29,9 +29,21 @@ Columns:
   on one entity and attribute merge into a new one. Spiked, shelved.
 - **Changes as facts**: a document is a mutable resource; its changes
   travel as ordinary facts and are applied to it. Dialog can read its text.
-- **Resource synced by Dialog**: the resource lives outside the tree; the
-  sync engine answers "what is its current version" and "changes since
-  this version", the way memory cells answer a branch's revision.
+- **Resource synced by Dialog**: an accreting resource, like an asset but
+  mutable by adding only: the document's changes live outside the tree as
+  immutable blocks; a fact in the tree points at the version (its heads).
+  The sync engine answers "what is its current version" and "changes
+  since this version", the way memory cells answer a branch's revision.
+
+```
+tree                                 outside the tree
+┌───────────────────────────┐        ┌──────────────────────────────┐
+│ doc:x  text/heads  {a3,b1}│───────▶│ change blocks, by hash       │
+│ doc:x  text/heads  {a2}   │  ┐     │ a1 ◀─ a2 ◀─ a3               │
+└───────────────────────────┘  │     │   ▲                          │
+ two concurrent pointers:      └────▶│   └── b1                     │
+ their union is the merged version   └──────────────────────────────┘
+```
 - **Template**: a text CRDT library with its own sync beside Dialog;
   Dialog holds a key; we document how and what to deploy.
 - **Built in**: a native text CRDT that reuses what Dialog already has.

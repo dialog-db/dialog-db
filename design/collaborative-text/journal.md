@@ -227,3 +227,21 @@ Primitive by primitive:
 **Decided.** Not decided. The hypothesis splits: the tree fits the
 replicated half; the positional half is new work, local, and need not be
 in the tree.
+
+## 2026-11-09, Directing: why the doc-as-value spike was reconsidered
+
+**Asked.** The maintainer gave the reason not captured before: merging
+two edits already keeps every change from both, so storing pre-merged
+copies is waste; a document resource with a pointer into it avoids it;
+like assets, but mutable, though only accreting.
+
+**Learned.** This is the "resource synced by Dialog" column, arrived at
+from the other side, and it matches the change-graph finding from the
+survey. Pushback: the copies are a cache, not only waste; one value is
+readable alone, while a pointer needs the whole change graph (or a
+snapshot) on the reading peer. Accreting also means deleted text is kept
+forever.
+
+**Decided.** The column is now "accreting resource plus heads pointer".
+Next: numbers (text-write-cost), starting with this column against doc
+as value.
