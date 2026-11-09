@@ -16,7 +16,7 @@ project's own benchmarks.
 | **Fugue** (paper) | n/a, an ordering algorithm | n/a | yes | Fugue: forward non-interleaving; FugueMax: maximally non-interleaving, proven [6] | TypeScript in Collabs [6]; Loro uses a Fugue-based algorithm [5] |
 | **Peritext** | n/a, rich text marks over a list CRDT | n/a | yes | inherits the list CRDT's | prototype in TypeScript; not in Automerge per its README [9]; ? Automerge's own marks |
 | **json-joy** | JSON CRDT patches with a compact binary codec [10]; ? since a version | ? | ? | ? | TypeScript |
-| **DeltaDB** (Zed) | records a delta per operation, each with a stable identity [11] | ? not described | ? replication across machines, hosting not described [11] | ? | pre-release; open source and embeddability not stated [11] |
+| **DeltaDB** (Zed) | an edit is `(parent version, offset, text)`; a version is a frontier of delta ids, not a version vector; sync sends logarithmically spaced versions to find a common ancestor, then the missing deltas [11][18] | to apply: the CRDT, which reconstructs the parent version and maps offset to a fragment [18]; the wire format is decoupled from the CRDT's internals [18] | 🟡 a server per thread (one Durable Object each) stores and fans out deltas [18] | concurrent inserts at one spot ordered by actor id [11]; Eg-walker lineage, loosely based on Diamond Types [11] | Rust; state is copy-on-write B+ trees (a SumTree variant) in a SQLite nodes table, refcounted [18] |
 
 ## Sources
 
@@ -37,3 +37,4 @@ project's own benchmarks.
 15. [Automerge storage](https://automerge.org/docs/reference/under-the-hood/storage/)
 16. [Sedimentree](https://github.com/automerge/beelay/blob/main/docs/sedimentree.md)
 17. [Loro Protocol](https://loro.dev/blog/loro-protocol)
+18. [Fine-grained version control for agents](https://delta.dev/blog/fine-grained-version-control-for-agents); [The future of version control](https://delta.dev/blog/future-of-version-control)

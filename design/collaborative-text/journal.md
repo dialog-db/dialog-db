@@ -190,3 +190,40 @@ the value type and query engine. Ask.
 commit frequency, which answers the earlier question (version fact per
 edit or per sync point) in favour of sync points, pending the
 measurement.
+
+## 2026-11-09, Directing: does the search tree give us the primitives?
+
+**Asked.** The maintainer read the two DeltaDB posts and thinks the
+dialog search tree may provide primitives collaborative text needs.
+
+**Learned.** Split DeltaDB into what it replicates and what it keeps local:
+
+```
+replicated                         local, per replica
+┌──────────────────────────┐       ┌─────────────────────────────┐
+│ delta graph              │       │ fragment index              │
+│ delta = parent, offset,  │──────▶│ positional B-tree: position │
+│         text             │ replay│ at a version → fragment     │
+│ ancestry apart from text │       │ copy-on-write, shared nodes │
+└──────────────────────────┘       └─────────────────────────────┘
+```
+
+Primitive by primitive:
+
+- **Structural sharing between versions**: Dialog has it.
+- **Ancestry walks, logarithmic search for a common ancestor**: Dialog has
+  it (skip links, tree differential).
+- **Storing a delta graph keyed by writer and sequence**: the history
+  region's shape; a fit, untested.
+- **A positional index**: Dialog does not have it. The search tree is
+  ordered by sorted key; text order is not a key. DeltaDB never replicates
+  its index, so it does not need one that is content addressed.
+- **Per-keystroke deltas**: DeltaDB's are not commits. Dialog's commit
+  cost is per commit (six keys, a signed record), so the fit depends on
+  deltas entering the tree without a revision each.
+- **Frontier over version vector**: DeltaDB rejected the growing map that
+  Dialog's watermark is. A tension to note, not to fix here.
+
+**Decided.** Not decided. The hypothesis splits: the tree fits the
+replicated half; the positional half is new work, local, and need not be
+in the tree.

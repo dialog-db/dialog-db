@@ -69,3 +69,30 @@ document.
 **Decision.** Hypothesis confirmed for Automerge, not for version-vector
 libraries. The per-change block count is the cost to watch; compaction
 or Sedimentree-style chunking is the known answer.
+
+## 2026-11-09 — DeltaDB's two posts
+
+**Question.** What does DeltaDB do that Dialog might already have?
+
+**Method.** The two delta.dev posts. No code, no numbers in either.
+
+**Results.**
+
+- A delta is the edit plus its parent version: `(parent, offset, text)`.
+  No per-character id travels; identity is the creating delta's id, and
+  a fragment index maps a position at a version to the current position.
+- The fragment index is a persistent B-tree: each version copies the path
+  to the changed leaf and shares the rest. Storage "grows linearithmicly
+  with the size of the edits"; nothing measured.
+- Ancestry is stored apart from payload. Versions are frontiers, not
+  version vectors, because a vector "can only ever grow". Sync finds a
+  common ancestor from a logarithmically spaced list of versions.
+- Every keystroke is a delta, persisted asynchronously by one writer
+  thread, synced as typed. Deltas are not commits.
+- Nodes are refcounted and released; old versions are reclaimable.
+- Text, last-writer-wins registers and add-wins maps compose into one
+  replicated struct.
+
+**Decision.** DeltaDB goes from `?` to filled. The useful split is between
+the replicated thing (a delta graph) and the local thing (a positional
+index rebuilt per replica). Recorded in the design topic.

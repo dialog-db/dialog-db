@@ -35,6 +35,8 @@ Columns:
 - **Template**: a text CRDT library with its own sync beside Dialog;
   Dialog holds a key; we document how and what to deploy.
 - **Built in**: a native text CRDT that reuses what Dialog already has.
+  One shape, from DeltaDB: replicate a delta graph (edit, parent version,
+  offset) in the tree; keep the positional index local and unreplicated.
 
 | criterion \ approach | Status quo | Doc as value | Changes as facts | Resource synced by Dialog | Template | Built in |
 |---|---|---|---|---|---|---|
