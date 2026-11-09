@@ -403,7 +403,7 @@ Comparing the design with [Bloom](http://bloom-lang.net) settled three of the ch
 - What a rule head that names no entity lands on. In R16, four of five readers of this spec put a sent notice on the to-do's own entity because no example shows another way; the readers of the shorter documents left it out. The obvious answer is the one writes have: the `id` of the head's facts.
 - Whether a rule that creates should only create. The R16 rule that asserts `state: :open` on every add reopens a done to-do that is added again; `(unless (todo ?t))` in its `when` would stop that.
 - Record types: a formula such as `id` takes a record, and there is no type for one yet.
-- How `:last` orders writes from devices that had not synced.
+- Concurrent claims under `:last` are ordered by standing (edition, then cause, then succession) and last by the hash of the value, so every replica elects alike (#752). A write after them settles them only once [#759](https://github.com/dialog-db/dialog-db/issues/759) lands.
 - Optional parameters: `(option …)` read correctly once in six.
 - Which layers exist beyond `:now` and stored, and their names.
 - Whether commands are conduct record types, one attribute whose value is a record, rather than one attribute per field. Dialog's `Record` value is opaque to queries today ([record-value](../../notes/record-value.md)).

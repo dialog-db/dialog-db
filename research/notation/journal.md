@@ -10,9 +10,9 @@ What we tried, what it measured, and what we decided, newest last. The [idea](..
 - **Measured:** 249 readers over 15 rounds. Without a visible word, readers do not see a derivation (R1 `default` line 0/3, R13's six brace shapes 0/18). With one paragraph of spec, they do (R14 5/5, R15 16/16).
 - **Rejected on design grounds, though readers got them:** `=` in a head (constraint elsewhere), the `{title author} ?b` head (construction does not belong in a concept).
 - **R16:** the revised design, read from four ways of writing its spec, scored 297 of 300 points; every document's median was 15 of 15. The style of the spec did not matter at this difficulty; the examples did.
-- **Settled after R16:** a write through a concept passes every parameter, and leaving one out is a compile error; a ground call is a rule with no premises, and the `!` on any form says whether it lives in the document or the replica; a call in an argument's place stands for its `is:` value.
+- **Settled after R16:** a write through a concept passes every parameter, and leaving one out is a compile error; a top-level call is `assert`, `assert!` or `query` by whether it has variables and a `!`; the `!` means retained; records in the entity's place are dropped for `(id {…})`; picks stay part of the attribute; a concept body holds only attribute lines and constraints.
 - **Next:** decide what a rule head that names no entity lands on; then a harder round, with tasks no example in the documents shows.
-- **Open:** whether a record in the entity's place writes its fields; key spelling inside records; `:last` across devices; optional parameters.
+- **Open:** whether commands are asserted or written; what a rule head that names no entity lands on; whether questions stay calls with variables or become rules into a domain-call head; text literals; optional parameters. The design's Open list has the rest.
 
 ## Datasets
 
