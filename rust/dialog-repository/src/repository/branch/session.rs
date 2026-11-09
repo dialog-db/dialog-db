@@ -10,8 +10,8 @@ use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::tree::ArtifactNodeCache;
 use dialog_artifacts::{
     Artifact, ArtifactSelector, ArtifactStream, ArtifactView, Changes, DialogArtifactsError,
-    Entity, Estimate, Likelihood, Preload, PreloadRequest, Select, SortKey, Speculation, Statement,
-    sort_key,
+    Entity, Estimate, EstimateRequest, Likelihood, Preload, PreloadRequest, Select, SortKey,
+    Speculation, Statement, sort_key,
 };
 use dialog_artifacts::{Relation as ArtifactsRelation, Standing, Value};
 use dialog_capability::{Capability, Fork, Provider, Subject};
@@ -993,19 +993,25 @@ impl<'a> Provider<Select<'a>> for QueryEnv<'a> {
 // strategy heuristic needs). Summing lines is an upper bound — a fact
 // on two lines counts twice — which is the safe direction for a "how
 // broad is this range" question. `None` from every line (all empty)
-// yields `None`.
+// yields `None`. Under a limit each line stops once it passes it, and
+// the lines stop once their sum passes it: the sum is then above the
+// limit, which is all a limited estimate promises.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl Provider<Estimate> for QueryEnv<'_> {
-    async fn execute(
-        &self,
-        input: ArtifactSelector<Constrained>,
-    ) -> Result<Option<u64>, DialogArtifactsError> {
+    async fn execute(&self, input: EstimateRequest) -> Result<Option<u64>, DialogArtifactsError> {
         let mut total: Option<u64> = None;
         for source in &self.sources {
-            let select = crate::Select::from_source(source.as_ref(), input.clone());
-            if let Some(estimate) = select.estimate(self.env as &dyn TreeEnv).await? {
-                total = Some(total.unwrap_or(0).saturating_add(estimate));
+            let select = crate::Select::from_source(source.as_ref(), input.selector.clone());
+            if let Some(estimate) = select
+                .estimate_within(self.env as &dyn TreeEnv, input.limit)
+                .await?
+            {
+                let sum = total.unwrap_or(0).saturating_add(estimate);
+                total = Some(sum);
+                if input.limit.is_some_and(|limit| sum > limit) {
+                    break;
+                }
             }
         }
         Ok(total)

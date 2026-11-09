@@ -768,6 +768,25 @@ pub trait ArtifactTreeExt {
             + ConditionalSend
             + ConditionalSync
             + Clone;
+
+    /// [`estimate`](Self::estimate), stopping once the count passes
+    /// `limit` (see `PersistentTree::range_estimate_within`): a range
+    /// estimated at most `limit` counts exactly, one past it reports some
+    /// number above `limit`.
+    async fn estimate_within<S>(
+        self,
+        store: S,
+        selector: ArtifactSelector<Constrained>,
+        limit: Option<u64>,
+    ) -> Result<Option<u64>, DialogArtifactsError>
+    where
+        Self: Sized,
+        S: Provider<archive::Load>
+            + Provider<blob::Load>
+            + Holds
+            + ConditionalSend
+            + ConditionalSync
+            + Clone;
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -976,6 +995,23 @@ impl ArtifactTreeExt for ArtifactTree {
             + ConditionalSync
             + Clone,
     {
+        self.estimate_within(store, selector, None).await
+    }
+
+    async fn estimate_within<S>(
+        self,
+        store: S,
+        selector: ArtifactSelector<Constrained>,
+        limit: Option<u64>,
+    ) -> Result<Option<u64>, DialogArtifactsError>
+    where
+        S: Provider<archive::Load>
+            + Provider<blob::Load>
+            + Holds
+            + ConditionalSend
+            + ConditionalSync
+            + Clone,
+    {
         let tree = self;
         let storage = store;
         // The range must be built under the manifest the facts were written
@@ -990,7 +1026,9 @@ impl ArtifactTreeExt for ArtifactTree {
         let lower = range.start().as_ref();
         let mut upper = range.end().as_ref().to_vec();
         upper.push(0);
-        Ok(tree.range_estimate(lower, &upper, &storage).await?)
+        Ok(tree
+            .range_estimate_within(lower, &upper, limit, &storage)
+            .await?)
     }
 
     fn scan<'s, S>(

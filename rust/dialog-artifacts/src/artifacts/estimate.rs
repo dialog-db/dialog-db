@@ -19,8 +19,32 @@ use crate::{ArtifactSelector, DialogArtifactsError};
 /// tree-derived numbers instead of the cost model's fixed constants.
 pub struct Estimate;
 
+/// What an [`Estimate`] is asked: a selector's range, and optionally the
+/// count past which its exact size does not matter.
+#[derive(Clone)]
+pub struct EstimateRequest {
+    /// The range to estimate.
+    pub selector: ArtifactSelector<Constrained>,
+    /// When set, the estimate may stop once its count passes `limit` and
+    /// report the count so far: some number above `limit`, at most what
+    /// the whole estimate would be. A range whose estimate is at most
+    /// `limit` counts exactly what it counts without one. A planner asking
+    /// only whether a range is wider than some bound passes the bound, and
+    /// a broad range is then answered from its top levels.
+    pub limit: Option<u64>,
+}
+
+impl From<ArtifactSelector<Constrained>> for EstimateRequest {
+    fn from(selector: ArtifactSelector<Constrained>) -> Self {
+        Self {
+            selector,
+            limit: None,
+        }
+    }
+}
+
 impl Command for Estimate {
-    type Input = ArtifactSelector<Constrained>;
+    type Input = EstimateRequest;
     /// An advisory upper-bound entry count for the selector's range. `None`
     /// when the tree is empty or the estimate is unavailable, in which case a
     /// caller should treat the range as unknown (maximally broad).

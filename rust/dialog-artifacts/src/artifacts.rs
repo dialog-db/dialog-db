@@ -16,7 +16,7 @@ pub mod selector;
 pub use selector::{ArtifactSelector, ValueBound};
 
 mod estimate;
-pub use estimate::Estimate;
+pub use estimate::{Estimate, EstimateRequest};
 
 mod query;
 pub use query::{

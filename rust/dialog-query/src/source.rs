@@ -106,12 +106,12 @@ pub(crate) mod test {
     impl Provider<dialog_artifacts::Estimate> for TestEnv<'_> {
         async fn execute(
             &self,
-            input: ArtifactSelector<Constrained>,
+            input: dialog_artifacts::EstimateRequest,
         ) -> Result<Option<u64>, DialogArtifactsError> {
             self.branch
                 .claims()
-                .select(input)
-                .estimate_perform(self.operator)
+                .select(input.selector)
+                .estimate_perform_within(self.operator, input.limit)
                 .await
         }
     }

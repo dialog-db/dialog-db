@@ -369,6 +369,32 @@ where
     where
         Env: Provider<Load> + Holds + ConditionalSync,
     {
+        self.range_estimate_within(lower, upper, None, storage)
+            .await
+    }
+
+    /// [`range_estimate`](Self::range_estimate), stopping once the count
+    /// passes `limit`.
+    ///
+    /// The count only grows as the walk goes on, so a walk that passes
+    /// `limit` would have ended above it too: it returns the count so far,
+    /// some number above `limit`, without reading the rest of the range's
+    /// edges. A range whose estimate is at most `limit` is walked whole and
+    /// counts exactly what `range_estimate` counts. A caller asking only
+    /// whether a range is wider than some bound, as a planner comparing
+    /// scans does, reads the root and stops there for any range that
+    /// covers whole children worth more than the bound.
+    pub async fn range_estimate_within<Env>(
+        &self,
+        lower: &[u8],
+        upper: &[u8],
+        limit: Option<u64>,
+        storage: &Env,
+    ) -> Result<Option<u64>, DialogSearchTreeError>
+    where
+        Env: Provider<Load> + Holds + ConditionalSync,
+    {
+        let passed = |total: u64| limit.is_some_and(|limit| total > limit);
         let Some(root) = self.stored_root() else {
             return Ok(None);
         };
@@ -391,6 +417,9 @@ where
                         }
                         if lower.is_none_or(|lower| key >= lower) {
                             total += 1;
+                            if passed(total) {
+                                return Ok(Some(total));
+                            }
                         }
                     }
                     continue;
@@ -417,6 +446,9 @@ where
                 } else {
                     pending.push((index.hash_at(at)?.clone(), cut_lower, cut_upper));
                 }
+            }
+            if passed(total) {
+                return Ok(Some(total));
             }
         }
         Ok(Some(total))
@@ -793,6 +825,60 @@ mod tests {
                 .await?
                 .expect("a populated tree estimates");
             assert_eq!(straddling, 40, "forty keys from {start} count as forty");
+        }
+        Ok(())
+    }
+
+    /// A limited estimate answers the question a limit asks: a range whose
+    /// estimate is at most the limit counts exactly what the unlimited
+    /// estimate counts, and a range whose estimate passes it reports some
+    /// number above the limit, never one at or under it.
+    #[dialog_common::test]
+    async fn it_stops_an_estimate_once_it_passes_the_limit() -> Result<()> {
+        let storage = Blocks::new();
+        let mut delta = Delta::zero();
+
+        const COUNT: u32 = 2_000;
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_catalog());
+        let mut edit = tree.edit();
+        for i in 0..COUNT {
+            edit = edit
+                .insert(i.to_be_bytes(), i.to_be_bytes().to_vec(), &storage)
+                .await?;
+        }
+        tree = edit.persist(&mut delta, &storage)?;
+        for (_, buffer) in delta.flush() {
+            storage.store(buffer);
+        }
+
+        let ranges: [(u32, u32); 5] = [
+            (0, COUNT),
+            (1000, 1020),
+            (1000, 1001),
+            (0, 700),
+            (300, 1900),
+        ];
+        let limits = [0, 1, 3, 20, 60, 500, 5_000, 50_000];
+        for (from, to) in ranges {
+            let (lower, upper) = (from.to_be_bytes(), to.to_be_bytes());
+            let whole = tree
+                .range_estimate(&lower, &upper, &storage)
+                .await?
+                .expect("a populated tree estimates");
+            for limit in limits {
+                let within = tree
+                    .range_estimate_within(&lower, &upper, Some(limit), &storage)
+                    .await?
+                    .expect("a populated tree estimates");
+                if whole <= limit {
+                    assert_eq!(within, whole, "[{from}, {to}) under {limit}: counted whole");
+                } else {
+                    assert!(
+                        within > limit && within <= whole,
+                        "[{from}, {to}) past {limit}: {within} of {whole}"
+                    );
+                }
+            }
         }
         Ok(())
     }

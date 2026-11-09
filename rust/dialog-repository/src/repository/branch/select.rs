@@ -205,7 +205,20 @@ impl Select<'_> {
     where
         Env: Provider<Get> + Provider<ArchiveLoad> + Provider<BlobLoad> + Holds + ConditionalSync,
     {
-        self.estimate(erased(env)).await
+        self.estimate_perform_within(env, None).await
+    }
+
+    /// [`estimate_perform`](Self::estimate_perform) with a limit (see
+    /// [`estimate_within`](Self::estimate_within)).
+    pub async fn estimate_perform_within<Env>(
+        self,
+        env: &Env,
+        limit: Option<u64>,
+    ) -> Result<Option<u64>, DialogArtifactsError>
+    where
+        Env: Provider<Get> + Provider<ArchiveLoad> + Provider<BlobLoad> + Holds + ConditionalSync,
+    {
+        self.estimate_within(erased(env), limit).await
     }
 
     /// An advisory upper-bound estimate of how many artifacts this selector's
@@ -227,11 +240,30 @@ impl Select<'_> {
             + ConditionalSync
             + Clone,
     {
+        self.estimate_within(store, None).await
+    }
+
+    /// [`estimate`](Self::estimate), stopping once the count passes
+    /// `limit`: a range estimated at most `limit` counts exactly, one past
+    /// it reports some number above `limit`.
+    pub async fn estimate_within<S>(
+        self,
+        store: S,
+        limit: Option<u64>,
+    ) -> Result<Option<u64>, DialogArtifactsError>
+    where
+        S: Provider<ArchiveLoad>
+            + Provider<BlobLoad>
+            + Holds
+            + ConditionalSend
+            + ConditionalSync
+            + Clone,
+    {
         let Some(tree_hash) = self.tree_hash() else {
             return Ok(None);
         };
         let tree = Index::at(self.catalog(), NodeHash::from(tree_hash));
-        tree.estimate(store, self.selector).await
+        tree.estimate_within(store, self.selector, limit).await
     }
 
     /// [`execute`](Self::execute) materializing every row from the scan's

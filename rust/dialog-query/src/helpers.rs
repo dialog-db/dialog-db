@@ -523,14 +523,14 @@ where
 {
     async fn execute(
         &self,
-        input: ArtifactSelector<Constrained>,
+        input: dialog_artifacts::EstimateRequest,
     ) -> Result<Option<u64>, DialogArtifactsError> {
         // Route the estimate's root read through the same counting store as
         // the scans, so a bench sees the block it costs.
-        let select = self.branch.claims().select(input);
+        let select = self.branch.claims().select(input.selector);
         let store = self.operator;
         let counting = CountingStore::new(store, self.journal.clone());
-        select.estimate(counting).await
+        select.estimate_within(counting, input.limit).await
     }
 }
 

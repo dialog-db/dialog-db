@@ -4,10 +4,12 @@ use crate::concept::query::ConceptQuery;
 use crate::query::Application as _;
 use crate::selection::{Match, Selection};
 use crate::{Environment, SortOrder, multi_merge_join};
+use core::future::Future;
 use core::pin::Pin;
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{
-    ArtifactSelector, Estimate, Likelihood, Preload, PreloadRequest, encode_value_owned,
+    ArtifactSelector, Estimate, EstimateRequest, Likelihood, Preload, PreloadRequest,
+    encode_value_owned,
 };
 use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
@@ -191,25 +193,42 @@ impl Conjunction {
             return true;
         }
 
-        let mut min_size = u64::MAX;
-        let mut max_size = 0u64;
-        for (_, selector) in selectors {
+        // The answer is only whether the widest range passes
+        // MERGE_COST_BALANCE times the narrowest, so no range needs a
+        // count past that bound. The ranges pinned to a value or an entity
+        // are likely the narrow ones and are estimated first; every later
+        // estimate stops once it passes the bound over the narrowest so far
+        // (`EstimateRequest::limit`), which for a broad range is usually at
+        // the root. A range that passes it decides the answer: the
+        // narrowest can only get narrower, so the rest are not estimated.
+        //
+        // This answers exactly what estimating every range whole answers.
+        // A range stopped past `bound * narrowest_then` is wider than
+        // `bound * narrowest` at the end too, and the narrowest range is
+        // never stopped: its whole estimate is at most the narrowest so far,
+        // so under every bound it is given.
+        let mut selectors = selectors;
+        selectors.sort_by_key(|(_, selector)| match selector {
+            Ok(selector) => selector.value().is_none() && selector.entity().is_none(),
+            Err(_) => true,
+        });
+        balanced(selectors, |(_, selector), limit| async move {
             // A selector build failure or an unavailable estimate means
             // "range size unknown"; treat as maximally broad so an all-broad
             // join stays eligible and a genuinely selective one is never
             // wrongly merged on a missing estimate.
-            let size = match selector {
-                Ok(selector) => Provider::<Estimate>::execute(env, selector)
-                    .await
-                    .ok()
-                    .flatten()
-                    .unwrap_or(u64::MAX),
+            match selector {
+                Ok(selector) => {
+                    Provider::<Estimate>::execute(env, EstimateRequest { selector, limit })
+                        .await
+                        .ok()
+                        .flatten()
+                        .unwrap_or(u64::MAX)
+                }
                 Err(_) => u64::MAX,
-            };
-            min_size = min_size.min(size);
-            max_size = max_size.max(size);
-        }
-        min_size != 0 && max_size <= min_size.saturating_mul(MERGE_COST_BALANCE as u64)
+            }
+        })
+        .await
     }
 
     /// Evaluate a structurally merge-eligible conjunction, choosing per query
@@ -452,6 +471,39 @@ impl MergeInput {
 /// variable is Absent (occurrence-typing narrowing); `Coalesce` is
 /// the explicit opt-in for treating a missing value as a default;
 /// absence is only ever read relative to a known entity.
+/// Whether the widest of `ranges` is within [`MERGE_COST_BALANCE`] times
+/// the narrowest, and none is empty, estimating them in order with
+/// `estimate`.
+///
+/// `estimate` is handed a limit (see `EstimateRequest::limit`) once one
+/// range is known: an estimate at most the limit is exact, one past it
+/// may stop at any count above it. The answer is the one exact estimates
+/// of every range give. A range stopped past `bound * narrowest_then` is
+/// wider than `bound * narrowest` at the end too, since the narrowest only
+/// gets narrower. The narrowest range is never stopped: its exact estimate
+/// is at most the narrowest so far, so it is under every limit it is
+/// given. And a range wider than the bound decides the answer, so the
+/// ranges after it are not estimated.
+async fn balanced<R, F, Fut>(ranges: impl IntoIterator<Item = R>, mut estimate: F) -> bool
+where
+    F: FnMut(R, Option<u64>) -> Fut,
+    Fut: Future<Output = u64>,
+{
+    let bound = MERGE_COST_BALANCE as u64;
+    let mut min_size = u64::MAX;
+    let mut max_size = 0u64;
+    for range in ranges {
+        let limit = (min_size != u64::MAX).then(|| min_size.saturating_mul(bound));
+        let size = estimate(range, limit).await;
+        min_size = min_size.min(size);
+        max_size = max_size.max(size);
+        if min_size == 0 || max_size > min_size.saturating_mul(bound) {
+            return false;
+        }
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     #[cfg(target_arch = "wasm32")]
@@ -474,6 +526,51 @@ mod tests {
     use dialog_artifacts::Entity;
     use dialog_peer::helpers::{test_repo, test_session_with_peer};
     use futures_util::{TryStreamExt, stream};
+
+    /// The limited, early-answering balance check answers what estimating
+    /// every range whole answers, for every order of every combination of
+    /// sizes drawn from a set that straddles the bound, unknown and empty
+    /// ranges included. The estimator honours the limit contract at its
+    /// stingiest: past the limit it reports one more than the limit.
+    #[dialog_common::test]
+    async fn it_balances_with_limits_as_it_does_with_whole_estimates() {
+        const SIZES: [u64; 9] = [0, 1, 2, 3, 4, 9, 10, 400, u64::MAX];
+        let exact = |sizes: &[u64]| {
+            let min = sizes.iter().copied().min().unwrap_or(u64::MAX);
+            let max = sizes.iter().copied().max().unwrap_or(0);
+            min != 0 && max <= min.saturating_mul(super::MERGE_COST_BALANCE as u64)
+        };
+        let mut cases = vec![vec![]];
+        for _ in 0..3 {
+            let mut longer = Vec::new();
+            for case in &cases {
+                for size in SIZES {
+                    let mut next: Vec<u64> = case.clone();
+                    next.push(size);
+                    longer.push(next);
+                }
+            }
+            cases.extend(longer);
+        }
+        let mut estimated = 0usize;
+        for sizes in cases {
+            let estimate = |size: u64, limit: Option<u64>| {
+                estimated += 1;
+                async move {
+                    match limit {
+                        Some(limit) if size > limit => limit + 1,
+                        _ => size,
+                    }
+                }
+            };
+            assert_eq!(
+                super::balanced(sizes.clone(), estimate).await,
+                exact(&sizes),
+                "sizes {sizes:?}"
+            );
+        }
+        assert!(estimated > 0);
+    }
 
     /// A two-attribute conjunction over a shared entity is structurally merge
     /// eligible, and the tree-derived balance check picks merge only when
