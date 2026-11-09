@@ -35,7 +35,13 @@ use super::{Context, Origin, Version, Watermark};
 /// a region at all.
 pub async fn context_in<S>(tree: &ArtifactTree, store: &S) -> Result<Context, DialogArtifactsError>
 where
-    S: ArtifactNodes + Provider<blob::Load> + ConditionalSync + Clone + ConditionalSync,
+    S: Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
+        + Provider<blob::Load>
+        + ConditionalSync
+        + Clone
+        + ConditionalSync,
 {
     let [range] = context_scope();
     let entries = tree.stream_range(range, store);
@@ -61,7 +67,13 @@ pub async fn region_entry<S>(
     store: &S,
 ) -> Result<Option<Watermark>, DialogArtifactsError>
 where
-    S: ArtifactNodes + Provider<blob::Load> + ConditionalSync + Clone + ConditionalSync,
+    S: Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
+        + Provider<blob::Load>
+        + ConditionalSync
+        + Clone
+        + ConditionalSync,
 {
     let key = context_key(origin);
     match tree.get(&key, store).await? {

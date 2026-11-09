@@ -1,16 +1,14 @@
-use dialog_artifacts::tree::ArtifactNodes;
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::Read as BlobRead;
+use dialog_search_tree::nodes;
 use std::cell::Cell;
 use std::collections::HashSet;
 use std::iter::once;
 
 use dialog_artifacts::history::Edition;
 use dialog_artifacts::selector::Constrained;
-use dialog_artifacts::tree::{
-    ArtifactNode, ArtifactPreload, ArtifactRead, ArtifactWrite, ArtifactWrites,
-};
+use dialog_artifacts::tree::CorpusNode;
 use dialog_artifacts::{
     Artifact, ArtifactSelector, ArtifactStream, ArtifactView, Changes, DialogArtifactsError,
     Entity, Estimate, Likelihood, Preload, PreloadRequest, Select, SortKey, Speculation, Statement,
@@ -360,8 +358,11 @@ impl<'a, Q: Application> SelectQuery<'a, Q> {
             + Provider<Resolve>
             + Provider<Identify>
             + Provider<ArchiveLoad>
-            + ArtifactNodes
-            + ArtifactWrites
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
             + Provider<Preload>
             + Provider<Speculation>
@@ -410,14 +411,18 @@ impl<'a, Q: Application> SelectQuery<'a, Q> {
 /// commits; erased, those names and copies collapse.
 pub(crate) trait Capabilities:
     TreeEnv
-    + ArtifactWrites
+    + Provider<nodes::Write<CorpusNode>>
+    + ConditionalSync
     + Provider<BlobRead>
     + Provider<Get>
     + Provider<Put>
     + Provider<Resolve>
     + Provider<ArchiveLoad>
-    + ArtifactNodes
-    + ArtifactWrites
+    + Provider<nodes::Read<CorpusNode>>
+    + Provider<nodes::Preload<CorpusNode>>
+    + ConditionalSync
+    + Provider<nodes::Write<CorpusNode>>
+    + ConditionalSync
     + Provider<BlobLoad>
     + Provider<Preload>
     + Provider<Fork<RemoteSite, Resolve>>
@@ -428,14 +433,18 @@ pub(crate) trait Capabilities:
 
 impl<T> Capabilities for T where
     T: TreeEnv
-        + ArtifactWrites
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
         + Provider<BlobRead>
         + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
         + Provider<ArchiveLoad>
-        + ArtifactNodes
-        + ArtifactWrites
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
         + Provider<BlobLoad>
         + Provider<Preload>
         + Provider<Fork<RemoteSite, Resolve>>
@@ -1116,11 +1125,11 @@ impl<'a> Provider<ArchiveLoad> for QueryEnv<'a> {
 /// A node is its hash, whichever line holds it, so the lines the env
 /// answers at once are taken first and the rest waited on only when none
 /// of those had it.
-impl<'a> Provider<ArtifactRead> for QueryEnv<'a> {
+impl<'a> Provider<nodes::Read<CorpusNode>> for QueryEnv<'a> {
     fn execute(
         &self,
-        read: ArtifactRead,
-    ) -> Resume<'_, Result<Option<ArtifactNode>, DialogSearchTreeError>> {
+        read: nodes::Read<CorpusNode>,
+    ) -> Resume<'_, Result<Option<CorpusNode>, DialogSearchTreeError>> {
         if !anywhere(read.catalog.subject()) {
             return read.perform(self.env);
         }
@@ -1149,8 +1158,8 @@ impl<'a> Provider<ArtifactRead> for QueryEnv<'a> {
     }
 }
 
-impl<'a> Provider<ArtifactPreload> for QueryEnv<'a> {
-    fn execute(&self, preload: ArtifactPreload) -> Resume<'_, ()> {
+impl<'a> Provider<nodes::Preload<CorpusNode>> for QueryEnv<'a> {
+    fn execute(&self, preload: nodes::Preload<CorpusNode>) -> Resume<'_, ()> {
         if !anywhere(preload.catalog.subject()) {
             return preload.perform(self.env);
         }
@@ -1174,8 +1183,11 @@ impl<'a> Provider<ArtifactPreload> for QueryEnv<'a> {
 }
 
 // Nodes are written where the commit says, through the env.
-impl<'a> Provider<ArtifactWrite> for QueryEnv<'a> {
-    fn execute(&self, write: ArtifactWrite) -> Resume<'_, Result<(), DialogSearchTreeError>> {
+impl<'a> Provider<nodes::Write<CorpusNode>> for QueryEnv<'a> {
+    fn execute(
+        &self,
+        write: nodes::Write<CorpusNode>,
+    ) -> Resume<'_, Result<(), DialogSearchTreeError>> {
         write.perform(self.env)
     }
 }
@@ -2259,8 +2271,11 @@ mod rule_tests {
             + dialog_capability::Provider<Resolve>
             + dialog_capability::Provider<Identify>
             + dialog_capability::Provider<ArchiveLoad>
-            + ArtifactNodes
-            + ArtifactWrites
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
             + dialog_capability::Provider<BlobLoad>
             + dialog_capability::Provider<dialog_artifacts::Preload>
             + dialog_capability::Provider<dialog_artifacts::Speculation>
@@ -2347,8 +2362,11 @@ mod rule_tests {
             + dialog_capability::Provider<Resolve>
             + dialog_capability::Provider<Identify>
             + dialog_capability::Provider<ArchiveLoad>
-            + ArtifactNodes
-            + ArtifactWrites
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
             + dialog_capability::Provider<BlobLoad>
             + dialog_capability::Provider<dialog_artifacts::Preload>
             + dialog_capability::Provider<dialog_artifacts::Speculation>
@@ -2430,8 +2448,11 @@ mod rule_tests {
             + dialog_capability::Provider<Resolve>
             + dialog_capability::Provider<Identify>
             + dialog_capability::Provider<ArchiveLoad>
-            + ArtifactNodes
-            + ArtifactWrites
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
             + dialog_capability::Provider<BlobLoad>
             + dialog_capability::Provider<dialog_artifacts::Preload>
             + dialog_capability::Provider<dialog_artifacts::Speculation>

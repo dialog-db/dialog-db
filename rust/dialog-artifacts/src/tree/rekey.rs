@@ -80,7 +80,12 @@ pub async fn rekey_tree<S>(
     manifest: Manifest,
 ) -> Result<ArtifactTree, DialogArtifactsError>
 where
-    S: ArtifactNodes + Provider<blob::Load> + ConditionalSync + Clone,
+    S: Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
+        + Provider<blob::Load>
+        + ConditionalSync
+        + Clone,
 {
     let value_encoding = manifest.value_encoding;
     let mut target = ArtifactTree::empty_with_manifest(source.catalog().clone(), manifest);

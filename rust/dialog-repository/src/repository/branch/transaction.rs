@@ -21,7 +21,7 @@ use crate::repository::branch::asset::store_assets;
 use crate::repository::source::SourceRef;
 use crate::rules::{SharedRuleCache, TriggerFootprint, is_rule_attribute, on_attr, reads_attr};
 use crate::{Branch, CommitError, RemoteSite, Revision, Snapshot, Staged};
-use dialog_artifacts::tree::{ArtifactNodes, ArtifactWrites};
+use dialog_artifacts::tree::CorpusNode;
 use dialog_artifacts::{Changes, Statement};
 use dialog_capability::{Fork, Provider};
 use dialog_common::{ConditionalSync, Holds};
@@ -33,6 +33,7 @@ use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::Read as BlobRead;
 use dialog_effects::blob::Size as BlobSize;
 use dialog_effects::memory::{Publish, Resolve};
+use dialog_search_tree::nodes;
 
 /// A transaction on a line of the repository.
 ///
@@ -241,14 +242,18 @@ impl TransactionCommit<&Snapshot> {
             + Provider<BlobRead>
             + Provider<Put>
             + Provider<Import>
-            + ArtifactWrites
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
             + Provider<Resolve>
             + Provider<Publish>
             + Provider<Identify>
             + Provider<Attest>
             + Provider<ArchiveLoad>
-            + ArtifactWrites
-            + ArtifactNodes
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
@@ -376,14 +381,18 @@ impl Branch {
             + Provider<BlobRead>
             + Provider<Put>
             + Provider<Import>
-            + ArtifactWrites
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
             + Provider<Resolve>
             + Provider<Publish>
             + Provider<Identify>
             + Provider<Attest>
             + Provider<ArchiveLoad>
-            + ArtifactWrites
-            + ArtifactNodes
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>

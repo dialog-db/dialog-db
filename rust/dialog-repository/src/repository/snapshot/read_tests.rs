@@ -6,14 +6,14 @@ wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
 use anyhow::Result;
 use dialog_artifacts::history::History as _;
-use dialog_artifacts::tree::ArtifactNodes;
-use dialog_artifacts::tree::ArtifactWrites;
+use dialog_artifacts::tree::CorpusNode;
 use dialog_artifacts::{Artifact, ArtifactSelector, Changes, Entity, Value};
 use dialog_effects::blob::BlobError;
 use dialog_effects::blob::Read as BlobRead;
 use dialog_peer::helpers::test_session_with_peer;
 use dialog_query::query::Output;
 use dialog_query::{Concept, Query, Term, the};
+use dialog_search_tree::nodes;
 use futures_util::{StreamExt as _, stream};
 
 use crate::helpers::test_repo;
@@ -64,8 +64,11 @@ where
         + Provider<Put>
         + Provider<Resolve>
         + Provider<ArchiveLoad>
-        + ArtifactWrites
-        + ArtifactNodes
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
         + Provider<BlobLoad>
         + Provider<dialog_artifacts::Preload>
         + Provider<dialog_artifacts::Speculation>
@@ -108,8 +111,11 @@ where
         + Provider<Resolve>
         + Provider<Identify>
         + Provider<ArchiveLoad>
-        + ArtifactWrites
-        + ArtifactNodes
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
         + Provider<BlobLoad>
         + Provider<dialog_artifacts::Preload>
         + Provider<dialog_artifacts::Speculation>
@@ -137,8 +143,11 @@ where
         + Provider<Resolve>
         + Provider<Identify>
         + Provider<ArchiveLoad>
-        + ArtifactWrites
-        + ArtifactNodes
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
         + Provider<BlobLoad>
         + Provider<dialog_artifacts::Preload>
         + Provider<dialog_artifacts::Speculation>

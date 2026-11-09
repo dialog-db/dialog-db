@@ -71,10 +71,11 @@ pub use archive::*;
 /// What a read bound names, for this crate's modules to import at once
 /// without colliding with what they import themselves.
 mod reads {
-    pub use crate::tree::ArtifactNodes;
+    pub use crate::tree::CorpusNode;
     pub use dialog_capability::Provider;
     pub use dialog_common::{ConditionalSend, ConditionalSync};
     pub use dialog_effects::blob;
+    pub use dialog_search_tree::nodes;
 }
 
 mod artifacts;

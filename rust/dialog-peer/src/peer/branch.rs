@@ -16,7 +16,7 @@
 
 use super::{Mode, Peer};
 use core::fmt::Display;
-use dialog_artifacts::tree::{ArtifactNodes, ArtifactWrites};
+use dialog_artifacts::tree::CorpusNode;
 use dialog_capability::{Capability, Fork, Policy, Provider, Subject};
 use dialog_common::Blake3Hash;
 use dialog_common::{ConditionalSend, ConditionalSync};
@@ -36,6 +36,7 @@ use dialog_repository::{
     Branch, LEGACY_EMPTY_ROOT, PublishError, REGISTRY, RemoteSite, RepositoryMemoryExt,
     RetractError,
 };
+use dialog_search_tree::nodes;
 
 /// The environment a branch operation runs against.
 ///
@@ -48,15 +49,19 @@ pub trait BranchEnv:
     + Provider<BlobImport>
     + Provider<Put>
     + Provider<Import>
-    + ArtifactWrites
+    + Provider<nodes::Write<CorpusNode>>
+    + ConditionalSync
     + Provider<Resolve>
     + Provider<Publish>
     + Provider<Retract>
     + Provider<Identify>
     + Provider<Attest>
     + Provider<ArchiveLoad>
-    + ArtifactWrites
-    + ArtifactNodes
+    + Provider<nodes::Write<CorpusNode>>
+    + ConditionalSync
+    + Provider<nodes::Read<CorpusNode>>
+    + Provider<nodes::Preload<CorpusNode>>
+    + ConditionalSync
     + Provider<BlobLoad>
     + Provider<dialog_artifacts::Preload>
     + Provider<dialog_artifacts::Speculation>
@@ -72,15 +77,19 @@ impl<T> BranchEnv for T where
         + Provider<BlobImport>
         + Provider<Put>
         + Provider<Import>
-        + ArtifactWrites
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
         + Provider<Resolve>
         + Provider<Publish>
         + Provider<Retract>
         + Provider<Identify>
         + Provider<Attest>
         + Provider<ArchiveLoad>
-        + ArtifactWrites
-        + ArtifactNodes
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
         + Provider<BlobLoad>
         + Provider<dialog_artifacts::Preload>
         + Provider<dialog_artifacts::Speculation>

@@ -85,7 +85,10 @@ pub trait ArtifactWriter: Sized {
         storage: &S,
     ) -> Result<Self, DialogSearchTreeError>
     where
-        S: ArtifactNodes + ConditionalSync;
+        S: Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + ConditionalSync;
 
     /// Insert (or overwrite) a batch of entries, one write at a time.
     ///
@@ -102,7 +105,10 @@ pub trait ArtifactWriter: Sized {
         storage: &S,
     ) -> Result<Self, DialogSearchTreeError>
     where
-        S: ArtifactNodes + ConditionalSync,
+        S: Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + ConditionalSync,
         Self: ConditionalSend,
     {
         for (key, value) in entries {
@@ -114,7 +120,10 @@ pub trait ArtifactWriter: Sized {
     /// Remove `key`, if present.
     async fn erase<S>(self, key: &Key, storage: &S) -> Result<Self, DialogSearchTreeError>
     where
-        S: ArtifactNodes + ConditionalSync;
+        S: Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + ConditionalSync;
 
     /// Read the value at `key`, seeing this batch's own pending writes.
     async fn read<S>(
@@ -123,7 +132,10 @@ pub trait ArtifactWriter: Sized {
         storage: &S,
     ) -> Result<Option<State<Datum>>, DialogSearchTreeError>
     where
-        S: ArtifactNodes + ConditionalSync;
+        S: Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + ConditionalSync;
 
     /// Scan `range` in key order, seeing this batch's own pending writes.
     ///
@@ -137,7 +149,10 @@ pub trait ArtifactWriter: Sized {
         storage: &'a S,
     ) -> impl Stream<Item = Result<Entry<Key, State<Datum>>, DialogSearchTreeError>> + 'a
     where
-        S: ArtifactNodes + ConditionalSync;
+        S: Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + ConditionalSync;
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -154,14 +169,20 @@ impl ArtifactWriter for TransientTree<Key, State<Datum>> {
         storage: &S,
     ) -> Result<Self, DialogSearchTreeError>
     where
-        S: ArtifactNodes + ConditionalSync,
+        S: Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + ConditionalSync,
     {
         self.insert(key, value, storage).await
     }
 
     async fn erase<S>(self, key: &Key, storage: &S) -> Result<Self, DialogSearchTreeError>
     where
-        S: ArtifactNodes + ConditionalSync,
+        S: Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + ConditionalSync,
     {
         self.delete(key, storage).await
     }
@@ -172,7 +193,10 @@ impl ArtifactWriter for TransientTree<Key, State<Datum>> {
         storage: &S,
     ) -> Result<Option<State<Datum>>, DialogSearchTreeError>
     where
-        S: ArtifactNodes + ConditionalSync,
+        S: Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + ConditionalSync,
     {
         self.get(key, storage).await
     }
@@ -183,7 +207,10 @@ impl ArtifactWriter for TransientTree<Key, State<Datum>> {
         storage: &'a S,
     ) -> impl Stream<Item = Result<Entry<Key, State<Datum>>, DialogSearchTreeError>> + 'a
     where
-        S: ArtifactNodes + ConditionalSync,
+        S: Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + ConditionalSync,
     {
         self.stream_range(range, storage)
     }
@@ -209,14 +236,20 @@ impl ArtifactWriter for BufferedArtifactTree {
         storage: &S,
     ) -> Result<Self, DialogSearchTreeError>
     where
-        S: ArtifactNodes + ConditionalSync,
+        S: Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + ConditionalSync,
     {
         self.insert_deferred(key, value, storage).await
     }
 
     async fn erase<S>(self, key: &Key, storage: &S) -> Result<Self, DialogSearchTreeError>
     where
-        S: ArtifactNodes + ConditionalSync,
+        S: Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + ConditionalSync,
     {
         self.delete_deferred(key.clone(), storage).await
     }
@@ -227,7 +260,10 @@ impl ArtifactWriter for BufferedArtifactTree {
         storage: &S,
     ) -> Result<Option<State<Datum>>, DialogSearchTreeError>
     where
-        S: ArtifactNodes + ConditionalSync,
+        S: Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + ConditionalSync,
     {
         self.get(key, storage).await
     }
@@ -238,7 +274,10 @@ impl ArtifactWriter for BufferedArtifactTree {
         storage: &'a S,
     ) -> impl Stream<Item = Result<Entry<Key, State<Datum>>, DialogSearchTreeError>> + 'a
     where
-        S: ArtifactNodes + ConditionalSync,
+        S: Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + ConditionalSync,
     {
         self.stream_range(range, storage)
     }
@@ -415,7 +454,12 @@ impl BufferedBatch {
         scope: WriteScope,
     ) -> Result<Self, DialogArtifactsError>
     where
-        S: ArtifactNodes + Provider<blob::Load> + ConditionalSync + Clone,
+        S: Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + Provider<blob::Load>
+            + ConditionalSync
+            + Clone,
         I: Stream<Item = Instruction> + ConditionalSend,
     {
         Self::open_batch(tree, store, version.into(), instructions, scope, None).await
@@ -441,7 +485,12 @@ impl BufferedBatch {
         scope: WriteScope,
     ) -> Result<Self, DialogArtifactsError>
     where
-        S: ArtifactNodes + Provider<blob::Load> + ConditionalSync + Clone,
+        S: Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + Provider<blob::Load>
+            + ConditionalSync
+            + Clone,
         I: Stream<Item = Instruction> + ConditionalSend,
     {
         Self::open_batch(
@@ -474,7 +523,12 @@ impl BufferedBatch {
         scope: WriteScope,
     ) -> Result<Self, DialogArtifactsError>
     where
-        S: ArtifactNodes + Provider<blob::Load> + ConditionalSync + Clone,
+        S: Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + Provider<blob::Load>
+            + ConditionalSync
+            + Clone,
         I: Stream<Item = Instruction> + ConditionalSend,
     {
         Self::open_batch(
@@ -497,7 +551,12 @@ impl BufferedBatch {
         slot: Option<SpineSlot>,
     ) -> Result<Self, DialogArtifactsError>
     where
-        S: ArtifactNodes + Provider<blob::Load> + ConditionalSync + Clone,
+        S: Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + Provider<blob::Load>
+            + ConditionalSync
+            + Clone,
         I: Stream<Item = Instruction> + ConditionalSend,
     {
         // The batch reads through what it stages, so a value it spills is
@@ -550,7 +609,12 @@ impl BufferedBatch {
         scope: WriteScope,
     ) -> Result<Self, DialogArtifactsError>
     where
-        S: ArtifactNodes + Provider<blob::Load> + ConditionalSync + Clone,
+        S: Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + Provider<blob::Load>
+            + ConditionalSync
+            + Clone,
         I: Stream<Item = Instruction> + ConditionalSend,
     {
         // Read through what the batch staged so far, as its first pass did.
@@ -624,7 +688,12 @@ impl BufferedBatch {
         entries: impl Into<RecordEntries>,
     ) -> Result<Self, DialogArtifactsError>
     where
-        S: ArtifactNodes + Provider<blob::Load> + ConditionalSync + Clone,
+        S: Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + Provider<blob::Load>
+            + ConditionalSync
+            + Clone,
     {
         let RecordEntries { entries, spill } = entries.into();
         // A spilled record value is staged with the batch's other spills,
@@ -661,7 +730,12 @@ impl BufferedBatch {
         canonicalize: bool,
     ) -> Result<ArtifactTree, DialogArtifactsError>
     where
-        S: ArtifactNodes + Provider<blob::Load> + ConditionalSync + Clone,
+        S: Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + Provider<blob::Load>
+            + ConditionalSync
+            + Clone,
     {
         // The values the batch spilled go out with its nodes.
         for blob in self.staged.flush_blobs() {
@@ -719,7 +793,12 @@ pub async fn apply_buffered<S, I>(
     canonicalize: bool,
 ) -> Result<bool, DialogArtifactsError>
 where
-    S: ArtifactNodes + Provider<blob::Load> + ConditionalSync + Clone,
+    S: Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
+        + Provider<blob::Load>
+        + ConditionalSync
+        + Clone,
     I: Stream<Item = Instruction> + ConditionalSend,
 {
     let batch =
@@ -742,7 +821,12 @@ pub async fn apply_buffered_reusing<S, I>(
     canonicalize: bool,
 ) -> Result<bool, DialogArtifactsError>
 where
-    S: ArtifactNodes + Provider<blob::Load> + ConditionalSync + Clone,
+    S: Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
+        + Provider<blob::Load>
+        + ConditionalSync
+        + Clone,
     I: Stream<Item = Instruction> + ConditionalSend,
 {
     let batch = BufferedBatch::apply_reusing(

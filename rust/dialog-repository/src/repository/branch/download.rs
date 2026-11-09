@@ -15,9 +15,10 @@
 //! the two acts — adopt the upstream head, then materialize it.
 
 use core::ops::RangeInclusive;
-use dialog_artifacts::tree::{ArtifactNodes, ArtifactWrites};
+use dialog_artifacts::tree::CorpusNode;
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::blob::Load as BlobLoad;
+use dialog_search_tree::nodes;
 
 use dialog_artifacts::merge::data_scope;
 use dialog_capability::{Fork, Provider};
@@ -115,8 +116,11 @@ impl Download<'_> {
             + Provider<BlobRead>
             + Provider<BlobImport>
             + Provider<ArchiveLoad>
-            + ArtifactWrites
-            + ArtifactNodes
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
@@ -209,7 +213,8 @@ impl<'a> PullDownload<'a> {
         Env: Provider<Get>
             + Provider<Put>
             + Provider<Import>
-            + ArtifactWrites
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
             + Provider<Resolve>
             + Provider<Publish>
             + Provider<Identify>
@@ -217,8 +222,11 @@ impl<'a> PullDownload<'a> {
             + Provider<BlobRead>
             + Provider<BlobImport>
             + Provider<ArchiveLoad>
-            + ArtifactWrites
-            + ArtifactNodes
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>

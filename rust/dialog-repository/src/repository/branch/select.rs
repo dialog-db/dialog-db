@@ -1,8 +1,7 @@
 use base58::ToBase58;
 use dialog_artifacts::selector::Constrained;
-use dialog_artifacts::tree::ArtifactNodes;
 use dialog_artifacts::tree::ArtifactTreeExt as _;
-use dialog_artifacts::tree::ArtifactWrites;
+use dialog_artifacts::tree::CorpusNode;
 use dialog_artifacts::{
     Artifact, ArtifactSelector, ArtifactStream, ArtifactView, Datum, DialogArtifactsError, Key,
     State,
@@ -13,6 +12,7 @@ use dialog_common::{ConditionalSend, ConditionalSync, Holds};
 use dialog_effects::archive::Get;
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::blob::Load as BlobLoad;
+use dialog_search_tree::nodes;
 use dialog_search_tree::{DialogSearchTreeError, Manifest, load_node};
 use dialog_storage::Blake3Hash;
 use futures_util::Stream;
@@ -64,7 +64,15 @@ pub(crate) async fn line_manifest<Env>(
     env: &Env,
 ) -> Result<Manifest, DialogArtifactsError>
 where
-    Env: Provider<ArchiveLoad> + ArtifactWrites + ArtifactNodes + Holds + ConditionalSync + ?Sized,
+    Env: Provider<ArchiveLoad>
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
+        + Holds
+        + ConditionalSync
+        + ?Sized,
 {
     Ok(source.tree().manifest(&env).await?)
 }
@@ -102,8 +110,11 @@ impl Select<'_> {
     where
         Env: Provider<Get>
             + Provider<ArchiveLoad>
-            + ArtifactNodes
-            + ArtifactWrites
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
             + Holds
             + ConditionalSync,
@@ -119,7 +130,14 @@ impl Select<'_> {
     /// The tree this select scans, with its root block probed eagerly.
     async fn probed_tree<S>(&self, store: &S) -> Result<Index, DialogSearchTreeError>
     where
-        S: Provider<ArchiveLoad> + ArtifactWrites + ArtifactNodes + Holds + ConditionalSync,
+        S: Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + Holds
+            + ConditionalSync,
     {
         // Tree hydration is lazy (nodes load on demand during the scan),
         // but unreachable branches should fail here rather than midway
@@ -167,8 +185,11 @@ impl Select<'_> {
     >
     where
         S: Provider<ArchiveLoad>
-            + ArtifactWrites
-            + ArtifactNodes
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
             + Holds
             + ConditionalSend
@@ -194,8 +215,11 @@ impl Select<'_> {
     ) -> Result<ArtifactStream<'s>, DialogSearchTreeError>
     where
         S: Provider<ArchiveLoad>
-            + ArtifactWrites
-            + ArtifactNodes
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
             + Holds
             + ConditionalSend
@@ -217,8 +241,11 @@ impl Select<'_> {
     where
         Env: Provider<Get>
             + Provider<ArchiveLoad>
-            + ArtifactNodes
-            + ArtifactWrites
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
             + Holds
             + ConditionalSync,
@@ -239,8 +266,11 @@ impl Select<'_> {
     pub async fn estimate<S>(self, store: S) -> Result<Option<u64>, DialogArtifactsError>
     where
         S: Provider<ArchiveLoad>
-            + ArtifactWrites
-            + ArtifactNodes
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
             + Holds
             + ConditionalSend
@@ -267,8 +297,11 @@ impl Select<'_> {
     >
     where
         S: Provider<ArchiveLoad>
-            + ArtifactWrites
-            + ArtifactNodes
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
             + Holds
             + ConditionalSend
@@ -307,8 +340,11 @@ impl SelectOwned<'_> {
     where
         Env: Provider<Get>
             + Provider<ArchiveLoad>
-            + ArtifactNodes
-            + ArtifactWrites
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
             + Holds
             + ConditionalSync,
@@ -327,8 +363,11 @@ impl SelectOwned<'_> {
     >
     where
         S: Provider<ArchiveLoad>
-            + ArtifactWrites
-            + ArtifactNodes
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
             + Holds
             + ConditionalSend

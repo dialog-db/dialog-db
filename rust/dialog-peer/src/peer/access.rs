@@ -33,9 +33,7 @@
 //! up front with `Branch::download`.
 
 use super::{Grant, Local, Mode, Peer, PeerSpace};
-use dialog_artifacts::tree::{
-    ArtifactNode, ArtifactPreload, ArtifactRead, ArtifactWrite, ArtifactWrites,
-};
+use dialog_artifacts::tree::CorpusNode;
 use dialog_capability::access::{
     Access, Authorize, AuthorizeError, Certificate as _, Export, Proof as _, Protocol, Prove,
     Retain, Scope as _, TimeRange,
@@ -52,6 +50,7 @@ use dialog_effects::blob::{BlobError, Import as BlobImport, Read as BlobRead, Wr
 use dialog_effects::memory::{Publish, Resolve};
 use dialog_repository::{Branch, RemoteSite};
 use dialog_search_tree::DialogSearchTreeError;
+use dialog_search_tree::nodes;
 use dialog_storage::provider::storage::Storage;
 use dialog_ucan::{Ucan, UcanCertificate, UcanDelegation, UcanProof};
 use dialog_ucan_core::DelegationChain;
@@ -96,7 +95,8 @@ trait LocalEnv:
     Provider<Get>
     + Provider<Put>
     + Provider<Import>
-    + ArtifactWrites
+    + Provider<nodes::Write<CorpusNode>>
+    + ConditionalSync
     + Provider<Resolve>
     + Provider<Publish>
     + Provider<Identify>
@@ -111,7 +111,8 @@ impl<T> LocalEnv for T where
     T: Provider<Get>
         + Provider<Put>
         + Provider<Import>
-        + ArtifactWrites
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
         + Provider<Resolve>
         + Provider<Publish>
         + Provider<Identify>
@@ -227,38 +228,41 @@ where
 // The walk's node reads are the operator's storage's, hydrated through
 // the walk's own hydration above, and kept in the caches it holds; a node
 // those hold is answered at once.
-impl<S, M: Mode> Provider<ArtifactRead> for AccessEnv<S, M>
+impl<S, M: Mode> Provider<nodes::Read<CorpusNode>> for AccessEnv<S, M>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
-    Storage<S>: Provider<ArtifactRead> + ConditionalSync,
+    Storage<S>: Provider<nodes::Read<CorpusNode>> + ConditionalSync,
     Self: Provider<dialog_repository::Hydrate> + ConditionalSync,
 {
     fn execute(
         &self,
-        read: ArtifactRead,
-    ) -> Resume<'_, Result<Option<ArtifactNode>, DialogSearchTreeError>> {
+        read: nodes::Read<CorpusNode>,
+    ) -> Resume<'_, Result<Option<CorpusNode>, DialogSearchTreeError>> {
         dialog_repository::read_node_or_hydrate(self, self.operator.mounted(), read)
     }
 }
 
-impl<S, M: Mode> Provider<ArtifactPreload> for AccessEnv<S, M>
+impl<S, M: Mode> Provider<nodes::Preload<CorpusNode>> for AccessEnv<S, M>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
-    Storage<S>: Provider<ArtifactRead> + ConditionalSync,
+    Storage<S>: Provider<nodes::Read<CorpusNode>> + ConditionalSync,
     Self: Provider<dialog_repository::Hydrate> + ConditionalSync,
 {
-    fn execute(&self, preload: ArtifactPreload) -> Resume<'_, ()> {
+    fn execute(&self, preload: nodes::Preload<CorpusNode>) -> Resume<'_, ()> {
         dialog_repository::preload_node_or_hydrate(self, self.operator.mounted(), preload)
     }
 }
 
-impl<S, M: Mode> Provider<ArtifactWrite> for AccessEnv<S, M>
+impl<S, M: Mode> Provider<nodes::Write<CorpusNode>> for AccessEnv<S, M>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
-    Storage<S>: Provider<ArtifactWrite> + ConditionalSync,
+    Storage<S>: Provider<nodes::Write<CorpusNode>> + ConditionalSync,
     Self: ConditionalSync,
 {
-    fn execute(&self, write: ArtifactWrite) -> Resume<'_, Result<(), DialogSearchTreeError>> {
+    fn execute(
+        &self,
+        write: nodes::Write<CorpusNode>,
+    ) -> Resume<'_, Result<(), DialogSearchTreeError>> {
         dialog_repository::write_nodes(self, self.operator.mounted(), write)
     }
 }
@@ -462,9 +466,9 @@ impl<S: Clone, M: Mode> Peer<S, M> {
         Self: LocalEnv,
         S: ConditionalSend
             + ConditionalSync
-            + Provider<ArtifactRead>
-            + Provider<ArtifactPreload>
-            + Provider<ArtifactWrite>
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + Provider<nodes::Write<CorpusNode>>
             + 'static,
     {
         if let Err(error) = self.delegations().refresh(self).await {
@@ -479,9 +483,9 @@ impl<S: Clone, M: Mode> Peer<S, M> {
         Self: LocalEnv,
         S: ConditionalSend
             + ConditionalSync
-            + Provider<ArtifactRead>
-            + Provider<ArtifactPreload>
-            + Provider<ArtifactWrite>
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + Provider<nodes::Write<CorpusNode>>
             + 'static,
     {
         self.refresh().await;
@@ -521,9 +525,9 @@ impl<S: Clone, M: Mode> Peer<S, M> {
         Self: LocalEnv,
         S: ConditionalSend
             + ConditionalSync
-            + Provider<ArtifactRead>
-            + Provider<ArtifactPreload>
-            + Provider<ArtifactWrite>
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + Provider<nodes::Write<CorpusNode>>
             + 'static,
     {
         // Every grant covering the claim is tried in turn: one whose
@@ -555,9 +559,9 @@ impl<S: Clone, M: Mode> Peer<S, M> {
         Self: LocalEnv,
         S: ConditionalSend
             + ConditionalSync
-            + Provider<ArtifactRead>
-            + Provider<ArtifactPreload>
-            + Provider<ArtifactWrite>
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + Provider<nodes::Write<CorpusNode>>
             + 'static,
     {
         let Grant {
@@ -588,9 +592,9 @@ impl<S: Clone, M: Mode> Peer<S, M> {
         Self: LocalEnv,
         S: ConditionalSend
             + ConditionalSync
-            + Provider<ArtifactRead>
-            + Provider<ArtifactPreload>
-            + Provider<ArtifactWrite>
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + Provider<nodes::Write<CorpusNode>>
             + 'static,
     {
         if let UcanSubject::Specific(subject) = &claim.access.subject
@@ -624,9 +628,9 @@ where
     S: Clone
         + ConditionalSend
         + ConditionalSync
-        + Provider<ArtifactRead>
-        + Provider<ArtifactPreload>
-        + Provider<ArtifactWrite>
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + Provider<nodes::Write<CorpusNode>>
         + 'static,
     Self: LocalEnv + ConditionalSend,
 {
@@ -644,9 +648,9 @@ where
     S: Clone
         + ConditionalSend
         + ConditionalSync
-        + Provider<ArtifactRead>
-        + Provider<ArtifactPreload>
-        + Provider<ArtifactWrite>
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + Provider<nodes::Write<CorpusNode>>
         + 'static,
     Self: LocalEnv + ConditionalSend,
 {
@@ -921,9 +925,9 @@ where
     S: Clone
         + ConditionalSend
         + ConditionalSync
-        + Provider<ArtifactRead>
-        + Provider<ArtifactPreload>
-        + Provider<ArtifactWrite>
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + Provider<nodes::Write<CorpusNode>>
         + 'static,
     P: Protocol,
     P::Certificate: ConditionalSend + ConditionalSync,
@@ -946,9 +950,9 @@ where
     S: Clone
         + ConditionalSend
         + ConditionalSync
-        + Provider<ArtifactRead>
-        + Provider<ArtifactPreload>
-        + Provider<ArtifactWrite>
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + Provider<nodes::Write<CorpusNode>>
         + 'static,
     Self: LocalEnv + ConditionalSend,
 {

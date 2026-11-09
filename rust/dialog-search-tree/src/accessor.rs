@@ -66,7 +66,7 @@ impl Default for Reading {
 
 impl Reading {
     /// The read of the node `hash` names in `catalog`, asked this way.
-    fn read<Key, Value>(&self, catalog: &CatalogScope, hash: &Blake3Hash) -> Read<Key, Value> {
+    fn read<N>(&self, catalog: &CatalogScope, hash: &Blake3Hash) -> Read<N> {
         let read = Read::new(catalog.clone(), hash.clone()).with_priority(self.priority);
         if self.local { read.locally() } else { read }
     }
@@ -74,11 +74,7 @@ impl Reading {
     /// The preload of the node `hash` names in `catalog`, ranked as this
     /// reads. A preload is never local: a read-ahead that may not hydrate
     /// has nothing to make cheap.
-    fn preload<Key, Value>(
-        &self,
-        catalog: &CatalogScope,
-        hash: &Blake3Hash,
-    ) -> Preload<Key, Value> {
+    fn preload<N>(&self, catalog: &CatalogScope, hash: &Blake3Hash) -> Preload<N> {
         Preload::new(catalog.clone(), hash.clone()).with_priority(self.priority)
     }
 }

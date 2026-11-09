@@ -27,14 +27,13 @@ pub use dialog_network::{Hydrate, HydrationLane, HydrationRequest, HydrationSche
 
 use super::routes::{HydrationRoute, Routes};
 use crate::ConnectedReplica;
-use dialog_artifacts::tree::{
-    ArtifactNode, ArtifactNodeCache, ArtifactPreload, ArtifactRead, ArtifactWrite,
-};
+use dialog_artifacts::tree::{ArtifactNodeCache, CorpusNode};
 use dialog_common::Holds;
 use dialog_effects::MethodExt as _;
 use dialog_effects::archive::Load;
 use dialog_effects::archive::prelude::CatalogScope;
 use dialog_search_tree::DialogSearchTreeError;
+use dialog_search_tree::nodes;
 use dialog_search_tree::nodes::decode as decode_node;
 use dialog_storage::provider::load::{archive_error, load_block, load_spill, read_all};
 
@@ -137,7 +136,7 @@ where
 /// from the routes registered for the subject, as [`load_or_hydrate`] does
 /// for a block, and decoded; what was read is kept in the cache.
 ///
-/// This is an environment's answer to a node read ([`ArtifactRead`]): a peer answers it
+/// This is an environment's answer to a node read ([`nodes::Read`](dialog_search_tree::nodes::Read)): a peer answers it
 /// with this over its storage. The store is the environment's node layer:
 /// one that keeps nodes in a form of its own answers in that form, one that
 /// keeps blocks answers through the translation layer
@@ -148,11 +147,11 @@ where
 pub fn read_node_or_hydrate<'a, Env, Store>(
     env: &'a Env,
     store: &'a Store,
-    read: ArtifactRead,
-) -> Resume<'a, Result<Option<ArtifactNode>, DialogSearchTreeError>>
+    read: nodes::Read<CorpusNode>,
+) -> Resume<'a, Result<Option<CorpusNode>, DialogSearchTreeError>>
 where
     Env: Provider<Hydrate> + Holds + ConditionalSync + ?Sized,
-    Store: Provider<ArtifactRead> + ConditionalSync + ?Sized,
+    Store: Provider<nodes::Read<CorpusNode>> + ConditionalSync + ?Sized,
 {
     let cache = ArtifactNodeCache::of(env, read.catalog.subject());
     // A hit answers at once, before any of the hydrating machinery is set
@@ -195,11 +194,11 @@ where
 pub fn preload_node_or_hydrate<'a, Env, Store>(
     env: &'a Env,
     store: &'a Store,
-    preload: ArtifactPreload,
+    preload: nodes::Preload<CorpusNode>,
 ) -> Resume<'a, ()>
 where
     Env: Provider<Hydrate> + Holds + ConditionalSync + ?Sized,
-    Store: Provider<ArtifactRead> + ConditionalSync + ?Sized,
+    Store: Provider<nodes::Read<CorpusNode>> + ConditionalSync + ?Sized,
 {
     if ArtifactNodeCache::of(env, preload.catalog.subject()).is_none() {
         return Resume::now(());
@@ -218,11 +217,11 @@ where
 pub fn write_nodes<'a, Env, Store>(
     env: &'a Env,
     store: &'a Store,
-    write: ArtifactWrite,
+    write: nodes::Write<CorpusNode>,
 ) -> Resume<'a, Result<(), DialogSearchTreeError>>
 where
     Env: Holds + ?Sized,
-    Store: Provider<ArtifactWrite> + ConditionalSync + ?Sized,
+    Store: Provider<nodes::Write<CorpusNode>> + ConditionalSync + ?Sized,
 {
     let cache = ArtifactNodeCache::of(env, write.catalog.subject());
     let nodes = write.nodes.clone();

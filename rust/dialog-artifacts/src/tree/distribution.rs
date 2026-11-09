@@ -88,7 +88,10 @@ pub async fn capture<Env>(
     env: &Env,
 ) -> Result<Vec<NodeStat>, DialogArtifactsError>
 where
-    Env: ArtifactNodes + ConditionalSync,
+    Env: Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
+        + ConditionalSync,
 {
     let mut stats: Vec<(usize, NodeStat)> = Vec::new();
     if root == dialog_common::NULL_BLAKE3_HASH.as_bytes() {

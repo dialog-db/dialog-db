@@ -1,6 +1,5 @@
 use dialog_artifacts::history::Version;
-use dialog_artifacts::tree::ArtifactNodes;
-use dialog_artifacts::tree::ArtifactWrites;
+use dialog_artifacts::tree::CorpusNode;
 use dialog_artifacts::{
     Datum, Key as ArtifactKey, ShipmentRef, State, shipment_ref, shipment_refs,
 };
@@ -16,6 +15,7 @@ use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::prelude::{ArchiveBlobExt as _, ReadBlobExt as _, WriteBlobExt as _};
 use dialog_effects::blob::{BlobError, BlobReader, Import as BlobImport, Read as BlobRead};
 use dialog_effects::memory::{Current, Publish, Resolve};
+use dialog_search_tree::nodes;
 use dialog_search_tree::{
     Accessor, MissingBlocks, MissingPolicy, NodeBody, NoveltyOp, PersistentNode, Reading,
     TreeDifference, into_owned,
@@ -905,8 +905,11 @@ where
         + Provider<BlobRead>
         + Provider<Fork<RemoteSite, Get>>
         + Provider<ArchiveLoad>
-        + ArtifactWrites
-        + ArtifactNodes
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
         + Provider<BlobLoad>
         + Provider<Fork<RemoteSite, Put>>
         + Provider<Fork<RemoteSite, BlobImport>>
@@ -1236,8 +1239,11 @@ where
     Env: Provider<Get>
         + Provider<Put>
         + Provider<ArchiveLoad>
-        + ArtifactWrites
-        + ArtifactNodes
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
         + Provider<Fork<RemoteSite, Get>>
         + Holds
         + ConditionalSync
@@ -1400,8 +1406,11 @@ where
         + Provider<BlobRead>
         + Provider<Fork<RemoteSite, Get>>
         + Provider<ArchiveLoad>
-        + ArtifactWrites
-        + ArtifactNodes
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
         + Provider<BlobLoad>
         + Provider<Fork<RemoteSite, Put>>
         + Provider<Fork<RemoteSite, BlobRead>>

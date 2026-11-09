@@ -21,7 +21,7 @@ pub(crate) mod test {
     use crate::recall::{BodyMemo, Memo};
     use crate::session::RuleRegistry;
     use dialog_artifacts::selector::Constrained;
-    use dialog_artifacts::tree::{ArtifactNode, ArtifactPreload, ArtifactRead};
+    use dialog_artifacts::tree::CorpusNode;
     use dialog_artifacts::{ArtifactSelector, ArtifactStream, DialogArtifactsError, Select};
     use dialog_capability::Provider;
     use dialog_capability::Resume;
@@ -29,6 +29,7 @@ pub(crate) mod test {
     use dialog_effects::blob;
     use dialog_peer::Peer as DialogOperator;
     use dialog_repository::Branch;
+    use dialog_search_tree::nodes;
     use dialog_storage::provider::storage::VolatileSpace;
 
     type Operator = DialogOperator<VolatileSpace, dialog_peer::Session>;
@@ -143,11 +144,11 @@ pub(crate) mod test {
 
     // Node reads for the scans, in the branch's catalog: what the operator
     /// answers at once is at once here too.
-    impl Provider<ArtifactRead> for TestEnv<'_> {
+    impl Provider<nodes::Read<CorpusNode>> for TestEnv<'_> {
         fn execute(
             &self,
-            read: ArtifactRead,
-        ) -> Resume<'_, Result<Option<ArtifactNode>, dialog_search_tree::DialogSearchTreeError>>
+            read: nodes::Read<CorpusNode>,
+        ) -> Resume<'_, Result<Option<CorpusNode>, dialog_search_tree::DialogSearchTreeError>>
         {
             let mut line = read;
             line.catalog = self.branch.archive().index();
@@ -156,8 +157,8 @@ pub(crate) mod test {
     }
 
     #[dialog_capability::provider]
-    impl Provider<ArtifactPreload> for TestEnv<'_> {
-        async fn execute(&self, preload: ArtifactPreload) {
+    impl Provider<nodes::Preload<CorpusNode>> for TestEnv<'_> {
+        async fn execute(&self, preload: nodes::Preload<CorpusNode>) {
             let mut line = preload;
             line.catalog = self.branch.archive().index();
             line.perform(self.operator).await

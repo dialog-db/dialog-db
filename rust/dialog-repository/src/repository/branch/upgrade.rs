@@ -40,7 +40,7 @@
 
 use crate::rules::transient_attr;
 use crate::{Branch, CommitError, RemoteSite, Revision, Transient};
-use dialog_artifacts::tree::{ArtifactNodes, ArtifactWrites};
+use dialog_artifacts::tree::CorpusNode;
 use dialog_artifacts::{ArtifactSelector, Entity, Pick, Relation as ArtifactsRelation, Value};
 use dialog_capability::{Fork, Provider};
 use dialog_common::{ConditionalSync, Holds};
@@ -55,6 +55,7 @@ use dialog_query::migration::concept_identity_v0;
 use dialog_query::rule::statement::source_attr;
 use dialog_query::rule::{DeductiveRule, InductiveRule};
 use dialog_query::{AttributeStatement, Cardinality, ConceptDescriptor};
+use dialog_search_tree::nodes;
 use futures_util::TryStreamExt as _;
 
 /// What [`Branch::upgrade_rules`] did.
@@ -140,14 +141,18 @@ impl UpgradeRules<'_> {
             + Provider<BlobRead>
             + Provider<Put>
             + Provider<Import>
-            + ArtifactWrites
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
             + Provider<Resolve>
             + Provider<Publish>
             + Provider<Identify>
             + Provider<Attest>
             + Provider<ArchiveLoad>
-            + ArtifactWrites
-            + ArtifactNodes
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>

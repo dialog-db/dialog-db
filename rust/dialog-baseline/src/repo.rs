@@ -10,9 +10,10 @@
 //! commit path. The branch handle is opened once and held across commits —
 //! the realistic application shape, which also keeps the branch-owned record
 //! and node caches warm the way a running app would.
-use dialog_artifacts::tree::{ArtifactNodes, ArtifactWrites};
+use dialog_artifacts::tree::CorpusNode;
 use dialog_effects::blob::Import as BlobImport;
 use dialog_effects::blob::Size as BlobSize;
+use dialog_search_tree::nodes;
 use std::str::FromStr;
 
 use anyhow::Result;
@@ -122,8 +123,11 @@ where
         + PeersEnv
         + Provider<dialog_effects::archive::Load>
         + Provider<dialog_effects::blob::Load>
-        + ArtifactNodes
-        + ArtifactWrites
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
         + Provider<dialog_artifacts::Preload>
         + Provider<dialog_artifacts::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>

@@ -81,6 +81,8 @@ pub use secret::{
 };
 pub use upgrade::{Step, StepBound, StepFuture, Upgraded};
 
+use dialog_artifacts::tree::CorpusNode;
+use dialog_search_tree::nodes;
 use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
@@ -88,7 +90,6 @@ use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
 
-use dialog_artifacts::tree::{ArtifactPreload, ArtifactRead, ArtifactWrite};
 use dialog_capability::identity::Entity;
 use dialog_capability::{Capability, Fork, Provider};
 use dialog_common::{ConditionalSend, ConditionalSync, Held, Holdings, Holds};
@@ -146,9 +147,9 @@ pub trait PeerSpace:
     + Provider<blob::Size>
     + Provider<blob::Write>
     + Provider<blob::Import>
-    + Provider<ArtifactRead>
-    + Provider<ArtifactPreload>
-    + Provider<ArtifactWrite>
+    + Provider<nodes::Read<CorpusNode>>
+    + Provider<nodes::Preload<CorpusNode>>
+    + Provider<nodes::Write<CorpusNode>>
     + Clone
     + ConditionalSend
     + ConditionalSync
@@ -163,9 +164,9 @@ impl<T> PeerSpace for T where
         + Provider<blob::Size>
         + Provider<blob::Write>
         + Provider<blob::Import>
-        + Provider<ArtifactRead>
-        + Provider<ArtifactPreload>
-        + Provider<ArtifactWrite>
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + Provider<nodes::Write<CorpusNode>>
         + Clone
         + ConditionalSend
         + ConditionalSync

@@ -8,8 +8,8 @@
 //! map, so this resolves it once per head, from the branch's memo when it
 //! can, and remembers it there.
 
-use dialog_artifacts::tree::ArtifactNodes;
-use dialog_artifacts::tree::ArtifactWrites;
+use dialog_artifacts::tree::CorpusNode;
+use dialog_search_tree::nodes;
 use std::sync::Arc;
 
 use dialog_artifacts::history::{
@@ -51,8 +51,11 @@ pub(crate) async fn published_context<S>(
 ) -> Result<Option<Arc<Context>>, DialogArtifactsError>
 where
     S: Provider<ArchiveLoad>
-        + ArtifactWrites
-        + ArtifactNodes
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
         + Provider<BlobLoad>
         + Holds
         + ConditionalSync
@@ -124,8 +127,11 @@ pub(crate) async fn head_observes<S>(
 ) -> Result<Option<bool>, DialogArtifactsError>
 where
     S: Provider<ArchiveLoad>
-        + ArtifactWrites
-        + ArtifactNodes
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
         + Provider<BlobLoad>
         + Holds
         + ConditionalSync
@@ -169,8 +175,11 @@ pub(crate) async fn full_context<S, H>(
 ) -> Result<Arc<Context>, DialogArtifactsError>
 where
     S: Provider<ArchiveLoad>
-        + ArtifactWrites
-        + ArtifactNodes
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
         + Provider<BlobLoad>
         + Holds
         + ConditionalSync
@@ -237,8 +246,11 @@ pub(crate) async fn successor<S, H>(
 ) -> Result<Successor, DialogArtifactsError>
 where
     S: Provider<ArchiveLoad>
-        + ArtifactWrites
-        + ArtifactNodes
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
         + Provider<BlobLoad>
         + Holds
         + ConditionalSync
@@ -325,8 +337,11 @@ pub(crate) async fn head_context<'a, Env>(
 ) -> Result<Arc<Context>, DialogArtifactsError>
 where
     Env: Provider<ArchiveLoad>
-        + ArtifactWrites
-        + ArtifactNodes
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
         + Provider<BlobLoad>
         + Holds
         + ConditionalSync,
@@ -359,8 +374,11 @@ pub(crate) async fn region_agrees<'a, Env>(
 ) -> Result<(Context, Context), DialogArtifactsError>
 where
     Env: Provider<ArchiveLoad>
-        + ArtifactWrites
-        + ArtifactNodes
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
         + Provider<BlobLoad>
         + Holds
         + ConditionalSync,

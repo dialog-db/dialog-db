@@ -35,15 +35,23 @@ implements the three commands and is reached the same way.
 
 What this changes for you:
 
-- A tree operation's environment bound is `Env: Nodes<Key, Value>`
-  (`Provider<nodes::Read<Key, Value>> + Provider<nodes::Preload<Key,
-  Value>> + ConditionalSync`) instead of `Provider<archive::Load> + Holds +
-  ConditionalSync` (and `+ Provider<archive::Get>` where a difference was
-  computed). `Holds`, `Load` and `Get` are no longer asked of a tree's
-  environment. An artifact tree's environment is `ArtifactNodes`, and one
-  that persists is `ArtifactWrites` too (`dialog_artifacts::tree`, with
-  `ArtifactRead`, `ArtifactPreload`, `ArtifactWrite` and `ArtifactNode` as
-  the concrete types).
+- A request is written at the node it is about: `nodes::Read<N>`,
+  `nodes::Preload<N>` and `nodes::Write<N>` for an `N: nodes::Node`, a
+  sealed trait `PersistentNode<Key, Value>` implements. A tree operation's
+  environment bound is `Env: Nodes<Key, Value>`
+  (`Provider<nodes::Read<PersistentNode<Key, Value>>> +
+  Provider<nodes::Preload<PersistentNode<Key, Value>>> + ConditionalSync`)
+  instead of `Provider<archive::Load> + Holds + ConditionalSync` (and `+
+  Provider<archive::Get>` where a difference was computed). `Holds`, `Load`
+  and `Get` are no longer asked of a tree's environment.
+- `dialog_artifacts::tree::CorpusNode` names the node of the corpus, the
+  tree over claims (`PersistentNode<Key, State<Datum>>`), and an
+  environment a corpus is read through is bounded as
+  `Provider<nodes::Read<CorpusNode>> + Provider<nodes::Preload<CorpusNode>>`,
+  one that is written through as `Provider<nodes::Write<CorpusNode>>`.
+  There is no alias trait for either: a signature says which requests it
+  performs. "Corpus" is the name the crate's storage side will carry when
+  `dialog-artifacts` is renamed; everything new here uses it.
 - `TransientTree::persist(delta)`, `HitchhikerTree::persist(delta)`,
   `HitchhikerTree::persist_mut(delta)` and `Node::into_link(delta,
   manifest)` take no environment and no cache, and the delta they fill is
@@ -122,8 +130,8 @@ What this changes for you:
   output needs `C::Output: ConditionalSend`, since a `Resume` is `Send`
   only when its output is; `async_trait` hid that bound inside the box.
 - `nodes::Ready` and `nodes::held_node`'s role as its answer are gone from
-  `dialog_search_tree`; `Nodes<Key, Value>` is `Provider<Read> +
-  Provider<Preload> + ConditionalSync`. `Read::through_blocks`,
+  `dialog_search_tree`; `Nodes<Key, Value>` is `Provider<Read<PersistentNode<Key, Value>>> +
+  Provider<Preload<PersistentNode<Key, Value>>> + ConditionalSync`. `Read::through_blocks`,
   `through_loader` and `through_held_blocks`, `Preload::through_blocks`
   and `through_held_blocks`, `Write::through_blocks` and
   `through_held_blocks`, every request's `perform`, and
