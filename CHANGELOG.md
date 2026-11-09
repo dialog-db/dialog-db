@@ -14,6 +14,62 @@ says how to cut a release.
 
 ## Unreleased
 
+### A blob store keeps the Bao tree of each blob, so it can hold a blob in part and serve verified ranges
+
+Backported from the `sapling` branch.
+
+The hash of a blob is the root of its Bao tree, a tree of BLAKE3 hashes
+over groups of 16 KiB. A filesystem or volatile blob store now keeps that
+tree beside each blob over one group (its outboard), and uses it to take
+in, hold and answer parts of a blob that verify on their own, group by
+group, against the digest alone.
+
+What this changes for you:
+
+- New blob effects: `ImportRange` takes the Bao encoding of a range and
+  keeps each group that verifies; `Held` says which groups a store holds
+  (`Holding`); `Proof` gives the hashes that tie a range to the digest;
+  `Usage` counts the bytes a subject's blob store keeps.
+- `Read` has a new `encoding` field. `Read::verified` (or
+  `encoding: Some(Encoding::Bao)`) asks for a verified range instead of raw
+  bytes. Code that builds `Read { digest, range }` by literal has to add
+  `encoding: None`. A store with no outboard (S3, the test stores) refuses a
+  verified read with `BlobError::Storage`.
+- `BlobError::Unverified` is new: a group of an imported range did not
+  verify, and nothing of that group was kept.
+- `Size` answers only for a blob held whole. A `Read` of a blob held in
+  part ends where the held part of the range ends.
+- `dialog_storage::bao` is new: outboards, verified-range encoding and
+  decoding, and proofs.
+- `FileSystemHandle::read_at`, `write_at` and `sync` are new. In the
+  browser, `write_at` takes the file's lock, so two imports of one blob at
+  once do not drop each other's groups. It falls back to a sync access
+  handle where `createWritable` is missing (Safari 18 and before), as
+  `write` does. Each `write_at` through `createWritable` still copies the
+  whole file.
+- A native `FileWriter` dropped without `finish` now removes its temp
+  file.
+- These effects are served by `Space`, `FileSystem` and `Volatile`. They
+  are not routed through `Storage`, a `Peer` or any remote yet.
+
+Why: a replica can now fetch, keep and serve parts of a large asset, and
+check each part as it arrives, instead of trusting a whole stream until
+its last byte is hashed.
+
+#### Compatibility and migration
+
+- A store now writes `{digest}.outboard` beside each blob over 16 KiB, and
+  `{digest}.partial`, `{digest}.partial.outboard` and `{digest}.held` for a
+  blob it holds in part. Nothing that is already stored is rewritten. A
+  blob written before this release gets its outboard at its first verified
+  read.
+- An older release reads whole blobs as before and ignores the new files.
+  It cannot see a blob held only in part.
+- An older server ignores `encoding` and answers raw bytes. A caller that
+  decodes them as a verified range fails to verify them, rather than
+  reading wrong bytes.
+- An embedder has nothing to run.
+
 ### Two claims that stand equal are told apart by the hash of their values
 
 [#752](https://github.com/dialog-db/dialog-db/pull/752)
