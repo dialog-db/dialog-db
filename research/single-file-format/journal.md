@@ -1689,6 +1689,37 @@ commit's own write over a merged concurrent claim, is
 [dialog-db/dialog-db#762](https://github.com/dialog-db/dialog-db/issues/762),
 open.
 
+**Review, and the candidate reworked.** The assessment on #762 found the
+first version unsafe: `last` does not always elect this commit's row. A
+session overlay row stands one edition past every staged write, and a
+derived candidate stands past the claim it displaces. In both cases
+seeding row by row finds a match that the combined seed misses. The
+"own row" condition guarded neither. The rework drops it and lets the
+engine's seeded read decide: a group is evaluated once, and when it
+finds nothing its rows are seeded one by one. When it does find a
+match, every grouped field reads its row's value either way, so the
+matches are the same.
+
+In the crate's tests, every seeded firing now also seeds row by row and
+checks the heads agree. Without the fallback, that check fails exactly
+on the overlay and derived cases.
+
+Groups found their match together 1,861 times in 1,900 while building
+and pulling, and 200 in 220 in warm commands; the misses are one group
+per memo post. Five alternating runs each, warm medians: 4.7–5.9 ms with
+both, against 6.9–8.7 with #761 alone.
+
+For #761 the review supplied the invariant that n copies of a head land
+the same tree as one, root and history included; it passes. #761's
+first version cost the `rule-dispatch` perf scenario 1.8% of its
+instructions, from copying every head into a std set. Comparing the
+heads where they stand, on hashbrown, brings that to 0.1%.
+
+The review's better question stands as the next one: after #761 a
+seeded evaluation is about 1 M instructions, and the largest part is the
+merge-or-fold estimate. That needs no correctness argument and compounds
+with seeding once per entity.
+
 ## How to reproduce
 
 ```sh
