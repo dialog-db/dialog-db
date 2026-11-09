@@ -282,6 +282,33 @@ where
 }
 
 impl<Key, Value> PersistentNode<Key, Value> {
+    /// Returns the content hash of this node.
+    pub fn hash(&self) -> &Blake3Hash {
+        match &self.backing {
+            Backing::Rows(rows) => rows.rows.hash(),
+            Backing::Block { buffer, .. } => buffer.blake3_hash(),
+        }
+    }
+
+    /// Returns the node's serialized bytes. A node read from rows builds its
+    /// block the first time it is asked, and keeps it.
+    pub fn buffer(&self) -> Result<&Buffer, DialogSearchTreeError> {
+        let rows = match &self.backing {
+            Backing::Block { buffer, .. } => return Ok(buffer),
+            Backing::Rows(rows) => rows,
+        };
+        if let Some(block) = rows.block.get() {
+            return Ok(block);
+        }
+        let block = rows.rows.block()?;
+        if block.blake3_hash() != rows.rows.hash() {
+            return Err(DialogSearchTreeError::Encoding(
+                "Rows built a block other than the one they stand for".to_string(),
+            ));
+        }
+        Ok(rows.block.get_or_init(|| block))
+    }
+
     /// What holding this node costs: its bytes, or for a node read from
     /// rows, what the rows take beyond the store (and its block, once
     /// built). What a cache charges for holding it.
@@ -331,33 +358,6 @@ where
         Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
     >,
 {
-    /// Returns the content hash of this node.
-    pub fn hash(&self) -> &Blake3Hash {
-        match &self.backing {
-            Backing::Rows(rows) => rows.rows.hash(),
-            Backing::Block { buffer, .. } => buffer.blake3_hash(),
-        }
-    }
-
-    /// Returns the node's serialized bytes. A node read from rows builds its
-    /// block the first time it is asked, and keeps it.
-    pub fn buffer(&self) -> Result<&Buffer, DialogSearchTreeError> {
-        let rows = match &self.backing {
-            Backing::Block { buffer, .. } => return Ok(buffer),
-            Backing::Rows(rows) => rows,
-        };
-        if let Some(block) = rows.block.get() {
-            return Ok(block);
-        }
-        let block = rows.rows.block()?;
-        if block.blake3_hash() != rows.rows.hash() {
-            return Err(DialogSearchTreeError::Encoding(
-                "Rows built a block other than the one they stand for".to_string(),
-            ));
-        }
-        Ok(rows.block.get_or_init(|| block))
-    }
-
     /// Builds a node from the rows a store keeps it in, if they hold values
     /// of this tree's `Value`; `None` otherwise, and the node is read from
     /// its block instead.

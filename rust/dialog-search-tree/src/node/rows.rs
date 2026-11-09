@@ -13,10 +13,8 @@
 use std::any::TypeId;
 use std::cmp::Ordering;
 use std::ops::Range;
-use std::sync::Arc;
 
-use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync, Holds, held_key};
-use dialog_effects::archive::prelude::CatalogScope;
+use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync};
 
 use crate::{DialogSearchTreeError, Manifest};
 
@@ -182,44 +180,6 @@ pub unsafe trait NodeRows: ConditionalSend + ConditionalSync + 'static {
     /// The block these rows stand for, built by the tree's encoder: what a
     /// reader that wants the node's bytes (sync, persistence) is given.
     fn block(&self) -> Result<dialog_common::Buffer, DialogSearchTreeError>;
-}
-
-/// A store that can hand the tree its nodes as rows.
-///
-/// An environment holds one per subject ([`NodeSource::serve`]); a tree read
-/// asks it first ([`NodeSource::of`]) and loads the block only for a node it
-/// does not have.
-pub trait NodeSource: ConditionalSend + ConditionalSync {
-    /// The node `hash` names in `catalog`, as rows, if the store holds it
-    /// that way.
-    fn node(&self, catalog: &CatalogScope, hash: &Blake3Hash) -> Option<Arc<dyn NodeRows>>;
-}
-
-/// What an environment holds a subject's node source as.
-type Served = Arc<dyn NodeSource>;
-
-fn served_key(subject: &impl std::fmt::Display) -> String {
-    held_key::<Served>(&format!("dialog-search-tree/node-source/{subject}"))
-}
-
-impl dyn NodeSource {
-    /// The node source `env` holds for `subject`, if any.
-    pub fn of(
-        env: &(impl Holds + ?Sized),
-        subject: &impl std::fmt::Display,
-    ) -> Option<Arc<dyn NodeSource>> {
-        let held = env.held(&served_key(subject))?;
-        held.downcast_ref::<Served>().cloned()
-    }
-
-    /// Makes `env` hand every tree read of `subject` to `source` first.
-    pub fn serve(
-        env: &(impl Holds + ?Sized),
-        subject: &impl std::fmt::Display,
-        source: Arc<dyn NodeSource>,
-    ) {
-        env.hold(served_key(subject), Arc::new(source));
-    }
 }
 
 /// Reads `bytes`, which a [`NodeRows`] vouched for, as an archived `T`.

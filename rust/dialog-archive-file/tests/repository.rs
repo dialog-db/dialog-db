@@ -5,7 +5,6 @@
 
 use std::path::Path;
 use std::str::FromStr;
-use std::sync::Arc;
 
 use dialog_archive_file::{FILE_NAME, FileArchive, Options};
 use dialog_artifacts::{
@@ -283,7 +282,8 @@ async fn it_takes_turns_with_another_process() -> anyhow::Result<()> {
 /// checks every answer the tree reads a node for agrees.
 fn compare(archive: &FileArchive, catalog: &str, hash: &Blake3Hash) -> anyhow::Result<bool> {
     use dialog_artifacts::{Datum, Key, State};
-    use dialog_search_tree::{NodeBody, NodeSource, PersistentNode, into_owned};
+    use dialog_search_tree::nodes::Read;
+    use dialog_search_tree::{NodeBody, PersistentNode, into_owned};
     type TreeNode = PersistentNode<Key, State<Datum>>;
 
     let block = Buffer::from(archive.get(catalog, hash)?.expect("a block it lists"));
@@ -294,11 +294,17 @@ fn compare(archive: &FileArchive, catalog: &str, hash: &Blake3Hash) -> anyhow::R
         "did:test:served".parse::<dialog_capability::Did>()?,
     ))
     .catalog(catalog);
-    let Some(rows) = archive.node(&scope, hash) else {
+    // The archive answers a node read at once, from its mapping.
+    let Some(served) = Read::<Key, State<Datum>>::new(scope, hash.clone())
+        .perform(archive)
+        .into_now()
+        .unwrap_or_else(|_| panic!("the archive answers a read at once"))?
+    else {
         return Ok(false);
     };
-    let served = TreeNode::from_rows(rows).expect("rows of State<Datum>");
-    assert!(served.is_rows());
+    if !served.is_rows() {
+        return Ok(false);
+    }
     assert_eq!(served.hash(), stored.hash());
     assert_eq!(served.manifest()?, stored.manifest()?);
     assert_eq!(served.scale(), stored.scale());
@@ -425,11 +431,11 @@ fn it_serves_every_node_of_a_file_as_its_block_reads() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A repository whose environment holds the archive as its node source
-/// reads its tree from the frames in place, and selects what it committed.
+/// A repository whose space keeps its blocks in the archive reads its tree
+/// from the frames in place, the archive answering the tree's node reads,
+/// and selects what it committed.
 #[tokio::test]
 async fn it_selects_through_nodes_served_in_place() -> anyhow::Result<()> {
-    use dialog_search_tree::NodeSource;
     let directory = tempfile::tempdir()?;
     let at = Directory::At(directory.path().to_string_lossy().into_owned());
     let (peer, name) = (unique_name("peer"), unique_name("repo"));
@@ -437,8 +443,9 @@ async fn it_selects_through_nodes_served_in_place() -> anyhow::Result<()> {
 
     let (operator, branch) = open!(at, peer, name);
     let archive = FileArchive::open(directory.path().join(&name).join(FILE_NAME))?;
+    // A second handle on the file shares the space's: its counts are the
+    // space's.
     let before = archive.stats().served;
-    <dyn NodeSource>::serve(&operator, branch.subject().did(), Arc::new(archive.clone()));
     let rows: Vec<Artifact> = branch
         .claims()
         .select(ArtifactSelector::new().the(Relation::from_str("person/name")?))

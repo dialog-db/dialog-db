@@ -49,6 +49,8 @@
 //! #         + Provider<BlobRead>
 //! #         + Provider<dialog_effects::archive::Load>
 //! #         + Provider<dialog_effects::blob::Load>
+//! #         + dialog_artifacts::tree::ArtifactNodes
+//! #         + dialog_artifacts::tree::ArtifactWrites
 //! #         + Provider<Fork<RemoteSite, Resolve>>
 //! #         + dialog_common::Holds
 //! #         + dialog_common::ConditionalSync
@@ -70,6 +72,7 @@ use crate::repository::archive::erased;
 use crate::repository::branch::asset::recorded_size;
 use crate::repository::source::SourceRef;
 use crate::{Branch, CommitError, Index, RemoteSite};
+use dialog_artifacts::tree::{ArtifactNodes, ArtifactWrites};
 use dialog_artifacts::{
     Artifact, Asset, BlobIndexExt as _, BlobRecord, DialogArtifactsError, Entity, Instruction,
     Relation, Value,
@@ -235,12 +238,15 @@ impl RetainDelegation<'_> {
             + Provider<Get>
             + Provider<Put>
             + Provider<Import>
+            + ArtifactWrites
             + Provider<Resolve>
             + Provider<Publish>
             + Provider<Identify>
             + Provider<Attest>
             + Provider<BlobWrite>
             + Provider<ArchiveLoad>
+            + ArtifactWrites
+            + ArtifactNodes
             + Provider<BlobLoad>
             + Provider<Fork<RemoteSite, Resolve>>
             + dialog_common::Holds
@@ -337,12 +343,15 @@ impl RetractDelegation<'_> {
             + Provider<Get>
             + Provider<Put>
             + Provider<Import>
+            + ArtifactWrites
             + Provider<Resolve>
             + Provider<Publish>
             + Provider<Identify>
             + Provider<Attest>
             + Provider<BlobWrite>
             + Provider<ArchiveLoad>
+            + ArtifactWrites
+            + ArtifactNodes
             + Provider<BlobLoad>
             + Provider<Fork<RemoteSite, Resolve>>
             + dialog_common::Holds

@@ -16,6 +16,7 @@
 
 use super::{Mode, Peer};
 use core::fmt::Display;
+use dialog_artifacts::tree::{ArtifactNodes, ArtifactWrites};
 use dialog_capability::{Capability, Fork, Policy, Provider, Subject};
 use dialog_common::Blake3Hash;
 use dialog_common::{ConditionalSend, ConditionalSync};
@@ -47,12 +48,15 @@ pub trait BranchEnv:
     + Provider<BlobImport>
     + Provider<Put>
     + Provider<Import>
+    + ArtifactWrites
     + Provider<Resolve>
     + Provider<Publish>
     + Provider<Retract>
     + Provider<Identify>
     + Provider<Attest>
     + Provider<ArchiveLoad>
+    + ArtifactWrites
+    + ArtifactNodes
     + Provider<BlobLoad>
     + Provider<dialog_artifacts::Preload>
     + Provider<dialog_artifacts::Speculation>
@@ -68,12 +72,15 @@ impl<T> BranchEnv for T where
         + Provider<BlobImport>
         + Provider<Put>
         + Provider<Import>
+        + ArtifactWrites
         + Provider<Resolve>
         + Provider<Publish>
         + Provider<Retract>
         + Provider<Identify>
         + Provider<Attest>
         + Provider<ArchiveLoad>
+        + ArtifactWrites
+        + ArtifactNodes
         + Provider<BlobLoad>
         + Provider<dialog_artifacts::Preload>
         + Provider<dialog_artifacts::Speculation>
@@ -104,8 +111,7 @@ where
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl<S, M: Mode> Provider<branch_fx::Create> for Peer<S, M>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
@@ -200,8 +206,7 @@ where
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl<S, M: Mode> Provider<branch_fx::List> for Peer<S, M>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
@@ -220,8 +225,7 @@ where
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl<S, M: Mode> Provider<branch_fx::Delete> for Peer<S, M>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
@@ -326,8 +330,7 @@ where
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl<S, M: Mode> Provider<branch_fx::Switch> for Peer<S, M>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,

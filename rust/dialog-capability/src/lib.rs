@@ -236,6 +236,23 @@ pub use fork::*;
 /// Derive macro that generates `Provider<Fx>` impls for composite structs.
 pub use dialog_macros::Provider;
 
+/// Writes a [`Provider`] impl whose `execute` is an `async fn`: the body
+/// becomes the future the provider answers with ([`Resume::later`]).
+///
+/// ```
+/// # use dialog_capability::{Command, Provider};
+/// # struct Len;
+/// # impl Command for Len { type Input = String; type Output = usize; }
+/// # struct Env;
+/// #[dialog_capability::provider]
+/// impl Provider<Len> for Env {
+///     async fn execute(&self, input: String) -> usize {
+///         input.len()
+///     }
+/// }
+/// ```
+pub use dialog_macros::provider;
+
 /// Derive macro that generates composite [`Site`] types from a struct of
 /// site fields.
 pub use dialog_macros::Site;

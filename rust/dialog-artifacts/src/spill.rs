@@ -173,7 +173,7 @@ pub fn shipment_refs<'a, Env>(
     difference: &'a TreeDifference<'a, Key, State<Datum>, Env>,
 ) -> impl Stream<Item = Result<ShipmentRef, DialogArtifactsError>> + 'a + ConditionalSend
 where
-    Env: Provider<archive::Load> + Provider<archive::Get> + Holds + ConditionalSync,
+    Env: ArtifactNodes + ConditionalSync,
 {
     try_stream! {
         let changes = difference.changes();
@@ -216,14 +216,7 @@ pub fn spilled_refs<'s, S>(
     store: S,
 ) -> impl Stream<Item = Result<Blake3Hash, DialogArtifactsError>> + 's + ConditionalSend
 where
-    S: Provider<archive::Load>
-        + Provider<archive::Get>
-        + Provider<blob::Load>
-        + Holds
-        + ConditionalSend
-        + ConditionalSync
-        + Clone
-        + 's,
+    S: ArtifactNodes + Provider<blob::Load> + ConditionalSend + ConditionalSync + Clone + 's,
 {
     let storage = store;
     try_stream! {

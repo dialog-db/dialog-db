@@ -22,6 +22,7 @@
 //! re-installs rules under the identities this release gives them.
 
 use dialog_artifacts::tree::rekey::rekey_tree;
+use dialog_artifacts::tree::{ArtifactNodes, ArtifactWrites};
 use dialog_artifacts::{ArchiveDelta, DialogArtifactsError, NUMBER_BAND};
 use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
@@ -71,6 +72,8 @@ impl Branch {
             + Provider<Put>
             + Provider<Resolve>
             + Provider<ArchiveLoad>
+            + ArtifactWrites
+            + ArtifactNodes
             + Provider<BlobLoad>
             + Provider<Fork<RemoteSite, Resolve>>
             + dialog_common::Holds
@@ -101,6 +104,8 @@ impl Branch {
             + Provider<Put>
             + Provider<Resolve>
             + Provider<ArchiveLoad>
+            + ArtifactWrites
+            + ArtifactNodes
             + Provider<BlobLoad>
             + Provider<Fork<RemoteSite, Resolve>>
             + dialog_common::Holds
@@ -157,11 +162,14 @@ impl RekeyStorage<'_> {
             + Provider<Get>
             + Provider<Put>
             + Provider<Import>
+            + ArtifactWrites
             + Provider<Resolve>
             + Provider<Publish>
             + Provider<Identify>
             + Provider<Attest>
             + Provider<ArchiveLoad>
+            + ArtifactWrites
+            + ArtifactNodes
             + Provider<BlobLoad>
             + Provider<Fork<RemoteSite, Resolve>>
             + dialog_common::Holds
@@ -219,11 +227,14 @@ impl Migrate<'_> {
             + Provider<BlobRead>
             + Provider<Put>
             + Provider<Import>
+            + ArtifactWrites
             + Provider<Resolve>
             + Provider<Publish>
             + Provider<Identify>
             + Provider<Attest>
             + Provider<ArchiveLoad>
+            + ArtifactWrites
+            + ArtifactNodes
             + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
@@ -263,10 +274,13 @@ where
     Env: Provider<Get>
         + Provider<Put>
         + Provider<Import>
+        + ArtifactWrites
         + Provider<BlobImport>
         + Provider<BlobRead>
         + Provider<Resolve>
         + Provider<ArchiveLoad>
+        + ArtifactWrites
+        + ArtifactNodes
         + Provider<BlobLoad>
         + Provider<Fork<RemoteSite, Resolve>>
         + dialog_common::Holds

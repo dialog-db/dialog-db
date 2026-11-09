@@ -31,7 +31,6 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::str::FromStr as _;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::time::{Duration, Instant};
 
@@ -42,7 +41,6 @@ use dialog_capability::Subject;
 use dialog_effects::storage::{Directory, Location};
 use dialog_peer::helpers::{Seed, open_peer_as, test_owned};
 use dialog_repository::RepositoryExt as _;
-use dialog_search_tree::NodeSource;
 use dialog_storage::provider::storage::NativeSpace;
 use dialog_storage::provider::{FileSystem, Space, Storage};
 use futures_util::TryStreamExt as _;
@@ -204,17 +202,6 @@ macro_rules! reads {
     }};
 }
 
-/// Makes the environment hand tree reads to the archive file, read in place,
-/// when `$serve` says so.
-macro_rules! serve {
-    ($serve:expr, $directory:expr, $operator:expr, $branch:expr) => {{
-        if $serve {
-            let archive = FileArchive::open($directory.join("repo").join(FILE_NAME))?;
-            <dyn NodeSource>::serve(&$operator, $branch.subject().did(), Arc::new(archive));
-        }
-    }};
-}
-
 macro_rules! run {
     ($space:ty, $name:expr, $directory:expr, $commits:expr, $attributes:expr, $entities:expr, $before:expr, $after:expr, $serve:expr) => {{
         let at = Directory::At($directory.to_string_lossy().into_owned());
@@ -226,7 +213,6 @@ macro_rules! run {
         {
             let _entropy = Seed::new(733).entropy();
             let (operator, branch) = open!($space, at, "peer", "repo", true);
-            serve!($serve, $directory, operator, branch);
             let started = Instant::now();
             let before = ALLOCATED.load(Relaxed);
             PEAK.store(before, Relaxed);
@@ -267,7 +253,6 @@ macro_rules! run {
         {
             let before = ALLOCATED.load(Relaxed);
             let (operator, branch) = open!($space, at, "peer", "repo", false);
-            serve!($serve, $directory, operator, branch);
             let opened = ALLOCATED.load(Relaxed);
             run.open_heap = opened.saturating_sub(before);
             (run.cold_scan, _, run.facts) = reads!(operator, branch, $attributes, &[] as &[String]);
@@ -283,7 +268,6 @@ macro_rules! run {
         }
         {
             let (operator, branch) = open!($space, at, "peer", "repo", false);
-            serve!($serve, $directory, operator, branch);
             let opened = ALLOCATED.load(Relaxed);
             (_, run.cold_points, _) = reads!(operator, branch, &[] as &[String], $entities);
             (_, run.warm_points, _) = reads!(operator, branch, &[] as &[String], $entities);
@@ -294,7 +278,6 @@ macro_rules! run {
             // edit costs once the data is there.
             let _entropy = Seed::new(734).entropy();
             let (operator, branch) = open!($space, at, "peer", "repo", false);
-            serve!($serve, $directory, operator, branch);
             let mut times = Vec::new();
             for (n, entity) in $entities.iter().cycle().take(100).enumerate() {
                 let instructions: Vec<Instruction> = (0..5)

@@ -67,8 +67,7 @@ where
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl<A, At, Fx, M: Mode> Provider<Fork<At, Fx>> for Peer<A, M>
 where
     // The peer's storage provider type; a space, so a certificate a

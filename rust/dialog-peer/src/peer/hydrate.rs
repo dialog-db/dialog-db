@@ -30,7 +30,7 @@
 use dialog_effects::blob::Load as BlobLoad;
 use std::sync::Arc;
 
-use dialog_capability::{Fork, Provider};
+use dialog_capability::{Fork, Provider, Resume};
 use dialog_common::{Buffer, Holds};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_effects::archive::Load;
@@ -41,9 +41,11 @@ use dialog_repository::{
 };
 
 use super::{Mode, Peer};
+use dialog_artifacts::tree::{ArtifactNode, ArtifactPreload, ArtifactRead, ArtifactWrite};
+use dialog_search_tree::DialogSearchTreeError;
+use dialog_storage::provider::storage::Storage;
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl<S, M: Mode> Provider<Hydrate> for Peer<S, M>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
@@ -84,8 +86,7 @@ where
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl<S, M: Mode> Provider<Load> for Peer<S, M>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
@@ -96,8 +97,48 @@ where
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+// The node layer: a tree read through the peer asks for nodes, and the
+// peer answers from the node cache it holds, its storage (the mounted
+// space's archive, in whatever form it keeps nodes), or a hydration from
+// the routes the subject's branches registered.
+/// A node the peer's cache holds is answered at once.
+impl<S, M: Mode> Provider<ArtifactRead> for Peer<S, M>
+where
+    S: Clone + ConditionalSend + ConditionalSync + 'static,
+    Storage<S>: Provider<ArtifactRead> + ConditionalSync,
+    Self: Provider<Hydrate> + Holds + ConditionalSync,
+{
+    fn execute(
+        &self,
+        read: ArtifactRead,
+    ) -> Resume<'_, Result<Option<ArtifactNode>, DialogSearchTreeError>> {
+        dialog_repository::read_node_or_hydrate(self, &self.storage, read)
+    }
+}
+
+impl<S, M: Mode> Provider<ArtifactPreload> for Peer<S, M>
+where
+    S: Clone + ConditionalSend + ConditionalSync + 'static,
+    Storage<S>: Provider<ArtifactRead> + ConditionalSync,
+    Self: Provider<Hydrate> + Holds + ConditionalSync,
+{
+    fn execute(&self, preload: ArtifactPreload) -> Resume<'_, ()> {
+        dialog_repository::preload_node_or_hydrate(self, &self.storage, preload)
+    }
+}
+
+impl<S, M: Mode> Provider<ArtifactWrite> for Peer<S, M>
+where
+    S: Clone + ConditionalSend + ConditionalSync + 'static,
+    Storage<S>: Provider<ArtifactWrite> + ConditionalSync,
+    Self: Holds + ConditionalSync,
+{
+    fn execute(&self, write: ArtifactWrite) -> Resume<'_, Result<(), DialogSearchTreeError>> {
+        dialog_repository::write_nodes(self, &self.storage, write)
+    }
+}
+
+#[dialog_capability::provider]
 impl<S, M: Mode> Provider<BlobLoad> for Peer<S, M>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,

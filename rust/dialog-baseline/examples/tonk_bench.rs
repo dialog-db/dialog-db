@@ -308,45 +308,13 @@ mod native {
         Ok((profile, operator, home))
     }
 
-    /// Makes the archive at `file` the node source of `branch`'s subject in
-    /// `operator`'s environment, so its trees read nodes from the file's
-    /// rows in place rather than from blocks built back from them. A second
-    /// handle on the same file, as the archive's own tests open one: nothing
-    /// in a peer registers it yet.
-    #[cfg(not(dialog_main))]
-    fn serve_in_place(
-        operator: &impl dialog_common::Holds,
-        branch: &Branch,
-        file: &Path,
-    ) -> anyhow::Result<()> {
-        let archive: std::sync::Arc<dyn dialog_search_tree::NodeSource> =
-            std::sync::Arc::new(dialog_archive_file::FileArchive::open(file)?);
-        <dyn dialog_search_tree::NodeSource>::serve(
-            operator,
-            branch.subject().did(),
-            archive.clone(),
-        );
-        // Queries, subscriptions and the rules a commit runs read through
-        // the query session, under the wildcard subject: register the file
-        // there too. Right for this bench, where each member's peer holds
-        // one space; a peer holding several could not (dialog-db/dialog-db#753
-        // plans the reads that make this unnecessary).
-        <dyn dialog_search_tree::NodeSource>::serve(
-            operator,
-            dialog_capability::Subject::any().did(),
-            archive,
-        );
-        Ok(())
-    }
-
-    #[cfg(dialog_main)]
-    fn serve_in_place(_: &impl dialog_common::Holds, _: &Branch, _: &Path) -> anyhow::Result<()> {
-        anyhow::bail!("main has no node source")
-    }
-
     /// The workload over `lines`, every member's replica on a space of `S`,
-    /// its tree reading nodes in place when `serve` says so.
-    async fn run<S: PeerSpace>(lines: &[Line], root: &Path, serve: bool) -> anyhow::Result<Report> {
+    /// its tree reading nodes in place when its archive keeps them so.
+    async fn run<S: PeerSpace>(
+        lines: &[Line],
+        root: &Path,
+        _serve: bool,
+    ) -> anyhow::Result<Report> {
         let mut report = Report::default();
         let seed = Seed::new(733);
         let count = lines
@@ -414,13 +382,6 @@ mod native {
                 .open()
                 .perform(&owner_operator)
                 .await?;
-            if serve {
-                serve_in_place(
-                    &owner_operator,
-                    &branch,
-                    &owner_home.join("space").join("archive.dialog"),
-                )?;
-            }
             let upstream = origin
                 .branch("main")
                 .open()
@@ -555,13 +516,6 @@ mod native {
                 .perform(&operator)
                 .await?;
             let branch = local.branch("main").open().perform(&operator).await?;
-            if serve {
-                serve_in_place(
-                    &operator,
-                    &branch,
-                    &home.join(format!("space-{}", n + 1)).join("archive.dialog"),
-                )?;
-            }
             let upstream = origin.branch("main").open().perform(&operator).await?;
             branch.set_upstream(upstream).perform(&operator).await?;
             let started = Instant::now();

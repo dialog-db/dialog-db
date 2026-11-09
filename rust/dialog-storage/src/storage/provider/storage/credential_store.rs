@@ -11,10 +11,6 @@
 //! space of the same name never share a directory or a database, and a
 //! directory holds one store however many keys it keeps.
 
-use std::fmt::Display;
-use std::sync::Arc;
-
-use async_trait::async_trait;
 use dialog_capability::{Capability, Did, Policy, Provider, Subject, did};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_credentials::Credential;
@@ -22,6 +18,8 @@ use dialog_effects::credential::prelude::*;
 use dialog_effects::storage::LocationExt as _;
 use dialog_effects::{credential, storage};
 use dialog_varsig::Principal as _;
+use std::fmt::Display;
+use std::sync::Arc;
 
 use super::Storage;
 
@@ -246,8 +244,7 @@ where
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl<S> Provider<storage::Load> for CredentialStore<S>
 where
     S: Clone + SpaceProvider + Resource<storage::Location> + ConditionalSend,
@@ -265,8 +262,7 @@ where
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl<S> Provider<storage::Create> for CredentialStore<S>
 where
     S: Clone + SpaceProvider + Resource<storage::Location> + ConditionalSend,
@@ -284,8 +280,7 @@ where
 }
 
 /// The key a store handed out, read again by the key's own DID.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl<S> Provider<credential::Load<Credential>> for CredentialStore<S>
 where
     S: Clone + SpaceProvider + Resource<storage::Location> + ConditionalSend,
@@ -307,8 +302,7 @@ where
 
 /// A key retracted from the store is gone: the store held its only copy.
 /// The name it was kept under is free for the next key created there.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl<S> Provider<credential::Retract<Credential>> for CredentialStore<S>
 where
     S: Clone + SpaceProvider + Resource<storage::Location> + ConditionalSend,

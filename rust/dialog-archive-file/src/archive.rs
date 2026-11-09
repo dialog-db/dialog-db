@@ -9,8 +9,7 @@ use std::sync::{Arc, LazyLock, Weak};
 use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
-use async_trait::async_trait;
-use dialog_capability::{Capability, Provider};
+use dialog_capability::{Capability, Provider, Resume};
 use dialog_common::{Blake3Hash, Buffer};
 use dialog_effects::archive::prelude::{GetExt, ImportExt, PutExt};
 use dialog_effects::archive::{ArchiveError, Get, Import, Put};
@@ -332,7 +331,7 @@ pub struct Stats {
     pub decode: Duration,
     /// Time reads spent realizing rows into blocks.
     pub realize: Duration,
-    /// Nodes served to trees in place ([`NodeSource`](dialog_search_tree::NodeSource)).
+    /// Nodes served to trees in place, answering their reads (`Read`).
     pub served: u64,
     /// Time spent serving them: finding where each part of each row is.
     pub serve: Duration,
@@ -1694,25 +1693,27 @@ struct Staging<'a> {
     depths: &'a HashMap<u32, u8>,
 }
 
-#[async_trait]
+// The file answers from its mapping and appends in place: nothing to wait
+// on, so every answer is at hand.
 impl Provider<Get> for FileArchive {
-    async fn execute(&self, effect: Capability<Get>) -> Result<Option<Vec<u8>>, ArchiveError> {
-        self.get(effect.catalog(), effect.digest())
+    fn execute(
+        &self,
+        effect: Capability<Get>,
+    ) -> Resume<'_, Result<Option<Vec<u8>>, ArchiveError>> {
+        Resume::now(self.get(effect.catalog(), effect.digest()))
     }
 }
 
-#[async_trait]
 impl Provider<Put> for FileArchive {
-    async fn execute(&self, effect: Capability<Put>) -> Result<(), ArchiveError> {
+    fn execute(&self, effect: Capability<Put>) -> Resume<'_, Result<(), ArchiveError>> {
         let block = Buffer::from(effect.content().to_vec());
-        self.append(effect.catalog(), std::slice::from_ref(&block))
+        Resume::now(self.append(effect.catalog(), std::slice::from_ref(&block)))
     }
 }
 
-#[async_trait]
 impl Provider<Import> for FileArchive {
-    async fn execute(&self, effect: Capability<Import>) -> Result<(), ArchiveError> {
-        self.append(effect.catalog(), effect.blocks())
+    fn execute(&self, effect: Capability<Import>) -> Resume<'_, Result<(), ArchiveError>> {
+        Resume::now(self.append(effect.catalog(), effect.blocks()))
     }
 }
 

@@ -1,3 +1,5 @@
+use dialog_artifacts::tree::ArtifactNodes;
+use dialog_artifacts::tree::ArtifactWrites;
 use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
 use dialog_effects::Rejection;
@@ -66,6 +68,8 @@ impl Reset<'_> {
             + Provider<ArchivePut>
             + Provider<Resolve>
             + Provider<ArchiveLoad>
+            + ArtifactWrites
+            + ArtifactNodes
             + Provider<BlobLoad>
             + dialog_common::Holds
             + ConditionalSync
@@ -130,6 +134,8 @@ where
         + Provider<ArchivePut>
         + Provider<Resolve>
         + Provider<ArchiveLoad>
+        + ArtifactWrites
+        + ArtifactNodes
         + Provider<BlobLoad>
         + dialog_common::Holds
         + ConditionalSync

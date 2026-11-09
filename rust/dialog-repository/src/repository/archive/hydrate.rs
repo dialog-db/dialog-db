@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use crate::RemoteSite;
 use dialog_capability::Fork;
-use dialog_capability::Provider;
+use dialog_capability::{Provider, Resume};
 use dialog_common::{Blake3Hash, Buffer, ConditionalSync, Priority};
 use dialog_effects::archive::prelude::ArchiveExt;
 use dialog_effects::archive::{ArchiveError, Get, Put};
@@ -27,10 +27,15 @@ pub use dialog_network::{Hydrate, HydrationLane, HydrationRequest, HydrationSche
 
 use super::routes::{HydrationRoute, Routes};
 use crate::ConnectedReplica;
+use dialog_artifacts::tree::{
+    ArtifactNode, ArtifactNodeCache, ArtifactPreload, ArtifactRead, ArtifactWrite,
+};
 use dialog_common::Holds;
 use dialog_effects::MethodExt as _;
 use dialog_effects::archive::Load;
 use dialog_effects::archive::prelude::CatalogScope;
+use dialog_search_tree::DialogSearchTreeError;
+use dialog_search_tree::nodes::decode as decode_node;
 use dialog_storage::provider::load::{archive_error, load_block, load_spill, read_all};
 
 /// Where a branch's local read miss hydrates from: what a miss means.
@@ -125,6 +130,115 @@ where
         return Ok(None);
     }
     hydrate_through(env, catalog, digest, HydrationLane::Block, priority).await
+}
+
+/// The node `read` names: from the node cache `env` holds for the catalog's
+/// subject, else from `store`, else hydrated through `env`'s [`Hydrate`]
+/// from the routes registered for the subject, as [`load_or_hydrate`] does
+/// for a block, and decoded; what was read is kept in the cache.
+///
+/// This is an environment's answer to a node read ([`ArtifactRead`]): a peer answers it
+/// with this over its storage. The store is the environment's node layer:
+/// one that keeps nodes in a form of its own answers in that form, one that
+/// keeps blocks answers through the translation layer
+/// ([`dialog_search_tree::nodes`]). What arrives from a remote is a block,
+/// written back into the local archive by the hydration and decoded here. A
+/// [local](dialog_search_tree::nodes::Read::locally) read is answered from
+/// the cache and the store alone.
+pub fn read_node_or_hydrate<'a, Env, Store>(
+    env: &'a Env,
+    store: &'a Store,
+    read: ArtifactRead,
+) -> Resume<'a, Result<Option<ArtifactNode>, DialogSearchTreeError>>
+where
+    Env: Provider<Hydrate> + Holds + ConditionalSync + ?Sized,
+    Store: Provider<ArtifactRead> + ConditionalSync + ?Sized,
+{
+    let cache = ArtifactNodeCache::of(env, read.catalog.subject());
+    // A hit answers at once, before any of the hydrating machinery is set
+    // up: nothing is allocated for it.
+    if let Some(cache) = &cache
+        && let Some(node) = cache.get_cached(&read.name)
+    {
+        return Resume::now(Ok(Some(node)));
+    }
+    Resume::later(async move {
+        let fetch = async |name: &Blake3Hash| {
+            if let Some(node) = store.execute(read.clone().locally()).await? {
+                return Ok(Some(node));
+            }
+            if read.local {
+                return Ok(None);
+            }
+            let block = hydrate_through(
+                env,
+                read.catalog.clone(),
+                name.clone(),
+                HydrationLane::Block,
+                read.priority,
+            )
+            .await
+            .map_err(|error| DialogSearchTreeError::Storage(error.into()))?;
+            block.map(|block| decode_node(block, name)).transpose()
+        };
+        match cache {
+            Some(cache) => cache.get_or_fetch(&read.name, fetch).await,
+            None => fetch(&read.name).await,
+        }
+    })
+}
+
+/// Makes the node `preload` names cheap to read: reads it as
+/// [`read_node_or_hydrate`] would, into the cache `env` holds, dropping the
+/// result. An environment holding no cache has nowhere for it to land, so
+/// nothing is read; a node the cache holds is done with at once.
+pub fn preload_node_or_hydrate<'a, Env, Store>(
+    env: &'a Env,
+    store: &'a Store,
+    preload: ArtifactPreload,
+) -> Resume<'a, ()>
+where
+    Env: Provider<Hydrate> + Holds + ConditionalSync + ?Sized,
+    Store: Provider<ArtifactRead> + ConditionalSync + ?Sized,
+{
+    if ArtifactNodeCache::of(env, preload.catalog.subject()).is_none() {
+        return Resume::now(());
+    }
+    match read_node_or_hydrate(env, store, preload.read()).into_now() {
+        Ok(_) => Resume::now(()),
+        Err(reading) => Resume::later(async move {
+            let _ = reading.await;
+        }),
+    }
+}
+
+/// Writes the nodes `write` carries through `store`, then keeps them in the
+/// node cache `env` holds for the catalog's subject, so the next edit opens
+/// them without reading them back. A write that fails keeps nothing.
+pub fn write_nodes<'a, Env, Store>(
+    env: &'a Env,
+    store: &'a Store,
+    write: ArtifactWrite,
+) -> Resume<'a, Result<(), DialogSearchTreeError>>
+where
+    Env: Holds + ?Sized,
+    Store: Provider<ArtifactWrite> + ConditionalSync + ?Sized,
+{
+    let cache = ArtifactNodeCache::of(env, write.catalog.subject());
+    let nodes = write.nodes.clone();
+    write.perform(store).map(move |written| {
+        written?;
+        if let Some(cache) = cache {
+            for node in nodes {
+                // A node the cache already holds under this hash is the same
+                // bytes with whatever it has derived since: it stays.
+                if cache.get_cached(node.hash()).is_none() {
+                    cache.insert(node.hash().clone(), node);
+                }
+            }
+        }
+        Ok(())
+    })
 }
 
 /// The spilled value `load` names: from `env`'s local blob store (or the
@@ -457,8 +571,7 @@ mod tests {
         }
     }
 
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    #[dialog_capability::provider]
     impl<P> Provider<Get> for Recording<P>
     where
         P: Provider<Get> + ConditionalSync,
@@ -468,8 +581,7 @@ mod tests {
         }
     }
 
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    #[dialog_capability::provider]
     impl<P> Provider<Hydrate> for Recording<P>
     where
         P: ConditionalSend + ConditionalSync,
@@ -480,8 +592,7 @@ mod tests {
         }
     }
 
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    #[dialog_capability::provider]
     impl<P> Provider<Load> for Recording<P>
     where
         P: Provider<Get> + Holds + ConditionalSend + ConditionalSync,
@@ -490,6 +601,11 @@ mod tests {
             super::load_or_hydrate(self, load).await
         }
     }
+
+    dialog_search_tree::reads_nodes_through_blocks!(
+        impl[P,] Recording<P>
+        where [P: Provider<Get> + Holds + ConditionalSend + ConditionalSync,]
+    );
 
     /// The priority a read is made at reaches the env's hydration request,
     /// which is where the scheduler reads it: a load is a demand read

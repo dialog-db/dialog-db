@@ -55,8 +55,10 @@ Backtracking moves a topic to an earlier phase and says so in its journal.
 
 ## Topics
 
+- [The search tree's concerns are not expressed as capabilities](tree-node-reads.md):
+  **Building.** The tree talks in nodes through capabilities it performs on
+  the environment; caching, decoding and storage form belong to providers.
+  The [plan](tree-node-reads/plan.md) is for whoever builds it.
+
 Bringing a large dataset into a replica (large transactions) is a topic on
 its own branch, `worker/design-large-transactions`.
-
-The search tree's node reads are a topic on
-[dialog-db/dialog-db#753](https://github.com/dialog-db/dialog-db/pull/753).

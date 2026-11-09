@@ -33,7 +33,7 @@ impl FileSystem {
     }
 }
 
-#[async_trait::async_trait(?Send)]
+#[dialog_capability::provider]
 impl Provider<Load<Credential>> for FileSystem {
     async fn execute(
         &self,
@@ -44,7 +44,7 @@ impl Provider<Load<Credential>> for FileSystem {
     }
 }
 
-#[async_trait::async_trait(?Send)]
+#[dialog_capability::provider]
 impl Provider<Save<Credential>> for FileSystem {
     async fn execute(&self, input: Capability<Save<Credential>>) -> Result<(), CredentialError> {
         // Only the public identity is persisted; a non-extractable web signer
@@ -55,7 +55,7 @@ impl Provider<Save<Credential>> for FileSystem {
     }
 }
 
-#[async_trait::async_trait(?Send)]
+#[dialog_capability::provider]
 impl Provider<Retract<Credential>> for FileSystem {
     async fn execute(&self, input: Capability<Retract<Credential>>) -> Result<(), CredentialError> {
         self.credential_key(input.address())?.remove().await?;

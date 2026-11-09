@@ -11,6 +11,8 @@
 use dialog_artifacts::history::{
     CausalityCache, ContextCache, RevisionRecord, TreeHistory, Version, log,
 };
+use dialog_artifacts::tree::ArtifactNodes;
+use dialog_artifacts::tree::ArtifactWrites;
 use dialog_artifacts::tree::{ArtifactNodeCache, SpillCache};
 use dialog_artifacts::{Changes, DialogArtifactsError, Entity, SpineSlot, Statement as _};
 use dialog_capability::{Capability, Provider, Subject};
@@ -250,7 +252,13 @@ impl<'a> SourceRef<'a> {
     /// locally, so an offline replica behaves as it always did.
     pub(crate) fn history<Env>(self, env: &Env) -> TreeHistory<&Env>
     where
-        Env: Provider<ArchiveLoad> + Provider<BlobLoad> + Holds + ConditionalSync + ?Sized,
+        Env: Provider<ArchiveLoad>
+            + ArtifactWrites
+            + ArtifactNodes
+            + Provider<BlobLoad>
+            + Holds
+            + ConditionalSync
+            + ?Sized,
     {
         let history = match self.root() {
             Some(root) => TreeHistory::from_root(self.catalog(), &root, env),
@@ -268,7 +276,13 @@ impl<'a> SourceRef<'a> {
         limit: usize,
     ) -> Result<Vec<(Version, RevisionRecord)>, DialogArtifactsError>
     where
-        Env: Provider<ArchiveLoad> + Provider<BlobLoad> + Holds + ConditionalSync + ?Sized,
+        Env: Provider<ArchiveLoad>
+            + ArtifactWrites
+            + ArtifactNodes
+            + Provider<BlobLoad>
+            + Holds
+            + ConditionalSync
+            + ?Sized,
     {
         let Some(head) = self.revision() else {
             return Ok(Vec::new());

@@ -13,6 +13,7 @@
 //! racing itself on one branch mints the same edition twice, and the
 //! loser's version is already taken; that race is refused instead.
 
+use dialog_artifacts::tree::{ArtifactNodes, ArtifactWrites};
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::blob::Import as BlobImport;
 use dialog_effects::blob::Load as BlobLoad;
@@ -56,11 +57,14 @@ where
         + Provider<Get>
         + Provider<Put>
         + Provider<Import>
+        + ArtifactWrites
         + Provider<Resolve>
         + Provider<Publish>
         + Provider<Identify>
         + Provider<Attest>
         + Provider<ArchiveLoad>
+        + ArtifactWrites
+        + ArtifactNodes
         + Provider<BlobLoad>
         + dialog_common::Holds
         + ConditionalSync
@@ -121,10 +125,13 @@ where
         + Provider<Get>
         + Provider<Put>
         + Provider<Import>
+        + ArtifactWrites
         + Provider<Resolve>
         + Provider<Identify>
         + Provider<Attest>
         + Provider<ArchiveLoad>
+        + ArtifactWrites
+        + ArtifactNodes
         + Provider<BlobLoad>
         + dialog_common::Holds
         + ConditionalSync
@@ -184,7 +191,7 @@ where
             .integrate(futures_util::StreamExt::chain(history, data), &tree_store),
     )
     .await?
-    .persist(delta.blocks(), &tree_store)?;
+    .persist(delta.nodes())?;
 
     // The merged tree started as theirs, so its context region is what
     // theirs held.

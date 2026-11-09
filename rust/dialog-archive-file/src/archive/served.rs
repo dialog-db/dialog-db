@@ -1,4 +1,4 @@
-//! The archive as a [`NodeSource`]: a node read where the file keeps it.
+//! The archive answers a tree's node reads: a node read where the file keeps it.
 //!
 //! A frame's rows name tokens by id; a node served to the tree turns them,
 //! once, into where each token sits in the file, and reads every key part,
@@ -16,12 +16,19 @@ use dialog_artifacts::{
     ATTRIBUTE_KEY_TAG, BLOB_KEY_TAG, COVERAGE_KEY_TAG, Datum, ENTITY_KEY_TAG, HISTORY_KEY_TAG,
     State, VALUE_KEY_TAG,
 };
+use dialog_capability::{Provider, Resume};
 use dialog_common::{Blake3Hash, Buffer};
-use dialog_effects::archive::prelude::CatalogScope;
+use dialog_common::{ConditionalSend, ConditionalSync};
+use dialog_search_tree::nodes::{Preload, Read, Write, decode};
 use dialog_search_tree::{
-    DialogSearchTreeError, KeyParts, Manifest, NodeRows, NodeSource, RowsKind,
+    DialogSearchTreeError, KeyParts, Manifest, NodeRows, PersistentNode, RowsKind,
 };
 use memmap2::Mmap;
+use rkyv::{
+    bytecheck::CheckBytes,
+    rancor::Strategy,
+    validation::{Validator, archive::ArchiveValidator, shared::SharedValidator},
+};
 use zerocopy::FromBytes as _;
 
 use super::index::{Place, Snapshot};
@@ -349,12 +356,69 @@ unsafe impl NodeRows for FileNode {
     }
 }
 
-/// The archive serves every node it keeps as a frame: a tree read through an
-/// environment that holds it ([`NodeSource::serve`]) reads such nodes in
-/// place, and loads the rest as blocks.
-impl NodeSource for FileArchive {
-    fn node(&self, catalog: &CatalogScope, hash: &Blake3Hash) -> Option<Arc<dyn NodeRows>> {
-        self.served(catalog.catalog_name(), hash)
-            .map(|node| Arc::new(node) as Arc<dyn NodeRows>)
+/// The archive answers a tree's node reads itself (the node layer,
+/// [`dialog_search_tree::nodes`]): a node it keeps as a frame is read from
+/// its rows in place, and a node kept whole is decoded from its block. The
+/// file is mapped, so both are answered at once; nothing here waits. The
+/// archive is this replica's store, so a read it cannot answer is absent
+/// here, and hydrating it from elsewhere is for whoever stands in front.
+impl<Key, Value> Provider<Read<Key, Value>> for FileArchive
+where
+    Key: dialog_search_tree::Key + ConditionalSend + ConditionalSync + 'static,
+    Value: dialog_search_tree::Value + ConditionalSend + ConditionalSync + 'static,
+    Value::Archived: for<'a> CheckBytes<
+        Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+    >,
+{
+    fn execute(
+        &self,
+        read: Read<Key, Value>,
+    ) -> Resume<'_, Result<Option<PersistentNode<Key, Value>>, DialogSearchTreeError>> {
+        let catalog = read.catalog.catalog_name();
+        // Rows of another value type than the tree's are read from the
+        // block instead, as `PersistentNode::from_rows` declines them.
+        if let Some(node) = self
+            .served(catalog, &read.name)
+            .and_then(|rows| PersistentNode::from_rows(Arc::new(rows)))
+        {
+            return Resume::now(Ok(Some(node)));
+        }
+        Resume::now(match self.get(catalog, &read.name) {
+            Ok(block) => block
+                .map(|block| decode(Buffer::from(block), &read.name))
+                .transpose(),
+            Err(error) => Err(DialogSearchTreeError::Storage(error.into())),
+        })
+    }
+}
+
+/// Reads from the file are as cheap as a held node: there is nothing to
+/// make cheaper ahead of time.
+impl<Key, Value> Provider<Preload<Key, Value>> for FileArchive {
+    fn execute(&self, _: Preload<Key, Value>) -> Resume<'_, ()> {
+        Resume::now(())
+    }
+}
+
+/// A write appends the nodes' blocks, which the archive frames as rows.
+impl<Key, Value> Provider<Write<Key, Value>> for FileArchive
+where
+    Key: ConditionalSend + ConditionalSync + 'static,
+    Value: ConditionalSend + ConditionalSync + 'static,
+{
+    fn execute(&self, write: Write<Key, Value>) -> Resume<'_, Result<(), DialogSearchTreeError>> {
+        let blocks = match write
+            .nodes
+            .iter()
+            .map(|node| node.buffer().cloned())
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(blocks) => blocks,
+            Err(error) => return Resume::now(Err(error)),
+        };
+        Resume::now(
+            self.append(write.catalog.catalog_name(), &blocks)
+                .map_err(|error| DialogSearchTreeError::Storage(error.into())),
+        )
     }
 }

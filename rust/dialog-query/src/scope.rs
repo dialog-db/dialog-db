@@ -12,6 +12,7 @@
 //! `Scope` names that bundle once so premise evaluation signatures stay
 //! stable as effects are added.
 
+use dialog_artifacts::tree::ArtifactNodes;
 use dialog_artifacts::{Estimate, Preload, Select};
 use dialog_capability::Provider;
 use dialog_common::{ConditionalSync, Holds};
@@ -29,6 +30,7 @@ pub trait Scope<'a>:
     Provider<Select<'a>>
     + Provider<SelectRules>
     + Provider<archive::Load>
+    + ArtifactNodes
     + Provider<blob::Load>
     + Provider<Preload>
     + Provider<Estimate>
@@ -42,6 +44,7 @@ impl<'a, T> Scope<'a> for T where
     T: Provider<Select<'a>>
         + Provider<SelectRules>
         + Provider<archive::Load>
+        + ArtifactNodes
         + Provider<blob::Load>
         + Provider<Preload>
         + Provider<Estimate>

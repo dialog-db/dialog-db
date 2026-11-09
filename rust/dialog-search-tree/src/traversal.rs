@@ -17,7 +17,7 @@
 //! is not reported at all -- a sparse walk yields a frontier, never a
 //! complete inventory of what is missing.
 
-use crate::reads::*;
+use crate::Nodes;
 use async_stream::try_stream;
 use dialog_common::{Blake3Hash, ConditionalSync};
 use futures_core::Stream;
@@ -73,7 +73,7 @@ where
         storage: &'a Env,
     ) -> impl Stream<Item = Result<Visit<Key, Value>, DialogSearchTreeError>> + 'a
     where
-        Env: Provider<Load> + Holds + ConditionalSync;
+        Env: Nodes<Key, Value>;
 
     /// [`traverse_available`](Self::traverse_available) restricted to
     /// `scope`: a child subtree whose key span cannot intersect any range
@@ -93,7 +93,7 @@ where
         scope: &'a [core::ops::RangeInclusive<Vec<u8>>],
     ) -> impl Stream<Item = Result<Visit<Key, Value>, DialogSearchTreeError>> + 'a
     where
-        Env: Provider<Load> + Holds + ConditionalSync;
+        Env: Nodes<Key, Value>;
 }
 
 impl<Key, Value, D> Traversable<Key, Value> for PersistentTree<Key, Value, D>
@@ -114,7 +114,7 @@ where
         storage: &'a Env,
     ) -> impl Stream<Item = Result<Visit<Key, Value>, DialogSearchTreeError>> + 'a
     where
-        Env: Provider<Load> + Holds + ConditionalSync,
+        Env: Nodes<Key, Value>,
     {
         traverse::<Key, Value, Env>(self.stored_root().cloned(), self.accessor(storage), None)
     }
@@ -125,7 +125,7 @@ where
         scope: &'a [core::ops::RangeInclusive<Vec<u8>>],
     ) -> impl Stream<Item = Result<Visit<Key, Value>, DialogSearchTreeError>> + 'a
     where
-        Env: Provider<Load> + Holds + ConditionalSync,
+        Env: Nodes<Key, Value>,
     {
         traverse::<Key, Value, Env>(
             self.stored_root().cloned(),
@@ -171,7 +171,7 @@ where
             Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
         + ConditionalSync,
-    Env: Provider<Load> + Holds + ConditionalSync,
+    Env: Nodes<Key, Value>,
 {
     use futures_util::StreamExt as _;
 
@@ -321,9 +321,13 @@ mod tests {
                     .edit()
                     .insert(key, vec![*tag; 512], storage)
                     .await?
-                    .persist(&mut delta, storage)?;
-                for (_, buffer) in delta.flush() {
-                    storage.store(buffer);
+                    .persist(&mut delta)?;
+                for (_, node) in delta.flush() {
+                    storage.store(
+                        node.buffer()
+                            .expect("a node built from its block has one")
+                            .clone(),
+                    );
                 }
             }
         }
@@ -347,9 +351,13 @@ mod tests {
                     .edit()
                     .insert(key, vec![*tag; 512], storage)
                     .await?
-                    .persist(&mut delta, storage)?;
-                for (_, buffer) in delta.flush() {
-                    storage.store(buffer);
+                    .persist(&mut delta)?;
+                for (_, node) in delta.flush() {
+                    storage.store(
+                        node.buffer()
+                            .expect("a node built from its block has one")
+                            .clone(),
+                    );
                 }
             }
         }
@@ -378,9 +386,13 @@ mod tests {
                 .edit()
                 .insert(i.to_be_bytes(), vec![i as u8], storage)
                 .await?
-                .persist(&mut delta, storage)?;
-            for (_, buffer) in delta.flush() {
-                storage.store(buffer);
+                .persist(&mut delta)?;
+            for (_, node) in delta.flush() {
+                storage.store(
+                    node.buffer()
+                        .expect("a node built from its block has one")
+                        .clone(),
+                );
             }
         }
         Ok(tree)
@@ -513,9 +525,13 @@ mod tests {
             hitchhiker = hitchhiker.insert(key, vec![0u8; 8], &storage).await?;
         }
         let mut delta = Delta::zero();
-        let root = hitchhiker.persist(&mut delta, &storage)?;
-        for (_, buffer) in delta.flush() {
-            storage.store(buffer);
+        let root = hitchhiker.persist(&mut delta)?;
+        for (_, node) in delta.flush() {
+            storage.store(
+                node.buffer()
+                    .expect("a node built from its block has one")
+                    .clone(),
+            );
         }
         let tree = PersistentTree::<[u8; 5], Vec<u8>>::at(crate::helpers::test_catalog(), root);
 

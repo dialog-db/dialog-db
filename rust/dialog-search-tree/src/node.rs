@@ -4,7 +4,7 @@ pub use persistent::*;
 mod archive;
 
 mod rows;
-pub use rows::{KeyParts, MAX_PARTS, NodeRows, NodeSource, RowsKind};
+pub use rows::{KeyParts, MAX_PARTS, NodeRows, RowsKind};
 
 mod view;
 pub use view::{BufferView, IndexView, KeyCursor, SegmentView};
@@ -36,9 +36,7 @@ use rkyv::{
     validation::{Validator, archive::ArchiveValidator, shared::SharedValidator},
 };
 
-use crate::{
-    Buffer, Delta, DialogSearchTreeError, Key, Link, Manifest, NodeCache, Separator, Value,
-};
+use crate::{Delta, DialogSearchTreeError, Key, Link, Manifest, Separator, Value};
 
 /// A tree node in either of its two representations.
 ///
@@ -127,17 +125,14 @@ where
     /// edits that built the transient.
     pub fn into_link(
         self,
-        delta: &mut Delta<Blake3Hash, Buffer>,
+        delta: &mut Delta<Blake3Hash, PersistentNode<Key, Value>>,
         manifest: &Manifest,
-        cache: Option<&NodeCache<Key, Value>>,
     ) -> Result<Link, DialogSearchTreeError> {
         match self {
             Node::Persistent(link) => Ok(link),
             Node::Transient(transient) => {
                 let separator = transient.edge()?.clone();
-                Ok(transient
-                    .persist(delta, manifest, cache)?
-                    .to_link(separator))
+                Ok(transient.persist(delta, manifest)?.to_link(separator))
             }
         }
     }

@@ -12,9 +12,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use base58::ToBase58 as _;
-use dialog_capability::{Capability, Provider};
+use dialog_artifacts::{Datum, Key as ArtifactKey, State};
+use dialog_capability::{Capability, Provider, Resume};
 use dialog_common::{Blake3Hash, Buffer, Held, Holds};
 use dialog_effects::archive::{self, ArchiveError, Get};
 use dialog_effects::blob;
@@ -79,14 +79,14 @@ impl Holds for Replica {
     fn hold(&self, _key: String, _handle: Held) {}
 }
 
-#[async_trait]
+#[dialog_capability::provider]
 impl Provider<archive::Load> for Replica {
     async fn execute(&self, load: archive::Load) -> Result<Option<Buffer>, ArchiveError> {
         Ok(self.block(&load.digest))
     }
 }
 
-#[async_trait]
+#[dialog_capability::provider]
 impl Provider<Get> for Replica {
     async fn execute(&self, get: Capability<Get>) -> Result<Option<Vec<u8>>, ArchiveError> {
         use dialog_effects::archive::prelude::GetExt as _;
@@ -96,9 +96,33 @@ impl Provider<Get> for Replica {
     }
 }
 
+/// A replica keeps blocks, so a tree's node reads go through the
+/// translation layer over them; with no cache, a preload has nowhere to
+/// land.
+impl Provider<dialog_search_tree::nodes::Read<ArtifactKey, State<Datum>>> for Replica {
+    fn execute(
+        &self,
+        read: dialog_search_tree::nodes::Read<ArtifactKey, State<Datum>>,
+    ) -> Resume<
+        '_,
+        Result<
+            Option<dialog_search_tree::PersistentNode<ArtifactKey, State<Datum>>>,
+            dialog_search_tree::DialogSearchTreeError,
+        >,
+    > {
+        read.through_blocks(self, None)
+    }
+}
+
+impl<Key, Value> Provider<dialog_search_tree::nodes::Preload<Key, Value>> for Replica {
+    fn execute(&self, _: dialog_search_tree::nodes::Preload<Key, Value>) -> Resume<'_, ()> {
+        Resume::now(())
+    }
+}
+
 /// A spilled value is read from the blob directory, else from the blocks,
 /// where a value spilled before values moved to the blob store is kept.
-#[async_trait]
+#[dialog_capability::provider]
 impl Provider<blob::Load> for Replica {
     async fn execute(&self, load: blob::Load) -> Result<Option<Buffer>, ArchiveError> {
         if let Some(blobs) = &self.blobs

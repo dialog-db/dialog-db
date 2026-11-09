@@ -11,8 +11,8 @@ use rkyv::{
 use std::ops::Bound;
 
 use crate::{
-    Buffer, BufferView, Delta, DialogSearchTreeError, Distribution, Entry, Hashed, IndexView, Key,
-    LazyHash, Link, Manifest, Node, NodeBody, NodeCache, NoveltyBuffer, NoveltyEntry, NoveltyOp,
+    BufferView, Delta, DialogSearchTreeError, Distribution, Entry, Hashed, IndexView, Key,
+    LazyHash, Link, Manifest, Node, NodeBody, NoveltyBuffer, NoveltyEntry, NoveltyOp,
     PersistentNode, PersistentNodeBody, Rank, SegmentEntry, Separator, Value, distribution::cap,
     into_owned, resolve_pending,
 };
@@ -1599,16 +1599,15 @@ where
     /// the children, novelty, and entries are encoded exactly as the edits
     /// left them.
     ///
-    /// Every node sealed is kept in `cache` (when there is one: the cache the
-    /// store a tree persists through keeps) with the hashes its entries (or
-    /// links) already had: it is the node the next edit of this tree opens,
-    /// and a node read back from storage instead would be checked again and
-    /// would hash every key again before it could be regrouped.
+    /// Every node sealed goes into `delta` carrying the hashes its entries
+    /// (or links) already had ([`PersistentNode::adopt_hashes`]): it is the
+    /// node the next edit of this tree opens, once the environment has
+    /// written and kept it, and a node that had to hash every key again
+    /// before it could be regrouped would pay that work twice.
     pub fn persist(
         self,
-        delta: &mut Delta<Blake3Hash, Buffer>,
+        delta: &mut Delta<Blake3Hash, PersistentNode<Key, Value>>,
         manifest: &Manifest,
-        cache: Option<&NodeCache<Key, Value>>,
     ) -> Result<PersistentNode<Key, Value>, DialogSearchTreeError> {
         // Measurement-only (uncommitted, env-gated): classify the node being
         // sealed so a duplicate store downstream can be attributed to a kind.
@@ -1635,7 +1634,7 @@ where
             TransientNode::Index(TransientIndex { children, novelty }) => {
                 let links = children
                     .into_iter()
-                    .map(|child| child.into_link(delta, manifest, cache))
+                    .map(|child| child.into_link(delta, manifest))
                     .collect::<Result<Vec<Link>, DialogSearchTreeError>>()?;
                 let hashes = links
                     .iter()
@@ -1653,8 +1652,8 @@ where
         if let Some(kind) = audit_kind {
             dialog_storage::dup_audit::note_seal(node.hash().as_bytes(), kind);
         }
-        delta.add(node.hash().clone(), node.buffer()?.clone());
-        Self::keep(cache, &node, hashes);
+        node.adopt_hashes(hashes);
+        delta.add(node.hash().clone(), node.clone());
         Ok(node)
     }
 
@@ -1672,9 +1671,8 @@ where
     /// later write touches pay a fresh encode next time.
     pub fn persist_mut(
         &mut self,
-        delta: &mut Delta<Blake3Hash, Buffer>,
+        delta: &mut Delta<Blake3Hash, PersistentNode<Key, Value>>,
         manifest: &Manifest,
-        cache: Option<&NodeCache<Key, Value>>,
     ) -> Result<PersistentNode<Key, Value>, DialogSearchTreeError> {
         let audit_kind = if dialog_storage::dup_audit::enabled() {
             Some(match &self {
@@ -1713,7 +1711,7 @@ where
                                 Vec::new(),
                             ))),
                         );
-                        *child = Node::Persistent(lifted.into_link(delta, manifest, cache)?);
+                        *child = Node::Persistent(lifted.into_link(delta, manifest)?);
                     }
                 }
                 let links = children
@@ -1741,28 +1739,9 @@ where
         if let Some(kind) = audit_kind {
             dialog_storage::dup_audit::note_seal(node.hash().as_bytes(), kind);
         }
-        delta.add(node.hash().clone(), node.buffer()?.clone());
-        Self::keep(cache, &node, hashes);
+        node.adopt_hashes(hashes);
+        delta.add(node.hash().clone(), node.clone());
         Ok(node)
-    }
-
-    /// Keeps a node just sealed in `cache`, with the hashes already computed
-    /// for what it was sealed from (see [`PersistentNode::adopt_hashes`]). A
-    /// node the cache already holds under this hash is the same bytes with
-    /// whatever it has derived since, so it stays. With no cache nothing is
-    /// kept.
-    fn keep(
-        cache: Option<&NodeCache<Key, Value>>,
-        node: &PersistentNode<Key, Value>,
-        hashes: Vec<Option<Blake3Hash>>,
-    ) {
-        let Some(cache) = cache else {
-            return;
-        };
-        if cache.get_cached(node.hash()).is_none() {
-            node.adopt_hashes(hashes);
-            cache.insert(node.hash().clone(), node.clone());
-        }
     }
 }
 
@@ -2495,16 +2474,10 @@ mod kept_hash_tests {
             .collect()
     }
 
-    fn seal(
-        entries: Vec<SegmentEntry<[u8; 4], Vec<u8>>>,
-        cache: &NodeCache<[u8; 4], Vec<u8>>,
-    ) -> Result<Leaf> {
+    fn seal(entries: Vec<SegmentEntry<[u8; 4], Vec<u8>>>) -> Result<Leaf> {
         Ok(
-            TransientNode::Segment(TransientSegment::new(entries, Vec::new())).persist(
-                &mut Delta::zero(),
-                &Manifest::default(),
-                Some(cache),
-            )?,
+            TransientNode::Segment(TransientSegment::new(entries, Vec::new()))
+                .persist(&mut Delta::zero(), &Manifest::default())?,
         )
     }
 
@@ -2520,7 +2493,7 @@ mod kept_hash_tests {
     /// nobody asked about stays unhashed.
     #[dialog_common::test]
     fn it_keeps_a_stored_leafs_key_hashes_between_openings() -> Result<()> {
-        let leaf = seal(entries_of(0..8), &NodeCache::new())?;
+        let leaf = seal(entries_of(0..8))?;
 
         let first = open(&leaf)?;
         assert!(
@@ -2548,7 +2521,7 @@ mod kept_hash_tests {
         let entries = entries_of(0..8);
         let ranked = entries[5].key_hash();
 
-        let opened = open(&seal(entries, &NodeCache::new())?)?;
+        let opened = open(&seal(entries)?)?;
 
         assert_eq!(opened.entries()[5].known_hash(), Some(ranked));
         assert_eq!(opened.entries()[4].known_hash(), None);
@@ -2560,8 +2533,7 @@ mod kept_hash_tests {
     /// stored key keeps the hash the stored key had.
     #[dialog_common::test]
     fn it_keeps_the_hashes_edits_bring_into_a_leaf() -> Result<()> {
-        let cache = NodeCache::new();
-        let mut segment = open(&seal(entries_of(0..8), &cache)?)?;
+        let mut segment = open(&seal(entries_of(0..8))?)?;
         let stored = segment.entries()[2].key_hash();
 
         let incoming = SegmentEntry::from(Entry::new(9u32.to_be_bytes(), vec![9]));
@@ -2573,11 +2545,8 @@ mod kept_hash_tests {
         assert_eq!(segment.entries()[2].known_hash(), Some(stored.clone()));
         assert_eq!(segment.entries()[2].value, vec![2]);
 
-        let sealed = TransientNode::Segment(segment).persist(
-            &mut Delta::zero(),
-            &Manifest::default(),
-            Some(&cache),
-        )?;
+        let sealed =
+            TransientNode::Segment(segment).persist(&mut Delta::zero(), &Manifest::default())?;
         let reopened = open(&sealed)?;
         assert_eq!(reopened.entries()[8].known_hash(), Some(ranked));
         assert_eq!(reopened.entries()[2].known_hash(), Some(stored));
@@ -2602,16 +2571,15 @@ mod kept_hash_tests {
     /// ones its links had, and handing them to whoever opens it.
     #[dialog_common::test]
     fn it_seals_an_index_with_the_hashes_its_separators_had() -> Result<()> {
-        let cache = NodeCache::new();
-        let left = seal(entries_of(0..4), &cache)?.to_link(Vec::new());
-        let right = seal(entries_of(4..8), &cache)?.to_link(4u32.to_be_bytes().to_vec());
+        let left = seal(entries_of(0..4))?.to_link(Vec::new());
+        let right = seal(entries_of(4..8))?.to_link(4u32.to_be_bytes().to_vec());
         let ranked = right.separator.hashed().hash();
 
-        let index = TransientNode::Index(TransientIndex {
+        let index = TransientNode::<[u8; 4], Vec<u8>>::Index(TransientIndex {
             children: vec![Node::Persistent(left), Node::Persistent(right)],
             novelty: Novelty::new(),
         })
-        .persist(&mut Delta::zero(), &Manifest::default(), Some(&cache))?;
+        .persist(&mut Delta::zero(), &Manifest::default())?;
         let opened = TransientNode::open_index(&index)?;
 
         assert_eq!(opened.children[1].edge()?.known_hash(), Some(ranked));
@@ -2619,42 +2587,54 @@ mod kept_hash_tests {
         Ok(())
     }
 
-    /// Every node a persist seals is kept in the cache it was given, so the
-    /// next edit opens the node that carries the hashes rather than reading
-    /// its bytes back from storage.
+    /// Every node a seal produces goes into the delta, the live children
+    /// of an index with it, each under its hash: what the environment is
+    /// handed to write and keep.
     #[dialog_common::test]
-    fn it_keeps_every_node_it_seals_in_the_cache() -> Result<()> {
-        let cache = NodeCache::new();
-        let left = seal(entries_of(0..4), &cache)?;
-        let right = seal(entries_of(4..8), &cache)?;
+    fn it_seals_every_node_into_the_delta() -> Result<()> {
+        let mut delta = Delta::zero();
         let index = TransientNode::<[u8; 4], Vec<u8>>::Index(TransientIndex {
             children: vec![
-                Node::Persistent(left.to_link(Vec::new())),
-                Node::Persistent(right.to_link(4u32.to_be_bytes().to_vec())),
+                Node::Transient(TransientNode::Segment(TransientSegment::new(
+                    entries_of(0..4),
+                    Vec::new(),
+                ))),
+                Node::Transient(TransientNode::Segment(TransientSegment::new(
+                    entries_of(4..8),
+                    4u32.to_be_bytes().to_vec(),
+                ))),
             ],
             novelty: Novelty::new(),
         })
-        .persist(&mut Delta::zero(), &Manifest::default(), Some(&cache))?;
+        .persist(&mut delta, &Manifest::default())?;
 
-        for node in [&left, &right, &index] {
-            assert!(
-                cache.get_cached(node.hash()).is_some(),
-                "a sealed node must be in the cache"
-            );
+        assert_eq!(delta.len(), 3, "the index and both leaves are sealed");
+        let sealed = delta.get(index.hash()).expect("the index is in the delta");
+        assert_eq!(sealed.hash(), index.hash());
+        for child in TransientNode::open_index(&index)?.children {
+            let Node::Persistent(link) = child else {
+                panic!("a sealed child is a link");
+            };
+            assert!(delta.get(&link.node).is_some(), "a leaf is in the delta");
         }
         Ok(())
     }
 
-    /// Sealing bytes the cache already holds leaves the held node in place:
+    /// Writing bytes the cache already holds leaves the held node in place:
     /// it is the same node, and it has whatever it derived since.
     #[dialog_common::test]
-    fn it_keeps_the_node_already_held_when_the_same_bytes_are_sealed_again() -> Result<()> {
+    async fn it_keeps_the_node_already_held_when_the_same_bytes_are_written_again() -> Result<()> {
+        let blocks = crate::helpers::Blocks::new();
         let cache = NodeCache::new();
-        let held = seal(entries_of(0..8), &cache)?;
+        let held = seal(entries_of(0..8))?;
         let hash = open(&held)?.entries()[1].key_hash();
+        cache.insert(held.hash().clone(), held.clone());
 
-        let again = seal(entries_of(0..8), &cache)?;
+        let again = seal(entries_of(0..8))?;
         assert_eq!(again.hash(), held.hash());
+        crate::nodes::Write::new(crate::helpers::test_catalog(), vec![again])
+            .through_blocks(&blocks, Some(&cache))
+            .await?;
 
         let cached = cache.get_cached(held.hash()).expect("the node is held");
         assert_eq!(open(&cached)?.entries()[1].known_hash(), Some(hash));
@@ -2666,7 +2646,7 @@ mod kept_hash_tests {
     #[dialog_common::test]
     fn it_keeps_a_piece_summary_under_the_knobs_it_was_built_with() -> Result<()> {
         let manifest = Manifest::default();
-        let leaf = seal(entries_of(0..8), &NodeCache::new())?;
+        let leaf = seal(entries_of(0..8))?;
         assert!(leaf.summary(&manifest).is_none());
 
         let segment = open(&leaf)?;

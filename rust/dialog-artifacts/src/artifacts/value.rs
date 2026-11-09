@@ -553,6 +553,18 @@ impl Value {
     pub fn to_reference(&self) -> Blake3Hash {
         make_reference(self.to_bytes())
     }
+
+    /// What an election compares two values by when nothing else
+    /// separates them: the hash of this value's
+    /// [`identity_key`](Self::identity_key), the greater winning. Values
+    /// that are one value (the natural 3 and the float 3.0) hash alike,
+    /// values of different types never do, and no writer can choose a
+    /// value to win the tie without searching for one whose hash does,
+    /// as no writer can choose a version to win between concurrent
+    /// revisions.
+    pub fn tiebreak(&self) -> Blake3Hash {
+        make_reference(self.identity_key())
+    }
 }
 
 impl Hash for Value {

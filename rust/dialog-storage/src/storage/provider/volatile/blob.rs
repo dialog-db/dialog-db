@@ -108,8 +108,7 @@ impl Volatile {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<Read> for Volatile {
     async fn execute(&self, effect: Capability<Read>) -> Result<BlobReader, BlobError> {
         let subject: Did = effect.subject().into();
@@ -139,8 +138,7 @@ impl Provider<Read> for Volatile {
 }
 
 /// The length of the buffer held under the digest; nothing is copied.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<Size> for Volatile {
     async fn execute(&self, effect: Capability<Size>) -> Result<Option<u64>, BlobError> {
         let subject: Did = effect.subject().into();
@@ -154,16 +152,14 @@ impl Provider<Size> for Volatile {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<Write> for Volatile {
     async fn execute(&self, effect: Capability<Write>) -> Result<BlobWriter, BlobError> {
         Ok(Box::new(self.open_blob_sink(effect.subject().into(), None)))
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<Import> for Volatile {
     async fn execute(&self, effect: Capability<Import>) -> Result<BlobWriter, BlobError> {
         let expected = effect.digest().clone();

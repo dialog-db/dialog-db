@@ -5,7 +5,6 @@
 
 use super::{IndexedDb, to_uint8array};
 use crate::storage::idb::KeyRange;
-use async_trait::async_trait;
 use dialog_capability::{Capability, Provider};
 use dialog_common::Blake3Hash;
 use dialog_effects::memory::prelude::{ListExt, PublishExt, ResolveExt, RetractExt};
@@ -53,7 +52,7 @@ impl From<super::IndexedDbError> for MemoryError {
     }
 }
 
-#[async_trait(?Send)]
+#[dialog_capability::provider]
 impl Provider<Resolve> for IndexedDb {
     async fn execute(
         &self,
@@ -86,7 +85,7 @@ impl Provider<Resolve> for IndexedDb {
     }
 }
 
-#[async_trait(?Send)]
+#[dialog_capability::provider]
 impl Provider<Publish> for IndexedDb {
     async fn execute(&self, effect: Capability<Publish>) -> Result<Version, MemoryError> {
         let key = make_key(effect.space(), effect.cell());
@@ -163,7 +162,7 @@ impl Provider<Publish> for IndexedDb {
     }
 }
 
-#[async_trait(?Send)]
+#[dialog_capability::provider]
 impl Provider<Retract> for IndexedDb {
     async fn execute(&self, effect: Capability<Retract>) -> Result<(), MemoryError> {
         let key = make_key(effect.space(), effect.cell());
@@ -203,7 +202,7 @@ impl Provider<Retract> for IndexedDb {
     }
 }
 
-#[async_trait(?Send)]
+#[dialog_capability::provider]
 impl Provider<List> for IndexedDb {
     async fn execute(&self, effect: Capability<List>) -> Result<Vec<String>, MemoryError> {
         // Every key under the space is `{space}/{cell}`, so the space's

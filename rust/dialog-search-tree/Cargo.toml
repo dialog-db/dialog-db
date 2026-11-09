@@ -7,7 +7,9 @@ license.workspace = true
 
 [features]
 default = []
-helpers = []
+# The test environments, and the node layer's answers for the test stores of
+# `dialog-storage`.
+helpers = ["dialog-storage/helpers"]
 # Counts the hashes the shaping paths ask for and compute, and attributes
 # duplicate block stores, for measurement harnesses. Off, the counters are
 # not compiled.

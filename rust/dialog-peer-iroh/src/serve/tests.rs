@@ -27,8 +27,7 @@ struct Recording {
     blocks: Mutex<HashMap<Blake3Hash, Vec<u8>>>,
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<archive::Put> for Recording {
     async fn execute(&self, input: Capability<archive::Put>) -> Result<(), ArchiveError> {
         let block = &input.constraint.block;
@@ -40,8 +39,7 @@ impl Provider<archive::Put> for Recording {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<archive::Get> for Recording {
     async fn execute(
         &self,
@@ -56,8 +54,7 @@ impl Provider<archive::Get> for Recording {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<archive::Import> for Recording {
     async fn execute(&self, input: Capability<archive::Import>) -> Result<(), ArchiveError> {
         let mut blocks = self.blocks.lock().expect("not poisoned");
@@ -73,8 +70,7 @@ impl Provider<archive::Import> for Recording {
 /// compile error rather than a refusal.
 macro_rules! unserved {
     ($effect:ty, $output:ty) => {
-        #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-        #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+        #[dialog_capability::provider]
         impl Provider<$effect> for Recording {
             async fn execute(&self, _: Capability<$effect>) -> $output {
                 Err(memory::MemoryError::Storage("not under test".into()))
@@ -93,8 +89,7 @@ unserved!(memory::Retract, Result<(), memory::MemoryError>);
 /// than handing back a transfer that would carry nothing.
 macro_rules! no_blobs {
     ($effect:ty, $output:ty) => {
-        #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-        #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+        #[dialog_capability::provider]
         impl Provider<$effect> for Recording {
             async fn execute(&self, _: Capability<$effect>) -> $output {
                 Err(dialog_effects::blob::BlobError::Storage(
@@ -120,8 +115,7 @@ no_blobs!(
 /// This store has no identity of its own, so it answers with the
 /// subject it was asked about and placeholders for the rest — enough
 /// to satisfy [`Store`] and to show the command reached a provider.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<dialog_effects::peer::Hello> for Recording {
     async fn execute(
         &self,
@@ -138,8 +132,7 @@ impl Provider<dialog_effects::peer::Hello> for Recording {
 /// Nothing held, which is the honest answer for a store that is a block
 /// map. Present so [`Store`] is satisfied; what the effect actually
 /// carries is covered in `site::tests`.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<dialog_effects::peer::Spaces> for Recording {
     async fn execute(
         &self,

@@ -24,8 +24,10 @@
 // own lib under the `dialog_query` name (its extern prelude), so bare
 // `dialog_query::…` resolves to the real crate in both.
 use anyhow::Result;
-use async_trait::async_trait;
 use dialog_artifacts::selector::Constrained;
+use dialog_artifacts::tree::{
+    ArtifactNode, ArtifactNodes, ArtifactPreload, ArtifactRead, ArtifactWrites,
+};
 use dialog_artifacts::{
     Artifact, ArtifactSelector, ArtifactStream, DialogArtifactsError, Instruction,
     Relation as ArtifactsRelation, Select, Value,
@@ -49,6 +51,7 @@ use dialog_peer::helpers::test_owned;
 use dialog_peer::helpers::{generate_data, open_peer, test_storage, unique_name};
 use dialog_peer::{Peer, Session};
 use dialog_repository::{Branch, HeldCaches, PeersEnv, RemoteSite, Repository, RepositoryExt as _};
+use dialog_search_tree::DialogSearchTreeError;
 use dialog_search_tree::audit as tree_audit;
 
 use dialog_storage::Blake3Hash;
@@ -395,8 +398,7 @@ impl<Backend> Holds for CountingStore<Backend> {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl<Backend> Provider<ArchiveLoad> for CountingStore<Backend>
 where
     Backend: Provider<ArchiveLoad> + ConditionalSync,
@@ -411,8 +413,32 @@ where
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+// A node read is answered through this store's own counted loads, into the
+// node cache it holds; a write goes through the backend's import and keeps
+// the nodes here.
+dialog_search_tree::reads_nodes_through_blocks!(
+    impl[Backend,] CountingStore<Backend>
+    where [Backend: Provider<ArchiveLoad> + ConditionalSync,]
+);
+dialog_search_tree::writes_nodes_through_blocks!(
+    impl[Backend,] CountingStore<Backend>
+    where [Backend: Provider<Import> + ConditionalSync,]
+);
+
+#[dialog_capability::provider]
+impl<Backend> Provider<Import> for CountingStore<Backend>
+where
+    Backend: Provider<Import> + ConditionalSync,
+{
+    async fn execute(
+        &self,
+        import: dialog_capability::Capability<Import>,
+    ) -> Result<(), ArchiveError> {
+        import.perform(&self.backend).await
+    }
+}
+
+#[dialog_capability::provider]
 impl<Backend> Provider<BlobLoad> for CountingStore<Backend>
 where
     Backend: Provider<BlobLoad> + ConditionalSync,
@@ -469,14 +495,14 @@ impl<'a, Env> JoinEnv<'a, Env> {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl<'a, Env> Provider<Select<'a>> for JoinEnv<'a, Env>
 where
     Env: Provider<BlobRead>
         + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
+        + Provider<Import>
         + Provider<ArchiveLoad>
         + Provider<BlobLoad>
         + Provider<dialog_artifacts::Preload>
@@ -497,22 +523,21 @@ where
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl<Env: ConditionalSync> Provider<SelectRules> for JoinEnv<'_, Env> {
     async fn execute(&self, input: ConceptDescriptor) -> Result<ConceptRules, EvaluationError> {
         self.rules.acquire(&input)
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl<Env> Provider<dialog_artifacts::Estimate> for JoinEnv<'_, Env>
 where
     Env: Provider<BlobRead>
         + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
+        + Provider<Import>
         + Provider<ArchiveLoad>
         + Provider<BlobLoad>
         + Provider<dialog_artifacts::Preload>
@@ -536,8 +561,7 @@ where
 
 // Preload hints have no listener in the bench env: refuse them so the
 // measured read counts stay exactly the demand reads.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl<Env: ConditionalSync> Provider<dialog_artifacts::Preload> for JoinEnv<'_, Env> {
     async fn execute(&self, _input: dialog_artifacts::PreloadRequest) -> bool {
         false
@@ -548,8 +572,7 @@ impl<Env: ConditionalSync> Provider<dialog_artifacts::Preload> for JoinEnv<'_, E
 // the query reads: read the branch's archive catalog through the same
 // counting store scans use, so resolver block reads land in the shared
 // read journal too.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl<Env> Provider<ArchiveLoad> for JoinEnv<'_, Env>
 where
     Env: Provider<ArchiveLoad> + ConditionalSync,
@@ -565,9 +588,39 @@ where
     }
 }
 
+// Node reads for the scans and resolver premises, through the same
+// counting store, in the branch's catalog.
+#[dialog_capability::provider]
+impl<Env> Provider<ArtifactRead> for JoinEnv<'_, Env>
+where
+    Env: Provider<ArchiveLoad> + ConditionalSync,
+{
+    async fn execute(
+        &self,
+        read: ArtifactRead,
+    ) -> Result<Option<ArtifactNode>, DialogSearchTreeError> {
+        let counting = CountingStore::new(self.operator, self.journal.clone());
+        let mut line = read;
+        line.catalog = self.branch.archive().index();
+        line.perform(&counting).await
+    }
+}
+
+#[dialog_capability::provider]
+impl<Env> Provider<ArtifactPreload> for JoinEnv<'_, Env>
+where
+    Env: Provider<ArchiveLoad> + ConditionalSync,
+{
+    async fn execute(&self, preload: ArtifactPreload) {
+        let counting = CountingStore::new(self.operator, self.journal.clone());
+        let mut line = preload;
+        line.catalog = self.branch.archive().index();
+        line.perform(&counting).await
+    }
+}
+
 // Spilled-value loads for `tree/value`, through the same counting store.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl<Env> Provider<BlobLoad> for JoinEnv<'_, Env>
 where
     Env: Provider<BlobLoad> + ConditionalSync,
@@ -698,6 +751,8 @@ where
         + Provider<List>
         + PeersEnv
         + Provider<ArchiveLoad>
+        + ArtifactNodes
+        + ArtifactWrites
         + Provider<BlobLoad>
         + Provider<dialog_artifacts::Preload>
         + Provider<dialog_artifacts::Speculation>
@@ -1820,6 +1875,8 @@ mod test {
             + Provider<List>
             + PeersEnv
             + Provider<ArchiveLoad>
+            + ArtifactNodes
+            + ArtifactWrites
             + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
@@ -1946,6 +2003,8 @@ mod test {
             + Provider<List>
             + PeersEnv
             + Provider<ArchiveLoad>
+            + ArtifactNodes
+            + ArtifactWrites
             + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
@@ -2082,6 +2141,8 @@ mod test {
             + Provider<List>
             + PeersEnv
             + Provider<ArchiveLoad>
+            + ArtifactNodes
+            + ArtifactWrites
             + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
@@ -2460,6 +2521,8 @@ where
         + Provider<List>
         + PeersEnv
         + Provider<ArchiveLoad>
+        + ArtifactNodes
+        + ArtifactWrites
         + Provider<BlobLoad>
         + Provider<dialog_artifacts::Preload>
         + Provider<dialog_artifacts::Speculation>

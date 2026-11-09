@@ -1,4 +1,6 @@
 use dialog_artifacts::history::Version;
+use dialog_artifacts::tree::ArtifactNodes;
+use dialog_artifacts::tree::ArtifactWrites;
 use dialog_artifacts::{
     Datum, Key as ArtifactKey, ShipmentRef, State, shipment_ref, shipment_refs,
 };
@@ -903,6 +905,8 @@ where
         + Provider<BlobRead>
         + Provider<Fork<RemoteSite, Get>>
         + Provider<ArchiveLoad>
+        + ArtifactWrites
+        + ArtifactNodes
         + Provider<BlobLoad>
         + Provider<Fork<RemoteSite, Put>>
         + Provider<Fork<RemoteSite, BlobImport>>
@@ -1232,6 +1236,8 @@ where
     Env: Provider<Get>
         + Provider<Put>
         + Provider<ArchiveLoad>
+        + ArtifactWrites
+        + ArtifactNodes
         + Provider<Fork<RemoteSite, Get>>
         + Holds
         + ConditionalSync
@@ -1394,6 +1400,8 @@ where
         + Provider<BlobRead>
         + Provider<Fork<RemoteSite, Get>>
         + Provider<ArchiveLoad>
+        + ArtifactWrites
+        + ArtifactNodes
         + Provider<BlobLoad>
         + Provider<Fork<RemoteSite, Put>>
         + Provider<Fork<RemoteSite, BlobRead>>

@@ -192,4 +192,4 @@ pub use dialog_macros::test;
 ///
 /// See the macro documentation for details.
 #[cfg(feature = "helpers")]
-pub use dialog_macros::provider;
+pub use dialog_macros::provision as provider;

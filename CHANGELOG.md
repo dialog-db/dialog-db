@@ -102,6 +102,168 @@ What this changes for you:
 Why: a replica's history costs a file per block per version, which is
 most of what a replica weighs. Replaying 4096 Stack Exchange commits, the
 `fs` archive takes about 1.2 GiB and the file 13 MiB.
+### A tree asks its environment for nodes, and the environment keeps them
+
+[design/tree-node-reads.md](./design/tree-node-reads.md), planned in
+[#753](https://github.com/dialog-db/dialog-db/pull/753).
+
+A search tree no longer reads blocks and decodes them, nor finds the node
+cache for itself. It performs three commands on the environment it is
+given, defined in `dialog_search_tree::nodes`: `Read` (the node a name
+names, from anywhere or from this replica alone), `Preload` (make a node
+cheap to read soon) and `Write` (the nodes a persist sealed, to store and
+keep readable). The environment answers however it keeps nodes. A store
+that keeps blocks (`Volatile`, `FileSystem`, `IndexedDb`) answers through
+the translation layer in the tree crate, which loads, checks and decodes;
+`Storage` routes a request to the space the catalog's subject is mounted
+as, and `Space` hands it to its archive; a peer answers from the node cache
+it holds, then its storage, then a hydration from the subject's routes, and
+keeps what it read or wrote. A store that keeps nodes in a form of its own
+implements the three commands and is reached the same way.
+
+What this changes for you:
+
+- A tree operation's environment bound is `Env: Nodes<Key, Value>`
+  (`Provider<nodes::Read<Key, Value>> + Provider<nodes::Preload<Key,
+  Value>> + ConditionalSync`) instead of `Provider<archive::Load> + Holds +
+  ConditionalSync` (and `+ Provider<archive::Get>` where a difference was
+  computed). `Holds`, `Load` and `Get` are no longer asked of a tree's
+  environment. An artifact tree's environment is `ArtifactNodes`, and one
+  that persists is `ArtifactWrites` too (`dialog_artifacts::tree`, with
+  `ArtifactRead`, `ArtifactPreload`, `ArtifactWrite` and `ArtifactNode` as
+  the concrete types).
+- `TransientTree::persist(delta)`, `HitchhikerTree::persist(delta)`,
+  `HitchhikerTree::persist_mut(delta)` and `Node::into_link(delta,
+  manifest)` take no environment and no cache, and the delta they fill is
+  a `Delta<Blake3Hash, PersistentNode<Key, Value>>`: the sealed nodes, not
+  their blocks. A persist keeps nothing in any cache; the environment keeps
+  the nodes when the commit performs `Write`. `ArchiveDelta::nodes()`
+  replaces `blocks()`, `node(hash)` and `flush_nodes()` are new, and
+  `block(hash)` and `flush_blocks()` still hand out blocks to a caller that
+  ships them. A batch that reads a node it sealed before the flush gets
+  the staged node back from its `DeltaOverlay`.
+- `Accessor::new(env, catalog)` asks nothing of the environment;
+  `Accessor::cache`, `cached` and `keeps` are gone, and `load_node` needs
+  `Env: Nodes<Key, Value>`.
+- An environment that answers `Load` and holds handles answers the node
+  requests through `dialog_search_tree::reads_nodes_through_blocks!` and
+  `writes_nodes_through_blocks!`; one with a store beneath it and a
+  hydration uses `dialog_repository::read_node_or_hydrate`,
+  `preload_node_or_hydrate` and `write_nodes`. `Peer`, `AccessEnv`, the
+  query session, `DeltaOverlay`, `Counting`, `Metered`, `Storage`, `Space`
+  and the three stores answer them; `PeerSpace` requires them of a space.
+- A difference's boundary side reads locally through the node layer
+  instead of performing `Get`: the environment's cache is consulted, which
+  changes no answer, since a scope's cache holds only what its archive has
+  produced or a successful write stored.
+- The query session no longer decodes and caches the blocks it loads; a
+  node read through it reaches the peer's cache. An integration opens its
+  read-ahead window once per batch of pending changes instead of when a
+  path misses the cache, since nothing outside the environment can tell.
+- A node the environment holds is answered at once, with nothing
+  allocated: the translation layer, `read_node_or_hydrate`, the overlay
+  and the query session return `Resume::now` on a hit (see the entry
+  below). Under `dialog-perf` the point-read scenarios are within 0.4% of
+  before and the commit scenarios 0.6% to 1.9% cheaper; the design topic's
+  journal has the table.
+
+Why: the tree was written before the capability model and only partly
+moved onto it, so what it needed from the world was not expressed as
+capabilities. It performed `Load` for bytes and then did a provider's work
+itself: found a cache through a lookup that could come back empty,
+checked, decoded and kept nodes, while other code kept them again its own
+way. A store that keeps nodes in a form of its own (the single-file
+archive of #733) could only reach the tree through a side channel. With
+nodes as the tree's requests, each concern sits with whoever owns it, and
+a store's byte representation is not the tree's concern.
+
+### A provider answers at once or later, and a caller cannot tell
+
+[#755](https://github.com/dialog-db/dialog-db/pull/755), argued in the
+journal of [design/tree-node-reads.md](./design/tree-node-reads.md).
+
+`Provider::execute` is no longer an `async fn` under `async_trait`. It
+returns a `Resume<'_, Output>`: either the output at once
+(`Resume::now`), or a future that produces it (`Resume::later`). A caller
+awaits either one the same way, so the change is invisible where a
+command is performed; what it changes is that a provider holding the
+answer (a cache that has the value, a check that fails before any I/O)
+hands it back without allocating a future, and a provider standing in
+front of another hands back what it was handed.
+
+What this changes for you:
+
+- A `Provider<C>` impl is written one of two ways. Under
+  `#[dialog_capability::provider]`, `async fn execute(&self, input) ->
+  Output` as before: the attribute replaces the `async_trait` pair, and
+  the body becomes the future. Without it, `fn execute(&self, input) ->
+  Resume<'_, Output>`, returning `Resume::now` on the paths that have the
+  answer and `Resume::later(async move { .. })` on the rest. A forwarding
+  impl returns what the inner provider returned, boxing nothing.
+- `#[derive(Provider)]` forwards without boxing, and no longer asks
+  `ConditionalSend` of the command's input or `ConditionalSync` of the
+  struct.
+- `Resume` implements `Future` and `Unpin`, and offers `is_now`,
+  `into_now` (the answer, or the future that waits for it) and `map`.
+  `dialog_capability::Pending<'a, T>` names the boxed future.
+- A generic provider whose future awaits another `execute` and holds its
+  output needs `C::Output: ConditionalSend`, since a `Resume` is `Send`
+  only when its output is; `async_trait` hid that bound inside the box.
+- `nodes::Ready` and `nodes::held_node`'s role as its answer are gone from
+  `dialog_search_tree`; `Nodes<Key, Value>` is `Provider<Read> +
+  Provider<Preload> + ConditionalSync`. `Read::through_blocks`,
+  `through_loader` and `through_held_blocks`, `Preload::through_blocks`
+  and `through_held_blocks`, `Write::through_blocks` and
+  `through_held_blocks`, every request's `perform`, and
+  `dialog_repository::read_node_or_hydrate`, `preload_node_or_hydrate`
+  and `write_nodes` return a `Resume` instead of being `async fn`;
+  `through_loader` takes an `FnOnce(Load) -> impl Future` instead of an
+  `AsyncFnOnce`.
+- `dialog_common::provider` (the test provisioning attribute) is
+  unchanged; in `dialog-macros` it is now `provision`.
+
+Why: the cost of crossing a provider boundary was a boxed future per
+call, paid even when the provider had the answer in hand. The first fix
+for the tree's node reads was a side door beside the capability model,
+which was a symptom of the model: a provider could only ever answer
+later. Answering now or later in the one trait keeps every answer inside
+the model, with sync and async providers written against the same
+signature, and takes the box off every hit in the workspace, not just the
+tree's.
+
+### Two claims that stand equal are told apart by the hash of their values
+
+[#752](https://github.com/dialog-db/dialog-db/pull/752)
+
+A cell read under `last` elects its newest claim: the greater standing
+(the version, then the cause, then the succession). Two claims stand
+equal when one revision wrote both under one cause, which is what two
+writes to one cell in one transaction are. Between those, the election
+fell to the values and the greater won. It now falls to the hash of each
+value's identity key (`Value::tiebreak`), the greater hash winning. Every
+place that elects does the same: the tree, a commit's settlement, a
+concept read, and `top` among values of one rank.
+
+What this changes for you:
+
+- Where one transaction writes two values to a cell under `last`, or
+  under `top` at one rank, the value a read returns may change: it is the
+  one whose hash is greater, not the greater value. Claims at different
+  standings, which is every concurrent edit between revisions, elect as
+  before.
+- `max` and `min` elect as before: by value, then between equal values
+  by standing. Equal values hash alike, so the hash never decides there.
+- Replicas on releases either side of this one can show different values
+  for such a cell. Nothing a replica stores is rewritten, and the claims
+  are the same on both; only which one a read returns differs.
+- `Value::tiebreak` is new.
+
+Why: a tie broken by value favours some values over others, so a writer
+can choose the value that wins (the greater number, `true` over `false`).
+The hash favours none, as the version's hash already does between
+concurrent revisions. It came up while designing record values, whose
+values all share one version, so every tie among them reaches this rule
+([#748](https://github.com/dialog-db/dialog-db/pull/748)).
 
 ### A file store's write lock is never taken by two writers at once
 
@@ -1761,9 +1923,9 @@ Why: numbers are one band and a rule compiles against types; what the body can b
   see what a flagged cell should hold, replay its writes one per commit
   on a scratch branch and compare. One difference is not the bug: when a
   choosing write lands on a cell holding two claims of its own
-  transaction, the two stand equal and the greater value is elected, so
-  one transaction and one commit per write can end differently, before this
-  release and after it.
+  transaction, the two stand equal and the value with the greater hash
+  is elected, so one transaction and one commit per write can end
+  differently, before this release and after it.
 - Nothing a replica stores or syncs is rewritten. A stored rule that no longer compiles under the head check (one that wrote a possibly negative integer into a `natural:` field, or a float into an `integer:` field) is held inert by `Branch::commit`, as any rule that fails to hydrate is: it stops firing and does not fail commits. Re-evaluate such a rule with a guard or a rounding formula, or widen the field, to have it fire again.
 
 ### A number binds a typed rule variable as the variable's type reads it

@@ -19,7 +19,7 @@ use std::time::Instant;
 
 use dialog_common::Blake3Hash;
 use dialog_search_tree::helpers::JournaledBlocks;
-use dialog_search_tree::{Buffer, Delta, NodeBody, PersistentNode, PersistentTree};
+use dialog_search_tree::{Delta, NodeBody, PersistentNode, PersistentTree};
 
 const KEY_LENGTH: usize = 162;
 const ENTITIES: usize = 5_000;
@@ -149,10 +149,14 @@ fn workload() -> Workload {
     Workload { facts }
 }
 
-async fn flush(delta: &mut Delta<Blake3Hash, Buffer>, storage: &Storage) -> (usize, u64) {
+async fn flush(
+    delta: &mut Delta<Blake3Hash, PersistentNode<[u8; 162], Vec<u8>>>,
+    storage: &Storage,
+) -> (usize, u64) {
     let mut nodes = 0usize;
     let mut bytes = 0u64;
-    for (_, buffer) in delta.flush() {
+    for (_, node) in delta.flush() {
+        let buffer = node.buffer().expect("a sealed node has its block").clone();
         nodes += 1;
         bytes += buffer.as_ref().len() as u64;
         storage.store(buffer);
@@ -244,7 +248,7 @@ async fn main() {
         for (key, value) in batch {
             edit = edit.insert(*key, value.clone(), &warm).await.unwrap();
         }
-        tree = edit.persist(&mut delta, &warm).unwrap();
+        tree = edit.persist(&mut delta).unwrap();
         let (nodes, bytes) = flush(&mut delta, &storage).await;
         written_nodes += nodes;
         written_bytes += bytes;
@@ -352,7 +356,7 @@ async fn main() {
         .insert(*changed_key, b"modified value".to_vec(), &warm)
         .await
         .unwrap()
-        .persist(&mut delta, &warm)
+        .persist(&mut delta)
         .unwrap();
     flush(&mut delta, &storage).await;
 
@@ -392,7 +396,7 @@ async fn main() {
         let (key, _) = &facts[rng.below(FACTS)];
         edit = edit.delete(key, &warm).await.unwrap();
     }
-    let _ = edit.persist(&mut delta, &warm).unwrap();
+    let _ = edit.persist(&mut delta).unwrap();
     println!(
         "deletes:    {DELETES} random deletes in one batch: {:>8.2?}",
         deletes.elapsed()
