@@ -8,9 +8,11 @@
 
 use std::io;
 
+use std::sync::Arc;
+
 use dialog_artifacts::{
-    ATTRIBUTE_KEY_TAG, BLOB_KEY_TAG, COVERAGE_KEY_TAG, Datum, ENTITY_KEY_TAG, HISTORY_KEY_TAG, Key,
-    State, VALUE_KEY_TAG, split_record_components,
+    ATTRIBUTE_KEY_TAG, ArchivedState, BLOB_KEY_TAG, COVERAGE_KEY_TAG, Datum, ENTITY_KEY_TAG,
+    HISTORY_KEY_TAG, Key, State, VALUE_KEY_TAG, split_record_components,
 };
 use dialog_common::{Blake3Hash, Buffer};
 use dialog_search_tree::{
@@ -76,23 +78,34 @@ fn key_tokens(key: &[u8]) -> (u8, [&[u8]; SLOTS], usize) {
 
 /// Rebuilds a key from its form and tokens: the inverse of [`key_tokens`].
 fn key_from_tokens(form: u8, tokens: &[&[u8]]) -> io::Result<Vec<u8>> {
-    Ok(match (form, tokens) {
-        (ENTITY_KEY_TAG, [entity, attribute, value]) => {
-            [&[form][..], entity, attribute, value].concat()
-        }
-        (ATTRIBUTE_KEY_TAG, [entity, attribute, value]) => {
-            [&[form][..], attribute, entity, value].concat()
-        }
-        (VALUE_KEY_TAG, [entity, attribute, value]) => {
-            [&[form][..], value, attribute, entity].concat()
-        }
+    let mut key = Vec::new();
+    key_into(form, tokens, &mut key)?;
+    Ok(key)
+}
+
+/// [`key_from_tokens`], into `key` (cleared first), so a caller rebuilding
+/// many keys reuses one buffer.
+fn key_into(form: u8, tokens: &[&[u8]], key: &mut Vec<u8>) -> io::Result<()> {
+    key.clear();
+    let parts: &[&[u8]] = match (form, tokens) {
+        (ENTITY_KEY_TAG, [entity, attribute, value]) => &[entity, attribute, value],
+        (ATTRIBUTE_KEY_TAG, [entity, attribute, value]) => &[attribute, entity, value],
+        (VALUE_KEY_TAG, [entity, attribute, value]) => &[value, attribute, entity],
         (HISTORY_KEY_TAG | COVERAGE_KEY_TAG, [version, entity, attribute, value]) => {
-            [&[form][..], version, entity, attribute, value].concat()
+            &[version, entity, attribute, value]
         }
-        (BLOB_KEY_TAG, [hash]) => [&[form][..], hash].concat(),
-        (_, [key]) => key.to_vec(),
+        (BLOB_KEY_TAG, [hash]) => &[hash],
+        (_, [whole]) => {
+            key.extend_from_slice(whole);
+            return Ok(());
+        }
         _ => return Err(invalid("a key's form and its tokens disagree")),
-    })
+    };
+    key.push(form);
+    for part in parts {
+        key.extend_from_slice(part);
+    }
+    Ok(())
 }
 
 /// The row of one entry's key and datum, by token id.
@@ -159,29 +172,184 @@ fn entry_of<T: TokenRead + ?Sized>(
     Ok((key_from_tokens(form, &parts)?, datum))
 }
 
+/// The rows of the node a node supersedes, walked beside the node's own
+/// entries: both are in key order, so one pass finds, for each entry, the
+/// predecessor's row for the same key, if it has one.
+struct Predecessor {
+    rows: Arc<Rows>,
+    section: usize,
+    next: usize,
+    /// The key of the row at `next`, rebuilt from its tokens.
+    key: Vec<u8>,
+    /// Where a datum token is copied when its bytes are not aligned for
+    /// reading in place (a token this append drafted).
+    aligned: rkyv::util::AlignedVec<16>,
+}
+
+impl Predecessor {
+    fn new(rows: Arc<Rows>, kind: u8, section: usize) -> Option<Self> {
+        (rows.kind == kind && rows.sections.len() > section).then(|| Self {
+            rows,
+            section,
+            next: 0,
+            key: Vec::new(),
+            aligned: rkyv::util::AlignedVec::new(),
+        })
+    }
+
+    /// The predecessor's row for `key`, when `same` says its datum (`None`
+    /// for a retraction) is the entry's: the row interning the entry would
+    /// build, so it is taken as it is. `None` when the predecessor has no
+    /// entry for `key`, or has it with another datum, or its tokens cannot
+    /// be read, and the entry is interned as usual.
+    fn row<T: TokenRead + ?Sized>(
+        &mut self,
+        tokens: &T,
+        key: &[u8],
+        same: impl FnOnce(Option<&ArchivedState<Datum>>) -> bool,
+    ) -> Option<Row> {
+        let rows = &self.rows.sections[self.section];
+        while let Some(row) = rows.get(self.next) {
+            let form = row[0] as u8;
+            let mut parts: [&[u8]; SLOTS] = [&[]; SLOTS];
+            let count = slots_of(form);
+            for slot in 0..count {
+                parts[slot] = tokens.get(row[1 + slot])?;
+            }
+            key_into(form, &parts[..count], &mut self.key).ok()?;
+            match self.key.as_slice().cmp(key) {
+                std::cmp::Ordering::Less => self.next += 1,
+                std::cmp::Ordering::Greater => return None,
+                std::cmp::Ordering::Equal => {
+                    self.next += 1;
+                    let stored = match row[DATUM] {
+                        NONE => None,
+                        id => Some(stored_datum(tokens.get(id)?, &mut self.aligned)?),
+                    };
+                    return same(stored).then_some(*row);
+                }
+            }
+        }
+        None
+    }
+}
+
+/// The state the datum token `bytes` archives, read where it is (or from a
+/// copy in `aligned` when its bytes are not aligned for it) and checked:
+/// nothing is deserialized. `None` when the bytes do not check as one.
+fn stored_datum<'a>(
+    bytes: &'a [u8],
+    aligned: &'a mut rkyv::util::AlignedVec<16>,
+) -> Option<&'a ArchivedState<Datum>> {
+    let bytes = if (bytes.as_ptr() as usize).is_multiple_of(16) {
+        bytes
+    } else {
+        aligned.clear();
+        aligned.extend_from_slice(bytes);
+        aligned.as_slice()
+    };
+    rkyv::access::<ArchivedState<Datum>, rkyv::rancor::Error>(bytes).ok()
+}
+
+/// Whether two archived states are the same state.
+fn same_archived(stored: &ArchivedState<Datum>, value: &ArchivedState<Datum>) -> bool {
+    match (stored, value) {
+        (ArchivedState::Added(stored), ArchivedState::Added(value)) => stored == value,
+        (ArchivedState::Removed, ArchivedState::Removed) => true,
+        _ => false,
+    }
+}
+
+/// Whether an archived state is the same state as `value`.
+fn same_owned(stored: &ArchivedState<Datum>, value: &State<Datum>) -> bool {
+    match (stored, value) {
+        (ArchivedState::Added(stored), State::Added(value)) => stored == value,
+        (ArchivedState::Removed, State::Removed) => true,
+        _ => false,
+    }
+}
+
+/// The row of a buffered op: the predecessor's when it holds the op
+/// unchanged, else interned.
+fn op_row(
+    tokens: &mut Draft<'_>,
+    before: Option<&mut Predecessor>,
+    key: &[u8],
+    datum: Option<&State<Datum>>,
+) -> io::Result<(Row, bool)> {
+    if let Some(row) = before.and_then(|before| {
+        before.row(&*tokens, key, |stored| match (stored, datum) {
+            (None, None) => true,
+            (Some(stored), Some(datum)) => same_owned(stored, datum),
+            _ => false,
+        })
+    }) {
+        return Ok((row, true));
+    }
+    Ok((entry_row(tokens, key, datum)?, false))
+}
+
 /// Splits `node` into rows, interning its tokens. A child is named by its
 /// node id when `child` knows one, else by a token of its hash.
+#[cfg(test)]
 pub(crate) fn rows_of(
     node: &TreeNode,
     tokens: &mut Draft<'_>,
     child: impl Fn(&Blake3Hash) -> Option<u32>,
 ) -> io::Result<Rows> {
+    rows_after(node, tokens, child, |_, _| None).map(|(rows, _)| rows)
+}
+
+/// [`rows_of`], taking unchanged entries' rows from the node `node`
+/// supersedes: `predecessor` finds that node's rows by its kind and
+/// lineage, which the first row gives. An entry the predecessor holds with
+/// the same value gets the predecessor's row, which is the row interning
+/// it would build (a token the file holds is named by its id either way),
+/// with no token hashed or looked up and no value copied out or archived
+/// again. Every other entry is interned. A rewritten node keeps most of its
+/// predecessor's entries, so most are not interned at all. Returns the rows
+/// and how many were taken from the predecessor.
+pub(crate) fn rows_after(
+    node: &TreeNode,
+    tokens: &mut Draft<'_>,
+    child: impl Fn(&Blake3Hash) -> Option<u32>,
+    mut predecessor: impl FnMut(u8, [u32; 4]) -> Option<Arc<Rows>>,
+) -> io::Result<(Rows, usize)> {
+    let mut taken = 0;
     match node.body() {
         NodeBody::Segment(segment) => {
-            let mut entries = Vec::with_capacity(segment.len());
+            let mut entries: Vec<Row> = Vec::with_capacity(segment.len());
+            let mut before: Option<Predecessor> = None;
             let mut keys = segment.keys::<Key>().map_err(tree_error)?;
             while let Some((at, key)) = keys.next_key().map_err(tree_error)? {
-                let value: State<Datum> =
-                    into_owned(segment.value_at(at).map_err(tree_error)?).map_err(tree_error)?;
-                entries.push(entry_row(tokens, key, Some(&value))?);
+                let archived = segment.value_at(at).map_err(tree_error)?;
+                if let Some(row) = before.as_mut().and_then(|before| {
+                    before.row(&*tokens, key, |stored| {
+                        stored.is_some_and(|stored| same_archived(stored, archived))
+                    })
+                }) {
+                    entries.push(row);
+                    taken += 1;
+                    continue;
+                }
+                let value: State<Datum> = into_owned(archived).map_err(tree_error)?;
+                let row = entry_row(tokens, key, Some(&value))?;
+                if entries.is_empty() {
+                    before = predecessor(SEGMENT, [row[0], row[1], row[2], row[3]])
+                        .and_then(|rows| Predecessor::new(rows, SEGMENT, 0));
+                }
+                entries.push(row);
             }
-            Ok(Rows {
-                kind: SEGMENT,
-                sections: vec![entries],
-            })
+            Ok((
+                Rows {
+                    kind: SEGMENT,
+                    sections: vec![entries],
+                },
+                taken,
+            ))
         }
         NodeBody::Index(index) => {
-            let mut links = Vec::with_capacity(index.len());
+            let mut links: Vec<Row> = Vec::with_capacity(index.len());
             for at in 0..index.len() {
                 let separator = tokens.intern(&index.separator(at).map_err(tree_error)?);
                 let hash = index.hash_at(at).map_err(tree_error)?;
@@ -192,6 +360,10 @@ pub(crate) fn rows_of(
                 let scale = index.scale_at(at).map_err(tree_error)?.as_u8() as u32;
                 links.push([separator, id, scale, absent, 0, 0]);
             }
+            let mut before = links
+                .first()
+                .and_then(|first| predecessor(INDEX, [first[0], 0, 0, 0]))
+                .and_then(|rows| Predecessor::new(rows, INDEX, 2));
             let (mut buffers, mut ops) = (Vec::new(), Vec::new());
             for buffer in index.buffers() {
                 let entries = buffer.entries::<Key>().map_err(tree_error)?;
@@ -201,13 +373,18 @@ pub(crate) fn rows_of(
                         NoveltyOp::Assert(value) => Some(value),
                         NoveltyOp::Retract => None,
                     };
-                    ops.push(entry_row(tokens, &item.key, datum)?);
+                    let (row, reused) = op_row(tokens, before.as_mut(), &item.key, datum)?;
+                    taken += reused as usize;
+                    ops.push(row);
                 }
             }
-            Ok(Rows {
-                kind: INDEX,
-                sections: vec![links, buffers, ops],
-            })
+            Ok((
+                Rows {
+                    kind: INDEX,
+                    sections: vec![links, buffers, ops],
+                },
+                taken,
+            ))
         }
     }
 }

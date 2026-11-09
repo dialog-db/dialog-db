@@ -26,6 +26,7 @@ use serde::{Deserialize, Serialize};
     rkyv::Deserialize,
 )]
 #[repr(transparent)]
+#[rkyv(derive(PartialEq), compare(PartialEq))]
 pub struct Edition(u64);
 
 /// The byte width of an [`Edition`] in key encodings

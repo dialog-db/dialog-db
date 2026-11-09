@@ -8,7 +8,7 @@ use std::str::FromStr;
 
 use dialog_archive_file::{FILE_NAME, FileArchive, Options};
 use dialog_artifacts::{
-    Artifact, ArtifactSelector, Changes, Entity, Instruction, Pick, Relation, Value,
+    Artifact, ArtifactSelector, Changes, Entity, Instruction, Pick, Relation, Update as _, Value,
 };
 use dialog_capability::Subject;
 use dialog_common::{Blake3Hash, Buffer};
@@ -428,6 +428,90 @@ fn it_serves_every_node_of_a_file_as_its_block_reads() -> anyhow::Result<()> {
     }
     println!("{served} nodes compared");
     assert_eq!(served, archive.stats().frames);
+    Ok(())
+}
+
+/// A node rewritten by a commit takes the rows of the entries it keeps
+/// unchanged from the node it supersedes, and only those: facts written,
+/// replaced and retracted, then claimed again, so the same keys come back
+/// with other data. Frames are verified in a debug build, so a row taken
+/// for an entry whose data changed would fail to rebuild its node's block
+/// and count as unverified; none does, and every fact reads back.
+#[tokio::test]
+async fn it_takes_unchanged_rows_from_the_node_a_commit_supersedes() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let at = Directory::At(directory.path().to_string_lossy().into_owned());
+    let (peer, name) = (unique_name("peer"), unique_name("repo"));
+    commit_facts(&at, &peer, &name).await?;
+
+    let (operator, branch) = open!(at, peer, name);
+    for commit in 0..10 {
+        let mut changes = Changes::new();
+        for row in 0..10 {
+            let entity = format!("did:test:person-{commit}-{row}");
+            if row % 3 == 0 {
+                let named = fact(&entity, &format!("person {commit}.{row}"))?;
+                changes.dissociate(named.the, named.of, named.is);
+            } else {
+                let renamed = fact(&entity, &format!("renamed {commit}.{row}"))?;
+                changes.associate(renamed.the, renamed.of, renamed.is, Pick::Last);
+            }
+        }
+        branch
+            .transaction()
+            .integrate(changes)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+    }
+
+    // A second claim of a fact already held lands on the same key, with a
+    // datum that now names both claims: the one case where a kept key's
+    // row must not be taken.
+    for commit in 0..10 {
+        let changes: Changes = (1..10)
+            .filter(|row| row % 3 != 0)
+            .map(|row| {
+                let entity = format!("did:test:person-{commit}-{row}");
+                Ok(Instruction::Assert(
+                    fact(&entity, &format!("renamed {commit}.{row}"))?,
+                    Pick::All,
+                ))
+            })
+            .collect::<anyhow::Result<_>>()?;
+        branch
+            .transaction()
+            .integrate(changes)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+    }
+
+    let archive = FileArchive::open(directory.path().join(&name).join(FILE_NAME))?;
+    let stats = archive.stats();
+    assert!(stats.rows_taken > 0, "rewritten nodes took rows: {stats:?}");
+    if cfg!(debug_assertions) {
+        assert_eq!(stats.unverified, 0, "every frame rebuilt its block");
+    }
+    let rows: Vec<Artifact> = branch
+        .claims()
+        .select(ArtifactSelector::new().the(Relation::from_str("person/name")?))
+        .to_owned()
+        .perform(&operator)
+        .await?
+        .try_collect()
+        .await?;
+    let renamed = rows
+        .iter()
+        .filter(|row| matches!(&row.is, Value::String(name) if name.starts_with("renamed")))
+        .count();
+    assert_eq!(
+        (rows.len(), renamed),
+        (60, 60),
+        "every third person retracted, the rest renamed"
+    );
     Ok(())
 }
 

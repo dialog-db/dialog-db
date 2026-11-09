@@ -31,6 +31,7 @@ pub const VERSION_LENGTH: usize = EDITION_LENGTH + ORIGIN_LENGTH;
     rkyv::Serialize,
     rkyv::Deserialize,
 )]
+#[rkyv(derive(PartialEq), compare(PartialEq))]
 pub struct Version {
     /// The repository-scoped identity of the actor that produced the revision
     pub origin: Origin,

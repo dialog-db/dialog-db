@@ -31,6 +31,7 @@ use crate::{Entity, Relation, Value, tree::ArtifactTree, tree::Stamp};
 #[derive(
     Clone, Debug, PartialEq, Serialize, Deserialize, Archive, rkyv::Serialize, rkyv::Deserialize,
 )]
+#[rkyv(derive(PartialEq), compare(PartialEq))]
 pub struct Datum {
     /// The [`Cause`] of this fact, if any: a reference to an ancestor version
     /// with a different [`Value`].

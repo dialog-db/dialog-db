@@ -17,7 +17,7 @@ use dialog_search_tree::{Manifest, NodeBody};
 use parking_lot::Mutex;
 
 use crate::file::{HEADER, Kind, MAGIC, put_record, read_at, record_in, write_at};
-use crate::node::{TreeNode, realize, rows_of, tree_node};
+use crate::node::{TreeNode, realize, rows_after, tree_node};
 use crate::rows::{Reader, Rows, get_rows, invalid, put_rows, put_varint, rename};
 use crate::tokens::{ALIGN, Draft, TokenRead};
 
@@ -190,6 +190,8 @@ struct Timings {
     /// Nodes served to trees in place, and the time spent finding where
     /// their parts are.
     served: AtomicU64,
+    /// Rows a frame took from the node it supersedes rather than interning.
+    rows_taken: AtomicU64,
     serve: AtomicU64,
     /// Blocks built back from rows for a `Get`, and blocks offered to an
     /// append (before those already held are skipped).
@@ -333,6 +335,12 @@ pub struct Stats {
     pub realize: Duration,
     /// Nodes served to trees in place, answering their reads (`Read`).
     pub served: u64,
+    /// Rows framed nodes took from the nodes they supersede, unchanged,
+    /// rather than interning their entries again.
+    pub rows_taken: u64,
+    /// Nodes kept whole because their rows did not rebuild their block,
+    /// when frames are verified ([`Options::verify`]).
+    pub unverified: u64,
     /// Time spent serving them: finding where each part of each row is.
     pub serve: Duration,
 }
@@ -910,6 +918,8 @@ impl FileArchive {
             decode: Timings::get(&self.inner.timings.decode),
             realize: Timings::get(&self.inner.timings.realize),
             served: self.inner.timings.served.load(Ordering::Relaxed),
+            rows_taken: self.inner.timings.rows_taken.load(Ordering::Relaxed),
+            unverified: self.inner.timings.unverified.load(Ordering::Relaxed),
             serve: Timings::get(&self.inner.timings.serve),
             rows_memory: self.inner.rows.footprint(),
         }
@@ -1612,12 +1622,33 @@ impl FileArchive {
         // tokens interned for it are dropped again: nothing names them.
         let mark = draft.pending();
         let started = Instant::now();
-        let rows = rows_of(node, draft, child);
+        // The node it supersedes, by its first row: entries it keeps
+        // unchanged take that node's rows rather than being interned again.
+        let no_staging = HashMap::new();
+        let predecessor = |kind: u8, first: [u32; 4]| -> Option<Arc<Rows>> {
+            let id = staging.lineages.get(&(kind, first)).copied().or_else(|| {
+                let catalog = catalog_id?;
+                let found = snapshot.lineage(lineage_key(catalog, kind, first)).ok()??;
+                (snapshot.frame(found).ok()?.kind == kind).then_some(found)
+            })?;
+            if id >= staging.first {
+                staging.rows.get(&id).map(|(rows, _, _)| rows.clone())
+            } else {
+                self.rows(snapshot, &no_staging, id)
+                    .ok()
+                    .map(|(rows, _)| rows)
+            }
+        };
+        let rows = rows_after(node, draft, child, predecessor);
         Timings::add(&self.inner.timings.split, started);
-        let Ok(rows) = rows else {
+        let Ok((rows, taken)) = rows else {
             draft.roll_back(mark);
             return Ok(None);
         };
+        self.inner
+            .timings
+            .rows_taken
+            .fetch_add(taken as u64, Ordering::Relaxed);
         let manifest_id = draft.intern(&manifest_bytes);
         // The node it supersedes: the latest of its lineage, among this
         // append's or the file's, while the chain stays short.
