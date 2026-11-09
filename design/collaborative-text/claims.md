@@ -62,3 +62,7 @@
 | the replay, screened and lost-race merges would drop entries of an unknown region | fact | `pull.rs` and `branch/merge.rs` diff only history and data scopes (regions report) | holds |
 | opening one document's range costs the same at 100 or 10 000 documents | fact | E3: 4 to 7 blocks per document (results/2026-11-09-regions.md) | holds |
 | a region entry costs ~5× its payload in today's encoding | fact | E3 harness, ~172 bytes per 20 to 50 byte change; cause (key column, value wrapper) is an inference | holds |
+| exported one change at a time, libraries cost 14 B (Yrs), 63 B (Diamond Types), 88 B (Loro), 94 to 96 B (Automerge) per change on the concurrent traces | fact | results/2026-11-09-libraries.md | holds |
+| splitting history into single changes costs 30 to 47× the batch for Automerge, Loro and Diamond Types, 1.7 to 1.8× for Yrs | fact | same | holds |
+| importing Automerge changes one call each is quadratic as the document grows | fact | same, 0.56 ms per change at start, 11 ms by change 24 000 | holds |
+| Yrs is the best fit for Dialog storing and syncing individual changes | hypothesis | library agent, 2026-11-09, from per-change size and rebuild time; costs: own sequence numbers, some interleaving, snapshot drops history | open |

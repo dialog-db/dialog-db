@@ -51,6 +51,14 @@ text sync and no library sync runs.
 
 ## H2. Any library fits if Dialog does the sync
 
+**Confirmed (2026-11-09)** for Automerge, Loro and Yrs: each exports one
+change alone and buffers changes whose parents are missing; all
+converged on both traces with every merge going one change at a time.
+Diamond Types 1.0 refuses out-of-order changes, so Dialog must deliver in
+causal order. Key changes by Dialog's `(origin, sequence)`: Yrs
+delete-only changes have no id, and Loro and Yrs counters count
+characters. [results](../../research/text-write-cost/results/2026-11-09-libraries.md)
+
 Earlier I wrote that version-vector libraries (Yjs, Loro) do not fit
 because computing "changes since" needs the library. That holds only if
 the library's sync answers it. If changes are keyed `(origin,
@@ -117,6 +125,11 @@ Change blocks by hash outside the tree, a heads pointer fact inside it.
 - **Experiment:** E1, both layouts on one trace.
 
 ## H6. The positional index is local and never replicated
+
+**Split (2026-11-09).** Rebuild from individual changes: Yrs 16 to 23 ms
+(confirmed); Automerge 159 to 175 ms and Loro 213 ms (refuted, but both
+open from a snapshot in ~50 ms and under 1 ms, so a local snapshot cache
+rescues them); Diamond Types 1.0 220 to 690 ms either way (refuted).
 
 As in DeltaDB: replicate changes, rebuild position → fragment per
 replica. It need not be in the search tree, so the tree's lack of
