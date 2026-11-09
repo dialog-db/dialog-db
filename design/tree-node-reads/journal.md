@@ -658,9 +658,10 @@ the request generic over the node instead (`Read<N>` for an `N:
 nodes::Node`, sealed, with `PersistentNode<Key, Value>` its one
 implementor) and the bound falls out at the node: a crate that fixes the
 keys and values names its node once and writes `Provider<Read<ItsNode>>`.
-The tree crate, which does not care what the keys and values are, keeps
-`Nodes<Key, Value>` as its shorthand; the maintainer's objection was to
-the layer that does care hiding what it asks for. `Get`/`Put` as the
+The tree crate, which does not care what the keys and values are, kept
+`Nodes<Key, Value>` as its shorthand at first; the maintainer's objection
+was to the layer that does care hiding what it asks for, and later in the
+day to the shorthand itself (see the entry below). `Get`/`Put` as the
 verbs were set aside: those are the local block effects, and the node
 read hydrates and carries a priority.
 
@@ -681,3 +682,36 @@ the storage side becomes the corpus (`Corpus`, `CorpusNode`,
 `CorpusCache`) and the model side's `Artifact` becomes `Claim`, per the
 notation; the glossary has the term. Whether that rename also splits the
 crate into model and engine is a question for that pull request.
+
+## 2026-11-09, Building: no shorthand in the tree crate either
+
+**Asked.** The maintainer: does the tree still need `Provider<blob::Load>`,
+and "I also do not want to have `Nodes<Key, Value>`! just spell it out
+everywhere".
+
+**Learned.** No tree operation bounds on `blob::Load`. In
+`dialog-search-tree` the only library code that names `Load` is the
+translation in `nodes.rs` (`Read::through_blocks`, `Preload::through_blocks`,
+`Write::through_blocks`): the way an environment that has only blocks
+answers a node request, which is what `Load` is for. Everything else that
+implements `Provider<Load>` in that crate is a test backend. Above the
+tree, `dialog-artifacts` bounds on `Provider<blob::Load>` wherever a value
+may be spilled: `fetch_spilled` and `load_spill` read a `Spilled { hash }`
+payload's bytes out of the archive's blobs, and `spilled_refs`,
+`blob_index`, `merge` and `rekey` walk those blocks for shipment. That is
+the corpus's requirement, not the tree's, and it is written in the block
+layer's vocabulary (a blob by hash) rather than the corpus's (a spilled
+value by reference); whether a corpus request should stand in front of it,
+as `nodes::Read<CorpusNode>` now stands in front of the node's block, is a
+question for the crate's rename, not this pull request.
+
+**Decided.** The `Nodes<Key, Value>` alias trait is gone from
+`dialog-search-tree`, with its `lib.rs` re-export. Every site that bounded
+on it (seventy-two across `tree/transient.rs`, `hitchhiker.rs`, `tree.rs`,
+`differential.rs`, `walker.rs`, `traversal.rs`, `helpers.rs`,
+`accessor.rs`, `validate.rs`) writes
+`Provider<Read<PersistentNode<Key, Value>>> +
+Provider<Preload<PersistentNode<Key, Value>>> + ConditionalSync` itself.
+The one thing the alias bought, a `&dyn Nodes<K, V>` to collapse
+monomorphic copies, nothing used; a bound of three traits cannot be a
+trait object, and no call site had asked for one.

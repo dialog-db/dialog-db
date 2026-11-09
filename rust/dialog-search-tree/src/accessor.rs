@@ -2,7 +2,9 @@ use dialog_common::{Blake3Hash, Priority};
 use dialog_effects::archive::prelude::CatalogScope;
 
 use crate::nodes::{Preload, Read};
-use crate::{DialogSearchTreeError, Nodes, PersistentNode};
+use crate::{DialogSearchTreeError, PersistentNode};
+use dialog_capability::Provider;
+use dialog_common::ConditionalSync;
 
 /// The node stored under `hash` in `catalog`, read through `env`: the
 /// environment's answer to a node [`Read`]. `None` when `env` can reach no
@@ -33,7 +35,10 @@ pub async fn load_node<Key, Value, Env>(
     hash: &Blake3Hash,
 ) -> Result<Option<PersistentNode<Key, Value>>, DialogSearchTreeError>
 where
-    Env: Nodes<Key, Value> + ?Sized,
+    Env: Provider<Read<PersistentNode<Key, Value>>>
+        + Provider<Preload<PersistentNode<Key, Value>>>
+        + ConditionalSync
+        + ?Sized,
 {
     Accessor::new(env, catalog).load_node(hash).await
 }
@@ -148,7 +153,10 @@ impl<'a, Key, Value, Env: ?Sized> Accessor<'a, Key, Value, Env> {
 
 impl<'a, Key, Value, Env> Accessor<'a, Key, Value, Env>
 where
-    Env: Nodes<Key, Value> + ?Sized,
+    Env: Provider<Read<PersistentNode<Key, Value>>>
+        + Provider<Preload<PersistentNode<Key, Value>>>
+        + ConditionalSync
+        + ?Sized,
 {
     /// The node at `hash`: the environment's answer to its [`Read`]. `None`
     /// when the environment can reach no such node.

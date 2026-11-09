@@ -1,4 +1,5 @@
-use crate::Nodes;
+use crate::nodes::{Preload, Read};
+use dialog_capability::Provider;
 use std::{
     collections::HashSet,
     future::Future,
@@ -392,7 +393,9 @@ where
     ) -> impl Stream<Item = Result<Entry<Key, Value>, DialogSearchTreeError>> + ConditionalSend
     where
         R: RangeBounds<Key> + ConditionalSend,
-        Env: Nodes<Key, Value>,
+        Env: Provider<Read<PersistentNode<Key, Value>>>
+            + Provider<Preload<PersistentNode<Key, Value>>>
+            + ConditionalSync,
     {
         // A thin adapter, not another generator: wrapping the walk in a
         // second `try_stream!` layer measurably bloats every future that
@@ -415,7 +418,9 @@ where
     ) -> impl Stream<Item = Result<Entry<KeyHandle, Value>, DialogSearchTreeError>> + ConditionalSend
     where
         R: RangeBounds<Key> + ConditionalSend,
-        Env: Nodes<Key, Value>,
+        Env: Provider<Read<PersistentNode<Key, Value>>>
+            + Provider<Preload<PersistentNode<Key, Value>>>
+            + ConditionalSync,
     {
         self.stream_scan::<R, Env, KeyHandle>(range, accessor)
     }
@@ -430,7 +435,9 @@ where
     ) -> impl Stream<Item = Result<Entry<Out, Value>, DialogSearchTreeError>> + ConditionalSend
     where
         R: RangeBounds<Key> + ConditionalSend,
-        Env: Nodes<Key, Value>,
+        Env: Provider<Read<PersistentNode<Key, Value>>>
+            + Provider<Preload<PersistentNode<Key, Value>>>
+            + ConditionalSync,
         Out: ScanKey + 'static,
     {
         try_stream! {
@@ -707,7 +714,9 @@ where
         options: SearchOptions,
     ) -> Result<Option<SearchResult<Key, Value>>, DialogSearchTreeError>
     where
-        Env: Nodes<Key, Value>,
+        Env: Provider<Read<PersistentNode<Key, Value>>>
+            + Provider<Preload<PersistentNode<Key, Value>>>
+            + ConditionalSync,
     {
         let Some(root) = &self.root else {
             return Ok(None);
@@ -843,7 +852,9 @@ where
             Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
         + ConditionalSync,
-    Env: Nodes<Key, Value>,
+    Env: Provider<Read<PersistentNode<Key, Value>>>
+        + Provider<Preload<PersistentNode<Key, Value>>>
+        + ConditionalSync,
 {
     // Only prefetch when the caller's key matches the leaf's last entry;
     // boundary-delete overflow can't happen otherwise.

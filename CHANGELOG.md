@@ -38,10 +38,10 @@ What this changes for you:
 - A request is written at the node it is about: `nodes::Read<N>`,
   `nodes::Preload<N>` and `nodes::Write<N>` for an `N: nodes::Node`, a
   sealed trait `PersistentNode<Key, Value>` implements. A tree operation's
-  environment bound is `Env: Nodes<Key, Value>`
-  (`Provider<nodes::Read<PersistentNode<Key, Value>>> +
-  Provider<nodes::Preload<PersistentNode<Key, Value>>> + ConditionalSync`)
-  instead of `Provider<archive::Load> + Holds + ConditionalSync` (and `+
+  environment bound is spelled out, `Env:
+  Provider<nodes::Read<PersistentNode<Key, Value>>> +
+  Provider<nodes::Preload<PersistentNode<Key, Value>>> + ConditionalSync`,
+  with no alias trait in between, instead of `Provider<archive::Load> + Holds + ConditionalSync` (and `+
   Provider<archive::Get>` where a difference was computed). `Holds`, `Load`
   and `Get` are no longer asked of a tree's environment.
 - `dialog_artifacts::tree::CorpusNode` names the node of the corpus, the
@@ -64,7 +64,8 @@ What this changes for you:
   the staged node back from its `DeltaOverlay`.
 - `Accessor::new(env, catalog)` asks nothing of the environment;
   `Accessor::cache`, `cached` and `keeps` are gone, and `load_node` needs
-  `Env: Nodes<Key, Value>`.
+  `Provider<nodes::Read<PersistentNode<Key, Value>>>` and
+  `Provider<nodes::Preload<PersistentNode<Key, Value>>>` of its environment.
 - An environment that answers `Load` and holds handles answers the node
   requests through `dialog_search_tree::reads_nodes_through_blocks!` and
   `writes_nodes_through_blocks!`; one with a store beneath it and a
@@ -130,8 +131,9 @@ What this changes for you:
   output needs `C::Output: ConditionalSend`, since a `Resume` is `Send`
   only when its output is; `async_trait` hid that bound inside the box.
 - `nodes::Ready` and `nodes::held_node`'s role as its answer are gone from
-  `dialog_search_tree`; `Nodes<Key, Value>` is `Provider<Read<PersistentNode<Key, Value>>> +
-  Provider<Preload<PersistentNode<Key, Value>>> + ConditionalSync`. `Read::through_blocks`,
+  `dialog_search_tree`, and so is the `Nodes<Key, Value>` alias trait: a tree
+  operation bounds on `Provider<Read<PersistentNode<Key, Value>>> +
+  Provider<Preload<PersistentNode<Key, Value>>> + ConditionalSync` itself. `Read::through_blocks`,
   `through_loader` and `through_held_blocks`, `Preload::through_blocks`
   and `through_held_blocks`, `Write::through_blocks` and
   `through_held_blocks`, every request's `perform`, and

@@ -60,10 +60,10 @@ Three layers:
   implements), so a crate that fixes the keys and values names its node
   once (`dialog_artifacts::tree::CorpusNode`) and bounds on
   `Provider<Read<CorpusNode>>`; the tree crate, which does not care what
-  the keys and values are, keeps `Nodes<Key, Value>` as the bound a tree
-  operation puts on its environment:
+  the keys and values are, spells the bound a tree operation puts on its
+  environment out at every site:
   `Provider<Read<PersistentNode<Key, Value>>> + Provider<Preload<..>> +
-  ConditionalSync`. `Holds`,
+  ConditionalSync`, with no alias trait (the maintainer asked for none). `Holds`,
   `Load` and `Get` have left every tree bound.
 
 **Who answers.** A store answers at the layer it keeps nodes in:
@@ -209,7 +209,9 @@ seal derived (the hashes it adopted), rather than decoding its block; and
 
 Built. In the tree crate every `Env: Provider<Load> + Holds +
 ConditionalSync` (and the `+ Provider<Get>` variants) is
-`Env: Nodes<Key, Value>`. `dialog-artifacts` and the crates above it
+`Env: Provider<Read<PersistentNode<Key, Value>>> +
+Provider<Preload<PersistentNode<Key, Value>>> + ConditionalSync`, spelled
+out at each site. `dialog-artifacts` and the crates above it
 bound on the requests at the corpus's node, `Provider<nodes::Read<CorpusNode>>
 + Provider<nodes::Preload<CorpusNode>>` (and `Provider<nodes::Write<CorpusNode>>`
 where they persist), with no alias trait in between: the maintainer

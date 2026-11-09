@@ -531,27 +531,6 @@ impl<N: Node> Write<N> {
     }
 }
 
-/// An environment a tree reads through: it answers the node layer's reads.
-///
-/// The bound every tree operation that reads puts on its environment.
-/// Nothing here asks `'static` of the environment, so a `&dyn Nodes<K, V>`
-/// collapses the copies of tree code read through many environments into
-/// one.
-pub trait Nodes<Key, Value>:
-    Provider<Read<PersistentNode<Key, Value>>>
-    + Provider<Preload<PersistentNode<Key, Value>>>
-    + ConditionalSync
-{
-}
-
-impl<T, Key, Value> Nodes<Key, Value> for T where
-    T: Provider<Read<PersistentNode<Key, Value>>>
-        + Provider<Preload<PersistentNode<Key, Value>>>
-        + ConditionalSync
-        + ?Sized
-{
-}
-
 /// The node `read` names if the cache `env` holds for the catalog's subject
 /// holds it ([`NodeCache::held_for`]): what an environment that keeps its
 /// cache in its handles answers a read with at once ([`Resume::now`]),

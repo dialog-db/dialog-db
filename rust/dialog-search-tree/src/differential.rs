@@ -21,7 +21,8 @@
 //! - [`TreeDifference::novel_nodes`]: the target-tree nodes absent from the
 //!   source tree (used to upload exactly the missing blocks to a remote).
 
-use crate::Nodes;
+use crate::nodes::{Preload, Read};
+use dialog_capability::Provider;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
@@ -63,7 +64,9 @@ where
     Value::Archived: for<'a> CheckBytes<
         Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
     >,
-    Env: Nodes<Key, Value>,
+    Env: Provider<Read<PersistentNode<Key, Value>>>
+        + Provider<Preload<PersistentNode<Key, Value>>>
+        + ConditionalSync,
 {
     let node = read_node(storage, &hash, missing).await.ok().flatten();
     (is_target, offset, node)
@@ -99,7 +102,9 @@ where
     Value::Archived: for<'a> CheckBytes<
         Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
     >,
-    Env: Nodes<Key, Value>,
+    Env: Provider<Read<PersistentNode<Key, Value>>>
+        + Provider<Preload<PersistentNode<Key, Value>>>
+        + ConditionalSync,
 {
     (at, read_node(storage, &hash, missing).await)
 }
@@ -130,7 +135,9 @@ where
     Value::Archived: for<'a> CheckBytes<
         Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
     >,
-    Env: Nodes<Key, Value>,
+    Env: Provider<Read<PersistentNode<Key, Value>>>
+        + Provider<Preload<PersistentNode<Key, Value>>>
+        + ConditionalSync,
 {
     match missing {
         MissingBlocks::Deny => storage.load_node(hash).await,
@@ -478,7 +485,9 @@ impl DryRun<'_> {
 struct SparseTree<'a, Key, Value, Env>
 where
     Key: self::Key,
-    Env: Nodes<Key, Value>,
+    Env: Provider<Read<PersistentNode<Key, Value>>>
+        + Provider<Preload<PersistentNode<Key, Value>>>
+        + ConditionalSync,
 {
     storage: Accessor<'a, Key, Value, Env>,
     nodes: Vec<SparseTreeNode<Key, Value>>,
@@ -519,7 +528,9 @@ where
     Value::Archived: for<'b> CheckBytes<
             Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>,
-    Env: Nodes<Key, Value>,
+    Env: Provider<Read<PersistentNode<Key, Value>>>
+        + Provider<Preload<PersistentNode<Key, Value>>>
+        + ConditionalSync,
 {
     /// The frontier slots still held by reference, with their hashes: the
     /// blocks a later pass reads unless pruning settles them first.
@@ -2073,7 +2084,9 @@ where
 pub struct TreeDifference<'a, Key, Value, Env>
 where
     Key: self::Key,
-    Env: Nodes<Key, Value>,
+    Env: Provider<Read<PersistentNode<Key, Value>>>
+        + Provider<Preload<PersistentNode<Key, Value>>>
+        + ConditionalSync,
 {
     source: SparseTree<'a, Key, Value, Env>,
     target: SparseTree<'a, Key, Value, Env>,
@@ -2097,7 +2110,9 @@ where
             Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
         + ConditionalSync,
-    Env: Nodes<Key, Value>,
+    Env: Provider<Read<PersistentNode<Key, Value>>>
+        + Provider<Preload<PersistentNode<Key, Value>>>
+        + ConditionalSync,
 {
     /// Computes the difference between two trees.
     ///
