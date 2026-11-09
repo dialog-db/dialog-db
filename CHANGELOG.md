@@ -14,6 +14,37 @@ says how to cut a release.
 
 ## Unreleased
 
+### A merge-or-fold check stops estimating once it has its answer
+
+A conjunction of attribute scans on one entity variable chooses between
+an N-way merge and a nested loop by comparing its scans' range
+estimates: it merges only when the widest is within three times the
+narrowest. Each estimate walked the range's edge paths down to the
+leaves and counted the edge leaves key by key, even for a broad range
+whose size could not change the answer. Now the narrow scans (pinned to
+a value or an entity) are estimated first, every later estimate is
+handed a limit of three times the narrowest so far and stops once it
+passes it, and the first scan past the bound answers for the rest. The
+answer is the one whole estimates give.
+
+What this changes for you:
+
+- `Estimate`'s input is now `EstimateRequest { selector, limit }`, with
+  `From<ArtifactSelector<Constrained>>` for a request with no limit. An
+  implementation of `Provider<Estimate>` takes the request; one that
+  ignores `limit` stays correct.
+- `ArtifactTreeExt::estimate_within`, `Select::estimate_within`,
+  `Select::estimate_perform_within` and
+  `PersistentTree::range_estimate_within` are new; the methods without a
+  limit are unchanged.
+- No result changes: merge and fold return the same rows, and the choice
+  between them is the same.
+
+Why: on warm tonk commands the estimates' own cost fell from 1.15 M to
+0.37 M instructions a command. Most of those conjunctions pin one scan to
+a value and leave the others broad, and a broad estimate past the bound
+now stops at the root.
+
 ### Two claims that stand equal are told apart by the hash of their values
 
 [#752](https://github.com/dialog-db/dialog-db/pull/752)
