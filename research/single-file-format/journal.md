@@ -1720,6 +1720,45 @@ seeded evaluation is about 1 M instructions, and the largest part is the
 merge-or-fold estimate. That needs no correctness argument and compounds
 with seeding once per entity.
 
+## 2026-11-09: the merge-or-fold estimate, stopped once it answers
+
+**What the check sees.** Logged over the warm phase, each decision with
+its scans' shapes: about 34 merge-or-fold decisions a command, and every
+one chose the fold. The usual shape is one scan pinned to an attribute
+and a value, with the entity free, beside 2 to 8 scans pinned to an
+attribute alone. The check asks only whether the widest range passes
+three times the narrowest. Yet it estimated every broad range down to
+its edge leaves, decoding them key by key.
+
+**Change** (`worker/merge-choice-by-shape`):
+- an estimate takes a limit and stops once its count passes it, at the
+  root for a broad range;
+- the scans pinned to a value or an entity are estimated first;
+- each later scan is limited to three times the narrowest so far;
+- the first scan past that bound answers the check, and the scans after
+  it are not estimated.
+
+The answer is the one whole estimates give. A test checks this against
+the exact rule for every order of up to three sizes drawn from a set
+that straddles the bound.
+
+**Result.** Measured under callgrind over the warm phase, on top of #761
+and #763, the estimates' own cost fell from 138 M to 44 M instructions
+over 120 commands: 1.15 M to 0.37 M a command, about 4% of a warm
+command. Wall-clock medians could not resolve it, 4.6–6.7 ms against
+4.5–5.7 over five alternating runs. The whole warm phase also differed
+by more than this between the two runs, on the commit side, which the
+change does not touch. Time-based behaviour, such as the archive's
+two-second sync timer, shifts under valgrind, so whole-phase totals
+from different runs are not comparable here; only the estimate path's
+own cost is.
+
+**Decision.** Kept: it is exact and costs nothing. It is small, though:
+with #761 and #763 the estimates were already down to about 6% of a warm
+command, so this does not move the 5 ms target much. What remains is
+about half committing (sealing the tree, about 30%; the file's append,
+about 17%) and half the seeded evaluations' own reads.
+
 ## How to reproduce
 
 ```sh
