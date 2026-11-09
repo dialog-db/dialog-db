@@ -1813,6 +1813,65 @@ is fixed here, so both integration features build.
 still cuts each one into rows from its bytes. Taking the rows a
 predecessor already wrote is the next step on the write side.
 
+## 2026-11-09: a rewritten node takes its unchanged rows from its predecessor
+
+**Question.** A warm commit rewrites the root (its buffer, a few hundred
+ops) and a few leaves, and the file cut every entry of each into rows,
+interning its tokens and archiving its value again. Most of those
+entries are unchanged from the node's previous version. How much does
+reusing the previous version's rows save?
+
+**Change.**
+- The file finds a node's predecessor by its first row before cutting
+  the rest. It looks first among this append's frames, then the file's,
+  by the same lineage the frame is written against.
+- It walks the node's entries beside the predecessor's rows; both are in
+  key order.
+- An entry whose key and archived value equal the predecessor row's takes
+  that row. Keys are compared as the predecessor's tokens rebuild them.
+  Values are compared archived against archived, or archived against the
+  owned value for a buffered op, so nothing is deserialized. The archived
+  forms of `Datum` and the types in it gain `PartialEq` for this; that
+  changes no bytes.
+- A taken row is the row interning would build, since a token the file
+  holds is named by its id either way, so the frames are unchanged.
+
+**Test.** `it_takes_unchanged_rows_from_the_node_a_commit_supersedes`
+writes facts, replaces and retracts them, then claims them again, so the
+same keys return with other data. Frames are verified in debug builds,
+and a row wrongly taken fails to rebuild its node's block. With the
+value comparison forced to "same", the test fails (one unverified
+frame); with it in place, none.
+
+**Result.** The warm phase under callgrind (team of six, 1×, the file
+store, 120 commands), before and after:
+
+| | before | after |
+|---|--:|--:|
+| the file's append | 1,206.8 M | 738.0 M |
+| — cutting nodes into rows | 930.8 M | 468.2 M |
+| — `entry_row` | 615.7 M | 36.6 M |
+| — token interning | 315.0 M | 33.3 M |
+| the whole warm phase | 7,586 M | 6,877 M |
+
+The append fell 39%, about 3.9 M instructions a command (about 6% of
+one). The whole phase fell 9.3%, but parts the change does not touch
+also moved between the two runs, as they did before: the append's own
+figure is the one to trust.
+
+**What is left.** On this branch, which has neither #761 nor the
+estimate change, a warm command walks keys one by one for 1,075 M
+instructions:
+- 650 M estimating ranges, which the estimate change takes out;
+- 170 M lifting nodes to edit them;
+- 152 M the file walking each new node's keys, once.
+
+Copying and allocation are about a third of a warm command (`memcpy`
+17%, `malloc` and `free` about 15%). The largest are front-coded keys
+rebuilt as leaves are walked, the tree's write buffer copied as it is
+edited, and the query engine's own bookkeeping, not values copied out
+to results.
+
 ## How to reproduce
 
 ```sh
