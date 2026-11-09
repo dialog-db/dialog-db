@@ -1541,10 +1541,11 @@ pub(crate) mod conformance {
     }
 
     /// Two imports at once of two ranges of one blob each keep their groups:
-    /// the record of the partial blob holds both.
+    /// the record of the partial blob holds both, and a read of each gives
+    /// its bytes, so neither write dropped the other.
     pub async fn it_keeps_both_of_two_imports_at_once<P>(store: &P, subject: &Subject)
     where
-        P: Provider<ImportRange> + Provider<Held> + dialog_common::ConditionalSync,
+        P: Provider<ImportRange> + Provider<Held> + Provider<Read> + dialog_common::ConditionalSync,
     {
         let bytes = blob(400 * GROUP as usize);
         let digest = Blake3Hash::from(*blake3::hash(&bytes).as_bytes());
@@ -1572,6 +1573,13 @@ pub(crate) mod conformance {
             .unwrap()
             .unwrap();
         assert_eq!(held.ranges, [first, second]);
+        for (start, end) in [first, second] {
+            assert_eq!(
+                read(store, subject, &bytes, start).await.as_deref(),
+                Some(&bytes[start as usize..end as usize]),
+                "the store gives the bytes of the range from {start} to {end}",
+            );
+        }
     }
 
     /// The size and the ranges of the part of `digest` that `store` holds.
