@@ -6,11 +6,7 @@
 #[cfg(target_arch = "wasm32")]
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 #[cfg(not(feature = "web-integration-tests"))]
-use dialog_artifacts::tree::ArtifactNode;
-#[cfg(not(feature = "web-integration-tests"))]
 use dialog_artifacts::tree::{ArtifactPreload, ArtifactRead, ArtifactWrite};
-#[cfg(not(feature = "web-integration-tests"))]
-use dialog_artifacts::{Datum, Key as ArtifactKey, State};
 #[cfg(not(feature = "web-integration-tests"))]
 use dialog_effects::archive::Load as ArchiveLoad;
 #[cfg(not(feature = "web-integration-tests"))]

@@ -1759,6 +1759,60 @@ command, so this does not move the 5 ms target much. What remains is
 about half committing (sealing the tree, about 30%; the file's append,
 about 17%) and half the seeded evaluations' own reads.
 
+## 2026-11-09: the node layer merged in (#755)
+
+**What changed.** [dialog-db/dialog-db#755](https://github.com/dialog-db/dialog-db/pull/755)
+makes the tree ask its environment for nodes (`Read`, `Preload`,
+`Write`). It routes those requests through `Storage` and `Space` to the
+archive, and lets a provider answer at once (`Resume::now`). Merged into
+this branch rather than rebased onto. The file now answers the tree's
+node reads itself:
+- a node kept as a frame is read from its rows in place;
+- one kept whole is decoded from its block;
+- both are answered at once, since the mapping waits on nothing;
+- `Write` appends the nodes' blocks.
+
+The `NodeSource` channel through `Holds` is gone, and so are the
+benches' registrations of it.
+
+**What the merge kept from this branch.** The row-backed node form
+(`PersistentNode`'s `Backing::Rows`, read through views). #755 keeps a
+node as one contiguous buffer. Without the rows form, the file could
+answer a read only by rebuilding the node's block, which is the cost
+serving in place removes. With it, `PersistentNode::buffer` stays
+fallible here, since a row-backed node builds its block on first asking.
+#755's callers of `buffer()` now handle the error.
+
+**Measured.** Ten `dialog-perf` scenarios under callgrind, the merge
+against its parent, both built from scratch:
+
+| scenario | before | after | Δ |
+|---|--:|--:|--:|
+| commit-batch | 327.5 M | 317.6 M | −3.0% |
+| commit-derived | 119.8 M | 118.5 M | −1.1% |
+| first-query | 1.87 M | 1.81 M | −3.3% |
+| query-join | 76.9 M | 77.0 M | +0.1% |
+| read-point | 22.9 M | 22.8 M | −0.5% |
+| read-scan | 30.4 M | 30.4 M | −0.0% |
+| read-sibling | 30.2 M | 30.2 M | −0.1% |
+| rule-dispatch | 610.3 M | 600.4 M | −1.6% |
+| rule-point | 52.7 M | 52.6 M | −0.2% |
+| transaction-reads | 305.9 M | 302.5 M | −1.1% |
+
+Counters and outcomes are identical. The team of six on the file store,
+five alternating runs each, could not resolve a difference: warm
+commands 16.9 → 16.4 ms (medians), queries within run-to-run noise, the
+same rows. That is expected: both serve the file's nodes in place, by a
+different route.
+
+**Also fixed.** #755's `E0252` in `dialog-repository`'s test build under
+`integration-tests` (two imports of `Datum` and `State`, from a01f9ed9)
+is fixed here, so both integration features build.
+
+**Open.** The node layer hands a `Write` encoded nodes, so the file
+still cuts each one into rows from its bytes. Taking the rows a
+predecessor already wrote is the next step on the write side.
+
 ## How to reproduce
 
 ```sh
