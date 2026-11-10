@@ -5,7 +5,7 @@
 |  | Understanding | Activity |
 |---|---|---|
 | **Status** | *What do we know?* Every read of a branch took its root from the shared head cell at the moment of the read, so a commit through another handle moved the root under a query, a transaction or a commit's settlement. The crate had one type for "the line" and "the line at a revision". Pinning per owned `Source` (the first fix) closed the query environment and left the borrowed paths open. | *Where are we at?* Building: the split into `Live` and `View` is in, transactions pin at open and commit against the pin, the harness sweeps every read path, and the harness has been run against main. |
-| **Agenda** | *What do we need to know?* Whether a snapshot should become a `View` that owns its caches (left as a `Live` kind for now). Whether `lag_delta` should refuse a watermark that is not an ancestor of the pin, rather than diffing against it (only reachable in the race window the publish closes). | *Where are we going?* Landing #758, then the perf sweep against main before the final push. |
+| **Agenda** | *What do we need to know?* Why `commit-succeed` moved +6.1% (volatile, not gated) against main. Whether a snapshot should become a `View` that owns its caches (left as a `Live` kind for now). Whether `lag_delta` should refuse a watermark that is not an ancestor of the pin, rather than diffing against it (only reachable in the race window the publish closes). | *Where are we going?* Landing #758, then the perf sweep against main before the final push. |
 
 ## 2026-11-09, Delimiting: what the first fix left open
 
@@ -47,8 +47,9 @@ before computing the lag; in the race between the check and the mint the
 lag would be a reversed diff and the publish would refuse the result.
 Left as is, noted on the agenda.
 
-**Learned, about the existing suite.** All 681 tests of the repository
-crate pass with transactions pinned at open and refused on a moved head:
+**Learned, about the existing suite.** Every existing test of the
+repository crate (695 with the new ones) passes with transactions pinned
+at open and refused on a moved head:
 nothing in the crate opened a transaction, moved the head through the
 same handle, and expected the commit to build on the moved head.
 
@@ -100,3 +101,24 @@ shared by every line the environment holds and keyed by content, and the
 fixture's biographies were identical in every repository, so after the
 first fixture they were read from the cache. The biographies now carry
 the repository's DID, which is the run above.
+
+## 2026-11-10, Building: perf against main
+
+Swept both on this machine (`dialog-perf sweep`, callgrind), then
+compared main to the branch. Every gated scenario is within tolerance and
+no counter moved. The point reads and commits:
+
+| scenario | main | branch | change |
+|---|--:|--:|--:|
+| read-point | 22,657,849 | 22,421,088 | -1.0% |
+| number-point | 33,289,092 | 33,435,655 | +0.4% |
+| rule-point | 51,290,704 | 50,950,321 | -0.7% |
+| commit-rows | 197,496,154 | 197,664,069 | +0.1% |
+| commit-batch | 316,517,759 | 316,836,486 | +0.1% |
+| commit-hot-key | 194,935,960 | 195,123,089 | +0.1% |
+| commit-derived | 118,332,720 | 118,027,401 | -0.3% |
+| commit-succeed | 1,353,186,862 | 1,435,531,995 | +6.1% |
+
+`commit-succeed` is marked volatile and not gated; it is the scenario
+whose commits run the settlement this change pins, so its move is on the
+agenda to look at rather than to dismiss as noise.
