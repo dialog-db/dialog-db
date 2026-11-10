@@ -5,7 +5,7 @@
 |  | Understanding | Activity |
 |---|---|---|
 | **Status** | Two processes advancing two branches of one space share no lock on main and take turns on one file lock with the file archive. Irakli requires that they not wait on one another. Cells live outside the file, a file each. | Directing: a matrix of four approaches, Irakli's candidate among them. |
-| **Agenda** | What a commit records as its read set, and its cost. Calibrating the slot's inline size. Then the next implementation decisions: extent claiming, integration. Whether "one file" means one file at rest, with side files while writers overlap. How a head's compare-and-swap works against a pending head record. The `?` cells in the matrix. | Ask who integrates; then the web; then the cells question. |
+| **Agenda** | Whether ranges as a filter and patterns as the test is the read set. Calibrating the slot's inline size. Then the next implementation decisions: extent claiming, integration. Whether "one file" means one file at rest, with side files while writers overlap. How a head's compare-and-swap works against a pending head record. The `?` cells in the matrix. | Ask who integrates; then the web; then the cells question. |
 
 ## 2026-11-10, Describing: the topic opens
 
@@ -300,3 +300,18 @@ forward to the new one until then.
 **Decided.** A cell has a capacity fixed at creation; outgrowing it is a
 resize, done as a delete and a create, leaving the old slot forwarding.
 Cells never spill. This replaces the inline-or-spilled entry above.
+
+**Asked.** Key ranges, or entities and attributes? Irakli: key ranges seem
+better, being less data to hold, but he is unsure of their precision: a
+scan may cover a wider range than its candidate frames, so capturing the
+triples that end up bound to variables might be the better strategy.
+
+**Learned.** Matched triples are precise for values a commit read, but
+miss phantoms: a fact newly asserted into a scanned range that would now
+match, which rules picking the latest value or matching on absence depend
+on. Combining both answers keeps both properties: record each scan's range
+and pattern, diff the trees over the ranges, and test each changed fact
+against the pattern.
+
+**Decided.** Not decided; three options in the read-set section of
+[design-branch-heads.md](design-branch-heads.md).

@@ -28,15 +28,21 @@ integration indexes them.
 
 ## The read-set check
 
-A commit records the ranges of the tree it read. When it takes the
-branch's lock and finds a head other than the one it started from, it
-computes the difference between the two trees restricted to those ranges
-(`TreeDifference` reads only the paths that differ):
+A commit that finds its branch's head moved replays only if what it read
+changed. What it records as "what it read" decides how often it replays,
+and whether it can miss a change.
 
-- empty: nothing it read changed, so its writes go onto the latest tree as
-  they are, and it publishes with the new parent;
-- not empty: it replays its operation over the latest head, and tries
-  again.
+| criterion \ approach | Key ranges: each scan's range of keys | Matched triples: the facts that ended up bound to variables (Irakli) | Ranges as a filter, patterns as the test: each scan's range and the pattern it matched with; the two trees are diffed over the ranges, and each changed fact is tested against the pattern |
+|---|---|---|---|
+| what a commit holds | two keys a scan | 🟡 every fact matched: a scan of 300 issues holds 300 | two keys and a pattern a scan |
+| a change to a value it read | caught | caught | caught |
+| a fact asserted into a range it scanned, which would now match (a phantom) | caught | 🔴 missed: no triple it read changed, yet the result would have; a rule picking a field's latest value (`Pick::Last`), or matching on absence, reads exactly this | caught: the new fact is in the diff, and matches the pattern |
+| replays for a change it did not depend on | 🟡 any change in a wide range forces one | few | few: a changed fact in the range that does not match the pattern is passed over |
+| what validating costs | the difference over the ranges | a lookup of each fact read in the new tree | the difference over the ranges (`TreeDifference` reads only the paths that differ), then one pattern test a changed fact |
 
-Open: what a commit records as its read set (key ranges scanned, or the
-entities and attributes queried), and what it costs to keep.
+In every case, the result of the check:
+
+- nothing it read changed: its writes go onto the latest tree as they are,
+  and it publishes with the new parent;
+- something changed: it replays its operation over the latest head, and
+  tries again.
