@@ -440,6 +440,24 @@ The `tutorial` broke the plan's promise that every document states the same fact
 
 **Decision.** User-defined picks stay orderings, which run at write and so keep the shortcut; the design says so and links #759.
 
+## 2026-11-09 — Commands are modifiers, and `!` is mutation
+
+**Question.** How does a command carry a concept's shape without declaring its fields again, and where does an entity come from when a write names none?
+
+**Method.** Design session with the maintainer, not a measurement. Prior art checked: Dedalus (persistence rules), LogiQL (delta predicates `+R` `-R` `^R`, pulse predicates, constructor predicates, `exec` vs `addblock`), relational lenses for writing through a view, and the EDB/IDB split of classic Datalog.
+
+**Results.**
+- `!` means mutation: `(x! …)` is short for `(! (x …))`, and the fact goes into the next tick. Without `!` a fact holds this tick only. A document with no `!` changes nothing, needs no permission to write, and its result lists what its rules would have done; the cascade runs to the turn limit, uncommitted.
+- Persistence belongs to the predicate, as in Dedalus: a concept is carried until retracted, a modifier is not. `layer: :now` on attributes is no longer needed for commands.
+- A concept is a rule that runs both ways. `concept!` is a rule the checker holds to the writable subset: attribute or domain calls, constraints, every body variable in the head.
+- A modifier is applied to a concept's shape: `(open (bug title: … author: …))`. Its facts are tagged with its name, so they never leak into a `bug` query, and are never carried, stored or synced. It needs no declaration: the rules that read it decide what it takes, by subset, and a parameter no rule reads is a compile error. Modifiers nest one deep; `!` is an operator, not a modifier.
+- `assert` and `retract` are modifiers that come with the language. `assert` takes every parameter and no entity, which is the `id` of the content. `retract` names only the entity and retracts every attribute of the concept on it. A rule that wants another identity writes `(bug! ?b …)` with `?b` from its own `(id …)`.
+- Every top-level form starts with its verb: `query`, `rule`, `rule!`, `concept!`, or a modifier. A bare concept call at the top level is an error. In a head, a bare call defines a relation; in a premise it matches what holds now, and `(x! …)` what is stored.
+- The prelude is four rules: stored stays stored unless retracted with `!`; what holds now is what is stored minus what is retracted, plus what is asserted now; `assert!` stores by content. A modifier on a concept applies to each of its attribute lines, and picks act on attributes.
+- A command's own rows land on an entity derived from the modifier's name and what it passes, or on a generated identifier; either works, and R17 does not depend on it.
+
+**Decision.** All taken as the design to measure in R17, [planned](results/r17-plan.md) before any reader ran. Open: assert and retract of one fact in one tick; what retract hides when a rule also derives the fact; a spelling for rules on change rather than state; under whose authority an installed rule writes; whether layers beyond carried and not-carried are needed, and whether they are Bloom's channels.
+
 ## How to reproduce
 
 1. Take a variant's prompt from its round's results file and save it as `<variant>.txt`.
