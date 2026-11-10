@@ -47,8 +47,8 @@ use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
 use futures_util::TryStreamExt as _;
 
-use crate::attribute::{Cardinality, Relation};
-use crate::concept::descriptor::ConceptDescriptor;
+use crate::attribute::{Cardinality, Relation, The};
+use crate::concept::descriptor::{ConceptDescriptor, ConceptFieldDescriptor};
 use crate::concept::query::ConceptQuery;
 use crate::corpus::Fact;
 use crate::error::EvaluationError;
@@ -60,6 +60,7 @@ use crate::rule::deductive::DeductiveRule;
 use crate::selection::{Binding, Match};
 use crate::source::SelectRules;
 use crate::term::Term;
+use crate::type_system::Type as Kind;
 use crate::types::{Any, Typed};
 use crate::{Entity, Environment, Value};
 
@@ -319,13 +320,19 @@ where
     // Collect the reachable concepts and their resolved rules.
     let mut rules_of: HashMap<Entity, Vec<DeductiveRule>> = HashMap::new();
     let mut targets_of: HashMap<Entity, BTreeSet<Entity>> = HashMap::new();
+    // The concepts that are one keyed collection under `all` which no rule
+    // derives:
+    // each row of such a concept is one stored entry, so a changed entry
+    // binds into a premise that reads it as a fact binds into an attribute
+    // premise (see `collection_premise`).
+    let mut stored: BTreeSet<Entity> = BTreeSet::new();
     let mut queue = vec![concept.clone()];
     while let Some(descriptor) = queue.pop() {
         let entity = descriptor.this();
         if rules_of.contains_key(&entity) {
             continue;
         }
-        let bundle = Provider::<SelectRules>::execute(after, descriptor).await?;
+        let bundle = Provider::<SelectRules>::execute(after, descriptor.clone()).await?;
         if bundle.recursion().is_some() {
             return Ok(None);
         }
@@ -337,6 +344,9 @@ where
         // model; incremental aggregate maintenance is A5).
         if bundle.rules().any(|rule| !rule.reduce().is_empty()) {
             return Ok(None);
+        }
+        if bundle.installed().is_empty() && collection_of(&descriptor).is_some() {
+            stored.insert(entity.clone());
         }
         let rules: Vec<DeductiveRule> = bundle.rules().cloned().collect();
         let mut targets = BTreeSet::new();
@@ -391,7 +401,7 @@ where
                     }
                     continue;
                 }
-                match rule_heads(rule, &changes, &affected, &states).await? {
+                match rule_heads(rule, &changes, &affected, &stored, &states).await? {
                     Some(found) => {
                         heads.before.extend(found.before);
                         heads.after.extend(found.after);
@@ -485,6 +495,62 @@ fn reading_attribute<'r>(
     })
 }
 
+/// The collection field of a concept that is one keyed collection under
+/// `all` and nothing else: its name and its descriptor.
+///
+/// A field typed by a concept is left out: its rows also depend on the
+/// facts of each member, which must conform, so a row can change with no
+/// change to an entry.
+///
+/// A field under a pick that elects is left out too. Under `all` each
+/// claim is an entry of its own, so a changed claim changes the rows that
+/// it matches and no other. Under a pick that elects, a claim can take the
+/// place of another claim that the premise read: a claim of the same key
+/// under `last`, and a claim of any key of the entity under `max`, `min`
+/// and `top`, which elect among every claim of the entity before the key
+/// is compared. A changed claim then stands for more than itself.
+fn collection_of(concept: &ConceptDescriptor) -> Option<(&str, &ConceptFieldDescriptor)> {
+    let mut fields = concept.with().iter();
+    let (name, field) = fields.next()?;
+    if fields.next().is_some() || field.conforms().is_some() {
+        return None;
+    }
+    if field.descriptor().pick().elects() {
+        return None;
+    }
+    matches!(field.the(), The::Collection { .. }).then_some((name, field))
+}
+
+/// The terms of a premise that reads a concept of one keyed collection,
+/// with the kind of the attributes of its entries.
+struct Entry<'p> {
+    /// The kind every attribute of an entry has: the collection's domain
+    /// and the shape of its keys.
+    kind: Kind,
+    /// The kind the field reads each value of an entry through, when it
+    /// declares one: the kind of the value slot of the collection's scan.
+    value_kind: Option<Kind>,
+    /// The entity that holds the collection.
+    this: Option<&'p Term<Any>>,
+    /// The key of an entry: the name half of its attribute.
+    key: Option<&'p Term<Any>>,
+    /// The value of an entry.
+    value: Option<&'p Term<Any>>,
+}
+
+/// How a changed fact binds into `query`, when it reads a concept that is
+/// one keyed collection.
+fn collection_premise(query: &ConceptQuery) -> Option<Entry<'_>> {
+    let (name, field) = collection_of(&query.predicate)?;
+    Some(Entry {
+        kind: field.the().kind()?,
+        value_kind: field.content_type().map(Kind::from),
+        this: query.terms.get("this"),
+        key: query.terms.get(&The::key_operand(name)),
+        value: query.terms.get(name),
+    })
+}
+
 /// The concept application of a premise, and whether it is negated.
 fn concept_premise(premise: &Premise) -> Option<(&ConceptQuery, bool)> {
     match premise {
@@ -504,6 +570,7 @@ async fn rule_heads<'a, Env, Before>(
     rule: &DeductiveRule,
     changes: &[Change<'_>],
     affected: &HashMap<Entity, Heads>,
+    stored: &BTreeSet<Entity>,
     states: &States<'a, Env, Before>,
 ) -> Result<Option<Heads>, EvaluationError>
 where
@@ -553,6 +620,89 @@ where
                     continue;
                 }
                 for side in bind.sides(change.exists) {
+                    let Some(env) = states.on(side) else {
+                        return Ok(None);
+                    };
+                    match sideways_heads(premises, matched.clone(), &scope, rule, env).await? {
+                        Some(found) => heads.on(side).extend(found),
+                        None => return Ok(None),
+                    }
+                }
+            }
+            continue;
+        }
+
+        // A premise that reads one stored keyed collection under `all` is matched
+        // by the changed entries of that collection, as an attribute
+        // premise is by the changed facts: an entry is a fact whose
+        // attribute holds the key, and it binds the entity and the
+        // key, and the value too unless it is a number. Bound by its
+        // entity alone, as a concept premise is below, one new entry
+        // would join every entry of its collection sideways, and
+        // every head those reach would be derived again: the whole
+        // window of a log, for one post.
+        if let Some((query, negated)) = concept_premise(premise)
+            && stored.contains(&query.predicate.this())
+            && let Some(entry) = collection_premise(query)
+        {
+            for change in changes {
+                let fact = change.fact;
+                let attribute = Value::from(Relation::from(fact.the.clone()));
+                if !entry.kind.admits(&attribute) {
+                    continue;
+                }
+                // The value is the value as a scan of the collection gives
+                // it: read through the type of the field (`Kind::view`). A
+                // fact whose value the field does not read is no entry, and
+                // it binds nothing.
+                let value = match &entry.value_kind {
+                    Some(kind) => match kind.view(fact.is.clone()) {
+                        Some(value) => value,
+                        None => continue,
+                    },
+                    None => fact.is.clone(),
+                };
+                let slots = [
+                    (entry.this, Value::Entity(fact.of.clone())),
+                    (entry.key, Value::String(fact.the.name().to_owned())),
+                    (entry.value, value),
+                ];
+                // A head is an entity. A field with no type can hold an
+                // entry of another value, and where the premise names the
+                // head as the value of its entry, such an entry reaches no
+                // head.
+                if slots.iter().any(|(term, value)| {
+                    term.is_some_and(|term| term.name() == Some("this"))
+                        && !matches!(value, Value::Entity(_))
+                }) {
+                    continue;
+                }
+                // A number is left to the scan, and binds nothing. A scan
+                // does not compare a number by equality: it reads each
+                // stored number through the type of the number that it is
+                // bound with, so 7.5 answers a read of the natural 7, and 7
+                // does not answer a read of 7.5. A number bound here would
+                // meet a constant of the premise, or the number of another
+                // premise, from the side of the entry alone. With the
+                // entity and the key bound, the read of the premise on each
+                // side compares the number as a first read does.
+                let mut matched = Match::new();
+                let mut scope = Environment::new();
+                if !slots.into_iter().all(|(term, value)| {
+                    value.data_type().is_number()
+                        || term.is_none_or(|term| {
+                            bind_slot(
+                                &mut matched,
+                                &mut scope,
+                                term.as_constant(),
+                                term.name(),
+                                value,
+                            )
+                        })
+                }) {
+                    continue;
+                }
+                for side in (Bind::Exact { negated }).sides(change.exists) {
                     let Some(env) = states.on(side) else {
                         return Ok(None);
                     };

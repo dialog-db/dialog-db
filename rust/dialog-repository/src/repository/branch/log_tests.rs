@@ -11,15 +11,18 @@
 
 use anyhow::Result;
 use dialog_corpus::position::{self, Bias, Position};
-use dialog_corpus::{Entity, Relation as CorpusRelation};
+use dialog_corpus::{Entity, Relation as CorpusRelation, Value};
 use dialog_peer::helpers::test_session_with_peer;
 use dialog_peer::{Peer, Session};
-use dialog_query::attribute::Relation;
+use dialog_query::attribute::{AttributeStatement, Relation};
 use dialog_query::rule::DeductiveRuleDescriptor;
-use dialog_query::{ConceptConclusion, ConceptQuery, DeductiveRule, Output as _, Parameters, Term};
+use dialog_query::{
+    Cardinality, ConceptConclusion, ConceptQuery, DeductiveRule, Output as _, Parameters, Term,
+};
 use dialog_storage::provider::storage::VolatileSpace;
 use serde_json::{Map, Value as Json, json};
 
+use super::Subscription;
 use crate::Branch;
 use crate::helpers::test_repo;
 
@@ -747,5 +750,796 @@ async fn it_keeps_a_row_of_a_live_window_while_one_entry_still_holds_it() -> Res
     let delta = subscription.poll(&operator).await?.expect("the row left");
     assert_eq!(numbers(&delta.retracted)?, vec![150]);
     assert_eq!(subscription.results().len(), 19);
+    Ok(())
+}
+
+/// A new entry costs a live window the same, whatever the window holds. The
+/// live query binds the new entry into the read of the log, with its key and
+/// its message, so the one message is the one row that it derives again. Two
+/// windows of one log, one that holds 100 rows and one that holds 2, read the
+/// same rows for one new message.
+#[dialog_common::test]
+async fn it_reads_the_same_rows_for_a_new_entry_whatever_a_live_window_holds() -> Result<()> {
+    let (branch, operator, keys) = opened(Keyed::Dictionary, &[400, 50]).await?;
+    let general = channel(0);
+    let from = |number: u64| Window {
+        key_in_head: false,
+        keyed: Keyed::Dictionary,
+        channel: Some(&general),
+        lower: at_least(keys.at(number)),
+        upper: None,
+    };
+    let (wide, narrow) = (from(300), from(398));
+    let mut holds_100 = branch.query().with(wide.rule()?).subscribe(wide.query()?);
+    let mut holds_2 = branch
+        .query()
+        .with(narrow.rule()?)
+        .subscribe(narrow.query()?);
+    let first = holds_100.poll(&operator).await?.expect("the first read");
+    assert_eq!(first.asserted.len(), 100);
+    let first = holds_2.poll(&operator).await?.expect("the first read");
+    assert_eq!(first.asserted.len(), 2);
+
+    let (before_100, before_2) = (holds_100.rows_read(), holds_2.rows_read());
+    post(branch.transaction(), 0, "new", 400, "n00400")?
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    let delta = holds_100.poll(&operator).await?.expect("a new row");
+    assert_eq!(numbers(&delta.asserted)?, vec![400]);
+    let delta = holds_2.poll(&operator).await?.expect("a new row");
+    assert_eq!(numbers(&delta.asserted)?, vec![400]);
+    let (cost_100, cost_2) = (
+        holds_100.rows_read() - before_100,
+        holds_2.rows_read() - before_2,
+    );
+    println!("a new entry costs a window of 100 rows {cost_100} rows, and one of 2 rows {cost_2}");
+    assert_eq!(
+        cost_100, cost_2,
+        "the cost of a new entry does not follow the rows that the window holds"
+    );
+    assert!(
+        cost_100 <= 12 * (1 + FIELDS.len()),
+        "a new entry reads the rows of one message a few times, got {cost_100}"
+    );
+    Ok(())
+}
+
+/// A rule can derive the entries of a collection. Then a row of the
+/// collection can change with no change to a stored entry, so a live window
+/// finds what a change affects through the rules, as for any concept. Here a
+/// rule derives an entry of the log from a pin, and a new pin reaches the
+/// window as a new row.
+#[dialog_common::test]
+async fn it_keeps_a_live_window_correct_over_a_log_that_a_rule_derives() -> Result<()> {
+    let (branch, operator, keys) = opened(Keyed::Dictionary, &[200]).await?;
+    let general = channel(0);
+    let window = Window {
+        key_in_head: false,
+        keyed: Keyed::Dictionary,
+        channel: Some(&general),
+        lower: at_least(keys.at(190)),
+        upper: None,
+    };
+    let pinned: DeductiveRuleDescriptor = serde_json::from_value(json!({
+        "deduce": log(Keyed::Dictionary),
+        "when": [{
+            "assert": { "with": {
+                "of": { "the": "chat.pin/of", "as": "entity:" },
+                "message": { "the": "chat.pin/message", "as": "entity:" },
+                "key": { "the": "chat.pin/key", "as": "text:" }
+            } },
+            "where": {
+                "this": { "?": { "name": "pin" } },
+                "of": { "?": { "name": "this" } },
+                "message": { "?": { "name": "log" } },
+                "key": { "?": { "name": "log/key" } }
+            }
+        }]
+    }))?;
+    let mut subscription = branch
+        .query()
+        .with(window.rule()?)
+        .with(pinned.compile()?)
+        .subscribe(window.query()?);
+    let first = subscription.poll(&operator).await?.expect("the first read");
+    assert_eq!(numbers(&first.asserted)?, (190..200).collect::<Vec<_>>());
+
+    // Message 5 is below the window. A pin gives it a second place, inside.
+    let of: Entity = general.parse()?;
+    let pin: Entity = "pin:1".parse()?;
+    let message: Entity = "message:0-5".parse()?;
+    branch
+        .transaction()
+        .assert(dialog_query::the!("chat.pin/of").of(pin.clone()).is(of))
+        .assert(
+            dialog_query::the!("chat.pin/message")
+                .of(pin.clone())
+                .is(message),
+        )
+        .assert(
+            dialog_query::the!("chat.pin/key")
+                .of(pin)
+                .is("n00195x".to_string()),
+        )
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    let delta = subscription.poll(&operator).await?.expect("the pinned row");
+    assert_eq!(numbers(&delta.asserted)?, vec![5]);
+    assert!(delta.retracted.is_empty());
+    Ok(())
+}
+
+/// A fact under a key of the log whose value is not an entity is no entry of
+/// the log, because the field reads entities. A live query passes over such a
+/// fact when it looks for the rows that a change affects, as a scan of the
+/// log does. Here a rule reads the messages that no entry of the log holds.
+/// One commit takes message 100 out of the log, and writes a text under a key
+/// of the log. The live query answers message 100, as a first read does.
+#[dialog_common::test]
+async fn it_passes_over_a_changed_fact_that_is_no_entry_of_the_log() -> Result<()> {
+    let (branch, operator, _) = opened(Keyed::Dictionary, &[120]).await?;
+    let general = channel(0);
+    let mut terms = Map::new();
+    terms.insert("this".to_string(), json!({ "?": { "name": "this" } }));
+    for (name, _) in FIELDS {
+        terms.insert(name.to_string(), json!({ "?": { "name": name } }));
+    }
+    let outside: DeductiveRuleDescriptor = serde_json::from_value(json!({
+        "deduce": fields("test.window"),
+        "when": [
+            { "assert": fields("chat.message"), "where": terms },
+            { "assert": "==", "where": {
+                "this": { "?": { "name": "channel" } }, "is": { "entity:": general }
+            } },
+            { "assert": ">=", "where": { "of": { "?": { "name": "number" } }, "with": 95 } }
+        ],
+        "unless": [{
+            "assert": log(Keyed::Dictionary),
+            "where": {
+                "this": { "entity:": general },
+                "log": { "the": { "?": {} }, "is": { "?": { "name": "this" } } }
+            }
+        }]
+    }))?;
+    let window = Window {
+        key_in_head: false,
+        keyed: Keyed::Dictionary,
+        channel: Some(&general),
+        lower: None,
+        upper: None,
+    };
+    let mut subscription = branch
+        .query()
+        .with(outside.compile()?)
+        .subscribe(window.query()?);
+    if let Some(first) = subscription.poll(&operator).await? {
+        assert!(first.asserted.is_empty(), "each message has an entry");
+    }
+
+    let of: Entity = general.parse()?;
+    let gone: Entity = "message:0-100".parse()?;
+    let entry = |key: &str| -> Result<Relation> {
+        Ok(Relation::from(CorpusRelation::try_from(format!(
+            "chat.channel.log/{key}"
+        ))?))
+    };
+    branch
+        .transaction()
+        .retract(entry("n00100")?.of(of.clone()).is(gone))
+        .assert(
+            entry("n00900")?
+                .of(of.clone())
+                .is("not an entity".to_string()),
+        )
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    let delta = subscription
+        .poll(&operator)
+        .await?
+        .expect("the message that left the log");
+    assert_eq!(numbers(&delta.asserted)?, vec![100]);
+    assert!(delta.retracted.is_empty());
+
+    // The text leaves again, and no row changes.
+    branch
+        .transaction()
+        .retract(entry("n00900")?.of(of).is("not an entity".to_string()))
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    if let Some(delta) = subscription.poll(&operator).await? {
+        assert!(delta.asserted.is_empty() && delta.retracted.is_empty());
+    }
+    assert_eq!(subscription.results().len(), 1);
+    Ok(())
+}
+
+/// A collection of numbers, as a concept: one dictionary field of `kind`, or
+/// a field with no type for an empty `kind`.
+fn scores(kind: &str) -> Json {
+    let mut field = json!({
+        "the": { "domain": "test.scores", "keyed": "dictionary" },
+        "pick": "all:",
+    });
+    if !kind.is_empty() {
+        field["as"] = json!(kind);
+    }
+    json!({ "with": { "scores": field } })
+}
+
+/// A new branch with nothing in it.
+async fn empty() -> Result<(Branch, Operator)> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    Ok((branch, operator))
+}
+
+/// The attribute of the entry of `test.scores` under `key`.
+fn score(key: &str) -> Result<Relation> {
+    Ok(Relation::from(CorpusRelation::try_from(format!(
+        "test.scores/{key}"
+    ))?))
+}
+
+/// A live query over each score of each holder: the rule reads the collection
+/// of `kind`, and its head holds the score. Gives the subscription after its
+/// first poll.
+async fn scored(
+    branch: &Branch,
+    operator: &Operator,
+    kind: &str,
+) -> Result<Subscription<ConceptQuery>> {
+    let head = json!({ "with": {
+        "score": { "the": "test.board/score", "as": kind, "pick": "all:" },
+    } });
+    let rule: DeductiveRuleDescriptor = serde_json::from_value(json!({
+        "deduce": head,
+        "when": [{
+            "assert": scores(kind),
+            "where": {
+                "this": { "?": { "name": "this" } },
+                "scores": { "the": { "?": { "name": "key" } }, "is": { "?": { "name": "score" } } }
+            }
+        }]
+    }))?;
+    let mut terms = Parameters::new();
+    terms.insert("this".into(), Term::var("this"));
+    terms.insert("score".into(), Term::var("score"));
+    let query = ConceptQuery {
+        predicate: serde_json::from_value(head)?,
+        terms,
+    };
+    let mut subscription = branch.query().with(rule.compile()?).subscribe(query);
+    if let Some(first) = subscription.poll(operator).await? {
+        assert!(first.asserted.is_empty(), "the branch holds no score");
+    }
+    Ok(subscription)
+}
+
+/// A field of integers reads a natural as an integer. A scan of the collection
+/// gives a row for an entry that holds the natural 7, so a live query binds
+/// that entry too, as the field reads it.
+#[dialog_common::test]
+async fn it_binds_a_changed_entry_of_a_number_as_its_field_reads_it() -> Result<()> {
+    let (branch, operator) = empty().await?;
+    let mut subscription = scored(&branch, &operator, "integer:").await?;
+    let board: Entity = "board:1".parse()?;
+    branch
+        .transaction()
+        .assert(score("a")?.of(board.clone()).is(7u64))
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    let delta = subscription.poll(&operator).await?.expect("the score");
+    assert_eq!(delta.asserted.len(), 1);
+    assert_eq!(delta.asserted[0].get::<i64>("score")?, 7);
+
+    branch
+        .transaction()
+        .assert(score("b")?.of(board).is(-3i64))
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    let delta = subscription.poll(&operator).await?.expect("a second score");
+    assert_eq!(delta.asserted.len(), 1);
+    assert_eq!(subscription.results().len(), 2);
+    Ok(())
+}
+
+/// A field of naturals reads 9.5 as 9. The row of that entry comes when the
+/// entry is written, and it leaves when the entry is retracted.
+#[dialog_common::test]
+async fn it_retracts_the_row_of_an_entry_that_its_field_read_as_another_number() -> Result<()> {
+    let (branch, operator) = empty().await?;
+    let mut subscription = scored(&branch, &operator, "natural:").await?;
+    let board: Entity = "board:1".parse()?;
+    branch
+        .transaction()
+        .assert(score("a")?.of(board.clone()).is(9.5f64))
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    let delta = subscription.poll(&operator).await?.expect("the score");
+    assert_eq!(delta.asserted.len(), 1);
+    assert_eq!(delta.asserted[0].get::<u64>("score")?, 9);
+
+    branch
+        .transaction()
+        .retract(score("a")?.of(board).is(9.5f64))
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    let delta = subscription.poll(&operator).await?.expect("the score left");
+    assert_eq!(delta.retracted.len(), 1);
+    assert!(subscription.results().is_empty());
+    Ok(())
+}
+
+/// The value of a changed entry joins the other premises as the field reads
+/// it. An item has the rank 7, and a rule gives each item whose rank is a
+/// score of one board. An entry of 7.5 in a field of naturals reads as 7, so
+/// the item shows.
+#[dialog_common::test]
+async fn it_joins_a_changed_entry_by_the_value_that_its_field_reads() -> Result<()> {
+    let (branch, operator) = empty().await?;
+    let board: Entity = "board:1".parse()?;
+    let item: Entity = "item:1".parse()?;
+    branch
+        .transaction()
+        .assert(
+            dialog_query::the!("test.item/rank")
+                .of(item.clone())
+                .is(7u64),
+        )
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    let ranked = json!({ "with": { "rank": { "the": "test.ranked/rank", "as": "natural:" } } });
+    let rule: DeductiveRuleDescriptor = serde_json::from_value(json!({
+        "deduce": ranked,
+        "when": [
+            {
+                "assert": scores("natural:"),
+                "where": {
+                    "this": { "entity:": "board:1" },
+                    "scores": { "the": { "?": { "name": "key" } }, "is": { "?": { "name": "rank" } } }
+                }
+            },
+            {
+                "assert": { "with": { "rank": { "the": "test.item/rank", "as": "natural:" } } },
+                "where": { "this": { "?": { "name": "this" } }, "rank": { "?": { "name": "rank" } } }
+            }
+        ]
+    }))?;
+    let mut terms = Parameters::new();
+    terms.insert("this".into(), Term::var("this"));
+    terms.insert("rank".into(), Term::var("rank"));
+    let query = ConceptQuery {
+        predicate: serde_json::from_value(ranked)?,
+        terms,
+    };
+    let mut subscription = branch.query().with(rule.compile()?).subscribe(query);
+    if let Some(first) = subscription.poll(&operator).await? {
+        assert!(first.asserted.is_empty(), "the board holds no score");
+    }
+
+    branch
+        .transaction()
+        .assert(score("a")?.of(board).is(7.5f64))
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    let delta = subscription
+        .poll(&operator)
+        .await?
+        .expect("the ranked item");
+    assert_eq!(delta.asserted.len(), 1);
+    assert_eq!(delta.asserted[0].entity(), &item);
+    Ok(())
+}
+
+/// The fact that `of` holds the value `is` under the attribute `the`, where
+/// the test names the value with its type.
+fn fact(the: &str, of: &Entity, is: Value) -> Result<AttributeStatement> {
+    Ok(AttributeStatement {
+        the: the.parse()?,
+        of: of.clone(),
+        is,
+        cause: None,
+        cardinality: Some(Cardinality::Many),
+        pick: None,
+    })
+}
+
+/// A query of each field of `head`.
+fn each_field(head: &Json) -> Result<ConceptQuery> {
+    let mut terms = Parameters::new();
+    terms.insert("this".into(), Term::var("this"));
+    for name in head["with"].as_object().expect("the fields").keys() {
+        terms.insert(name.clone(), Term::var(name.clone()));
+    }
+    Ok(ConceptQuery {
+        predicate: serde_json::from_value(head.clone())?,
+        terms,
+    })
+}
+
+/// Polls `live`, and compares the rows that it holds with the rows that a
+/// new query of the same rule reads. Gives the number of rows.
+async fn rows_of_both(
+    branch: &Branch,
+    operator: &Operator,
+    rule: &DeductiveRule,
+    head: &Json,
+    live: &mut Subscription<ConceptQuery>,
+) -> Result<usize> {
+    live.poll(operator).await?;
+    let mut new = branch
+        .query()
+        .with(rule.clone())
+        .subscribe(each_field(head)?);
+    let read = new
+        .poll(operator)
+        .await?
+        .map_or(Vec::new(), |delta| delta.asserted);
+    let held = live.results();
+    assert_eq!(held.len(), read.len(), "the live query and a first read");
+    assert!(held.iter().all(|row| read.contains(row)));
+    Ok(held.len())
+}
+
+/// A rule that gives each holder whose collection of `kind` holds the number
+/// 7, with the name of the holder. The 7 is a constant in the place of the
+/// value of an entry.
+fn holder_of_seven(kind: &str) -> Result<(DeductiveRule, Json)> {
+    holder_with(scores(kind), "scores", json!({ "?": {} }), json!(7))
+}
+
+/// A rule that gives each holder whose `collection`, a concept of the one
+/// field `field`, holds an entry of `value` under `key`, with the name of the
+/// holder. The key and the value are each a constant of the rule or a blank,
+/// and one of the two is a constant.
+fn holder_with(
+    collection: Json,
+    field: &str,
+    key: Json,
+    value: Json,
+) -> Result<(DeductiveRule, Json)> {
+    let head = json!({ "with": { "name": { "the": "test.flagged/name", "as": "text:" } } });
+    let rule: DeductiveRuleDescriptor = serde_json::from_value(json!({
+        "deduce": head,
+        "when": [
+            {
+                "assert": collection,
+                "where": {
+                    "this": { "?": { "name": "this" } },
+                    field: { "the": key, "is": value }
+                }
+            },
+            {
+                "assert": { "with": { "name": { "the": "test.board/name", "as": "text:" } } },
+                "where": { "this": { "?": { "name": "this" } }, "name": { "?": { "name": "name" } } }
+            }
+        ]
+    }))?;
+    Ok((rule.compile()?, head))
+}
+
+/// A branch that holds one board with a name, and no score.
+async fn board() -> Result<(Branch, Operator, Entity)> {
+    let (branch, operator) = empty().await?;
+    let board: Entity = "board:1".parse()?;
+    branch
+        .transaction()
+        .assert(
+            dialog_query::the!("test.board/name")
+                .of(board.clone())
+                .is("board".to_string()),
+        )
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    Ok((branch, operator, board))
+}
+
+/// A scan does not compare a number by equality. It reads each stored number
+/// through the type of the field, and the constant of a rule as that type. So
+/// in a field of floats, an entry that holds the natural 7 answers a rule
+/// that names 7. A live query finds that entry as a first read does.
+#[dialog_common::test]
+async fn it_finds_a_changed_entry_of_a_number_by_a_constant_of_another_number_type() -> Result<()> {
+    let (branch, operator, board) = board().await?;
+    let (rule, head) = holder_of_seven("float:")?;
+    let mut live = branch
+        .query()
+        .with(rule.clone())
+        .subscribe(each_field(&head)?);
+    assert_eq!(
+        rows_of_both(&branch, &operator, &rule, &head, &mut live).await?,
+        0
+    );
+
+    branch
+        .transaction()
+        .assert(score("a")?.of(board.clone()).is(7u64))
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    assert_eq!(
+        rows_of_both(&branch, &operator, &rule, &head, &mut live).await?,
+        1
+    );
+    assert_eq!(live.results()[0].entity(), &board);
+
+    branch
+        .transaction()
+        .retract(score("a")?.of(board).is(7u64))
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    assert_eq!(
+        rows_of_both(&branch, &operator, &rule, &head, &mut live).await?,
+        0
+    );
+    Ok(())
+}
+
+/// In a field with no type, a scan reads each stored number through the type
+/// of the constant of the rule. So an entry of 7.5 answers a rule that names
+/// 7, as an entry of 7 does. The row of the holder stays while one of the two
+/// entries is there, and it leaves with the last.
+#[dialog_common::test]
+async fn it_keeps_the_row_of_a_holder_while_an_entry_still_answers_the_constant() -> Result<()> {
+    let (branch, operator, board) = board().await?;
+    let (rule, head) = holder_of_seven("")?;
+    let mut live = branch
+        .query()
+        .with(rule.clone())
+        .subscribe(each_field(&head)?);
+    live.poll(&operator).await?;
+
+    let mut held = Vec::new();
+    for (exists, key, number) in [
+        (true, "a", Value::UnsignedInt(7)),
+        (true, "c", Value::Float(7.5)),
+        (false, "a", Value::UnsignedInt(7)),
+        (false, "c", Value::Float(7.5)),
+    ] {
+        let entry = fact(&format!("test.scores/{key}"), &board, number)?;
+        let transaction = branch.transaction();
+        let transaction = if exists {
+            transaction.assert(entry)
+        } else {
+            transaction.retract(entry)
+        };
+        transaction.commit().publish().perform(&operator).await?;
+        held.push(rows_of_both(&branch, &operator, &rule, &head, &mut live).await?);
+    }
+    assert_eq!(held, [1, 1, 1, 0]);
+    Ok(())
+}
+
+/// A number joins the number of another premise as a scan compares the two:
+/// the number that a read is bound with reads each stored number through its
+/// own type. An item of the rank 7 is held by an entry of 7.5, and an item of
+/// the rank 7.5 is not held by an entry of 7. A rule gives each item whose
+/// rank no entry of one board holds. After each change of an entry, the live
+/// query holds the items that a first read gives.
+#[dialog_common::test]
+async fn it_joins_a_changed_entry_of_a_number_as_a_first_read_does() -> Result<()> {
+    let (branch, operator, board) = board().await?;
+    let mut transaction = branch.transaction();
+    for (item, rank) in [
+        ("item:1", Value::UnsignedInt(7)),
+        ("item:2", Value::UnsignedInt(8)),
+        ("item:3", Value::SignedInt(-3)),
+        ("item:4", Value::Float(7.5)),
+    ] {
+        transaction = transaction.assert(fact("test.item/rank", &item.parse()?, rank)?);
+    }
+    transaction.commit().publish().perform(&operator).await?;
+
+    let head = json!({ "with": { "rank": { "the": "test.ranked/rank" } } });
+    let rule: DeductiveRuleDescriptor = serde_json::from_value(json!({
+        "deduce": head,
+        "when": [{
+            "assert": { "with": { "rank": { "the": "test.item/rank" } } },
+            "where": { "this": { "?": { "name": "this" } }, "rank": { "?": { "name": "rank" } } }
+        }],
+        "unless": [{
+            "assert": scores(""),
+            "where": {
+                "this": { "entity:": "board:1" },
+                "scores": { "the": { "?": {} }, "is": { "?": { "name": "rank" } } }
+            }
+        }]
+    }))?;
+    let rule = rule.compile()?;
+    let mut live = branch
+        .query()
+        .with(rule.clone())
+        .subscribe(each_field(&head)?);
+    assert_eq!(
+        rows_of_both(&branch, &operator, &rule, &head, &mut live).await?,
+        4
+    );
+
+    let mut held = Vec::new();
+    for (exists, key, number) in [
+        (true, "a", Value::UnsignedInt(7)),
+        (true, "c", Value::Float(7.5)),
+        (false, "a", Value::UnsignedInt(7)),
+        (false, "c", Value::Float(7.5)),
+    ] {
+        let entry = fact(&format!("test.scores/{key}"), &board, number)?;
+        let transaction = branch.transaction();
+        let transaction = if exists {
+            transaction.assert(entry)
+        } else {
+            transaction.retract(entry)
+        };
+        transaction.commit().publish().perform(&operator).await?;
+        held.push(rows_of_both(&branch, &operator, &rule, &head, &mut live).await?);
+    }
+    assert_eq!(held, [3, 2, 2, 4]);
+    Ok(())
+}
+
+/// A collection under `pick`, a pick that elects, as a concept: one dictionary
+/// field of `kind`. A live query reads such a collection as it reads each
+/// other concept, by the entity of a changed claim, because a claim can take
+/// the place of another claim that a premise read.
+fn settings(kind: &str, pick: &str) -> Json {
+    json!({ "with": { "settings": {
+        "the": { "domain": "test.settings", "keyed": "dictionary" },
+        "as": kind,
+        "pick": pick,
+    } } })
+}
+
+/// Writes or retracts one claim of the collection of [`settings`], under
+/// `key`. A claim is an append, so an older claim of the key stays in the
+/// store beside it.
+async fn claim(
+    branch: &Branch,
+    operator: &Operator,
+    board: &Entity,
+    exists: bool,
+    key: &str,
+    value: Value,
+) -> Result<()> {
+    let claim = fact(&format!("test.settings/{key}"), board, value)?;
+    let transaction = branch.transaction();
+    let transaction = if exists {
+        transaction.assert(claim)
+    } else {
+        transaction.retract(claim)
+    };
+    transaction.commit().publish().perform(operator).await?;
+    Ok(())
+}
+
+/// Under `last:`, a scan gives one claim of each key of a holder, and a newer
+/// claim takes that place whatever its own value. A rule names the mode
+/// "dark". The holder shows while "dark" is the claim that a scan gives.
+/// It leaves when a claim of "light" takes that place, though the rule does
+/// not match "light", and it returns when that claim leaves.
+#[dialog_common::test]
+async fn it_follows_a_claim_that_takes_the_place_of_the_claim_that_a_rule_names() -> Result<()> {
+    let (branch, operator, board) = board().await?;
+    let (rule, head) = holder_with(
+        settings("text:", "last:"),
+        "settings",
+        json!({ "?": {} }),
+        json!("dark"),
+    )?;
+    let mut live = branch
+        .query()
+        .with(rule.clone())
+        .subscribe(each_field(&head)?);
+    live.poll(&operator).await?;
+
+    let mut held = Vec::new();
+    for (exists, mode) in [
+        (true, "dark"),
+        (true, "light"),
+        (false, "light"),
+        (true, "light"),
+        (false, "dark"),
+    ] {
+        let mode = Value::String(mode.to_owned());
+        claim(&branch, &operator, &board, exists, "mode", mode).await?;
+        held.push(rows_of_both(&branch, &operator, &rule, &head, &mut live).await?);
+    }
+    assert_eq!(held, [1, 0, 1, 0, 0]);
+    Ok(())
+}
+
+/// A claim that the field does not read takes the place of a claim too. A
+/// field of naturals under `last:` holds 7 under one key, and a rule gives
+/// each number of each holder. A claim of an entity arrives under that key. A
+/// scan then gives no row for the key, so the live query drops the row of 7,
+/// and the row returns when the claim of the entity leaves.
+#[dialog_common::test]
+async fn it_follows_a_claim_that_its_field_does_not_read() -> Result<()> {
+    let (branch, operator, board) = board().await?;
+    let head = json!({ "with": {
+        "setting": { "the": "test.board/setting", "as": "natural:", "pick": "all:" },
+    } });
+    let rule: DeductiveRuleDescriptor = serde_json::from_value(json!({
+        "deduce": head,
+        "when": [{
+            "assert": settings("natural:", "last:"),
+            "where": {
+                "this": { "?": { "name": "this" } },
+                "settings": { "the": { "?": { "name": "key" } }, "is": { "?": { "name": "setting" } } }
+            }
+        }]
+    }))?;
+    let rule = rule.compile()?;
+    let mut live = branch
+        .query()
+        .with(rule.clone())
+        .subscribe(each_field(&head)?);
+    live.poll(&operator).await?;
+
+    let thing = Value::Entity("thing:1".parse()?);
+    let mut held = Vec::new();
+    for (exists, value) in [
+        (true, Value::UnsignedInt(7)),
+        (true, thing.clone()),
+        (false, thing),
+    ] {
+        claim(&branch, &operator, &board, exists, "level", value).await?;
+        held.push(rows_of_both(&branch, &operator, &rule, &head, &mut live).await?);
+    }
+    assert_eq!(held, [1, 0, 1]);
+    Ok(())
+}
+
+/// Under `max:`, a read elects among each claim of a holder, and compares the
+/// key after that. A rule gives each holder with an entry under the key
+/// `level`. The holder shows while its greatest claim is under `level`, and it
+/// leaves when a greater claim arrives under another key, though the rule does
+/// not name that key.
+#[dialog_common::test]
+async fn it_follows_a_claim_of_another_key_that_a_pick_elects() -> Result<()> {
+    let (branch, operator, board) = board().await?;
+    let (rule, head) = holder_with(
+        settings("natural:", "max:"),
+        "settings",
+        json!("level"),
+        json!({ "?": {} }),
+    )?;
+    let mut live = branch
+        .query()
+        .with(rule.clone())
+        .subscribe(each_field(&head)?);
+    live.poll(&operator).await?;
+
+    let mut held = Vec::new();
+    for (key, number) in [("level", 7), ("limit", 9)] {
+        let number = Value::UnsignedInt(number);
+        claim(&branch, &operator, &board, true, key, number).await?;
+        held.push(rows_of_both(&branch, &operator, &rule, &head, &mut live).await?);
+    }
+    assert_eq!(held, [1, 0]);
     Ok(())
 }
