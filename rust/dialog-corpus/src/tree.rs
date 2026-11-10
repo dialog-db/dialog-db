@@ -64,8 +64,8 @@ use crate::{NUMBER_BAND, encode_key_value_owned};
 pub mod distribution;
 pub mod rekey;
 
-/// The corpus: the body of claims a branch holds, as the search tree that
-/// stores them, keyed for the entity-, attribute- and value-ordered scans.
+/// The corpus: the body of claims a branch holds, in the search tree, keyed
+/// for the entity-, attribute- and value-ordered scans.
 ///
 /// Keys are the raw variable-length bytes of [`Key`]; values are [`State`]
 /// payloads stored in the tree's native (rkyv) encoding.

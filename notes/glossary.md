@@ -189,7 +189,7 @@ DialogDB's approach to time where facts exist in causal timelines rather than a 
 
 ### Corpus
 
-The body of claims a branch holds, as the tree that stores them: every fact the transactor has incorporated, keyed for the entity-, attribute- and value-ordered scans. It is the storage side of the `dialog-corpus` crate: `dialog_corpus::tree::Corpus` is the tree, `CorpusNode` a node of it and `CorpusCache` the cache those nodes are kept in; the model side (`Artifact`, `ArtifactSelector`) keeps its names until the claim rename. A corpus is one revision's worth: a query pins the one its branch stood at when it began.
+The body of claims a branch holds, in the search tree: every fact the transactor has incorporated, keyed for the entity-, attribute- and value-ordered scans. It is the storage side of the `dialog-corpus` crate: `dialog_corpus::tree::Corpus` is the tree, `CorpusNode` a node of it and `CorpusCache` the cache those nodes are kept in; the model side (`Artifact`, `ArtifactSelector`) keeps its names until the claim rename. A corpus is one revision's worth: a query pins the one its branch stood at when it began.
 
 ### EAV Index (Entity-Attribute-Value)
 

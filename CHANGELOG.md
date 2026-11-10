@@ -22,8 +22,8 @@ read is argued in
 [design-spilled-values.md](./design/tree-node-reads/design-spilled-values.md).
 
 The crate that held the data model and its indexes, `dialog-artifacts`, is
-`dialog-corpus`: the corpus is the body of claims a branch holds, as the
-tree that stores them. Its storage side is named after it, and the crate
+`dialog-corpus`: the corpus is the body of claims a branch holds, in the
+search tree. Its storage side is named after it, and the crate
 no longer depends on a store crate. What it reads beside its nodes, a
 value spilled out of its key, it asks its environment for through
 `blob::Load`, performed in one place and checked against the reference;
