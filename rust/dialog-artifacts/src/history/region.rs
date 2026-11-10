@@ -35,9 +35,10 @@ use super::{Context, Origin, Version, Watermark};
 /// a region at all.
 pub async fn context_in<S>(tree: &ArtifactTree, store: &S) -> Result<Context, DialogArtifactsError>
 where
-    S: Provider<archive::Load>
+    S: Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
         + Provider<blob::Load>
-        + Holds
         + ConditionalSync
         + Clone
         + ConditionalSync,
@@ -66,9 +67,10 @@ pub async fn region_entry<S>(
     store: &S,
 ) -> Result<Option<Watermark>, DialogArtifactsError>
 where
-    S: Provider<archive::Load>
+    S: Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
         + Provider<blob::Load>
-        + Holds
         + ConditionalSync
         + Clone
         + ConditionalSync,

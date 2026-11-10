@@ -110,8 +110,7 @@ where
     )
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<archive::Get> for MemoryStore {
     async fn execute(
         &self,
@@ -128,8 +127,7 @@ impl Provider<archive::Get> for MemoryStore {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<archive::Put> for MemoryStore {
     async fn execute(&self, capability: Capability<archive::Put>) -> Result<(), ArchiveError> {
         let content = capability.content().to_vec();
@@ -164,8 +162,7 @@ impl BlobSource for Chunks {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<blob::Read> for MemoryStore {
     async fn execute(&self, capability: Capability<blob::Read>) -> Result<BlobReader, BlobError> {
         let digest = capability.digest().clone();
@@ -227,8 +224,7 @@ impl BlobSink for Importing {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<blob::Import> for MemoryStore {
     async fn execute(&self, capability: Capability<blob::Import>) -> Result<BlobWriter, BlobError> {
         Ok(Box::new(Importing {
@@ -242,8 +238,7 @@ impl Provider<blob::Import> for MemoryStore {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<memory::Resolve> for MemoryStore {
     async fn execute(
         &self,
@@ -263,8 +258,7 @@ impl Provider<memory::Resolve> for MemoryStore {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<memory::Publish> for MemoryStore {
     async fn execute(
         &self,
@@ -288,8 +282,7 @@ impl Provider<memory::Publish> for MemoryStore {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<memory::Retract> for MemoryStore {
     async fn execute(&self, capability: Capability<memory::Retract>) -> Result<(), MemoryError> {
         let key = cell_key(&capability);

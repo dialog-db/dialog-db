@@ -31,6 +31,7 @@ use crate::{
     SelectQuery, Snapshot, SnapshotClaims, Staged, TransactionQuery, origin_of,
 };
 use dialog_artifacts::history::{CausalityCache, Context, ContextCache, RevisionRecord, Version};
+use dialog_artifacts::tree::CorpusNode;
 use dialog_artifacts::tree::WriteScope;
 use dialog_artifacts::{
     Artifact, ArtifactSelector, Change, Changes, Entity, Statement, Update as _,
@@ -48,6 +49,7 @@ use dialog_effects::blob::Size as BlobSize;
 use dialog_effects::memory::{Current, Publish, Resolve, Version as MemoryVersion};
 use dialog_query::query::Application;
 use dialog_search_tree::Cache;
+use dialog_search_tree::nodes;
 use std::sync::Arc;
 
 /// A staged chain of commits on a branch: minted, persisted, invisible.
@@ -420,11 +422,18 @@ impl TransactionPublish<&Branch> {
             + Provider<BlobRead>
             + Provider<Put>
             + Provider<Import>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
             + Provider<Resolve>
             + Provider<Publish>
             + Provider<Identify>
             + Provider<Attest>
             + Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
@@ -449,11 +458,18 @@ impl TransactionPublish<TransactionBatch> {
             + Provider<BlobRead>
             + Provider<Put>
             + Provider<Import>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
             + Provider<Resolve>
             + Provider<Publish>
             + Provider<Identify>
             + Provider<Attest>
             + Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
@@ -492,10 +508,17 @@ impl TransactionCommit<&Branch> {
             + Provider<BlobRead>
             + Provider<Put>
             + Provider<Import>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
             + Provider<Resolve>
             + Provider<Identify>
             + Provider<Attest>
             + Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
@@ -606,10 +629,17 @@ impl TransactionCommit<TransactionBatch> {
             + Provider<BlobRead>
             + Provider<Put>
             + Provider<Import>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
             + Provider<Resolve>
             + Provider<Identify>
             + Provider<Attest>
             + Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
@@ -722,10 +752,17 @@ where
         + Provider<BlobRead>
         + Provider<Put>
         + Provider<Import>
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
         + Provider<Resolve>
         + Provider<Identify>
         + Provider<Attest>
         + Provider<ArchiveLoad>
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
         + Provider<BlobLoad>
         + Provider<dialog_artifacts::Preload>
         + Provider<dialog_artifacts::Speculation>

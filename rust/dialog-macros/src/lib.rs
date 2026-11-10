@@ -14,6 +14,7 @@ use proc_macro::TokenStream;
 mod attenuate;
 mod compose;
 mod provider;
+mod provision;
 mod query;
 mod site;
 mod test;
@@ -62,6 +63,23 @@ pub fn test(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// 2. A `Provisionable` trait implementation on the address type
 ///
 /// This allows the address type to be used with `#[dialog_common::test]`.
+#[proc_macro_attribute]
+pub fn provision(attr: TokenStream, item: TokenStream) -> TokenStream {
+    provision::generate(attr, item)
+}
+
+/// Write a `Provider` impl whose `execute` is an `async fn`.
+///
+/// This macro is re-exported as `dialog_capability::provider`. See that
+/// documentation for usage examples.
+///
+/// `Provider::execute` answers with a `Resume`: the output at once, or a
+/// future that produces it. Under this attribute, an `async fn execute`
+/// in the impl becomes an `execute` that answers with its body as the
+/// future (`Resume::later`), so a provider that always has to wait is
+/// written as it would be under `async_trait`. An `execute` that is not
+/// `async` is left as written, so one impl can answer at once on some
+/// paths and later on the rest.
 #[proc_macro_attribute]
 pub fn provider(attr: TokenStream, item: TokenStream) -> TokenStream {
     provider::generate(attr, item)

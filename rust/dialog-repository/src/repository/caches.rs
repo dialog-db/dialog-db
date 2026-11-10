@@ -675,8 +675,7 @@ mod tests {
     macro_rules! delegate_provider {
         ($($command:ty),+ $(,)?) => {
             $(
-                #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-                #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+                #[dialog_capability::provider]
                 impl<P> Provider<$command> for RefusingImport<P>
                 where
                     P: Provider<$command> + ConditionalSync,
@@ -706,8 +705,18 @@ mod tests {
         Fork<RemoteSite, Resolve>,
     );
 
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    // The node requests are answered through this env's own loads and
+    // imports, so a write meets the refusal.
+    dialog_search_tree::reads_nodes_through_blocks!(
+        impl[P,] RefusingImport<P>
+        where [P: Provider<ArchiveLoad> + Holds + ConditionalSync,]
+    );
+    dialog_search_tree::writes_nodes_through_blocks!(
+        impl[P,] RefusingImport<P>
+        where [P: Holds + ConditionalSync,]
+    );
+
+    #[dialog_capability::provider]
     impl<P: ConditionalSync> Provider<Import> for RefusingImport<P> {
         async fn execute(&self, _input: <Import as Command>::Input) -> <Import as Command>::Output {
             Err(ArchiveError::Storage(

@@ -6,12 +6,16 @@
 #[cfg(target_arch = "wasm32")]
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 #[cfg(not(feature = "web-integration-tests"))]
+use dialog_artifacts::tree::CorpusNode;
+#[cfg(not(feature = "web-integration-tests"))]
 use dialog_effects::archive::Load as ArchiveLoad;
 #[cfg(not(feature = "web-integration-tests"))]
 use dialog_effects::archive::prelude::CatalogScope;
 #[cfg(not(feature = "web-integration-tests"))]
 use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::storage::Location;
+#[cfg(not(feature = "web-integration-tests"))]
+use dialog_search_tree::nodes;
 
 use dialog_effects::MethodExt as _;
 use dialog_effects::archive::prelude::{ArchiveExt as _, ArchiveScope};
@@ -2469,17 +2473,16 @@ async fn it_bridges_foreign_bulk_to_a_second_remote(s3: S3Address) -> Result<()>
 macro_rules! delegate_provider {
     ($($command:ty),+ $(,)?) => {
         $(
-            #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-            #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
             impl<P> Provider<$command> for AbortOnRemoteBlobImport<P>
             where
-                P: Provider<$command> + dialog_common::ConditionalSync,
+                P: Provider<$command>,
             {
-                async fn execute(
+                fn execute(
                     &self,
                     input: <$command as dialog_capability::Command>::Input,
-                ) -> <$command as dialog_capability::Command>::Output {
-                    self.inner.execute(input).await
+                ) -> dialog_capability::Resume<'_, <$command as dialog_capability::Command>::Output>
+                {
+                    self.inner.execute(input)
                 }
             }
         )+
@@ -2529,6 +2532,9 @@ delegate_provider!(
     dialog_effects::blob::Import,
     ArchiveLoad,
     BlobLoad,
+    nodes::Read<CorpusNode>,
+    nodes::Preload<CorpusNode>,
+    nodes::Write<CorpusNode>,
     Fork<RemoteSite, dialog_effects::archive::Get>,
     Fork<RemoteSite, dialog_effects::archive::Put>,
     Fork<RemoteSite, dialog_effects::memory::Resolve>,
@@ -2537,8 +2543,7 @@ delegate_provider!(
 );
 
 #[cfg(not(feature = "web-integration-tests"))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl<P> Provider<Fork<RemoteSite, BlobImportEffect>> for AbortOnRemoteBlobImport<P>
 where
     P: dialog_common::ConditionalSync,

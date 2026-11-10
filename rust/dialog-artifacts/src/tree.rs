@@ -34,7 +34,9 @@ use async_trait::async_trait;
 use dialog_capability::Provider;
 use dialog_common::{Blake3Hash as NodeHash, ConditionalSend, ConditionalSync};
 use dialog_effects::archive::prelude::ArchiveScope;
-use dialog_search_tree::{Buffer, Manifest, NodeCache, PersistentTree, Value as TreeValue};
+use dialog_search_tree::{
+    Buffer, Manifest, NodeCache, PersistentNode, PersistentTree, Value as TreeValue,
+};
 use dialog_storage::Blake3Hash;
 use futures_util::{Stream, StreamExt};
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -70,6 +72,13 @@ pub type ArtifactTree = PersistentTree<Key, State<Datum>>;
 /// The node cache an [`ArtifactTree`] reads through: nodes by content hash,
 /// already checked.
 pub type ArtifactNodeCache = NodeCache<Key, State<Datum>>;
+
+/// A node of the corpus: the search tree's node at the corpus's keys and
+/// values. What an environment a corpus is read or written through
+/// answers the node layer's requests for: `Provider<nodes::Read<CorpusNode>>`,
+/// `Provider<nodes::Preload<CorpusNode>>`, `Provider<nodes::Write<CorpusNode>>`
+/// ([`dialog_search_tree::nodes`]).
+pub type CorpusNode = PersistentNode<Key, State<Datum>>;
 
 // Deletion is no longer resolved at the slot: it travels as a history
 // record and is applied to the active indexes by the observed-remove
@@ -593,7 +602,12 @@ pub trait ArtifactTreeExt {
         instructions: I,
     ) -> Result<(), DialogArtifactsError>
     where
-        S: Provider<archive::Load> + Provider<blob::Load> + Holds + ConditionalSync + Clone,
+        S: Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + Provider<blob::Load>
+            + ConditionalSync
+            + Clone,
         I: Stream<Item = Instruction> + ConditionalSend;
 
     /// Like [`ArtifactTreeExt::apply`], but tags every [`Datum`] written by
@@ -615,7 +629,12 @@ pub trait ArtifactTreeExt {
         instructions: I,
     ) -> Result<bool, DialogArtifactsError>
     where
-        S: Provider<archive::Load> + Provider<blob::Load> + Holds + ConditionalSync + Clone,
+        S: Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + Provider<blob::Load>
+            + ConditionalSync
+            + Clone,
         I: Stream<Item = Instruction> + ConditionalSend;
 
     /// The currently asserted [`Datum`]s recorded for the given entity and
@@ -628,9 +647,10 @@ pub trait ArtifactTreeExt {
         the: &crate::Relation,
     ) -> Result<Vec<Datum>, DialogArtifactsError>
     where
-        S: Provider<archive::Load>
+        S: Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<blob::Load>
-            + Holds
             + ConditionalSend
             + ConditionalSync
             + Clone;
@@ -644,9 +664,10 @@ pub trait ArtifactTreeExt {
         the: &crate::Relation,
     ) -> Result<Vec<Artifact>, DialogArtifactsError>
     where
-        S: Provider<archive::Load>
+        S: Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<blob::Load>
-            + Holds
             + ConditionalSend
             + ConditionalSync
             + Clone;
@@ -667,9 +688,10 @@ pub trait ArtifactTreeExt {
         delta: &ArchiveDelta,
     ) -> Result<Manifest, DialogArtifactsError>
     where
-        S: Provider<archive::Load>
+        S: Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<blob::Load>
-            + Holds
             + ConditionalSend
             + ConditionalSync
             + Clone;
@@ -685,7 +707,12 @@ pub trait ArtifactTreeExt {
         entries: RecordEntries,
     ) -> Result<(), DialogArtifactsError>
     where
-        S: Provider<archive::Load> + Provider<blob::Load> + Holds + ConditionalSync + Clone;
+        S: Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + Provider<blob::Load>
+            + ConditionalSync
+            + Clone;
 
     /// Scan the tree for facts matching the given constrained selector,
     /// yielding each as a borrowed-access [`ArtifactView`] rather than a
@@ -711,9 +738,10 @@ pub trait ArtifactTreeExt {
     ) -> impl Stream<Item = Result<ArtifactView, DialogArtifactsError>> + 's + ConditionalSend
     where
         Self: Sized,
-        S: Provider<archive::Load>
+        S: Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<blob::Load>
-            + Holds
             + ConditionalSend
             + ConditionalSync
             + Clone
@@ -740,9 +768,10 @@ pub trait ArtifactTreeExt {
     ) -> impl Stream<Item = Result<Artifact, DialogArtifactsError>> + 's + ConditionalSend
     where
         Self: Sized,
-        S: Provider<archive::Load>
+        S: Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<blob::Load>
-            + Holds
             + ConditionalSend
             + ConditionalSync
             + Clone
@@ -762,9 +791,10 @@ pub trait ArtifactTreeExt {
     ) -> Result<Option<u64>, DialogArtifactsError>
     where
         Self: Sized,
-        S: Provider<archive::Load>
+        S: Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<blob::Load>
-            + Holds
             + ConditionalSend
             + ConditionalSync
             + Clone;
@@ -780,7 +810,12 @@ impl ArtifactTreeExt for ArtifactTree {
         instructions: I,
     ) -> Result<(), DialogArtifactsError>
     where
-        S: Provider<archive::Load> + Provider<blob::Load> + Holds + ConditionalSync + Clone,
+        S: Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + Provider<blob::Load>
+            + ConditionalSync
+            + Clone,
         I: Stream<Item = Instruction> + ConditionalSend,
     {
         self.apply_versioned(store, delta, None, instructions)
@@ -796,7 +831,12 @@ impl ArtifactTreeExt for ArtifactTree {
         instructions: I,
     ) -> Result<bool, DialogArtifactsError>
     where
-        S: Provider<archive::Load> + Provider<blob::Load> + Holds + ConditionalSync + Clone,
+        S: Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + Provider<blob::Load>
+            + ConditionalSync
+            + Clone,
         I: Stream<Item = Instruction> + ConditionalSend,
     {
         // Every read goes THROUGH the delta: this tree's root may have been
@@ -826,7 +866,7 @@ impl ArtifactTreeExt for ArtifactTree {
         .await?;
         // Seal the whole batch with a single bottom-up persist into the
         // caller's delta.
-        *self = transient.persist(delta.blocks(), store)?;
+        *self = transient.persist(delta.nodes())?;
         Ok(changed)
     }
 
@@ -837,9 +877,10 @@ impl ArtifactTreeExt for ArtifactTree {
         the: &crate::Relation,
     ) -> Result<Vec<Datum>, DialogArtifactsError>
     where
-        S: Provider<archive::Load>
+        S: Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<blob::Load>
-            + Holds
             + ConditionalSend
             + ConditionalSync
             + Clone,
@@ -875,9 +916,10 @@ impl ArtifactTreeExt for ArtifactTree {
         the: &crate::Relation,
     ) -> Result<Vec<Artifact>, DialogArtifactsError>
     where
-        S: Provider<archive::Load>
+        S: Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<blob::Load>
-            + Holds
             + ConditionalSend
             + ConditionalSync
             + Clone,
@@ -920,9 +962,10 @@ impl ArtifactTreeExt for ArtifactTree {
         delta: &ArchiveDelta,
     ) -> Result<Manifest, DialogArtifactsError>
     where
-        S: Provider<archive::Load>
+        S: Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<blob::Load>
-            + Holds
             + ConditionalSend
             + ConditionalSync
             + Clone,
@@ -941,7 +984,12 @@ impl ArtifactTreeExt for ArtifactTree {
         entries: RecordEntries,
     ) -> Result<(), DialogArtifactsError>
     where
-        S: Provider<archive::Load> + Provider<blob::Load> + Holds + ConditionalSync + Clone,
+        S: Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + Provider<blob::Load>
+            + ConditionalSync
+            + Clone,
     {
         let RecordEntries { entries, spill } = entries;
         stage_spilled_value(delta, spill);
@@ -959,7 +1007,7 @@ impl ArtifactTreeExt for ArtifactTree {
             }
             transient
         };
-        *self = transient.persist(delta.blocks(), store)?;
+        *self = transient.persist(delta.nodes())?;
         Ok(())
     }
 
@@ -969,9 +1017,10 @@ impl ArtifactTreeExt for ArtifactTree {
         selector: ArtifactSelector<Constrained>,
     ) -> Result<Option<u64>, DialogArtifactsError>
     where
-        S: Provider<archive::Load>
+        S: Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<blob::Load>
-            + Holds
             + ConditionalSend
             + ConditionalSync
             + Clone,
@@ -1000,9 +1049,10 @@ impl ArtifactTreeExt for ArtifactTree {
         selector: ArtifactSelector<Constrained>,
     ) -> impl Stream<Item = Result<ArtifactView, DialogArtifactsError>> + 's + ConditionalSend
     where
-        S: Provider<archive::Load>
+        S: Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<blob::Load>
-            + Holds
             + ConditionalSend
             + ConditionalSync
             + Clone
@@ -1119,9 +1169,10 @@ impl ArtifactTreeExt for ArtifactTree {
         selector: ArtifactSelector<Constrained>,
     ) -> impl Stream<Item = Result<Artifact, DialogArtifactsError>> + 's + ConditionalSend
     where
-        S: Provider<archive::Load>
+        S: Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<blob::Load>
-            + Holds
             + ConditionalSend
             + ConditionalSync
             + Clone
@@ -1466,7 +1517,12 @@ pub async fn write_instructions<W, S, I>(
 ) -> Result<(W, bool), DialogArtifactsError>
 where
     W: ArtifactWriter + ConditionalSend,
-    S: Provider<archive::Load> + Provider<blob::Load> + Holds + ConditionalSync + Clone,
+    S: Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
+        + Provider<blob::Load>
+        + ConditionalSync
+        + Clone,
     I: Stream<Item = Instruction> + ConditionalSend,
 {
     // History records are buffered and only written if the batch changed

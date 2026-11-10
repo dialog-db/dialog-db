@@ -30,12 +30,6 @@
 //! overflow, per the algorithm. The structural counts are printed once at
 //! startup; criterion then times the differential walk itself.
 
-use std::sync::{
-    Arc,
-    atomic::{AtomicU64, Ordering},
-};
-
-use async_trait::async_trait;
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use dialog_capability::{Capability, Provider};
 use dialog_common::{Blake3Hash, helpers::BenchData};
@@ -43,6 +37,10 @@ use dialog_effects::archive::{ArchiveError, Get, Load};
 use dialog_search_tree::helpers::Blocks;
 use dialog_search_tree::{Buffer, Delta, FlushPolicy, HitchhikerTree, PersistentTree};
 use futures_util::StreamExt;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 
 const BENCH_SEED: u64 = 42;
 
@@ -110,8 +108,7 @@ impl dialog_common::Holds for CountingBackend {
     fn hold(&self, _key: String, _handle: dialog_common::Held) {}
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<Load> for CountingBackend {
     async fn execute(&self, load: Load) -> Result<Option<Buffer>, ArchiveError> {
         Ok(self.count(&load.digest))
@@ -119,8 +116,7 @@ impl Provider<Load> for CountingBackend {
 }
 
 /// A local-only read counts as a read of the block too.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<Get> for CountingBackend {
     async fn execute(&self, get: Capability<Get>) -> Result<Option<Vec<u8>>, ArchiveError> {
         use dialog_effects::archive::prelude::GetExt as _;
@@ -130,14 +126,19 @@ impl Provider<Get> for CountingBackend {
     }
 }
 
+dialog_search_tree::reads_nodes_through_blocks!(CountingBackend);
+
 type Tree = PersistentTree<[u8; 16], Vec<u8>>;
 
 /// Flushes a delta's nodes into storage, counting how many distinct new nodes it
 /// produced (the commit's write churn).
-async fn flush_counting(delta: &mut Delta<Blake3Hash, Buffer>, storage: &mut Storage) -> u64 {
+async fn flush_counting(
+    delta: &mut Delta<Blake3Hash, dialog_search_tree::PersistentNode<[u8; 16], Vec<u8>>>,
+    storage: &mut Storage,
+) -> u64 {
     let mut count = 0u64;
-    for (_, buffer) in delta.flush() {
-        storage.store(buffer);
+    for (_, node) in delta.flush() {
+        storage.store(node.buffer().clone());
         count += 1;
     }
     count
@@ -160,7 +161,7 @@ async fn build_base(base_size: usize) -> (Tree, Storage) {
             .insert(*key, key.to_vec(), &storage)
             .await
             .unwrap()
-            .persist(&mut delta, &storage)
+            .persist(&mut delta)
             .unwrap();
         flush_counting(&mut delta, &mut storage).await;
     }
@@ -194,7 +195,7 @@ async fn advance_persistent(base: &Tree, keys: &[[u8; 16]], storage: &mut Storag
             .insert(*key, key.to_vec(), storage)
             .await
             .unwrap()
-            .persist(&mut delta, storage)
+            .persist(&mut delta)
             .unwrap();
         churn += flush_counting(&mut delta, storage).await;
     }
@@ -221,7 +222,7 @@ async fn advance_hitchhiker(base: &Tree, keys: &[[u8; 16]], storage: &mut Storag
         hh = hh.insert(*key, key.to_vec(), storage).await.unwrap();
     }
     let mut delta = Delta::zero();
-    let root = hh.persist(&mut delta, storage).unwrap();
+    let root = hh.persist(&mut delta).unwrap();
     let churn = flush_counting(&mut delta, storage).await;
     (
         Tree::at(dialog_search_tree::helpers::test_catalog(), root),

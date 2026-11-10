@@ -22,7 +22,6 @@ use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
 
-use async_trait::async_trait;
 use dialog_capability::{Capability, Did, Provider as Perform, Subject};
 use dialog_common::time::{self, UNIX_EPOCH};
 use dialog_effects::archive::{self, ArchiveError};
@@ -484,7 +483,7 @@ impl Announcing {
     }
 }
 
-#[async_trait]
+#[dialog_capability::provider]
 impl Perform<archive::Get> for Announcing {
     async fn execute(
         &self,
@@ -494,14 +493,14 @@ impl Perform<archive::Get> for Announcing {
     }
 }
 
-#[async_trait]
+#[dialog_capability::provider]
 impl Perform<archive::Put> for Announcing {
     async fn execute(&self, capability: Capability<archive::Put>) -> Result<(), ArchiveError> {
         Perform::<archive::Put>::execute(&self.store, capability).await
     }
 }
 
-#[async_trait]
+#[dialog_capability::provider]
 impl Perform<blob::Read> for Announcing {
     async fn execute(
         &self,
@@ -511,7 +510,7 @@ impl Perform<blob::Read> for Announcing {
     }
 }
 
-#[async_trait]
+#[dialog_capability::provider]
 impl Perform<blob::Import> for Announcing {
     async fn execute(
         &self,
@@ -521,7 +520,7 @@ impl Perform<blob::Import> for Announcing {
     }
 }
 
-#[async_trait]
+#[dialog_capability::provider]
 impl Perform<memory::Resolve> for Announcing {
     async fn execute(
         &self,
@@ -531,7 +530,7 @@ impl Perform<memory::Resolve> for Announcing {
     }
 }
 
-#[async_trait]
+#[dialog_capability::provider]
 impl Perform<memory::Publish> for Announcing {
     async fn execute(
         &self,
@@ -555,7 +554,7 @@ impl Perform<memory::Publish> for Announcing {
     }
 }
 
-#[async_trait]
+#[dialog_capability::provider]
 impl Perform<memory::Retract> for Announcing {
     async fn execute(&self, capability: Capability<memory::Retract>) -> Result<(), MemoryError> {
         let subject = capability.subject().clone();

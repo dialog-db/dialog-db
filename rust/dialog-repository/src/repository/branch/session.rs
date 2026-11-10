@@ -1,20 +1,21 @@
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::Read as BlobRead;
+use dialog_search_tree::nodes;
 use std::cell::Cell;
 use std::collections::HashSet;
 use std::iter::once;
 
 use dialog_artifacts::history::Edition;
 use dialog_artifacts::selector::Constrained;
-use dialog_artifacts::tree::ArtifactNodeCache;
+use dialog_artifacts::tree::CorpusNode;
 use dialog_artifacts::{
     Artifact, ArtifactSelector, ArtifactStream, ArtifactView, Changes, DialogArtifactsError,
     Entity, Estimate, Likelihood, Preload, PreloadRequest, Select, SortKey, Speculation, Statement,
     sort_key,
 };
 use dialog_artifacts::{Relation as ArtifactsRelation, Standing, Value};
-use dialog_capability::{Capability, Fork, Provider, Subject};
+use dialog_capability::{Capability, Fork, Provider, Resume, Subject};
 use dialog_common::{Blake3Hash, Buffer, ConditionalSync, Held, Holds};
 use dialog_effects::archive::{ArchiveError, Get, Put};
 use dialog_effects::authority::{Identify, Operator, OperatorExt as _};
@@ -30,7 +31,8 @@ use dialog_query::rule::statement::on_entity;
 use dialog_query::session::{ProgramAnalysis, Quarantine};
 use dialog_query::source::SelectRules;
 use dialog_query::{Claim, DeductiveRule, Negation, Premise, Proposition};
-use dialog_search_tree::{Manifest, PersistentNode};
+use dialog_search_tree::DialogSearchTreeError;
+use dialog_search_tree::Manifest;
 use futures_util::future::try_join_all;
 use futures_util::{TryStreamExt as _, stream};
 use std::sync::OnceLock;
@@ -356,6 +358,11 @@ impl<'a, Q: Application> SelectQuery<'a, Q> {
             + Provider<Resolve>
             + Provider<Identify>
             + Provider<ArchiveLoad>
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
             + Provider<Preload>
             + Provider<Speculation>
@@ -404,11 +411,18 @@ impl<'a, Q: Application> SelectQuery<'a, Q> {
 /// commits; erased, those names and copies collapse.
 pub(crate) trait Capabilities:
     TreeEnv
+    + Provider<nodes::Write<CorpusNode>>
+    + ConditionalSync
     + Provider<BlobRead>
     + Provider<Get>
     + Provider<Put>
     + Provider<Resolve>
     + Provider<ArchiveLoad>
+    + Provider<nodes::Read<CorpusNode>>
+    + Provider<nodes::Preload<CorpusNode>>
+    + ConditionalSync
+    + Provider<nodes::Write<CorpusNode>>
+    + ConditionalSync
     + Provider<BlobLoad>
     + Provider<Preload>
     + Provider<Fork<RemoteSite, Resolve>>
@@ -419,11 +433,18 @@ pub(crate) trait Capabilities:
 
 impl<T> Capabilities for T where
     T: TreeEnv
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
         + Provider<BlobRead>
         + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
         + Provider<ArchiveLoad>
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
         + Provider<BlobLoad>
         + Provider<Preload>
         + Provider<Fork<RemoteSite, Resolve>>
@@ -794,8 +815,7 @@ pub(crate) async fn select_from_source<'a>(
     Ok(select.execute_boxed(reads).await?)
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 // Deliberately implemented for the *same* lifetime on both sides
 // (`QueryEnv<'a>: Provider<Select<'a>>`), never a decoupled pair
 // (`impl<'a, 's> ... where 'a: 's`). Auto-trait (`Send`) checking of
@@ -994,8 +1014,7 @@ impl<'a> Provider<Select<'a>> for QueryEnv<'a> {
 // on two lines counts twice — which is the safe direction for a "how
 // broad is this range" question. `None` from every line (all empty)
 // yields `None`.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<Estimate> for QueryEnv<'_> {
     async fn execute(
         &self,
@@ -1026,8 +1045,7 @@ impl Provider<Estimate> for QueryEnv<'_> {
 // hints, which also tells an evaluator to stop composing them: a
 // selection that hands each scan many rows otherwise queues a hint per
 // row only for it to be dropped.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<Preload> for QueryEnv<'_> {
     async fn execute(&self, input: PreloadRequest) -> bool {
         // Warming ahead of demand has something to do only for a line whose
@@ -1058,8 +1076,7 @@ fn anywhere(subject: &dialog_capability::Did) -> bool {
 // hydrating as a fact scan does). Spilled values are not nodes, so the
 // node cache is not consulted. A load of one archive's value is that
 // archive's, read through the env.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl<'a> Provider<BlobLoad> for QueryEnv<'a> {
     async fn execute(&self, load: BlobLoad) -> Result<Option<Buffer>, ArchiveError> {
         if !anywhere(load.archive.subject()) {
@@ -1078,54 +1095,100 @@ impl<'a> Provider<BlobLoad> for QueryEnv<'a> {
     }
 }
 
-// The idempotent block-load behind resolver premises (`tree/node` &
-// co), which ask for a block anywhere the query reads. No demand is
-// recorded: the block behind a hash is content-addressed and can never
-// change, so no tree diff could ever invalidate a row derived from it —
-// the soundness argument lives in `dialog_artifacts::inspect`. Each
-// line's catalog is tried in turn, through the env's load (so a miss
-// hydrates as a fact scan's does); the first line that has the block
-// wins (content addressing makes them interchangeable), and a block
-// absent everywhere contributes nothing. Reads go through the node cache
-// the env holds for each line's repository (the same one the eager root
-// probe in `select.rs` and `Subscription::touched` use): a resolver join
-// re-resolves the same reference once per outer row, and a raw backend
-// get would re-fetch that identical immutable block every time. A load
-// of one catalog's block is that catalog's, read through the env.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+// A load of a block anywhere the query reads (the resolver's wildcard
+// archive) is tried line by line, each line's catalog in turn; a load of
+// one catalog's block is that catalog's, read through the env.
+#[dialog_capability::provider]
 impl<'a> Provider<ArchiveLoad> for QueryEnv<'a> {
     async fn execute(&self, load: ArchiveLoad) -> Result<Option<Buffer>, ArchiveError> {
         if !anywhere(load.catalog.subject()) {
             return load.perform(self.env).await;
         }
         for source in &self.sources {
-            let source = source.as_ref();
-            let cache = ArtifactNodeCache::of(self.env, source.subject().did());
-            if let Some(node) = cache
-                .as_ref()
-                .and_then(|cache| cache.get_cached(&load.digest))
-            {
-                return Ok(Some(node.buffer().clone()));
-            }
             let line = ArchiveLoad {
-                catalog: source.catalog(),
+                catalog: source.as_ref().catalog(),
                 ..load.clone()
             };
             if let Some(block) = line.perform(self.env).await? {
-                // A block that is the one asked for and checks as a node
-                // joins the cache; any other block is returned as it is,
-                // for the caller to read.
-                if let Some(cache) = &cache
-                    && block.blake3_hash() == &load.digest
-                    && let Ok(node) = PersistentNode::try_from(block.clone())
-                {
-                    cache.insert(load.digest.clone(), node);
-                }
                 return Ok(Some(block));
             }
         }
         Ok(None)
+    }
+}
+
+// A node read anywhere the query reads is tried line by line, each line's
+// catalog in turn, through the env: the env answers from the node cache it
+// holds for the line's repository, its store, or a hydration, so a resolver
+// join that re-resolves the same reference once per outer row reads the
+// node once. A read of one catalog's node is that catalog's.
+/// A node is its hash, whichever line holds it, so the lines the env
+/// answers at once are taken first and the rest waited on only when none
+/// of those had it.
+impl<'a> Provider<nodes::Read<CorpusNode>> for QueryEnv<'a> {
+    fn execute(
+        &self,
+        read: nodes::Read<CorpusNode>,
+    ) -> Resume<'_, Result<Option<CorpusNode>, DialogSearchTreeError>> {
+        if !anywhere(read.catalog.subject()) {
+            return read.perform(self.env);
+        }
+        let mut pending = Vec::new();
+        for source in &self.sources {
+            let mut line = read.clone();
+            line.catalog = source.as_ref().catalog();
+            match line.perform(self.env).into_now() {
+                Ok(Ok(Some(node))) => return Resume::now(Ok(Some(node))),
+                Ok(Ok(None)) => {}
+                Ok(Err(error)) => return Resume::now(Err(error)),
+                Err(reading) => pending.push(reading),
+            }
+        }
+        if pending.is_empty() {
+            return Resume::now(Ok(None));
+        }
+        Resume::later(async move {
+            for reading in pending {
+                if let Some(node) = reading.await? {
+                    return Ok(Some(node));
+                }
+            }
+            Ok(None)
+        })
+    }
+}
+
+impl<'a> Provider<nodes::Preload<CorpusNode>> for QueryEnv<'a> {
+    fn execute(&self, preload: nodes::Preload<CorpusNode>) -> Resume<'_, ()> {
+        if !anywhere(preload.catalog.subject()) {
+            return preload.perform(self.env);
+        }
+        let mut pending = Vec::new();
+        for source in &self.sources {
+            let mut line = preload.clone();
+            line.catalog = source.as_ref().catalog();
+            if let Err(preloading) = line.perform(self.env).into_now() {
+                pending.push(preloading);
+            }
+        }
+        if pending.is_empty() {
+            return Resume::now(());
+        }
+        Resume::later(async move {
+            for preloading in pending {
+                preloading.await;
+            }
+        })
+    }
+}
+
+// Nodes are written where the commit says, through the env.
+impl<'a> Provider<nodes::Write<CorpusNode>> for QueryEnv<'a> {
+    fn execute(
+        &self,
+        write: nodes::Write<CorpusNode>,
+    ) -> Resume<'_, Result<(), DialogSearchTreeError>> {
+        write.perform(self.env)
     }
 }
 
@@ -1382,8 +1445,7 @@ impl<'a> QueryEnv<'a> {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<SelectRules> for QueryEnv<'_> {
     /// Resolve a concept's deductive rules by unioning across layers:
     /// each line is a durable layer (committed `dialog.rule/*`, head-cached),
@@ -2209,6 +2271,11 @@ mod rule_tests {
             + dialog_capability::Provider<Resolve>
             + dialog_capability::Provider<Identify>
             + dialog_capability::Provider<ArchiveLoad>
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
             + dialog_capability::Provider<BlobLoad>
             + dialog_capability::Provider<dialog_artifacts::Preload>
             + dialog_capability::Provider<dialog_artifacts::Speculation>
@@ -2295,6 +2362,11 @@ mod rule_tests {
             + dialog_capability::Provider<Resolve>
             + dialog_capability::Provider<Identify>
             + dialog_capability::Provider<ArchiveLoad>
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
             + dialog_capability::Provider<BlobLoad>
             + dialog_capability::Provider<dialog_artifacts::Preload>
             + dialog_capability::Provider<dialog_artifacts::Speculation>
@@ -2376,6 +2448,11 @@ mod rule_tests {
             + dialog_capability::Provider<Resolve>
             + dialog_capability::Provider<Identify>
             + dialog_capability::Provider<ArchiveLoad>
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
             + dialog_capability::Provider<BlobLoad>
             + dialog_capability::Provider<dialog_artifacts::Preload>
             + dialog_capability::Provider<dialog_artifacts::Speculation>

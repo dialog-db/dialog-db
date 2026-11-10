@@ -1,7 +1,6 @@
 //! Credential capability providers for IndexedDb.
 
 use super::{IndexedDb, to_uint8array};
-use async_trait::async_trait;
 use dialog_capability::{Capability, Provider};
 use dialog_credentials::Credential;
 use dialog_credentials::credential::CredentialExport;
@@ -15,7 +14,7 @@ use wasm_bindgen::{JsCast, JsValue};
 
 const CREDENTIAL: &str = "credential";
 
-#[async_trait(?Send)]
+#[dialog_capability::provider]
 impl Provider<Load<Credential>> for IndexedDb {
     async fn execute(
         &self,
@@ -47,7 +46,7 @@ impl Provider<Load<Credential>> for IndexedDb {
     }
 }
 
-#[async_trait(?Send)]
+#[dialog_capability::provider]
 impl Provider<Save<Credential>> for IndexedDb {
     async fn execute(&self, input: Capability<Save<Credential>>) -> Result<(), CredentialError> {
         let idb_key = format!("key/{}", input.address());
@@ -73,7 +72,7 @@ impl Provider<Save<Credential>> for IndexedDb {
     }
 }
 
-#[async_trait(?Send)]
+#[dialog_capability::provider]
 impl Provider<Retract<Credential>> for IndexedDb {
     async fn execute(&self, input: Capability<Retract<Credential>>) -> Result<(), CredentialError> {
         let idb_key = format!("key/{}", input.address());
@@ -93,7 +92,7 @@ impl Provider<Retract<Credential>> for IndexedDb {
     }
 }
 
-#[async_trait(?Send)]
+#[dialog_capability::provider]
 impl Provider<Load<Secret>> for IndexedDb {
     async fn execute(&self, input: Capability<Load<Secret>>) -> Result<Secret, CredentialError> {
         let idb_key = format!("site/{}", input.address());
@@ -123,7 +122,7 @@ impl Provider<Load<Secret>> for IndexedDb {
     }
 }
 
-#[async_trait(?Send)]
+#[dialog_capability::provider]
 impl Provider<Save<Secret>> for IndexedDb {
     async fn execute(&self, input: Capability<Save<Secret>>) -> Result<(), CredentialError> {
         let idb_key = format!("site/{}", input.address());
@@ -144,7 +143,7 @@ impl Provider<Save<Secret>> for IndexedDb {
     }
 }
 
-#[async_trait(?Send)]
+#[dialog_capability::provider]
 impl Provider<Retract<Secret>> for IndexedDb {
     async fn execute(&self, input: Capability<Retract<Secret>>) -> Result<(), CredentialError> {
         let idb_key = format!("site/{}", input.address());
