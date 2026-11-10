@@ -45,4 +45,9 @@
 | lock a range of the file, or something like it | opinion | Irakli, 2026-11-10 | - |
 | with an extent per writer, claimed by a byte-range lock, a writer that dies leaves a torn end of its own extent only, recovered as today's file is | hypothesis | follows from one writer per extent; confirmed by a test that kills a writer mid-record in its extent while another writes its own, then reopens | open |
 | claiming an extent is the one wait left: growing the file and recording the extent under a short lock, once per extent filled | hypothesis | follows from the design; how long it takes and how often is measured by a run of k writers with extents of a given size | open |
+| a short wait once per extent filled is within the requirement | opinion | Irakli, 2026-11-10 | - |
+| writers on one branch commit optimistically and retry over the latest head when another moved it, as in an STM | opinion | Irakli, 2026-11-10 | - |
+| today, commits to one branch take turns within a process on the branch's writer mutex; across processes a commit mints over the head it noted and publishes compare-and-swap, failing with `VersionMismatch` for the caller to refresh and retry | fact | `rust/dialog-repository/src/repository/branch/commit.rs` (the writer lock, `checkpoint`, `PublishError::VersionMismatch`) | holds |
+| retrying the same instructions over a newer head is not what an STM retries: a transaction whose writes depend on what it read before committing (read, then write a value computed from it) needs its reads made again, which only re-running the caller's code does | fact | Clojure's `dosync` re-runs the transaction's body on conflict; replaying writes alone is the lost update | holds |
+| every failed attempt leaves its blocks in the writer's extent, unreferenced | hypothesis | follows from blocks being written before the head is published; how much it adds is measured by a run of k writers on one branch | open |
 

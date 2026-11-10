@@ -5,7 +5,7 @@
 |  | Understanding | Activity |
 |---|---|---|
 | **Status** | Two processes advancing two branches of one space share no lock on main and take turns on one file lock with the file archive. Irakli requires that they not wait on one another. Cells live outside the file, a file each. | Directing: a matrix of four approaches, Irakli's candidate among them. |
-| **Agenda** | Whether a short wait once per extent filled is within the requirement. Whether "one file" means one file at rest, with side files while writers overlap. How a head's compare-and-swap works against a pending head record. The `?` cells in the matrix. | Ask who integrates; then the web; then the cells question. |
+| **Agenda** | Whether an STM retry replays the same instructions or re-runs the caller's transaction. Whether "one file" means one file at rest, with side files while writers overlap. How a head's compare-and-swap works against a pending head record. The `?` cells in the matrix. | Ask who integrates; then the web; then the cells question. |
 
 ## 2026-11-10, Describing: the topic opens
 
@@ -178,3 +178,20 @@ one wait left is claiming a new extent, once per extent filled.
 
 **Decided.** The one-file column now uses an extent per writer. Open:
 whether a short wait once per extent filled is within the requirement.
+
+**Asked.** Is a short lock once per extent filled within the requirement?
+Irakli: he thinks so. And how do concurrent writers on one branch work?
+Like an STM, where a writer that fails keeps retrying over the latest.
+
+**Learned.** That is close to today: across processes a commit already
+mints over the head it noted and publishes compare-and-swap, failing with
+`VersionMismatch` for the caller to retry; in one process, commits to a
+branch take turns on its writer mutex. An STM makes the library run the
+retry. What it retries matters: replaying the same instructions over a
+newer head loses an update that depended on an earlier read, which is why
+an STM re-runs the transaction's body. Each failed attempt leaves
+unreferenced blocks behind in the writer's extent.
+
+**Decided.** The once-per-extent wait is acceptable, on Irakli's say-so.
+Writers on one branch retry over the latest head, in a loop the library
+runs. Open: replay the instructions, or re-run the caller's transaction.
