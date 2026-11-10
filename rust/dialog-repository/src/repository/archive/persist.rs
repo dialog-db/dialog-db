@@ -1,11 +1,12 @@
 //! Writing what a batch staged into the archive, each lane into its store.
 
-use dialog_artifacts::tree::ArtifactWrite;
+use dialog_artifacts::tree::CorpusNode;
 use dialog_artifacts::{ArchiveDelta, DialogArtifactsError};
 use dialog_capability::Provider;
 use dialog_common::{Buffer, ConditionalSync};
 use dialog_effects::archive::prelude::CatalogScope;
 use dialog_effects::blob::Import as BlobImport;
+use dialog_search_tree::nodes;
 use futures_util::{StreamExt as _, TryStreamExt as _, stream};
 
 use super::hydrate::write_blob;
@@ -15,7 +16,7 @@ const BLOB_WRITES: usize = 16;
 
 /// Write everything `delta` staged into `catalog`'s archive: the spilled
 /// values into its blob store, then the tree's nodes through the node
-/// layer's write ([`ArtifactWrite`]).
+/// layer's write ([`nodes::Write`](dialog_search_tree::nodes::Write)).
 ///
 /// The spilled values land first because nodes reference them: a node
 /// must never be durable before the values its entries name, the same
@@ -32,7 +33,11 @@ pub(crate) async fn persist<Env>(
     env: &Env,
 ) -> Result<(), DialogArtifactsError>
 where
-    Env: Provider<ArtifactWrite> + Provider<BlobImport> + ConditionalSync + ?Sized + 'static,
+    Env: Provider<nodes::Write<CorpusNode>>
+        + Provider<BlobImport>
+        + ConditionalSync
+        + ?Sized
+        + 'static,
 {
     let blobs: Vec<Buffer> = delta.flush_blobs().collect();
     stream::iter(blobs)
@@ -44,7 +49,7 @@ where
         .buffer_unordered(BLOB_WRITES)
         .try_collect::<()>()
         .await?;
-    ArtifactWrite::new(catalog.clone(), delta.flush_nodes())
+    nodes::Write::<CorpusNode>::new(catalog.clone(), delta.flush_nodes())
         .perform(env)
         .await
         .map_err(DialogArtifactsError::from)

@@ -17,8 +17,9 @@
 //! is not reported at all -- a sparse walk yields a frontier, never a
 //! complete inventory of what is missing.
 
-use crate::Nodes;
+use crate::nodes::{Preload, Read};
 use async_stream::try_stream;
+use dialog_capability::Provider;
 use dialog_common::{Blake3Hash, ConditionalSync};
 use futures_core::Stream;
 use futures_util::stream::FuturesUnordered;
@@ -73,7 +74,9 @@ where
         storage: &'a Env,
     ) -> impl Stream<Item = Result<Visit<Key, Value>, DialogSearchTreeError>> + 'a
     where
-        Env: Nodes<Key, Value>;
+        Env: Provider<Read<PersistentNode<Key, Value>>>
+            + Provider<Preload<PersistentNode<Key, Value>>>
+            + ConditionalSync;
 
     /// [`traverse_available`](Self::traverse_available) restricted to
     /// `scope`: a child subtree whose key span cannot intersect any range
@@ -93,7 +96,9 @@ where
         scope: &'a [core::ops::RangeInclusive<Vec<u8>>],
     ) -> impl Stream<Item = Result<Visit<Key, Value>, DialogSearchTreeError>> + 'a
     where
-        Env: Nodes<Key, Value>;
+        Env: Provider<Read<PersistentNode<Key, Value>>>
+            + Provider<Preload<PersistentNode<Key, Value>>>
+            + ConditionalSync;
 }
 
 impl<Key, Value, D> Traversable<Key, Value> for PersistentTree<Key, Value, D>
@@ -114,7 +119,9 @@ where
         storage: &'a Env,
     ) -> impl Stream<Item = Result<Visit<Key, Value>, DialogSearchTreeError>> + 'a
     where
-        Env: Nodes<Key, Value>,
+        Env: Provider<Read<PersistentNode<Key, Value>>>
+            + Provider<Preload<PersistentNode<Key, Value>>>
+            + ConditionalSync,
     {
         traverse::<Key, Value, Env>(self.stored_root().cloned(), self.accessor(storage), None)
     }
@@ -125,7 +132,9 @@ where
         scope: &'a [core::ops::RangeInclusive<Vec<u8>>],
     ) -> impl Stream<Item = Result<Visit<Key, Value>, DialogSearchTreeError>> + 'a
     where
-        Env: Nodes<Key, Value>,
+        Env: Provider<Read<PersistentNode<Key, Value>>>
+            + Provider<Preload<PersistentNode<Key, Value>>>
+            + ConditionalSync,
     {
         traverse::<Key, Value, Env>(
             self.stored_root().cloned(),
@@ -171,7 +180,9 @@ where
             Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
         + ConditionalSync,
-    Env: Nodes<Key, Value>,
+    Env: Provider<Read<PersistentNode<Key, Value>>>
+        + Provider<Preload<PersistentNode<Key, Value>>>
+        + ConditionalSync,
 {
     use futures_util::StreamExt as _;
 

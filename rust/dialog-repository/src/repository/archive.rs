@@ -23,11 +23,12 @@ pub use routes::{Routes, Routing};
 mod persist;
 pub(crate) use persist::persist;
 
-use dialog_artifacts::tree::{ArtifactNodes, ArtifactWrites};
+use dialog_artifacts::tree::CorpusNode;
 use dialog_capability::Provider;
 use dialog_common::{ConditionalSync, Holds};
 use dialog_effects::archive::{Get, Load};
 use dialog_effects::blob::Load as BlobLoad;
+use dialog_search_tree::nodes;
 
 /// What a tree read or commit needs of the environment it goes through, as
 /// one trait object: the node layer's reads and write, the loads of both
@@ -47,8 +48,11 @@ use dialog_effects::blob::Load as BlobLoad;
 /// an outlives bound on it then cannot be shown, and every provider that
 /// commits stops being `Send` (rust-lang/rust#100013).
 pub(crate) trait TreeEnv:
-    ArtifactNodes
-    + ArtifactWrites
+    Provider<nodes::Read<CorpusNode>>
+    + Provider<nodes::Preload<CorpusNode>>
+    + ConditionalSync
+    + Provider<nodes::Write<CorpusNode>>
+    + ConditionalSync
     + Provider<Get>
     + Provider<Load>
     + Provider<BlobLoad>
@@ -58,8 +62,11 @@ pub(crate) trait TreeEnv:
 }
 
 impl<T> TreeEnv for T where
-    T: ArtifactNodes
-        + ArtifactWrites
+    T: Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
         + Provider<Get>
         + Provider<Load>
         + Provider<BlobLoad>

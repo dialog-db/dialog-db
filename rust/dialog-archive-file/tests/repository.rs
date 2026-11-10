@@ -295,7 +295,7 @@ fn compare(archive: &FileArchive, catalog: &str, hash: &Blake3Hash) -> anyhow::R
     ))
     .catalog(catalog);
     // The archive answers a node read at once, from its mapping.
-    let Some(served) = Read::<Key, State<Datum>>::new(scope, hash.clone())
+    let Some(served) = Read::<TreeNode>::new(scope, hash.clone())
         .perform(archive)
         .into_now()
         .unwrap_or_else(|_| panic!("the archive answers a read at once"))?

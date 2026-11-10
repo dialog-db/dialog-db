@@ -55,8 +55,15 @@ Three layers:
   | `Preload { catalog, name, priority }` | make this node cheap to read soon; returns nothing | `Accessor::warm`, `Accessor::keeps` |
   | `Write { catalog, nodes }` | the nodes a persist made; the provider stores them and keeps them readable | the `NodeCache::of(..).insert` in persist, `Import` and `forget` in `archive::persist` |
 
-  `Nodes<Key, Value>` is the bound a tree operation puts on its environment:
-  `Provider<Read> + Provider<Preload> + ConditionalSync`. `Holds`,
+  A request is written at the node it is about (`Read<N>` for an
+  `N: nodes::Node`, a sealed trait `PersistentNode<Key, Value>`
+  implements), so a crate that fixes the keys and values names its node
+  once (`dialog_artifacts::tree::CorpusNode`) and bounds on
+  `Provider<Read<CorpusNode>>`; the tree crate, which does not care what
+  the keys and values are, spells the bound a tree operation puts on its
+  environment out at every site:
+  `Provider<Read<PersistentNode<Key, Value>>> + Provider<Preload<..>> +
+  ConditionalSync`, with no alias trait (the maintainer asked for none). `Holds`,
   `Load` and `Get` have left every tree bound.
 
 **Who answers.** A store answers at the layer it keeps nodes in:
@@ -202,8 +209,14 @@ seal derived (the hashes it adopted), rather than decoding its block; and
 
 Built. In the tree crate every `Env: Provider<Load> + Holds +
 ConditionalSync` (and the `+ Provider<Get>` variants) is
-`Env: Nodes<Key, Value>`. `dialog-artifacts` bounds on `ArtifactNodes`
-(and `ArtifactWrites` where it persists); `TreeEnv`, `Capabilities`,
+`Env: Provider<Read<PersistentNode<Key, Value>>> +
+Provider<Preload<PersistentNode<Key, Value>>> + ConditionalSync`, spelled
+out at each site. `dialog-artifacts` and the crates above it
+bound on the requests at the corpus's node, `Provider<nodes::Read<CorpusNode>>
++ Provider<nodes::Preload<CorpusNode>>` (and `Provider<nodes::Write<CorpusNode>>`
+where they persist), with no alias trait in between: the maintainer
+wanted a signature to show the providers it needs, and the first build's
+`ArtifactNodes` and `ArtifactWrites` hid them. `TreeEnv`, `Capabilities`,
 `BranchEnv`, `PeerSpace` and `Scope` carry them. The repository's own
 bounds keep `Provider<ArchiveLoad>` and `Holds` where they still load
 blocks or hold routes; those were not pruned.

@@ -247,7 +247,9 @@ pub fn screen_history<'a, Backend, C>(
     storage: Backend,
 ) -> impl Differential<Key, State<Datum>> + 'a
 where
-    Backend: ArtifactNodes
+    Backend: Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
         + Provider<blob::Load>
         + ConditionalSync
         + Clone
@@ -278,7 +280,9 @@ async fn screen_record<Backend>(
     storage: &Backend,
 ) -> Result<Vec<Change<Key, State<Datum>>>, DialogSearchTreeError>
 where
-    Backend: ArtifactNodes
+    Backend: Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
         + Provider<blob::Load>
         + ConditionalSync
         + Clone

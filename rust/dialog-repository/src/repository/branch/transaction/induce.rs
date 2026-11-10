@@ -30,11 +30,11 @@
 //! keep hot-attribute fan-out flat, delta-restricted body evaluation,
 //! and the `retract!` head polarity.
 
-use dialog_artifacts::tree::ArtifactNodes;
-use dialog_artifacts::tree::ArtifactWrites;
+use dialog_artifacts::tree::CorpusNode;
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::Read as BlobRead;
+use dialog_search_tree::nodes;
 use std::collections::{BTreeSet, HashMap};
 
 use dialog_artifacts::selector::Constrained;
@@ -87,8 +87,11 @@ where
         + Provider<Resolve>
         + Provider<Identify>
         + Provider<ArchiveLoad>
-        + ArtifactWrites
-        + ArtifactNodes
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
         + Provider<BlobLoad>
         + Provider<dialog_artifacts::Preload>
         + Provider<dialog_artifacts::Speculation>
@@ -414,8 +417,11 @@ impl<'a> Dispatch<'a> {
             + Provider<Put>
             + Provider<Resolve>
             + Provider<ArchiveLoad>
-            + ArtifactWrites
-            + ArtifactNodes
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
@@ -477,8 +483,11 @@ impl<'a> Dispatch<'a> {
             + Provider<Put>
             + Provider<Resolve>
             + Provider<ArchiveLoad>
-            + ArtifactWrites
-            + ArtifactNodes
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
@@ -536,8 +545,11 @@ impl<'a> Dispatch<'a> {
             + Provider<Put>
             + Provider<Resolve>
             + Provider<ArchiveLoad>
-            + ArtifactWrites
-            + ArtifactNodes
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
@@ -608,8 +620,11 @@ impl<'a> Dispatch<'a> {
             + Provider<Put>
             + Provider<Resolve>
             + Provider<ArchiveLoad>
-            + ArtifactWrites
-            + ArtifactNodes
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
@@ -655,8 +670,11 @@ impl<'a> Dispatch<'a> {
             + Provider<Put>
             + Provider<Resolve>
             + Provider<ArchiveLoad>
-            + ArtifactWrites
-            + ArtifactNodes
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
@@ -707,8 +725,11 @@ impl<'a> Dispatch<'a> {
             + Provider<Put>
             + Provider<Resolve>
             + Provider<ArchiveLoad>
-            + ArtifactWrites
-            + ArtifactNodes
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
@@ -750,8 +771,11 @@ impl<'a> Dispatch<'a> {
             + Provider<Put>
             + Provider<Resolve>
             + Provider<ArchiveLoad>
-            + ArtifactWrites
-            + ArtifactNodes
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
@@ -799,8 +823,11 @@ where
         + Provider<Put>
         + Provider<Resolve>
         + Provider<ArchiveLoad>
-        + ArtifactWrites
-        + ArtifactNodes
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
         + Provider<BlobLoad>
         + Provider<dialog_artifacts::Preload>
         + Provider<dialog_artifacts::Speculation>
@@ -915,8 +942,11 @@ where
         + Provider<Put>
         + Provider<Resolve>
         + Provider<ArchiveLoad>
-        + ArtifactWrites
-        + ArtifactNodes
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
         + Provider<BlobLoad>
         + Provider<dialog_artifacts::Preload>
         + Provider<dialog_artifacts::Speculation>
@@ -1229,7 +1259,7 @@ mod tests {
     use crate::rules::Transient;
     use crate::{Branch, CommitError, RemoteSite, Revision};
     use anyhow::Result;
-    use dialog_artifacts::tree::{ArtifactNodes, ArtifactWrites};
+    use dialog_artifacts::tree::CorpusNode;
     use dialog_artifacts::{ArtifactSelector, Changes, Entity, Instruction, Value};
     use dialog_capability::{Fork, Provider};
     use dialog_common::ConditionalSync;
@@ -1239,6 +1269,7 @@ mod tests {
     use dialog_peer::helpers::test_session_with_peer;
     use dialog_query::rule::statement::on_entities;
     use dialog_query::{ConceptDescriptor, InductiveRule};
+    use dialog_search_tree::nodes;
     use futures_util::StreamExt as _;
     use serde_json::json;
 
@@ -1250,8 +1281,11 @@ mod tests {
             + Provider<Put>
             + Provider<Resolve>
             + Provider<ArchiveLoad>
-            + ArtifactWrites
-            + ArtifactNodes
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
@@ -3308,8 +3342,11 @@ mod tests {
             + Provider<Put>
             + Provider<Resolve>
             + Provider<ArchiveLoad>
-            + ArtifactWrites
-            + ArtifactNodes
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>

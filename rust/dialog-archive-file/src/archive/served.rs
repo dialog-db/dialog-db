@@ -18,8 +18,7 @@ use dialog_artifacts::{
 };
 use dialog_capability::{Provider, Resume};
 use dialog_common::{Blake3Hash, Buffer};
-use dialog_common::{ConditionalSend, ConditionalSync};
-use dialog_search_tree::nodes::{Preload, Read, Write, decode};
+use dialog_search_tree::nodes::{Node, Preload, Read, Write, decode};
 use dialog_search_tree::{
     DialogSearchTreeError, KeyParts, Manifest, NodeRows, PersistentNode, RowsKind,
 };
@@ -362,30 +361,26 @@ unsafe impl NodeRows for FileNode {
 /// file is mapped, so both are answered at once; nothing here waits. The
 /// archive is this replica's store, so a read it cannot answer is absent
 /// here, and hydrating it from elsewhere is for whoever stands in front.
-impl<Key, Value> Provider<Read<Key, Value>> for FileArchive
+impl<N> Provider<Read<N>> for FileArchive
 where
-    Key: dialog_search_tree::Key + ConditionalSend + ConditionalSync + 'static,
-    Value: dialog_search_tree::Value + ConditionalSend + ConditionalSync + 'static,
-    Value::Archived: for<'a> CheckBytes<
+    N: Node,
+    <N::Value as rkyv::Archive>::Archived: for<'a> CheckBytes<
         Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
     >,
 {
-    fn execute(
-        &self,
-        read: Read<Key, Value>,
-    ) -> Resume<'_, Result<Option<PersistentNode<Key, Value>>, DialogSearchTreeError>> {
+    fn execute(&self, read: Read<N>) -> Resume<'_, Result<Option<N>, DialogSearchTreeError>> {
         let catalog = read.catalog.catalog_name();
         // Rows of another value type than the tree's are read from the
         // block instead, as `PersistentNode::from_rows` declines them.
         if let Some(node) = self
             .served(catalog, &read.name)
-            .and_then(|rows| PersistentNode::from_rows(Arc::new(rows)))
+            .and_then(|rows| PersistentNode::<N::Key, N::Value>::from_rows(Arc::new(rows)))
         {
-            return Resume::now(Ok(Some(node)));
+            return Resume::now(Ok(Some(N::from_persistent(node))));
         }
         Resume::now(match self.get(catalog, &read.name) {
             Ok(block) => block
-                .map(|block| decode(Buffer::from(block), &read.name))
+                .map(|block| decode::<N>(Buffer::from(block), &read.name))
                 .transpose(),
             Err(error) => Err(DialogSearchTreeError::Storage(error.into())),
         })
@@ -394,19 +389,15 @@ where
 
 /// Reads from the file are as cheap as a held node: there is nothing to
 /// make cheaper ahead of time.
-impl<Key, Value> Provider<Preload<Key, Value>> for FileArchive {
-    fn execute(&self, _: Preload<Key, Value>) -> Resume<'_, ()> {
+impl<N> Provider<Preload<N>> for FileArchive {
+    fn execute(&self, _: Preload<N>) -> Resume<'_, ()> {
         Resume::now(())
     }
 }
 
 /// A write appends the nodes' blocks, which the archive frames as rows.
-impl<Key, Value> Provider<Write<Key, Value>> for FileArchive
-where
-    Key: ConditionalSend + ConditionalSync + 'static,
-    Value: ConditionalSend + ConditionalSync + 'static,
-{
-    fn execute(&self, write: Write<Key, Value>) -> Resume<'_, Result<(), DialogSearchTreeError>> {
+impl<N: Node> Provider<Write<N>> for FileArchive {
+    fn execute(&self, write: Write<N>) -> Resume<'_, Result<(), DialogSearchTreeError>> {
         let blocks = match write
             .nodes
             .iter()

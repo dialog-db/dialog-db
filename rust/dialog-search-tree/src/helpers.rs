@@ -30,7 +30,7 @@
 //! # }
 //! ```
 
-use crate::Nodes;
+use crate::nodes::{Preload, Read};
 use dialog_capability::Provider;
 use dialog_effects::archive::{Get, Load};
 use std::{
@@ -153,7 +153,9 @@ where
         storage: &'a Env,
     ) -> impl Stream<Item = Result<PersistentNode<Key, Value>, DialogSearchTreeError>> + 'a
     where
-        Env: Nodes<Key, Value>;
+        Env: Provider<Read<PersistentNode<Key, Value>>>
+            + Provider<Preload<PersistentNode<Key, Value>>>
+            + ConditionalSync;
 }
 
 impl<Key, Value, D> Traversable<Key, Value> for PersistentTree<Key, Value, D>
@@ -175,7 +177,9 @@ where
         storage: &'a Env,
     ) -> impl Stream<Item = Result<PersistentNode<Key, Value>, DialogSearchTreeError>> + 'a
     where
-        Env: Nodes<Key, Value>,
+        Env: Provider<Read<PersistentNode<Key, Value>>>
+            + Provider<Preload<PersistentNode<Key, Value>>>
+            + ConditionalSync,
     {
         let root = self.stored_root().cloned();
 
@@ -215,7 +219,9 @@ where
     Value::Archived: for<'b> CheckBytes<
             Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>,
-    Env: Nodes<Key, Value>,
+    Env: Provider<Read<PersistentNode<Key, Value>>>
+        + Provider<Preload<PersistentNode<Key, Value>>>
+        + ConditionalSync,
 {
     Accessor::new(storage, catalog).get_node(hash).await
 }

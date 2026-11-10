@@ -13,7 +13,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use base58::ToBase58 as _;
-use dialog_artifacts::{Datum, Key as ArtifactKey, State};
 use dialog_capability::{Capability, Provider, Resume};
 use dialog_common::{Blake3Hash, Buffer, Held, Holds};
 use dialog_effects::archive::{self, ArchiveError, Get};
@@ -99,23 +98,17 @@ impl Provider<Get> for Replica {
 /// A replica keeps blocks, so a tree's node reads go through the
 /// translation layer over them; with no cache, a preload has nowhere to
 /// land.
-impl Provider<dialog_search_tree::nodes::Read<ArtifactKey, State<Datum>>> for Replica {
+impl<N: dialog_search_tree::nodes::Node> Provider<dialog_search_tree::nodes::Read<N>> for Replica {
     fn execute(
         &self,
-        read: dialog_search_tree::nodes::Read<ArtifactKey, State<Datum>>,
-    ) -> Resume<
-        '_,
-        Result<
-            Option<dialog_search_tree::PersistentNode<ArtifactKey, State<Datum>>>,
-            dialog_search_tree::DialogSearchTreeError,
-        >,
-    > {
+        read: dialog_search_tree::nodes::Read<N>,
+    ) -> Resume<'_, Result<Option<N>, dialog_search_tree::DialogSearchTreeError>> {
         read.through_blocks(self, None)
     }
 }
 
-impl<Key, Value> Provider<dialog_search_tree::nodes::Preload<Key, Value>> for Replica {
-    fn execute(&self, _: dialog_search_tree::nodes::Preload<Key, Value>) -> Resume<'_, ()> {
+impl<N> Provider<dialog_search_tree::nodes::Preload<N>> for Replica {
+    fn execute(&self, _: dialog_search_tree::nodes::Preload<N>) -> Resume<'_, ()> {
         Resume::now(())
     }
 }

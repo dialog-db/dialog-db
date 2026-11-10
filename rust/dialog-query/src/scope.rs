@@ -12,11 +12,12 @@
 //! `Scope` names that bundle once so premise evaluation signatures stay
 //! stable as effects are added.
 
-use dialog_artifacts::tree::ArtifactNodes;
+use dialog_artifacts::tree::CorpusNode;
 use dialog_artifacts::{Estimate, Preload, Select};
 use dialog_capability::Provider;
 use dialog_common::{ConditionalSync, Holds};
 use dialog_effects::{archive, blob};
+use dialog_search_tree::nodes;
 
 use crate::recall::BodyMemo;
 use crate::source::SelectRules;
@@ -30,7 +31,9 @@ pub trait Scope<'a>:
     Provider<Select<'a>>
     + Provider<SelectRules>
     + Provider<archive::Load>
-    + ArtifactNodes
+    + Provider<nodes::Read<CorpusNode>>
+    + Provider<nodes::Preload<CorpusNode>>
+    + ConditionalSync
     + Provider<blob::Load>
     + Provider<Preload>
     + Provider<Estimate>
@@ -44,7 +47,9 @@ impl<'a, T> Scope<'a> for T where
     T: Provider<Select<'a>>
         + Provider<SelectRules>
         + Provider<archive::Load>
-        + ArtifactNodes
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
         + Provider<blob::Load>
         + Provider<Preload>
         + Provider<Estimate>

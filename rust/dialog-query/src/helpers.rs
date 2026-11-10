@@ -25,9 +25,7 @@
 // `dialog_query::…` resolves to the real crate in both.
 use anyhow::Result;
 use dialog_artifacts::selector::Constrained;
-use dialog_artifacts::tree::{
-    ArtifactNode, ArtifactNodes, ArtifactPreload, ArtifactRead, ArtifactWrites,
-};
+use dialog_artifacts::tree::CorpusNode;
 use dialog_artifacts::{
     Artifact, ArtifactSelector, ArtifactStream, DialogArtifactsError, Instruction,
     Relation as ArtifactsRelation, Select, Value,
@@ -53,6 +51,7 @@ use dialog_peer::{Peer, Session};
 use dialog_repository::{Branch, HeldCaches, PeersEnv, RemoteSite, Repository, RepositoryExt as _};
 use dialog_search_tree::DialogSearchTreeError;
 use dialog_search_tree::audit as tree_audit;
+use dialog_search_tree::nodes;
 
 use dialog_storage::Blake3Hash;
 use dialog_storage::dup_audit;
@@ -591,14 +590,14 @@ where
 // Node reads for the scans and resolver premises, through the same
 // counting store, in the branch's catalog.
 #[dialog_capability::provider]
-impl<Env> Provider<ArtifactRead> for JoinEnv<'_, Env>
+impl<Env> Provider<nodes::Read<CorpusNode>> for JoinEnv<'_, Env>
 where
     Env: Provider<ArchiveLoad> + ConditionalSync,
 {
     async fn execute(
         &self,
-        read: ArtifactRead,
-    ) -> Result<Option<ArtifactNode>, DialogSearchTreeError> {
+        read: nodes::Read<CorpusNode>,
+    ) -> Result<Option<CorpusNode>, DialogSearchTreeError> {
         let counting = CountingStore::new(self.operator, self.journal.clone());
         let mut line = read;
         line.catalog = self.branch.archive().index();
@@ -607,11 +606,11 @@ where
 }
 
 #[dialog_capability::provider]
-impl<Env> Provider<ArtifactPreload> for JoinEnv<'_, Env>
+impl<Env> Provider<nodes::Preload<CorpusNode>> for JoinEnv<'_, Env>
 where
     Env: Provider<ArchiveLoad> + ConditionalSync,
 {
-    async fn execute(&self, preload: ArtifactPreload) {
+    async fn execute(&self, preload: nodes::Preload<CorpusNode>) {
         let counting = CountingStore::new(self.operator, self.journal.clone());
         let mut line = preload;
         line.catalog = self.branch.archive().index();
@@ -751,8 +750,11 @@ where
         + Provider<List>
         + PeersEnv
         + Provider<ArchiveLoad>
-        + ArtifactNodes
-        + ArtifactWrites
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
         + Provider<BlobLoad>
         + Provider<dialog_artifacts::Preload>
         + Provider<dialog_artifacts::Speculation>
@@ -1875,8 +1877,11 @@ mod test {
             + Provider<List>
             + PeersEnv
             + Provider<ArchiveLoad>
-            + ArtifactNodes
-            + ArtifactWrites
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
@@ -2003,8 +2008,11 @@ mod test {
             + Provider<List>
             + PeersEnv
             + Provider<ArchiveLoad>
-            + ArtifactNodes
-            + ArtifactWrites
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
@@ -2141,8 +2149,11 @@ mod test {
             + Provider<List>
             + PeersEnv
             + Provider<ArchiveLoad>
-            + ArtifactNodes
-            + ArtifactWrites
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
@@ -2521,8 +2532,11 @@ where
         + Provider<List>
         + PeersEnv
         + Provider<ArchiveLoad>
-        + ArtifactNodes
-        + ArtifactWrites
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
         + Provider<BlobLoad>
         + Provider<dialog_artifacts::Preload>
         + Provider<dialog_artifacts::Speculation>

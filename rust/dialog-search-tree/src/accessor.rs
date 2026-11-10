@@ -2,7 +2,9 @@ use dialog_common::{Blake3Hash, Priority};
 use dialog_effects::archive::prelude::CatalogScope;
 
 use crate::nodes::{Preload, Read};
-use crate::{DialogSearchTreeError, Nodes, PersistentNode};
+use crate::{DialogSearchTreeError, PersistentNode};
+use dialog_capability::Provider;
+use dialog_common::ConditionalSync;
 
 /// The node stored under `hash` in `catalog`, read through `env`: the
 /// environment's answer to a node [`Read`]. `None` when `env` can reach no
@@ -33,7 +35,10 @@ pub async fn load_node<Key, Value, Env>(
     hash: &Blake3Hash,
 ) -> Result<Option<PersistentNode<Key, Value>>, DialogSearchTreeError>
 where
-    Env: Nodes<Key, Value> + ?Sized,
+    Env: Provider<Read<PersistentNode<Key, Value>>>
+        + Provider<Preload<PersistentNode<Key, Value>>>
+        + ConditionalSync
+        + ?Sized,
 {
     Accessor::new(env, catalog).load_node(hash).await
 }
@@ -66,7 +71,7 @@ impl Default for Reading {
 
 impl Reading {
     /// The read of the node `hash` names in `catalog`, asked this way.
-    fn read<Key, Value>(&self, catalog: &CatalogScope, hash: &Blake3Hash) -> Read<Key, Value> {
+    fn read<N>(&self, catalog: &CatalogScope, hash: &Blake3Hash) -> Read<N> {
         let read = Read::new(catalog.clone(), hash.clone()).with_priority(self.priority);
         if self.local { read.locally() } else { read }
     }
@@ -74,11 +79,7 @@ impl Reading {
     /// The preload of the node `hash` names in `catalog`, ranked as this
     /// reads. A preload is never local: a read-ahead that may not hydrate
     /// has nothing to make cheap.
-    fn preload<Key, Value>(
-        &self,
-        catalog: &CatalogScope,
-        hash: &Blake3Hash,
-    ) -> Preload<Key, Value> {
+    fn preload<N>(&self, catalog: &CatalogScope, hash: &Blake3Hash) -> Preload<N> {
         Preload::new(catalog.clone(), hash.clone()).with_priority(self.priority)
     }
 }
@@ -152,7 +153,10 @@ impl<'a, Key, Value, Env: ?Sized> Accessor<'a, Key, Value, Env> {
 
 impl<'a, Key, Value, Env> Accessor<'a, Key, Value, Env>
 where
-    Env: Nodes<Key, Value> + ?Sized,
+    Env: Provider<Read<PersistentNode<Key, Value>>>
+        + Provider<Preload<PersistentNode<Key, Value>>>
+        + ConditionalSync
+        + ?Sized,
 {
     /// The node at `hash`: the environment's answer to its [`Read`]. `None`
     /// when the environment can reach no such node.

@@ -20,6 +20,12 @@
 //! block requests by encoding; a node it lacks arrives from a remote as a
 //! block, through translation.
 //!
+//! A request is written at the node it is about ([`Node`]): a tree over
+//! keys and values reads `Read<PersistentNode<Key, Value>>`, and a crate
+//! that fixes the keys and values names the node once and writes
+//! `Read<ItsNode>`. The tree crate does not care what the keys and values
+//! are; the crate above it does, and its bounds should say so.
+//!
 //! Caching is a concern of whoever answers: an environment that keeps a
 //! [`NodeCache`] consults it before its blocks and keeps what it reads and
 //! writes. The tree performs no lookup of its own.
@@ -51,13 +57,95 @@ use crate::{DialogSearchTreeError, NodeCache, PersistentNode};
 
 mod stores;
 
+mod sealed {
+    pub trait Sealed {}
+    impl<Key, Value> Sealed for crate::PersistentNode<Key, Value> {}
+}
+
+/// A node the node layer's requests are about: what a tree reads by name
+/// and writes when it persists.
+///
+/// The one node is [`PersistentNode`], a block decoded. The trait names a
+/// node's key and value types, so a request can be written at the node
+/// rather than at the pair, and how a block becomes one, which is what the
+/// translation layer needs. It is sealed: a node of another form would be
+/// another shape of [`PersistentNode`], not another implementor.
+pub trait Node: sealed::Sealed + Clone + ConditionalSend + ConditionalSync + 'static {
+    /// The tree's key type.
+    type Key: crate::Key + ConditionalSend + ConditionalSync + 'static;
+    /// The tree's value type.
+    type Value: crate::Value + ConditionalSync + 'static;
+
+    /// `block` as the node `name` names: the translation layer's decode. A
+    /// block of other bytes is a corrupt read, not an absent one, and bytes
+    /// that are not a node's are an encoding error.
+    fn decode(block: Buffer, name: &Blake3Hash) -> Result<Self, DialogSearchTreeError>;
+
+    /// The hash of the node's block: the name it is read by.
+    fn hash(&self) -> &Blake3Hash;
+
+    /// The node's block. A node read from rows builds it on first asking,
+    /// and one whose rows do not rebuild it is an error.
+    fn buffer(&self) -> Result<&Buffer, DialogSearchTreeError>;
+
+    /// The node as the persistent node a cache keeps.
+    fn into_persistent(self) -> PersistentNode<Self::Key, Self::Value>;
+
+    /// The node a cache kept, as this node.
+    fn from_persistent(node: PersistentNode<Self::Key, Self::Value>) -> Self;
+}
+
+impl<Key, Value> Node for PersistentNode<Key, Value>
+where
+    Key: crate::Key + ConditionalSend + ConditionalSync + 'static,
+    Value: crate::Value + ConditionalSync + 'static,
+    Value::Archived: for<'a> CheckBytes<
+        Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+    >,
+{
+    type Key = Key;
+    type Value = Value;
+
+    fn decode(block: Buffer, name: &Blake3Hash) -> Result<Self, DialogSearchTreeError> {
+        if block.blake3_hash() != name {
+            return Err(DialogSearchTreeError::Storage(
+                DialogStorageError::Verification(
+                    "Retrieved bytes did not match the provided hash".to_string(),
+                ),
+            ));
+        }
+        PersistentNode::try_from(block)
+    }
+
+    fn hash(&self) -> &Blake3Hash {
+        PersistentNode::hash(self)
+    }
+
+    fn buffer(&self) -> Result<&Buffer, DialogSearchTreeError> {
+        PersistentNode::buffer(self)
+    }
+
+    fn into_persistent(self) -> PersistentNode<Key, Value> {
+        self
+    }
+
+    fn from_persistent(node: PersistentNode<Key, Value>) -> Self {
+        node
+    }
+}
+
+/// `block` as the node `name` names ([`Node::decode`]).
+pub fn decode<N: Node>(block: Buffer, name: &Blake3Hash) -> Result<N, DialogSearchTreeError> {
+    N::decode(block, name)
+}
+
 /// Command: the node `name` names in `catalog`, from the local archive, or
 /// else from wherever the environment knows the subject's blocks live. The
 /// node layer's read.
 ///
 /// `None` means the environment can reach no such node. An environment
 /// that keeps a node cache answers a node it holds from there.
-pub struct Read<Key, Value> {
+pub struct Read<N> {
     /// The catalog the node's block lives in.
     pub catalog: CatalogScope,
     /// The name the node is asked for by: the hash of its block.
@@ -68,10 +156,10 @@ pub struct Read<Key, Value> {
     /// Whether the read sees only what this replica holds, never
     /// hydrating (see [`locally`](Self::locally)).
     pub local: bool,
-    types: PhantomData<fn() -> (Key, Value)>,
+    node: PhantomData<fn() -> N>,
 }
 
-impl<Key, Value> std::fmt::Debug for Read<Key, Value> {
+impl<N> std::fmt::Debug for Read<N> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Read")
             .field("catalog", &self.catalog)
@@ -82,19 +170,19 @@ impl<Key, Value> std::fmt::Debug for Read<Key, Value> {
     }
 }
 
-impl<Key, Value> Clone for Read<Key, Value> {
+impl<N> Clone for Read<N> {
     fn clone(&self) -> Self {
         Self {
             catalog: self.catalog.clone(),
             name: self.name.clone(),
             priority: self.priority,
             local: self.local,
-            types: PhantomData,
+            node: PhantomData,
         }
     }
 }
 
-impl<Key, Value> Read<Key, Value> {
+impl<N> Read<N> {
     /// Read the node `name` names in `catalog`, as a read someone is
     /// waiting on, from anywhere.
     pub fn new(catalog: CatalogScope, name: Blake3Hash) -> Self {
@@ -103,7 +191,7 @@ impl<Key, Value> Read<Key, Value> {
             name,
             priority: Priority::Demand,
             local: false,
-            types: PhantomData,
+            node: PhantomData,
         }
     }
 
@@ -133,7 +221,7 @@ impl<Key, Value> Read<Key, Value> {
     pub fn perform<'a, Env>(
         self,
         env: &'a Env,
-    ) -> Resume<'a, Result<Option<PersistentNode<Key, Value>>, DialogSearchTreeError>>
+    ) -> Resume<'a, Result<Option<N>, DialogSearchTreeError>>
     where
         Env: Provider<Self> + ?Sized,
     {
@@ -141,19 +229,12 @@ impl<Key, Value> Read<Key, Value> {
     }
 }
 
-impl<Key, Value> Command for Read<Key, Value> {
+impl<N> Command for Read<N> {
     type Input = Self;
-    type Output = Result<Option<PersistentNode<Key, Value>>, DialogSearchTreeError>;
+    type Output = Result<Option<N>, DialogSearchTreeError>;
 }
 
-impl<Key, Value> Read<Key, Value>
-where
-    Key: crate::Key,
-    Value: crate::Value,
-    Value::Archived: for<'a> CheckBytes<
-        Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-    >,
-{
+impl<N: Node> Read<N> {
     /// Answers this read over `env`'s blocks: from `cache` when it holds the
     /// node, else the block the name names, [loaded](Load) as this read
     /// asks, checked against the name and decoded, then kept in `cache`.
@@ -167,12 +248,10 @@ where
     pub fn through_blocks<'a, Env>(
         self,
         env: &'a Env,
-        cache: Option<&'a NodeCache<Key, Value>>,
-    ) -> Resume<'a, Result<Option<PersistentNode<Key, Value>>, DialogSearchTreeError>>
+        cache: Option<&'a NodeCache<N::Key, N::Value>>,
+    ) -> Resume<'a, Result<Option<N>, DialogSearchTreeError>>
     where
         Env: Provider<Load> + ConditionalSync + ?Sized,
-        Key: ConditionalSend + ConditionalSync + 'a,
-        Value: ConditionalSend + ConditionalSync + 'a,
     {
         self.through_loader(move |load| load.perform(env), cache)
     }
@@ -184,32 +263,33 @@ where
     pub fn through_loader<'a, Loader, Loading>(
         self,
         load: Loader,
-        cache: Option<&'a NodeCache<Key, Value>>,
-    ) -> Resume<'a, Result<Option<PersistentNode<Key, Value>>, DialogSearchTreeError>>
+        cache: Option<&'a NodeCache<N::Key, N::Value>>,
+    ) -> Resume<'a, Result<Option<N>, DialogSearchTreeError>>
     where
         Loader: FnOnce(Load) -> Loading + ConditionalSend + 'a,
         Loading: Future<Output = Result<Option<Buffer>, archive::ArchiveError>> + ConditionalSend,
-        Key: ConditionalSend + ConditionalSync + 'a,
-        Value: ConditionalSend + ConditionalSync + 'a,
     {
         // A hit answers before any of the loading machinery is set up: the
         // common case of a warm read costs the lookup and nothing else.
         if let Some(cache) = cache
             && let Some(node) = cache.get_cached(&self.name)
         {
-            return Resume::now(Ok(Some(node)));
+            return Resume::now(Ok(Some(N::from_persistent(node))));
         }
         Resume::later(async move {
             let fetch = async |name: &Blake3Hash| {
                 let block = load(self.load())
                     .await
                     .map_err(|error| DialogSearchTreeError::Storage(error.into()))?;
-                block.map(|block| decode(block, name)).transpose()
+                block
+                    .map(|block| N::decode(block, name).map(N::into_persistent))
+                    .transpose()
             };
-            match cache {
-                Some(cache) => cache.get_or_fetch(&self.name, fetch).await,
-                None => fetch(&self.name).await,
-            }
+            let node = match cache {
+                Some(cache) => cache.get_or_fetch(&self.name, fetch).await?,
+                None => fetch(&self.name).await?,
+            };
+            Ok(node.map(N::from_persistent))
         })
     }
 
@@ -219,46 +299,20 @@ where
     pub fn through_held_blocks<'a, Env>(
         self,
         env: &'a Env,
-    ) -> Resume<'a, Result<Option<PersistentNode<Key, Value>>, DialogSearchTreeError>>
+    ) -> Resume<'a, Result<Option<N>, DialogSearchTreeError>>
     where
         Env: Provider<Load> + Holds + ConditionalSync + ?Sized,
-        Key: ConditionalSend + ConditionalSync + 'static,
-        Value: ConditionalSend + ConditionalSync + 'static,
     {
         match NodeCache::of(env, self.catalog.subject()) {
             None => self.through_blocks(env, None),
             Some(cache) => {
                 if let Some(node) = cache.get_cached(&self.name) {
-                    return Resume::now(Ok(Some(node)));
+                    return Resume::now(Ok(Some(N::from_persistent(node))));
                 }
                 Resume::later(async move { self.through_blocks(env, Some(&cache)).await })
             }
         }
     }
-}
-
-/// `block` as the node `name` names: the translation layer's decode. A
-/// block of other bytes is a corrupt read, not an absent one, and bytes
-/// that are not a node's are an encoding error.
-pub fn decode<Key, Value>(
-    block: Buffer,
-    name: &Blake3Hash,
-) -> Result<PersistentNode<Key, Value>, DialogSearchTreeError>
-where
-    Key: crate::Key,
-    Value: crate::Value,
-    Value::Archived: for<'a> CheckBytes<
-        Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-    >,
-{
-    if block.blake3_hash() != name {
-        return Err(DialogSearchTreeError::Storage(
-            DialogStorageError::Verification(
-                "Retrieved bytes did not match the provided hash".to_string(),
-            ),
-        ));
-    }
-    PersistentNode::try_from(block)
 }
 
 /// Command: make the node `name` names in `catalog` cheap to read soon.
@@ -270,17 +324,17 @@ where
 /// meanwhile reads for itself rather than waiting on it: only the owner
 /// can join it, by polling it to completion. An environment with nowhere
 /// to keep the node does nothing.
-pub struct Preload<Key, Value> {
+pub struct Preload<N> {
     /// The catalog the node's block lives in.
     pub catalog: CatalogScope,
     /// The name of the node to make cheap.
     pub name: Blake3Hash,
     /// How a hydration this causes ranks against the site's other reads.
     pub priority: Priority,
-    types: PhantomData<fn() -> (Key, Value)>,
+    node: PhantomData<fn() -> N>,
 }
 
-impl<Key, Value> std::fmt::Debug for Preload<Key, Value> {
+impl<N> std::fmt::Debug for Preload<N> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Preload")
             .field("catalog", &self.catalog)
@@ -290,25 +344,25 @@ impl<Key, Value> std::fmt::Debug for Preload<Key, Value> {
     }
 }
 
-impl<Key, Value> Clone for Preload<Key, Value> {
+impl<N> Clone for Preload<N> {
     fn clone(&self) -> Self {
         Self {
             catalog: self.catalog.clone(),
             name: self.name.clone(),
             priority: self.priority,
-            types: PhantomData,
+            node: PhantomData,
         }
     }
 }
 
-impl<Key, Value> Preload<Key, Value> {
+impl<N> Preload<N> {
     /// Preload the node `name` names in `catalog`.
     pub fn new(catalog: CatalogScope, name: Blake3Hash) -> Self {
         Self {
             catalog,
             name,
             priority: Priority::Demand,
-            types: PhantomData,
+            node: PhantomData,
         }
     }
 
@@ -319,7 +373,7 @@ impl<Key, Value> Preload<Key, Value> {
     }
 
     /// The read this preload makes ahead of time.
-    pub fn read(&self) -> Read<Key, Value> {
+    pub fn read(&self) -> Read<N> {
         Read::new(self.catalog.clone(), self.name.clone()).with_priority(self.priority)
     }
 
@@ -332,19 +386,12 @@ impl<Key, Value> Preload<Key, Value> {
     }
 }
 
-impl<Key, Value> Command for Preload<Key, Value> {
+impl<N> Command for Preload<N> {
     type Input = Self;
     type Output = ();
 }
 
-impl<Key, Value> Preload<Key, Value>
-where
-    Key: crate::Key,
-    Value: crate::Value,
-    Value::Archived: for<'a> CheckBytes<
-        Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-    >,
-{
+impl<N: Node> Preload<N> {
     /// Answers this preload over `env`'s blocks: reads the node into
     /// `cache` as [`Read::through_blocks`] would, dropping the result. With
     /// no cache there is nowhere for the node to land, so nothing is read;
@@ -352,12 +399,10 @@ where
     pub fn through_blocks<'a, Env>(
         self,
         env: &'a Env,
-        cache: Option<&'a NodeCache<Key, Value>>,
+        cache: Option<&'a NodeCache<N::Key, N::Value>>,
     ) -> Resume<'a, ()>
     where
         Env: Provider<Load> + ConditionalSync + ?Sized,
-        Key: ConditionalSend + ConditionalSync + 'a,
-        Value: ConditionalSend + ConditionalSync + 'a,
     {
         let Some(cache) = cache else {
             return Resume::now(());
@@ -375,8 +420,6 @@ where
     pub fn through_held_blocks<'a, Env>(self, env: &'a Env) -> Resume<'a, ()>
     where
         Env: Provider<Load> + Holds + ConditionalSync + ?Sized,
-        Key: ConditionalSend + ConditionalSync + 'static,
-        Value: ConditionalSend + ConditionalSync + 'static,
     {
         let Some(cache) = NodeCache::of(env, self.catalog.subject()) else {
             return Resume::now(());
@@ -398,14 +441,14 @@ where
 /// them there too, so the next edit opens them without reading them back;
 /// a write that fails keeps nothing, so a scope holds only what its archive
 /// has.
-pub struct Write<Key, Value> {
+pub struct Write<N> {
     /// The catalog the nodes belong in.
     pub catalog: CatalogScope,
     /// The nodes to store.
-    pub nodes: Vec<PersistentNode<Key, Value>>,
+    pub nodes: Vec<N>,
 }
 
-impl<Key, Value> std::fmt::Debug for Write<Key, Value> {
+impl<N> std::fmt::Debug for Write<N> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Write")
             .field("catalog", &self.catalog)
@@ -414,9 +457,9 @@ impl<Key, Value> std::fmt::Debug for Write<Key, Value> {
     }
 }
 
-impl<Key, Value> Write<Key, Value> {
+impl<N> Write<N> {
     /// Write `nodes` into `catalog`.
-    pub fn new(catalog: CatalogScope, nodes: Vec<PersistentNode<Key, Value>>) -> Self {
+    pub fn new(catalog: CatalogScope, nodes: Vec<N>) -> Self {
         Self { catalog, nodes }
     }
 
@@ -429,12 +472,12 @@ impl<Key, Value> Write<Key, Value> {
     }
 }
 
-impl<Key, Value> Command for Write<Key, Value> {
+impl<N> Command for Write<N> {
     type Input = Self;
     type Output = Result<(), DialogSearchTreeError>;
 }
 
-impl<Key, Value> Write<Key, Value> {
+impl<N: Node> Write<N> {
     /// Answers this write over `env`'s blocks: [imports](Import) each
     /// node's block into the catalog, then keeps the nodes in `cache`. A
     /// failed import keeps nothing; a write of no nodes is done at once.
@@ -444,12 +487,10 @@ impl<Key, Value> Write<Key, Value> {
     pub fn through_blocks<'a, Env>(
         self,
         env: &'a Env,
-        cache: Option<&'a NodeCache<Key, Value>>,
+        cache: Option<&'a NodeCache<N::Key, N::Value>>,
     ) -> Resume<'a, Result<(), DialogSearchTreeError>>
     where
         Env: Provider<Import> + ConditionalSync + ?Sized,
-        Key: ConditionalSend + ConditionalSync + 'a,
-        Value: ConditionalSend + ConditionalSync + 'a,
     {
         let Self { catalog, nodes } = self;
         if nodes.is_empty() {
@@ -472,7 +513,7 @@ impl<Key, Value> Write<Key, Value> {
                     // A node the cache already holds under this hash is the
                     // same bytes with whatever it has derived since: it stays.
                     if cache.get_cached(node.hash()).is_none() {
-                        cache.insert(node.hash().clone(), node);
+                        cache.insert(node.hash().clone(), node.into_persistent());
                     }
                 }
             }
@@ -488,8 +529,6 @@ impl<Key, Value> Write<Key, Value> {
     ) -> Resume<'a, Result<(), DialogSearchTreeError>>
     where
         Env: Provider<Import> + Holds + ConditionalSync + ?Sized,
-        Key: ConditionalSend + ConditionalSync + 'static,
-        Value: ConditionalSend + ConditionalSync + 'static,
     {
         if self.nodes.is_empty() {
             return Resume::now(Ok(()));
@@ -499,40 +538,19 @@ impl<Key, Value> Write<Key, Value> {
     }
 }
 
-/// An environment a tree reads through: it answers the node layer's reads.
-///
-/// The bound every tree operation that reads puts on its environment.
-/// Nothing here asks `'static` of the environment, so a `&dyn Nodes<K, V>`
-/// collapses the copies of tree code read through many environments into
-/// one.
-pub trait Nodes<Key, Value>:
-    Provider<Read<Key, Value>> + Provider<Preload<Key, Value>> + ConditionalSync
-{
-}
-
-impl<T, Key, Value> Nodes<Key, Value> for T where
-    T: Provider<Read<Key, Value>> + Provider<Preload<Key, Value>> + ConditionalSync + ?Sized
-{
-}
-
 /// The node `read` names if the cache `env` holds for the catalog's subject
 /// holds it ([`NodeCache::held_for`]): what an environment that keeps its
 /// cache in its handles answers a read with at once ([`Resume::now`]),
 /// before it asks anything beneath it.
-pub fn held_node<Env, Key, Value>(
-    env: &Env,
-    read: &Read<Key, Value>,
-) -> Option<PersistentNode<Key, Value>>
+pub fn held_node<Env, N>(env: &Env, read: &Read<N>) -> Option<N>
 where
     Env: Holds + ?Sized,
-    Key: ConditionalSend + ConditionalSync + 'static,
-    Value: ConditionalSend + ConditionalSync + 'static,
+    N: Node,
 {
-    NodeCache::held_for(env, read.catalog.subject())?.get_cached(&read.name)
+    NodeCache::held_for(env, read.catalog.subject())?
+        .get_cached(&read.name)
+        .map(N::from_persistent)
 }
-
-#[doc(hidden)]
-pub use rkyv as __rkyv;
 
 /// Makes a type that answers [`Load`] and holds handles ([`Holds`]) answer
 /// the node layer's reads ([`Read`], [`Preload`]) through the translation
@@ -548,54 +566,28 @@ macro_rules! reads_nodes_through_blocks {
         $crate::reads_nodes_through_blocks!(impl[] $ty where []);
     };
     (impl[$($g:tt)*] $ty:ty where [$($w:tt)*]) => {
-        impl<$($g)* Key, Value> dialog_capability::Provider<$crate::nodes::Read<Key, Value>>
-            for $ty
+        impl<$($g)* N> dialog_capability::Provider<$crate::nodes::Read<N>> for $ty
         where
-            Key: $crate::Key + dialog_common::ConditionalSend + dialog_common::ConditionalSync + 'static,
-            Value: $crate::Value + dialog_common::ConditionalSync + 'static,
-            <Value as $crate::nodes::__rkyv::Archive>::Archived:
-                for<'__a> $crate::nodes::__rkyv::bytecheck::CheckBytes<
-                    $crate::nodes::__rkyv::rancor::Strategy<
-                        $crate::nodes::__rkyv::validation::Validator<
-                            $crate::nodes::__rkyv::validation::archive::ArchiveValidator<'__a>,
-                            $crate::nodes::__rkyv::validation::shared::SharedValidator,
-                        >,
-                        $crate::nodes::__rkyv::rancor::Error,
-                    >,
-                >,
+            N: $crate::nodes::Node,
             $($w)*
         {
             fn execute(
                 &self,
-                read: $crate::nodes::Read<Key, Value>,
-            ) -> dialog_capability::Resume<
-                '_,
-                Result<Option<$crate::PersistentNode<Key, Value>>, $crate::DialogSearchTreeError>,
-            > {
+                read: $crate::nodes::Read<N>,
+            ) -> dialog_capability::Resume<'_, Result<Option<N>, $crate::DialogSearchTreeError>>
+            {
                 read.through_held_blocks(self)
             }
         }
 
-        impl<$($g)* Key, Value> dialog_capability::Provider<$crate::nodes::Preload<Key, Value>>
-            for $ty
+        impl<$($g)* N> dialog_capability::Provider<$crate::nodes::Preload<N>> for $ty
         where
-            Key: $crate::Key + dialog_common::ConditionalSend + dialog_common::ConditionalSync + 'static,
-            Value: $crate::Value + dialog_common::ConditionalSync + 'static,
-            <Value as $crate::nodes::__rkyv::Archive>::Archived:
-                for<'__a> $crate::nodes::__rkyv::bytecheck::CheckBytes<
-                    $crate::nodes::__rkyv::rancor::Strategy<
-                        $crate::nodes::__rkyv::validation::Validator<
-                            $crate::nodes::__rkyv::validation::archive::ArchiveValidator<'__a>,
-                            $crate::nodes::__rkyv::validation::shared::SharedValidator,
-                        >,
-                        $crate::nodes::__rkyv::rancor::Error,
-                    >,
-                >,
+            N: $crate::nodes::Node,
             $($w)*
         {
             fn execute(
                 &self,
-                preload: $crate::nodes::Preload<Key, Value>,
+                preload: $crate::nodes::Preload<N>,
             ) -> dialog_capability::Resume<'_, ()> {
                 preload.through_held_blocks(self)
             }
@@ -613,16 +605,14 @@ macro_rules! writes_nodes_through_blocks {
         $crate::writes_nodes_through_blocks!(impl[] $ty where []);
     };
     (impl[$($g:tt)*] $ty:ty where [$($w:tt)*]) => {
-        impl<$($g)* Key, Value> dialog_capability::Provider<$crate::nodes::Write<Key, Value>>
-            for $ty
+        impl<$($g)* N> dialog_capability::Provider<$crate::nodes::Write<N>> for $ty
         where
-            Key: $crate::Key + dialog_common::ConditionalSend + dialog_common::ConditionalSync + 'static,
-            Value: $crate::Value + dialog_common::ConditionalSync + 'static,
+            N: $crate::nodes::Node,
             $($w)*
         {
             fn execute(
                 &self,
-                write: $crate::nodes::Write<Key, Value>,
+                write: $crate::nodes::Write<N>,
             ) -> dialog_capability::Resume<'_, Result<(), $crate::DialogSearchTreeError>> {
                 write.through_held_blocks(self)
             }

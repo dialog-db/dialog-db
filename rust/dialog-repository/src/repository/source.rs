@@ -11,8 +11,7 @@
 use dialog_artifacts::history::{
     CausalityCache, ContextCache, RevisionRecord, TreeHistory, Version, log,
 };
-use dialog_artifacts::tree::ArtifactNodes;
-use dialog_artifacts::tree::ArtifactWrites;
+use dialog_artifacts::tree::CorpusNode;
 use dialog_artifacts::tree::{ArtifactNodeCache, SpillCache};
 use dialog_artifacts::{Changes, DialogArtifactsError, Entity, SpineSlot, Statement as _};
 use dialog_capability::{Capability, Provider, Subject};
@@ -23,6 +22,7 @@ use dialog_effects::authority::{Operator, OperatorExt as _};
 use dialog_effects::blob::Load as BlobLoad;
 use dialog_query::concept::query::PlanCache;
 use dialog_search_tree::Cache;
+use dialog_search_tree::nodes;
 use dialog_storage::Blake3Hash;
 use std::sync::Arc;
 
@@ -253,8 +253,11 @@ impl<'a> SourceRef<'a> {
     pub(crate) fn history<Env>(self, env: &Env) -> TreeHistory<&Env>
     where
         Env: Provider<ArchiveLoad>
-            + ArtifactWrites
-            + ArtifactNodes
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
             + Holds
             + ConditionalSync
@@ -277,8 +280,11 @@ impl<'a> SourceRef<'a> {
     ) -> Result<Vec<(Version, RevisionRecord)>, DialogArtifactsError>
     where
         Env: Provider<ArchiveLoad>
-            + ArtifactWrites
-            + ArtifactNodes
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
             + Holds
             + ConditionalSync

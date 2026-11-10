@@ -49,7 +49,8 @@
 //! key …" at the causing edit. Cost is O(n) in entries plus one in-memory
 //! rebuild; no reference store, no second persist.
 
-use crate::Nodes;
+use crate::nodes::{Preload, Read};
+use dialog_capability::Provider;
 use dialog_common::{Blake3Hash, ConditionalSync};
 use rkyv::{
     Deserialize, Serialize,
@@ -106,7 +107,10 @@ where
         storage: &Env,
     ) -> Result<Vec<String>, DialogSearchTreeError>
     where
-        Env: Nodes<K, V> + Clone,
+        Env: Provider<Read<PersistentNode<K, V>>>
+            + Provider<Preload<PersistentNode<K, V>>>
+            + ConditionalSync
+            + Clone,
     {
         // An unpersisted empty tree has no stored form to validate; it is
         // trivially canonical.

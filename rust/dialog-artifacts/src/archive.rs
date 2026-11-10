@@ -16,9 +16,9 @@ use dialog_effects::blob;
 use dialog_search_tree::nodes::{Preload, Read, Write};
 use dialog_search_tree::{Delta, DialogSearchTreeError};
 
-use crate::tree::ArtifactNode;
+use crate::tree::CorpusNode;
 
-use crate::{Datum, DialogArtifactsError, Key, State};
+use crate::DialogArtifactsError;
 
 /// The spilled value stored under `hash` in `archive`'s blobs, loaded
 /// through `env` and checked: `None` when `env` can reach no such value.
@@ -54,7 +54,7 @@ where
 /// a batch reads the values it spilled itself.
 #[derive(Clone, Debug)]
 pub struct ArchiveDelta {
-    nodes: Delta<Blake3Hash, ArtifactNode>,
+    nodes: Delta<Blake3Hash, CorpusNode>,
     blobs: Delta<Blake3Hash, Buffer>,
 }
 
@@ -82,7 +82,7 @@ impl ArchiveDelta {
     }
 
     /// The nodes lane: where a tree persists its new nodes.
-    pub fn nodes(&mut self) -> &mut Delta<Blake3Hash, ArtifactNode> {
+    pub fn nodes(&mut self) -> &mut Delta<Blake3Hash, CorpusNode> {
         &mut self.nodes
     }
 
@@ -94,7 +94,7 @@ impl ArchiveDelta {
     }
 
     /// The staged node under `hash`, if any.
-    pub fn node(&self, hash: &Blake3Hash) -> Option<ArtifactNode> {
+    pub fn node(&self, hash: &Blake3Hash) -> Option<CorpusNode> {
         self.nodes.get(hash)
     }
 
@@ -111,7 +111,7 @@ impl ArchiveDelta {
     }
 
     /// Takes every staged node, emptying the nodes lane.
-    pub fn flush_nodes(&mut self) -> Vec<ArtifactNode> {
+    pub fn flush_nodes(&mut self) -> Vec<CorpusNode> {
         self.nodes.flush().map(|(_, node)| node).collect()
     }
 
@@ -205,14 +205,14 @@ where
 
 /// A staged node answers its read at once, as the node the seal produced;
 /// any other read is the environment's.
-impl<Env> Provider<Read<Key, State<Datum>>> for DeltaOverlay<'_, Env>
+impl<Env> Provider<Read<CorpusNode>> for DeltaOverlay<'_, Env>
 where
-    Env: Provider<Read<Key, State<Datum>>> + ?Sized,
+    Env: Provider<Read<CorpusNode>> + ?Sized,
 {
     fn execute(
         &self,
-        read: Read<Key, State<Datum>>,
-    ) -> Resume<'_, Result<Option<ArtifactNode>, DialogSearchTreeError>> {
+        read: Read<CorpusNode>,
+    ) -> Resume<'_, Result<Option<CorpusNode>, DialogSearchTreeError>> {
         if let Some(node) = self.delta.node(&read.name) {
             return Resume::now(Ok(Some(node)));
         }
@@ -222,11 +222,11 @@ where
 
 /// A staged node is already as cheap to read as it gets; any other
 /// preload is the environment's.
-impl<Env> Provider<Preload<Key, State<Datum>>> for DeltaOverlay<'_, Env>
+impl<Env> Provider<Preload<CorpusNode>> for DeltaOverlay<'_, Env>
 where
-    Env: Provider<Preload<Key, State<Datum>>> + ?Sized,
+    Env: Provider<Preload<CorpusNode>> + ?Sized,
 {
-    fn execute(&self, preload: Preload<Key, State<Datum>>) -> Resume<'_, ()> {
+    fn execute(&self, preload: Preload<CorpusNode>) -> Resume<'_, ()> {
         if self.delta.node(&preload.name).is_some() {
             return Resume::now(());
         }
@@ -236,14 +236,11 @@ where
 
 /// A write through the overlay is the environment's: nothing is staged by
 /// writing.
-impl<Env> Provider<Write<Key, State<Datum>>> for DeltaOverlay<'_, Env>
+impl<Env> Provider<Write<CorpusNode>> for DeltaOverlay<'_, Env>
 where
-    Env: Provider<Write<Key, State<Datum>>> + ?Sized,
+    Env: Provider<Write<CorpusNode>> + ?Sized,
 {
-    fn execute(
-        &self,
-        write: Write<Key, State<Datum>>,
-    ) -> Resume<'_, Result<(), DialogSearchTreeError>> {
+    fn execute(&self, write: Write<CorpusNode>) -> Resume<'_, Result<(), DialogSearchTreeError>> {
         write.perform(self.env)
     }
 }

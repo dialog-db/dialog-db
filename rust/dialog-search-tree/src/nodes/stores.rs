@@ -12,51 +12,32 @@ use dialog_capability::{Provider, Resume, StorageError};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_effects::archive::ArchiveError;
 use dialog_storage::provider::{Space, Storage, Volatile};
-use rkyv::{
-    bytecheck::CheckBytes,
-    rancor::Strategy,
-    validation::{Validator, archive::ArchiveValidator, shared::SharedValidator},
-};
 
-use super::{Preload, Read, Write};
-use crate::{DialogSearchTreeError, PersistentNode};
+use super::{Node, Preload, Read, Write};
+use crate::DialogSearchTreeError;
 
 /// A store answers the node requests through the translation layer, over
 /// the blocks it holds.
 macro_rules! translates {
     ($store:ty) => {
-        impl<Key, Value> Provider<Read<Key, Value>> for $store
-        where
-            Key: crate::Key + ConditionalSend + ConditionalSync + 'static,
-            Value: crate::Value + ConditionalSend + ConditionalSync + 'static,
-            Value::Archived: for<'a> CheckBytes<
-                Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-            >,
-        {
+        impl<N: Node> Provider<Read<N>> for $store {
             fn execute(
                 &self,
-                read: Read<Key, Value>,
-            ) -> Resume<'_, Result<Option<PersistentNode<Key, Value>>, DialogSearchTreeError>> {
+                read: Read<N>,
+            ) -> Resume<'_, Result<Option<N>, DialogSearchTreeError>> {
                 read.through_blocks(self, None)
             }
         }
 
         /// A store holds no cache for a node to land in: nothing to do.
-        impl<Key, Value> Provider<Preload<Key, Value>> for $store {
-            fn execute(&self, _: Preload<Key, Value>) -> Resume<'_, ()> {
+        impl<N> Provider<Preload<N>> for $store {
+            fn execute(&self, _: Preload<N>) -> Resume<'_, ()> {
                 Resume::now(())
             }
         }
 
-        impl<Key, Value> Provider<Write<Key, Value>> for $store
-        where
-            Key: crate::Key + ConditionalSend + ConditionalSync + 'static,
-            Value: crate::Value + ConditionalSend + ConditionalSync + 'static,
-        {
-            fn execute(
-                &self,
-                write: Write<Key, Value>,
-            ) -> Resume<'_, Result<(), DialogSearchTreeError>> {
+        impl<N: Node> Provider<Write<N>> for $store {
+            fn execute(&self, write: Write<N>) -> Resume<'_, Result<(), DialogSearchTreeError>> {
                 write.through_blocks(self, None)
             }
         }
@@ -71,14 +52,14 @@ translates!(dialog_storage::provider::IndexedDb);
 /// A space hands a node request to its archive.
 macro_rules! space_forwards {
     ($request:ident) => {
-        impl<Key, Value, A, M, C, D, B> Provider<$request<Key, Value>> for Space<A, M, C, D, B>
+        impl<N, A, M, C, D, B> Provider<$request<N>> for Space<A, M, C, D, B>
         where
-            A: Provider<$request<Key, Value>>,
+            A: Provider<$request<N>>,
         {
             fn execute(
                 &self,
-                request: $request<Key, Value>,
-            ) -> Resume<'_, <$request<Key, Value> as dialog_capability::Command>::Output> {
+                request: $request<N>,
+            ) -> Resume<'_, <$request<N> as dialog_capability::Command>::Output> {
                 self.archive.execute(request)
             }
         }
@@ -97,16 +78,15 @@ space_forwards!(Write);
 /// owns it, even when the space would have answered at once.
 macro_rules! storage_routes {
     ($request:ident, $missing:ident) => {
-        impl<Key, Value, S> Provider<$request<Key, Value>> for Storage<S>
+        impl<N, S> Provider<$request<N>> for Storage<S>
         where
-            Key: crate::Key + ConditionalSend + ConditionalSync + 'static,
-            Value: crate::Value + ConditionalSend + ConditionalSync + 'static,
-            S: Provider<$request<Key, Value>> + Clone + ConditionalSend + ConditionalSync + 'static,
+            N: Node,
+            S: Provider<$request<N>> + Clone + ConditionalSend + ConditionalSync + 'static,
         {
             fn execute(
                 &self,
-                request: $request<Key, Value>,
-            ) -> Resume<'_, <$request<Key, Value> as dialog_capability::Command>::Output> {
+                request: $request<N>,
+            ) -> Resume<'_, <$request<N> as dialog_capability::Command>::Output> {
                 let subject = request.catalog.subject();
                 match self.space(subject) {
                     Some(space) => Resume::later(async move { space.execute(request).await }),

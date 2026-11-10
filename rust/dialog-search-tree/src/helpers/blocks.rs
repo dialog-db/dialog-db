@@ -204,8 +204,7 @@ impl<'a, Env: ?Sized> Holding<'a, Env> {
         delta: &mut Delta<Blake3Hash, PersistentNode<Key, Value>>,
     ) -> Result<(), crate::DialogSearchTreeError>
     where
-        Key: crate::Key + dialog_common::ConditionalSend + dialog_common::ConditionalSync + 'static,
-        Value: crate::Value + dialog_common::ConditionalSync + 'static,
+        PersistentNode<Key, Value>: crate::nodes::Node,
         Env: Provider<Import> + dialog_common::ConditionalSync,
     {
         let nodes = delta.flush().map(|(_, node)| node).collect();

@@ -7,11 +7,12 @@
 //! measurement sees exactly what a commit or query moved, beneath every
 //! cache the branch keeps. Every other effect passes through untouched.
 
-use dialog_artifacts::tree::{ArtifactPreload, ArtifactRead, ArtifactWrite};
+use dialog_artifacts::tree::CorpusNode;
 use dialog_capability::{Capability, Command, Provider, Resume};
 use dialog_common::{Buffer, ConditionalSend, ConditionalSync, Held, Holds};
 use dialog_effects::archive::prelude::{ImportExt as _, PutExt as _};
 use dialog_effects::archive::{ArchiveError, Get, Import, Load, Put};
+use dialog_search_tree::nodes;
 use std::any::Any;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -128,13 +129,13 @@ where
         // hand, unmetered: no block is read for it.
         let mut input = Some(input);
         let slot = &mut input as &mut dyn Any;
-        if let Some(read) = slot.downcast_mut::<Option<ArtifactRead>>() {
+        if let Some(read) = slot.downcast_mut::<Option<nodes::Read<CorpusNode>>>() {
             let read = read.take().expect("the input is taken once");
             return read.through_held_blocks(self).map(answered::<C>);
-        } else if let Some(preload) = slot.downcast_mut::<Option<ArtifactPreload>>() {
+        } else if let Some(preload) = slot.downcast_mut::<Option<nodes::Preload<CorpusNode>>>() {
             let preload = preload.take().expect("the input is taken once");
             return preload.through_held_blocks(self).map(answered::<C>);
-        } else if let Some(write) = slot.downcast_mut::<Option<ArtifactWrite>>() {
+        } else if let Some(write) = slot.downcast_mut::<Option<nodes::Write<CorpusNode>>>() {
             let write = write.take().expect("the input is taken once");
             return write.through_held_blocks(self).map(answered::<C>);
         }

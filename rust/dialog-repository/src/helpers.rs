@@ -1,10 +1,9 @@
-use dialog_artifacts::tree::{
-    ArtifactNode, ArtifactNodeCache, ArtifactPreload, ArtifactRead, ArtifactWrite,
-};
+use dialog_artifacts::tree::{ArtifactNodeCache, CorpusNode};
 use dialog_effects::archive::ArchiveError;
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::blob::Load as BlobLoad;
 use dialog_search_tree::DialogSearchTreeError;
+use dialog_search_tree::nodes;
 use std::any::{Any, type_name};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -171,11 +170,15 @@ where
         + Provider<Identify>
         + Provider<Attest>
         + Provider<Import>
-        + ArtifactWrites
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
         + Provider<Write>
         + Provider<ArchiveLoad>
-        + ArtifactWrites
-        + ArtifactNodes
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
         + Provider<BlobLoad>
         + Provider<Fork<Network, Resolve>>
         + dialog_common::Holds
@@ -231,7 +234,6 @@ where
 }
 
 #[cfg(test)]
-use dialog_artifacts::tree::{ArtifactNodes, ArtifactWrites};
 #[cfg(test)]
 use dialog_capability::Fork;
 #[cfg(test)]
@@ -288,7 +290,7 @@ impl<P: fmt::Debug> fmt::Debug for Counting<P> {
 /// A load's answer.
 type Loaded<'a> = Resume<'a, Result<Option<Buffer>, ArchiveError>>;
 /// A node read's answer.
-type NodeRead<'a> = Resume<'a, Result<Option<ArtifactNode>, DialogSearchTreeError>>;
+type NodeRead<'a> = Resume<'a, Result<Option<CorpusNode>, DialogSearchTreeError>>;
 /// A node write's answer.
 type NodesWritten<'a> = Resume<'a, Result<(), DialogSearchTreeError>>;
 
@@ -297,9 +299,9 @@ type NodesWritten<'a> = Resume<'a, Result<(), DialogSearchTreeError>>;
 struct Loads<P> {
     block: for<'a> fn(&'a Counting<P>, ArchiveLoad) -> Loaded<'a>,
     blob: for<'a> fn(&'a Counting<P>, BlobLoad) -> Loaded<'a>,
-    read: for<'a> fn(&'a Counting<P>, ArtifactRead) -> NodeRead<'a>,
-    preload: for<'a> fn(&'a Counting<P>, ArtifactPreload) -> Resume<'a, ()>,
-    write: for<'a> fn(&'a Counting<P>, ArtifactWrite) -> NodesWritten<'a>,
+    read: for<'a> fn(&'a Counting<P>, nodes::Read<CorpusNode>) -> NodeRead<'a>,
+    preload: for<'a> fn(&'a Counting<P>, nodes::Preload<CorpusNode>) -> Resume<'a, ()>,
+    write: for<'a> fn(&'a Counting<P>, nodes::Write<CorpusNode>) -> NodesWritten<'a>,
 }
 
 impl<P> Clone for Loads<P> {
@@ -343,7 +345,7 @@ fn load_block<P: CountedLoads>(env: &Counting<P>, load: ArchiveLoad) -> Loaded<'
 // imports, so every block a node read or write touches is tallied as the
 // `Get`, `Hydrate` or `Import` it is. A node the env holds is at hand,
 // uncounted: no block is read for it.
-fn read_node<P: CountedLoads>(env: &Counting<P>, read: ArtifactRead) -> NodeRead<'_> {
+fn read_node<P: CountedLoads>(env: &Counting<P>, read: nodes::Read<CorpusNode>) -> NodeRead<'_> {
     let Some(cache) = ArtifactNodeCache::of(env, read.catalog.subject()) else {
         return read.through_loader(|load| crate::load_or_hydrate(env, load), None);
     };
@@ -356,7 +358,10 @@ fn read_node<P: CountedLoads>(env: &Counting<P>, read: ArtifactRead) -> NodeRead
     })
 }
 
-fn preload_node<P: CountedLoads>(env: &Counting<P>, preload: ArtifactPreload) -> Resume<'_, ()> {
+fn preload_node<P: CountedLoads>(
+    env: &Counting<P>,
+    preload: nodes::Preload<CorpusNode>,
+) -> Resume<'_, ()> {
     if ArtifactNodeCache::of(env, preload.catalog.subject()).is_none() {
         return Resume::now(());
     }
@@ -368,7 +373,10 @@ fn preload_node<P: CountedLoads>(env: &Counting<P>, preload: ArtifactPreload) ->
     }
 }
 
-fn write_nodes<P: CountedLoads>(env: &Counting<P>, write: ArtifactWrite) -> NodesWritten<'_> {
+fn write_nodes<P: CountedLoads>(
+    env: &Counting<P>,
+    write: nodes::Write<CorpusNode>,
+) -> NodesWritten<'_> {
     write.through_held_blocks(env)
 }
 
@@ -538,13 +546,13 @@ where
         } else if let Some(load) = slot.downcast_mut::<Option<BlobLoad>>() {
             let load = load.take().expect("the input is taken once");
             return (self.loads.blob)(self, load).map(answered::<C>);
-        } else if let Some(read) = slot.downcast_mut::<Option<ArtifactRead>>() {
+        } else if let Some(read) = slot.downcast_mut::<Option<nodes::Read<CorpusNode>>>() {
             let read = read.take().expect("the input is taken once");
             return (self.loads.read)(self, read).map(answered::<C>);
-        } else if let Some(preload) = slot.downcast_mut::<Option<ArtifactPreload>>() {
+        } else if let Some(preload) = slot.downcast_mut::<Option<nodes::Preload<CorpusNode>>>() {
             let preload = preload.take().expect("the input is taken once");
             return (self.loads.preload)(self, preload).map(answered::<C>);
-        } else if let Some(write) = slot.downcast_mut::<Option<ArtifactWrite>>() {
+        } else if let Some(write) = slot.downcast_mut::<Option<nodes::Write<CorpusNode>>>() {
             let write = write.take().expect("the input is taken once");
             return (self.loads.write)(self, write).map(answered::<C>);
         }
