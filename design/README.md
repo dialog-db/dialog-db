@@ -59,3 +59,8 @@ Backtracking moves a topic to an earlier phase and says so in its journal.
   **Building.** The tree talks in nodes through capabilities it performs on
   the environment; caching, decoding and storage form belong to providers.
   The [plan](tree-node-reads/plan.md) is for whoever builds it.
+- [A branch commit is refused when the head has moved](commit-handling.md):
+  **Describing.** A publish that loses the race for the head fails and the
+  caller runs the transaction again; the maintainer says that leaves a UI
+  application no good way to handle it. Arrived as a request for an
+  approach inspired by Software Transactional Memory.

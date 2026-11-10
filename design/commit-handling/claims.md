@@ -1,0 +1,17 @@
+# A branch commit is refused when the head has moved: claims
+
+| claim | kind | backing | status |
+|---|---|---|---|
+| A branch commit publishes its revision by compare-and-set of the head cell against the head it was built on; if the head moved, the publish fails with `PublishError::VersionMismatch` | fact | `rust/dialog-repository/src/repository/branch/commit.rs` on main `4fd67af` (`perform_on_branch`: `branch.revision.checkpoint()`, `head.publish`) | holds |
+| A commit whose writes change nothing re-reads the head and fails with the same `VersionMismatch` if it moved | fact | `commit.rs`, the `Outcome::Unchanged` arm | holds |
+| After a lost race a staged batch is stale, and recovery is to run the transaction again on the fresh head; dialog leaves that to the caller | fact | `rust/dialog-repository/src/repository/branch/transaction/batch.rs`, the doc of `TransactionBatch` | holds |
+| Blocks of a staged batch that is never published stay in the archive, unreachable | fact | the same doc of `TransactionBatch` | holds |
+| Within one environment, commits and pulls of one branch take turns under a writer lock | fact | `commit.rs` (`branch.writer().lock()`) | holds |
+| A commit can ask to `merge()`: on a lost race its minted revision is kept and a merge of it with the winning head is published; a value both set is elected by version when read | fact | `commit.rs` (`Commit::merge`, `merge_with_winner`) | holds |
+| The publish checks only whether the head cell changed, not whether what the transaction read was changed by whoever moved it | hypothesis | confirmed if no path from `Transaction::commit` to `head.publish` compares reads with the winner's writes; `ReadObservation` (`rust/dialog-repository/src/repository/staged.rs`) records heads and overlays for a read settlement and its uses are not all read yet | open |
+| Tonk's reactor refreshes and runs a refused commit again up to four times, recognising the refusal by the rendered text "Version mismatch" | fact | tonk `bfb2d72`, `rust/dialog-reactor/src/transaction.rs` (`COMMIT_RETRY_LIMIT`, `is_head_moved`) | holds |
+| Tonk's evaluate route runs a refused commit again up to four tries, except when the request named an expected revision, where it answers with a revision conflict and does not run again | fact | tonk `bfb2d72`, `rust/tonk-worker/src/router/evaluate.rs` (`EVALUATE_RETRY_LIMIT`, `revision_conflict`) | holds |
+| In tonk the only thing that races a commit is sync, and one retry settles it in practice | hypothesis | said by a comment in `rust/dialog-reactor/src/transaction.rs`; confirmed or refuted by counting "reactor commit raced (attempt N)" log lines on a running app, and by listing what else writes the head cell (another tab, a worker) | open |
+| A refused commit gives a UI application no good strategy for handling it | opinion | the maintainer, 2026-11-10 | what a UI does today and what is wrong with it is not yet said |
+| An approach inspired by Software Transactional Memory should handle commits | opinion | the maintainer, 2026-11-10 | which part of it is meant is not yet said |
+| Software Transactional Memory answers a conflict by discarding the attempt and running the body again, so adopting it moves the refusal from the caller into the runtime and does not remove it | hypothesis | the agent, 2026-11-10; refuted if the maintainer means a part of it that never runs the body again, or if the run-again is acceptable to a UI when the runtime does it | open |
