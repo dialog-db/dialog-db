@@ -68,12 +68,19 @@ impl ElectingCells {
     /// may succeed a claim of a value they do not share. Ranged on the
     /// attribute when the read bounds one exactly or by prefix, else on
     /// the entity when the read bounds one; a read bounding neither,
-    /// or only an attribute's name or shape, visits every cell.
+    /// or only an attribute's name, shape or range, visits every cell
+    /// and keeps those its bounds admit.
     pub(crate) fn within(&self, selector: &Selector<Constrained>) -> Vec<(Relation, Entity)> {
         let admits_attribute = |the: &Relation| {
             selector
-                .attribute_name()
-                .is_none_or(|name| the.name() == name.as_str())
+                .attribute_lower()
+                .is_none_or(|bound| bound.admits(the.as_str().as_bytes(), true))
+                && selector
+                    .attribute_upper()
+                    .is_none_or(|bound| bound.admits(the.as_str().as_bytes(), false))
+                && selector
+                    .attribute_name()
+                    .is_none_or(|name| the.name() == name.as_str())
                 && selector.name_shape().is_none_or(|shape| {
                     the.name()
                         .as_bytes()
@@ -200,6 +207,16 @@ mod tests {
             within(Selector::new().is(dialog_corpus::Value::String("x".into()))).len(),
             5,
             "a value bound reads every cell"
+        );
+        assert_eq!(
+            within(
+                Selector::new()
+                    .of(of.clone())
+                    .the_greater_than("person/age")
+                    .the_less_than("person/role")
+            ),
+            vec![cell("person/name", "id:a")],
+            "an attribute range keeps the cells its bounds admit"
         );
         assert!(within(Selector::new().the(cell("person/born", "id:a").0)).is_empty());
         assert!(within(Selector::new().of_starting_with("id:z")).is_empty());

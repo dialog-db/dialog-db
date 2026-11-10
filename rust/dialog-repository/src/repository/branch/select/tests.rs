@@ -344,6 +344,80 @@ async fn it_selects_by_attribute_prefix() -> Result<()> {
     Ok(())
 }
 
+/// An attribute range under one entity ranges over the EAV index: the
+/// attribute follows the entity in the key, so the range holds the
+/// entity's facts between the bounds. This is the read of a window of a
+/// keyed collection, whose entries are keyed by the name half of their
+/// attribute.
+#[dialog_common::test]
+async fn it_selects_by_attribute_range() -> Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    let general = Entity::new()?;
+    let random = Entity::new()?;
+
+    let entry = |number: usize| format!("chat.channel.log/n{number:03}");
+    let mut facts = vec![fact(
+        "chat.channel/name",
+        general.clone(),
+        Value::String("general".into()),
+    )?];
+    for number in 0..200 {
+        facts.push(fact(
+            &entry(number),
+            general.clone(),
+            Value::String(format!("general {number}")),
+        )?);
+        facts.push(fact(
+            &entry(number),
+            random.clone(),
+            Value::String(format!("random {number}")),
+        )?);
+    }
+    assert_all(&branch, facts, &operator).await?;
+
+    let window = select(
+        &branch,
+        Selector::new()
+            .of(general.clone())
+            .the_at_least(entry(150))
+            .the_less_than(entry(160)),
+        &operator,
+    )
+    .await?;
+    let expected: Vec<String> = (150..160)
+        .map(|number| format!("general {number}"))
+        .collect();
+    assert_eq!(
+        window
+            .iter()
+            .map(|row| match &row.is {
+                Value::String(text) => text.clone(),
+                other => panic!("unexpected value {other:?}"),
+            })
+            .collect::<Vec<_>>(),
+        expected,
+        "the entries of one entity between the bounds, in key order"
+    );
+
+    // With no entity the range is of the AEV index, and holds the
+    // entries of every entity under the attributes in the range.
+    let both = select(
+        &branch,
+        Selector::new()
+            .the_greater_than(entry(197))
+            .the_at_most(entry(199)),
+        &operator,
+    )
+    .await?;
+    assert_eq!(
+        strings(&both),
+        vec!["general 198", "general 199", "random 198", "random 199"]
+    );
+    Ok(())
+}
+
 /// A domain selector is the typed form of an attribute-prefix scan, and
 /// a name filter narrows any selection to one entry per domain. Combined
 /// they lower onto an exact attribute.

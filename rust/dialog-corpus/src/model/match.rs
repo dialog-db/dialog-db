@@ -149,6 +149,21 @@ pub fn match_selector_and_key_ref(
         }
     }
 
+    // Attribute bounds compare the key's raw attribute bytes, which is the
+    // order every index keys them in. The key range sets its edge at the
+    // bound itself, so this is what drops the attribute at an exclusive
+    // bound, and what filters a range where the attribute does not lead.
+    for (bound, lower) in [
+        (selector.attribute_lower(), true),
+        (selector.attribute_upper(), false),
+    ] {
+        if let Some(bound) = bound
+            && !bound.admits(key.attribute.as_ref(), lower)
+        {
+            return SelectorMatch::Excluded;
+        }
+    }
+
     if let Some(name) = selector.attribute_name() {
         let segment = key.attribute.as_ref();
         let name_half = match segment.iter().position(|&byte| byte == b'/') {

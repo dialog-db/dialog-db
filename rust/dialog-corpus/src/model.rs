@@ -10,7 +10,7 @@ mod instruction;
 pub use instruction::*;
 
 pub mod selector;
-pub use selector::{Selector, ValueBound};
+pub use selector::{AttributeBound, Selector, ValueBound};
 
 mod estimate;
 pub use estimate::Estimate;

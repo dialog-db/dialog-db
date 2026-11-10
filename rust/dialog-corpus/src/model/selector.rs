@@ -2,6 +2,7 @@
 
 //! Domain module for the [`Selector`]
 
+use std::cmp::Ordering;
 use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
 use std::str::FromStr as _;
@@ -82,6 +83,35 @@ impl ValueBound {
     }
 }
 
+/// A one-sided bound on an attribute: the bounding text and whether the
+/// bound itself is included. Used for the attribute range constraints
+/// ([`Selector::the_at_least`] and friends).
+///
+/// Attributes order by their bytes, in every index. The bound is free text,
+/// not a [`Relation`]: it need not name an attribute that can be stored, so
+/// a bare `domain/` is a bound below every attribute of that domain.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AttributeBound {
+    /// The bounding attribute text.
+    pub attribute: String,
+    /// Whether the bound is inclusive (`>=` / `<=`) rather than exclusive
+    /// (`>` / `<`).
+    pub inclusive: bool,
+}
+
+impl AttributeBound {
+    /// Whether an attribute, by its bytes, lies on the admitted side of
+    /// this bound: at or above it for a lower bound, at or below it for an
+    /// upper one, and never at it when the bound is exclusive.
+    pub fn admits(&self, attribute: &[u8], lower: bool) -> bool {
+        match attribute.cmp(self.attribute.as_bytes()) {
+            Ordering::Equal => self.inclusive,
+            Ordering::Greater => lower,
+            Ordering::Less => !lower,
+        }
+    }
+}
+
 /// The basic query system for selecting [`Fact`]s from a fact index.
 /// You can assign its fields directly, but for convenience and ergonomics it is
 /// also possible to construct it incrementally with the `the`, `of` and `is`
@@ -133,6 +163,17 @@ where
     /// range bytes); strict [`Name`] vocabulary enforcement is the
     /// consumer's re-check.
     name_shape: Option<NameShape>,
+    /// Lower bound on the attribute: selected [`Fact`]s' attributes
+    /// must be `>=` (or `>`, when not inclusive) this, in the order of
+    /// their bytes. Every index keys the attribute by its raw bytes, so
+    /// this is a key range bound: under one entity it bounds the entity
+    /// index to a part of that entity's facts, which is how a scan reads a
+    /// window of a keyed collection. Exclusivity is enforced by the
+    /// per-entry re-check.
+    attribute_lower: Option<AttributeBound>,
+    /// Upper bound on the attribute: selected [`Fact`]s' attributes
+    /// must be `<=` (or `<`, when not inclusive) this.
+    attribute_upper: Option<AttributeBound>,
     /// Prefix bound on the value: selected [`Fact`]s' values must
     /// be strings beginning with this string. The M3 value-in-key
     /// format stores the value order-preservingly in the VAE index, so
@@ -173,6 +214,8 @@ struct SelectorIdentity<'a> {
     attribute_prefix: Option<&'a str>,
     attribute_name: Option<&'a Name>,
     name_shape: Option<NameShape>,
+    attribute_lower: Option<&'a AttributeBound>,
+    attribute_upper: Option<&'a AttributeBound>,
     value_prefix: Option<&'a str>,
     value_lower: Option<(Vec<u8>, bool)>,
     value_upper: Option<(Vec<u8>, bool)>,
@@ -196,6 +239,8 @@ where
             attribute_prefix: self.attribute_prefix.as_deref(),
             attribute_name: self.attribute_name.as_ref(),
             name_shape: self.name_shape,
+            attribute_lower: self.attribute_lower.as_ref(),
+            attribute_upper: self.attribute_upper.as_ref(),
             value_prefix: self.value_prefix.as_deref(),
             value_lower: bound(&self.value_lower),
             value_upper: bound(&self.value_upper),
@@ -239,6 +284,8 @@ impl Selector<Unconstrained> {
             attribute_prefix: None,
             attribute_name: None,
             name_shape: None,
+            attribute_lower: None,
+            attribute_upper: None,
             value_prefix: None,
             value_lower: None,
             value_upper: None,
@@ -261,6 +308,8 @@ where
             && self.attribute_prefix.is_none()
             && self.attribute_name.is_none()
             && self.name_shape.is_none()
+            && self.attribute_lower.is_none()
+            && self.attribute_upper.is_none()
         {
             return None;
         }
@@ -272,6 +321,8 @@ where
             attribute_prefix: self.attribute_prefix.clone(),
             attribute_name: self.attribute_name.clone(),
             name_shape: self.name_shape,
+            attribute_lower: self.attribute_lower.clone(),
+            attribute_upper: self.attribute_upper.clone(),
             value_prefix: None,
             value_lower: None,
             value_upper: None,
@@ -314,6 +365,16 @@ where
         self.name_shape
     }
 
+    /// The lower bound on attributes, if any
+    pub fn attribute_lower(&self) -> Option<&AttributeBound> {
+        self.attribute_lower.as_ref()
+    }
+
+    /// The upper bound on attributes, if any
+    pub fn attribute_upper(&self) -> Option<&AttributeBound> {
+        self.attribute_upper.as_ref()
+    }
+
     /// The prefix bound on values, if any
     pub fn value_prefix(&self) -> Option<&str> {
         self.value_prefix.as_deref()
@@ -339,6 +400,8 @@ where
             attribute_prefix: self.attribute_prefix,
             attribute_name: self.attribute_name,
             name_shape: self.name_shape,
+            attribute_lower: self.attribute_lower,
+            attribute_upper: self.attribute_upper,
             value_prefix: self.value_prefix,
             value_lower: self.value_lower,
             value_upper: self.value_upper,
@@ -356,6 +419,8 @@ where
             attribute_prefix: self.attribute_prefix,
             attribute_name: self.attribute_name,
             name_shape: self.name_shape,
+            attribute_lower: self.attribute_lower,
+            attribute_upper: self.attribute_upper,
             value_prefix: self.value_prefix,
             value_lower: self.value_lower,
             value_upper: self.value_upper,
@@ -373,6 +438,8 @@ where
             attribute_prefix: self.attribute_prefix,
             attribute_name: self.attribute_name,
             name_shape: self.name_shape,
+            attribute_lower: self.attribute_lower,
+            attribute_upper: self.attribute_upper,
             value_prefix: self.value_prefix,
             value_lower: self.value_lower,
             value_upper: self.value_upper,
@@ -448,6 +515,91 @@ where
             attribute_prefix: Some(prefix.into()),
             attribute_name: self.attribute_name,
             name_shape: self.name_shape,
+            attribute_lower: self.attribute_lower,
+            attribute_upper: self.attribute_upper,
+            value_prefix: self.value_prefix,
+            value_lower: self.value_lower,
+            value_upper: self.value_upper,
+            state_type: PhantomData,
+        }
+    }
+
+    /// Constrain selected [`Fact`]s to attributes at or above
+    /// `attribute` (`>= attribute`), in the order of their bytes. A bound
+    /// is a constraint, so the resulting selector is [`Constrained`].
+    /// Beside an exact attribute set via [`Selector::the`], the
+    /// exact attribute decides the key range and the bound filters.
+    ///
+    /// Every index keys the attribute by its raw bytes, so this bounds the
+    /// scan's key range from below wherever the attribute leads the key or
+    /// follows an exact component. With an entity it bounds the entity
+    /// index to the facts of that entity from this attribute on: the
+    /// entries of a keyed collection from one key on, since an entry's
+    /// attribute is its domain, a `/`, and its key.
+    pub fn the_at_least(self, attribute: impl Into<String>) -> Selector<Constrained> {
+        self.with_attribute_lower(AttributeBound {
+            attribute: attribute.into(),
+            inclusive: true,
+        })
+    }
+
+    /// Constrain selected [`Fact`]s to attributes strictly above
+    /// `attribute` (`> attribute`).
+    pub fn the_greater_than(self, attribute: impl Into<String>) -> Selector<Constrained> {
+        self.with_attribute_lower(AttributeBound {
+            attribute: attribute.into(),
+            inclusive: false,
+        })
+    }
+
+    /// Constrain selected [`Fact`]s to attributes at or below
+    /// `attribute` (`<= attribute`). Bounds the scan's key range from
+    /// above.
+    pub fn the_at_most(self, attribute: impl Into<String>) -> Selector<Constrained> {
+        self.with_attribute_upper(AttributeBound {
+            attribute: attribute.into(),
+            inclusive: true,
+        })
+    }
+
+    /// Constrain selected [`Fact`]s to attributes strictly below
+    /// `attribute` (`< attribute`).
+    pub fn the_less_than(self, attribute: impl Into<String>) -> Selector<Constrained> {
+        self.with_attribute_upper(AttributeBound {
+            attribute: attribute.into(),
+            inclusive: false,
+        })
+    }
+
+    fn with_attribute_lower(self, bound: AttributeBound) -> Selector<Constrained> {
+        Selector::<Constrained> {
+            attribute: self.attribute,
+            entity: self.entity,
+            value: self.value,
+            entity_prefix: self.entity_prefix,
+            attribute_prefix: self.attribute_prefix,
+            attribute_name: self.attribute_name,
+            name_shape: self.name_shape,
+            attribute_lower: Some(bound),
+            attribute_upper: self.attribute_upper,
+            value_prefix: self.value_prefix,
+            value_lower: self.value_lower,
+            value_upper: self.value_upper,
+            state_type: PhantomData,
+        }
+    }
+
+    fn with_attribute_upper(self, bound: AttributeBound) -> Selector<Constrained> {
+        Selector::<Constrained> {
+            attribute: self.attribute,
+            entity: self.entity,
+            value: self.value,
+            entity_prefix: self.entity_prefix,
+            attribute_prefix: self.attribute_prefix,
+            attribute_name: self.attribute_name,
+            name_shape: self.name_shape,
+            attribute_lower: self.attribute_lower,
+            attribute_upper: Some(bound),
             value_prefix: self.value_prefix,
             value_lower: self.value_lower,
             value_upper: self.value_upper,
@@ -468,6 +620,8 @@ where
             attribute_prefix: self.attribute_prefix,
             attribute_name: self.attribute_name,
             name_shape: self.name_shape,
+            attribute_lower: self.attribute_lower,
+            attribute_upper: self.attribute_upper,
             value_prefix: self.value_prefix,
             value_lower: self.value_lower,
             value_upper: self.value_upper,
@@ -494,6 +648,8 @@ where
             attribute_prefix: self.attribute_prefix,
             attribute_name: self.attribute_name,
             name_shape: self.name_shape,
+            attribute_lower: self.attribute_lower,
+            attribute_upper: self.attribute_upper,
             value_prefix: Some(prefix.into()),
             value_lower: self.value_lower,
             value_upper: self.value_upper,
@@ -565,6 +721,8 @@ where
             attribute_prefix: self.attribute_prefix,
             attribute_name: self.attribute_name,
             name_shape: self.name_shape,
+            attribute_lower: self.attribute_lower,
+            attribute_upper: self.attribute_upper,
             value_prefix: self.value_prefix,
             value_lower: Some(bound),
             value_upper: self.value_upper,
@@ -581,6 +739,8 @@ where
             attribute_prefix: self.attribute_prefix,
             attribute_name: self.attribute_name,
             name_shape: self.name_shape,
+            attribute_lower: self.attribute_lower,
+            attribute_upper: self.attribute_upper,
             value_prefix: self.value_prefix,
             value_lower: self.value_lower,
             value_upper: Some(bound),

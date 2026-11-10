@@ -166,10 +166,23 @@ const HEAD_ATTRIBUTES: [&str; 3] = [
 /// Whether a selector could read a head-bearing metadata attribute:
 /// an exact `the` match, a covering `the` prefix, or no attribute
 /// constraint over an entity slice that can hold the metadata
-/// entities (`metadata` — the anchored branch entities).
+/// entities (`metadata` — the anchored branch entities). A `the`
+/// range that leaves each such attribute out reads none of them.
 fn selects_head(selector: &Selector<Constrained>, metadata: &BTreeSet<Entity>) -> bool {
     if let Some(attribute) = selector.attribute() {
         return HEAD_ATTRIBUTES.contains(&attribute.as_str());
+    }
+    // An attribute range that holds no head-bearing attribute reads none.
+    let within = |attribute: &&str| {
+        selector
+            .attribute_lower()
+            .is_none_or(|bound| bound.admits(attribute.as_bytes(), true))
+            && selector
+                .attribute_upper()
+                .is_none_or(|bound| bound.admits(attribute.as_bytes(), false))
+    };
+    if !HEAD_ATTRIBUTES.iter().any(within) {
+        return false;
     }
     if let Some(prefix) = selector.attribute_prefix() {
         return HEAD_ATTRIBUTES
