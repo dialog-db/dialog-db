@@ -3,9 +3,11 @@ name: 'File archive against main'
 # Measures the team-of-six bench for main's `fs` and this branch's file
 # store on one runner, and reports the tables in the job summary. It does
 # not gate: the Perf and Replication gates are unchanged.
+# On push, not pull_request: a pull request's path filter matches its whole
+# diff, so every push to the branch would start (and cancel) a run.
 on:
   workflow_dispatch:
-  pull_request:
+  push:
     paths:
       - '.github/workflows/file-archive-bench.yml'
       - 'research/single-file-format/bench/**'
