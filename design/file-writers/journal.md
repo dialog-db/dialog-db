@@ -5,7 +5,7 @@
 |  | Understanding | Activity |
 |---|---|---|
 | **Status** | Two processes advancing two branches of one space share no lock on main and take turns on one file lock with the file archive. Irakli requires that they not wait on one another. Cells live outside the file, a file each. | Directing: a matrix of four approaches, Irakli's candidate among them. |
-| **Agenda** | Whether "one file" means one file at rest, with side files while writers overlap. How a head's compare-and-swap works against a pending head record. The `?` cells in the matrix. | Ask who integrates; then the web; then the cells question. |
+| **Agenda** | Whether a short wait once per extent filled is within the requirement. Whether "one file" means one file at rest, with side files while writers overlap. How a head's compare-and-swap works against a pending head record. The `?` cells in the matrix. | Ask who integrates; then the web; then the cells question. |
 
 ## 2026-11-10, Describing: the topic opens
 
@@ -165,3 +165,16 @@ a scan resume; readers scan the tail until it is indexed; and on the web
 an OPFS file has one writing handle at a time.
 
 **Decided.** Not decided; a sixth column in the matrix.
+
+**Asked.** Irakli: maybe lock a range, or something like that.
+
+**Learned.** A range lock per write does not help, but a range lock per
+extent does: a writer claims an extent of the file by a byte-range lock and
+writes only there while it holds it. Each extent then has one writer, so a
+writer that dies leaves a torn end of its own extent, recovered as today,
+instead of a hole between others' records. Integration copies nothing: the
+records are already in the file, and indexing them is the whole job. The
+one wait left is claiming a new extent, once per extent filled.
+
+**Decided.** The one-file column now uses an extent per writer. Open:
+whether a short wait once per extent filled is within the requirement.
