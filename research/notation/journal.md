@@ -590,6 +590,20 @@ The complaint about `!` narrowed. Readers no longer name premises or the commit;
 
 **Decision.** Take `scope`'s wording: a document is a transaction, `!` makes an assertion global. Drop `effect`, which unmade the bare fact. What is left to decide is whether a rule head that is global only when its trigger was global needs to say so.
 
+## 2026-11-10 — Commands, and `assert` back with an entity
+
+**Question.** Without `assert`, writes are `(todo! …)` but retracts are `(retract! (todo …))`, and one value cannot be retracted. What restores the symmetry?
+
+**Method.** Maintainer's decisions, not a measurement.
+
+**Results.**
+- Modifiers are commands, written around their concept: `(add! (todo …))`. A command always wraps a concept or a domain.
+- `assert` and `retract` are the two commands that come with the language and the only ones that change a concept. `assert` needs an entity and every parameter, or a domain with any of its fields; there is no content identity. `retract` takes the entity alone, for every field, or a domain with fields, for those values. There is no `(todo! …)`.
+- A rule reacts to commands and issues commands, and may have several heads, so one rule can retract and assert. This is Bloom's model: tables change only through `<+` and `<-`; channels carry messages for one tick.
+- `!` makes a command global; without it a command is scoped to the transaction.
+
+**Decision.** Taken; R22 [planned](results/r22-plan.md) before any reader ran.
+
 ## How to reproduce
 
 1. Take a variant's prompt from its round's results file and save it as `<variant>.txt`.
