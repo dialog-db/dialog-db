@@ -60,12 +60,31 @@ impl Conjunction {
     /// of it. A range reaches the scan through the kind, as in an attribute
     /// premise. A scan whose kinds have no meet keeps its own, and the
     /// comparison above still filters its rows.
+    ///
+    /// A bound can also name the attribute variable of a collection's scan,
+    /// with the kind that holds the range of its keys as a range of the
+    /// attribute (see `ConceptQuery::bounds`).
     pub fn bounded(&self, bounds: &[(String, Kind)]) -> Self {
         let mut bounded = self.clone();
         for step in &mut bounded.steps {
             let Plan::Scan(_, query) = step else {
                 continue;
             };
+            // A bound that names a scan's attribute variable is the range of
+            // the keys of a collection, restated over the attribute. It
+            // reaches the scan through the kind of the attribute slot.
+            if let Some(name) = query.the().name()
+                && let Some((_, caller)) = bounds.iter().find(|(field, _)| field == name)
+            {
+                let narrowed = match query.the().kind() {
+                    Some(own) => own.intersect(caller),
+                    None => Some(caller.clone()),
+                };
+                if let Some(kind) = narrowed {
+                    **query = (**query).clone().with_subject_kinds(Some(kind), None);
+                }
+                continue;
+            }
             let Some(name) = query.is().name() else {
                 continue;
             };

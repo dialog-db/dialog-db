@@ -19,14 +19,14 @@ use std::fmt;
 use crate::attribute::The;
 use crate::attribute::query::all::pushes_interval;
 use crate::concept::descriptor::{ConceptDescriptor, ConceptFieldDescriptor};
-use crate::corpus::{CorpusRelation, Type, Value};
+use crate::corpus::{CorpusRelation, Type, Value, decode_value};
 use crate::planner::{Disjunction, Plan};
 use crate::rule::deductive::DeductiveRule;
 use crate::schema::CONCEPT_OVERHEAD;
 use crate::selection::{Selection, Standing};
 use crate::source::SelectRules;
 use crate::stream::{fork_stream, stream_select};
-use crate::type_system::Type as Kind;
+use crate::type_system::{Primitive, Type as Kind};
 use crate::types::Any;
 use crate::{
     Binding, Cardinality, Environment, EvaluationError, Match, Parameters, Requirement, Schema,
@@ -1147,8 +1147,9 @@ impl ConceptQuery {
     ///   `all` gives each claim. A pick that elects by value (`max`, `min`,
     ///   `top`) reads every claim of a cell to choose one, so a range would
     ///   change what it chooses.
-    /// - A field of one stored relation. A chain ranks several relations, and
-    ///   a collection reads a key as well.
+    /// - A field of one stored relation. A chain ranks several relations. A
+    ///   collection takes no bound on its value, and it takes one on its key
+    ///   (see [`key_bound`](Self::key_bound)).
     /// - An optional field stays out, because a scan that finds nothing there
     ///   yields an `Absent` row where a value does exist.
     ///
@@ -1159,6 +1160,10 @@ impl ConceptQuery {
     fn bounds(&self, first: &Match, proved: &Environment) -> Vec<(String, Kind)> {
         let mut bounds = Vec::new();
         for (name, field) in self.predicate.with().iter() {
+            if matches!(field.the(), The::Collection { .. }) {
+                bounds.extend(self.key_bound(name, field, first, proved));
+                continue;
+            }
             let Some(term) = self.terms.get(name) else {
                 continue;
             };
@@ -1170,10 +1175,7 @@ impl ConceptQuery {
                 continue;
             }
             let descriptor = field.descriptor();
-            if !matches!(descriptor.pick(), Pick::Last | Pick::All)
-                || descriptor.is_chain()
-                || matches!(field.the(), The::Collection { .. })
-            {
+            if !matches!(descriptor.pick(), Pick::Last | Pick::All) || descriptor.is_chain() {
                 continue;
             }
             if let Some(kind) = term.kind() {
@@ -1181,6 +1183,61 @@ impl ConceptQuery {
             }
         }
         bounds
+    }
+
+    /// The bound that a proved range of the key of the collection field
+    /// `name` gives the scan of that collection: the attribute variable of
+    /// the scan, with the kind that holds the range.
+    ///
+    /// An entry of a collection is a fact whose attribute is the domain, a
+    /// `/`, and the key. So the attributes of one domain order as their keys
+    /// do, and a range of the key is the same range of the attribute, each
+    /// bound with the domain before it. The scan then reads the entries in
+    /// the range alone, where it read each entry of the domain and left the
+    /// comparison to drop the rest.
+    ///
+    /// The range excludes whole cells, since each key is a cell of its own.
+    /// So it cannot change what a pick elects within a cell, and it holds
+    /// under every pick. A bound whose attribute cannot be an attribute,
+    /// such as one past the length an attribute can have, gives no bound on
+    /// its side. The comparison still filters each row, as it does for every
+    /// bound here.
+    fn key_bound(
+        &self,
+        name: &str,
+        field: &ConceptFieldDescriptor,
+        first: &Match,
+        proved: &Environment,
+    ) -> Option<(String, Kind)> {
+        let The::Collection { domain, .. } = field.the() else {
+            return None;
+        };
+        let key = self.terms.get(&The::key_operand(name))?;
+        if first.contains(key) || !key.name().is_some_and(|name| proved.contains(name)) {
+            return None;
+        }
+        let kind = key.kind()?;
+        if kind.primitive_part().required() != Primitive::from(Type::String) {
+            return None;
+        }
+        let interval = kind.refinement()?.interval.as_ref()?;
+        if interval.value_type != Type::String {
+            return None;
+        }
+        let mut attribute = field.the().kind()?;
+        let mut bounded = false;
+        for (bound, lower) in [(&interval.lower, true), (&interval.upper, false)] {
+            let Some(bound) = bound else { continue };
+            let Some((Value::String(key), [])) = decode_value(Type::String, &bound.encoded) else {
+                continue;
+            };
+            let Ok(entry) = CorpusRelation::try_from(format!("{}/{key}", domain.as_str())) else {
+                continue;
+            };
+            attribute = attribute.with_interval(&Value::Symbol(entry), bound.inclusive, lower)?;
+            bounded = true;
+        }
+        bounded.then(|| (The::attribute_variable(name), attribute))
     }
 
     /// This query over the concept narrowed to the fields it binds:

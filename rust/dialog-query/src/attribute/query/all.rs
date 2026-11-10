@@ -536,6 +536,39 @@ impl TryFrom<&AttributeQueryAll> for Selector<Constrained> {
                 {
                     selector = selector.map(|s| s.with_name_shape(shape));
                 }
+                // An interval refinement on the attribute variable becomes
+                // a range of the attribute: under a bound entity, a part
+                // of that entity's facts in the EAV index, which is how a
+                // window of a keyed collection is read (the attribute of
+                // an entry is its domain, a `/`, and its key, so the
+                // attributes of one domain order as the keys do). The
+                // interval comes from a comparison that still filters each
+                // row: one over this variable, or one over the key of a
+                // collection, whose range `Conjunction::bounded` restates
+                // over the attribute. Pushed only when the kind admits
+                // attributes alone, as an interval over a value is.
+                if let Some(kind) = from.the.kind().as_ref()
+                    && kind.primitive_part().required() == Primitive::from(Type::Symbol)
+                    && let Some(interval) = kind
+                        .refinement()
+                        .and_then(|refinement| refinement.interval.as_ref())
+                    && interval.value_type == Type::Symbol
+                {
+                    for (bound, lower) in [(&interval.lower, true), (&interval.upper, false)] {
+                        let Some(bound) = bound else { continue };
+                        let Some((Value::Symbol(attribute), [])) =
+                            decode_value(Type::Symbol, &bound.encoded)
+                        else {
+                            continue;
+                        };
+                        selector = Some(push_attribute_bound(
+                            selector.take(),
+                            attribute.to_string(),
+                            bound.inclusive,
+                            lower,
+                        ));
+                    }
+                }
             }
         }
 
@@ -777,6 +810,30 @@ fn push_bound(
     }
 }
 
+/// Extends `selector` with one bound of an attribute range, choosing the
+/// matching range constructor.
+fn push_attribute_bound(
+    selector: Option<Selector<Constrained>>,
+    attribute: String,
+    inclusive: bool,
+    lower: bool,
+) -> Selector<Constrained> {
+    match selector {
+        Some(constrained) => match (lower, inclusive) {
+            (true, true) => constrained.the_at_least(attribute),
+            (true, false) => constrained.the_greater_than(attribute),
+            (false, true) => constrained.the_at_most(attribute),
+            (false, false) => constrained.the_less_than(attribute),
+        },
+        None => match (lower, inclusive) {
+            (true, true) => Selector::new().the_at_least(attribute),
+            (true, false) => Selector::new().the_greater_than(attribute),
+            (false, true) => Selector::new().the_at_most(attribute),
+            (false, false) => Selector::new().the_less_than(attribute),
+        },
+    }
+}
+
 impl Display for AttributeQueryAll {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         write!(f, "Claim {{")?;
@@ -877,6 +934,75 @@ mod tests {
         assert_eq!(selector.entity_prefix(), None);
         assert_eq!(selector.attribute_prefix(), None);
         assert_eq!(selector.value_prefix(), None);
+        Ok(())
+    }
+
+    /// An interval refinement on the attribute variable becomes a range of
+    /// the attribute on the selector, beside the domain prefix and the name
+    /// shape that the scan of a keyed collection carries. A kind that
+    /// admits more than attributes pushes none: a range of attributes
+    /// would drop the rows of its other members.
+    #[dialog_common::test]
+    fn it_pushes_an_attribute_interval_into_the_selector() -> anyhow::Result<()> {
+        let lower: CorpusRelation = "todo.list/n010".parse()?;
+        let upper: CorpusRelation = "todo.list/n020".parse()?;
+        let kind = Kind::from(Type::Symbol)
+            .with_prefix("todo.list/")
+            .expect("symbol is textual")
+            .with_name_shape(NameShape::Symbol)
+            .expect("shapes compose with prefixes")
+            .with_interval(&Value::Symbol(lower.clone()), true, true)
+            .expect("an attribute admits an interval")
+            .with_interval(&Value::Symbol(upper), false, false)
+            .expect("an attribute admits an interval");
+        let query = AttributeQueryAll::new(
+            Term::<Relation>::var("a").with_kind(kind),
+            Term::<Entity>::var("e"),
+            Term::var("v"),
+            Term::var("cause"),
+        );
+        let selector = Selector::<Constrained>::try_from(&query)?;
+        assert_eq!(selector.attribute_prefix(), Some("todo.list/"));
+        assert_eq!(selector.name_shape(), Some(NameShape::Symbol));
+        let pushed = selector
+            .attribute_lower()
+            .expect("the lower bound is pushed");
+        assert_eq!(pushed.attribute, "todo.list/n010");
+        assert!(pushed.inclusive);
+        let pushed = selector
+            .attribute_upper()
+            .expect("the upper bound is pushed");
+        assert_eq!(pushed.attribute, "todo.list/n020");
+        assert!(!pushed.inclusive);
+
+        // One side alone pushes that side alone.
+        let kind = Kind::from(Type::Symbol)
+            .with_interval(&Value::Symbol(lower.clone()), false, true)
+            .expect("an attribute admits an interval");
+        let query = AttributeQueryAll::new(
+            Term::<Relation>::var("a").with_kind(kind),
+            Term::<Entity>::var("e"),
+            Term::var("v"),
+            Term::var("cause"),
+        );
+        let selector = Selector::<Constrained>::try_from(&query)?;
+        assert!(!selector.attribute_lower().expect("pushed").inclusive);
+        assert!(selector.attribute_upper().is_none());
+
+        // An interval of text is no range of attributes.
+        let kind = Kind::from(Primitive::TEXTUAL)
+            .with_prefix("todo.list/")
+            .expect("text has a prefix")
+            .with_interval(&Value::String("todo.list/n010".into()), true, true)
+            .expect("text admits an interval");
+        let query = AttributeQueryAll::new(
+            Term::<Relation>::var("a").with_kind(kind),
+            Term::<Entity>::var("e"),
+            Term::var("v"),
+            Term::var("cause"),
+        );
+        let selector = Selector::<Constrained>::try_from(&query)?;
+        assert!(selector.attribute_lower().is_none() && selector.attribute_upper().is_none());
         Ok(())
     }
 
