@@ -253,7 +253,7 @@ mod tests {
     use dialog_common::{Held, Holdings, Holds};
     use dialog_effects::archive::Get;
     use dialog_query::query::Output as _;
-    use dialog_search_tree::helpers::Blocks;
+    use dialog_search_tree::helpers::{Blocks, buffer_decodes};
     use dialog_storage::DialogStorageError;
     use dialog_varsig::did;
     use futures_util::stream;
@@ -620,7 +620,11 @@ mod tests {
 
     fn attribute_query(attribute: &str) -> AttributeQuery {
         AttributeQuery::new(
-            Term::from(attribute.parse::<dialog_query::Relation>().expect("an attribute")),
+            Term::from(
+                attribute
+                    .parse::<dialog_query::Relation>()
+                    .expect("an attribute"),
+            ),
             Term::blank(),
             Term::blank(),
             Term::blank(),
@@ -676,20 +680,44 @@ mod tests {
                 .await?;
         }
 
+        // The nodes a walk of `b/name` passes hold buffered links it could
+        // decode: without them this pins nothing.
+        let source = Source::from(branch.clone());
+        let root = source.as_ref().root().expect("the branch has a head");
+        let tree = Index::at(
+            ArchiveScope::new(source.as_ref().subject()).index(),
+            NodeHash::from(root),
+        );
+        let manifest = tree.manifest(&env).await?;
+        let range = selector_range(&selector("b/name"), &manifest);
+        let scope = [range.start().as_ref().to_vec()..=range.end().as_ref().to_vec()];
+        let mut buffered = 0usize;
+        {
+            let visits = tree.traverse_available_within(&env, &scope);
+            futures_util::pin_mut!(visits);
+            while let Some(visit) = visits.next().await {
+                if let Some(node) = visit?.node()
+                    && let dialog_search_tree::NodeBody::Index(index) = node.body()
+                {
+                    buffered += index.novelty_len();
+                }
+            }
+        }
+        assert!(
+            buffered > 0,
+            "fixture: the walk's nodes must hold buffered ops it could decode"
+        );
+
         // What the read of `a/name` costs with nothing to warm.
-        let decodes = dialog_search_tree::helpers::buffer_decodes();
+        let decodes = buffer_decodes();
         let rows = branch
             .query()
             .select(attribute_query("a/name"))
             .perform(&env)
             .try_vec()
             .await?;
-        let bare = dialog_search_tree::helpers::buffer_decodes() - decodes;
+        let bare = buffer_decodes() - decodes;
         assert_eq!(rows.len(), 24 * 12);
-        assert!(
-            bare > 0,
-            "fixture: the tree must hold buffered links a walk could decode"
-        );
 
         let listening = Provider::<Preload>::execute(
             &env,
@@ -703,19 +731,23 @@ mod tests {
 
         let gets = env.count("archive::Get");
         let hydrations = env.count("hydrate::Hydrate");
-        let decodes = dialog_search_tree::helpers::buffer_decodes();
+        let decodes = buffer_decodes();
         let rows = branch
             .query()
             .select(attribute_query("a/name"))
             .perform(&env)
             .try_vec()
             .await?;
-        let warmed = dialog_search_tree::helpers::buffer_decodes() - decodes;
+        let warmed = buffer_decodes() - decodes;
         assert_eq!(rows.len(), 24 * 12);
         let queue = Provider::<Speculation>::execute(&env, ()).await;
         assert_eq!(queue.pending(), 0, "the driven query executed the hint");
 
-        assert_eq!(env.count("archive::Get") - gets, 0, "the walk reads no block");
+        assert_eq!(
+            env.count("archive::Get") - gets,
+            0,
+            "the walk reads no block"
+        );
         assert_eq!(
             env.count("hydrate::Hydrate") - hydrations,
             0,
@@ -807,7 +839,10 @@ mod tests {
             .open()
             .perform(&replica_operator)
             .await?;
-        replica.set_upstream(remote).perform(&replica_operator).await?;
+        replica
+            .set_upstream(remote)
+            .perform(&replica_operator)
+            .await?;
         replica
             .pull()
             .perform(&replica_operator)
