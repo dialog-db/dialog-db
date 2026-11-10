@@ -35,6 +35,10 @@ fn main() {
             fresh.apply_changes(vec![c.clone()]).unwrap();
         }
         let us = t.elapsed().as_secs_f64() * 1e6 / chunk.len() as f64;
-        println!("changes {}..{}: {us:.0} us per apply_changes call", k * 2000, k * 2000 + chunk.len());
+        println!(
+            "changes {}..{}: {us:.0} us per apply_changes call",
+            k * 2000,
+            k * 2000 + chunk.len()
+        );
     }
 }

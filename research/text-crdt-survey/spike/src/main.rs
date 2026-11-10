@@ -3,7 +3,7 @@
 //! replicas as one exported change. Measures change export, out of order
 //! import, snapshot and per change sizes, and load time.
 //!
-//! Usage: text-crdt-spike <trace.json.gz>... [--libs automerge,loro,yrs,dt] [--runs N]
+//! Usage: text-crdt-spike <trace.json.gz>... [--libs automerge,loro,yrs,dt,dt2] [--runs N]
 
 mod libs;
 
@@ -229,7 +229,7 @@ fn load(path: &str) -> Trace {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut paths = Vec::new();
-    let mut libs = "automerge,loro,yrs,dt".to_string();
+    let mut libs = "automerge,loro,yrs,dt,dt2".to_string();
     let mut runs = 7;
     let mut it = args.into_iter();
     while let Some(a) = it.next() {
@@ -260,6 +260,7 @@ fn main() {
                 "loro" => run::<libs::loro::Lo>(&name, &trace, runs),
                 "yrs" => run::<libs::yrs::Y>(&name, &trace, runs),
                 "dt" => run::<libs::dt::Dt>(&name, &trace, runs),
+                "dt2" => run::<libs::dt2::Dt2>(&name, &trace, runs),
                 other => panic!("unknown lib {other}"),
             };
             rows.push(row);

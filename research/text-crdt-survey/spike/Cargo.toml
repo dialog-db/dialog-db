@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 automerge = "0.12.0"
 diamond-types = "1.0.0"
+diamond-types-git = { git = "https://github.com/josephg/diamond-types", rev = "89ae3a0ab8d941a2885e6ec89d094bc9ce9d2922", version = "2.0.0", package = "diamond-types" }
 flate2 = "1.1.11"
 loro = "1.17.1"
 serde = { version = "1.0.229", features = ["derive"] }
