@@ -4,8 +4,8 @@
 
 |  | Understanding | Activity |
 |---|---|---|
-| **Status** | *What do we know?* How a branch commit publishes on main: compare-and-set of the head cell against the head it was built on, refused with `VersionMismatch` when the head moved, recovery left to the caller; `merge()` publishes a merge with the winner instead. What callers do: tonk's reactor and worker run again up to four times, its command line does not run again and reports "commit failed". What the maintainer reports: a web app shows an error (if its author handled it), agents sharing a branch are refused repeatedly, and they write from queries that may be stale. The maintainer's ideal, which is a remedy: a commit never fails and is given an operation dialog runs again on the latest state. | *Where are we at?* Diagnosing, of the kind that goes from a feature to the problem it answers. Three candidate problems are written down in the last entry, none accepted. |
-| **Agenda** | *What do we need to know?* **Open question, asked 2026-11-10, not answered:** when the operation runs on the latest state and what it was decided from is no longer so (the thing it meant to change is gone, or was changed by someone else), what should the person or agent get back, and is that a failure in the sense of "a commit never fails"? Then: which of the three candidate problems the maintainer recognises, and whether they are one problem or several. Which refusal the agents met: the local commit's, or the push's (open hypothesis). Whether the web app's errors come from a path that does not run again or from four lost tries (open hypothesis). What "conflict" means: the glossary holds two meanings. For the agent case, what the "operation" could be when the deciding happened outside dialog. | *Where are we going?* Diagnosing until the candidate problems are accepted, merged or struck; then Delimiting. |
+| **Status** | *What do we know?* How a branch commit publishes on main: compare-and-set of the head cell and nothing else (confirmed: no reads are compared), refused with `VersionMismatch` when the head moved, recovery left to the caller; `merge()` publishes a merge with the winner instead. Three callers in tonk handle the refusal three ways. A transaction can hold commands, whose rules read and decide at commit, so dialog holds what it would need to do such a transaction again. The maintainer accepts three problems: the refusal has no answer in the application's terms; a caller that runs again through an agent is slower than the head; a correct loop for running again is not obvious and applications get it wrong. | *Where are we at?* Delimiting. A problem statement is drafted in the top story, not accepted. The maintainer's approach (capture reads and writes; apply without running again when they do not overlap what moved the head, assert the command again on the latest revision when they do) is recorded for Direction and not examined. |
+| **Agenda** | *What do we need to know?* **Open question, asked 2026-11-10, not answered:** which of the four ways a transaction's writes come about (table in the last entry) the problem is about, given that for two of them dialog cannot do the deciding again. Then: whether the drafted problem statement is accepted. Not answered from the sitting before: what the agent or person gets back when a command's rule finds nothing to do, and so what "fail" means. Open hypotheses: what bounds the running again, since a commit applied or run again still publishes by compare-and-set; which refusal the agents met; where the web app's errors come from. Unsettled terms: conflict, fail, overlap. | *Where are we going?* Accept the problem statement and its scope, then Direction: use cases, a second and third approach beside the maintainer's and the status quo, and the matrix. |
 
 ## 2026-11-10, Describing: the situation, and the remedy it arrived as
 
@@ -97,3 +97,73 @@ overlap. Both are in the glossary, unresolved.
 **Decided.** Not decided. Phase moved from Describing to Diagnosing: the
 symptoms are written, and the remedy and the ideal are recorded as the
 maintainer's, not as the problem.
+
+## 2026-11-10, Delimiting: three problems accepted, a statement drafted
+
+**Asked.** The three candidate problems were put, and then: agent A
+decides to mark todo T done, agent B deletes or reassigns T before A's
+write lands, A's operation runs on the latest state; what should A get
+back, and is that a failure? Answers as given: "1. Exactly. 2. Correct.
+3. My point is correct retry loop is not obvious and applications get it
+wrong. What we should have is rule and a command to mark todo completed.
+Command is asserted which reads whatever state it needs and update it
+accordingly e.g. only update todo if one with matching entity still
+exists. Yeah so solution I'm reaching for is to capture reads & writes
+performed and if there is no overlap commit can be applied without rerun.
+If there is an overlap dialog could reassert command over latest
+revision."
+
+**Learned.** Candidates 1 and 2 are accepted. Candidate 3 is the
+maintainer's restated: the fault is that a correct loop is not obvious and
+applications get it wrong. The agent's version (a write lands without its
+read being looked at again, refusal or not) is narrower in one way and
+wider in another; what is left of it is kind 4 in the table below.
+
+The todo answer says how the deciding is to be held: as a command, whose
+rule reads what it needs when it runs. That exists on main
+(`Transaction::dispatch`, commit-time induction). So the hypothesis that
+an agent's decision cannot be held by dialog is refuted as far as the
+agent states it as a command. The answer does not say what A gets back
+when the rule finds T gone and writes nothing; that part of the question
+stands.
+
+The hypothesis that a remedy from Software Transactional Memory only moves
+the refusal is refuted on its own terms: the maintainer wants the running
+again, and objects to callers doing it.
+
+Confirmed by reading `TransactionBatch::publish`: a publish compares the
+head cell and nothing else. `ReadObservation` is the key of a memo for
+read settlements, not a check at publish. The hypothesis is now a fact.
+
+A transaction's writes come about in one of four ways, which differ in
+what dialog holds when the head has moved:
+
+| | how the writes come about | the reads | the deciding |
+|---|---|---|---|
+| 1 | asserted or retracted without reading | none | none |
+| 2 | written by rules firing on a dispatched command | made by dialog, at commit | in the rule, which dialog holds |
+| 3 | asserted by the caller after reading through the transaction (`Transaction::query`) | made through dialog, which could record them | in the caller's code, which dialog cannot run |
+| 4 | asserted by the caller after a query made elsewhere, an earlier invocation say | unknown to the commit | outside dialog |
+
+For 1 and 2 dialog holds everything needed to land the change on another
+head. For 3 it could know that a read went stale and cannot decide again.
+For 4 it knows nothing, and today such a write is accepted. "A commit
+never fails" can be made true of 1 and 2 only.
+
+**The maintainer's approach, recorded for Direction, not examined.**
+Capture the reads and writes a commit performed. If what moved the head
+does not overlap them, apply the commit without running it again. If it
+does, assert the command again over the latest revision.
+
+Two observations on it for when it is examined, both the agent's and both
+in the ledger as hypotheses. It joins two things, dialog doing the work
+again and telling when that is needed; the first alone answers the three
+accepted problems, and what the second adds has not been said in terms of
+a problem (a cost nobody has reported yet, or telling kind 3 apart).
+And a commit applied or run again still publishes by compare-and-set, so
+it can lose again; what makes it never fail is whatever bounds that, which
+the approach does not name.
+
+**Decided.** Not decided. The problem statement is a draft; its scope
+waits on the open question. Phase moved from Diagnosing to Delimiting on
+the maintainer's acceptance of the three problems.

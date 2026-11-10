@@ -1,6 +1,6 @@
 # A branch commit is refused when the head has moved
 
-Phase: **Diagnosing.** See the [design index](README.md) for what the
+Phase: **Delimiting.** See the [design index](README.md) for what the
 phases mean, and the [journal](commit-handling/journal.md) for where the
 topic stands.
 
@@ -62,10 +62,33 @@ Memory, and describes the ideal as: a commit never fails; instead it
 receives an operation that dialog can run again on the latest state, and
 that considers the latest state.
 
+A transaction can already hold commands: a claim dispatched into it is a
+transient fact, inductive rules that watch for it fire at commit against
+the transaction's view, what they write joins the commit, and the command
+itself is never stored. Run again on a fresh head, such a transaction
+reads and decides again; today it is the caller that runs it again.
+
 ## Problem
 
-Not stated yet.
+*Draft, not yet accepted.* A writer means a change to the branch as it
+stands when the change lands: mark this todo done, if it is still there.
+A commit is worked out against the one head the writer held, and publishes
+only if the head is still that one, whether or not what moved it touched
+anything the commit read. When the head moved, the work is discarded and
+the caller gets an error that nothing in the application's terms answers.
+Landing the change is then the caller's: take the fresh head, read and
+decide again, publish, and so on until a publish wins. Every caller writes
+that loop for itself, a correct one is not obvious, and callers get it
+wrong: some write none and show the error, and one whose round passes
+through an agent takes longer than the gap between other writers' commits
+and loses again. This holds even for a transaction of commands, where the
+rules that read and decide are in dialog.
+
+*Scope, not yet decided.* A transaction's writes come about in one of four
+ways, and the problem may be about some and not others; see the
+[journal](commit-handling/journal.md), 2026-11-10, Delimiting.
 
 ## Approach
 
-Not decided.
+Not decided. The maintainer's first approach is recorded in the journal
+for the Direction phase and has not been examined.

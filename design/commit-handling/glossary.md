@@ -21,6 +21,16 @@ one meaning, or has no definition yet; settling it is on the agenda.
   mean "is never refused because the head moved" or "always leaves the
   writes the caller meant". The two differ when what the caller decided
   from is no longer so.
-- **operation** (*unsettled*): the maintainer's word for what a commit
-  would be given in place of writes, such that dialog can run it again
-  on the latest state. Not defined: what it holds, and who writes it.
+- **operation**: the maintainer's word, answered 2026-11-10: a command
+  together with the rules that fire on it.
+- **command**: a claim dispatched into a transaction as a transient fact.
+  Inductive rules that watch for it fire at commit against the
+  transaction's view; what they write joins the commit; the command is
+  not stored.
+- **overlap** (*unsettled*): the maintainer's word for what a commit read
+  or wrote meeting what the writer that moved the head wrote. Not
+  defined: at what grain (a fact, an entity, an attribute, a range a
+  query scanned), and whether a read of something absent counts.
+- **run again**: to evaluate a transaction on another head, its reads and
+  its deciding included. Distinct from **apply again**: to put the same
+  writes on another head without reading or deciding.
