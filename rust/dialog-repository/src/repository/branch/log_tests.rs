@@ -112,6 +112,8 @@ struct Bound<'a> {
 /// A window of the log of a channel: its bounds on the key, and its channel.
 #[derive(Clone, Copy)]
 struct Window<'a> {
+    /// Whether the head of the rule also holds the key of each entry.
+    key_in_head: bool,
     keyed: Keyed,
     channel: Option<&'a str>,
     lower: Option<Bound<'a>>,
@@ -155,12 +157,23 @@ impl Window<'_> {
             terms.insert(name.to_string(), json!({ "?": { "name": name } }));
         }
         when.push(json!({ "assert": fields("chat.message"), "where": terms }));
-        let deduce = fields("test.window");
+        let deduce = self.head();
         let descriptor: DeductiveRuleDescriptor = serde_json::from_value(json!({
             "deduce": deduce,
             "when": when,
         }))?;
         Ok(descriptor.compile()?)
+    }
+
+    /// The head of the rule: each field of a message, and the key of its
+    /// entry when the window asks for it.
+    fn head(&self) -> Json {
+        let mut head = fields("test.window");
+        if self.key_in_head {
+            head["with"]["key"] =
+                json!({ "the": "test.window/key", "as": "text:", "pick": "all:" });
+        }
+        head
     }
 
     /// The query of the head of the rule.
@@ -170,8 +183,11 @@ impl Window<'_> {
         for (name, _) in FIELDS {
             terms.insert(name.into(), Term::var(name));
         }
+        if self.key_in_head {
+            terms.insert("key".into(), Term::var("key"));
+        }
         Ok(ConceptQuery {
-            predicate: serde_json::from_value(fields("test.window"))?,
+            predicate: serde_json::from_value(self.head())?,
             terms,
         })
     }
@@ -309,14 +325,12 @@ fn below(key: &str) -> Option<Bound<'_>> {
 }
 
 /// The most rows that a read of a window of `rows` messages takes from the
-/// store. The head of the rule holds each field of a message, and its body
-/// reads an `all:` collection, which can yield several rows for one entity.
-/// So the query reads each attribute of the head through the rule on its own:
-/// one evaluation of the body for each field, and each evaluation reads one
-/// entry and each field of each message. The few rows more are the entry at
-/// an exclusive bound, once for each evaluation.
+/// store: one entry of the log and one row of each field for each message.
+/// Each field of the head follows from the message, so the body of the rule
+/// is evaluated once for all of them (see `DeductiveRule::head_determined`).
+/// The two rows more are slack for an entry at an exclusive bound.
 fn budget(rows: usize) -> usize {
-    FIELDS.len() * (1 + FIELDS.len()) * rows + 2 * FIELDS.len()
+    (1 + FIELDS.len()) * rows + 2
 }
 
 /// A window of 99 messages of a log of 10,000 reads the entries of the window
@@ -327,6 +341,7 @@ async fn it_reads_a_window_of_a_log_by_its_keys() -> Result<()> {
     let (branch, operator, keys) = opened(Keyed::Dictionary, &[10_000, 300, 300]).await?;
     let general = channel(0);
     let window = Window {
+        key_in_head: false,
         keyed: Keyed::Dictionary,
         channel: Some(&general),
         lower: at_least(keys.at(4_901)),
@@ -354,6 +369,7 @@ async fn it_answers_each_form_of_a_window_as_its_comparisons_do() -> Result<()> 
     let (branch, operator, keys) = opened(Keyed::Dictionary, &[400, 100]).await?;
     let general = channel(0);
     let window = |lower, upper| Window {
+        key_in_head: false,
         keyed: Keyed::Dictionary,
         channel: Some(&general),
         lower,
@@ -411,6 +427,7 @@ async fn it_reads_a_window_of_a_sequence() -> Result<()> {
     );
     let general = channel(0);
     let window = Window {
+        key_in_head: false,
         keyed: Keyed::Sequence,
         channel: Some(&general),
         lower: at_least(keys.at(500)),
@@ -429,6 +446,7 @@ async fn it_reads_a_window_of_a_sequence() -> Result<()> {
 async fn it_reads_a_window_of_each_log_with_the_channel_free() -> Result<()> {
     let (branch, operator, keys) = opened(Keyed::Dictionary, &[300, 300, 150]).await?;
     let window = Window {
+        key_in_head: false,
         keyed: Keyed::Dictionary,
         channel: None,
         lower: at_least(keys.at(148)),
@@ -457,6 +475,7 @@ async fn it_keeps_a_live_window_at_rest_for_an_entry_outside_its_keys() -> Resul
     let (branch, operator, keys) = opened(Keyed::Dictionary, &[200, 200]).await?;
     let general = channel(0);
     let window = Window {
+        key_in_head: false,
         keyed: Keyed::Dictionary,
         channel: Some(&general),
         lower: at_least(keys.at(100)),
@@ -530,6 +549,7 @@ async fn it_reads_a_window_through_a_session_overlay() -> Result<()> {
     let (branch, operator, keys) = opened(Keyed::Dictionary, &[50]).await?;
     let general = channel(0);
     let window = Window {
+        key_in_head: false,
         keyed: Keyed::Dictionary,
         channel: Some(&general),
         lower: at_least(keys.at(40)),
@@ -568,5 +588,164 @@ async fn it_reads_a_window_through_a_session_overlay() -> Result<()> {
     let mut expected: Vec<u64> = (40..50).collect();
     expected.push(55);
     assert_eq!(numbers(&rows)?, expected);
+    Ok(())
+}
+
+/// A second entry of the log that holds a message of the channel `at`, under
+/// `key`.
+async fn held_again(
+    branch: &Branch,
+    operator: &Operator,
+    at: usize,
+    name: &str,
+    key: &str,
+) -> Result<()> {
+    let of: Entity = channel(at).parse()?;
+    let this: Entity = format!("message:{at}-{name}").parse()?;
+    let entry = Relation::from(CorpusRelation::try_from(format!("chat.channel.log/{key}"))?);
+    branch
+        .transaction()
+        .assert(entry.of(of).is(this))
+        .commit()
+        .publish()
+        .perform(operator)
+        .await?;
+    Ok(())
+}
+
+/// The body of the rule of a window gives one row for each entry, so a message
+/// that two entries hold comes from it twice. Each field of the head follows
+/// from the message, so the two rows are one row of the head, and the window
+/// answers it once. The answer equals what one evaluation for each field
+/// gives: a stored fact of an attribute of the head turns the fast path off,
+/// and the same window then reads each field through the rule on its own.
+#[dialog_common::test]
+async fn it_answers_a_window_once_for_a_message_that_two_entries_hold() -> Result<()> {
+    let (branch, operator, keys) = opened(Keyed::Dictionary, &[400, 100]).await?;
+    held_again(&branch, &operator, 0, "150", "n00155x").await?;
+    let general = channel(0);
+    let window = Window {
+        key_in_head: false,
+        keyed: Keyed::Dictionary,
+        channel: Some(&general),
+        lower: at_least(keys.at(140)),
+        upper: below(keys.at(160)),
+    };
+    let (fast, fast_read) = first_read(&branch, &operator, window).await?;
+    assert_eq!(numbers(&fast)?, (140..160).collect::<Vec<_>>());
+    assert!(
+        fast_read <= budget(21),
+        "20 messages from 21 entries read {fast_read}"
+    );
+
+    // A row with a value of one field alone is no instance of the head: the
+    // answer stays the same, and each attribute now has a stored source.
+    let lone: Entity = "other:lone".parse()?;
+    branch
+        .transaction()
+        .assert(
+            dialog_query::the!("test.window/text")
+                .of(lone)
+                .is("alone".to_string()),
+        )
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    let (slow, slow_read) = first_read(&branch, &operator, window).await?;
+    assert_eq!(numbers(&slow)?, numbers(&fast)?);
+    assert!(
+        fast_read * 2 < slow_read,
+        "the slow path reads the body for each field: {fast_read} against {slow_read}"
+    );
+    Ok(())
+}
+
+/// A head that holds the key of each entry is not determined by its entity:
+/// a message that two entries hold has two keys. Such a rule keeps one
+/// evaluation for each field, and the window answers the message once for each
+/// of its keys.
+#[dialog_common::test]
+async fn it_answers_each_key_of_a_message_when_the_head_holds_the_key() -> Result<()> {
+    let (branch, operator, keys) = opened(Keyed::Dictionary, &[400]).await?;
+    held_again(&branch, &operator, 0, "150", "n00155x").await?;
+    let general = channel(0);
+    let window = Window {
+        key_in_head: true,
+        keyed: Keyed::Dictionary,
+        channel: Some(&general),
+        lower: at_least(keys.at(140)),
+        upper: below(keys.at(160)),
+    };
+    let (rows, read) = first_read(&branch, &operator, window).await?;
+    let mut expected: Vec<u64> = (140..160).collect();
+    expected.push(150);
+    expected.sort_unstable();
+    assert_eq!(numbers(&rows)?, expected);
+    let mut held: Vec<String> = rows
+        .iter()
+        .filter(|row| row.get::<u64>("number").unwrap() == 150)
+        .map(|row| row.get::<String>("key").unwrap())
+        .collect();
+    held.sort();
+    assert_eq!(held, vec!["n00150".to_string(), "n00155x".to_string()]);
+    assert!(
+        read > budget(21),
+        "the head is not determined by its entity, so each field reads the body: {read}"
+    );
+    Ok(())
+}
+
+/// A live window keeps a message for as long as one entry of its range holds
+/// it. Two entries hold message 150. The window answers it once, keeps it when
+/// one of the two entries leaves, and drops it when the other leaves too.
+#[dialog_common::test]
+async fn it_keeps_a_row_of_a_live_window_while_one_entry_still_holds_it() -> Result<()> {
+    let (branch, operator, keys) = opened(Keyed::Dictionary, &[400]).await?;
+    held_again(&branch, &operator, 0, "150", "n00155x").await?;
+    let general = channel(0);
+    let window = Window {
+        key_in_head: false,
+        keyed: Keyed::Dictionary,
+        channel: Some(&general),
+        lower: at_least(keys.at(140)),
+        upper: below(keys.at(160)),
+    };
+    let mut subscription = branch
+        .query()
+        .with(window.rule()?)
+        .subscribe(window.query()?);
+    let first = subscription.poll(&operator).await?.expect("the first read");
+    assert_eq!(numbers(&first.asserted)?, (140..160).collect::<Vec<_>>());
+
+    let of: Entity = general.parse()?;
+    let held: Entity = "message:0-150".parse()?;
+    let leave = |key: &str| -> Result<_> {
+        let entry = Relation::from(CorpusRelation::try_from(format!("chat.channel.log/{key}"))?);
+        Ok(branch
+            .transaction()
+            .retract(entry.of(of.clone()).is(held.clone())))
+    };
+    leave("n00150")?
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    if let Some(delta) = subscription.poll(&operator).await? {
+        assert!(
+            delta.asserted.is_empty() && delta.retracted.is_empty(),
+            "the other entry still holds the message"
+        );
+    }
+    assert_eq!(subscription.results().len(), 20);
+
+    leave("n00155x")?
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    let delta = subscription.poll(&operator).await?.expect("the row left");
+    assert_eq!(numbers(&delta.retracted)?, vec![150]);
+    assert_eq!(subscription.results().len(), 19);
     Ok(())
 }

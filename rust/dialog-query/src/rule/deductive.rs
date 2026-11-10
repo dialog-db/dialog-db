@@ -861,6 +861,96 @@ impl DeductiveRule {
         }
     }
 
+    /// Whether the body binds at most one distinct row of the head per
+    /// `this`: each field of the head is determined by `this`, as
+    /// [`single_valued`](Self::single_valued) finds a variable determined,
+    /// through reads under a choosing pick of an entity already determined,
+    /// and through equalities.
+    ///
+    /// The body can hold other reads of a concept beside those: a read of a
+    /// collection, a read under `all`, a read keyed by a variable that
+    /// nothing determines. Such a read can bind `this` and the variables the
+    /// head does not name. It can drop a row of an entity or repeat it, and
+    /// it cannot give a field of the head a second value, since every row of
+    /// one entity reads each field from the same cells. So the rows of the
+    /// body, with each repeat of an entity dropped, are what a read of each
+    /// attribute of the head on its own would join into.
+    ///
+    /// The rule of a window of a log is the case: its body reads the entries
+    /// of a collection between two keys, which gives one row for each entry
+    /// that holds a message, and reads each field of the head from the
+    /// message itself.
+    pub fn head_determined(&self) -> bool {
+        let mut determined: BTreeSet<&str> = BTreeSet::from(["this"]);
+        let mut pending: Vec<&ConceptQuery> = Vec::new();
+        let mut equalities: Vec<&Equality> = Vec::new();
+        for premise in self.analysis().premises() {
+            match premise {
+                Premise::Assert(Proposition::Concept(query)) => pending.push(query),
+                Premise::Assert(Proposition::Constraint(constraint)) => match constraint {
+                    Constraint::Equality(equality) => equalities.push(equality),
+                    Constraint::LessThan(_)
+                    | Constraint::AtMost(_)
+                    | Constraint::GreaterThan(_)
+                    | Constraint::AtLeast(_) => {}
+                    Constraint::Coalesce(_) | Constraint::TypeOf(_) | Constraint::StartsWith(_) => {
+                        return false;
+                    }
+                },
+                Premise::Unless(_) => {}
+                _ => return false,
+            }
+        }
+        loop {
+            let before = pending.len() + equalities.len();
+            equalities.retain(|equality| {
+                let known = |term: &Term<Any>| {
+                    term.is_constant() || term.name().is_some_and(|name| determined.contains(name))
+                };
+                if !known(&equality.this) && !known(&equality.is) {
+                    return true;
+                }
+                determined.extend(equality.this.name());
+                determined.extend(equality.is.name());
+                false
+            });
+            let mut index = 0;
+            while index < pending.len() {
+                let query = pending[index];
+                let keyed = query.terms.get("this").is_some_and(|term| {
+                    term.is_constant() || term.name().is_some_and(|name| determined.contains(name))
+                });
+                let single = query.predicate.with().iter().all(|(_, field)| {
+                    !field.is_optional()
+                        && field.descriptor().pick().elects()
+                        && !field.descriptor().is_chain()
+                        && !matches!(field.the(), The::Collection { .. })
+                });
+                // A read that is not one row of a determined entity stays
+                // pending: it determines nothing.
+                if !keyed || !single || query.widens() {
+                    index += 1;
+                    continue;
+                }
+                for (name, term) in query.terms.iter() {
+                    if name != "this"
+                        && let Some(variable) = term.name()
+                    {
+                        determined.insert(variable);
+                    }
+                }
+                pending.swap_remove(index);
+            }
+            if pending.len() + equalities.len() == before {
+                break;
+            }
+        }
+        self.conclusion()
+            .sorted_operands()
+            .iter()
+            .all(|operand| determined.contains(operand.as_str()))
+    }
+
     /// This rule re-headed onto `concept`: its body, with the variables of
     /// the head fields it shares with the concept renamed to the concept's
     /// field names, joined with stored scans of the concept's other
@@ -2272,5 +2362,118 @@ mod tests {
             }]
         }));
         assert!(!rule.single_valued());
+    }
+
+    /// The rule of a window of a log: its body reads the entries of a
+    /// collection between two keys, and each field of its head from the
+    /// message of each entry.
+    fn window(head: serde_json::Value, message: serde_json::Value) -> DeductiveRule {
+        compiled(serde_json::json!({
+            "deduce": { "with": head },
+            "when": [
+                {
+                    "assert": { "with": { "log": {
+                        "the": { "domain": "chat.channel.log", "keyed": "dictionary" },
+                        "as": "entity:",
+                        "pick": "all:"
+                    } } },
+                    "where": {
+                        "this": { "entity:": "channel:general" },
+                        "log": {
+                            "the": { "?": { "name": "key" } },
+                            "is": { "?": { "name": "this" } }
+                        }
+                    }
+                },
+                {
+                    "assert": ">=",
+                    "where": { "of": { "?": { "name": "key" } }, "with": { "text:": "n10" } }
+                },
+                message,
+            ]
+        }))
+    }
+
+    /// A read of the fields of `this` under `last`, into `number` and `text`.
+    fn message(pick: &str) -> serde_json::Value {
+        serde_json::json!({
+            "assert": { "with": {
+                "number": { "the": "chat.message/number", "as": "natural:" },
+                "text": { "the": "chat.message/text", "as": "text:", "pick": pick }
+            } },
+            "where": {
+                "this": { "?": { "name": "this" } },
+                "number": { "?": { "name": "number" } },
+                "text": { "?": { "name": "text" } }
+            }
+        })
+    }
+
+    /// A body that reads a collection gives a row for each entry, so it is
+    /// not single-valued. Each field of its head still follows from the
+    /// entity, through a read of `this` under `last`, so its rows are one
+    /// row of the head for each entity.
+    #[dialog_common::test]
+    fn a_head_read_from_this_beside_a_collection_is_determined() {
+        let rule = window(
+            serde_json::json!({
+                "number": { "the": "test.window/number", "as": "natural:" },
+                "text": { "the": "test.window/text", "as": "text:" }
+            }),
+            message("last:"),
+        );
+        assert!(!rule.single_valued());
+        assert!(rule.head_determined());
+    }
+
+    /// The key of an entry comes from the read of the collection, and a
+    /// message that two entries hold has two keys. A head that names the key
+    /// is not determined by its entity.
+    #[dialog_common::test]
+    fn a_head_that_names_the_key_of_a_collection_is_not_determined() {
+        let rule = window(
+            serde_json::json!({
+                "number": { "the": "test.window/number", "as": "natural:" },
+                "text": { "the": "test.window/text", "as": "text:" },
+                "key": { "the": "test.window/key", "as": "text:", "pick": "all:" }
+            }),
+            message("last:"),
+        );
+        assert!(!rule.head_determined());
+    }
+
+    /// A field of the head that a read under `all` binds has a value for
+    /// each claim, so the head is not determined by its entity.
+    #[dialog_common::test]
+    fn a_head_read_under_all_is_not_determined() {
+        let rule = window(
+            serde_json::json!({
+                "number": { "the": "test.window/number", "as": "natural:" },
+                "text": { "the": "test.window/text", "as": "text:" }
+            }),
+            message("all:"),
+        );
+        assert!(!rule.head_determined());
+    }
+
+    /// Every single-valued body determines its head: each variable of the
+    /// body follows from `this`.
+    #[dialog_common::test]
+    fn a_single_valued_body_determines_its_head() {
+        let rule = compiled(serde_json::json!({
+            "deduce": { "with": { "title": { "the": "member/title", "as": "text:" } } },
+            "when": [
+                {
+                    "assert": { "with": { "group": { "the": "member/group", "as": "entity:" } } },
+                    "where": { "this": { "?": { "name": "this" } }, "group": { "?": { "name": "group" } } }
+                },
+                {
+                    "assert": { "with": { "name": { "the": "group/name", "as": "text:" } } },
+                    "where": { "this": { "?": { "name": "group" } }, "name": { "?": { "name": "title" } } }
+                }
+            ]
+        }));
+        assert!(rule.single_valued());
+        assert!(rule.head_determined());
     }
 }
