@@ -409,12 +409,13 @@ fn value_lower_edge(value: &Value, manifest: &Manifest) -> Vec<u8> {
 }
 
 /// Tighten a scan's `(start, end)` key pair with the selector's
-/// prefix bounds. A prefix on a field that also has an exact
-/// constraint is skipped — the exact value is already in the keys
-/// and is strictly tighter. Applying a prefix to a non-leading key
-/// dimension is sound (the range stays a superset of the matches;
-/// [`match_selector_and_key_ref`] filters the rest) and tightens the
-/// range whenever every more-significant dimension is exact.
+/// prefix bounds and its attribute and value ranges. A bound on a
+/// field that also has an exact constraint is skipped — the exact
+/// value is already in the keys and is strictly tighter. Applying a
+/// bound to a non-leading key dimension is sound (the range stays a
+/// superset of the matches; [`match_selector_and_key_ref`] filters
+/// the rest) and tightens the range whenever every more-significant
+/// dimension is exact.
 fn apply_prefix_bounds<K: KeyViewMut>(
     start: K,
     end: K,
@@ -423,6 +424,9 @@ fn apply_prefix_bounds<K: KeyViewMut>(
 ) -> (K, K) {
     let mut start = start;
     let mut end = end;
+    // The edges a prefix gives the attribute segment, for the attribute
+    // bounds below to tighten.
+    let mut attribute_edges: (Option<Vec<u8>>, Option<Vec<u8>>) = (None, None);
     if selector.attribute().is_none()
         && let Some(prefix) = selector.attribute_prefix()
     {
@@ -449,6 +453,31 @@ fn apply_prefix_bounds<K: KeyViewMut>(
         };
         start = start.set_attribute(AttributeKeyPart(&lo));
         end = end.set_attribute(AttributeKeyPart(&hi));
+        attribute_edges = (Some(lo), Some(hi));
+    }
+    // An attribute range bounds the attribute segment from each side it
+    // names. The edge sits at the bound itself: an inclusive upper bound
+    // must reach every entity and value keyed under that attribute, which
+    // the max filler of the components after it gives, and an exclusive
+    // bound keeps the same edge, so the range stays a superset and the
+    // per-entry re-check drops the attribute at the bound. Beside a prefix
+    // the tighter edge of the two stands. An exact attribute is already in
+    // the keys, so it skips this, and the per-entry re-check applies the
+    // bounds to it.
+    if selector.attribute().is_none() {
+        let (prefix_lo, prefix_hi) = attribute_edges;
+        if let Some(bound) = selector.attribute_lower() {
+            let lo = bound.attribute.as_bytes();
+            if prefix_lo.as_deref().is_none_or(|edge| edge < lo) {
+                start = start.set_attribute(AttributeKeyPart(lo));
+            }
+        }
+        if let Some(bound) = selector.attribute_upper() {
+            let hi = bound.attribute.as_bytes();
+            if prefix_hi.as_deref().is_none_or(|edge| edge > hi) {
+                end = end.set_attribute(AttributeKeyPart(hi));
+            }
+        }
     }
     if selector.entity().is_none()
         && let Some(prefix) = selector.entity_prefix()
@@ -1281,10 +1310,12 @@ fn reconstruct(
 /// The inclusive key range a selector's scan reads.
 ///
 /// Index choice: exact fields take priority (entity / value /
-/// attribute); prefix bounds pick the index whose leading dimension
-/// they constrain when no exact field does. The range is additionally
-/// tightened with whatever prefix bounds the selector carries (sound
-/// on any dimension, tight on leading ones) via
+/// attribute); prefix bounds, and the bounds of an attribute range,
+/// pick the index whose leading dimension they constrain when no exact
+/// field does. The range is additionally tightened with whatever
+/// bounds the selector carries (sound on any dimension, tight on
+/// leading ones and on one that follows exact fields, as an attribute
+/// range under one entity is) via
 /// [`apply_prefix_bounds`]; per-entry re-checking against the full
 /// selector happens during the scan, not here. The lower/upper bounds
 /// collapse to the same exact key when every component is
@@ -1336,7 +1367,9 @@ pub fn selector_range(
         || (selector.entity_prefix().is_some()
             && selector.value().is_none()
             && selector.attribute().is_none()
-            && selector.attribute_prefix().is_none())
+            && selector.attribute_prefix().is_none()
+            && selector.attribute_lower().is_none()
+            && selector.attribute_upper().is_none())
     {
         let (start, end) = apply_prefix_bounds(
             EntityKey(exact_bound(ENTITY_KEY_TAG, false)),
@@ -1357,7 +1390,11 @@ pub fn selector_range(
             manifest,
         );
         start.into_key()..=end.into_key()
-    } else if selector.attribute().is_some() || selector.attribute_prefix().is_some() {
+    } else if selector.attribute().is_some()
+        || selector.attribute_prefix().is_some()
+        || selector.attribute_lower().is_some()
+        || selector.attribute_upper().is_some()
+    {
         let (start, end) = apply_prefix_bounds(
             AttributeKey(exact_bound(ATTRIBUTE_KEY_TAG, false)),
             AttributeKey(exact_bound(ATTRIBUTE_KEY_TAG, true)),
@@ -2168,7 +2205,9 @@ mod selector_range_tests {
             || (selector.entity_prefix().is_some()
                 && selector.value().is_none()
                 && selector.attribute().is_none()
-                && selector.attribute_prefix().is_none())
+                && selector.attribute_prefix().is_none()
+                && selector.attribute_lower().is_none()
+                && selector.attribute_upper().is_none())
         {
             let (start, end) = apply_prefix_bounds(
                 <EntityKey<Key> as KeyViewConstruct>::min().apply_selector(selector, manifest),
@@ -2189,7 +2228,11 @@ mod selector_range_tests {
                 manifest,
             );
             start.into_key()..=end.into_key()
-        } else if selector.attribute().is_some() || selector.attribute_prefix().is_some() {
+        } else if selector.attribute().is_some()
+            || selector.attribute_prefix().is_some()
+            || selector.attribute_lower().is_some()
+            || selector.attribute_upper().is_some()
+        {
             let (start, end) = apply_prefix_bounds(
                 <AttributeKey<Key> as KeyViewConstruct>::min().apply_selector(selector, manifest),
                 <AttributeKey<Key> as KeyViewConstruct>::max().apply_selector(selector, manifest),
@@ -2249,6 +2292,19 @@ mod selector_range_tests {
             Selector::new()
                 .is_at_least(Value::UnsignedInt(5))
                 .is_at_most(Value::UnsignedInt(50)),
+            Selector::new().the_at_least("person/b"),
+            Selector::new().the_less_than("person/n"),
+            Selector::new()
+                .of(entity())
+                .the_at_least("person/b")
+                .the_less_than("person/n"),
+            Selector::new()
+                .the_starting_with("person/")
+                .the_greater_than("person/b")
+                .the_at_most("person/n"),
+            Selector::new()
+                .the_at_least("person/b")
+                .is_at_least(Value::UnsignedInt(10)),
         ];
         for value in probe_values(manifest) {
             matrix.push(Selector::new().is(value.clone()));
@@ -2286,6 +2342,328 @@ mod selector_range_tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod attribute_range_tests {
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    use super::{Corpus, CorpusExt, selector_range, spill_cache};
+    use crate::selector::Constrained;
+    use crate::{ArchiveDelta, Entity, Fact, Instruction, Selector, Value};
+    use dialog_search_tree::Manifest;
+    use dialog_search_tree::helpers::{Blocks, test_catalog};
+    use futures_util::{StreamExt as _, TryStreamExt as _, stream};
+    use std::ops::Range;
+
+    /// How many entries a log holds in these tests.
+    const ENTRIES: usize = 10_000;
+
+    fn channel() -> Entity {
+        "channel:general".parse().expect("an entity")
+    }
+
+    /// The attribute of entry `number` of a log: its domain, a `/`, and a
+    /// key that orders as the number does.
+    fn entry(number: usize) -> String {
+        format!("chat.channel.log/n{number:05}")
+    }
+
+    fn fact(the: &str, of: &str, is: Value) -> Fact {
+        Fact {
+            the: the.parse().expect("an attribute"),
+            of: of.parse().expect("an entity"),
+            is,
+            cause: None,
+        }
+    }
+
+    /// A tree that holds a log of [`ENTRIES`] entries under one channel,
+    /// with facts on each side of it: one attribute of the same channel
+    /// that sorts below the log's domain and two that sort above it, and
+    /// the same log under two other channels, one keyed below this
+    /// channel and one above.
+    async fn chat() -> anyhow::Result<(Corpus, Blocks)> {
+        let store = Blocks::new();
+        let mut delta = ArchiveDelta::zero();
+        let mut tree = Corpus::empty_in(test_catalog());
+        let mut facts = vec![
+            fact(
+                "chat.box/name",
+                "channel:general",
+                "below".to_string().into(),
+            ),
+            fact(
+                "chat.channel.zone/n00010",
+                "channel:general",
+                "above".to_string().into(),
+            ),
+            fact(
+                "chat.channel/name",
+                "channel:general",
+                "general".to_string().into(),
+            ),
+        ];
+        for number in 0..ENTRIES {
+            facts.push(fact(
+                &entry(number),
+                "channel:general",
+                Value::Entity(format!("message:{number}").parse()?),
+            ));
+        }
+        for other in ["channel:a", "channel:random"] {
+            for number in [0, 4950, 9999] {
+                facts.push(fact(
+                    &entry(number),
+                    other,
+                    Value::Entity(format!("message:{other}:{number}").parse()?),
+                ));
+            }
+        }
+        tree.apply(
+            &store,
+            &mut delta,
+            stream::iter(
+                facts
+                    .into_iter()
+                    .map(|fact| Instruction::Assert(fact, crate::Pick::All)),
+            ),
+        )
+        .await?;
+        delta.flush_into(&store);
+        Ok((tree, store))
+    }
+
+    /// The attributes of the rows a selector's scan yields, in scan order.
+    async fn scanned(
+        tree: &Corpus,
+        store: &Blocks,
+        selector: Selector<Constrained>,
+    ) -> anyhow::Result<Vec<(String, String)>> {
+        let rows: Vec<Fact> = tree
+            .clone()
+            .scan_owned(store.clone(), spill_cache(), selector)
+            .try_collect()
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| (row.of.to_string(), row.the.to_string()))
+            .collect())
+    }
+
+    /// How many entries of the tree a selector's scan visits: every entry
+    /// its key range holds, matched or not.
+    async fn visited(tree: &Corpus, store: &Blocks, selector: &Selector<Constrained>) -> usize {
+        let range = selector_range(selector, &Manifest::default());
+        tree.stream_range(range, store).count().await
+    }
+
+    /// An attribute range under one entity is one range of the entity
+    /// index: the scan visits the entries between the bounds and no
+    /// other, however many entries the entity holds on each side.
+    #[dialog_common::test]
+    async fn it_reads_only_the_entries_between_attribute_bounds() -> anyhow::Result<()> {
+        let (tree, store) = chat().await?;
+        let window = Selector::new()
+            .of(channel())
+            .the_at_least(entry(4901))
+            .the_less_than(entry(5000));
+
+        let rows = scanned(&tree, &store, window.clone()).await?;
+        let expected: Vec<(String, String)> = (4901..5000)
+            .map(|number| ("channel:general".to_string(), entry(number)))
+            .collect();
+        assert_eq!(rows, expected, "the 99 entries of the window, in key order");
+
+        // The edge of an exclusive bound sits at the bound, so the scan
+        // visits the one entry there and drops it.
+        let visits = visited(&tree, &store, &window).await;
+        assert_eq!(
+            visits, 100,
+            "a window of 99 entries visits them and the entry at its exclusive bound, \
+             of {ENTRIES} under the entity"
+        );
+
+        // The whole log, by its domain, visits every entry of it.
+        let log = Selector::new()
+            .of(channel())
+            .the_starting_with("chat.channel.log/");
+        assert_eq!(visited(&tree, &store, &log).await, ENTRIES);
+        Ok(())
+    }
+
+    /// Each form of a bound admits the entries on its side, and an
+    /// exclusive one leaves out the entry at the bound.
+    #[dialog_common::test]
+    async fn it_admits_each_form_of_an_attribute_bound() -> anyhow::Result<()> {
+        let (tree, store) = chat().await?;
+        let log = || {
+            Selector::new()
+                .of(channel())
+                .the_starting_with("chat.channel.log/")
+        };
+        let numbers = |rows: Vec<(String, String)>| -> Vec<String> {
+            rows.into_iter().map(|(_, the)| the).collect()
+        };
+        let entries = |range: Range<usize>| -> Vec<String> { range.map(entry).collect() };
+
+        let at_least = scanned(&tree, &store, log().the_at_least(entry(9997))).await?;
+        assert_eq!(numbers(at_least), entries(9997..ENTRIES));
+        let greater = scanned(&tree, &store, log().the_greater_than(entry(9997))).await?;
+        assert_eq!(numbers(greater), entries(9998..ENTRIES));
+        let at_most = scanned(&tree, &store, log().the_at_most(entry(2))).await?;
+        assert_eq!(numbers(at_most), entries(0..3));
+        let less = scanned(&tree, &store, log().the_less_than(entry(2))).await?;
+        assert_eq!(numbers(less), entries(0..2));
+
+        // A bound that names no stored attribute bounds just the same.
+        let between = scanned(
+            &tree,
+            &store,
+            Selector::new()
+                .of(channel())
+                .the_greater_than("chat.channel.log/n00004x")
+                .the_less_than("chat.channel.log/n00007x"),
+        )
+        .await?;
+        assert_eq!(numbers(between), entries(5..8));
+
+        // Bounds that cross admit nothing.
+        let crossed = scanned(
+            &tree,
+            &store,
+            Selector::new()
+                .of(channel())
+                .the_at_least(entry(50))
+                .the_less_than(entry(10)),
+        )
+        .await?;
+        assert!(crossed.is_empty());
+        Ok(())
+    }
+
+    /// With no entity, an attribute range narrows the attribute index: it
+    /// reads the facts of every entity under the attributes in the range,
+    /// and the rows equal a filter over the whole index.
+    #[dialog_common::test]
+    async fn it_narrows_the_attribute_index_with_no_entity() -> anyhow::Result<()> {
+        let (tree, store) = chat().await?;
+        let window = Selector::new()
+            .the_at_least(entry(4950))
+            .the_at_most(entry(4951));
+        let mut rows = scanned(&tree, &store, window.clone()).await?;
+        rows.sort();
+
+        let everything = Selector::new().the_starting_with("chat.");
+        let mut filtered: Vec<(String, String)> = scanned(&tree, &store, everything)
+            .await?
+            .into_iter()
+            .filter(|(_, the)| *the >= entry(4950) && *the <= entry(4951))
+            .collect();
+        filtered.sort();
+        assert_eq!(rows, filtered);
+        assert_eq!(
+            rows,
+            vec![
+                ("channel:a".to_string(), entry(4950)),
+                ("channel:general".to_string(), entry(4950)),
+                ("channel:general".to_string(), entry(4951)),
+                ("channel:random".to_string(), entry(4950)),
+            ]
+        );
+        assert_eq!(
+            visited(&tree, &store, &window).await,
+            4,
+            "the range holds the facts under the two attributes alone"
+        );
+        Ok(())
+    }
+
+    /// A bound beside a prefix reads the part of the prefix that the bound
+    /// admits. Beside an exact attribute the bound only filters.
+    #[dialog_common::test]
+    async fn it_composes_an_attribute_bound_with_a_prefix_and_an_exact_attribute()
+    -> anyhow::Result<()> {
+        let (tree, store) = chat().await?;
+
+        // The bound alone reaches past the log's domain, into each domain
+        // above it; the prefix keeps the read inside the log.
+        let from = Selector::new().of(channel()).the_at_least(entry(9998));
+        let open = scanned(&tree, &store, from.clone()).await?;
+        assert_eq!(
+            open.iter().map(|(_, the)| the.as_str()).collect::<Vec<_>>(),
+            vec![
+                entry(9998).as_str(),
+                entry(9999).as_str(),
+                "chat.channel.zone/n00010",
+                "chat.channel/name",
+            ]
+        );
+        let inside = from.the_starting_with("chat.channel.log/");
+        let closed = scanned(&tree, &store, inside.clone()).await?;
+        assert_eq!(
+            closed
+                .iter()
+                .map(|(_, the)| the.clone())
+                .collect::<Vec<_>>(),
+            vec![entry(9998), entry(9999)]
+        );
+        assert_eq!(visited(&tree, &store, &inside).await, 2);
+
+        // A bound that a prefix already implies leaves the prefix's range.
+        let wide = Selector::new()
+            .of(channel())
+            .the_starting_with("chat.channel.log/")
+            .the_at_least("chat.");
+        assert_eq!(visited(&tree, &store, &wide).await, ENTRIES);
+
+        // An exact attribute decides the key range, and a bound beside it
+        // still filters: the attribute shows when the bounds admit it.
+        let exact = Selector::new().of(channel()).the(entry(7).parse()?);
+        let inside = exact.clone().the_at_least(entry(5));
+        assert_eq!(visited(&tree, &store, &inside).await, 1);
+        assert_eq!(
+            scanned(&tree, &store, inside).await?,
+            vec![("channel:general".to_string(), entry(7))]
+        );
+        let outside = exact.the_at_least(entry(5000));
+        assert_eq!(visited(&tree, &store, &outside).await, 1);
+        assert!(scanned(&tree, &store, outside).await?.is_empty());
+        Ok(())
+    }
+
+    /// Selectors that differ in a bound are different selectors, and the
+    /// ranges they demand differ, so a reader of one window is no reader
+    /// of another.
+    #[dialog_common::test]
+    fn it_tells_selectors_apart_by_their_attribute_bounds() {
+        let manifest = Manifest::default();
+        let window = |lower: usize, upper: usize| {
+            Selector::new()
+                .of(channel())
+                .the_at_least(entry(lower))
+                .the_less_than(entry(upper))
+        };
+        assert_eq!(window(10, 20), window(10, 20));
+        assert_ne!(window(10, 20), window(10, 21));
+        assert_ne!(window(10, 20), window(11, 20));
+        assert_ne!(
+            Selector::new().of(channel()).the_at_most(entry(20)),
+            Selector::new().of(channel()).the_less_than(entry(20)),
+            "an inclusive bound is not its exclusive form"
+        );
+
+        let below = selector_range(&window(10, 20), &manifest);
+        let above = selector_range(&window(30, 40), &manifest);
+        assert!(
+            below.end() < above.start(),
+            "two windows apart demand disjoint ranges"
+        );
+
+        let cells = window(10, 20).cells().expect("bounded cells");
+        assert_eq!(cells, window(10, 20), "the cells keep the attribute bounds");
     }
 }
 

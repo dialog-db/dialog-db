@@ -607,8 +607,14 @@ impl Facts {
         let rows = self.map.range(range);
         // A range of value bounds spans every attribute, since the value leads
         // the key of the value index, so each entry takes the check that a scan
-        // of a tree gives it.
-        if window.selector.value_lower().is_none() && window.selector.value_upper().is_none() {
+        // of a tree gives it. So does each entry of an attribute range, whose
+        // edge sits at the bound even where the bound is exclusive.
+        let selector = window.selector;
+        if selector.value_lower().is_none()
+            && selector.value_upper().is_none()
+            && selector.attribute_lower().is_none()
+            && selector.attribute_upper().is_none()
+        {
             return rows.map(|(_, fact)| fact.clone()).collect();
         }
         let selector = window.selector.clone().for_manifest(&self.manifest);
@@ -1955,6 +1961,54 @@ mod tests {
             1
         );
         assert_eq!(line.len(), 4);
+    }
+
+    /// An in-memory store reads an attribute range as a tree does: the
+    /// facts of the entity between the bounds, without the attribute at
+    /// an exclusive bound.
+    #[dialog_common::test]
+    fn it_scans_an_attribute_range_as_a_tree_does() {
+        let line = Ephemeral::new();
+        for (of, the_, is) in [
+            ("id:a", "chat.channel/name", "general"),
+            ("id:a", "chat.channel.log/n1", "one"),
+            ("id:a", "chat.channel.log/n2", "two"),
+            ("id:a", "chat.channel.log/n3", "three"),
+            ("id:a", "chat.channel.zone/n2", "zone"),
+            ("id:b", "chat.channel.log/n2", "other"),
+        ] {
+            line.assert(claim(of, the_, is)).unwrap();
+        }
+        let read = |selector: Selector<Constrained>| -> Vec<String> {
+            line.scan(&selector)
+                .into_iter()
+                .map(|fact| format!("{} {}", fact.of, fact.the))
+                .collect()
+        };
+        let of = || Selector::new().of("id:a".parse().unwrap());
+        assert_eq!(
+            read(
+                of().the_at_least("chat.channel.log/n1")
+                    .the_less_than("chat.channel.log/n3")
+            ),
+            vec!["id:a chat.channel.log/n1", "id:a chat.channel.log/n2"]
+        );
+        assert_eq!(
+            read(
+                of().the_greater_than("chat.channel.log/n1")
+                    .the_at_most("chat.channel.log/n3")
+            ),
+            vec!["id:a chat.channel.log/n2", "id:a chat.channel.log/n3"]
+        );
+        // With no entity the range is of the attribute index.
+        assert_eq!(
+            read(
+                Selector::new()
+                    .the_at_least("chat.channel.log/n2")
+                    .the_less_than("chat.channel.log/n3")
+            ),
+            vec!["id:a chat.channel.log/n2", "id:b chat.channel.log/n2"]
+        );
     }
 
     #[dialog_common::test]
