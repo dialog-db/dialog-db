@@ -1932,6 +1932,45 @@ that a walk over a root and a range found every node present, and skip
 later walks over the same root within that range. Failing that, decide
 whether a buffer holds an in-range key without decoding all of it.
 
+## 2026-11-10: which change slows the reads
+
+**Question.** The entry before last found reads twice as slow with the
+head dedupe and grouped seeding together (#761, #763). Does #761 alone
+do it? The answer decides whether #761 can land before a fix for the
+warm walk.
+
+**Runs.** Main with #755 (427546fa), main + #761 (47d20118), main + #761
++ #763 (44c0cfd2). The team of six, 1×, the fs store, 5 rounds with the
+three alternated, medians of the round medians, in ms. The reader is a
+member that pulled from origin, so it has an upstream.
+
+| | main | + #761 | + #761 + #763 |
+|---|--:|--:|--:|
+| query v2/activity, cold | 124 | 159 | 190 |
+| query v2/activity, warm | 123 | 149 | 150 |
+| query v2/issue, cold | 96 | 132 | 135 |
+| query v2/issue, warm | 55 | 66 | 68 |
+| steady, all commands | 18.1 | 9.7 | 7.2 |
+
+The cold activity view, round by round: main 124, 110, 126, 153, 103;
++ #761 184, 159, 156, 175, 153; + #761 + #763 190, 199, 151, 165, 201.
+
+**Result.**
+- #761 alone slows every read by 20 to 37%. Every one of its rounds on
+  the cold activity view is above main's median.
+- #763 cannot be told apart from #761 alone on reads. Its higher cold
+  activity median comes from two slow rounds, and its warm reads match.
+  Instruction counts would settle it; they were not taken.
+- #755 is neutral. The main binary from before #755 against main after
+  it, 5 alternated rounds: cold activity 109 against 106, warm issue 51
+  against 51.
+- This machine is noisier than the one the entry before last ran on
+  (main's cold activity view spans 103 to 153), and slower, so its
+  absolute numbers are not comparable with that entry's.
+
+So the walk that reads did not need has to stop costing this much before
+#761 lands, or with it.
+
 ## How to reproduce
 
 ```sh
