@@ -16,8 +16,11 @@
 //!   unstarted item is simply ignored by demand, and hydration makes it a
 //!   local no-op when the driver later reaches it.
 //! - **The driver is the evaluation.** Progress happens whenever a
-//!   consumer polls a driven stream — on any executor, wasm included,
-//!   with nothing detached. A queue nobody drives holds no resources.
+//!   consumer polls a driven stream and the evaluation's own stream is
+//!   waiting — on any executor, wasm included, with nothing detached. An
+//!   evaluation whose reads are all local never waits, so it yields its
+//!   rows without running a walk and leaves its hints queued for one that
+//!   does. A queue nobody drives holds no resources.
 //!   The queue being ambient (an operator field, reached by the
 //!   [`Speculation`](dialog_artifacts::Speculation) command) is what
 //!   lets one evaluation's polling execute another's hints: queries,
@@ -238,16 +241,19 @@ where
 {
     type Item = S::Item;
 
+    /// Demand first: the inner stream is polled before any walk, and
+    /// speculation starts and runs only on a poll where the inner stream
+    /// pends. A walk over local nodes never pends, so run ahead of the
+    /// inner poll it would run to its end on the evaluation's task before
+    /// the row that poll was about to yield. Where the inner stream is
+    /// parked on a fetch, the walks start in that same poll, after the
+    /// inner poll has enqueued whatever hints it composed, so they still
+    /// overlap the fetch it waits on.
     fn poll_next(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
-        this.start_jobs();
-        this.reap(context);
         let polled = this.inner.poll_next_unpin(context);
-        // The inner poll may have enqueued new work (an evaluator hook
-        // firing mid-evaluation): start it now so it overlaps with the
-        // very fetch the inner stream is parked on, instead of waiting
-        // for the next wake.
-        if this.start_jobs() {
+        if polled.is_pending() {
+            this.start_jobs();
             this.reap(context);
         }
         polled
@@ -509,12 +515,15 @@ mod tests {
     }
 
     /// A hint enqueued through the env's ambient queue is executed by
-    /// whatever evaluation polls next — here a query that never asked
-    /// for it — and the hinted range is local afterwards: its own
-    /// select then reads nothing from the backend. This is the
-    /// cross-evaluation sharing the ambient design exists for.
+    /// whatever evaluation next waits on demand, not by one that never
+    /// does: a query over local blocks yields every row without pending,
+    /// so it leaves the hint queued, and an evaluation parked on demand
+    /// (here a driver over a stream that never yields) executes it. The
+    /// hinted range is local afterwards: its own select then reads nothing
+    /// from the backend. This is the cross-evaluation sharing the ambient
+    /// design exists for.
     #[dialog_common::test]
-    async fn it_replicates_hinted_ranges_while_any_query_runs() -> Result<()> {
+    async fn it_replicates_hinted_ranges_while_any_evaluation_waits() -> Result<()> {
         let (operator, profile) = test_session_with_peer().await;
         let env = Counting::new(operator);
         let repo = profile
@@ -560,7 +569,25 @@ mod tests {
         assert_eq!(rows.len(), 40, "the demand query yields its rows");
 
         let queue = Provider::<Speculation>::execute(&env, ()).await;
-        assert_eq!(queue.pending(), 0, "the driven stream executed the hint");
+        assert_eq!(
+            queue.pending(),
+            1,
+            "a query that never waited on demand left the hint queued"
+        );
+        let erased: &Erased = &env;
+        let mut waiting = Driven::new(
+            stream::pending::<()>(),
+            vec![Source::from(branch.clone())],
+            erased,
+            queue.clone(),
+        );
+        drive_to_idle(&mut waiting).await;
+        drop(waiting);
+        assert_eq!(
+            queue.pending(),
+            0,
+            "the waiting evaluation executed the hint"
+        );
 
         // The hinted range is now local: reading it touches the
         // backend not at all (every node is in the line's shared cache).
@@ -585,7 +612,9 @@ mod tests {
     /// Every warm-up job asks whether the source's misses hydrate from
     /// somewhere. It is answered from the routes the branch registered on
     /// the env, with no store read, and a driver reads them once for
-    /// every job: four hints in flight add no memory reads to the query.
+    /// every job: four hints in flight add no memory reads. The query
+    /// over local blocks never waits, so it leaves them queued; the
+    /// driver that executes them is one parked on demand.
     #[dialog_common::test]
     async fn it_loads_a_sources_remote_fallback_once_per_driver() -> Result<()> {
         let (operator, profile) = test_session_with_peer().await;
@@ -666,13 +695,29 @@ mod tests {
             .perform(&env)
             .try_vec()
             .await?;
-        let warmed = env.count("memory::Resolve") - before;
+        let queued = env.count("memory::Resolve") - before;
         let queue = Provider::<Speculation>::execute(&env, ()).await;
-        assert_eq!(queue.pending(), 0, "the driven query executed every hint");
-
         assert_eq!(
-            warmed,
-            bare,
+            queue.pending(),
+            4,
+            "a query that never waited on demand left every hint queued"
+        );
+        assert_eq!(queued, bare, "queued hints cost the query nothing");
+
+        let before = env.count("memory::Resolve");
+        let erased: &Erased = &env;
+        let mut waiting = Driven::new(
+            stream::pending::<()>(),
+            vec![Source::from(branch.clone())],
+            erased,
+            queue.clone(),
+        );
+        drive_to_idle(&mut waiting).await;
+        drop(waiting);
+        assert_eq!(queue.pending(), 0, "the waiting driver executed every hint");
+        assert_eq!(
+            env.count("memory::Resolve") - before,
+            0,
             "four warm-ups add no fallback loads: {:?}",
             env.snapshot()
         );
@@ -800,17 +845,6 @@ mod tests {
             "fixture: the walk's nodes must hold buffered ops it could decode"
         );
 
-        // What the read of `a/name` costs with nothing to warm.
-        let decodes = buffer_decodes();
-        let rows = branch
-            .query()
-            .select(attribute_query("a/name"))
-            .perform(&env)
-            .try_vec()
-            .await?;
-        let bare = buffer_decodes() - decodes;
-        assert_eq!(rows.len(), 24 * 12);
-
         let listening = Provider::<Preload>::execute(
             &env,
             PreloadRequest {
@@ -821,19 +855,31 @@ mod tests {
         .await;
         assert!(listening, "the default budget accepts hints");
 
-        let gets = env.count("archive::Get");
-        let hydrations = env.count("hydrate::Hydrate");
-        let decodes = buffer_decodes();
+        // A read of `a/name` over local blocks never waits on demand, so
+        // it runs no walk: the hint stays queued for an evaluation that does.
         let rows = branch
             .query()
             .select(attribute_query("a/name"))
             .perform(&env)
             .try_vec()
             .await?;
-        let warmed = buffer_decodes() - decodes;
         assert_eq!(rows.len(), 24 * 12);
         let queue = Provider::<Speculation>::execute(&env, ()).await;
-        assert_eq!(queue.pending(), 0, "the driven query executed the hint");
+        assert_eq!(queue.pending(), 1, "the query left the hint queued");
+
+        let gets = env.count("archive::Get");
+        let hydrations = env.count("hydrate::Hydrate");
+        let decodes = buffer_decodes();
+        let erased: &Erased = &env;
+        let mut waiting = Driven::new(
+            stream::pending::<()>(),
+            vec![Source::from(branch.clone())],
+            erased,
+            queue.clone(),
+        );
+        drive_to_idle(&mut waiting).await;
+        drop(waiting);
+        assert_eq!(queue.pending(), 0, "the waiting driver walked the hint");
 
         assert_eq!(
             env.count("archive::Get") - gets,
@@ -845,10 +891,7 @@ mod tests {
             0,
             "the walk fetches nothing"
         );
-        assert_eq!(
-            warmed, bare,
-            "the walk decodes no buffer: the query decoded what it decodes alone"
-        );
+        assert_eq!(buffer_decodes() - decodes, 0, "the walk decodes no buffer");
         Ok(())
     }
 

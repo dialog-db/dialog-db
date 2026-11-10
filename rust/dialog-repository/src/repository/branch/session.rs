@@ -2715,8 +2715,9 @@ mod rule_tests {
     /// region (conclusion and source spans) into the env's ambient
     /// queue: the region is committed work the moment any resolution
     /// scans it, and warming it whole makes every deeper closure
-    /// level's discovery and hydration local. The query's own driven
-    /// stream executes the hints, leaving nothing pending.
+    /// level's discovery and hydration local. Every block the query reads
+    /// is local, so its stream never waits and runs no walk: the hints stay
+    /// queued for the next evaluation that does.
     ///
     /// The branch tracks a remote, since hints are only taken from a
     /// query whose lines can fetch; the remote is never reached, because
@@ -2759,7 +2760,10 @@ mod rule_tests {
             "cold rule resolution hints the conclusion and source spans"
         );
         let queue = Provider::<Speculation>::execute(&env, ()).await;
-        assert_eq!(queue.pending(), 0, "the query's own stream drove the hints");
+        assert!(
+            queue.pending() >= 2,
+            "a query that never waited left both spans' hints queued"
+        );
         Ok(())
     }
 

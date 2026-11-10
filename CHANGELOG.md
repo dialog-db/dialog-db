@@ -14,6 +14,30 @@ says how to cut a release.
 
 ## Unreleased
 
+### A query yields its rows before it runs any prefetch walk
+
+[#770](https://github.com/dialog-db/dialog-db/pull/770), measured in
+[notes/fetch-scheduler.md](./notes/fetch-scheduler.md) ("Demand first").
+
+An evaluation drives the env's prefetch hints only on a poll where its
+own stream is waiting. It used to start and run walks ahead of every
+poll, so on a member whose blocks are all local a walk ran to its end
+before the row that poll yielded.
+
+What this changes for you:
+
+- A view read on a member that tracks a remote and holds every block runs
+  no prefetch walk (`query-member`: 120.0 M to 109.8 M instructions).
+- A query whose reads are all local leaves the hints it and others
+  composed queued (`PreloadQueue::pending()` stays above zero) until an
+  evaluation waits on a fetch; up to 1,024 a rank are kept.
+- On a partial replica a walk advances only while the query that took it
+  is waiting on its own fetches, so less of a hinted range may be local
+  when that query ends.
+
+Why: speculation should never delay demand, and on a local member it
+did so on every poll.
+
 ### A prefetch hint a query took but did not finish is resumed by the next query
 
 [#770](https://github.com/dialog-db/dialog-db/pull/770), argued in
