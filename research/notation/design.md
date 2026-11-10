@@ -126,7 +126,7 @@ A concept says what facts make it up, not how its entity is made. Construction b
 
 Every to-do is also a note, and `(retract (todo todo:9c1e))` takes the `text` a note reads, so it stops being a note.
 
-A domain call names no type and no pick. It reads every live claim of its fields, whatever their values, and types and picks are constraints on the variables it binds (below). Claims are stored under their field, `xyz.todo/state`, so a concept and a bare domain call that read one field differently are two views of the same claims.
+A domain call names no type and no pick. It reads every live claim of its fields, whatever their values, and types and picks are constraints on the variables it binds (below). A bare domain call and a concept that read one field with different types or picks are two attributes over the same stored claims.
 
 ### Collections
 
@@ -192,7 +192,7 @@ The write is the read's shortcut, so a read normally finds one live claim, and e
 
 ### Identity
 
-A concept's identity is its set of fields, each with the type and pick the concept gives it. A field is its domain and its name. A name binds a concept to a signature, meaning the head's labels; two names over the same fields are one concept with two signatures. Redefining a name with a different body rebinds the name. Stored facts belong to fields, not names, so they are not touched.
+An attribute's identity is its domain, its name, its type and its pick: the same name with another type or pick is another attribute. Attributes over one name read the same stored claims, `xyz.todo/state`, each through its own type and pick. A concept's identity is its set of attributes. A name binds a concept to a signature, meaning the head's labels; two names over the same fields are one concept with two signatures. Redefining a name with a different body rebinds the name. Stored facts belong to fields, not names, so they are not touched.
 
 ## Commands
 
