@@ -5,7 +5,7 @@
 |  | Understanding | Activity |
 |---|---|---|
 | **Status** | Two processes advancing two branches of one space share no lock on main and take turns on one file lock with the file archive. Irakli requires that they not wait on one another. Cells live outside the file, a file each. | Directing: a matrix of four approaches, Irakli's candidate among them. |
-| **Agenda** | What a cell's slot holds: the value, of a fixed size, or a pointer to a record. What a commit records as its read set, and its cost. Then the next implementation decisions: extent claiming, integration. Whether "one file" means one file at rest, with side files while writers overlap. How a head's compare-and-swap works against a pending head record. The `?` cells in the matrix. | Ask who integrates; then the web; then the cells question. |
+| **Agenda** | Whether a slot carries the block's offset beside its hash. What a commit records as its read set, and its cost. Then the next implementation decisions: extent claiming, integration. Whether "one file" means one file at rest, with side files while writers overlap. How a head's compare-and-swap works against a pending head record. The `?` cells in the matrix. | Ask who integrates; then the web; then the cells question. |
 
 ## 2026-11-10, Describing: the topic opens
 
@@ -252,3 +252,18 @@ whole one.
 **Decided.** The slot-per-cell design, with the cell index, replaces the
 slot table in [design-branch-heads.md](design-branch-heads.md). Open: what
 a slot holds.
+
+**Asked.** The value in a fixed-size slot, or a pointer to a record?
+Irakli: branches hold whole records today, but the slot need not point to a
+record: it can point to a block, and the block holds whatever is written.
+
+**Learned.** That matches how cells already work: under `fs`, a cell's
+edition is the hash of its content. With the value as a block, the slot's
+hash is the edition, and a compare-and-swap compares the slot without
+reading the value. A value block is new on every update, so almost never
+indexed: with its offset in the slot as well, a reader reads it straight
+from the mapping.
+
+**Decided.** A cell's slot references a block holding its value; the
+block's hash is the edition. Suggested, not decided: the offset and length
+beside the hash.

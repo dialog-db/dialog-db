@@ -61,4 +61,7 @@
 | memory cells kept as blocks are: an index of each cell's byte offset, changed only when cells are created or deleted, as two tables swapped in turn; a cell's slot written over in place on update; readers go to the extents only for a cell created since the index was written | opinion | Irakli, 2026-11-10 | - |
 | a branch cell holds a `Revision` of variable length: the branch's identifier, the issuer's DID, the tree's hash, an edition, an optional context and a flag | fact | `rust/dialog-capability/src/identity/revision.rs` | holds |
 | a write of more than 8 aligned bytes in place is not atomic against a crash or a reader of the mapping | fact | hardware: atomic stores are at most 8 (or 16) aligned bytes; a page written back can tear at the sector | holds |
+| a cell's slot points to a block, so a cell's value is whatever a block holds | opinion | Irakli, 2026-11-10 | - |
+| under `fs`, a cell's edition is the BLAKE3 hash of its content, so a slot holding the value block's hash holds the cell's edition | fact | `rust/dialog-storage/src/storage/provider/fs/memory.rs` (`content_hash`, the edition compared in `Publish`) | holds |
+| a slot that carries the block's offset and length beside its hash lets a reader read a value not yet indexed straight from the mapping; offsets stay valid because integration copies nothing | hypothesis | follows from the extent design; the agent's suggestion, not decided | open |
 
