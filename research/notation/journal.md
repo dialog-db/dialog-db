@@ -615,6 +615,19 @@ The complaint about `!` narrowed. Readers no longer name premises or the commit;
 
 **Decision.** Take the command design. The rule head is the next question: R21 and R22 readers keep asking that a head say its own scope. One answer is that a head never says it, because it always inherits its trigger's: rule heads lose `!`, commands a rule issues take effect after the tick, and same-tick derivation is a view. That is for the maintainer.
 
+## 2026-11-10 — `!` is induction
+
+**Question.** R21 and R22 readers named a rule head's `!` being global only when its trigger was. What does `!` mean?
+
+**Method.** Maintainer's decisions, not a measurement. A proposal to drop `!` from heads was withdrawn: it would have hidden whether a head is inductive or deductive in what kind of head it is, and lost deductive derivation into a concept.
+
+**Results.**
+- `!` marks induction and nothing else: with it a form lands after this tick, where rules see it again; without it a form holds within this tick, and rules derive from it to a fixpoint. A top-level form is a rule with no body, so `!` means the same at the top level and in a head.
+- Nothing is gated on what set a rule off. A run that does not commit returns everything inductive it produced, without advancing the revision.
+- Committing is per document, so one form's `!` keeps what the whole run lands. Two ways to say it are open: a `!` at the top level makes the document a transaction; or the document carries no top-level `!` and is submitted as a query or a transaction, with `assert` and `retract` the commands whose facts land, so `!` remains only on a head that re-issues a command.
+
+**Decision.** R23 [planned](results/r23-plan.md) before any reader ran, to compare the two and ask readers which they prefer.
+
 ## How to reproduce
 
 1. Take a variant's prompt from its round's results file and save it as `<variant>.txt`.
