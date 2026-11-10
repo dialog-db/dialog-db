@@ -1,14 +1,14 @@
 # E2, E4 and the E1 library bar: four text CRDT libraries
 
-Date 2026-11-09. Worktree `/home/claude/wt-libs`, branch `research/text-libs`, nothing committed.
+Date 2026-11-09. Worktree `/home/claude/wt-libs`, branch `research/text-libs`. The first harness is in commit `efaab95`. The Diamond Types git main changes are in the working tree but not committed: the commit and push were denied by the permission system. This report is not in the repo.
 
 ## Paths and how to run
 
 - Spike crate: `/home/claude/wt-libs/research/text-crdt-survey/spike` (own empty `[workspace]`, `target/` is git-ignored).
   - `src/main.rs`: trace loader, faithful concurrent replay driver, measurements, table output.
-  - `src/libs/{automerge,loro,yrs,dt}.rs`: one adapter per library behind a small `Lib` trait.
+  - `src/libs/{automerge,loro,yrs,dt,dt2}.rs`: one adapter per library behind a small `Lib` trait. `dt` is Diamond Types 1.0.0 (crates.io), `dt2` is Diamond Types at git main.
   - `examples/am_scaling.rs`: side check of Automerge's per-call import cost.
-- Versions (crates.io, all built): automerge 0.12.0, loro 1.17.1, yrs 0.28.1, diamond-types 1.0.0. The git version of Diamond Types was not tried, since crates.io built.
+- Versions: automerge 0.12.0, loro 1.17.1, yrs 0.28.1 and diamond-types 1.0.0 from crates.io. Diamond Types git main is `josephg/diamond-types` at rev `89ae3a0ab8d941a2885e6ec89d094bc9ce9d2922` (root package `diamond-types` 2.0.0), as dependency key `diamond-types-git`.
 - Run:
 
 ```
@@ -16,12 +16,13 @@ cd /home/claude/wt-libs/research/text-crdt-survey/spike
 export RUSTUP_TOOLCHAIN=stable-x86_64-unknown-linux-gnu
 cargo build --release
 D=/home/claude/data/editing-traces/concurrent_traces
-./target/release/text-crdt-spike $D/friendsforever.json.gz $D/clownschool.json.gz --runs 7   # --libs automerge,loro,yrs,dt
+./target/release/text-crdt-spike $D/friendsforever.json.gz $D/clownschool.json.gz --runs 7   # --libs automerge,loro,yrs,dt,dt2
 cargo run --release --example am_scaling /home/claude/data/editing-traces/sequential_traces/friendsforever_flat.json.gz
 ```
 
 - Datasets (not copied): friendsforever.json.gz sha256 `c80f9ee7...2769` (26 078 txns, 2 agents), clownschool.json.gz sha256 `b53866c8...0b94` (23 136 txns, 3 agents). Both are pure ASCII, so position units (code points, UTF-16, bytes) do not matter. The README's txn counts (~4000, 5380) do not match the files.
-- Full table run took about 25 min on 2 vCPU (Xeon 2.1 GHz). Raw output: `/tmp/claude-0/-home-claude/4507dc3e-fd42-59bc-b8b8-da41034e480a/scratchpad/results.md`.
+- The full table run took about 25 min on 2 vCPU (Xeon 2.1 GHz). The DT 1.0 vs git run (`--libs dt,dt2`) took 83 s and ran alone on the machine.
+- Raw output: `/tmp/claude-0/-home-claude/4507dc3e-fd42-59bc-b8b8-da41034e480a/scratchpad/results.md` and `.../scratchpad/results-dt.md`.
 
 ## Method
 
@@ -61,6 +62,10 @@ B = bytes. Per-change average = sum / changes.
 | Yrs | clownschool | yes | 32 910 | 331 368 (14) | 192 969 | 1.7x | buffers, converged | 0.56 | 19.4 | 15.9 | same |
 | Diamond Types 1.0 | friendsforever | yes | 41 971 | 1 630 721 (63) | 41 971 | 39x | **refuses**: `BaseVersionUnknown` on 26 072 of 26 078, rolls back cleanly; converged only with a caller-side retry buffer | 427 | 219 | 258 | (agent name, seq span) |
 | Diamond Types 1.0 | clownschool | yes | 50 482 | 1 479 004 (64) | 50 482 | 29x | same, 23 117 refusals | 687 | 355 | 229 | same |
+| Diamond Types git | friendsforever | yes | 42 272 | 1 630 721 (63) | 42 272 | 39x | same as 1.0 | 4.6 | 23.2 | 188 | same |
+| Diamond Types git | clownschool | yes | 50 778 | 1 479 003 (64) | 50 778 | 29x | same as 1.0 | 7.5 | 23.4 | 180 | same |
+
+The DT 1.0 rows above are from the first, contended run. The uncontended rerun (`results-dt.md`) gives 436 / 787 ms (snapshot), 229 / 381 ms (each) and 284 / 261 ms (one call).
 
 Other measurements:
 
@@ -68,21 +73,58 @@ Other measurements:
   - Automerge: 116 to 203 s.
   - Loro: 14 to 20 s.
   - Yrs: 9 to 10 s.
-  - DT with retry buffer: 14 to 17 s.
+  - DT with retry buffer: 14 to 17 s (1.0), 12 to 15 s (git).
 - **Full concurrent replay wall time** (friendsforever / clownschool):
   - Automerge: 156 / 112 s.
   - Loro: 1.9 / 2.9 s.
   - Yrs: 0.17 / 0.19 s.
-  - DT: 0.8 / 1.1 s.
+  - DT: 0.8 / 1.1 s (1.0), 1.0 / 1.3 s (git).
 - **Automerge per-call import cost grows linearly with document size** (`am_scaling`, flat friendsforever, one `apply_changes` call per change): 0.56 ms per call for the first 2000 changes, rising to 11 ms per call by change 24 000. Importing one change per call is therefore quadratic. Handing all changes over in one call takes 160 to 175 ms.
 - **Yrs deletes do not advance a clock.** Delete-only txns carry no new `(client, clock)`: 2358 of 26 078 in friendsforever and 809 of 23 136 in clownschool. Their change bytes are just a delete set.
 - **Snapshot contents differ by library:**
   - Yrs snapshots garbage-collect deleted content and keep no history.
   - Loro snapshots hold history plus state (hence 70 KB).
-  - DT's saved form is the op log only: no materialized text, so loading means replaying (427 to 687 ms).
+  - DT's saved form is the op log only: no materialized text, so loading means replaying. That replay takes 427 to 787 ms on 1.0 and 4.6 to 7.5 ms on git main.
 - **Caveats on timing:**
   - The friendsforever Automerge row overlapped with the `am_scaling` run on a 2-core machine. Its replay was 92 s and its per-call load 131 s in an earlier uncontended n=1 run.
   - The n=1 Automerge "each" numbers are single runs and noisy.
+
+## Diamond Types at git main
+
+Rev `89ae3a0a` (2026-09-02). The library is the root package `diamond-types` 2.0.0; the workspace's `crates/*` are tools and bindings (cli, wasm, swift, bench). Its public API is close to 1.0:
+
+- `list::{ListCRDT, ListOpLog, ListBranch}`;
+- `ListOpLog::encode_from(&EncodeOptions, frontier)` for changes since a version;
+- `decode_and_add` and `ListCRDT::merge_data_and_ff` for import;
+- `checkout_tip` for the text.
+
+The merge underneath is the newer Eg-walker style one. Per the README, the crates.io release is out of date in both API and performance.
+
+### What failed or is missing
+
+- **Build.** The crate does not build as-is. Its `smallvec = "2.0.0-alpha.12"` requirement resolves to 2.0.0-beta.4, which fails with three E0119 conflicting `From` impls (`frontier.rs`, `buffered_iter.rs`, `causalgraph/graph/mod.rs`). There is no upstream lockfile at the root. The spike pins it with `cargo update -p smallvec@2.0.0-beta.4 --precise 2.0.0-alpha.12`, recorded in the spike's `Cargo.lock`.
+- **End content in the snapshot.** `EncodeOptions::experimentally_store_end_branch_content(true)` writes an `ExperimentalEndBranch` chunk: 53 468 / 62 191 B, against 42 272 / 50 778 B without it. Nothing in the decoder reads that chunk, so a snapshot cannot skip the replay at this rev. With git main's replay speed it does not need to.
+- **No buffering of out-of-order changes.** `decode_and_add` still refuses a change with missing parents (`BaseVersionUnknown`) and rolls back. There is still no multi-chunk import.
+
+### Measured (uncontended, median of 7)
+
+| | 1.0.0 ff / cs | git main ff / cs |
+|---|---|---|
+| converged | yes / yes | yes / yes |
+| snapshot B | 41 971 / 50 482 | 42 272 / 50 778 |
+| sum per-change B | 1 630 721 / 1 479 004 | 1 630 721 / 1 479 003 |
+| batch B | 41 971 / 50 482 | 42 272 / 50 778 |
+| out of order | refuses, rolls back; converges with caller retry | same |
+| load snapshot ms | 436 / 787 | **4.6 / 7.5** |
+| load changes, decode_and_add per change + one checkout, ms | 229 / 381 | **23.2 / 23.4** |
+| load changes, live branch merge per change, ms | 284 / 261 | 188 / 180 |
+| change id | (agent name, seq span) | same |
+
+### What this shows
+
+- **Measured.** On git main, opening from the saved op log is 60 to 100x faster than on 1.0. Rebuilding from individual changes is 10 to 16x faster.
+- **Measured.** Merging each change into a live branch is the slow path on both versions (180 to 290 ms over the whole history, about 7 to 11 us per change). An editor pays this one keystroke at a time; a fresh open does not.
+- **Inference.** Wire and storage bytes are unchanged, so E1 sees no difference between the versions. Only H6 moves.
 
 ## Changes since a version (item 5)
 
@@ -120,7 +162,7 @@ The test was: export one change on its own, and import it out of order or in cau
 | Automerge | **Confirmed** | Single-change export with hash id. Import buffers missing deps (internal queue). Converged on both traces, both in order and fully shuffled. | Per-change import is O(doc size) per call. Live sync of one remote keystroke into a 21 KB doc costs ~10 ms. Rebuild must hand changes over in bulk. Per-change bytes are 39 to 47x the bundle. |
 | Loro | **Confirmed** | `Updates { from: vv_before }` yields one change. Import holds back pending ops (`ImportStatus.pending`). Converged shuffled. | Per-change bytes 38 to 46x the batch (88 B each). |
 | Yrs | **Confirmed** | `encode_update_v1` per transaction. `apply_update` stashes pending structs and delete sets. Converged shuffled with nothing left pending. | Per-change bytes only 1.7 to 1.8x the merged batch (14 B each). Ids cannot key delete-only changes. |
-| Diamond Types 1.0 | **Confirmed with a condition** | Single-change export works and converges. | Import of a change whose parents are missing is refused (`BaseVersionUnknown`) and rolled back, so **Dialog must deliver in causal order** or keep its own retry buffer (shown to converge). The parents are inside the encoded bytes, so ordering them needs either the retry loop or Dialog storing parents beside the change (inference). Old crates.io release. |
+| Diamond Types (1.0 and git main) | **Confirmed with a condition** | Single-change export works and converges, on both versions. | Import of a change whose parents are missing is refused (`BaseVersionUnknown`) and rolled back, so **Dialog must deliver in causal order** or keep its own retry buffer (shown to converge). The parents are inside the encoded bytes, so ordering them needs either the retry loop or Dialog storing parents beside the change (inference). Per-change bytes 29 to 39x the batch (63 B each). |
 
 The refutation clause ("can only export ranges since a version vector, and splitting loses compression") does not hold for any library: all can export one change. The loss of compression is real, though, at 30 to 47x for all but Yrs. That is E1's question, not E2's.
 
@@ -133,17 +175,18 @@ Inference on delivery order: Dialog's differential returns entries in key order,
 | Yrs | **Confirmed** | 16 to 23 ms from individual changes, either one call per change or one call total. Under 1 ms from a snapshot. |
 | Automerge | **Refuted from changes, confirmed from snapshot** | 159 to 175 ms in one call; 57 to 71 s one call per change. 48 to 51 ms from `save()`. |
 | Loro | **Refuted from changes, confirmed from snapshot** | 213 ms in one call; 1.3 to 1.6 s one call per change. Under 1 ms from a snapshot. |
-| Diamond Types 1.0 | **Refuted** | 219 to 355 ms from changes. 427 to 687 ms from its saved form, which is also a replay. Newer DT on git may differ; not measured. |
+| Diamond Types git main | **Confirmed** | 23 ms from individual changes (one `decode_and_add` per change, then one checkout). 4.6 to 7.5 ms from its saved form, which stores no text and is a replay of the op log. Nothing positional is persisted. |
+| Diamond Types 1.0 | **Refuted** | 229 to 381 ms from changes. 436 to 787 ms from its saved form (also a replay). |
 
-H6's refute clause says "the index has to be persisted, at which point it needs a home". For Automerge and Loro this means a local snapshot cache, which never has to be replicated. Whether a local, unreplicated snapshot counts as "a home" is the maintainer's call. For Yrs, no cache is needed at this size.
+H6's refute clause says "the index has to be persisted, at which point it needs a home". For Automerge and Loro this means a local snapshot cache, which never has to be replicated. Whether a local, unreplicated snapshot counts as "a home" is the maintainer's call. For Yrs and DT git main, no cache is needed at this size.
 
 ## Best fit for "Dialog stores and syncs individual changes" (inference)
 
 **Yrs looks like the best fit.**
 
 - It is the only library whose per-change encoding is close to its batch encoding: 14 B per change, sum 1.7x the merged batch. Splitting history into one entry per change costs it little on the wire. The others pay 30 to 47x before any Dialog overhead.
-- It is the only one that rebuilds from individual changes well under 100 ms, so no persisted positional index is needed.
-- It buffers out-of-order delivery.
+- It rebuilds from individual changes well under 100 ms (16 to 23 ms), so no persisted positional index is needed. DT git main now matches it here.
+- It buffers out-of-order delivery. DT does not.
 
 Its costs:
 
@@ -151,17 +194,30 @@ Its costs:
 - Yjs ordering can interleave in some multi-replica backward-insertion cases (survey [6]).
 - Its snapshot drops history. That is acceptable when Dialog holds the changes, but there is no time travel from the snapshot.
 
-**Loro is second.** It has Fugue ordering, buffering and sub-millisecond snapshot load. Per-change export is heavy (88 B), and it needs a local snapshot cache to open fast.
+**Diamond Types git main is now a close second, and first on H6's model.**
+
+- It rebuilds from changes in 23 ms and from its op log in 5 to 8 ms. It stores only the op log, never a positional index, which is exactly the H6 and DeltaDB split.
+- It is the Eg-walker implementation the hypotheses name.
+
+What keeps it behind Yrs:
+
+- 4.5x the per-change bytes (63 B vs 14 B).
+- No out-of-order buffering. Dialog must deliver in causal order across origins or keep a retry buffer.
+- The unpinned `smallvec` pre-release breaks the build.
+- No crates.io release of this code.
+
+If E1 shows Dialog's per-entry overhead dwarfs the 49 B difference, DT git main and Yrs are close to even (inference). The deciders then become ordering quality, where Yjs interleaves in some cases (survey [6]) and DT's behavior is marked unknown in the survey, and out-of-order handling.
+
+**Loro is third.** It has Fugue ordering, buffering and sub-millisecond snapshot load. Per-change export is heavy (88 B), and it needs a local snapshot cache to open fast.
 
 **Automerge works functionally**, but its per-call import cost grows with document size. Live single-change sync gets slower as the document grows (inference from the linear trend, measured to 26k changes).
 
-**DT 1.0** requires causal delivery and is slow to open in this old release.
+**DT 1.0** requires causal delivery and is slow to open; it is superseded by git main.
 
 These rankings hold for 2 to 3 agents, about 21 KB of ASCII text and one change per keystroke. Larger or non-ASCII documents were not measured.
 
 ## Not done
 
-- Diamond Types from git.
 - Yrs update v2 encoding.
 - Compressed (gzip) sizes.
 - Sequential flat traces, except for the Automerge scaling check.

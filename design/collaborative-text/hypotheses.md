@@ -145,7 +145,8 @@ Change blocks by hash outside the tree, a heads pointer fact inside it.
 **Split (2026-11-09).** Rebuild from individual changes: Yrs 16 to 23 ms
 (confirmed); Automerge 159 to 175 ms and Loro 213 ms (refuted, but both
 open from a snapshot in ~50 ms and under 1 ms, so a local snapshot cache
-rescues them); Diamond Types 1.0 220 to 690 ms either way (refuted).
+rescues them); Diamond Types 1.0 220 to 690 ms either way (refuted); at git main 23 ms
+from changes and 5 to 8 ms from its log (confirmed).
 
 As in DeltaDB: replicate changes, rebuild position → fragment per
 replica. It need not be in the search tree, so the tree's lack of
