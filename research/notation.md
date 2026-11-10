@@ -39,7 +39,7 @@ Added on 2026-11-07, before R16 ran. With the notation held fixed, which way of 
 ## Prior art
 
 - [Dedalus](https://www2.eecs.berkeley.edu/Pubs/TechRpts/2009/EECS-2009-173.html): now, next and async as rule timings.
-- [Bloom](http://bloom-lang.net) and Bloom^L: collections, merge operators, channels, lattices. The [design](notation/design.md#from-bloom) has what it changed.
+- [Bloom](http://bloom-lang.net) and Bloom^L: collections, merge operators, channels, lattices. The [design](notation/design.md#prior-art) has what it changed.
 - [Datomic](https://docs.datomic.com): temporary ids, transaction functions, a query over several sources.
 - [Unison](https://www.unison-lang.org)'s remote abilities: sending a computation by hash.
 - [conduct](https://github.com/Gozala/conduct): labeled arguments and one primary.

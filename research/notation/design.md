@@ -1,415 +1,341 @@
 # Dialog notation
 
-A single notation for dialog queries, rules and transactions. Nothing is implemented yet. Everything here is agreed unless it is marked **Proposed**, and the questions still open are listed at the end. The forms are spelled as Lisp while the semantics settle. The YAML spelling comes after.
+One notation for dialog's queries, rules and transactions. Nothing is implemented yet. Everything here is agreed unless it is marked **Proposed**, and what is still open is listed at the end. Forms are spelled as Lisp while the semantics settle; the YAML spelling comes after.
 
-This is the current decision of the [notation research](../notation.md). The [journal](journal.md) has the reader evals behind each choice, numbered R1 to R15, and the Bloom comparison that reshaped lifetimes and commands. [`sketches/`](sketches) has tonk's `core.yaml` and `notebook.yaml` redone in this notation.
+This is the current decision of the [notation research](../notation.md). The [journal](journal.md) has the reader rounds behind each choice, R1 to R25. The [sketches](sketches) redo tonk's `core.yaml` and `notebook.yaml` in the notation as it stood at R16, before commands, and have not been redone since.
 
 ## Model
 
-A replica holds facts. Each fact is an entity, an attribute and a value, with the cause and version it was written at. A document is evaluated against three times, after [Dedalus](https://www2.eecs.berkeley.edu/Pubs/TechRpts/2009/EECS-2009-173.html):
+A replica holds facts: an entity, an attribute and a value, with the cause and version it was written at. Facts belong to domains, such as `xyz.todo`, and concepts are views over domains.
 
-- **`now`** holds the facts as they stand when the document starts, plus whatever the document's facts and deductive rules derive from them.
-- **`next`** is the state the document commits: `now` with the document's writes applied.
-- **later** is some tick after `next`, possibly at another replica. A fact sent to later arrives when it arrives, and nothing that sends it waits.
+Time moves in ticks, after [Dedalus](https://www2.eecs.berkeley.edu/Pubs/TechRpts/2009/EECS-2009-173.html). A tick reads the facts as they stood when it began, plus whatever is asserted or deduced in it.
 
-Deduction happens within `now`, induction carries `now` into `next`, and `ensue!` sends a fact to a later tick.
+- **Deduction** happens within a tick. A form or a rule head without `!` holds in this tick, and rules derive from it to a fixpoint.
+- **Induction** carries one tick into the next. A rule head with `!` lands after this tick, where rules see it again.
 
 ```mermaid
 flowchart LR
-  now["now<br/>facts + deductions"] -- "assert! / retract!" --> next["next<br/>what the document commits"]
-  now -- "ensue!" --> later["a later tick<br/>here or at a peer"]
-  now -- "assert / retract" --> now
+  subgraph tick["a tick"]
+    start["facts as the tick began"] --> derive["commands, asserts,<br/>deductions to a fixpoint"]
+    derive --> derive
+  end
+  derive -- "what assert and retract land" --> after["after the tick"]
+  derive -- "heads with !" --> after
+  after -- "the next tick, while a ! head produced something" --> tick
 ```
+
+A run goes on tick by tick while inductive heads produce something, up to a turn limit.
 
 ## Terms
 
 | Term | Spelling |
 |---|---|
-| Variable | `?b`, `?status`. It belongs to the one rule or question it appears in. |
-| Text | `"triage"` |
+| Variable | `?t`, `?state`. It belongs to the one rule or question it appears in. |
+| Text | `"Buy milk"` |
 | Number | `16`, `0.5` |
-| Keyword | `:done`, `:text`, `:last`. A keyword is an entity: `:done` is `done:`, with the colon in front so it is not read as a label. Keywords serve where other languages use them: types, picks, layers and the cases of a variant. |
-| Entity | a URI: `id:notebook/scratch`, `did:key:z6Mk…`, `tonk:notebook/edge` |
-| Record | `{xyz.bug/title "Crash" xyz.bug/author "ada"}`, `{"N1" id:notebook/scratch/1}` |
-| Variant | `[:todo :done]`, a type whose value is one of these cases |
-| Name | `notebook/block`, the name of a concept, view or event |
+| Keyword | `:done`, `:text`. A keyword is an entity: `:done` is `done:`, with the colon in front so it is not read as a label. Keywords serve where other languages use them: types, picks and the cases of a variant. |
+| Entity | a URI: `todo:9c1e`, `did:key:z6Mk…`, `tonk:notebook/edge` |
+| Variant | `[:open :done]`, a type whose value is one of these cases |
+| Record | `{"N1" id:notebook/scratch/1}`, the value of a collection |
+| Domain | `xyz.todo`, where facts live |
+| Name | `todo`, the name of a concept |
 
 `;` starts a comment.
 
 ## Calls
 
-A call names a concept and passes its parameters. Every definition has exactly one primary parameter, written without a label. Every other parameter has a label, and arguments are never punned. At a call the primary may be written bare or as `of:`, in any position, as in [conduct](https://github.com/Gozala/conduct).
+A call names a concept, a domain, a command or a formula, and passes its parameters. Every definition has exactly one primary, written without a label. Every other parameter has its label, and arguments are never punned. The primary may also be written `of:`, in any position, as in [conduct](https://github.com/Gozala/conduct).
 
 ```clj
-(bug/status ?b is: :triage)
-(bug/status is: :triage of: ?b)
-(bug/summary ?b title: ?t assignee: ?who)
+(todo ?t list: ?l state: :open)
+(todo state: :open of: ?t)
 ```
 
-A call may leave out any parameter whose definition says how to derive it. Today only the primary has such a rule, under [Entities](#entities).
-
-`is:` is a call's result. A call written in any argument's place stands for its `is:` value, through a fresh variable, when that variable would only wire the two calls together:
-
-```clj
-(bug/report (id {…}) title: "hello world")
-
-; is short for
-(id {…} is: ?bug)
-(bug/report ?bug title: "hello world")
-```
-
-A `!` after the name makes the call a write: `(bug/status! bug:01 is: :done)`.
+In a question or a premise, a parameter left out matches anything. In an `assert` through a concept, leaving one out is a compile error (see [Commands](#commands)).
 
 ## Documents
 
-A document is a set of top-level forms evaluated as one tick. The order of its forms does not matter.
+A document is a set of top-level forms evaluated as one run. The order of its forms does not matter. A top-level form is one of:
 
-The `!` says whether something is retained. Without `!`, what a form asserts or defines holds for this document's tick and is not retained. With `!`, it is retained until it is retracted: it goes into `next`, and the document does not see it. Every premise and every question reads `now`, so a document sees what it asserts and deduces, but never what it writes with `!`.
+- a question, `(query …)`;
+- a command, such as `(add (todo list: list:home text: "Buy milk"))` or `(assert (xyz.todo todo:9c1e state: :done))`;
+- a `rule`;
+- a `concept`.
 
-```clj
-(concept (bug ?bug title: ?title) …)
-(bug title: "Hello world")        ; asserted into now
-(bug ?bug title: ?title)          ; finds the Hello world bug
-```
+Top-level forms never carry `!`. A command at the top level must be ground: a variable in one is an error. A bare call, with variables or without, is not a top-level form.
 
-Neither the concept nor the bug reaches `next`. Written `(bug! title: "Hello world")` instead, the bug would be in `next` and the question would not find it, and the concept still would not be in `next`. A chain, where one write depends on reading another, takes a second document.
+A document is submitted in one of two ways:
 
-A call at the top of a document is short for a form:
+- As a **query**, it runs and returns what it derived and what would have landed. It changes nothing, so it needs no permission to write.
+- As a **transaction**, it runs the same way, then advances the replica's revision with everything that landed.
 
-| written | is short for |
-|---|---|
-| `(bug title: "Hello world")`, no variables | `(assert (bug title: "Hello world"))` |
-| `(bug! title: "Hello world")`, no variables | `(assert! (bug title: "Hello world"))` |
-| `(bug ?b title: ?t)`, with variables | `(query (bug ?b title: ?t))` |
-| `(bug! ?b title: ?t)`, with variables | an error: there is no inductive query |
+So one document can be run as a query to see what it would do, then as a transaction. In a transaction a top-level `rule` or `concept` is installed and runs from then on; in a query it lives for that run only.
 
-**Proposed.** At the top of a document, a call may nest a formula whose arguments are ground, as in `(bug! (id {…}) title: "x")`. A formula over ground arguments has exactly one result and reads no facts, so the call is still ground once it is computed, and it is still an assertion or a write. It means the same as `(rule (assert! (bug ?b title: "x")) (when (id {…} is: ?b)))`. A nested concept call reads facts and can match many rows, which would make an assertion a query in disguise; that takes a rule, written out.
-
-So the `!` means the same on every form: retained. A rule or concept defined with `!` is retained; without it, it is gone after the tick. The verb in a rule's head says the same of its conclusions: a deductive rule (`assert`) does not retain them but keeps deducing them while its premises hold, which is why an installed deductive rule's deductions appear in every question; an inductive rule (`assert!`) retains them.
-
-Installed rules read `now`, including what a document asserts there. An installed inductive rule (`rule!` with `assert!`) that matches a document's assertion writes into `next`, and that write is stored. An installed deductive rule that matches it deduces only in this tick, since the assertion is gone in the next. So an assertion without `!` persists nothing itself; only the inductive rules it triggers do.
-
-The top-level forms are:
-
-- **a question**, `(query …)`, or a call with a variable, such as `(bug/status ?b is: :done)`;
-- **an assertion**, `(assert …)`, or a call with no variable and no `!`, which holds for this document's tick;
-- **a write**, `(assert! …)`, or a call with no variable and a `!`, which is retained;
-- **a rule**, `(rule …)`;
-- **a definition**: `concept`, `rule`, `view` or `event`, with `!` to install it.
+In R23, 8 of 10 readers preferred this to a `!` at the top level deciding the commit: `!` keeps one meaning, and a stray `!` cannot turn a read into a write.
 
 ## Questions
 
-A call with a variable is a question. Its answer is the rows of variable bindings that match `now`. A parameter the question leaves out matches any value. There are no yes-or-no questions: a call with no variable is an assertion, as a ground atom is a fact in a Datalog program.
-
-## Writes
-
-A bare call with `!` writes into `next`. It must be ground, except for an entity it leaves out (see [Entities](#entities)).
-
 ```clj
-(bug/status! bug:01 is: :done)
+(query (todo ?t list: list:home state: :open))
 ```
 
-A write means the same as a rule with one `assert!` head and no `when`, so that longer form is never written.
+A question's answer is the rows of variable bindings that match what holds in the tick, including what the document asserts and deduces. It changes nothing, in either kind of run.
 
-A write through a concept passes every parameter. Leaving one out is a compile error, not "keep what is there", because it is more often a mistake than a choice. To change one attribute, write the attribute itself, `(xyz.tonk.notebook/source! id:b1 is: "x")`, or a concept over just that attribute, `(block/source! id:b1 is: "x")`. There is no marker for "keep this one". An entity is an identity over time, never partial; what can be partial is what is known about it, so that only some of a concept's facts hold. That is allowed when it is meant: it comes from writing an attribute or a smaller concept, never from forgetting a parameter.
+A concept a question names must be declared, installed or in the same document, or the question is a compile error. A domain call needs no declaration: `(query (xyz.todo ?t text: ?x))` reads whatever the domain holds. A reader's default is the other way: in R25, 16 of 20 expected an undeclared concept to answer nothing, as an unknown relation does in Datalog.
 
-How a retract says "every value" is open.
-
-## Rules
-
-A rule is one or more heads and one `when`:
-
-```clj
-(rule (assert (bug/review ?b reviewer: ?who))
-  (when (bug/status ?b is: :review)
-        (bug/assignee ?b is: ?who)))
-```
-
-A head is a verb around a call. The verb says when the head takes effect, and the call inside it carries no `!`:
-
-| verb | takes effect | |
-|---|---|---|
-| `assert` | in `now` | a deductive rule: it derives into `now` and settles to a fixpoint |
-| `retract` | in `now` | **Proposed:** stratified the way `unless` is |
-| `assert!` | in `next` | an inductive rule: it reads `now` and writes `next` |
-| `retract!` | in `next` | |
-| `ensue!` | in a later tick | an asynchronous rule; it has no retracting form |
-
-Several heads may share one `when`, so a body is written once:
-
-```clj
-(rule (assert! (bug/status ?b is: :done))
-      (retract! (bug/assignee ?b is: ?who))
-  (when (bug/status ?b is: :review)
-        (bug/assignee ?b is: ?who)))
-```
-
-A premise in `when` is one of:
-- a call, on a concept or on a stored attribute, such as `(xyz.todo.list/owner-peer ?l is: ?peer)`;
-- `(unless call)`, which holds when the call has no match;
-- a formula, such as `(== ?a ?b)`, `(!= ?old ?key)`, `(id {…} is: ?e)` or `(dialog/position ?b after: ?lo before: ?hi is: ?at)`.
-
-Every variable in a head must be bound by the premises.
-
-The `!` moved from the head's call to the verb because readers could not tell when a rule spelled `(assert! (bug/status! ?b …) …)` takes effect: all nine readers in R4 said the form never says, and five of them asked for a separate part that names the trigger. In R10, `ensue!` with no definition said nothing about when it takes effect (none of three could tell), but no reader invented a retracting form for it; two of three invented `retract-later!` for `assert-later!`. So `ensue!` needs this line in the spec, and keeps it from growing an opposite.
-
-## Installing
-
-A `!` on a definition's keyword installs it in the replica: `concept!`, `rule!`, `view!`, `event!`. That is the same `!` a write has: the definition goes into `next`. Without the `!`, the definition belongs to the document it is written in.
-
-An installed inductive rule fires whenever its premises match, which is how a command takes effect.
-
-Installed inductive rules write into `next`, so the document's questions do not see what they induce. Their edits appear in the report and in the commit. A document's own `!` writes reach installed rules a tick later, when `next` has become `now`.
+`query`, `select`, `find` and `(? …)` read alike, with documentation (R24) and without (R25), and no reader misread any of them. `query` is the maintainer's choice. A query form and a document run as a query mean the same thing: they read and change nothing.
 
 ## Concepts
 
-`concept!` declares a concept. Its head is a call made of variables, and its body is a conjunction. A concept can be read with a query and written with a `!` call.
-
-### Attributes
-
-A body line that names a stored attribute declares it: the stored name, the primary, `is:`, the value type (`as:`) and the pick.
-
 ```clj
-(concept! (notebook/title ?of is: ?is)
-  (xyz.tonk.notebook/title ?of is: ?is as: :text pick: :last))
+(concept (todo ?t list: ?l text: ?x state: ?s)
+  (xyz.todo ?t list: ?l text: ?x state: ?s)
+  (dialog.type ?l is: :entity)
+  (dialog.type ?x is: :text)
+  (dialog.type ?s is: [:open :done]))
 ```
 
-**Proposed.** The line is a call on the stored name. It replaces the `(the xyz.tonk.notebook/title of: ?of …)` spelling, and is what every reader prompt used from R1 on. What tells such a line apart from a call on another concept is open.
+A concept is a rule that runs both ways. Read, its body makes the concept; asserted, each of its fields goes into its domain. Its facts are stored, and carried from tick to tick until retracted.
 
-The types used so far are `:text`, `:entity`, `:bytes`, `:natural`, `:float`, sized numbers such as `(:float 64)`, variants such as `[:todo :done]`, and the collections `(:sequence T)` and `(:dictionary T)`. A collection value is written as a record from key to element: `(notebook/entry! id:notebook/scratch is: {"N1" id:notebook/scratch/1})`.
+A body holds domain calls, concept calls and constraints, and every variable in it appears in the head. That is what lets every concept be read and written, as an updatable view in SQL maps each column back to one base column; anything else is a rule. A concept may not contain itself.
 
-The picks are `:last`, `:all`, `:max`, `:min` and `:top`, the last of which ranks the cases of a variant. A pick is named by an entity (`last:`, `all:` …) and is part of the attribute's identity. In dialog today it is one ordering over a cell's claims, used both ways:
-
-- **On read**, the claims of one entity and attribute are elected by the ordering, and the winner is returned. `:all` returns every claim. A query over a one-valued attribute scans, then checks each candidate against the other claims of its cell, so the pick is a second select over the claims the scan found.
-- **On write**, the claim the ordering elects, the one a read would return, leaves the operational index beside the new value; history keeps every value. Under `:all` a write appends and retracts nothing. So under `:max`, writing 3 over a 5 replaces the 5: the pick decides which claim concurrent writes resolve to, not that values only grow.
-
-The write is the read's shortcut: it keeps the operational index at the claim a read would return, so a read normally finds one live claim. It elects among several only after replicas that wrote concurrently merge. A write today succeeds only the elected claim and leaves the other concurrent ones live, so under `:max`, `:min` and `:top` a value the write meant to replace can win the next read ([#759](https://github.com/dialog-db/dialog-db/issues/759)). It should succeed every live claim the writer holds.
-
-**Proposed.** User-defined picks are user-defined orderings: how two values compare, with the shared fallback to standing (version, cause, succession) and then the value's hash breaking ties, so every ordering is total and every replica elects alike. The tree and the query already run every pick through that one function, so an ordering runs at write, keeping the operational index, and at read, settling merged concurrent claims. A pick written as an arbitrary query would lose the shortcut, since a write could not tell what to retract. Its definition is hashed into the attribute's identity, as `:top`'s list of cases already is. A pick elects one claim; something that computes a new value from several, a sum or a count, is a rule over an `:all` attribute. Every pick but `:all` retracts on write, so only `:all` only grows: rules over it never take a conclusion back.
-
-An attribute line may also carry `layer:` (see [Layers](#layers)) and `role:`, the palette slot that a command's field fills.
-
-### Composite concepts
-
-A composite concept's body is a conjunction of attribute lines, concept calls and constants.
+A concept's primary need not be the entity it reads. Read from the value's side, a field gives the reverse relation:
 
 ```clj
-(concept! (notebook/block ?block notebook: ?n source: ?s)
-  (block/notebook ?block is: ?n)
-  (block/source ?block is: ?s))
+(concept (list-item ?l todo: ?t)
+  (xyz.todo ?t list: ?l))
+
+(query (list-item list:home todo: ?t))    ; every to-do on list:home
 ```
 
-Every variable in a body appears in the head. A body cannot reach through an entity it does not name, because a write through the concept could not construct that entity. A rule can reach through one.
-
-A concept's primary need not be the entity of the attributes it reads. Read from the value's side, an attribute gives the reverse relation:
-
-```clj
-(concept! (list/todo ?list todo: ?todo)
-  (xyz.todo/list ?todo is: ?list))
-
-(list/todo list:home todo: ?t)    ; every to-do on list:home
-```
-
-A concept body holds no formulas, only [constraints](#constraints), so every concept can be read and written. Formulas belong in rule bodies, and also at the top of a document: in a question, in an assertion, and in a write, as `(bug! (id {…}) …)` does. A concept may not contain itself.
-
-A concept says what facts make it up, not how its entity is made. Construction is the call's business (below) or a rule's.
+A concept says what facts make it up, not how its entity is made. Construction belongs to a command's rule (see [Creating things](#creating-things)).
 
 ### Domain calls
 
-**Proposed.** A call on a domain is a concept that is never declared. Each label names the attribute of that name in the domain:
+`(xyz.todo ?t text: ?x)` reads the `text` field of `?t` in the `xyz.todo` domain. A domain is never declared; each label names a field. Fields belong to the domain, not to a concept, so concepts can share them:
 
 ```clj
-(xyz.tonk ?bug title: ?t assignee: ?a)   ; reads xyz.tonk/title and xyz.tonk/assignee
+(concept (note ?n text: ?x)
+  (xyz.todo ?n text: ?x)
+  (dialog.type ?x is: :text))
 ```
 
-Each attribute's type is inferred: from whatever narrows its variable, such as a constraint or another call it is passed to, and on a write from the value written. Its pick is `:last` unless something says otherwise. Type and pick are part of an attribute's identity, so a different type or pick is another attribute, not a narrower view of the same facts. A writer who means a particular attribute says so, with an attribute line or a declared concept; one who says neither gets whatever the values imply:
+Every to-do is also a note, and `(retract (todo todo:9c1e))` takes the `text` a note reads, so it stops being a note.
 
-```clj
-(concept! (bug ?b title: ?t assignee: ?a)
-  (xyz.tonk/title ?b is: ?t as: :text pick: :last)
-  (xyz.tonk/assignee ?b is: ?a as: :entity pick: :last))
-```
-
-A rule's head can be a domain call, which gives a document's answer a concept without declaring one: `(rule (my.app.found ?b title: ?t) (when (bug ?b title: ?t)))`.
+A field's type is inferred from whatever narrows its variable: a constraint, another call it is passed to, or on an assert the value. Type and pick are part of a field's identity, so a different type or pick is another field, not a narrower view of the same facts. A writer who means a particular field says so with a declared concept.
 
 ### Constraints
 
-A concept body may hold constraints. A constraint computes nothing; it holds or it does not, so it works the same whether the concept is read or written through: on a read it filters, on a write it rejects. Formulas compute, and belong in rules. The constraints are:
+A body may hold constraints. A constraint computes nothing; it holds or it does not, so it works the same whether the concept is read or asserted: on a read it filters, on an assert it rejects. The constraints are:
 
-- **type**: a variable's value is text, an entity, a number, or a case of a variant;
+- **type**: `(dialog.type ?x is: :text)`, a value is text, an entity, a number, or a case of a variant;
 - **equality**: two variables are equal, or a variable equals a constant;
 - **comparison**: less than, greater than, within a range.
 
-Negation is not a constraint, since a write could not say what it enforces, and neither is arithmetic that runs both ways, since it computes.
+Negation is not a constraint, since an assert could not say what it enforces, and neither is arithmetic that runs both ways, since it computes. Formulas belong in rules.
 
-This is the line between a concept and a rule: a concept is a view whose every parameter maps back to one attribute, as an updatable view in SQL maps each column to one base column. A rule is any view.
+The types used so far are `:text`, `:entity`, `:bytes`, `:natural`, `:float`, sized numbers such as `(:float 64)`, variants such as `[:open :done]`, and the collections `(:sequence T)` and `(:dictionary T)`.
 
-### Optional parameters
+### Picks
 
-A parameter marked `(option ?x)` in the head may stay unbound in a match.
+A field keeps one value per entity, elected by its pick: `:last` unless something says otherwise, and `:top` for a variant, which ranks its cases in the order they are listed. The other picks are `:all`, `:max` and `:min`. A pick is named by an entity (`last:`, `top:` …) and is part of the field's identity.
 
-```clj
-(concept! (tonk/repository ?r name: ?name description: (option ?d))
-  (repo/name ?r is: ?name)
-  (repo/description ?r is: ?d))
-```
+In dialog today a pick is one ordering over a cell's claims, used both ways:
 
-This is open. In R2 one reader in six expected `(option ?who)` to let a bug with no assignee match.
+- **On read**, the claims of one entity and field are elected by the ordering, and the winner is returned. `:all` returns every claim.
+- **On write**, the claim the ordering elects, the one a read would return, leaves the operational index beside the new value; history keeps every value. Under `:all` a write appends and retracts nothing. Under `:max`, writing 3 over a 5 replaces the 5: the pick decides which claim concurrent writes resolve to, not that values only grow.
+
+The write is the read's shortcut, so a read normally finds one live claim, and elects among several only after replicas that wrote concurrently merge. A write today succeeds only the elected claim and leaves the other concurrent ones live, so under `:max`, `:min` and `:top` a value the write meant to replace can win the next read ([#759](https://github.com/dialog-db/dialog-db/issues/759)). It should succeed every live claim the writer holds.
+
+**Proposed.** User-defined picks are user-defined orderings: how two values compare, with the shared fallback to standing (version, cause, succession) and then the value's hash, so every ordering is total and every replica elects alike. An ordering runs at write, keeping the operational index, and at read, settling merged claims. A pick written as an arbitrary query would lose that shortcut, since a write could not tell what to retract. A pick elects one claim; a sum or a count is a rule over an `:all` field.
 
 ### Identity
 
-A concept's identity is its set of attributes. An attribute's identity is its stored name, type, pick and layer, so the same name in another layer is another attribute. A name binds a concept to a signature, meaning the head's labels. Two names over the same attributes are one concept with two signatures. Redefining a name with a different body rebinds the name. Stored facts belong to attributes, not names, so they are not touched.
-
-**Proposed.** Views and routes refer to names, so two route models with the same fields keep separate templates.
-
-## Entities
-
-A write either names its entity or leaves it out:
-
-```clj
-(bug/status! bug:7f3a is: :done)                             ; names it
-(bug! (id {xyz.bug/title "Crash" xyz.bug/author "ada"})       ; names it, by id
-      title: "Crash on save" author: "ada" status: :todo)
-(report! title: "Crash on save" author: "ada" status: :todo)  ; leaves it out
-```
-
-**Leaving the primary out creates.** When every other parameter is given and the primary is not, the write makes a new instance of the concept, and its entity is the `id` of every attribute and value the write states. Two writes of the same facts are one entity, and two writes that differ in any fact are two.
-
-**Naming it** uses an entity, or the `id` formula in the primary's place. `id`'s primary is a value, usually a record, and its `is:` is the entity that value identifies: the one named by the hash of the value's canonical encoding, the same on every replica. The record that names an entity and the facts written about it are separate things: an identity is fixed when it is made, and the facts can change after.
-
-A record in the entity's place is not an entity. R15 showed readers will take one as an identifier when the spec says so (sixteen of sixteen), but `(id {…})` says it outright, and in R9 readers read `(id {…})` as a derived entity five of five times, a bare record none of five.
-
-An identity that must agree everywhere, such as "a bug is its title and author", belongs in a rule that every replica runs, not in each writer's choice of fields:
-
-```clj
-(rule! (assert! (bug ?b title: ?t author: ?a status: ?s))
-  (when (report title: ?t author: ?a status: ?s)
-        (id {xyz.bug/title ?t xyz.bug/author ?a} is: ?b)))
-```
-
-Writers send a report, and the rule picks the fields. `id` runs one way, so the planner binds its record first. The keys are stored attribute names: R15's readers spelled the same identity three ways (short names, stored names, `title:` labels), and each spelling hashes to a different entity.
-
-Entities with the same content are the same entity. That is the point for value-like things such as routes. For things that must stay distinct even when their content is equal, a rule can lend them another entity, or the write adds a field that tells them apart, such as the event's time. In `notebook.clj`, each new block takes the entity of the insert command that made it.
-
-There is no `default` line and no marker in the concept's head that says how a write derives the entity. Readers did not see a derivation in a `default` line (none of three in R1), and the marker that read best, `(bug {title author} ?b …)` (five of five in R14 once a rule explained it), puts construction in a definition that is otherwise only about which facts make the concept up.
-
-## Layers
-
-**Proposed.** The set of layers and their names beyond `:now`.
-
-An attribute line's `layer:` says where its facts live and how long. Layers are a fixed set, named by entities, and no document declares one. An attribute with no `layer:` is stored in the replica.
-
-| layer | holds facts | |
-|---|---|---|
-| (none) | until retracted | stored, and synced as the replica is |
-| `:now` | for one tick | never stored; gone once the document's tick ends |
-
-The layer is part of the attribute's identity. `xyz.tonk.site/path` stored and `xyz.tonk.site/path` in `:now` are two attributes, so a concept over one is not a concept over the other.
-
-Facts move between layers by rules, as Bloom moves them between collections. A deductive rule reads several layers on demand; an inductive rule copies facts into another layer and keeps them there. Nothing else replicates.
+A concept's identity is its set of fields. A field's identity is its domain, its name, its type and its pick. A name binds a concept to a signature, meaning the head's labels; two names over the same fields are one concept with two signatures. Redefining a name with a different body rebinds the name. Stored facts belong to fields, not names, so they are not touched.
 
 ## Commands
 
-A command is a concept whose attributes are in `:now`. There is no `command` form. Writing one triggers installed rules and stores nothing.
+Everything that changes anything is a command, written around a concept or a domain:
 
 ```clj
-(concept! (tonk/rename-repository ?cmd repository: ?r name: ?name)
-  (xyz.tonk.rename-repository/subject ?cmd is: ?r as: :entity layer: :now)
-  (xyz.tonk.rename-repository/name ?cmd is: ?name as: :text layer: :now))
-
-(rule! (assert! (repo/name ?r is: ?name))
-  (when (tonk/rename-repository ?cmd repository: ?r name: ?name)))
-
-(tonk/rename-repository! repository: did:key:z6Mk… name: "Plans")
+(add (todo list: list:home text: "Buy milk"))
 ```
 
-The command's write leaves its entity out, so the entity is the `id` of its fields. Two commands in one tick never share an entity, so their fields never mix. A shared placeholder entity such as `:new` mixes them: in R3, three of three readers predicted that two `(bug! :new …)` writes in one document leave one entity with two titles.
+- A command's facts are not the concept's facts. They are tagged with the command's name, so `(query (todo …))` never sees them, and they are never carried, stored or synced: rules see them in the tick they are issued, and then they are gone. The `add` above keeps nothing; what lands is what its rules assert. In R25 all 20 readers, shown no documentation, took `add` to write the to-do itself, so this has to be said.
+- A command needs no declaration. The rules that read it decide what it takes: any of the concept's parameters, with or without its entity, as in `(remind (todo todo:9c1e))`. Issuing one with a parameter no rule reads is a compile error.
+- A command wraps exactly one concept or domain, one deep.
+- A command's rows are keyed by its name and everything it passes, so identical commands in one tick are one. A command that must count twice in a tick, such as an increment, carries a field that tells them apart.
 
-Whether only rules may write a stored concept, so that its command is the only way in, is a matter of authorization, not notation: a capability that lets a writer into `:now` but not into the stored attributes.
+### `assert` and `retract`
 
-## Sending
+The two commands that come with the language, and the only ones that change a concept:
 
-`ensue!` sends a fact to a later tick. Where it goes is data on the fact: the `to:` field names the peer, and the runtime routes on it, the way Bloom routes a channel row by its `@` column.
+| form | does |
+|---|---|
+| `(assert (todo todo:9c1e list: list:home text: "Buy milk" state: :open))` | names the entity and passes every parameter; leaving any out is a compile error |
+| `(assert (xyz.todo todo:9c1e state: :done))` | a domain takes any of its fields |
+| `(retract (todo todo:9c1e))` | retracts every field of the concept on that entity |
+| `(retract (xyz.todo todo:9c1e text: "Buy milk"))` | retracts just that value |
+
+What is asserted holds in this tick and lands after it. What is retracted stops holding now and is gone after it. Every other command changes a concept only through rules that issue `assert` or `retract`.
+
+Leaving a parameter out of an assert through a concept is an error, not "keep what is there", because it is more often a mistake than a choice. A change to some fields goes through the domain. An entity is an identity over time, never partial; what can be partial is what is known about it.
+
+There is no content identity: `assert` never derives an entity. In R17 and R18 an entity derived from every field made a changed state a new to-do, and readers tripped on it until it was removed (R19, 0 of 15).
+
+## Creating things
+
+Nothing gets an entity by itself. A new thing is made by a command whose rule computes its entity, with one of two formulas:
+
+- `(id ?t list: ?l text: ?x)` binds `?t` to the entity those labels and values identify. The same labels and values give the same entity, on every device. It derives; it neither mints nor looks up. It runs one way, so the planner binds its fields first.
+- `(fresh ?n)` binds `?n` to a new entity, never equal to any other.
 
 ```clj
-(rule! (ensue! (xyz.bug/report ?r title: ?t author: ?a status: ?s to: ?peer))
-  (when (draft ?r title: ?t author: ?a status: ?s peer: ?peer)))
+(rule (assert (todo ?t list: ?l text: ?x state: :open))
+  (when (add (todo list: ?l text: ?x))
+        (id ?t list: ?l text: ?x)))
+
+(rule (assert (note ?n text: ?x))
+  (when (jot (note text: ?x))
+        (fresh ?n)))
 ```
 
-The facts the receiver needs go with the message, in the same tick: the sender says which, rather than the receiver fetching them. On arrival they are in the receiver's `:now` for one tick, where its rules join them with its own facts.
+Two devices that `add` the same list and text make one to-do; every `jot` makes a new note. The schema's author owns how things are created, so every agent that creates through `add` agrees on identity. In R25, 19 of 20 readers could not tell from the code alone whether `id` mints, derives or looks up, so the spec says it.
 
-**Proposed.** A remote call, Unison's `fork` and `await`, is a layer on top: a request sent with `ensue!`, a rule at the peer that answers with `ensue!`, and a rule that matches the reply to its request by the request's entity. It needs no form of its own in the core.
+## Rules
+
+`(rule head… (when premise…))`. A head is a command the rule issues, or a relation it defines with a domain call. Several heads share one `when`, so one rule can retract and assert:
+
+```clj
+(rule (retract (note ?n))
+      (assert (archived ?n text: ?x))
+  (when (archive (note ?n))
+        (note ?n text: ?x)))
+```
+
+A premise is one of:
+
+- a call on a concept, a domain or a command;
+- `(unless call)`, which holds when the call has no match;
+- a formula: `id`, `fresh`, `(== ?a ?b)`, `(!= ?a ?b)`, `(dialog/position ?b after: ?lo before: ?hi is: ?at)`.
+
+Every variable in a head is bound by a premise. A premise matches what holds now, and `!` never appears in one.
+
+A head without `!` holds in this tick, and rules derive from it to a fixpoint, recursion included. A relation head is never stored; it holds while its premises do:
+
+```clj
+(rule (xyz.app.open ?t text: ?x)
+  (when (todo ?t text: ?x state: :open)))
+
+(query (xyz.app.open ?t text: ?x))
+```
+
+A head with `!` lands after this tick: the rule issues its command again in the next one. This is the only place `!` is written.
+
+```clj
+(rule (remind! (todo ?t))
+  (when (remind (todo ?t))
+        (todo ?t state: :open)))
+```
+
+Once `(remind (todo todo:9c1e))` is issued, `remind` is issued again every tick for as long as the to-do is open.
+
+The cost R23's readers named: a head's `assert` lands only when the run is a transaction, and the rule's text does not say which it will be.
+
+## The prelude
+
+**Proposed.** A concept is carried from tick to tick by a rule the language supplies, as persistence is in Dedalus; a command is not carried, because nothing carries it. `?concept` stands for any concept and `… ?params` for its parameters but the primary.
+
+```clj
+(rule (?concept ?e … ?params)             ; what is asserted holds now
+  (when (assert (?concept ?e … ?params))))
+
+(rule (?concept! ?e … ?params)            ; what holds is carried, unless retracted
+  (when (?concept ?e … ?params)
+        (unless (retract (?concept ?e)))))
+```
+
+They act on each field a concept reads, so an assert or retract through a domain is the same rules over one field. They do not yet say that a retract also stops a fact holding in its own tick; that, and an assert and a retract of one fact in one tick, are open. In R17 the prelude did not help readers; it is the definition, not the teaching.
 
 ## Conflicts
 
 A conflict is never an error. It is elected, as concurrent writes are, comparing version first, then cause, then succession, and value only as the last resort.
 
-- Conflicting writes in one document are concurrent candidates.
-- A write in a later document succeeds the claim it read.
-- A deductive rule's value under `:last` succeeds the claim its body read (dialog #724, fixed by #725), so `(rule (assert (bug/status ?b is: :todo)) (when (bug/status ?b is: :triage)))` rewrites the status instead of standing beside it.
+- Conflicting asserts in one tick are concurrent candidates.
+- An assert in a later transaction succeeds the claim it read.
+- A value a rule derives under `:last` succeeds the claim its body read (dialog #724, fixed by #725), so a rule that moves a status rewrites it instead of standing beside it.
 - A cycle of rewrites converges, with the rewrites as concurrent candidates. A counter (`?n + 1`) does not converge.
 
 A pick is a choice of merge, which Bloom^L would call a lattice. `:all` is a set union and needs no order. `:top` over a variant's ranked cases only moves up the ranking, so two devices that never synced agree once they do. `:last` needs an order across devices, which seventeen of nineteen readers in R15 asked about.
 
+## Sending
+
+**Proposed.** Sending to a later tick or to a peer was spelled `ensue!` before commands, which now collides with `!`. Its semantics stay: where a fact goes is data on it, a `to:` field the runtime routes on, the way Bloom routes a channel row by its `@` column. The facts the receiver needs go with the message, in the same tick: the sender says which, rather than the receiver fetching them. On arrival they hold for one tick at the receiver, as a command's facts do, where its rules join them with its own facts. Its spelling is open.
+
+A remote call, Unison's `fork` and `await`, is a layer on top: a request sent, a rule at the peer that answers, and a rule that matches the reply to its request by the request's entity.
+
 ## Views, events and routes
 
-**Proposed.** `view!` and `event!` name what they define by their first argument, the way `concept!` does.
+**Proposed.** `view`, `event` and `route` are top-level forms like `rule` and `concept`: installed by a transaction, and named by their first argument.
 
 A view attaches templates to a concept by facet:
 
 ```clj
-(view! notebook/block
+(view block
   show: {:directory "<div class='notebook-block-row' subject={this} data-source={source}></div>"})
 ```
 
 An event says how a platform event fills a command. Its `where` keys name command parameters, and its values are paths into the event:
 
 ```clj
-(event! on/block-remove
+(event block-remove
   type: "remove"
   where: {:block ".currentTarget.dataset.subject"})
 ```
 
-A template binds an event to a command with `on:block-remove=block/remove`. A command filled from an element's event is still a command. Elements never write facts directly.
+A template binds an event to a command, and a command filled from an element's event is still a command. Elements never write facts directly. How a template names a command that wraps a concept, `(remove (block …))`, is open.
 
 A route maps a path to a route model:
 
 ```clj
-(route! path: "/notebook/{*entity}" concept: notebook/route)
+(route path: "/notebook/{*entity}" concept: notebook-route)
 ```
 
-## Preview
+## Prior art
 
-**Proposed.** A preview is the same document, evaluated without committing.
+Comparing the design with [Bloom](http://bloom-lang.net), Dedalus and LogiQL settled most of the choices above.
 
-## From Bloom
-
-Comparing the design with [Bloom](http://bloom-lang.net) settled three of the choices above and changed two.
-
-| Bloom | here |
+| there | here |
 |---|---|
-| A collection's kind (`table`, `scratch`, `channel`) is declared once; a rule only names collections. | Lifetime is on the attribute (`layer:`), not on the rule or the call. |
-| The merge operator says when a rule takes effect: `<=` now, `<+` next, `<-` delete next, `<~` later. | The head's verb: `assert`, `assert!`, `retract!`, `ensue!`. |
-| An input is a `scratch` row; `interface input` only labels who writes it. | A command is a concept in `:now`; `command` and `transient:` are gone. Who may write what is authorization. |
-| A `channel` is a scratch with one column marked `@` for the destination. | `to:` is a field of the sent fact, not a parameter of `ensue!`. |
-| A row's fields stay together because a row is one tuple. | A fact's fields stay together only on a shared entity, so each command needs its own: the `id` of its write. |
-| A key is the declared columns, and a row with other key values is another row. | A derived entity is fixed when it is made. That keeps it stable when its title changes, and is why the identity fields are open below. |
-| Bloom^L lattices merge without coordination. | Picks are merges; `:last` is the one that needs a clock. |
+| Bloom: a `table` persists; a `scratch` or `channel` lasts one tick. | A concept is carried until retracted; a command lasts one tick. Lifetime belongs to what is called, not to the call. |
+| Bloom: tables change only through `<+` and `<-`. | Concepts change only through `assert` and `retract`, which land after the tick. |
+| Bloom: `<=` holds now, `<~` arrives later. | A head without `!` holds now; sending is open. |
+| Dedalus: persistence is a rule, and induction is the successor tick. | The [prelude](#the-prelude) carries concepts; `!` on a head is induction. |
+| LogiQL: pulse predicates hold for one transaction. | Commands. |
+| LogiQL: delta predicates `+R`, `-R`, `^R`. | `assert` and `retract`. |
+| LogiQL: constructor predicates make entities from a key. | `id` and `fresh` in a command's rule. |
+| LogiQL: `exec` runs a block once, `addblock` installs it. | A query runs a document's rules once; a transaction installs them. |
+| Bloom: a row's fields stay together because a row is one tuple. | A command's rows are keyed by its name and content. |
+| Bloom^L: lattices merge without coordination. | Picks are merges; `:last` is the one that needs a clock. |
 
 ## Open
 
-- Whether a command is asserted rather than written. A command is something not retained, so `(report title: …)` without `!` fits: installed inductive rules match it in this tick and retain the bug, and nothing retains the report. Every example here writes it with `!`, which retains it. If commands are asserted, `layer: :now` only keeps anyone from retaining one by writing it with `!`.
-- How text spans lines or holds `"`. The sketches still write templates as `"""…"""`, which is not part of the notation.
-- What a rule head that names no entity lands on. In R16, four of five readers of this spec put a sent notice on the to-do's own entity because no example shows another way; the readers of the shorter documents left it out. The obvious answer is the one writes have: the `id` of the head's facts.
-- Whether a rule that creates should only create. The R16 rule that asserts `state: :open` on every add reopens a done to-do that is added again; `(unless (todo ?t))` in its `when` would stop that.
-- Record types: a formula such as `id` takes a record, and there is no type for one yet.
-- Concurrent claims under `:last` are ordered by standing (edition, then cause, then succession) and last by the hash of the value, so every replica elects alike (#752). A write after them settles them only once [#759](https://github.com/dialog-db/dialog-db/issues/759) lands.
-- Optional parameters: `(option …)` read correctly once in six.
-- Which layers exist beyond `:now` and stored, and their names.
-- Whether commands are conduct record types, one attribute whose value is a record, rather than one attribute per field. Dialog's `Record` value is opaque to queries today ([record-value](../../notes/record-value.md)).
-- How an entity is named across the rules and writes of a document, and what a bare symbol such as `scratch` or `tab-title` means.
-- Whether a document's questions are answered jointly or one at a time.
-- Whether a rule's head must be a declared attribute or concept.
+- Under whose authority an installed rule writes: the transaction that installed it, or the one that set it off.
+- What a retract hides in its own tick when a rule also derives the fact, and what an assert and a retract of one fact in one tick do.
+- A command in a premise and an issued command look alike: `(add (todo list: ?l text: ?x))` matches in a `when` and issues at the top. Readers proposed `(do add …)`.
+- What drives a tick. A run goes on while `!` heads produce, to the turn limit, so a `remind!` that re-issues itself while a to-do is open runs to the limit in one run. Whether later ticks belong to the run, to later transactions, or to a clock.
+- Whether `id` names a domain or a concept, so two concepts with the same labels and values do not share an entity.
+- Whether a rule that creates should only create. The `add` rule asserts `state: :open`, so adding a done to-do's list and text again reopens it; `(unless (todo ?t))` in its `when` would stop that.
+- How a body names a pick other than the default.
+- Optional parameters. `(option ?x)` in a head read correctly once in six (R2).
+- Whether a top-level command may compute its entity with a ground formula, `(assert (xyz.todo (id list: list:home text: "Call mom") state: :done))`, so an update skips the read (R19).
+- Whether a query holds several calls answered jointly, and whether questions stay calls or become rules into a relation head.
+- How text spans lines or holds `"`. The sketches write templates as `"""…"""`, which is not part of the notation.
+- Record types: there is no type for a record yet.
+- Concurrent claims under `:last` are ordered by standing and last by the value's hash, so every replica elects alike (#752). A write after them settles them only once [#759](https://github.com/dialog-db/dialog-db/issues/759) lands.
+- Whether a command's parameters are a conduct record type, one field whose value is a record. Dialog's `Record` value is opaque to queries today ([record-value](../../notes/record-value.md)).
+- How an entity is named across the rules and commands of a document, and what a bare symbol such as `scratch` means.
 - Whether metadata (`description:`, `action:`, `role:`) is labeled entries kept as data.
 - Whether templates name models by concept name rather than by pinned URI.
+- The sketches, which predate commands.
 - The YAML spelling.
