@@ -700,6 +700,16 @@ xychart-beta
 
 **Decision.** For the maintainer: reading cold does not separate the spellings. The question that could is which spelling an agent writes unprompted.
 
+## 2026-11-10 — Constraints, picks and writes, as decided after R26
+
+**Question.** With R26 unable to separate the spellings, how are a type and a pick spelled, and what does a write replace?
+
+**Method.** Discussion with the maintainer. Not a measurement.
+
+**Results.** Written into [design.md](design.md). A type is `(: ?x as: :text)`: the maintainer ruled out `dialog.type`, which reads as a domain, and `claim`, `where` and `the` already mean something in dialog. A pick is a separate constraint, `(pick :last from: ?x)`, allowed in rules as well as concepts, since it constrains how every field holding the variable is elected. With no pick a read returns every live claim. A write needs no pick: it succeeds the claims its `when` read for the same entity and field, and adds when it read none, which is dialog's `cause`. Any top-level command may take a `when`, which runs once and is never installed. A collection is read with a variable label, `(xyz.notebook ?n ?p: ?b)`, one collection per concept. Equality takes its label, `(== ?a is: ?b)`.
+
+**Decision.** Taken. Open: whether a type filters before a pick elects or after, what retract takes for a keyed concept, and what two concurrent blind writes leave.
+
 ## How to reproduce
 
 1. Take a variant's prompt from its round's results file and save it as `<variant>.txt`.

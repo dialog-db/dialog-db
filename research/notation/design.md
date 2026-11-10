@@ -62,7 +62,7 @@ A document is a set of top-level forms evaluated as one run. The order of its fo
 - a `rule`;
 - a `concept`.
 
-Top-level forms never carry `!`. A command at the top level must be ground: a variable in one is an error. A bare call, with variables or without, is not a top-level form.
+Top-level forms never carry `!`. A command at the top level is ground, or has a `when` that binds its variables (see [Writes succeed what they read](#writes-succeed-what-they-read)). A bare call, with variables or without, is not a top-level form.
 
 A document is submitted in one of two ways:
 
@@ -90,9 +90,12 @@ A concept a question names must be declared, installed or in the same document, 
 ```clj
 (concept (todo ?t list: ?l text: ?x state: ?s)
   (xyz.todo ?t list: ?l text: ?x state: ?s)
-  (dialog.type ?l is: :entity)
-  (dialog.type ?x is: :text)
-  (dialog.type ?s is: [:open :done]))
+  (: ?l as: :entity)
+  (: ?x as: :text)
+  (: ?s as: [:open :done])
+  (pick :last from: ?l)
+  (pick :last from: ?x)
+  (pick :top from: ?s))
 ```
 
 A concept is a rule that runs both ways. Read, its body makes the concept; asserted, each of its fields goes into its domain. Its facts are stored, and carried from tick to tick until retracted.
@@ -117,41 +120,79 @@ A concept says what facts make it up, not how its entity is made. Construction b
 ```clj
 (concept (note ?n text: ?x)
   (xyz.todo ?n text: ?x)
-  (dialog.type ?x is: :text))
+  (: ?x as: :text)
+  (pick :last from: ?x))
 ```
 
 Every to-do is also a note, and `(retract (todo todo:9c1e))` takes the `text` a note reads, so it stops being a note.
 
-A field's type is inferred from whatever narrows its variable: a constraint, another call it is passed to, or on an assert the value. Type and pick are part of a field's identity, so a different type or pick is another field, not a narrower view of the same facts. A writer who means a particular field says so with a declared concept.
+A domain call names no type and no pick. It reads every live claim of its fields, whatever their values, and types and picks are constraints on the variables it binds (below). Claims are stored under their field, `xyz.todo/state`, so a concept and a bare domain call that read one field differently are two views of the same claims.
+
+### Collections
+
+A domain's fields whose names start lowercase are its dictionary; those whose names start uppercase are positions, its sequence, as in dialog today. A label written as a variable reads every entry, one row per entry, with the label bound to the variable:
+
+```clj
+(xyz.tonk.element.method ?e run: ?source)     ; one key
+(xyz.tonk.element.method ?e ?name: ?source)   ; every key
+(xyz.tonk.notebook ?n ?at: ?block)            ; every position
+```
+
+A concept over a collection gives the key a parameter of its own, and holds one collection only. Two collections in one concept would give a row for every pair of their entries.
+
+```clj
+(concept (element-method ?e name: ?n source: ?s)
+  (xyz.tonk.element.method ?e ?n: ?s)
+  (: ?n as: :symbol)
+  (: ?s as: :text))
+
+(concept (notebook-entry ?n at: ?p block: ?b)
+  (xyz.tonk.notebook ?n ?p: ?b)
+  (: ?p as: :position)
+  (: ?b as: :entity))
+```
+
+An entry is a fact, `(assert (xyz.tonk.notebook notebook:scratch N5: block:2))`, so entries written on two devices merge key by key. A record value, `{"N5" block:2}`, is one value: it is opaque to queries, and two concurrent writes of it elect one whole record. Records are for data that is one value.
+
+In R26, 22 of 25 readers named the variable label as the hardest thing to guess, though all 25 read it correctly.
 
 ### Constraints
 
-A body may hold constraints. A constraint computes nothing; it holds or it does not, so it works the same whether the concept is read or asserted: on a read it filters, on an assert it rejects. The constraints are:
+A constraint computes nothing; it holds or it does not. It may stand in a concept's body or a rule's `when`. On a read it filters; on an assert through a concept it refuses the write, and nothing lands. About half of R26's readers could not guess which, so this has to be said. The constraints are:
 
-- **type**: `(dialog.type ?x is: :text)`, a value is text, an entity, a number, or a case of a variant;
-- **equality**: two variables are equal, or a variable equals a constant;
-- **comparison**: less than, greater than, within a range.
+- **type**: `(: ?x as: :text)`, a value is text, an entity, a number, a case of a variant, or a label that is a `:symbol` or a `:position`;
+- **equality**: `(== ?a is: ?b)`, `(!= ?a is: ?b)`, with a variable or a constant;
+- **comparison**: less than, greater than, within a range;
+- **pick**: `(pick :last from: ?x)`, below.
 
 Negation is not a constraint, since an assert could not say what it enforces, and neither is arithmetic that runs both ways, since it computes. Formulas belong in rules.
 
-The types used so far are `:text`, `:entity`, `:bytes`, `:natural`, `:float`, sized numbers such as `(:float 64)`, variants such as `[:open :done]`, and the collections `(:sequence T)` and `(:dictionary T)`.
+The types used so far are `:text`, `:entity`, `:bytes`, `:natural`, `:float`, sized numbers such as `(:float 64)`, variants such as `[:open :done]`, and the label types `:symbol` and `:position`.
+
+`(: ?x as: …)` is ascription, `x : T`. R26 tried five spellings, `(dialog/type ?x is: :text)`, `(: ?x as: :text)`, `(?x as: :text)`, `(:text ?x)` and `(text ?x)`, and every reader read every one as a check that touches no stored facts. `:` is the one taken: it takes no word, where `claim`, `where` and `the` already mean something in dialog.
 
 ### Picks
 
-A field keeps one value per entity, elected by its pick: `:last` unless something says otherwise, and `:top` for a variant, which ranks its cases with the first listed best, as dialog's `as:` list does today. The other picks are `:all`, `:max` and `:min`. A pick is named by an entity (`last:`, `top:` …) and is part of the field's identity.
+A pick elects among the live claims of one entity and field. `(pick :last from: ?x)` applies to every field whose value position holds `?x`. Without one, a read returns every live claim, `:all`. The picks are `:all`, `:last`, `:max`, `:min`, and `:top`, which ranks a variant's cases with the first listed best, as dialog's `as:` list does today. A pick is named by an entity (`last:`, `top:` …).
+
+- A variable has one pick. To read one field two ways, use two variables.
+- A pick on a variable that only appears as an entity is an error: an entity has no claims to elect.
+- A pick is per cell, not per row: whether a claim survives depends on the others in its cell, so adding a claim can take away a row. A rule that picks from a field it also writes recurses through an election, and is checked as `unless` is.
+
+Writes normally leave one live claim in a cell, so `:all` usually returns one row, and several only after replicas that wrote concurrently merge. Leaving the pick out shows those conflicts; a concept's picks say how they are elected.
 
 In dialog today a pick is one ordering over a cell's claims, used both ways:
 
 - **On read**, the claims of one entity and field are elected by the ordering, and the winner is returned. `:all` returns every claim.
 - **On write**, the claim the ordering elects, the one a read would return, leaves the operational index beside the new value; history keeps every value. Under `:all` a write appends and retracts nothing. Under `:max`, writing 3 over a 5 replaces the 5: the pick decides which claim concurrent writes resolve to, not that values only grow.
 
-The write is the read's shortcut, so a read normally finds one live claim, and elects among several only after replicas that wrote concurrently merge. A write today succeeds only the elected claim and leaves the other concurrent ones live, so under `:max`, `:min` and `:top` a value the write meant to replace can win the next read ([#759](https://github.com/dialog-db/dialog-db/issues/759)). It should succeed every live claim the writer holds.
+The write is the read's shortcut, so a read normally finds one live claim, and elects among several only after replicas that wrote concurrently merge. A write today succeeds only the elected claim and leaves the other concurrent ones live, so under `:max`, `:min` and `:top` a value the write meant to replace can win the next read ([#759](https://github.com/dialog-db/dialog-db/issues/759)). In the notation a write succeeds the claims it read (see [Commands](#writes-succeed-what-they-read)), so a write after a read under `:all` settles every live claim.
 
-**Proposed.** User-defined picks are user-defined orderings: how two values compare, with the shared fallback to standing (version, cause, succession) and then the value's hash, so every ordering is total and every replica elects alike. An ordering runs at write, keeping the operational index, and at read, settling merged claims. A pick written as an arbitrary query would lose that shortcut, since a write could not tell what to retract. A pick elects one claim; a sum or a count is a rule over an `:all` field.
+**Proposed.** User-defined picks are user-defined orderings: how two values compare, with the shared fallback to standing (version, cause, succession) and then the value's hash, so every ordering is total and every replica elects alike. An ordering runs at read. A write succeeds what its read elected, so it needs no ordering of its own. A pick elects one claim; a sum or a count is a rule over an `:all` field.
 
 ### Identity
 
-A concept's identity is its set of fields. A field's identity is its domain, its name, its type and its pick. A name binds a concept to a signature, meaning the head's labels; two names over the same fields are one concept with two signatures. Redefining a name with a different body rebinds the name. Stored facts belong to fields, not names, so they are not touched.
+A concept's identity is its set of fields, each with the type and pick the concept gives it. A field is its domain and its name. A name binds a concept to a signature, meaning the head's labels; two names over the same fields are one concept with two signatures. Redefining a name with a different body rebinds the name. Stored facts belong to fields, not names, so they are not touched.
 
 ## Commands
 
@@ -173,13 +214,35 @@ The two commands that come with the language, and the only ones that change a co
 | form | does |
 |---|---|
 | `(assert (todo todo:9c1e list: list:home text: "Buy milk" state: :open))` | names the entity and passes every parameter; leaving any out is a compile error |
-| `(assert (xyz.todo todo:9c1e state: :done))` | a domain takes any of its fields |
+| `(assert (xyz.todo todo:9c1e tag: "urgent"))` | a domain takes any of its fields; with nothing read, the value is added beside what is there |
 | `(retract (todo todo:9c1e))` | retracts every field of the concept on that entity |
 | `(retract (xyz.todo todo:9c1e text: "Buy milk"))` | retracts just that value |
 
 What is asserted holds in this tick and lands after it. What is retracted stops holding now and is gone after it. Every other command changes a concept only through rules that issue `assert` or `retract`.
 
-Leaving a parameter out of an assert through a concept is an error, not "keep what is there", because it is more often a mistake than a choice. A change to some fields goes through the domain. An entity is an identity over time, never partial; what can be partial is what is known about it.
+Leaving a parameter out of an assert through a concept is an error, not "keep what is there", because it is more often a mistake than a choice. A change to some fields goes through the domain, with a `when` (below). An entity is an identity over time, never partial; what can be partial is what is known about it.
+
+### Writes succeed what they read
+
+An assert succeeds the claims its body read for the same entity and field. If it read none, it adds. This is dialog's `cause`: an assertion with one succeeds the claim it names, and one without is additive.
+
+Any top-level command may take a `when`. It runs once, in this document, and is never installed, unlike a top-level `rule` in a transaction:
+
+```clj
+; replace: read the winner, succeed it
+(assert (xyz.todo ?t state: :done)
+  (when (xyz.todo ?t state: ?old)
+        (pick :last from: ?old)
+        (== ?t is: todo:9c1e)))
+
+; find the entity by what it says
+(assert (xyz.todo ?t state: :done)
+  (when (todo ?t text: "Call mom")))
+```
+
+So writes need no pick of their own. A read under `:last` and a write replace; a read under `:all` and a write settle a conflict; a write with no read of that field appends. An assert through a concept reads first: it reads the concept's fields on the entity under the concept's picks, and succeeds what it read, so `(assert (todo todo:9c1e …))` replaces each field.
+
+Every variable in a command with a `when` is bound by it; a command without one is ground.
 
 There is no content identity: `assert` never derives an entity. In R17 and R18 an entity derived from every field made a changed state a new to-do, and readers tripped on it until it was removed (R19, 0 of 15).
 
@@ -217,7 +280,8 @@ A premise is one of:
 
 - a call on a concept, a domain or a command;
 - `(unless call)`, which holds when the call has no match;
-- a formula: `id`, `fresh`, `(== ?a ?b)`, `(!= ?a ?b)`, `(dialog/position ?b after: ?lo before: ?hi is: ?at)`.
+- a constraint: a type, an equality, a comparison or a pick;
+- a formula: `id`, `fresh`, `(dialog/position ?b after: ?lo before: ?hi is: ?at)`.
 
 Every variable in a head is bound by a premise. A premise matches what holds now, and `!` never appears in one.
 
@@ -329,9 +393,10 @@ Comparing the design with [Bloom](http://bloom-lang.net), Dedalus and LogiQL set
 - What a view is: data on a concept, a relation head with a template, or a concept that can be written through ([implementation](implementation.md#views)).
 - Whether `id` names a domain or a concept, so two concepts with the same labels and values do not share an entity.
 - Whether a rule that creates should only create. The `add` rule asserts `state: :open`, so adding a done to-do's list and text again reopens it; `(unless (todo ?t))` in its `when` would stop that.
-- How a body names a pick other than the default.
+- Whether a type filters before a pick elects or after. With two text claims, `"Buy milk"` and a newer `42`, under `(: ?x as: :text)` and `:last`, typing first gives `"Buy milk"` and electing first gives nothing.
+- What retract takes for a keyed concept: `(retract (notebook-entry notebook:scratch))` names every entry; it likely needs the entity and the key.
+- What two concurrent blind `:last` writes leave: each succeeds what was live where it landed, so both stay live for the next read to elect.
 - Optional parameters. `(option ?x)` in a head read correctly once in six (R2).
-- Whether a top-level command may compute its entity with a ground formula, `(assert (xyz.todo (id list: list:home text: "Call mom") state: :done))`, so an update skips the read (R19).
 - Whether a query holds several calls answered jointly, and whether questions stay calls or become rules into a relation head.
 - How text spans lines or holds `"`. The sketches write templates as `"""…"""`, which is not part of the notation.
 - Record types: there is no type for a record yet.

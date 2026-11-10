@@ -24,8 +24,12 @@ flowchart LR
 
 | notation | dialog today | change |
 |---|---|---|
-| `(concept (todo ?t …) (xyz.todo ?t …) (dialog.type …))` | `ConceptDescriptor`, a field per label, `the: xyz.todo/<label>`, `as` from the type | none |
-| `(dialog.type ?s is: [:open :done])` | `as: [open:, done:]`, which implies the `top` pick | none; see the ranking note below |
+| `(concept (todo ?t …) (xyz.todo ?t …) (: ?x as: :text) (pick :last from: ?x))` | `ConceptDescriptor`, a field per label, `the: xyz.todo/<label>`, `as` from `:`, the pick from `pick` | none |
+| `(: ?s as: [:open :done])` | `as: [open:, done:]` | none; see the ranking note below |
+| a domain call with no pick | an attribute query under `all` | none |
+| `(xyz.notebook ?n ?p: ?b)` | a keyed collection field, the key as `<field>/key` | none |
+| a write after a read in its `when` | an assertion whose `cause` is the claim read | the compiler carries the read claim's cause to the write |
+| a command with a `when` at the top level | a document rule, run once | none; it is not installed |
 | `(xyz.todo ?t text: ?x)` in a premise | an attribute query per label | type inferred; untyped when nothing narrows it |
 | `(query …)` | a query over concept and attribute premises | none |
 | relation head `(rule (xyz.app.open ?t text: ?x) …)` | `DeductiveRuleDescriptor`, `deduce` over `xyz.app.open/*` | none |
