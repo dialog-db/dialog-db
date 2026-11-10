@@ -16,7 +16,8 @@ says how to cut a release.
 
 ### A blob store keeps the Bao tree of each blob, so it can hold a blob in part and serve verified ranges
 
-Backported from the `sapling` branch.
+[#765](https://github.com/dialog-db/dialog-db/pull/765), backported from the
+`sapling` branch.
 
 The hash of a blob is the root of its Bao tree, a tree of BLAKE3 hashes
 over groups of 16 KiB. A filesystem or volatile blob store now keeps that
