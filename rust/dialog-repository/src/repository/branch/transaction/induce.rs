@@ -4080,6 +4080,140 @@ mod tests {
         Ok(())
     }
 
+    /// A durable `who` written in round 1 and a transient `who` emitted
+    /// in round 2 for the same command stand equal in round 3's view:
+    /// both at the pending edition, neither succeeding the other, so
+    /// `last` elects by [`Value::tiebreak`]. The values are chosen so
+    /// the durable one wins. The command's transient rows group in
+    /// round 3 and bind the transient `who`, which `last` does not
+    /// elect, so the group finds nothing; seeded one by one, the rows
+    /// that leave `who` free read the durable value and match. The
+    /// firing falls back to them and writes what they write.
+    ///
+    /// Checking a group against the stimulus alone (whether the round's
+    /// rows hold another claim of a grouped cell) could not see this:
+    /// round 3's stimulus holds one `who`, the transient, and the claim
+    /// that displaces it was folded into the commit two rounds before.
+    #[dialog_common::test]
+    async fn it_falls_back_when_a_round_one_write_ties_a_round_two_transient() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        // Round 1 stages the command's fields as transients; round 2
+        // turns them into the command, also transient; round 3 fires
+        // `assign_rule` on it.
+        let staged = json!({
+            "who": { "the": "stage/who", "as": "text:" },
+            "issue": { "the": "stage/issue", "as": "entity:" },
+            "note": { "the": "stage/note", "as": "text:" }
+        });
+        let command_fields = json!({
+            "who": { "the": "cmd.assign/who", "as": "text:" },
+            "issue": { "the": "cmd.assign/issue", "as": "entity:" },
+            "note": { "the": "cmd.assign/note", "as": "text:" }
+        });
+        let bind = json!({
+            "this": { "?": { "name": "this" } },
+            "who": { "?": { "name": "who" } },
+            "issue": { "?": { "name": "issue" } },
+            "note": { "?": { "name": "note" } }
+        });
+        let stage: InductiveRule = serde_json::from_value(json!({
+            "assert!": { "with": staged },
+            "when": [{
+                "assert": { "with": {
+                    "who": { "the": "src/who", "as": "text:" },
+                    "issue": { "the": "src/issue", "as": "entity:" },
+                    "note": { "the": "src/note", "as": "text:" }
+                } },
+                "where": bind
+            }]
+        }))?;
+        let issue_command: InductiveRule = serde_json::from_value(json!({
+            "assert!": { "with": command_fields },
+            "when": [{ "assert": { "with": staged }, "where": bind }]
+        }))?;
+        let transient = |with: &serde_json::Value| -> Result<Transient> {
+            let concept: ConceptDescriptor = serde_json::from_value(json!({ "with": with }))?;
+            Ok(Transient(concept.this()))
+        };
+        branch
+            .transaction()
+            .assert(assign_rule()?)
+            .assert(stage)
+            .assert(issue_command)
+            .assert(transient(&staged)?)
+            .assert(transient(&command_fields)?)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        let (a, b) = (
+            Value::String("member-a".to_string()),
+            Value::String("member-b".to_string()),
+        );
+        let (durable, transient) = if a.tiebreak() > b.tiebreak() {
+            (a, b)
+        } else {
+            (b, a)
+        };
+        let (Value::String(durable_who), Value::String(transient_who)) =
+            (durable.clone(), transient)
+        else {
+            unreachable!("both values are text");
+        };
+
+        let command: Entity = "cmd:1".parse()?;
+        let issue: Entity = "issue:1".parse()?;
+        super::oracle::evaluations();
+        branch
+            .transaction()
+            .assert(
+                dialog_query::the!("cmd.assign/who")
+                    .of(command.clone())
+                    .is(durable_who),
+            )
+            .assert(
+                dialog_query::the!("src/who")
+                    .of(command.clone())
+                    .is(transient_who),
+            )
+            .assert(
+                dialog_query::the!("src/issue")
+                    .of(command.clone())
+                    .is(issue.clone()),
+            )
+            .assert(
+                dialog_query::the!("src/note")
+                    .of(command)
+                    .is("from the board".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        assert_eq!(
+            super::oracle::evaluations(),
+            // Round 1: `assign_rule` seeded by the durable `who` alone,
+            // and `stage` by its three rows together. Round 2:
+            // `issue_command` by its three rows together. Round 3:
+            // `assign_rule` by the command's three rows together, which
+            // find nothing, then by each alone.
+            1 + 1 + 1 + (1 + 3),
+            "the round-3 group found nothing, so each of its three rows was seeded alone"
+        );
+        branch.refresh(&operator).await?;
+        assert_eq!(
+            values(&branch, &operator, "issue/assignee", &issue).await?,
+            vec![durable],
+            "the rows left free read the durable `who` the tie elects, as seeding them alone does"
+        );
+        Ok(())
+    }
+
     /// A row the watermark lag carries in groups with this commit's rows
     /// of the same entity: the issue arrives by a raw commit, the `who`
     /// and `note` by an inducing one, and the firing derives the head
