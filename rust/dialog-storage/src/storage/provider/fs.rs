@@ -364,6 +364,27 @@ impl FileSystemHandle {
         backend::open_reader(self, offset, len).await
     }
 
+    /// Read at most `len` bytes of the file at this location from `offset`:
+    /// fewer where the file ends.
+    pub async fn read_at(&self, offset: u64, len: usize) -> Result<Vec<u8>, FileSystemError> {
+        backend::read_at(self, offset, len).await
+    }
+
+    /// Write `bytes` into the file at this location at `offset`, and keep the
+    /// rest of the file. A file that is missing is made, with its parent
+    /// directories; a write past the end of the file leaves a hole before it.
+    /// This is not atomic: a reader can see the write in part.
+    pub async fn write_at(&self, offset: u64, bytes: &[u8]) -> Result<(), FileSystemError> {
+        backend::write_at(self, offset, bytes).await
+    }
+
+    /// Make sure that the bytes of the file at this location are on the
+    /// disk, as a power loss leaves them. A file that is missing has nothing
+    /// to make sure of.
+    pub async fn sync(&self) -> Result<(), FileSystemError> {
+        backend::sync(self).await
+    }
+
     /// Open a streaming writer that commits atomically on
     /// [`finish`](FileWriter::finish), so large content is never buffered whole.
     pub async fn writer(&self) -> Result<FileWriter, FileSystemError> {

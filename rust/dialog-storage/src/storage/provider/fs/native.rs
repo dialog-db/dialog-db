@@ -405,6 +405,63 @@ pub(super) async fn size(handle: &FileSystemHandle) -> Result<Option<u64>, FileS
     }
 }
 
+pub(super) async fn read_at(
+    handle: &FileSystemHandle,
+    offset: u64,
+    len: usize,
+) -> Result<Vec<u8>, FileSystemError> {
+    let path: PathBuf = handle.try_into()?;
+    let io = |e: io::Error| FileSystemError::Io(e.to_string());
+    let mut file = match fs::File::open(&path).await {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return Err(FileSystemError::NotFound(path.display().to_string()));
+        }
+        Err(e) => return Err(io(e)),
+    };
+    file.seek(SeekFrom::Start(offset)).await.map_err(io)?;
+    let mut bytes = Vec::with_capacity(len);
+    file.take(len as u64)
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(io)?;
+    Ok(bytes)
+}
+
+pub(super) async fn write_at(
+    handle: &FileSystemHandle,
+    offset: u64,
+    bytes: &[u8],
+) -> Result<(), FileSystemError> {
+    let path: PathBuf = handle.try_into()?;
+    let io = |e: io::Error| FileSystemError::Io(e.to_string());
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).await.map_err(io)?;
+    }
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .await
+        .map_err(io)?;
+    file.seek(SeekFrom::Start(offset)).await.map_err(io)?;
+    file.write_all(bytes).await.map_err(io)?;
+    file.flush().await.map_err(io)
+}
+
+pub(super) async fn sync(handle: &FileSystemHandle) -> Result<(), FileSystemError> {
+    let path: PathBuf = handle.try_into()?;
+    match fs::File::open(&path).await {
+        Ok(file) => file
+            .sync_data()
+            .await
+            .map_err(|e| FileSystemError::Io(e.to_string())),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(FileSystemError::Io(e.to_string())),
+    }
+}
+
 pub(super) async fn exists(handle: &FileSystemHandle) -> bool {
     let Ok(path) = PathBuf::try_from(handle) else {
         return false;
@@ -470,16 +527,31 @@ pub(super) async fn open_writer(handle: &FileSystemHandle) -> Result<FileWriter,
     let file = fs::File::create(&tmp)
         .await
         .map_err(|e| FileSystemError::Io(e.to_string()))?;
-    Ok(FileWriter { file, tmp, target })
+    Ok(FileWriter {
+        file,
+        tmp,
+        target,
+        settled: false,
+    })
 }
 
 /// A streaming, atomically-committed file writer. Bytes go to a temp file;
 /// [`finish`](Self::finish) flushes and renames it into place. Dropping without
-/// `finish` leaves the temp file (cleaned up best-effort).
+/// `finish` removes the temp file, so a write that does not end keeps nothing.
 pub struct FileWriter {
     file: fs::File,
     tmp: PathBuf,
     target: PathBuf,
+    /// Whether the temp file is gone: moved into place, or removed.
+    settled: bool,
+}
+
+impl Drop for FileWriter {
+    fn drop(&mut self) {
+        if !self.settled {
+            let _ = std::fs::remove_file(&self.tmp);
+        }
+    }
 }
 
 impl FileWriter {
@@ -520,17 +592,22 @@ impl FileWriter {
             .await
             .map_err(|e| FileSystemError::Io(e.to_string()))?;
         match fs::rename(&self.tmp, dest).await {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                self.settled = true;
+                Ok(())
+            }
             Err(e) => {
                 let _ = fs::remove_file(&self.tmp).await;
+                self.settled = true;
                 Err(FileSystemError::Io(e.to_string()))
             }
         }
     }
 
     /// Discard the staged content without committing it.
-    pub async fn discard(self) -> Result<(), FileSystemError> {
+    pub async fn discard(mut self) -> Result<(), FileSystemError> {
         let _ = fs::remove_file(&self.tmp).await;
+        self.settled = true;
         Ok(())
     }
 }

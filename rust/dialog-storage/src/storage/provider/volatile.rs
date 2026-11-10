@@ -65,6 +65,11 @@ struct Session {
     /// parallel to the block archive (mirrors the filesystem layout
     /// `{space_root}/blob/{base58(digest)}`).
     blobs: HashMap<String, Vec<u8>>,
+    /// The outboard of each blob of more than one group, by the key of the
+    /// blob (mirrors `{space_root}/blob/{base58(digest)}.outboard`).
+    outboards: HashMap<String, Vec<u8>>,
+    /// Each blob that the session holds in part, by its key.
+    partials: HashMap<String, blob::Partial>,
     /// Transactional memory storage keyed by (space, cell).
     memory: HashMap<MemoryKey, Vec<u8>>,
     /// Credential storage keyed by address.

@@ -1057,6 +1057,141 @@ pub(super) async fn size(handle: &FileSystemHandle) -> Result<Option<u64>, FileS
     Ok(Some(file.size() as u64))
 }
 
+/// A read of a range, as one `Blob.slice` of the file.
+pub(super) async fn read_at(
+    handle: &FileSystemHandle,
+    offset: u64,
+    len: usize,
+) -> Result<Vec<u8>, FileSystemError> {
+    use futures_util::StreamExt as _;
+    let mut reader = open_reader(handle, offset, Some(len as u64)).await?;
+    let mut bytes = Vec::with_capacity(len);
+    while let Some(chunk) = reader.next().await {
+        bytes.extend(chunk?);
+    }
+    Ok(bytes)
+}
+
+/// A write at an offset that keeps the rest of the file. Where the file
+/// handle has `createWritable`, this goes through a writable stream that
+/// keeps the data of the file: the browser stages the file and swaps it in on
+/// close, so each call costs a copy of the file. Where it has not, as on
+/// Safari 18 and before, it goes through a sync access handle, as
+/// [`write`] does, which writes in place.
+///
+/// Writes at offsets of one file take its lock in turn. Two writable streams
+/// open on one file at once would each stage a copy, and the one that closes
+/// last would drop the bytes of the other; two sync access handles cannot be
+/// open at once at all.
+pub(super) async fn write_at(
+    handle: &FileSystemHandle,
+    offset: u64,
+    bytes: &[u8],
+) -> Result<(), FileSystemError> {
+    let _guard = lock(handle).await?;
+    let Some((parent, name)) = handle.navigate_parent(true).await? else {
+        return Err(FileSystemError::Io(
+            "parent directory navigation failed".into(),
+        ));
+    };
+    let file_handle = get_file_handle(&parent, &name, true)
+        .await?
+        .ok_or_else(|| FileSystemError::Io(format!("could not create file '{name}'")))?;
+    if has_method(&file_handle, "createWritable") {
+        write_at_via_writable(&file_handle, offset, bytes).await
+    } else {
+        write_at_via_sync_access(&file_handle, offset, bytes).await
+    }
+}
+
+/// A write at an offset through a `FileSystemWritableFileStream` that keeps
+/// the data of the file.
+async fn write_at_via_writable(
+    file_handle: &FileSystemFileHandle,
+    offset: u64,
+    bytes: &[u8],
+) -> Result<(), FileSystemError> {
+    let options = web_sys::FileSystemCreateWritableOptions::new();
+    options.set_keep_existing_data(true);
+    let writable: FileSystemWritableFileStream =
+        JsFuture::from(file_handle.create_writable_with_options(&options))
+            .await
+            .map_err(|e| js_io_error("creating writable stream", e))?
+            .dyn_into()
+            .map_err(|_| FileSystemError::Io("expected FileSystemWritableFileStream".into()))?;
+    let seek = writable
+        .seek_with_f64(offset as f64)
+        .map_err(|e| js_io_error("scheduling seek", e))?;
+    JsFuture::from(seek)
+        .await
+        .map_err(|e| js_io_error("seeking", e))?;
+    let chunk = Uint8Array::from(bytes);
+    let write = writable
+        .write_with_buffer_source(&chunk)
+        .map_err(|e| js_io_error("scheduling write", e))?;
+    JsFuture::from(write)
+        .await
+        .map_err(|e| js_io_error("writing at an offset", e))?;
+    JsFuture::from(writable.close())
+        .await
+        .map_err(|e| js_io_error("closing writable stream", e))?;
+    Ok(())
+}
+
+/// A write at an offset through a `FileSystemSyncAccessHandle`: in place,
+/// with no truncation, so the rest of the file stays. A write past the end
+/// extends the file, and leaves a hole of zeros before it. The handle is
+/// exclusive, so it is acquired, used and closed within this call. As in
+/// [`write_via_sync_access`], the methods are checked, not the interface.
+async fn write_at_via_sync_access(
+    file_handle: &FileSystemFileHandle,
+    offset: u64,
+    bytes: &[u8],
+) -> Result<(), FileSystemError> {
+    if !has_method(file_handle, "createSyncAccessHandle") {
+        return Err(FileSystemError::Io(
+            "this browser cannot write to the origin private file system here: \
+             neither createWritable nor createSyncAccessHandle is available"
+                .into(),
+        ));
+    }
+    let access = JsFuture::from(file_handle.create_sync_access_handle())
+        .await
+        .map_err(|e| js_io_error("creating sync access handle", e))?;
+    if !["write", "flush", "close"]
+        .iter()
+        .all(|method| has_method(&access, method))
+    {
+        return Err(FileSystemError::Io(
+            "createSyncAccessHandle returned an object without the \
+             FileSystemSyncAccessHandle methods"
+                .into(),
+        ));
+    }
+    let access: web_sys::FileSystemSyncAccessHandle = access.unchecked_into();
+
+    let result = (|| {
+        let options = web_sys::FileSystemReadWriteOptions::new();
+        options.set_at(offset as f64);
+        access
+            .write_with_u8_array_and_options(bytes, &options)
+            .map_err(|e| js_io_error("writing at an offset", e))?;
+        access
+            .flush()
+            .map_err(|e| js_io_error("flushing file", e))?;
+        Ok(())
+    })();
+    access.close();
+    result
+}
+
+/// The close of each writable stream already gave its bytes to the browser,
+/// which keeps them as it keeps the rest of the origin: there is nothing more
+/// to make sure of.
+pub(super) async fn sync(_handle: &FileSystemHandle) -> Result<(), FileSystemError> {
+    Ok(())
+}
+
 pub(super) async fn exists(handle: &FileSystemHandle) -> bool {
     let Ok(Some((parent, name))) = handle.navigate_parent(false).await else {
         // Either the parent directory is missing, or this is the root handle.
@@ -1497,6 +1632,43 @@ mod tests {
 
         result?;
         assert_eq!(super::read_optional(&handle).await?, Some(contents));
+        Ok(())
+    }
+
+    /// The Safari 18 path of a write at an offset: through a sync access
+    /// handle, forced here even where `createWritable` is there too. It
+    /// keeps the bytes before and after the write, and a write past the end
+    /// leaves zeros before it, as the writable stream does.
+    #[dialog_common::test]
+    async fn it_writes_at_an_offset_via_sync_access_handle() -> anyhow::Result<()> {
+        let provider = opfs_provider("web-sync-access-at").await;
+        let handle = provider.resolve("blob")?.resolve("partial.data")?;
+        let (parent, name) = handle
+            .navigate_parent(true)
+            .await?
+            .expect("file path has a parent");
+        let file_handle = super::get_file_handle(&parent, &name, true)
+            .await?
+            .expect("file handle is created");
+
+        super::write_at_via_sync_access(&file_handle, 4, b"tail").await?;
+        assert_eq!(
+            super::read_optional(&handle).await?,
+            Some(b"\0\0\0\0tail".to_vec())
+        );
+
+        super::write_at_via_sync_access(&file_handle, 0, b"he").await?;
+        assert_eq!(
+            super::read_optional(&handle).await?,
+            Some(b"he\0\0tail".to_vec())
+        );
+
+        // The writable stream reads the same bytes back at the same places.
+        super::write_at_via_writable(&file_handle, 2, b"ll").await?;
+        assert_eq!(
+            super::read_optional(&handle).await?,
+            Some(b"helltail".to_vec())
+        );
         Ok(())
     }
 

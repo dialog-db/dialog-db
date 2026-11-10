@@ -38,6 +38,7 @@ signature = { workspace = true }
 anyhow = { workspace = true, optional = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
+bao-tree = { workspace = true }
 base58 = { workspace = true }
 blake3 = { workspace = true }
 futures-util = { workspace = true }
@@ -55,7 +56,7 @@ url = { workspace = true }
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 libc = { workspace = true }
 tempfile = { workspace = true, optional = true }
-tokio = { workspace = true, features = ["sync", "fs", "macros", "rt", "net", "io-util"] }
+tokio = { workspace = true, features = ["sync", "fs", "macros", "rt", "net", "io-util", "time"] }
 http-body-util = { workspace = true, optional = true }
 bytes = { workspace = true, optional = true }
 tokio-test = { workspace = true, optional = true }
