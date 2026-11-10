@@ -29,7 +29,8 @@ statuses mean.
   every build, main's included where it runs. Commands are 2.6–9× faster
   with the head dedupe and grouped seeding (#761, #763), which slow reads
   at 1× by 1.3–1.6×.
-- **Next:** find what made a push slower since 2026-11-08.
+- **Next:** a push is level with main off the disk and 1.5× on this
+  machine's; find what it waits on there.
 - **Open:** the writer's token dictionary (in memory today, as a cache);
   skipping unchanged entries on write; values yielded in place by the
   tree's scans; Windows; the web (OPFS); verified range reads.
@@ -1976,6 +1977,51 @@ The cold activity view, round by round: main 124, 110, 126, 153, 103;
 
 So the walk that reads did not need has to stop costing this much before
 #761 lands, or with it.
+
+## 2026-11-10: the push behind main is this disk's
+
+**Question.** The status puts a push 1.4× main at 1× (28.4 against 20.2
+ms) and 1.56× at 10×, where on 2026-11-08 it was 0.95×. What changed?
+
+**Bisect.** Builds of this branch before #755 (bc08a242, the library code
+of the 2026-11-08 run), after its first merge (86291435), after row reuse
+(c7f88b66) and now (a9cf314d), 3 rounds alternated with main:
+
+| push, in a round (ms) | main | before #755 | after #755 | row reuse | now |
+|---|--:|--:|--:|--:|--:|
+| `tonk-1x-steady` | 20.6 | 44.4 | 33.3 | 34.4 | 33.9 |
+| `tonk-1x` (2026-11-08's) | 21.6 | 46.6 | | | 35.6 |
+
+The library code of 2026-11-08's run pushes in 46.6 ms on its own
+dataset, against 21.2 that day. Nothing in the code or the data moved:
+the machine did.
+
+**On a RAM disk** (`/dev/shm`), 3 rounds:
+
+| ms | main | before #755 | now |
+|---|--:|--:|--:|
+| push, in a round | 15.8 | 26.8 | **16.0** |
+| the owner's first push | 79.5 | 103.5 | 65.6 |
+| a member joining | 2.7 | 3.1 | 2.5 |
+| pull, in a round | 46.1 | 60.8 | 49.4 |
+| a command | 16.8 | 19.0 | 17.6 |
+
+- Off the disk, a push is level with main, and #755 made it 40% faster:
+  a push reads the nodes it walks from rows and builds only the blocks
+  it uploads, where it used to rebuild every block it walked.
+- On this machine's disk (ext4, mounted with `discard`) the same build
+  pushes in 34 ms against main's 23. Its sync points are not why: with
+  them turned off a push still takes 34 ms (the owner's first push falls
+  from 175 to 95). The whole run takes as long as main's (52.9 against
+  53.9 s), with half the system time and a quarter of the bytes written
+  (0.33 against 1.4 GB). What a push waits on, on this disk, is not
+  found.
+- `strace` counts 23,144 `flock` calls a run (0.75 s) and 472
+  `fdatasync` (0.44 s), where main makes none; together not enough for
+  the push's 11 ms over 150 pushes.
+
+**Next.** Timers in a push for its walk, its block builds and its puts, to
+see which waits on the disk.
 
 ## How to reproduce
 
