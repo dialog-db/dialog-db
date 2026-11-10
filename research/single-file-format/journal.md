@@ -15,15 +15,21 @@ statuses mean.
   file, tree nodes as frames over shared tokens, read by the tree in place
   through a mapping of the file; writers take turns across processes.
   `dialog-migration` moves a replica the `fs` provider wrote into it.
-- **Size:** tonk-team's 5,623 modern tree nodes take 5.7 MiB, against
-  379.4 MiB as a file per block (66×). Stack Exchange at 4096 commits takes
-  13.2 MiB against 1147 MiB (the history-key split below has not been
-  re-measured there yet).
-- **Speed, against main's `fs` archive:** cold reads level, warm reads the
-  same, cached nodes a third of the memory; commits about 2.3 ms slower.
-- **Next:** the [evaluation](evaluation.md) that decides the block index's
-  layout on queries, writes, sync, memory and storage; a hitchhiker tree
-  leads on size.
+- **Size** (2026-11-10, [status](results/2026-11-10-status.md)): a
+  member's replica is 2.0 MiB against main's 170 MiB at tonk 1×, the
+  owner's 15 MiB against 2.7 GiB at 10×, and 30 MiB at 100×, where main
+  does not fit this machine's disk. MusicBrainz's first 100 commits take
+  30 MiB against 2.9 GiB; at 300 commits `fs` outgrew 16 GB, and the file
+  holds all 2,000 in 1 GiB.
+- **Speed, against main's `fs`:** views and subscription polls level at 1×
+  and 4–14% faster at 10×; commands level. Behind main: a push (1.4× at
+  1×, 1.56× at 10×; 0.95× on 2026-11-08), a member's first pull (7.5
+  against 5.3 ms), MusicBrainz commits (1.09×).
+- **Not the store's:** the views take 2–5 s at 10× and 13–33 s at 100× on
+  every build, main's included where it runs. Commands are 2.6–9× faster
+  with the head dedupe and grouped seeding (#761, #763), which slow reads
+  at 1× by 1.3–1.6×.
+- **Next:** find what made a push slower since 2026-11-08.
 - **Open:** the writer's token dictionary (in memory today, as a cache);
   skipping unchanged entries on write; values yielded in place by the
   tree's scans; Windows; the web (OPFS); verified range reads.
