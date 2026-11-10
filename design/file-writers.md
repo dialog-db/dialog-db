@@ -1,6 +1,6 @@
 # Writers on separate branches wait on one another in the file archive
 
-**Phase: Delimiting.**
+**Phase: Directing.**
 
 ## Description
 
@@ -47,4 +47,7 @@ file, a second question with its own problem not yet stated.
 
 ## Approach
 
-Not chosen yet.
+Not chosen yet. Irakli's candidate: writers write blocks, as main's `fs`
+archive does, and an integrator folds them into the space's file; queries
+look in both. The approaches and the criteria that decide between them are
+in [direction.md](file-writers/direction.md).

@@ -21,4 +21,7 @@
 | Dolt lets one process write a database: other processes are refused writes while a server runs, and concurrent writers are sessions inside the server | fact | [prior-art.md](prior-art.md), DoltHub's CLI-to-SQL and concurrency posts; embedded single-writer from third-party docs | holds |
 | inside a Dolt server, commit-graph writes take a lock per branch, with merges done outside it | fact | DoltHub, "Dolt's Extra Layers of Concurrency", 2026-02-17 | holds |
 | Dolt is the only contender among existing systems | opinion | Irakli, 2026-11-10. As a product with branches over a content-addressed tree, the closest; for storage that separate processes write without waiting, it does not do it, and git is the closer precedent | - |
+| writers write blocks and an integrator folds them into the file; queries consult both | opinion | Irakli, 2026-11-10: the candidate approach | - |
+| a read that misses in the file and then among the loose blocks can miss a block the integrator moved between the two looks, unless it looks in the file again when the file grew | hypothesis | follows from the integrator deleting a loose block once the file holds it; git rescans its packs on a miss for the same reason. Confirmed by a test that integrates and deletes between a reader's two looks | open |
+| a read that misses in the file costs one more lookup among the loose blocks (a `stat` under `fs`) | hypothesis | measured by a read-heavy run with an empty loose store, against today's | open |
 

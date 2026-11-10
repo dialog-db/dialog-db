@@ -1,0 +1,22 @@
+# Direction
+
+**Decision:** how a space's writers store blocks so that processes on
+separate branches never wait on one another, while the space is still kept
+in one file.
+
+**For:** many processes work on separate branches of one space at once; on
+main they never wait on one another to write, and the single-file archive
+makes every write take one file's writer turn
+([the problem](../file-writers.md#problem)).
+
+| criterion \ approach | Status quo: every writer appends to the one file, in turns | Loose blocks and an integrator: writers put blocks as files of their own (main's `fs` archive); an integrator folds them into the file later; reads look in both | A journal per writer and an integrator: each writer appends to a file of its own; the integrator folds those files in | One owning process: every writer reaches the space through one process that writes the file (Dolt's server) |
+|---|---|---|---|---|
+| a writer on one branch waits on a writer on another | 🔴 every append takes the file's turn | 🟢 never: a block is a file of its own, written atomically, skipped if present | 🟢 never: each appends to its own file | 🟡 sessions meet in the owner, on a lock per branch |
+| a writer waits on another writer of the same branch | for its blocks, the file's turn; for the head, the head's compare-and-swap | only at the head's compare-and-swap, as on main | only at the head's compare-and-swap | on the owner's lock for that branch |
+| what a read consults | the file | the file, then the loose blocks, then the file again if it grew (an integrated block is deleted after the file has it) | the file, then every writer's journal not yet folded in | the owner, or the file |
+| files on disk before integration | one | a file per block written since the last integration (main's layout, bounded by the lag) | one per writer | one |
+| where splitting nodes into rows runs | in the writer's commit, outside its turn | in the integrator, off every commit | in the integrator | in the owner |
+| who integrates, and when | nobody needs to | ? | ? | the owner, as it writes |
+| a process dies mid-write | the torn tail is dropped on open | a block is written atomically or not at all; the integrator deletes only what the file holds durably | a journal's torn tail is dropped | the owner's torn tail is dropped; a client's write was not acknowledged |
+| the web, where an OPFS file has one writer at a time | 🟡 the tabs need one owner anyway | ? one file per block in OPFS, and an integrator in one worker | ? a file per tab | 🟢 a worker that owns the file is the web's own shape |
+| what exists to build on | built | 🟢 both halves exist: `fs` writes, `FileArchive` imports | the file format's records, a journal reader | 🔴 no server process, no protocol between processes and the owner |

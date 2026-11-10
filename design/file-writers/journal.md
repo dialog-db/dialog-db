@@ -4,8 +4,8 @@
 
 |  | Understanding | Activity |
 |---|---|---|
-| **Status** | Two processes advancing two branches of one space share no lock on main and take turns on one file lock with the file archive. Irakli requires that they not wait on one another. Cells live outside the file, a file each. | Delimiting: the problem is stated for writers on separate branches. |
-| **Agenda** | Whether processes on the same branch must also write without waiting on each other. What keeping cells in the file would let someone do that they cannot now. | Settle the unit of independence (branch or process), then the cells question, then use cases. |
+| **Status** | Two processes advancing two branches of one space share no lock on main and take turns on one file lock with the file archive. Irakli requires that they not wait on one another. Cells live outside the file, a file each. | Directing: a matrix of four approaches, Irakli's candidate among them. |
+| **Agenda** | Who runs the integrator, and when. The `?` cells in the matrix. What keeping cells in the file would let someone do that they cannot now. | Ask who integrates; then the web; then the cells question. |
 
 ## 2026-11-10, Describing: the topic opens
 
@@ -70,3 +70,23 @@ product, but it answers the requirement by having one owning process, not
 writers of their own; git is the closer precedent for separate processes.
 That adds a candidate approach for Direction: one process owns the file and
 every writer goes through it.
+
+## 2026-11-10, Directing: writers write blocks, an integrator folds them in
+
+**Asked.** May processes reach the space through one owning process, as
+Dolt's server does? Irakli: the idea is to just write blocks and have an
+integrator integrate them; queries consult both.
+
+**Learned.** That is git's object store: loose objects without a lock,
+packed later, read from both. Both halves exist here: main's `fs` archive
+writes blocks as files of their own, and the file archive imports them.
+Writers then meet only at a branch head's compare-and-swap, whether on
+separate branches or one, which settles the same-branch question the way
+main already answers it. A read has to look in the file, then the loose
+blocks, then the file again if it grew, or it can miss a block the
+integrator moved between its looks (a hypothesis in the ledger).
+
+**Decided.** Not decided. Four approaches in [direction.md](direction.md):
+the status quo, loose blocks and an integrator, a journal per writer and an
+integrator, and one owning process. Open in the matrix: who integrates and
+when, and the web.

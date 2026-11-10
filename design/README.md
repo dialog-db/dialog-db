@@ -63,5 +63,5 @@ Backtracking moves a topic to an earlier phase and says so in its journal.
 Bringing a large dataset into a replica (large transactions) is a topic on
 its own branch, `worker/design-large-transactions`.
 - [Writers on separate branches wait on one another in the file archive](file-writers.md):
-  **Delimiting.** Processes on separate branches must write without waiting
+  **Directing.** Processes on separate branches must write without waiting
   on one another, as they do on main; the file archive serializes them.
