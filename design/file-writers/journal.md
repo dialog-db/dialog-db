@@ -5,7 +5,7 @@
 |  | Understanding | Activity |
 |---|---|---|
 | **Status** | Two processes advancing two branches of one space share no lock on main and take turns on one file lock with the file archive. Irakli requires that they not wait on one another. Cells live outside the file, a file each. | Directing: a matrix of four approaches, Irakli's candidate among them. |
-| **Agenda** | Who runs the integrator, and when. The `?` cells in the matrix. What keeping cells in the file would let someone do that they cannot now. | Ask who integrates; then the web; then the cells question. |
+| **Agenda** | Whether the integrator is a task in the writer's process or a process of its own. The `?` cells in the matrix. What keeping cells in the file would let someone do that they cannot now. | Ask who integrates; then the web; then the cells question. |
 
 ## 2026-11-10, Describing: the topic opens
 
@@ -90,3 +90,17 @@ integrator moved between its looks (a hypothesis in the ledger).
 the status quo, loose blocks and an integrator, a journal per writer and an
 integrator, and one owning process. Open in the matrix: who integrates and
 when, and the web.
+
+**Asked.** Who runs the integrator, and when? Irakli: a scheduler. After a
+commit, integration is scheduled: if an integrator holds the lock, it does
+the integration; otherwise one is spawned to do it.
+
+**Learned.** SQLite's automatic checkpoint and git's `gc --auto` work this
+way: whoever commits past a threshold does the integration, or starts it.
+The check "someone already holds the lock" has a lost-wakeup race: blocks
+written while the holder is releasing are left until the next commit. The
+holder closes it by looking for new blocks again after releasing, and
+taking the lock back if there are any.
+
+**Decided.** The scheduling, on Irakli's say-so, into the matrix's "who
+integrates" row. Open: where the spawned integrator runs.
