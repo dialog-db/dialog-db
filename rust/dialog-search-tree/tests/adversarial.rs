@@ -22,7 +22,9 @@
 use anyhow::Result;
 use dialog_common::Blake3Hash;
 use dialog_search_tree::helpers::Blocks;
-use dialog_search_tree::{Buffer, Delta, HitchhikerTree, Manifest, PersistentTree, TransientTree};
+use dialog_search_tree::{
+    Delta, HitchhikerTree, Manifest, PersistentNode, PersistentTree, TransientTree,
+};
 
 type Store = Blocks;
 type TreeKey = [u8; 40];
@@ -150,9 +152,12 @@ fn manifests() -> Vec<(&'static str, Manifest)> {
     ]
 }
 
-async fn settle(delta: &mut Delta<Blake3Hash, Buffer>, storage: &mut Store) -> Result<()> {
-    for (_, buffer) in delta.flush() {
-        storage.store(buffer);
+async fn settle<K, V>(
+    delta: &mut Delta<Blake3Hash, PersistentNode<K, V>>,
+    storage: &mut Store,
+) -> Result<()> {
+    for (_, node) in delta.flush() {
+        storage.store(node.buffer().clone());
     }
     Ok(())
 }
@@ -190,7 +195,7 @@ async fn run_canonical(program: &Program, manifest: Manifest) -> Result<Vec<Blak
             }
             Op::Delete(key) => edit.delete(&key, &storage).await?,
         }
-        .persist(&mut delta, &storage)?;
+        .persist(&mut delta)?;
         settle(&mut delta, &mut storage).await?;
         if program.checkpoints.contains(&(at + 1)) {
             roots.push(checkpoint_root(&tree, &storage, "canonical").await?);
@@ -235,7 +240,7 @@ async fn run_buffered(
         }
         Op::Delete(key) => seed_edit.delete(&key, &storage).await?,
     }
-    .persist(&mut delta, &storage)?;
+    .persist(&mut delta)?;
     settle(&mut delta, &mut storage).await?;
 
     // Pin the manifest on every session: the manifest travels in the tree,
@@ -271,7 +276,7 @@ async fn run_buffered(
             buffered = open.clone()(&tree, next_buf());
         } else if done.is_multiple_of(persist_every) {
             let mut delta = Delta::zero();
-            let root = buffered.persist(&mut delta, &storage)?;
+            let root = buffered.persist(&mut delta)?;
             settle(&mut delta, &mut storage).await?;
             tree = Tree::at(dialog_search_tree::helpers::test_catalog(), root);
             buffered = open.clone()(&tree, next_buf());
@@ -434,7 +439,7 @@ async fn minimize_caught_divergence() -> Result<()> {
             }
             Op::Delete(key) => edit.delete(&key, &storage).await?,
         }
-        .persist(&mut delta, &storage)?;
+        .persist(&mut delta)?;
         settle(&mut delta, &mut storage).await?;
     }
     let canonical_entries = entries_of(&tree, &storage).await?;
@@ -458,7 +463,7 @@ async fn minimize_caught_divergence() -> Result<()> {
         }
         Op::Delete(key) => seed_edit.delete(&key, &storage2).await?,
     }
-    .persist(&mut delta, &storage)?;
+    .persist(&mut delta)?;
     settle(&mut delta, &mut storage2).await?;
     let bufs = [Some(4usize), Some(32), None];
     let mut session = 0usize;
@@ -488,7 +493,7 @@ async fn minimize_caught_divergence() -> Result<()> {
             break;
         } else if done.is_multiple_of(11) {
             let mut delta = Delta::zero();
-            let root = buffered.persist(&mut delta, &storage)?;
+            let root = buffered.persist(&mut delta)?;
             settle(&mut delta, &mut storage2).await?;
             tree2 = Tree::at(dialog_search_tree::helpers::test_catalog(), root);
             buffered = open.clone()(&tree2, bufs[session % bufs.len()]);

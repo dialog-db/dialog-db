@@ -44,6 +44,7 @@ use crate::repository::archive::erased;
 use crate::repository::archive::write_blob;
 use crate::repository::source::SourceRef;
 use crate::{Branch, CommitError, Index, Snapshot};
+use dialog_artifacts::tree::CorpusNode;
 use dialog_artifacts::{Asset, AssetChange, BlobIndexExt as _, Instruction};
 use dialog_capability::Provider;
 use dialog_common::{Blake3Hash, Blake3Hash as NodeHash, ConditionalSend, ConditionalSync};
@@ -54,6 +55,7 @@ use dialog_effects::blob::{
     BlobError, Import as BlobImport, Read as BlobRead, Size as BlobSize, Write as BlobWrite,
 };
 use dialog_effects::memory::Resolve;
+use dialog_search_tree::nodes;
 use futures_util::{Stream, StreamExt};
 
 impl Branch {
@@ -160,6 +162,11 @@ where
         + Provider<Put>
         + Provider<Resolve>
         + Provider<ArchiveLoad>
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
         + Provider<BlobLoad>
         + dialog_common::Holds
         + ConditionalSync
@@ -206,6 +213,11 @@ where
         + Provider<Put>
         + Provider<Resolve>
         + Provider<ArchiveLoad>
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
         + Provider<BlobLoad>
         + dialog_common::Holds
         + ConditionalSync
@@ -267,6 +279,11 @@ where
         + Provider<Put>
         + Provider<Resolve>
         + Provider<ArchiveLoad>
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
         + Provider<BlobLoad>
         + dialog_common::Holds
         + ConditionalSync

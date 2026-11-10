@@ -1,6 +1,7 @@
 use super::memory::Cell;
 use crate::rules::SharedRuleCache;
 use crate::{CacheBudget, Ephemeral, RemoteFallback, ResolveError, Revision};
+use dialog_artifacts::tree::CorpusNode;
 use dialog_capability::Provider;
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::{ConditionalSync, Holds};
@@ -8,6 +9,7 @@ use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::memory;
 use dialog_query::concept::query::PlanCache;
+use dialog_search_tree::nodes;
 
 use crate::repository::source::{Caches, SourceRef};
 use dialog_artifacts::Changes;
@@ -689,7 +691,16 @@ impl Branch {
     /// branches tracks a remote reads purely locally.
     pub fn history<'a, Env>(&self, env: &'a Env) -> TreeHistory<&'a Env>
     where
-        Env: Provider<ArchiveLoad> + Provider<BlobLoad> + Holds + ConditionalSync + ?Sized,
+        Env: Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + Provider<BlobLoad>
+            + Holds
+            + ConditionalSync
+            + ?Sized,
     {
         SourceRef::from(self).history(env)
     }
@@ -706,7 +717,16 @@ impl Branch {
         limit: usize,
     ) -> Result<Vec<(Version, RevisionRecord)>, DialogArtifactsError>
     where
-        Env: Provider<ArchiveLoad> + Provider<BlobLoad> + Holds + ConditionalSync + ?Sized,
+        Env: Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + Provider<BlobLoad>
+            + Holds
+            + ConditionalSync
+            + ?Sized,
     {
         SourceRef::from(self).log(env, limit).await
     }

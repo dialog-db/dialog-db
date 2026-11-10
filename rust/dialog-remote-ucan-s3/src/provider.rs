@@ -17,8 +17,6 @@
 //! as a missing object or a CAS conflict leave the permit cached: it is
 //! still good, and dropping it would restore the redeem round-trip this
 //! cache exists to remove.
-
-use async_trait::async_trait;
 use dialog_capability::{Capability, Constraint, Effect, ForkInvocation, Provider};
 use dialog_common::{ConditionalSend, time};
 use dialog_remote_s3::request::{IntoRequest, RequestMethod};
@@ -27,8 +25,7 @@ use dialog_remote_s3::{PermitRejection, S3, S3Error, S3Invocation};
 use crate::permit_cache::PermitKey;
 use crate::site::UcanSite;
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl<Fx, T, E> Provider<ForkInvocation<UcanSite, Fx>> for UcanSite
 where
     Fx: Effect<Output = Result<T, E>> + 'static,
