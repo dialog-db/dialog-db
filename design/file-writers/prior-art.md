@@ -60,6 +60,37 @@ step that makes it visible.
 These keep one file but need memory shared by every writer: one process,
 or shared memory across processes.
 
+## Dolt: branches over a content-addressed tree
+
+The closest product to dialog: SQL tables as probabilistic search trees
+over content-addressed chunks, with branches and merges. Sources:
+DoltHub's posts on the [chunk journal](https://dolthub.com/blog/2023-03-08-dolt-chunk-journal),
+[ACID transactions](https://www.dolthub.com/blog/2023-01-04-acid-transactions/),
+[conjoin](https://www.dolthub.com/blog/2025-07-23-conjoin-means-bugs),
+[journal repair](https://www.dolthub.com/blog/2025-12-10-journal-data-loss-detection),
+[concurrency](https://www.dolthub.com/blog/2026-02-17-dolt-concurrency) and
+[CLI against a server](https://www.dolthub.com/blog/2023-06-12-cli-to-sql/).
+
+- **One journal file a database.** Chunks and root records are appended to
+  one file, `.dolt/noms/vvvv…`, fsynced at each transaction commit. A
+  manifest names the root and the immutable table files; since the journal
+  it is rarely written. Conjoin merges table files and their indexes into
+  one, in the background, because a read has to look in each.
+- **One writing process.** A `dolt` command run while a `dolt sql-server`
+  is up is told the database is locked to writes; embedded use is
+  single-writer, by a file lock (the second from third-party
+  documentation, [beads](https://beads.gascity.com/architecture/dolt)).
+- **Many sessions inside that process.** Concurrent writers are sessions
+  of the one server. Writes to the commit graph (commits, branch creation
+  and deletion, merges) take a lock that was a global one and is now one
+  per branch; merge work is done outside it. A SQL transaction that
+  conflicts with its branch's head on commit is rolled back and retried.
+- **Not stated** in what was read: whether branch heads live inside the
+  root value, and how the root is updated when two branches commit at once.
+
+So Dolt does not let separate processes write one database: it puts every
+writer in one process and serializes per branch inside it.
+
 ## What carries over
 
 1. **A single file serializes its writers.** Every design that does not
@@ -69,7 +100,11 @@ or shared memory across processes.
    branches never meet; writers to one branch meet only at the head.
 3. **Integration is deferred and readers look in both:** SQLite's
    checkpoint, git's repack, compaction in LSM stores.
-4. **The landing place is per writer, not per branch:** git's loose
+4. **Or one process owns the file.** Dolt answers concurrent writers with
+   a server that every writer talks to, not with writers of their own:
+   the file keeps one writer, and branches meet only on a lock per branch
+   inside it.
+5. **The landing place is per writer, not per branch:** git's loose
    objects, Delta's data files and Jujutsu's operations belong to whoever
    wrote them. A per-branch landing file would still make two writers on
    one branch take turns on it.

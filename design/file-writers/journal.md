@@ -58,3 +58,15 @@ the unit that conflicts (a ref, a table), then integrate later, with
 readers looking in both. Git's object store is main's `fs` archive plus the
 packing it lacks, and is close to the proposal in this topic. The landing
 place in all of them belongs to a writer, not a branch.
+
+**Asked.** Irakli: Dolt is probably the only contender.
+
+**Learned.** [prior-art.md](prior-art.md), Dolt. It keeps one journal file
+a database, fsynced per transaction, and merges table files in the
+background. It does not let separate processes write one database: a
+second process is refused writes, and concurrency is sessions inside one
+server, which serialize commit-graph writes per branch. Dolt is the closest
+product, but it answers the requirement by having one owning process, not
+writers of their own; git is the closer precedent for separate processes.
+That adds a candidate approach for Direction: one process owns the file and
+every writer goes through it.

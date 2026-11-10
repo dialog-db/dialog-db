@@ -17,4 +17,8 @@
 | the stores surveyed that let writers run at once (git, Delta Lake, Iceberg, Jujutsu) land each writer's data where no other writer writes, and coordinate only publication, per ref or per table | fact | [prior-art.md](prior-art.md) | holds |
 | git's object store is main's `fs` archive plus background packing: loose objects written without a lock, packed later, read from both | fact | [prior-art.md](prior-art.md); gitrepository-layout, git-repack | holds |
 | a landing file per writer (process or session) is what the surveyed designs use; one per branch would make same-branch writers take turns on it | hypothesis | follows from the survey; refuted if a surveyed store lands data per branch without serializing that branch's writers | open |
+| Dolt appends a database's chunks and roots to one journal file, fsynced at each transaction commit, and merges table files in the background (conjoin) | fact | [prior-art.md](prior-art.md), DoltHub's journal, ACID and conjoin posts | holds |
+| Dolt lets one process write a database: other processes are refused writes while a server runs, and concurrent writers are sessions inside the server | fact | [prior-art.md](prior-art.md), DoltHub's CLI-to-SQL and concurrency posts; embedded single-writer from third-party docs | holds |
+| inside a Dolt server, commit-graph writes take a lock per branch, with merges done outside it | fact | DoltHub, "Dolt's Extra Layers of Concurrency", 2026-02-17 | holds |
+| Dolt is the only contender among existing systems | opinion | Irakli, 2026-11-10. As a product with branches over a content-addressed tree, the closest; for storage that separate processes write without waiting, it does not do it, and git is the closer precedent | - |
 
