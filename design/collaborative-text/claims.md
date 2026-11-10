@@ -72,3 +72,7 @@
 | doc as value grows without bound: at one commit per transaction a fresh replica downloads 342 MB for a 21 KB text | fact | E1, extrapolated from a 5000-transaction prefix | holds |
 | on the concurrent traces, library snapshots are 33 to 70 KB, 0.14 to 0.26× the raw trace encoding (~274 KB) | fact | libraries and E1 results | holds |
 | perf and soak numbers taken through `Metered` under-report writes of values large enough to spill | fact | E1 found `blob::Import` uncounted; fixed on research/text-e1 only | holds |
+| rich text will eventually be needed | opinion | maintainer, 2026-11-09 | - |
+| Yrs supports formatting on text; Automerge has marks; Diamond Types is plain text only | fact | Yrs `Text` trait docs; Automerge 2.2 rich text; Diamond Types README | holds |
+| transplanting a library's ideas into Dialog has no clear payoff today | opinion | maintainer, 2026-11-09 | - |
+| the layer model's channel is the live path this topic needs | opinion | maintainer, 2026-11-09; reconciled in layers.md | - |

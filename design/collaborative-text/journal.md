@@ -302,3 +302,21 @@ region wins on moving parts unless H5 is much cheaper); Yrs versus
 Diamond Types at main (pending).
 
 **Decided.** Not decided; the maintainer decides.
+
+## 2026-11-09, Directing: layers, rich text, automerge-repo
+
+**Asked.** Build a prototype next. The realtime channel is the right
+framing, and the layer model's broadcast layer points the same way:
+reconcile the two. Rich text will be needed eventually; could that tilt
+Yrs versus Diamond Types? Transplanting ideas pays only if we gain
+something, not obvious today. Learn from automerge-repo.
+
+**Learned.** layers.md. The layer model turns the text region into a
+question: a batch could be a fact (H9), which removes the format gate
+and merge changes, at the replicated commit floor. Each keystroke as a
+memory-layer commit (H10) is the other cost to check. Rich text tilts to
+Yrs. automerge-repo's lessons are the document handle, a per-document
+share policy, per-document broadcast and per-connection sync signals.
+
+**Decided.** Yrs is the default engine. H9 measured before the prototype
+picks region or fact.

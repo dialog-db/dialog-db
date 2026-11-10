@@ -189,9 +189,33 @@ catches up from the region.
   live delivery so peers diverge.
 - **Experiment:** read #522's channel code first; then a two-peer run.
 
+## H9. A text batch is a fact in the replicated layer, and no region is needed
+
+Per the layer model: one `text/batch` fact per flush. No new region, no
+format gate, no merge allow-list change.
+
+- **Confirm:** at a pause interval, bytes written and synced are within
+  2× of the text region's (H1).
+- **Refute:** the replicated commit floor (~66 KB median) puts it many
+  times over the region at every interval an editor accepts.
+- **Experiment:** E1 harness, a "one batch fact per flush" variant.
+
+## H10. A keystroke can be a memory-layer commit
+
+Each keystroke asserts one `text/change` on a memory layer with a
+channel, runs the stack's commit and reaches peers.
+
+- **Confirm:** under ~1 ms per keystroke with text rules installed, and
+  the channel carries ≈ the library's per-change bytes.
+- **Refute:** induction over the stack per keystroke dominates.
+- **Experiment:** on the stack branch (#720, #722), two in-process peers.
+
 ## Not hypotheses yet
 
-- Which library: decided by H2 and E1, not up front.
+- Which library: Yrs leads on size per change (14 B), rebuild time, and
+  rich text (formatting attributes on text). Diamond Types at main
+  rebuilds as fast but is plain text only. Rich text being needed
+  eventually (maintainer) makes Yrs the default.
 - Built in versus a library: if H2 holds, a library is only the merge
   engine; transplanting DeltaDB's ideas (delta = parent + offset + text;
   local positional index) is a later swap of that engine, not a separate
