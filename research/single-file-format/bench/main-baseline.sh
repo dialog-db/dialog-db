@@ -7,17 +7,20 @@
 # is built with `--cfg dialog_main`, which leaves out the stores main does
 # not have.
 #
-#   research/single-file-format/bench/main-baseline.sh <worktree dir>
+#   research/single-file-format/bench/main-baseline.sh <worktree dir> [<ref>]
+#
+# <ref> is what to build as main, origin/main by default.
 #
 # The binary lands in <worktree dir>/target/release/examples/tonk_bench.
 set -euo pipefail
 here="$(git rev-parse --show-toplevel)"
 worktree="${1:?the directory to check origin/main out into}"
+ref="${2:-origin/main}"
 git -C "$here" fetch -q origin main
 if [ ! -d "$worktree" ]; then
-  git -C "$here" worktree add -q --detach "$worktree" origin/main
+  git -C "$here" worktree add -q --detach "$worktree" "$ref"
 fi
-git -C "$worktree" checkout -q --detach origin/main
+git -C "$worktree" checkout -q --detach "$ref"
 baseline="$worktree/rust/dialog-baseline"
 mkdir -p "$baseline/examples/tonk"
 cp "$here/rust/dialog-baseline/examples/tonk_bench.rs" "$baseline/examples/"

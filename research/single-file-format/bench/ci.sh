@@ -25,7 +25,11 @@ mkdir -p "$work" "$out/bin" "$out/datasets"
 (cd "$here" && cargo build --release -p dialog-baseline --example tonk_bench --example tonk_dataset)
 cp "$here/target/release/examples/tonk_bench" "$out/bin/branch"
 cp "$here/target/release/examples/tonk_dataset" "$out/bin/dataset"
-main="$("$bench/main-baseline.sh" "$work/main" | tail -1)"
+# Main as this branch last merged it, so both builds share everything but
+# what the branch changed (a main that moved on since may not build the
+# bench at all).
+base="$(git -C "$here" merge-base HEAD origin/main)"
+main="$("$bench/main-baseline.sh" "$work/main" "$base" | tail -1)"
 cp "$main" "$out/bin/main"
 
 fixture="$here/rust/dialog-baseline/fixtures/tonk-team-schema.jsonl"
