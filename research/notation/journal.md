@@ -20,7 +20,7 @@ What we tried, what it measured, and what we decided, newest last. The [idea](..
 - **R23:** with `!` as induction only and the commit decided by submitting a document as a query or a transaction, 8 of 10 readers preferred it to a top-level `!`, and one of five named `!` most confusing, the first time since R17 it was not all.
 - **R24:** `query`, `select`, `find` and `(? …)` read the same, 19 of 19 medians, and every reader chose its own; only readers of the others named `query`'s clash with the submission mode.
 - **R25:** cold, with no documentation, the four words read the same again: 31 of 35 points and 11 of 15 word points each, and no reader took `select` for a projection, `find` for one match or `?` for a variable. Readers expect an undeclared concept to be empty, not an error (16 of 20), and 19 of 20 could not tell what `id` does.
-- **Next:** a plan for representing concepts, rules and commands in dialog; redo the sketches in the current notation.
+- **Next:** settle what [implementation](implementation.md) found the design must decide first (rounds, `:top` ranking, authority, `fresh`), then build the front end in its order.
 - **Open:** whether commands are asserted or written; what a rule head that names no entity lands on; whether questions stay calls with variables or become rules into a domain-call head; text literals; optional parameters. The design's Open list has the rest.
 
 ## Datasets
@@ -678,6 +678,16 @@ xychart-beta
 **Results.** `query`, after GraphQL. [design.md](design.md) is rewritten to the notation as R22 to R25 read it: commands and `assert`/`retract`, `id` and `fresh`, `!` on rule heads only, queries and transactions, domains throughout, and an inductive head shown in an example. It states what R25's readers could not guess: an undeclared concept is a compile error, `id` derives, and a command keeps nothing. Layers, top-level calls as sugar, `!` as retained and installing with `concept!` are gone. Sending, views, events and routes keep their semantics, marked **Proposed**, with `!` taken out.
 
 **Decision.** Taken. The sketches still use the R16 notation.
+
+## 2026-11-10 — How the notation maps onto dialog
+
+**Question.** Can concepts, rules and commands as designed be represented in dialog as it stores them, and where not, in what form?
+
+**Method.** Read the code: `ConceptDescriptor`, the `dialog.rule/*` storage in `rules.rs`, the inductive and deductive descriptors, and commit-time induction in `transaction/induce.rs`. Not a measurement.
+
+**Results.** [implementation](implementation.md). Almost all of it compiles to today's descriptors unchanged: concepts, domain calls, relation heads as deductive rules, `assert` and `retract` heads as inductive `assert!` and `retract!`, several heads split into sibling rules, `!` heads as heads concluding a transient. New: concept names, a command domain convention that is also the transient marker, command definitions derived from the `reads` index, a `dialog/id` formula, `fresh` bound by the engine, a non-committing preview for query mode, and retract by entity. Four things the design has to settle first: induction fails a commit after 16 rounds, so the `remind!` example would fail; `:top` ranks the first case best, so `[:open :done]` resolves a conflict to open; induction runs as the committing operator; and `fresh` must be deterministic per firing.
+
+**Decision.** For the maintainer: the four settlements, the command domain spelling, and what a view is.
 
 ## How to reproduce
 

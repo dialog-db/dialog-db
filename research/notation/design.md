@@ -138,7 +138,7 @@ The types used so far are `:text`, `:entity`, `:bytes`, `:natural`, `:float`, si
 
 ### Picks
 
-A field keeps one value per entity, elected by its pick: `:last` unless something says otherwise, and `:top` for a variant, which ranks its cases in the order they are listed. The other picks are `:all`, `:max` and `:min`. A pick is named by an entity (`last:`, `top:` …) and is part of the field's identity.
+A field keeps one value per entity, elected by its pick: `:last` unless something says otherwise, and `:top` for a variant, which ranks its cases with the first listed best, as dialog's `as:` list does today. The other picks are `:all`, `:max` and `:min`. A pick is named by an entity (`last:`, `top:` …) and is part of the field's identity.
 
 In dialog today a pick is one ordering over a cell's claims, used both ways:
 
@@ -320,10 +320,13 @@ Comparing the design with [Bloom](http://bloom-lang.net), Dedalus and LogiQL set
 
 ## Open
 
-- Under whose authority an installed rule writes: the transaction that installed it, or the one that set it off.
+- Under whose authority an installed rule writes: the transaction that installed it, or the one that set it off. Dialog's induction today runs as the operator committing.
 - What a retract hides in its own tick when a rule also derives the fact, and what an assert and a retract of one fact in one tick do.
 - A command in a premise and an issued command look alike: `(add (todo list: ?l text: ?x))` matches in a `when` and issues at the top. Readers proposed `(do add …)`.
-- What drives a tick. A run goes on while `!` heads produce, to the turn limit, so a `remind!` that re-issues itself while a to-do is open runs to the limit in one run. Whether later ticks belong to the run, to later transactions, or to a clock.
+- What drives a tick. Dialog runs induction inside one commit and fails it after 16 rounds, so a `remind!` that re-issues itself while a to-do is open fails the transaction that issues it. Whether `!` heads must quiesce within a run, or a command can be carried to a later transaction or a clock.
+- Which case of a variant ranks best. With `[:open :done]` and the first case best, a to-do done on one device and reopened on another resolves to open.
+- How commands are defined for discovery: derived from the rules that read them, with metadata as facts ([implementation](implementation.md#commands)).
+- What a view is: data on a concept, a relation head with a template, or a concept that can be written through ([implementation](implementation.md#views)).
 - Whether `id` names a domain or a concept, so two concepts with the same labels and values do not share an entity.
 - Whether a rule that creates should only create. The `add` rule asserts `state: :open`, so adding a done to-do's list and text again reopens it; `(unless (todo ?t))` in its `when` would stop that.
 - How a body names a pick other than the default.
