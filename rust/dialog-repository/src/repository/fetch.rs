@@ -593,4 +593,270 @@ mod tests {
         );
         Ok(())
     }
+
+    /// `rounds` batches of `per` entities' `a/name` and `b/name`. Each
+    /// committed on its own leaves the index nodes above the leaves
+    /// holding ops in their links' buffers.
+    fn rounds(rounds: usize, per: usize) -> Result<Vec<dialog_artifacts::Changes>> {
+        use dialog_artifacts::Statement as _;
+        let mut batches = Vec::with_capacity(rounds);
+        for round in 0..rounds {
+            let mut changes = dialog_artifacts::Changes::new();
+            for index in 0..per {
+                let entity: dialog_artifacts::Entity = format!("id:{round}-{index}").parse()?;
+                the!("a/name")
+                    .of(entity.clone())
+                    .is(format!("a {round} {index}"))
+                    .assert(&mut changes);
+                the!("b/name")
+                    .of(entity)
+                    .is(format!("b {round} {index}"))
+                    .assert(&mut changes);
+            }
+            batches.push(changes);
+        }
+        Ok(batches)
+    }
+
+    fn attribute_query(attribute: &str) -> AttributeQuery {
+        AttributeQuery::new(
+            Term::from(attribute.parse::<dialog_query::Relation>().expect("an attribute")),
+            Term::blank(),
+            Term::blank(),
+            Term::blank(),
+            None,
+        )
+    }
+
+    /// A member that tracks a remote and holds every block warms a hinted
+    /// range without reading a block, fetching one, or decoding a buffer:
+    /// the walk picks the children a read of the range descends into from
+    /// the separators alone, and finds each of them in the line's cache.
+    #[dialog_common::test]
+    async fn it_warms_a_local_member_without_reading_fetching_or_decoding() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let env = Counting::new(operator);
+        let repo = profile
+            .space(unique_name("local-member"))
+            .create()
+            .perform(&env)
+            .await?;
+        let branch = repo.branch("main").open().perform(&env).await?;
+        for batch in rounds(24, 12)? {
+            branch
+                .transaction()
+                .integrate(batch)
+                .commit()
+                .publish()
+                .perform(&env)
+                .await?;
+        }
+
+        // Track a remote nothing here reaches: every block is local.
+        let site = dialog_remote_s3::Address::builder("https://s3.us-east-1.amazonaws.com")
+            .region("us-east-1")
+            .bucket("bucket")
+            .build()?;
+        let origin = connect("origin", site, repo.did(), &env).await?;
+        let remote_branch = origin.branch("main").open().perform(&env).await?;
+        branch.set_upstream(remote_branch).perform(&env).await?;
+        let branch = repo.branch("main").open().perform(&env).await?;
+        assert!(
+            branch.routes().fetches(branch.of()),
+            "a member tracking a remote has reads warm ahead"
+        );
+
+        // Both ranges read once: what a view's reads touch is cached.
+        for attribute in ["a/name", "b/name"] {
+            branch
+                .query()
+                .select(attribute_query(attribute))
+                .perform(&env)
+                .try_vec()
+                .await?;
+        }
+
+        // What the read of `a/name` costs with nothing to warm.
+        let decodes = dialog_search_tree::helpers::buffer_decodes();
+        let rows = branch
+            .query()
+            .select(attribute_query("a/name"))
+            .perform(&env)
+            .try_vec()
+            .await?;
+        let bare = dialog_search_tree::helpers::buffer_decodes() - decodes;
+        assert_eq!(rows.len(), 24 * 12);
+        assert!(
+            bare > 0,
+            "fixture: the tree must hold buffered links a walk could decode"
+        );
+
+        let listening = Provider::<Preload>::execute(
+            &env,
+            PreloadRequest {
+                selector: selector("b/name"),
+                likelihood: Likelihood::Likely,
+            },
+        )
+        .await;
+        assert!(listening, "the default budget accepts hints");
+
+        let gets = env.count("archive::Get");
+        let hydrations = env.count("hydrate::Hydrate");
+        let decodes = dialog_search_tree::helpers::buffer_decodes();
+        let rows = branch
+            .query()
+            .select(attribute_query("a/name"))
+            .perform(&env)
+            .try_vec()
+            .await?;
+        let warmed = dialog_search_tree::helpers::buffer_decodes() - decodes;
+        assert_eq!(rows.len(), 24 * 12);
+        let queue = Provider::<Speculation>::execute(&env, ()).await;
+        assert_eq!(queue.pending(), 0, "the driven query executed the hint");
+
+        assert_eq!(env.count("archive::Get") - gets, 0, "the walk reads no block");
+        assert_eq!(
+            env.count("hydrate::Hydrate") - hydrations,
+            0,
+            "the walk fetches nothing"
+        );
+        assert_eq!(
+            warmed, bare,
+            "the walk decodes no buffer: the query decoded what it decodes alone"
+        );
+        Ok(())
+    }
+
+    /// A replica that adopted a head by reference still warms ahead of
+    /// demand: a hinted range the replica does not hold is fetched while
+    /// another query runs, level by level, and the hinted range's own read
+    /// then fetches nothing.
+    #[dialog_common::test]
+    async fn it_fetches_a_hinted_range_a_partial_replica_lacks() -> Result<()> {
+        use crate::SiteAddress;
+        use dialog_effects::credential::prelude::*;
+        use dialog_effects::storage::{Directory, Location};
+        use dialog_remote_fs::FsAddress;
+        use dialog_storage::provider::FileSystem;
+        use dialog_storage::resource::Resource as _;
+
+        // The origin: a repository that commits and pushes to a directory
+        // a remote serves.
+        let (operator, profile) = test_session_with_peer().await;
+        let source_repo = profile
+            .space(unique_name("partial-source"))
+            .create()
+            .perform(&operator)
+            .await?;
+        let location = Location::new(Directory::Temp, unique_name("partial-remote"));
+        let site = FileSystem::open(&location).await?;
+        source_repo
+            .did()
+            .credential()
+            .key("self")
+            .save(dialog_credentials::Credential::Signer(
+                source_repo.credential().clone(),
+            ))
+            .perform(&site)
+            .await?;
+        let address = SiteAddress::Fs(FsAddress::new(location));
+        let origin = connect("origin", address.clone(), source_repo.did(), &operator).await?;
+        let source = source_repo.branch("main").open().perform(&operator).await?;
+        let remote = origin.branch("main").open().perform(&operator).await?;
+        source.set_upstream(remote).perform(&operator).await?;
+        for batch in rounds(4, 40)? {
+            source
+                .transaction()
+                .integrate(batch)
+                .commit()
+                .publish()
+                .perform(&operator)
+                .await?;
+        }
+        assert!(source.push().perform(&operator).await?.is_some());
+
+        // A replica on its own profile and storage, adopting the head by
+        // reference: it holds none of the tree.
+        let (replica_operator, replica_profile) = test_session_with_peer().await;
+        replica_profile
+            .access()
+            .save(
+                source_repo
+                    .access()
+                    .claim(&source_repo)
+                    .delegate(replica_profile.did())
+                    .perform(&operator)
+                    .await?,
+            )
+            .perform(&replica_operator)
+            .await?;
+        let replica_repo = replica_profile
+            .space(unique_name("partial-replica"))
+            .open()
+            .perform(&replica_operator)
+            .await?;
+        let origin = connect("origin", address, source_repo.did(), &replica_operator).await?;
+        let replica = replica_repo
+            .branch("main")
+            .open()
+            .perform(&replica_operator)
+            .await?;
+        let remote = origin
+            .branch("main")
+            .open()
+            .perform(&replica_operator)
+            .await?;
+        replica.set_upstream(remote).perform(&replica_operator).await?;
+        replica
+            .pull()
+            .perform(&replica_operator)
+            .await?
+            .expect("the replica adopts the upstream head");
+        let replica = replica_repo
+            .branch("main")
+            .open()
+            .perform(&replica_operator)
+            .await?;
+
+        let env = Counting::new(replica_operator);
+        let listening = Provider::<Preload>::execute(
+            &env,
+            PreloadRequest {
+                selector: selector("b/name"),
+                likelihood: Likelihood::Likely,
+            },
+        )
+        .await;
+        assert!(listening, "the default budget accepts hints");
+
+        let rows = replica
+            .query()
+            .select(attribute_query("a/name"))
+            .perform(&env)
+            .try_vec()
+            .await?;
+        assert_eq!(rows.len(), 4 * 40);
+        let queue = Provider::<Speculation>::execute(&env, ()).await;
+        assert_eq!(queue.pending(), 0, "the driven query executed the hint");
+        assert!(
+            env.count("hydrate::Hydrate") > 0,
+            "the replica held nothing, so its reads fetched"
+        );
+
+        let hydrations = env.count("hydrate::Hydrate");
+        let rows = replica
+            .query()
+            .select(attribute_query("b/name"))
+            .perform(&env)
+            .try_vec()
+            .await?;
+        assert_eq!(rows.len(), 4 * 40);
+        assert_eq!(
+            env.count("hydrate::Hydrate") - hydrations,
+            0,
+            "the walk fetched the hinted range, so its own read fetches nothing"
+        );
+        Ok(())
+    }
 }
