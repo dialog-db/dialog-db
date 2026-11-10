@@ -117,6 +117,9 @@ pub use upstream::*;
 // module on the native feature alone compiled it out of the cross-target
 // run before the macro was ever reached.
 #[cfg(test)]
+mod log_tests;
+
+#[cfg(test)]
 mod segment_tests;
 
 #[cfg(all(
