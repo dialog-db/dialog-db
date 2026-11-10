@@ -191,6 +191,12 @@ catches up from the region.
 
 ## H9. A text batch is a fact in the replicated layer, and no region is needed
 
+**Split (2026-11-09).** Disk: within 2× of the region only at a 5 s pause
+or 1000 changes per flush (1.0 to 1.3×); 5 to 24× over at finer
+intervals. Sync: over at every interval, ~300 to 400 KB per synced flush
+round even at coarse policies (rewritten roots plus a merge revision per
+pull). Region sync was measured as one writer's upload only.
+
 Per the layer model: one `text/batch` fact per flush. No new region, no
 format gate, no merge allow-list change.
 

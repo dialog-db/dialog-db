@@ -320,3 +320,10 @@ share policy, per-document broadcast and per-connection sync signals.
 
 **Decided.** Yrs is the default engine. H9 measured before the prototype
 picks region or fact.
+
+**Measured (later).** H9 split: a batch fact matches the region on disk
+only at a 5 s pause, and syncs many times over it at every interval. The
+breakdown shows the floor is the root re-serializing earlier commits'
+buffered ops, not the commit's own writes. If that floor drops, H9 and
+the region converge and the region loses its reason to exist. Opened as
+its own design topic: the commit floor matters beyond text.

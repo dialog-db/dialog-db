@@ -76,3 +76,5 @@
 | Yrs supports formatting on text; Automerge has marks; Diamond Types is plain text only | fact | Yrs `Text` trait docs; Automerge 2.2 rich text; Diamond Types README | holds |
 | transplanting a library's ideas into Dialog has no clear payoff today | opinion | maintainer, 2026-11-09 | - |
 | the layer model's channel is the live path this topic needs | opinion | maintainer, 2026-11-09; reconciled in layers.md | - |
+| the median small commit writes one node, the root, at 52 to 66 KB, re-serializing 20 to 30 earlier commits' buffered ops; a commit's own ops are ~2 KB | fact | E1 breakdown (results/2026-11-09-e1.md, H9 section) | holds |
+| the commit floor is reducible: ~95% of a commit's bytes copy forward what earlier commits wrote | hypothesis | E1 breakdown; an append-only root buffer would test it | open |
