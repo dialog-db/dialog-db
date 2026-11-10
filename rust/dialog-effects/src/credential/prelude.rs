@@ -5,7 +5,7 @@
 //! use dialog_effects::credential::prelude::*;
 //! ```
 
-use super::{Credential, Key, Load, Retract, Save, Secret, Site};
+use super::{Credential, Generate, Key, Load, Retract, Save, Secret, Site};
 use dialog_capability::{Capability, Did, Policy, SiteId, Subject};
 use dialog_credentials::Credential as KeyCredential;
 
@@ -58,12 +58,16 @@ impl CredentialCapabilityExt for Capability<Credential> {
 
 /// Extension methods for invoking effects on a key credential.
 pub trait CredentialKeyExt {
+    /// The resulting generate chain type.
+    type Generate;
     /// The resulting load chain type.
     type Load;
     /// The resulting save chain type.
     type Save;
     /// The resulting retract chain type.
     type Retract;
+    /// Generate a signing key at this address, in the store that keeps it.
+    fn generate(self) -> Self::Generate;
     /// Load a key credential from this address.
     fn load(self) -> Self::Load;
     /// Save a key credential to this address.
@@ -74,9 +78,14 @@ pub trait CredentialKeyExt {
 }
 
 impl CredentialKeyExt for Capability<Key> {
+    type Generate = Capability<Generate>;
     type Load = Capability<Load<KeyCredential>>;
     type Save = Capability<Save<KeyCredential>>;
     type Retract = Capability<Retract<KeyCredential>>;
+
+    fn generate(self) -> Capability<Generate> {
+        self.invoke(Generate)
+    }
 
     fn load(self) -> Capability<Load<KeyCredential>> {
         self.invoke(Load::new())
@@ -122,6 +131,18 @@ impl CredentialSiteExt for Capability<Site> {
 
     fn retract(self) -> Capability<Retract<Secret>> {
         self.invoke(Retract::new())
+    }
+}
+
+/// Field accessors on `Capability<Generate>`.
+pub trait GenerateCredentialExt {
+    /// Get the key address from the capability chain.
+    fn address(&self) -> &str;
+}
+
+impl GenerateCredentialExt for Capability<Generate> {
+    fn address(&self) -> &str {
+        &Key::of(self).address
     }
 }
 

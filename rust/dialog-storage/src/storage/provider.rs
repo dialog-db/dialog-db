@@ -38,6 +38,7 @@ pub mod volatile;
 pub use volatile::*;
 
 pub mod load;
+mod generate;
 
 pub mod space;
 pub use space::{Space, SpaceProvider};

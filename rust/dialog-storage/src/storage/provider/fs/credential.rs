@@ -10,7 +10,7 @@ use dialog_effects::credential::prelude::{
     LoadCredentialExt, LoadSecretExt, RetractCredentialExt, RetractSecretExt, SaveCredentialExt,
     SaveSecretExt,
 };
-use dialog_effects::credential::{CredentialError, Load, Retract, Save, Secret};
+use dialog_effects::credential::{CredentialError, Generate, Load, Retract, Save, Secret};
 
 const CREDENTIAL: &str = "credential";
 const KEY: &str = "key";
@@ -45,6 +45,13 @@ impl Provider<Load<Credential>> for FileSystem {
         Credential::import(export)
             .await
             .map_err(|e| CredentialError::Corrupted(e.to_string()))
+    }
+}
+
+#[async_trait::async_trait]
+impl Provider<Generate> for FileSystem {
+    async fn execute(&self, input: Capability<Generate>) -> Result<Credential, CredentialError> {
+        crate::provider::generate::generate(self, &input).await
     }
 }
 
