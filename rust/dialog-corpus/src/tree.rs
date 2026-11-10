@@ -1,14 +1,15 @@
 //! Shared tree-ops on the corpus.
 //!
-//! Both [`Artifacts`](crate::Artifacts) and the higher-level branch
-//! abstractions in `dialog-repository` and `dialog-query` operate on the
-//! same EAV/AEV/VAE search tree. The per-instruction mutation loop and the
+//! The branch abstractions in `dialog-repository` and `dialog-query` all
+//! operate on the same EAV/AEV/VAE search tree. The per-instruction mutation loop and the
 //! selector → key-range scan dispatch are identical across all of them, so
 //! they live here as an extension trait on [`Corpus`], parameterized
-//! over any environment that loads the tree's nodes
-//! ([`archive::Load`](dialog_effects::archive::Load)) and spilled values
-//! ([`blob::Load`](dialog_effects::blob::Load)), and holds the node cache
-//! its reads are answered from ([`Holds`](dialog_common::Holds)).
+//! over any environment that answers the corpus's node reads
+//! ([`nodes::Read<CorpusNode>`](dialog_search_tree::nodes::Read),
+//! [`nodes::Preload<CorpusNode>`](dialog_search_tree::nodes::Preload))
+//! and, where an operation reaches a value spilled out of its key, loads
+//! it ([`blob::Load`](dialog_effects::blob::Load)). Where a node is kept,
+//! and whether it is cached, is the environment's business.
 //!
 //! Callers responsible for revisions, upstreams, remote fallback, or any
 //! other branch specifics keep that logic on their side and call
