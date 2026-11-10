@@ -12,7 +12,8 @@ What we tried, what it measured, and what we decided, newest last. The [idea](..
 - **R16:** the revised design, read from four ways of writing its spec, scored 297 of 300 points; every document's median was 15 of 15. The style of the spec did not matter at this difficulty; the examples did.
 - **Settled after R16:** a write through a concept passes every parameter, and leaving one out is a compile error; a top-level call is `assert`, `assert!` or `query` by whether it has variables and a `!`; the `!` means retained; records in the entity's place are dropped for `(id {…})`; picks stay part of the attribute; a concept body holds only attribute lines and constraints.
 - **R17:** the modifier design (commands as modifiers, `!` as mutation, `assert` and `retract` as modifiers) read right from a card: 125 of 130 points, every item passing. Every reader rated it 3 of 5, and 9 of 10 named `!` as the most confusing thing.
-- **Next:** decide whether a premise names the stored read; then take the design into `design.md`.
+- **R18:** with no `!` in premises and committing decided by the invocation, both documents read (medians 14 and 15 of 15), but ratings stayed at 3 and 7 of 10 still named `!`; writing concepts through `assert!` did not beat `todo!`.
+- **Next:** take the design into `design.md`, with the card's `assert` hole fixed.
 - **Open:** whether commands are asserted or written; what a rule head that names no entity lands on; whether questions stay calls with variables or become rules into a domain-call head; text literals; optional parameters. The design's Open list has the rest.
 
 ## Datasets
@@ -494,6 +495,30 @@ Outside the rubric, every reader rated the notation 3 of 5, and 9 of 10 named `!
 - A concept's `!` lasting until retracted and a modifier's lasting one tick is tested in R18: writing every concept through `(assert! (todo todo:9c1e …))`, with `assert`'s entity optional and the content's `id` when left out.
 
 **Decision.** Taken; R18 [planned](results/r18-plan.md) before any reader ran.
+
+## 2026-11-10 — R18: `assert` reads as well as `todo!`, and `!` is still named
+
+**Question.** The one [planned](results/r18-plan.md): with no `!` in premises and committing decided by the invocation, does `!` read better, and does writing every concept through `(assert! (todo …))` help?
+
+**Method.** As planned: two documents, five readers each, all started at once, scored by the committed rubric.
+
+**Results.** [r18](results/r18.md).
+
+```mermaid
+xychart-beta
+  title "Readers naming ! as most confusing (of 5 per document)"
+  x-axis ["R17 card", "R17 prelude", "R18 short", "R18 assert"]
+  y-axis "readers" 0 --> 5
+  bar [4, 5, 4, 3]
+```
+
+Both documents read: medians 14 and 15 of 15, every miss on item 11. No reader wrote `!` in a premise, and all ten read a mixed document as committing only its `!` invocation. Clarity did not move: ratings of 3, and two 2s in `assert`. `assert` did not beat `short` by the bars; keep `todo!`.
+
+Item 11 failed in `short` (2 of 5) because the card contradicts itself: `assert` is a modifier, a modifier's facts never reach a concept query, and the card never says `assert` is the exception. Readers who missed it reasoned correctly from the text.
+
+The complaints changed. Premises are gone; what readers name now is that a top-level `!` decides the commit while a head's `!` decides the tick, and that `add!` lasts one tick while `assert!` is stored. Seven proposed a word for the next tick. Content identity rose to 3 of 10.
+
+**Decision.** Keep `todo!`. Fix the card: `assert` is the modifier whose facts are the concept's. Two rounds on `!` have not moved the rating and comprehension is near the ceiling, so the rating may not discriminate for this reader; whether a word for the next tick is worth trying is the maintainer's call. Content identity is the next thing readers trip on.
 
 ## How to reproduce
 
