@@ -11,7 +11,7 @@ use dialog_effects::memory;
 use dialog_query::concept::query::PlanCache;
 use dialog_search_tree::nodes;
 
-use crate::repository::source::{Caches, SourceRef};
+use crate::repository::source::{Caches, Live};
 use dialog_artifacts::Changes;
 use dialog_artifacts::DialogArtifactsError;
 use dialog_artifacts::Entity;
@@ -123,6 +123,8 @@ pub use upstream::*;
 ))]
 mod integration_tests;
 
+#[cfg(test)]
+mod isolation_tests;
 #[cfg(all(
     test,
     any(feature = "integration-tests", feature = "web-integration-tests")
@@ -382,9 +384,10 @@ impl Writer {
 }
 
 impl Branch {
-    /// The metadata a query layer over this branch alone folds in, as
-    /// `derive` computes it (`heads` computing its revision facts alone), reused while the profile, operator, and head
-    /// are those it was derived under. Shared rather than copied: every
+    /// The metadata a query layer over this branch alone folds in at
+    /// `revision`, as `derive` computes it (`heads` computing its
+    /// revision facts alone), reused while the profile, operator, and
+    /// revision are those it was derived under. Shared rather than copied: every
     /// query over the branch reads the same facts.
     ///
     /// Only the revision facts move with the head, so the rest is kept
@@ -394,19 +397,19 @@ impl Branch {
     pub(crate) fn layer_metadata(
         &self,
         operator: &Capability<Operator>,
+        revision: Option<&Revision>,
         derive: impl FnOnce() -> (Changes, Changes),
         heads: impl FnOnce() -> Changes,
     ) -> Ephemeral {
         let profile = operator.profile();
         let did = operator.did();
-        let revision = self.revision();
         let mut cache = self
             .layer_metadata_cache
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let fixed = match cache.as_ref() {
             Some(memo) if memo.profile == *profile && memo.operator == did => {
-                if memo.revision == revision {
+                if memo.revision.as_ref() == revision {
                     return memo.metadata.clone();
                 }
                 Some(memo.fixed.clone())
@@ -424,7 +427,7 @@ impl Branch {
         *cache = Some(LayerMetadata {
             profile: profile.clone(),
             operator: did,
-            revision,
+            revision: revision.cloned(),
             fixed,
             metadata: metadata.clone(),
         });
@@ -702,7 +705,7 @@ impl Branch {
             + ConditionalSync
             + ?Sized,
     {
-        SourceRef::from(self).history(env)
+        Live::from(self).pin().history(env)
     }
 
     /// The branch's committed history, newest first — at most `limit`
@@ -728,7 +731,7 @@ impl Branch {
             + ConditionalSync
             + ?Sized,
     {
-        SourceRef::from(self).log(env, limit).await
+        Live::from(self).pin().log(env, limit).await
     }
 
     /// Export all artifacts from this branch to the given exporter.

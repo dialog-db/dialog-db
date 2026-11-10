@@ -200,7 +200,7 @@ fn inline_n() -> usize {
 /// under the same catalog, and no blob.
 async fn without_spills(branch: &Branch, operator: &Operator) -> Result<Blocks> {
     let blocks = Blocks::in_catalog(branch.archive().index());
-    let tree = crate::repository::source::SourceRef::from(branch).tree();
+    let tree = crate::repository::source::Live::from(branch).pin().tree();
     let visits = tree.traverse_available(operator);
     let mut visits = pin!(visits);
     while let Some(visit) = visits.next().await {

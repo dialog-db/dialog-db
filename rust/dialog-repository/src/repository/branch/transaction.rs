@@ -14,13 +14,15 @@ mod succession;
 pub use batch::*;
 pub use query::{TransactionQuery, TransactionSelectQuery};
 pub(crate) use succession::ReadSettlement;
+#[cfg(test)]
+pub(crate) use succession::{settle, stored_claims};
 
 use crate::Commit;
-use crate::repository::branch::QueryLayer;
 use crate::repository::branch::asset::store_assets;
-use crate::repository::source::SourceRef;
+use crate::repository::branch::session::shared_metadata;
+use crate::repository::source::{Live, View};
 use crate::rules::{SharedRuleCache, TriggerFootprint, is_rule_attribute, on_attr, reads_attr};
-use crate::{Branch, CommitError, RemoteSite, Revision, Snapshot, Staged};
+use crate::{Branch, CommitError, PublishError, RemoteSite, Revision, Snapshot, Staged};
 use dialog_artifacts::tree::CorpusNode;
 use dialog_artifacts::{Changes, Statement};
 use dialog_capability::{Fork, Provider};
@@ -32,12 +34,13 @@ use dialog_effects::blob::Import as BlobImport;
 use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::Read as BlobRead;
 use dialog_effects::blob::Size as BlobSize;
-use dialog_effects::memory::{Publish, Resolve};
+use dialog_effects::memory::{self, Edition, Publish, Resolve};
 use dialog_search_tree::nodes;
+use std::slice::from_ref;
 
 /// A transaction on a line of the repository.
 ///
-/// `Line` is what the transaction runs on, and it decides what
+/// `L` is the [`Line`] the transaction runs on, and it decides what
 /// committing does:
 ///
 /// - `&`[`Branch`]: `.commit().perform(&env)` STAGES the batch. It mints
@@ -63,18 +66,85 @@ use dialog_search_tree::nodes;
 /// and to inductive-rule bodies during commit-time induction, but they
 /// never enter the durable batch: they live for exactly one induction
 /// round and leave no trace in the committed tree.
-pub struct Transaction<Line> {
-    line: Line,
+///
+/// # A transaction reads and commits against one revision
+///
+/// Opening a transaction pins its line at the head the line stands at
+/// then ([`Line::pin`]). Every query of the transaction reads that
+/// revision, however a commit through another handle of the branch
+/// moves the head meanwhile, and the commit builds on it: a branch
+/// transaction's publish CAS's the head cell against the version it
+/// read when it opened, so a head that moved since is refused with
+/// [`PublishError::VersionMismatch`](crate::PublishError::VersionMismatch)
+/// rather than built over, and a snapshot transaction's advance is
+/// refused the same way when a commit through the same handle moved
+/// the snapshot. The caller opens a new transaction on the fresh head.
+pub struct Transaction<L: Line> {
+    line: L,
+    /// The head the line stood at when the transaction opened: what
+    /// its queries read and its commit builds on.
+    pinned: L::Pin,
     /// The durable writes, held so reading them is a range read (see
     /// [`Staged`]); exported to a [`Changes`] batch once, at commit.
     changes: Staged,
     transients: Staged,
 }
 
-impl<Line> Transaction<Line> {
-    pub(crate) fn on(line: Line) -> Self {
+/// What a [`Transaction`] runs on: a `&`[`Branch`], a `&`[`Snapshot`]
+/// or a [`TransactionBatch`]. Sealed; the three lines are the only ones.
+///
+/// Opening a transaction pins the line (see [`Transaction`]): the pin is
+/// what the line has of a head that another handle can move. A branch's
+/// is the revision in its head cell together with the cell version the
+/// commit's CAS expects; a snapshot's is the revision it holds; a staged
+/// chain is owned by its transaction, so nothing else can move it and it
+/// pins nothing.
+pub trait Line: sealed::Sealed {
+    /// What the transaction holds of the line's head from open to
+    /// commit.
+    type Pin;
+
+    /// Read the line's head now: the one read of it a transaction makes.
+    fn pin(&self) -> Self::Pin;
+}
+
+mod sealed {
+    pub trait Sealed {}
+    impl Sealed for &crate::Branch {}
+    impl Sealed for &crate::Snapshot {}
+    impl Sealed for super::TransactionBatch {}
+}
+
+impl Line for &Branch {
+    type Pin = Option<Edition<Revision>>;
+
+    fn pin(&self) -> Self::Pin {
+        // One read of the cell, so the revision built on and the version
+        // the publish CAS's against name the same head.
+        self.revision.edition()
+    }
+}
+
+impl Line for &Snapshot {
+    type Pin = Revision;
+
+    fn pin(&self) -> Self::Pin {
+        self.revision()
+    }
+}
+
+impl Line for TransactionBatch {
+    type Pin = ();
+
+    fn pin(&self) -> Self::Pin {}
+}
+
+impl<L: Line> Transaction<L> {
+    pub(crate) fn on(line: L) -> Self {
+        let pinned = line.pin();
         Transaction {
             line,
+            pinned,
             changes: Staged::default(),
             transients: Staged::default(),
         }
@@ -123,9 +193,10 @@ impl<Line> Transaction<Line> {
     /// into the commit while transient heads seed further rounds. Only
     /// then is the durable batch committed; transients are dropped,
     /// never written.
-    pub fn commit(self) -> TransactionCommit<Line> {
+    pub fn commit(self) -> TransactionCommit<L> {
         TransactionCommit {
             line: self.line,
+            pinned: self.pinned,
             changes: self.changes.clone(),
             transients: self.transients.export(),
             allow_empty: false,
@@ -135,7 +206,7 @@ impl<Line> Transaction<Line> {
     }
 }
 
-impl<Line> Transaction<Line> {
+impl<L: Line> Transaction<L> {
     /// The staged layers [`Transaction::query`] reads over the line:
     /// the durable writes, then the transients. Shared, not copied.
     fn layers(&self) -> Vec<Staged> {
@@ -147,25 +218,37 @@ impl<Line> Transaction<Line> {
     }
 }
 
-impl<'a> Transaction<&'a Branch> {
+impl Transaction<&Branch> {
     /// Run queries against this transaction's "as-if committed" view of
-    /// the branch.
+    /// the branch, at the revision the transaction opened at.
     ///
     /// Pending asserts and retracts are surfaced through a
     /// [`TransactionQuery`] handle — assertions show up alongside the
     /// stored facts; retractions tombstone matching facts in the stored
     /// stream before the merge. Dispatched transients are part of the
     /// view too. The transaction itself stays open and committable.
-    pub fn query(&self) -> TransactionQuery<'a> {
-        TransactionQuery::new(SourceRef::Branch(self.line), self.layers())
+    pub fn query(&self) -> TransactionQuery<'_> {
+        TransactionQuery::new(self.view(), self.layers())
+    }
+
+    /// The branch at the revision this transaction pinned.
+    fn view(&self) -> View<'_> {
+        View::at(
+            Live::Branch(self.line),
+            self.pinned.as_ref().map(|edition| &edition.content),
+        )
     }
 }
 
-impl<'a> Transaction<&'a Snapshot> {
+impl Transaction<&Snapshot> {
     /// Run queries against this transaction's "as-if committed" view of
-    /// the snapshot. See [`Transaction::<&Branch>::query`].
-    pub fn query(&self) -> TransactionQuery<'a> {
-        TransactionQuery::new(SourceRef::Snapshot(self.line), self.layers())
+    /// the snapshot, at the revision the transaction opened at. See
+    /// [`Transaction::<&Branch>::query`].
+    pub fn query(&self) -> TransactionQuery<'_> {
+        TransactionQuery::new(
+            View::at(Live::Snapshot(self.line), Some(&self.pinned)),
+            self.layers(),
+        )
     }
 }
 
@@ -188,8 +271,9 @@ impl Snapshot {
     ///
     /// Use `.assert()` and `.retract()` to accumulate changes, then
     /// `.commit().perform(&env)` to apply them; the snapshot advances to
-    /// the revision `perform` returns. Clone first to keep the view you
-    /// have.
+    /// the revision `perform` returns. The transaction reads and builds
+    /// on the revision the snapshot holds now (see [`Transaction`]).
+    /// Clone first to keep the view you have.
     pub fn transaction(&self) -> Transaction<&Snapshot> {
         Transaction::on(self)
     }
@@ -205,8 +289,9 @@ impl Snapshot {
 /// [`canonicalize`](Self::canonicalize)); the difference is the
 /// induction step in front and that transients never reach the
 /// durable batch.
-pub struct TransactionCommit<Line> {
-    pub(super) line: Line,
+pub struct TransactionCommit<L: Line> {
+    pub(super) line: L,
+    pub(super) pinned: L::Pin,
     pub(super) changes: Staged,
     pub(super) transients: Changes,
     pub(super) allow_empty: bool,
@@ -214,7 +299,7 @@ pub struct TransactionCommit<Line> {
     pub(super) amend: bool,
 }
 
-impl<Line> TransactionCommit<Line> {
+impl<L: Line> TransactionCommit<L> {
     /// Mint a revision even when the settled change batch leaves the
     /// indexes untouched. See [`Commit::allow_empty`](crate::Commit::allow_empty).
     pub fn allow_empty(mut self) -> Self {
@@ -263,11 +348,24 @@ impl TransactionCommit<&Snapshot> {
             + 'static,
     {
         let snapshot = self.line;
-        let source = SourceRef::Snapshot(snapshot);
+        // The revision the transaction opened at: what it read, and
+        // what the commit builds on. A commit through the same handle
+        // since has moved the snapshot past it, and the advance below
+        // would refuse to build over that commit: refuse now, with the
+        // same answer, before settling and inducing.
+        let previous = self.pinned;
+        if snapshot.revision() != previous {
+            return Err(PublishError::VersionMismatch {
+                expected: Some(memory::Version::from(previous.tree.hash())),
+                current: memory::Current::Unknown,
+            }
+            .into());
+        }
+        let view = View::at(Live::Snapshot(snapshot), Some(&previous));
         let operator = Identify.perform(env).await?;
         let mut changes = Box::pin(succession::settle(
-            vec![source.to_source()],
-            QueryLayer::from(source).overlay(&operator),
+            vec![view.to_source()],
+            shared_metadata(from_ref(&view), &operator),
             &self.changes,
             env,
         ))
@@ -275,19 +373,13 @@ impl TransactionCommit<&Snapshot> {
         // A snapshot commit reports only its revision: the transients
         // induction emitted surface on a staged
         // [`TransactionBatch::induced`] alone.
-        induce::induce(
-            SourceRef::Snapshot(snapshot),
-            &mut changes,
-            self.transients,
-            env,
-        )
-        .await?;
+        induce::induce(&view, &mut changes, self.transients, env).await?;
 
-        let previous = snapshot.revision();
         let touches_rules = touches_rules(&changes);
         let touches_rule_facts = touches_rule_facts(&changes);
-        let machinery =
-            store_assets(SourceRef::Snapshot(snapshot), changes.take_assets(), env).await?;
+        let machinery = store_assets(&view, changes.take_assets(), env).await?;
+        let rule_cache = view.rule_cache();
+        drop(view);
 
         let mut commit = Commit::new(snapshot, changes.into_stream()).with_machinery(machinery);
         if self.allow_empty {
@@ -296,19 +388,19 @@ impl TransactionCommit<&Snapshot> {
         if self.canonicalize {
             commit = commit.canonicalize();
         }
-        let revision = Box::pin(commit.perform(env)).await?;
+        // The lineage is read now: it is allocated by the snapshot's first
+        // commit, and the advance refuses a head that moved since the
+        // transaction opened whichever lineage it was minted on.
+        let (_, lineage) = snapshot.head();
+        let revision =
+            Box::pin(commit.perform_on_snapshot_at(snapshot, previous.clone(), lineage, env))
+                .await?;
 
         if !touches_rules {
-            carry_footprint(
-                &SourceRef::Snapshot(snapshot).rule_cache(),
-                Some(&previous),
-                &revision,
-            );
+            carry_footprint(&rule_cache, Some(&previous), &revision);
         }
         if !touches_rule_facts {
-            SourceRef::Snapshot(snapshot)
-                .rule_cache()
-                .carry_rules_root(Some(*previous.tree.hash()), Some(*revision.tree.hash()));
+            rule_cache.carry_rules_root(Some(*previous.tree.hash()), Some(*revision.tree.hash()));
         }
         Ok(revision)
     }

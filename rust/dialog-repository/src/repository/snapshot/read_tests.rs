@@ -17,7 +17,7 @@ use dialog_search_tree::nodes;
 use futures_util::{StreamExt as _, stream};
 
 use crate::helpers::test_repo;
-use crate::repository::source::SourceRef;
+use crate::repository::source::Live;
 use crate::schema::DidExt as _;
 use dialog_capability::{Fork, Provider};
 use dialog_common::{ConditionalSync, Holds};
@@ -57,7 +57,7 @@ fn person(id: &str, name: &str) -> Person {
 
 /// Every `test/name` value on a line, sorted, read through the raw
 /// artifact index (the lowest read path there is).
-async fn names<'a, Env>(source: impl Into<SourceRef<'a>>, env: &Env) -> Result<Vec<String>>
+async fn names<'a, Env>(line: impl Into<Live<'a>>, env: &Env) -> Result<Vec<String>>
 where
     Env: Provider<BlobRead>
         + Provider<Get>
@@ -77,8 +77,8 @@ where
         + ConditionalSync
         + 'static,
 {
-    let rows: Vec<Artifact> = Select::from_source(
-        source.into(),
+    let rows: Vec<Artifact> = Select::from_view(
+        line.into().pin(),
         ArtifactSelector::new().the("test/name".parse()?),
     )
     .to_owned()

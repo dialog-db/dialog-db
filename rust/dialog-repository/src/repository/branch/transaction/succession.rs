@@ -328,7 +328,7 @@ fn overlay_holds(sources: &[Source], the: &ArtifactsRelation, of: &Entity) -> bo
     let selector = ArtifactSelector::new().the(the.clone()).of(of.clone());
     sources
         .iter()
-        .any(|source| !source.as_ref().overlay().scan(&selector).is_empty())
+        .any(|source| !source.overlay().scan(&selector).is_empty())
 }
 
 /// The claims a cell holds as `view` reads them: the stored claims a

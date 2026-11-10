@@ -83,7 +83,7 @@ use dialog_varsig::Principal;
 use crate::repository::archive::erased;
 use crate::repository::archive::routes;
 use crate::repository::remote::Step;
-use crate::repository::source::{Caches, SourceRef};
+use crate::repository::source::{Caches, Live};
 use crate::{
     BlobArchive, Branch, ConnectedReplica, Ephemeral, Index, PublishError, RemoteSite, Repository,
     Revision, Select, SelectQuery, SnapshotError,
@@ -460,7 +460,7 @@ impl Snapshot {
             + ConditionalSync
             + ?Sized,
     {
-        SourceRef::from(self).history(env)
+        Live::from(self).pin().history(env)
     }
 
     /// The snapshot's committed history, newest first — at most `limit`
@@ -482,7 +482,7 @@ impl Snapshot {
             + ConditionalSync
             + ?Sized,
     {
-        SourceRef::from(self).log(env, limit).await
+        Live::from(self).pin().log(env, limit).await
     }
 
     /// A shared handle to this snapshot's causal-verdict memo. See
@@ -526,7 +526,7 @@ pub struct SnapshotClaims<'a> {
 impl<'a> SnapshotClaims<'a> {
     /// Select artifacts matching the selector.
     pub fn select(self, selector: ArtifactSelector<Constrained>) -> Select<'a> {
-        Select::from_source(SourceRef::from(self.snapshot), selector)
+        Select::from_view(Live::from(self.snapshot).pin(), selector)
     }
 }
 

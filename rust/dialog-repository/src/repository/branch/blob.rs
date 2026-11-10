@@ -76,7 +76,7 @@
 use crate::repository::archive::erased;
 use crate::repository::branch::asset::recorded_size;
 use crate::repository::remote::Step;
-use crate::repository::source::SourceRef;
+use crate::repository::source::{Live, View};
 use crate::{Branch, CommitError, Index, RemoteFallback, RemoteSite, Snapshot};
 use dialog_artifacts::tree::CorpusNode;
 use dialog_artifacts::{Asset, BlobIndexExt as _, BlobRecord, Entity, Instruction};
@@ -108,15 +108,18 @@ use futures_util::{Stream, stream};
 /// which a reference to a snapshot cannot do (its revision is held by
 /// value): they fail with [`CommitError::Detached`], and the snapshot is
 /// advanced by consuming it instead.
+///
+/// Holds the line live: each operation pins it when performed, so a
+/// size lookup or a read names the revision the line stands at then.
 #[derive(Clone, Copy)]
 pub struct BlobArchive<'a> {
-    source: SourceRef<'a>,
+    line: Live<'a>,
 }
 
 impl<'a> From<&'a Branch> for BlobArchive<'a> {
     fn from(branch: &'a Branch) -> Self {
         Self {
-            source: SourceRef::from(branch),
+            line: Live::from(branch),
         }
     }
 }
@@ -124,7 +127,7 @@ impl<'a> From<&'a Branch> for BlobArchive<'a> {
 impl<'a> From<&'a Snapshot> for BlobArchive<'a> {
     fn from(snapshot: &'a Snapshot) -> Self {
         Self {
-            source: SourceRef::from(snapshot),
+            line: Live::from(snapshot),
         }
     }
 }
@@ -133,10 +136,7 @@ impl<'a> BlobArchive<'a> {
     /// The branch behind this archive, for the operations that advance
     /// it; a snapshot's archive refuses them.
     fn branch(&self) -> Result<&'a Branch, CommitError> {
-        match self.source {
-            SourceRef::Branch(branch) | SourceRef::Pinned(branch, _) => Ok(branch),
-            SourceRef::Snapshot(_) => Err(CommitError::Detached),
-        }
+        self.line.branch().ok_or(CommitError::Detached)
     }
 }
 
@@ -235,7 +235,7 @@ fn blob_hash(entity: &Entity) -> Result<Blake3Hash, BlobError> {
 /// by an asset's `dialog.asset/size` fact or a legacy blob-index entry, or
 /// `None` when it vouches for no such content.
 async fn index_size<Env>(
-    source: SourceRef<'_>,
+    view: &View<'_>,
     hash: &Blake3Hash,
     env: &Env,
 ) -> Result<Option<u64>, CommitError>
@@ -255,20 +255,20 @@ where
         + ConditionalSync
         + 'static,
 {
-    let Some(revision) = source.revision() else {
+    let Some(revision) = view.revision() else {
         return Ok(None);
     };
     // A tree node the replica lacks (after a fast-forward pull only the
     // revision pointer is local) hydrates through the env's load.
     let store = erased(env);
-    let tree = Index::at(source.catalog(), NodeHash::from(*revision.tree.hash()));
+    let tree = Index::at(view.catalog(), NodeHash::from(*revision.tree.hash()));
     Ok(tree.content_size(&store, hash.as_bytes()).await?)
 }
 
 /// Whether the line's blob index itself still references `hash`: content a
 /// tree recorded before assets, which a retraction tombstones.
 async fn index_references<Env>(
-    source: SourceRef<'_>,
+    view: &View<'_>,
     hash: &Blake3Hash,
     env: &Env,
 ) -> Result<bool, CommitError>
@@ -288,13 +288,13 @@ where
         + ConditionalSync
         + 'static,
 {
-    let Some(revision) = source.revision() else {
+    let Some(revision) = view.revision() else {
         return Ok(false);
     };
     // A tree node the replica lacks (after a fast-forward pull only the
     // revision pointer is local) hydrates through the env's load.
     let store = erased(env);
-    let tree = Index::at(source.catalog(), NodeHash::from(*revision.tree.hash()));
+    let tree = Index::at(view.catalog(), NodeHash::from(*revision.tree.hash()));
     Ok(tree.get_blob(&store, hash.as_bytes()).await?.is_some())
 }
 
@@ -325,7 +325,7 @@ impl BlobSize<'_> {
             + 'static,
     {
         let hash = blob_hash(&self.entity)?;
-        index_size(self.archive.source, &hash, env).await
+        index_size(&self.archive.line.pin(), &hash, env).await
     }
 }
 
@@ -364,7 +364,7 @@ impl ReadBlob<'_> {
             + ConditionalSync
             + 'static,
     {
-        let line = self.archive.source;
+        let line = self.archive.line;
         let hash = blob_hash(&self.entity)?;
         let range = self.range;
 
@@ -387,9 +387,9 @@ impl ReadBlob<'_> {
         // Local miss. Hydrate from the upstream peer, if any (a snapshot
         // has none: its reads are local). Asked only now, on the miss: a
         // read the local blob store answers never works out the route.
-        let route = match line {
-            SourceRef::Branch(branch) | SourceRef::Pinned(branch, _) => branch.fallback(),
-            SourceRef::Snapshot(_) => RemoteFallback::None,
+        let route = match line.branch() {
+            Some(branch) => branch.fallback(),
+            None => RemoteFallback::None,
         };
         let remote = match route {
             RemoteFallback::Remote(remote) => remote,
@@ -403,7 +403,7 @@ impl ReadBlob<'_> {
 
         // The tree must already vouch for the blob for us to import it; without
         // a size we have no import to issue and the miss is genuine.
-        let Some(size) = index_size(line, &hash, env).await? else {
+        let Some(size) = index_size(&line.pin(), &hash, env).await? else {
             return Err(BlobError::NotFound(miss_key).into());
         };
 
@@ -567,15 +567,15 @@ impl RetractBlob<'_> {
     {
         let branch = self.archive.branch()?;
         let hash = blob_hash(&self.entity)?;
-        let source = SourceRef::from(branch);
+        let view = Live::from(branch).pin();
         let mut retractions = Vec::new();
-        if let Some(size) = recorded_size(source, hash.as_bytes(), env).await? {
+        if let Some(size) = recorded_size(&view, hash.as_bytes(), env).await? {
             retractions.push(Instruction::Retract(
                 Asset::stored(*hash.as_bytes(), size).fact()?,
             ));
         }
         let mut entries = Vec::new();
-        if index_references(source, &hash, env).await? {
+        if index_references(&view, &hash, env).await? {
             entries.push(BlobRecord::retract_entry(hash.as_bytes()));
         }
         if retractions.is_empty() && entries.is_empty() {

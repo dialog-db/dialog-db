@@ -3,7 +3,7 @@ use super::merge::merge_with_winner;
 use super::transaction::induction_ignores;
 use crate::repository::archive::erased;
 use crate::repository::archive::persist;
-use crate::repository::source::SourceRef;
+use crate::repository::source::{Live, View};
 use crate::{
     Branch, CommitError, Index, PublishError, RemoteSite, RepositoryMemoryExt as _, Revision,
     Snapshot, TreeReference, origin_of,
@@ -36,7 +36,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// Created by [`Branch::commit`]. Execute with
 /// `.perform(&env)`.
 pub struct Commit<'a, Changes> {
-    source: SourceRef<'a>,
+    line: Live<'a>,
     changes: Changes,
     allow_empty: bool,
     canonicalize: bool,
@@ -48,9 +48,9 @@ pub struct Commit<'a, Changes> {
 }
 
 impl<'a, Changes> Commit<'a, Changes> {
-    pub(crate) fn new(source: impl Into<SourceRef<'a>>, changes: Changes) -> Self {
+    pub(crate) fn new(line: impl Into<Live<'a>>, changes: Changes) -> Self {
         Self {
-            source: source.into(),
+            line: line.into(),
             changes,
             allow_empty: false,
             canonicalize: false,
@@ -240,11 +240,13 @@ where
             + ConditionalSync
             + 'static,
     {
-        match self.source {
-            SourceRef::Branch(branch) | SourceRef::Pinned(branch, _) => {
-                self.perform_on_branch(branch, env).await
+        match self.line {
+            Live::Branch(branch) => self.perform_on_branch(branch, env).await,
+            Live::Snapshot(snapshot) => {
+                let (base, lineage) = snapshot.head();
+                self.perform_on_snapshot_at(snapshot, base, lineage, env)
+                    .await
             }
-            SourceRef::Snapshot(snapshot) => self.perform_on_snapshot(snapshot, env).await,
         }
     }
 
@@ -309,10 +311,13 @@ where
         // of, so the publish below CAS's against it. A concurrent commit or
         // pull that advances the head while we apply changes then makes this
         // publish fail with `VersionMismatch` rather than silently overwriting
-        // it — the caller refreshes and retries. See `Cell::checkpoint`.
-        let head = branch.revision.checkpoint();
-        let base_revision = branch.revision();
-        let base_version = branch.revision.edition().map(|edition| edition.version);
+        // it — the caller refreshes and retries. See `Cell::checkpoint`. The
+        // revision built on and the version CAS'd against are one read of
+        // the cell, so they name the same head.
+        let pinned = branch.revision.edition();
+        let base_version = pinned.as_ref().map(|edition| edition.version.clone());
+        let head = branch.revision.checkpoint_at(base_version.clone());
+        let base_revision = pinned.map(|edition| edition.content);
         let merging = self.merge.then(|| base_revision.clone());
         let built_on = base_revision.clone();
 
@@ -331,8 +336,7 @@ where
         };
 
         let minted = Mint {
-            source: SourceRef::from(branch),
-            base: base_revision,
+            view: View::at(Live::Branch(branch), base_revision.as_ref()),
             changes,
             entries: self.entries,
             machinery: self.machinery,
@@ -419,11 +423,15 @@ where
         Ok(revision)
     }
 
-    /// The snapshot path: build on the head the snapshot holds, mint on
-    /// the snapshot's own lineage, and advance the head in place.
-    async fn perform_on_snapshot<Env>(
+    /// The snapshot path: build on `base`, the head the snapshot holds
+    /// (or held when the transaction committing through here opened),
+    /// mint on the snapshot's lineage `lineage`, and advance the head in
+    /// place, refused when it no longer stands at `base`.
+    pub(crate) async fn perform_on_snapshot_at<Env>(
         self,
         snapshot: &Snapshot,
+        base: Revision,
+        lineage: Option<Entity>,
         env: &Env,
     ) -> Result<Revision, CommitError>
     where
@@ -449,19 +457,16 @@ where
             + ConditionalSync
             + 'static,
     {
-        // The head this commit builds on and the line it mints on, read
-        // together. The lineage is inherited from the snapshot's earlier
-        // commits, or allocated now for its first: random rather than
-        // derived, because two clones of one base must not share it.
-        let (base, lineage) = snapshot.head();
+        // The line this commit mints on is inherited from the snapshot's
+        // earlier commits, or allocated now for its first: random rather
+        // than derived, because two clones of one base must not share it.
         let lineage = match lineage {
             Some(lineage) => lineage,
             None => Entity::new()?,
         };
 
         let minted = Mint {
-            source: SourceRef::from(snapshot),
-            base: Some(base.clone()),
+            view: View::at(Live::Snapshot(snapshot), Some(&base)),
             changes: self.changes,
             entries: self.entries,
             machinery: self.machinery,
@@ -535,12 +540,10 @@ pub(crate) enum Outcome {
 /// its head cell, a snapshot takes it by value — so the caller owns the
 /// step that makes the revision visible.
 pub(crate) struct Mint<'a, Changes> {
-    /// The line the commit builds on: where its store, caches, and
-    /// remote fallback come from.
-    pub(crate) source: SourceRef<'a>,
-    /// The revision the batch applies on top of, captured by the caller
-    /// (a branch checkpoints it for its CAS).
-    pub(crate) base: Option<Revision>,
+    /// The line the commit builds on, at the revision the batch applies
+    /// on top of, captured by the caller (a branch checkpoints it for
+    /// its CAS): where its store, caches, and remote fallback come from.
+    pub(crate) view: View<'a>,
     /// The instruction stream to apply.
     pub(crate) changes: Changes,
     /// Pre-built machinery entries riding the same batch. See
@@ -613,8 +616,8 @@ where
             + ConditionalSync
             + 'static,
     {
-        let source = self.source;
-        let base_revision = self.base;
+        let source = self.view;
+        let base_revision = source.revision().cloned();
         let changes = self.changes;
 
         // If the line tracks a remote upstream, commits must be able

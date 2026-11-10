@@ -14,38 +14,67 @@ says how to cut a release.
 
 ## Unreleased
 
-### A query reads one revision, the one its branch stood at when it began
+### A read reads one revision, and a transaction reads and commits against the one it opened at
 
-[#757](https://github.com/dialog-db/dialog-db/issues/757)
+[#757](https://github.com/dialog-db/dialog-db/issues/757),
+[#758](https://github.com/dialog-db/dialog-db/pull/758),
+[design/query-isolation.md](./design/query-isolation.md)
 
 A query performs many selects on its environment: a conjunction looks
 its second premise up per row of the first, a resolver re-reads a
-reference per outer row. Each select took its tree root from the
-branch's head cell as it stood at that moment, and that cell is shared by
-every handle of the branch, so a commit made through another handle
-while a query ran moved the root under it: the query read some of its
-premises at one revision and the rest at another, and could yield rows
-no revision held. A query's lines are now pinned to the revision they
-stand at when the query is built, and every select of that query reads
-that root. A query over a `Snapshot` was already pinned, and is
+reference per outer row. A transaction performs many queries, and a
+commit's settlement and induction read the line many times over. Each
+of those reads took its tree root from the branch's head cell as it
+stood at that moment, and that cell is shared by every handle of the
+branch, so a commit made through another handle while a read ran moved
+the root under it: the read saw some of the line at one revision and
+the rest at another, and could yield rows no revision held. Every unit
+of isolation now pins its line when it begins (a query, a select, one
+poll of a subscription, a transaction from open to commit), and every
+scan it performs reads that revision. Inside the crate a read source is
+a pinned `View` and the live `&Branch` or `&Snapshot` is reachable only
+by what needs the current head (a commit's CAS, a subscription deciding
+whether to re-evaluate), so a read that follows the head cannot be
+written. A query over a `Snapshot` was already pinned, and is
 unchanged.
 
 What this changes for you:
 
-- A `Branch::query()`, a transaction's query, a subscription's
-  evaluation and the induction and succession reads a commit makes each
-  see one revision throughout. A commit that lands on the branch while
-  one of them runs is seen by the next query, not by the rest of this
-  one.
+- A `Branch::query()`, `Branch::select()`, `Branch::claims().select()`,
+  a subscription's poll, and the induction and succession reads a
+  commit makes each see one revision throughout. A commit that lands on
+  the branch while one of them runs is seen by the next read, not by
+  the rest of this one.
+- A `Transaction` reads the revision its line stood at when it was
+  opened, in every query it runs, and its commit builds on that
+  revision. If the head moved meanwhile (a commit through another
+  handle of the branch, a pull, a commit through the same handle of a
+  snapshot), `commit().perform()` and `commit().publish().perform()`
+  are refused with `CommitError::Publish(PublishError::VersionMismatch)`
+  and nothing of the transaction lands: open a new transaction on the
+  fresh head. Before, such a transaction silently built on the moved
+  head, reading one revision and committing against another. The
+  publish still CAS's the head cell against the version the transaction
+  read, so the refusal holds under a race too; the check at commit is
+  only the early word.
+- `Transaction<L>` requires `L: Line`, a new sealed trait implemented
+  for `&Branch`, `&Snapshot` and `TransactionBatch`. Code generic over
+  the line (`fn f<L>(t: Transaction<L>)`) adds the bound. The lifetime of
+  `Transaction::query()`'s `TransactionQuery` is now that of the borrow
+  of the transaction, not of the branch.
 - The heads a read settlement records (`ReadObservation`) are the
-  revisions the query read, which were already what it meant.
+  revisions the transaction pinned, and the edition its writes stand at
+  is that head's successor, whatever the head is by the time it commits.
 - A line's session overlay (`Branch::overlay`) is not pinned: it is
   read live, as before.
+- `SourceRef`, the crate's internal borrowed line, is gone; `View` and
+  `Live` replace it. It was never public.
 
-Why: a query's answer should be a function of one state of the branch.
-Reading each scan against whatever the head happened to be made the
-answer depend on the timing of unrelated commits, which no caller can
-reason about.
+Why: a read's answer should be a function of one state of the branch,
+and a transaction's commit should apply what the transaction read.
+Reading each scan against whatever the head happened to be made both
+depend on the timing of unrelated commits, which no caller can reason
+about.
 
 ### A tree asks its environment for nodes, and the environment keeps them
 

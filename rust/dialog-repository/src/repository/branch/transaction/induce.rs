@@ -54,13 +54,13 @@ use dialog_query::{Any, Binding, Environment, InductiveRule, Match, Term};
 use futures_util::{StreamExt as _, TryStreamExt};
 
 use crate::repository::archive::erased;
-use crate::repository::branch::QueryLayer;
-use crate::repository::branch::session::QueryEnv;
-use crate::repository::source::SourceRef;
+use crate::repository::branch::session::{QueryEnv, shared_metadata};
+use crate::repository::source::View;
 use crate::rules::{
     TriggerFootprint, hydrate, hydrate_inductive, on_attr, reads_attr, source_attr, transient_attr,
 };
 use crate::{CommitError, RemoteSite, Revision, Staged};
+use std::slice::from_ref;
 
 /// Round bound for the induction loop: a cascade still emitting
 /// transients or novelty after this many rounds fails the commit
@@ -75,7 +75,7 @@ pub(crate) const MAX_ROUNDS: u32 = 16;
 /// Returns every transient a rule head emitted, across all rounds. The
 /// dispatched `transients` are not part of it.
 pub(crate) async fn induce<Env>(
-    source: SourceRef<'_>,
+    view: &View<'_>,
     changes: &mut Changes,
     transients: Changes,
     env: &Env,
@@ -115,7 +115,7 @@ where
     // missed one is caught up.
     let mut stimulus: Vec<Instruction> = changes.clone().into_instructions();
     stimulus.extend(transients.clone().into_instructions());
-    stimulus.extend(lag_delta(source, env).await?);
+    stimulus.extend(lag_delta(view, env).await?);
     let mut induced = Changes::new();
     if stimulus.is_empty() {
         return Ok(induced);
@@ -127,7 +127,7 @@ where
     // cache lookup below. The overlay slice is never head-cached; it
     // is re-scanned each round (cheap, in-memory) so rules installed
     // by this very commit — or by a rule during induction — fire.
-    let dispatch = Dispatch::resolve(source, env).await?;
+    let dispatch = Dispatch::resolve(view.clone(), env).await?;
 
     // The identity is resolved once: it only feeds the schema-metadata
     // overlay of the round view, which does not change across rounds.
@@ -227,8 +227,8 @@ where
         // mid-transaction query would: the writes as staged layers
         // beside the shared metadata.
         let view = QueryEnv::new(
-            vec![source.to_source()],
-            QueryLayer::from(source).overlay(&operator),
+            vec![view.to_source()],
+            shared_metadata(from_ref(view), &operator),
             env,
         )
         .with_layers(vec![
@@ -330,7 +330,7 @@ where
 /// the established disciplines — discovery head-keyed, hydrated bodies
 /// content-addressed, the overlay never head-cached.
 struct Dispatch<'a> {
-    source: SourceRef<'a>,
+    view: View<'a>,
     head: Option<Revision>,
     footprint: TriggerFootprint,
 }
@@ -410,7 +410,7 @@ impl<'a> Dispatch<'a> {
     /// Resolve the committed dispatch state: the branch head and the
     /// trigger footprint at it (cached per head; one range scan over
     /// each of `dialog.rule/on` and `dialog.rule/reads` on a miss).
-    async fn resolve<Env>(source: SourceRef<'a>, env: &Env) -> Result<Dispatch<'a>, CommitError>
+    async fn resolve<Env>(view: View<'a>, env: &Env) -> Result<Dispatch<'a>, CommitError>
     where
         Env: Provider<BlobRead>
             + Provider<Get>
@@ -430,28 +430,27 @@ impl<'a> Dispatch<'a> {
             + ConditionalSync
             + 'static,
     {
-        let head = source.revision();
-        let Some(head) = head else {
+        let Some(head) = view.revision().cloned() else {
             // A branch with no commits has no committed rules.
             return Ok(Dispatch {
-                source,
+                view,
                 head: None,
                 footprint: TriggerFootprint::default(),
             });
         };
 
-        let cache = source.rule_cache();
+        let cache = view.rule_cache();
         let footprint = match cache.footprint(&head) {
             Some(footprint) => footprint,
             None => {
                 let mut footprint = TriggerFootprint::default();
-                for claim in committed(source, ArtifactSelector::new().the(on_attr()), env).await? {
+                for claim in committed(&view, ArtifactSelector::new().the(on_attr()), env).await? {
                     if let Value::Entity(key) = claim.is {
                         footprint.on.insert(key);
                     }
                 }
                 for claim in
-                    committed(source, ArtifactSelector::new().the(reads_attr()), env).await?
+                    committed(&view, ArtifactSelector::new().the(reads_attr()), env).await?
                 {
                     if let Value::Entity(key) = claim.is {
                         footprint.reads.insert(key);
@@ -462,7 +461,7 @@ impl<'a> Dispatch<'a> {
             }
         };
         Ok(Dispatch {
-            source,
+            view,
             head: Some(head),
             footprint,
         })
@@ -500,14 +499,14 @@ impl<'a> Dispatch<'a> {
         if let Some(head) = &self.head
             && self.footprint.on.contains(on)
         {
-            let cache = self.source.rule_cache();
+            let cache = self.view.rule_cache();
             let committed_entities = match cache.triggers(on, head) {
                 Some(entities) => entities,
                 None => {
                     let selector = ArtifactSelector::new()
                         .the(on_attr())
                         .is(Value::Entity(on.clone()));
-                    let entities: Vec<Entity> = committed(self.source, selector, env)
+                    let entities: Vec<Entity> = committed(&self.view, selector, env)
                         .await?
                         .into_iter()
                         .map(|claim| claim.of)
@@ -558,7 +557,7 @@ impl<'a> Dispatch<'a> {
             + ConditionalSync
             + 'static,
     {
-        let cache = self.source.rule_cache();
+        let cache = self.view.rule_cache();
         let mut frontier: Vec<Reach> = touched.iter().cloned().collect();
         while let Some(reach) = frontier.pop() {
             let mut readers: Vec<Entity> = Vec::new();
@@ -572,7 +571,7 @@ impl<'a> Dispatch<'a> {
                             let selector = ArtifactSelector::new()
                                 .the(reads_attr())
                                 .is(Value::Entity(on.clone()));
-                            let entities: Vec<Entity> = committed(self.source, selector, env)
+                            let entities: Vec<Entity> = committed(&self.view, selector, env)
                                 .await?
                                 .into_iter()
                                 .map(|claim| claim.of)
@@ -633,7 +632,7 @@ impl<'a> Dispatch<'a> {
             + ConditionalSync
             + 'static,
     {
-        let cache = self.source.rule_cache();
+        let cache = self.view.rule_cache();
         let bytes = match overlay.sources.get(entity) {
             Some(bytes) => Some(bytes.clone()),
             None => self.source_bytes(entity, env).await?,
@@ -683,7 +682,7 @@ impl<'a> Dispatch<'a> {
             + ConditionalSync
             + 'static,
     {
-        let cache = self.source.rule_cache();
+        let cache = self.view.rule_cache();
         let bytes = match overlay.sources.get(entity) {
             Some(bytes) => Some(bytes.clone()),
             None => self.source_bytes(entity, env).await?,
@@ -747,14 +746,14 @@ impl<'a> Dispatch<'a> {
         let Some(head) = &self.head else {
             return Ok(false);
         };
-        let cache = self.source.rule_cache();
+        let cache = self.view.rule_cache();
         if let Some(verdict) = cache.transient(concept, head) {
             return Ok(verdict);
         }
         let selector = ArtifactSelector::new()
             .the(transient_attr())
             .of(concept.clone());
-        let verdict = !committed(self.source, selector, env).await?.is_empty();
+        let verdict = !committed(&self.view, selector, env).await?.is_empty();
         cache.record_transient(concept.clone(), head.clone(), verdict);
         Ok(verdict)
     }
@@ -790,7 +789,7 @@ impl<'a> Dispatch<'a> {
         let selector = ArtifactSelector::new()
             .the(source_attr())
             .of(entity.clone());
-        Ok(committed(self.source, selector, env)
+        Ok(committed(&self.view, selector, env)
             .await?
             .into_iter()
             .find_map(|claim| match claim.is {
@@ -816,7 +815,7 @@ impl<'a> Dispatch<'a> {
 /// records, which every commit writes) are excluded from the lag, so
 /// catching up over N commits stimulates rules with the *data* those
 /// commits changed, not their bookkeeping.
-async fn lag_delta<Env>(source: SourceRef<'_>, env: &Env) -> Result<Vec<Instruction>, CommitError>
+async fn lag_delta<Env>(view: &View<'_>, env: &Env) -> Result<Vec<Instruction>, CommitError>
 where
     Env: Provider<BlobRead>
         + Provider<Get>
@@ -841,10 +840,10 @@ where
     use dialog_common::Blake3Hash as NodeHash;
     use dialog_search_tree::Change as TreeChange;
 
-    let (SourceRef::Branch(branch) | SourceRef::Pinned(branch, _)) = source else {
+    let Some(branch) = view.branch() else {
         return Ok(Vec::new());
     };
-    let Some(head) = source.revision() else {
+    let Some(head) = view.revision() else {
         return Ok(Vec::new());
     };
     let cell = branch.induction_cell();
@@ -932,7 +931,7 @@ pub(crate) fn induction_ignores(the: &str) -> bool {
 /// Collect the artifacts a selector matches on the line's committed
 /// tree (no overlay — the cacheable slice).
 async fn committed<Env>(
-    source: SourceRef<'_>,
+    view: &View<'_>,
     selector: ArtifactSelector<Constrained>,
     env: &Env,
 ) -> Result<Vec<Artifact>, CommitError>
@@ -955,7 +954,7 @@ where
         + ConditionalSync
         + 'static,
 {
-    let stream = crate::Select::from_source(source, selector)
+    let stream = crate::Select::from_view(view.clone(), selector)
         .perform(env)
         .await
         .map_err(|error| CommitError::Induction(format!("committed probe: {error}")))?;

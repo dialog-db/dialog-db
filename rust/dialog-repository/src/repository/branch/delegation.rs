@@ -71,7 +71,7 @@ pub use prove::*;
 
 use crate::repository::archive::erased;
 use crate::repository::branch::asset::recorded_size;
-use crate::repository::source::SourceRef;
+use crate::repository::source::Live;
 use crate::{Branch, CommitError, Index, RemoteSite};
 use dialog_artifacts::tree::CorpusNode;
 use dialog_artifacts::{
@@ -391,7 +391,7 @@ impl RetractDelegation<'_> {
             // A certificate the tree does not reference has nothing to
             // retract. One retained before assets is referenced by its
             // blob-index entry alone.
-            let asset = recorded_size(SourceRef::from(branch), &index_hash, env).await?;
+            let asset = recorded_size(&Live::from(branch).pin(), &index_hash, env).await?;
             let indexed = tree.get_blob(&store, &index_hash).await?.is_some();
             if asset.is_none() && !indexed {
                 continue;

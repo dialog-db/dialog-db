@@ -26,14 +26,14 @@ use dialog_storage::provider::storage::VolatileSpace;
 use futures_util::StreamExt as _;
 
 use crate::helpers::test_repo;
-use crate::repository::source::SourceRef;
+use crate::repository::source::Live;
 use crate::{
     Branch, CommitError, Item, PublishError, RemoteSite, Repository, Select, Snapshot,
     TreeReference, schema,
 };
 
 /// Every `user/name` value on a line, sorted.
-async fn names<'a, Env>(source: impl Into<SourceRef<'a>>, env: &Env) -> Result<Vec<String>>
+async fn names<'a, Env>(line: impl Into<Live<'a>>, env: &Env) -> Result<Vec<String>>
 where
     Env: Provider<BlobRead>
         + Provider<Get>
@@ -53,7 +53,7 @@ where
         + ConditionalSync
         + 'static,
 {
-    let mut names: Vec<String> = values(source, env, "user/name", None)
+    let mut names: Vec<String> = values(line, env, "user/name", None)
         .await?
         .into_iter()
         .filter_map(|value| match value {
@@ -67,7 +67,7 @@ where
 
 /// The values under `the` on a line, narrowed to `of` when given.
 async fn values<'a, Env>(
-    source: impl Into<SourceRef<'a>>,
+    line: impl Into<Live<'a>>,
     env: &Env,
     the: &str,
     of: Option<&Entity>,
@@ -95,7 +95,7 @@ where
     if let Some(of) = of {
         selector = selector.of(of.clone());
     }
-    let rows: Vec<Artifact> = Select::from_source(source.into(), selector)
+    let rows: Vec<Artifact> = Select::from_view(line.into().pin(), selector)
         .to_owned()
         .perform(env)
         .await?

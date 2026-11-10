@@ -62,10 +62,10 @@ use dialog_effects::memory::Resolve;
 use dialog_query::query::{Application, Output};
 use dialog_search_tree::nodes;
 
-use crate::repository::branch::QueryLayer;
-use crate::repository::branch::session::QueryEnv;
-use crate::repository::source::SourceRef;
+use crate::repository::branch::session::{QueryEnv, shared_metadata};
+use crate::repository::source::View;
 use crate::{RemoteSite, Staged};
+use std::slice::from_ref;
 
 /// A non-composable query handle returned by
 /// [`Transaction::query`](crate::repository::branch::Transaction::query)
@@ -73,28 +73,26 @@ use crate::{RemoteSite, Staged};
 ///
 /// Holds the transaction's staged layers as they stand (shared, so
 /// taking them copies nothing, and later writes to the transaction do
-/// not reach them) plus a reference to the line (branch or snapshot)
-/// it runs on. The transaction itself remains open and committable.
+/// not reach them) plus the line (branch or snapshot) it runs on, at
+/// the revision the transaction pinned when it opened. The transaction
+/// itself remains open and committable.
 ///
 /// See module docs for tombstone semantics.
 pub struct TransactionQuery<'a> {
-    source: SourceRef<'a>,
+    view: View<'a>,
     layers: Vec<Staged>,
 }
 
 impl<'a> TransactionQuery<'a> {
-    pub(crate) fn new(source: impl Into<SourceRef<'a>>, layers: Vec<Staged>) -> Self {
-        Self {
-            source: source.into(),
-            layers,
-        }
+    pub(crate) fn new(view: View<'a>, layers: Vec<Staged>) -> Self {
+        Self { view, layers }
     }
 
     /// Stage a query against this transaction's view. Call
     /// [`perform`](TransactionSelectQuery::perform) to execute.
     pub fn select<Q: Application>(self, query: Q) -> TransactionSelectQuery<'a, Q> {
         TransactionSelectQuery {
-            source: self.source,
+            view: self.view,
             layers: self.layers,
             query,
         }
@@ -103,7 +101,7 @@ impl<'a> TransactionQuery<'a> {
 
 /// A staged query on a [`TransactionQuery`].
 pub struct TransactionSelectQuery<'a, Q> {
-    source: SourceRef<'a>,
+    view: View<'a>,
     layers: Vec<Staged>,
     query: Q,
 }
@@ -141,7 +139,7 @@ impl<'a, Q: Application> TransactionSelectQuery<'a, Q> {
             + 'static,
     {
         let TransactionSelectQuery {
-            source,
+            view,
             layers,
             query,
         } = self;
@@ -155,14 +153,14 @@ impl<'a, Q: Application> TransactionSelectQuery<'a, Q> {
             // in (Session, SessionBranch, per-branch BranchMetadata),
             // shared rather than rebuilt, beside the transaction's
             // staged layers.
-            let overlay = QueryLayer::from(source).overlay(&operator);
+            let overlay = shared_metadata(from_ref(&view), &operator);
 
             // A transaction query is just a single-line `QueryEnv`.
             // Constructing the *same* env type the branch-session path
             // uses is what guarantees identical behavior — fact reads,
             // tombstones, schema metadata, and deductive-rule
             // resolution all share one implementation.
-            let sources = vec![source.to_source()];
+            let sources = vec![view.into_source()];
             let query_env = QueryEnv::new(sources.clone(), overlay, env).with_layers(layers);
             let results = Box::pin(query.perform(&query_env));
             // Mid-transaction queries drive the ambient preload queue

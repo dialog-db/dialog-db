@@ -70,7 +70,7 @@ impl Branch {
     /// [`Identify`](dialog_effects::authority::Identify)) carries both
     /// the profile and operator DIDs.
     pub fn metadata(&self, operator: &Capability<Operator>) -> BranchMetadata {
-        self.metadata_at(operator, self.revision())
+        self.metadata_at(operator, self.revision().as_ref())
     }
 
     /// [`metadata`](Self::metadata) as of `revision` rather than the
@@ -78,7 +78,7 @@ impl Branch {
     pub(crate) fn metadata_at(
         &self,
         operator: &Capability<Operator>,
-        revision: Option<Revision>,
+        revision: Option<&Revision>,
     ) -> BranchMetadata {
         let profile = operator.profile();
         let mut cache = self
@@ -87,12 +87,12 @@ impl Branch {
             .unwrap_or_else(|poison| poison.into_inner());
         if let Some((cached_profile, cached_revision, metadata)) = cache.as_ref()
             && cached_profile == profile
-            && *cached_revision == revision
+            && cached_revision.as_ref() == revision
         {
             return metadata.clone();
         }
-        let metadata = self.derive_metadata(profile, revision.as_ref());
-        *cache = Some((profile.clone(), revision, metadata.clone()));
+        let metadata = self.derive_metadata(profile, revision);
+        *cache = Some((profile.clone(), revision.cloned(), metadata.clone()));
         metadata
     }
 
