@@ -5,7 +5,7 @@
 |  | Understanding | Activity |
 |---|---|---|
 | **Status** | Two processes advancing two branches of one space share no lock on main and take turns on one file lock with the file archive. Irakli requires that they not wait on one another. Cells live outside the file, a file each. | Directing: a matrix of four approaches, Irakli's candidate among them. |
-| **Agenda** | Whether a slot carries the block's offset beside its hash. What a commit records as its read set, and its cost. Then the next implementation decisions: extent claiming, integration. Whether "one file" means one file at rest, with side files while writers overlap. How a head's compare-and-swap works against a pending head record. The `?` cells in the matrix. | Ask who integrates; then the web; then the cells question. |
+| **Agenda** | The slot's size. What a commit records as its read set, and its cost. Then the next implementation decisions: extent claiming, integration. Whether "one file" means one file at rest, with side files while writers overlap. How a head's compare-and-swap works against a pending head record. The `?` cells in the matrix. | Ask who integrates; then the web; then the cells question. |
 
 ## 2026-11-10, Describing: the topic opens
 
@@ -267,3 +267,15 @@ from the mapping.
 **Decided.** A cell's slot references a block holding its value; the
 block's hash is the edition. Suggested, not decided: the offset and length
 beside the hash.
+
+**Asked.** (The read set, again.) Irakli: treating it as spills is a good
+call; a fast path and graceful degradation.
+
+**Learned.** Read as the cell slot: a value inline in its slot when it
+fits, spilled to a block when it does not, as dialog already spills large
+values out of tree nodes. Inline is one read; spilled is a reference with
+the block's hash, offset and length. The slot carries the value's hash
+either way, so the edition and the compare-and-swap are unchanged.
+
+**Decided.** Cell values inline, spilling to a block (to confirm that this
+was the question answered). Open: the slot's size; the read set.
