@@ -15,7 +15,8 @@ What we tried, what it measured, and what we decided, newest last. The [idea](..
 - **R18:** with no `!` in premises and committing decided by the invocation, both documents read (medians 14 and 15 of 15), but ratings stayed at 3 and 7 of 10 still named `!`; writing concepts through `assert!` did not beat `todo!`.
 - **R19:** with no content identity, every reader created through a command and updated the same entity, and none named identity; ground facts at the top level and `fresh` read 15 of 15. No framing of `!` moved it; what readers name now is modifiers spelled like concepts.
 - **R20:** naming a modifier after its concept, `(todo/add! …)`, removed the request for a modifier mark (3 of 5 readers to 0 of 5); what readers name now is the top-level `!` deciding the commit, and 7 of 10 proposed `(commit …)`.
-- **Next:** decide how a commit is spelled; then take the design into `design.md`.
+- **R21:** explaining `!` as "without it an assertion is scoped to the transaction, with it global" removed the request for `(commit …)` and lost nothing; Roc's "effect" removed it too but made readers reject a bare fact.
+- **Next:** take the design into `design.md` with the `scope` wording.
 - **Open:** whether commands are asserted or written; what a rule head that names no entity lands on; whether questions stay calls with variables or become rules into a domain-call head; text literals; optional parameters. The design's Open list has the rest.
 
 ## Datasets
@@ -578,6 +579,16 @@ The complaint about `!` narrowed. Readers no longer name premises or the commit;
 **Results.** [r20](results/r20.md). Both read, medians 15 of 15. By the bar `slash` did not win, since all ten readers still name `!`. What they name split by document. Three of five `nested` readers asked for a mark on modifiers, as R19's did; no `slash` reader did. All five `slash` readers named only the top-level `!` deciding the commit, and all five proposed spelling it as a word: `(commit (todo/add …))`. Across both, seven of ten proposed that word. No reader confused a command with a domain write.
 
 **Decision.** For the maintainer: take `(todo/add! …)`, which removed the complaint it was aimed at with no cost the round showed; and whether a commit is spelled `!` at the top level or as a word, which is now the one thing readers name.
+
+## 2026-11-10 — R21: "scoped to the transaction or global" moves the complaint off the commit
+
+**Question.** The one [planned](results/r21-plan.md): does Roc's "`!` marks an effect", or "without `!` scoped to the transaction, with `!` global", read better than "mutation"?
+
+**Method.** As planned: three documents, five readers each, with `(todo/add! …)` spelling; one empty reply replaced.
+
+**Results.** [r21](results/r21.md). No wording stops readers naming `!`. But the request for `(commit …)`, 5 of 5 in R20 and 3 of 5 for `mutation` here, is gone in both `effect` and `scope`. `effect` cost item 8: four of five readers took "a call without `!` is pure" to mean a bare ground fact is not a valid form. `scope` scored 15 of 15 for every reader. What its readers name now is that a rule head's `!` depends on what set the rule off.
+
+**Decision.** Take `scope`'s wording: a document is a transaction, `!` makes an assertion global. Drop `effect`, which unmade the bare fact. What is left to decide is whether a rule head that is global only when its trigger was global needs to say so.
 
 ## How to reproduce
 
