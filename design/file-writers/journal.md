@@ -149,3 +149,19 @@ it waits for the turn, off the commit, and folds in what it left loose;
 closing a space waits for it; a process that dies leaves its blocks to the
 next writer with the turn. A space is one file, heads included, on Irakli's
 say-so. Open: whether "one file" may mean one file at rest.
+
+**Asked.** Irakli: can the same concurrency be had on the one file, rather
+than many?
+
+**Learned.** On native platforms, largely yes, with three mechanisms. Data:
+writers append to the file's tail without the turn, the kernel ordering
+`O_APPEND` writes or a reservation giving each its range (PostgreSQL's WAL
+inserters). Index: only indexing the tail takes the turn, by whoever next
+gets it; readers scan the unindexed tail and index it in memory (SQLite's
+`-shm` for its WAL). Heads: a byte-range lock per branch in the one file
+(SQLite locks byte ranges of its database). The costs: a writer that dies
+mid-append leaves a hole with records after it, so the framing has to let
+a scan resume; readers scan the tail until it is indexed; and on the web
+an OPFS file has one writing handle at a time.
+
+**Decided.** Not decided; a sixth column in the matrix.
