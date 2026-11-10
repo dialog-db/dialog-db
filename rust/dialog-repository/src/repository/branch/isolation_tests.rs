@@ -112,9 +112,14 @@ fn command(index: u64) -> Entity {
     format!("cmd:{index}").parse().expect("an entity")
 }
 
-fn bio(fill: char, index: u64) -> String {
+/// A biography, distinct per repository: the spilled-value cache is
+/// shared by every line the environment holds and keyed by content, so
+/// a biography two fixtures shared would be read from the blob store
+/// once and from the cache ever after, and no blob load would remain
+/// to put the commit under.
+fn bio(branch: &Branch, fill: char, index: u64) -> String {
     let mut bio = repeat_n(fill, BIO_LENGTH).collect::<String>();
-    bio.push_str(&index.to_string());
+    bio.push_str(&format!("{}{index}", branch.of()));
     bio
 }
 
@@ -166,7 +171,7 @@ async fn fixture(operator: &Operator, profile: &Peer<VolatileSpace>) -> Result<B
         transaction = transaction
             .assert(Name::of(person(index)).is(format!("p{index}")))
             .assert(Age::of(person(index)).is(Age(10 + index)))
-            .assert(Bio::of(person(index)).is(bio('b', index)));
+            .assert(Bio::of(person(index)).is(bio(&branch, 'b', index)));
     }
     transaction.commit().publish().perform(operator).await?;
     Ok(branch)
@@ -183,8 +188,8 @@ async fn move_head(operator: &Operator, branch: &Branch) -> Result<()> {
             .assert(Name::of(person(index)).is(format!("q{index}")))
             .retract(Age::of(person(index)).is(Age(10 + index)))
             .assert(Age::of(person(index)).is(Age(100 + index)))
-            .retract(Bio::of(person(index)).is(bio('b', index)))
-            .assert(Bio::of(person(index)).is(bio('c', index)));
+            .retract(Bio::of(person(index)).is(bio(branch, 'b', index)))
+            .assert(Bio::of(person(index)).is(bio(branch, 'c', index)));
     }
     transaction.commit().publish().perform(operator).await?;
     Ok(())

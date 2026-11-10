@@ -69,5 +69,34 @@ the snapshot transaction likewise); and the observation test (the heads a
 `ReadObservation` records are the pinned ones, the pending edition is the
 pin's successor).
 
-**Harness on main.** Recorded below once the run against `427546f`
-completes.
+**Harness on main** (`427546f`, the harness and the ten paths ported to
+main's `SourceRef`, 40 reads of each kind per path, reporting rather than
+asserting). Under the k-th tree node read, the commit landed and the
+path read another revision at:
+
+| path | node read: commit landed under | node read: another revision at | blob load: landed under | blob load: another revision at |
+|---|---|---|---|---|
+| `query` | 1..40 | every k | 1..5 | every k |
+| `select` | 1..40 | every k | 1..5 | every k |
+| `transaction` (two queries) | 1..40 | every k | 1..5 | every k |
+| `subscription` (one poll) | 1..40 | every k | 1..5 | every k |
+| `induction` (a staged commit) | 1..40 | every k | none | none |
+| `succession` (a settlement) | 1..25 (all it reads) | 1..21 | none | none |
+| `oracle` | 1..21 (all it reads) | 1..17 | none | none |
+| `claims` (one scan) | 1..4 (all it reads) | never | none | none |
+| `snapshot` (the control) | 1..40 | never | 1..5 | never |
+| `log` | none (record memo) | never | none | none |
+
+Every multi-scan path read another revision on main at every point the
+commit could land under, the settlement and the oracle at every point but
+their last few reads (by then every cell had been read), and under every
+spilled-value load the paths that read biographies. The single-scan
+paths and the snapshot held, as the first fix's analysis said. On the
+branch the same sweep reads the pinned revision at every k for every
+path (`reads_one_revision_under_a_commit::*`).
+
+The first run fired no blob load at all: the spilled-value cache is
+shared by every line the environment holds and keyed by content, and the
+fixture's biographies were identical in every repository, so after the
+first fixture they were read from the cache. The biographies now carry
+the repository's DID, which is the run above.
