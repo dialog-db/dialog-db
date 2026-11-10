@@ -64,6 +64,8 @@
 | a cell's slot points to a block, so a cell's value is whatever a block holds | opinion | Irakli, 2026-11-10 | - |
 | under `fs`, a cell's edition is the BLAKE3 hash of its content, so a slot holding the value block's hash holds the cell's edition | fact | `rust/dialog-storage/src/storage/provider/fs/memory.rs` (`content_hash`, the edition compared in `Publish`) | holds |
 | a slot that carries the block's offset and length beside its hash lets a reader read a value not yet indexed straight from the mapping; offsets stay valid because integration copies nothing | hypothesis | follows from the extent design; the agent's suggestion, not decided | open |
-| a cell's value is inline in its slot when it fits and spills to a block when it does not: a fast path, and graceful degradation | opinion | Irakli, 2026-11-10 (read by the agent as being about cell slots; to confirm) | - |
+| a cell's value is inline in its slot when it fits and spills to a block when it does not: a fast path, and graceful degradation | opinion | Irakli, 2026-11-10, confirmed for cells | - |
+| cells do not accrete: an update writes over the slot and keeps no history; the inline size is calibrated, and only a value that outgrows it spills | opinion | Irakli, 2026-11-10 | - |
+| each update of a spilled cell leaves its previous block in the extent, unreferenced | fact | follows from spilled values being blocks appended to a writer's extent | holds |
 | dialog already spills a value too large for a tree node into a block of its own, referenced from the node | fact | `rust/dialog-artifacts/src/spill.rs` on this branch (`dialog-corpus` on main since #768); CHANGELOG, "spilled values share one budget" (#742) | holds |
 

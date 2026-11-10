@@ -5,7 +5,7 @@
 |  | Understanding | Activity |
 |---|---|---|
 | **Status** | Two processes advancing two branches of one space share no lock on main and take turns on one file lock with the file archive. Irakli requires that they not wait on one another. Cells live outside the file, a file each. | Directing: a matrix of four approaches, Irakli's candidate among them. |
-| **Agenda** | The slot's size. What a commit records as its read set, and its cost. Then the next implementation decisions: extent claiming, integration. Whether "one file" means one file at rest, with side files while writers overlap. How a head's compare-and-swap works against a pending head record. The `?` cells in the matrix. | Ask who integrates; then the web; then the cells question. |
+| **Agenda** | What a commit records as its read set, and its cost. Calibrating the slot's inline size. Then the next implementation decisions: extent claiming, integration. Whether "one file" means one file at rest, with side files while writers overlap. How a head's compare-and-swap works against a pending head record. The `?` cells in the matrix. | Ask who integrates; then the web; then the cells question. |
 
 ## 2026-11-10, Describing: the topic opens
 
@@ -279,3 +279,11 @@ either way, so the edition and the compare-and-swap are unchanged.
 
 **Decided.** Cell values inline, spilling to a block (to confirm that this
 was the question answered). Open: the slot's size; the read set.
+
+**Asked.** Was that about cells? Irakli: for cells we do not want
+accretion, so inline space makes sense; calibrate it, and if more is
+needed, resort to spills.
+
+**Decided.** Cells do not accrete: an update writes over the slot. Values
+are inline in a slot of a calibrated size; only a value that outgrows it
+spills, leaving its previous block behind in the extent on each update.
