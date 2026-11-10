@@ -162,13 +162,16 @@ pub fn catalog() -> Vec<Spec> {
             size: 2000,
             about: "on a member that tracks a remote and holds every block, one cold read of every entity's name and role, then the names of one role: the reads that warm ahead of demand",
             volatile: false,
-            // Unmeasured across CPU models: its two CI sweeps (#767, heads
-            // 387f06b and 18d5a61) both ran on a Xeon Platinum 8370C,
-            // flags 662b464ced6baa9c, and differ by 0.135% (115,986,589
-            // and 115,829,922). The runtime dispatch that could move it is
-            // blake3, verifying the 1.5 MB its 32 cold loads read: 12% of
-            // the phase. first-query spends 65% of its phase in the same
-            // verification and measured under 0.2% across models (#653).
+            // Three CI sweeps of #767: 115,986,589 (387f06b) and 115,829,922
+            // (18d5a61) on a Xeon Platinum 8370C, flags 662b464ced6baa9c,
+            // and 115,729,243 (6587a02) on an EPYC 9V45, flags
+            // 060ba73ad866d3a8. Across the models it moves 0.09% to 0.22%,
+            // within one 0.135%: under the 0.2% floor. blake3, verifying
+            // the 1.5 MB its 32 cold loads read (12% of the phase),
+            // retired 13,672,977 instructions on both models. On the same
+            // EPYC sweep first-query moved +3.65% against the Intel base,
+            // nearly all of it in glibc's `_int_malloc` (+63 K of +64 K);
+            // here `_int_malloc` is 6.9% of the phase and moved -53 K.
             cross_cpu_pct: 0.0,
             prepare: |size| Box::pin(member::view(size)),
         },
