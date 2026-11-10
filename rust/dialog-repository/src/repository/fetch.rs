@@ -139,6 +139,13 @@ where
         }
     }
 
+    /// Whether nothing is queued for this driver and none of its jobs is
+    /// in flight: every hint it took has been walked to the end.
+    #[cfg(test)]
+    fn is_idle(&self) -> bool {
+        self.inflight.is_empty() && self.queue.pending() == 0
+    }
+
     /// Reap completed jobs without blocking, freeing budget capacity.
     fn reap(&mut self, context: &mut Context<'_>) {
         while let Poll::Ready(Some(likelihood)) = self.inflight.poll_next_unpin(context) {
@@ -256,6 +263,7 @@ mod tests {
     use dialog_search_tree::helpers::{Blocks, buffer_decodes};
     use dialog_storage::DialogStorageError;
     use dialog_varsig::did;
+    use futures_util::future::poll_fn;
     use futures_util::stream;
 
     #[cfg(target_arch = "wasm32")]
@@ -636,6 +644,13 @@ mod tests {
     /// range without reading a block, fetching one, or decoding a buffer:
     /// the walk picks the children a read of the range descends into from
     /// the separators alone, and finds each of them in the line's cache.
+    ///
+    /// "Reads no block" holds because the read before it left every node
+    /// of both ranges in the node cache, and the cache keeps them: its
+    /// budget is `NODE_CACHE_BUDGET` (128 MiB) on every target and profile,
+    /// against a tree of a few hundred kilobytes here. A cache small enough
+    /// to evict them would make the walk read them back from the local
+    /// archive, which is still no fetch and no decode.
     #[dialog_common::test]
     async fn it_warms_a_local_member_without_reading_fetching_or_decoding() -> Result<()> {
         let (operator, profile) = test_session_with_peer().await;
@@ -761,9 +776,15 @@ mod tests {
     }
 
     /// A replica that adopted a head by reference still warms ahead of
-    /// demand: a hinted range the replica does not hold is fetched while
-    /// another query runs, level by level, and the hinted range's own read
-    /// then fetches nothing.
+    /// demand: a walk of a hinted range the replica does not hold fetches
+    /// the whole range, so the range's own read then fetches nothing.
+    ///
+    /// A query drives the walks it takes only while it runs: they are
+    /// dropped with its stream, finished or not, so whether a walk ends
+    /// inside some query depends on how fast the remote answers. This test
+    /// drives the walk itself, with a driver over a stream that never
+    /// yields, until the driver is idle, so it pins what a walk fetches
+    /// rather than how long a query happens to last.
     #[dialog_common::test]
     async fn it_fetches_a_hinted_range_a_partial_replica_lacks() -> Result<()> {
         use crate::SiteAddress;
@@ -865,21 +886,31 @@ mod tests {
         .await;
         assert!(listening, "the default budget accepts hints");
 
-        let rows = replica
-            .query()
-            .select(attribute_query("a/name"))
-            .perform(&env)
-            .try_vec()
-            .await?;
-        assert_eq!(rows.len(), 4 * 40);
         let queue = Provider::<Speculation>::execute(&env, ()).await;
-        assert_eq!(queue.pending(), 0, "the driven query executed the hint");
+        let erased: &Erased = &env;
+        let mut driver = Driven::new(
+            stream::pending::<()>(),
+            vec![Source::from(replica.clone())],
+            erased,
+            queue.clone(),
+        );
+        poll_fn(|context| {
+            let _ = driver.poll_next_unpin(context);
+            if driver.is_idle() {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        })
+        .await;
+        assert_eq!(queue.pending(), 0, "the driver took the hint");
         assert!(
             env.count("hydrate::Hydrate") > 0,
-            "the replica held nothing, so its reads fetched"
+            "the replica held none of the range, so the walk fetched it"
         );
 
         let hydrations = env.count("hydrate::Hydrate");
+        let gets = env.count("archive::Get");
         let rows = replica
             .query()
             .select(attribute_query("b/name"))
@@ -891,6 +922,11 @@ mod tests {
             env.count("hydrate::Hydrate") - hydrations,
             0,
             "the walk fetched the hinted range, so its own read fetches nothing"
+        );
+        assert_eq!(
+            env.count("archive::Get") - gets,
+            0,
+            "and the walk left every node it fetched in the line's cache"
         );
         Ok(())
     }
