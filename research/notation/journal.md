@@ -11,7 +11,8 @@ What we tried, what it measured, and what we decided, newest last. The [idea](..
 - **Rejected on design grounds, though readers got them:** `=` in a head (constraint elsewhere), the `{title author} ?b` head (construction does not belong in a concept).
 - **R16:** the revised design, read from four ways of writing its spec, scored 297 of 300 points; every document's median was 15 of 15. The style of the spec did not matter at this difficulty; the examples did.
 - **Settled after R16:** a write through a concept passes every parameter, and leaving one out is a compile error; a top-level call is `assert`, `assert!` or `query` by whether it has variables and a `!`; the `!` means retained; records in the entity's place are dropped for `(id {…})`; picks stay part of the attribute; a concept body holds only attribute lines and constraints.
-- **R17:** the modifier design (commands as modifiers, `!` as mutation, `assert` and `retract` as modifiers) read right from a card: 125 of 130 points, every item passing. Every reader rated it 3 of 5, and 9 of 10 named `!` as the most confusing thing.\n- **Next:** decide whether a premise names the stored read; then take the design into `design.md`.
+- **R17:** the modifier design (commands as modifiers, `!` as mutation, `assert` and `retract` as modifiers) read right from a card: 125 of 130 points, every item passing. Every reader rated it 3 of 5, and 9 of 10 named `!` as the most confusing thing.
+- **Next:** decide whether a premise names the stored read; then take the design into `design.md`.
 - **Open:** whether commands are asserted or written; what a rule head that names no entity lands on; whether questions stay calls with variables or become rules into a domain-call head; text literals; optional parameters. The design's Open list has the rest.
 
 ## Datasets
@@ -476,7 +477,7 @@ xychart-beta
 
 125 of 130 points; both medians 13 of 13. Every item and every hypothesis passes. Lifetime, which R3 scored 0 of 9 with `transient: true`, is 10 of 10 and 9 of 10. The prelude made no difference, and the one reader below 12 had it: it read `add!` as a stored fact, which the prelude's `(?concept! …)` rules may have suggested.
 
-Outside the rubric, every reader rated the notation 3 of 5, the lowest since R13, and 9 of 10 named `!` as the most confusing thing: a write into next, a stored read in a premise, and a commit that depends on the trigger. Five proposed naming the stored read, `(stored (bug …))`, and six naming the next tick, `(next (add …))`. Three readers found a gap: the card does not say whether an uncommitted `!` head is visible to a same-tick query.
+Outside the rubric, every reader rated the notation 3 of 5, and 9 of 10 named `!` as the most confusing thing: a write into next, a stored read in a premise, and a commit that depends on the trigger. Five proposed naming the stored read, `(stored (bug …))`, and six naming the next tick, `(next (add …))`. Three readers found a gap: the card does not say whether an uncommitted `!` head is visible to a same-tick query.
 
 **Decision.** The design reads; take it into `design.md`. Keep the prelude as the definition, not as teaching. Two questions go to the maintainer: whether `!` keeps its three readings or a premise names the stored read, and what a same-tick query sees of a `!` head that does not commit.
 
