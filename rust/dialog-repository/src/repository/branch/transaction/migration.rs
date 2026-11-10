@@ -19,7 +19,7 @@ wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 use crate::helpers::test_repo;
 use crate::{Branch, Transient};
 use anyhow::Result;
-use dialog_artifacts::{ArtifactSelector, Entity, Pick, Relation as ArtifactsRelation, Value};
+use dialog_corpus::{ArtifactSelector, Entity, Pick, Relation as ArtifactsRelation, Value};
 use dialog_peer::helpers::test_session_with_peer;
 use dialog_query::attribute::Relation;
 use dialog_query::query::Output as _;
@@ -615,7 +615,7 @@ fn the_previous_release_identities_are_reproduced_for_migration() -> Result<()> 
 /// path, as on the commit path.
 #[dialog_common::test]
 async fn rule_facts_under_an_entity_that_is_not_their_address_derive_nothing() -> Result<()> {
-    use dialog_artifacts::{Change, Changes};
+    use dialog_corpus::{Change, Changes};
     use dialog_query::Statement as _;
 
     let (operator, profile) = test_session_with_peer().await;

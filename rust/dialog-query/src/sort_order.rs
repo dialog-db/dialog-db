@@ -3,7 +3,7 @@
 //! Every fact scan reads one of the three index orderings (EAV, AEV, VAE) and
 //! yields entries in that index's key order. Which ordering it reads is decided
 //! by which term positions are constrained: entity wins, then value, then
-//! attribute (see `dialog-artifacts` `selector_range`). The chosen ordering
+//! attribute (see `dialog-corpus` `selector_range`). The chosen ordering
 //! sorts primarily by its first component, then its second, then its third; a
 //! component that is already bound to a constant is fixed across the whole
 //! scan, so the stream is effectively sorted on the first component that is

@@ -24,15 +24,15 @@
 // own lib under the `dialog_query` name (its extern prelude), so bare
 // `dialog_query::…` resolves to the real crate in both.
 use anyhow::Result;
-use dialog_artifacts::selector::Constrained;
-use dialog_artifacts::tree::CorpusNode;
-use dialog_artifacts::{
-    Artifact, ArtifactSelector, ArtifactStream, DialogArtifactsError, Instruction,
-    Relation as ArtifactsRelation, Select, Value,
-};
 use dialog_capability::{Fork, Provider, Subject};
 use dialog_common::Buffer;
 use dialog_common::{ConditionalSync, Held, Holdings, Holds};
+use dialog_corpus::selector::Constrained;
+use dialog_corpus::tree::CorpusNode;
+use dialog_corpus::{
+    Artifact, ArtifactSelector, ArtifactStream, DialogCorpusError, Instruction,
+    Relation as ArtifactsRelation, Select, Value,
+};
 use dialog_effects::archive::ArchiveError;
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::{Get, Import, Put};
@@ -504,8 +504,8 @@ where
         + Provider<Import>
         + Provider<ArchiveLoad>
         + Provider<BlobLoad>
-        + Provider<dialog_artifacts::Preload>
-        + Provider<dialog_artifacts::Speculation>
+        + Provider<dialog_corpus::Preload>
+        + Provider<dialog_corpus::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
         + ConditionalSync
         + 'static,
@@ -513,7 +513,7 @@ where
     async fn execute(
         &self,
         input: ArtifactSelector<Constrained>,
-    ) -> Result<ArtifactStream<'a>, DialogArtifactsError> {
+    ) -> Result<ArtifactStream<'a>, DialogCorpusError> {
         let select = self.branch.claims().select(input);
         let store = self.operator;
         let counting = CountingStore::new(store, self.journal.clone());
@@ -530,7 +530,7 @@ impl<Env: ConditionalSync> Provider<SelectRules> for JoinEnv<'_, Env> {
 }
 
 #[dialog_capability::provider]
-impl<Env> Provider<dialog_artifacts::Estimate> for JoinEnv<'_, Env>
+impl<Env> Provider<dialog_corpus::Estimate> for JoinEnv<'_, Env>
 where
     Env: Provider<BlobRead>
         + Provider<Get>
@@ -539,8 +539,8 @@ where
         + Provider<Import>
         + Provider<ArchiveLoad>
         + Provider<BlobLoad>
-        + Provider<dialog_artifacts::Preload>
-        + Provider<dialog_artifacts::Speculation>
+        + Provider<dialog_corpus::Preload>
+        + Provider<dialog_corpus::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
         + ConditionalSync
         + 'static,
@@ -548,7 +548,7 @@ where
     async fn execute(
         &self,
         input: ArtifactSelector<Constrained>,
-    ) -> Result<Option<u64>, DialogArtifactsError> {
+    ) -> Result<Option<u64>, DialogCorpusError> {
         // Route the estimate's root read through the same counting store as
         // the scans, so a bench sees the block it costs.
         let select = self.branch.claims().select(input);
@@ -561,8 +561,8 @@ where
 // Preload hints have no listener in the bench env: refuse them so the
 // measured read counts stay exactly the demand reads.
 #[dialog_capability::provider]
-impl<Env: ConditionalSync> Provider<dialog_artifacts::Preload> for JoinEnv<'_, Env> {
-    async fn execute(&self, _input: dialog_artifacts::PreloadRequest) -> bool {
+impl<Env: ConditionalSync> Provider<dialog_corpus::Preload> for JoinEnv<'_, Env> {
+    async fn execute(&self, _input: dialog_corpus::PreloadRequest) -> bool {
         false
     }
 }
@@ -756,8 +756,8 @@ where
         + Provider<nodes::Write<CorpusNode>>
         + ConditionalSync
         + Provider<BlobLoad>
-        + Provider<dialog_artifacts::Preload>
-        + Provider<dialog_artifacts::Speculation>
+        + Provider<dialog_corpus::Preload>
+        + Provider<dialog_corpus::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
         + Holds
         + ConditionalSync
@@ -786,7 +786,7 @@ where
 
         let instructions: Vec<Instruction> = data
             .into_iter()
-            .map(|artifact| Instruction::Assert(artifact, dialog_artifacts::Pick::All))
+            .map(|artifact| Instruction::Assert(artifact, dialog_corpus::Pick::All))
             .collect();
         branch
             .transaction()
@@ -1248,7 +1248,7 @@ where
                     is,
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             ));
         }
 
@@ -1883,8 +1883,8 @@ mod test {
             + Provider<nodes::Write<CorpusNode>>
             + ConditionalSync
             + Provider<BlobLoad>
-            + Provider<dialog_artifacts::Preload>
-            + Provider<dialog_artifacts::Speculation>
+            + Provider<dialog_corpus::Preload>
+            + Provider<dialog_corpus::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + Holds
             + ConditionalSync
@@ -2014,8 +2014,8 @@ mod test {
             + Provider<nodes::Write<CorpusNode>>
             + ConditionalSync
             + Provider<BlobLoad>
-            + Provider<dialog_artifacts::Preload>
-            + Provider<dialog_artifacts::Speculation>
+            + Provider<dialog_corpus::Preload>
+            + Provider<dialog_corpus::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + Holds
             + ConditionalSync
@@ -2090,7 +2090,7 @@ mod test {
     use super::*;
 
     #[cfg(not(target_arch = "wasm32"))]
-    use dialog_artifacts::tree::distribution;
+    use dialog_corpus::tree::distribution;
     #[cfg(not(target_arch = "wasm32"))]
     use std::fs::read_dir;
     #[cfg(not(target_arch = "wasm32"))]
@@ -2155,8 +2155,8 @@ mod test {
             + Provider<nodes::Write<CorpusNode>>
             + ConditionalSync
             + Provider<BlobLoad>
-            + Provider<dialog_artifacts::Preload>
-            + Provider<dialog_artifacts::Speculation>
+            + Provider<dialog_corpus::Preload>
+            + Provider<dialog_corpus::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + Holds
             + ConditionalSync
@@ -2538,8 +2538,8 @@ where
         + Provider<nodes::Write<CorpusNode>>
         + ConditionalSync
         + Provider<BlobLoad>
-        + Provider<dialog_artifacts::Preload>
-        + Provider<dialog_artifacts::Speculation>
+        + Provider<dialog_corpus::Preload>
+        + Provider<dialog_corpus::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
         + Holds
         + ConditionalSync

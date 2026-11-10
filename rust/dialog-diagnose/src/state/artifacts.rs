@@ -5,7 +5,7 @@ use std::{
     sync::{Arc, mpsc::Sender},
 };
 
-use dialog_artifacts::{DialogArtifactsError, Index, Key};
+use dialog_corpus::{DialogCorpusError, Index, Key};
 use futures_util::{Stream, TryStreamExt};
 use tokio::sync::Mutex;
 
@@ -76,7 +76,7 @@ impl ArtifactsCursor {
             let mut state = state.lock().await;
 
             if state.finished {
-                return Ok(()) as Result<(), DialogArtifactsError>;
+                return Ok(()) as Result<(), DialogCorpusError>;
             }
 
             if index < state.next_index {

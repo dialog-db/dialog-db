@@ -41,7 +41,7 @@
 //!     avoids up front but pays incrementally.
 
 use anyhow::{Context as _, Result};
-use dialog_artifacts::{Artifact, ArtifactSelector, Instruction, Value};
+use dialog_corpus::{Artifact, ArtifactSelector, Instruction, Value};
 use dialog_credentials::{Credential, SignerCredential};
 use dialog_effects::credential::prelude::*;
 use dialog_effects::storage::Location;
@@ -139,7 +139,7 @@ pub struct Listing {
 /// row (short fields plus one few-hundred-byte body), the shape tonk
 /// spaces carry.
 pub(crate) fn entity_facts(index: usize) -> Result<Vec<Instruction>> {
-    let of: dialog_artifacts::Entity = format!("bug:{index}").parse()?;
+    let of: dialog_corpus::Entity = format!("bug:{index}").parse()?;
     let title = format!(
         "Bug #{index}: the {} widget misbehaves on load",
         index * 7 % 100
@@ -178,7 +178,7 @@ pub(crate) fn entity_facts(index: usize) -> Result<Vec<Instruction>> {
                     is,
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             ))
         })
         .collect()
@@ -193,10 +193,10 @@ pub(crate) fn meta_facts(members: usize) -> Result<Vec<Instruction>> {
             is: Value::String("soak space".into()),
             cause: None,
         },
-        dialog_artifacts::Pick::All,
+        dialog_corpus::Pick::All,
     )];
     for member in 0..members {
-        let of: dialog_artifacts::Entity = format!("member:{member}").parse()?;
+        let of: dialog_corpus::Entity = format!("member:{member}").parse()?;
         facts.push(Instruction::Assert(
             Artifact {
                 the: "member/name".parse()?,
@@ -204,7 +204,7 @@ pub(crate) fn meta_facts(members: usize) -> Result<Vec<Instruction>> {
                 is: Value::String(format!("Member {member}")),
                 cause: None,
             },
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         ));
         facts.push(Instruction::Assert(
             Artifact {
@@ -213,7 +213,7 @@ pub(crate) fn meta_facts(members: usize) -> Result<Vec<Instruction>> {
                 is: Value::String(if member == 0 { "owner" } else { "editor" }.into()),
                 cause: None,
             },
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         ));
     }
     Ok(facts)
@@ -266,7 +266,7 @@ pub(crate) fn open_card_rule() -> Result<DeductiveRule> {
 
 /// The joiner's claim: the membership facts a join commits.
 fn claim_facts() -> Result<Vec<Instruction>> {
-    let of: dialog_artifacts::Entity = "member:joiner".parse()?;
+    let of: dialog_corpus::Entity = "member:joiner".parse()?;
     Ok(vec![
         Instruction::Assert(
             Artifact {
@@ -275,7 +275,7 @@ fn claim_facts() -> Result<Vec<Instruction>> {
                 is: Value::String("The Joiner".into()),
                 cause: None,
             },
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         ),
         Instruction::Assert(
             Artifact {
@@ -284,7 +284,7 @@ fn claim_facts() -> Result<Vec<Instruction>> {
                 is: Value::String("editor".into()),
                 cause: None,
             },
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         ),
         Instruction::Assert(
             Artifact {
@@ -293,7 +293,7 @@ fn claim_facts() -> Result<Vec<Instruction>> {
                 is: Value::String("2026-09-01".into()),
                 cause: None,
             },
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         ),
     ])
 }
@@ -364,7 +364,7 @@ pub(crate) async fn mount_client(
 async fn select_count(
     branch: &Branch,
     operator: &Peer<VolatileSpace, dialog_peer::Session>,
-    selector: ArtifactSelector<dialog_artifacts::selector::Constrained>,
+    selector: ArtifactSelector<dialog_corpus::selector::Constrained>,
 ) -> Result<usize> {
     let rows = branch
         .claims()

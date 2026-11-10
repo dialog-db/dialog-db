@@ -9,7 +9,7 @@ use crate::statement::Statement;
 use crate::term::Term;
 use crate::types::{Scalar, Typed};
 use crate::{Claim, Premise, Proposition};
-use dialog_artifacts::{Pick, Update};
+use dialog_corpus::{Pick, Update};
 use std::ops::Not;
 
 /// Converts a value into a [`Term`], resolving the type unambiguously
@@ -165,7 +165,7 @@ impl<Is: Scalar> Statement for DynamicAttributeExpression<Relation, Entity, Is> 
                 update.associate(the.into(), self.of, value, Pick::Last);
             }
             (None, _) => {
-                update.associate(the.into(), self.of, value, dialog_artifacts::Pick::All);
+                update.associate(the.into(), self.of, value, dialog_corpus::Pick::All);
             }
         }
     }

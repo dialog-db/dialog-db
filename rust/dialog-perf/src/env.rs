@@ -12,8 +12,8 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
-use dialog_artifacts::{Artifact, Changes, Entity, Instruction, Pick, Relation, Value};
 use dialog_capability::Subject;
+use dialog_corpus::{Artifact, Changes, Entity, Instruction, Pick, Relation, Value};
 use dialog_credentials::{Ed25519Signer, SignerCredential};
 use dialog_effects::storage::Location;
 use dialog_peer::helpers::{Meter, Metered, Tally, open_peer_as, test_storage};

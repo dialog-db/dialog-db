@@ -18,7 +18,7 @@ The subject a claim is about, denoted by `of`. An entity is an arbitrary URI (`u
 
 The named set of claims a claim belongs to, denoted by `the`: `person/name` is the relation every claim of a person's name belongs to, and _the_ **person/name** _of_ **alice** _is_ **"Alice"** is one member. A relation is a name and nothing more: it says nothing about the type of its values or how many an entity has. Relation names are `domain/name`, at most 64 bytes, in lowercase kebab-case.
 
-In Rust a relation is `dialog_artifacts::Relation`, and `dialog_query::Relation` is the same name validated (the `the!` macro builds one at compile time).
+In Rust a relation is `dialog_corpus::Relation`, and `dialog_query::Relation` is the same name validated (the `the!` macro builds one at compile time).
 
 ##### Domain
 
@@ -75,7 +75,7 @@ Which of the claims a relation holds for an entity an attribute reads, spelled `
 
 Like a type, each pick is named by an entity, `last:`, `all:`, `top:`, `max:` and `min:`, which is how a descriptor spells it and what an attribute's identity hashes.
 
-A pick governs writes too: writing through an attribute under any pick but `all` succeeds the claim a read under that pick returns, and `all` adds a claim beside the others. In Rust a pick is `dialog_artifacts::Pick`.
+A pick governs writes too: writing through an attribute under any pick but `all` succeeds the claim a read under that pick returns, and `all` adds a claim beside the others. In Rust a pick is `dialog_corpus::Pick`.
 
 ### Concept
 
@@ -189,7 +189,7 @@ DialogDB's approach to time where facts exist in causal timelines rather than a 
 
 ### Corpus
 
-The body of claims a branch holds, as the tree that stores them: every fact the transactor has incorporated, keyed for the entity-, attribute- and value-ordered scans. The word is the storage side of what `dialog-artifacts` holds today (`ArtifactTree` is the corpus; `CorpusNode` is a node of it), and the name that side will carry when the crate is renamed. A corpus is one revision's worth: a query pins the one its branch stood at when it began.
+The body of claims a branch holds, as the tree that stores them: every fact the transactor has incorporated, keyed for the entity-, attribute- and value-ordered scans. It is the storage side of the `dialog-corpus` crate: `dialog_corpus::tree::Corpus` is the tree, `CorpusNode` a node of it and `CorpusCache` the cache those nodes are kept in; the model side (`Artifact`, `ArtifactSelector`) keeps its names until the claim rename. A corpus is one revision's worth: a query pins the one its branch stood at when it began.
 
 ### EAV Index (Entity-Attribute-Value)
 

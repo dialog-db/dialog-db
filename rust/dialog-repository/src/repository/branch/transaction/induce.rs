@@ -30,20 +30,20 @@
 //! keep hot-attribute fan-out flat, delta-restricted body evaluation,
 //! and the `retract!` head polarity.
 
-use dialog_artifacts::tree::CorpusNode;
+use dialog_corpus::tree::CorpusNode;
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::Read as BlobRead;
 use dialog_search_tree::nodes;
 use std::collections::{BTreeSet, HashMap};
 
-use dialog_artifacts::selector::Constrained;
-use dialog_artifacts::{
-    Artifact, ArtifactSelector, Change, Changes, DialogArtifactsError, Entity, Instruction,
-    Relation, Select, Statement, Value,
-};
 use dialog_capability::{Fork, Provider};
 use dialog_common::{ConditionalSync, Holds};
+use dialog_corpus::selector::Constrained;
+use dialog_corpus::{
+    Artifact, ArtifactSelector, Change, Changes, DialogCorpusError, Entity, Instruction, Relation,
+    Select, Statement, Value,
+};
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::Identify;
 use dialog_effects::memory::Resolve;
@@ -93,8 +93,8 @@ where
         + Provider<nodes::Preload<CorpusNode>>
         + ConditionalSync
         + Provider<BlobLoad>
-        + Provider<dialog_artifacts::Preload>
-        + Provider<dialog_artifacts::Speculation>
+        + Provider<dialog_corpus::Preload>
+        + Provider<dialog_corpus::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
         + Holds
         + ConditionalSync
@@ -103,9 +103,7 @@ where
     // Transients never commit, so an asset among them would be dropped:
     // refuse the commit before anything is written instead.
     if transients.has_assets() {
-        return Err(
-            DialogArtifactsError::AssetsUnsupported("a dispatched transient".into()).into(),
-        );
+        return Err(DialogCorpusError::AssetsUnsupported("a dispatched transient".into()).into());
     }
 
     // Round 1 stimulus: everything the commit changes, plus the
@@ -423,8 +421,8 @@ impl<'a> Dispatch<'a> {
             + Provider<nodes::Preload<CorpusNode>>
             + ConditionalSync
             + Provider<BlobLoad>
-            + Provider<dialog_artifacts::Preload>
-            + Provider<dialog_artifacts::Speculation>
+            + Provider<dialog_corpus::Preload>
+            + Provider<dialog_corpus::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + dialog_common::Holds
             + ConditionalSync
@@ -489,8 +487,8 @@ impl<'a> Dispatch<'a> {
             + Provider<nodes::Preload<CorpusNode>>
             + ConditionalSync
             + Provider<BlobLoad>
-            + Provider<dialog_artifacts::Preload>
-            + Provider<dialog_artifacts::Speculation>
+            + Provider<dialog_corpus::Preload>
+            + Provider<dialog_corpus::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + dialog_common::Holds
             + ConditionalSync
@@ -551,8 +549,8 @@ impl<'a> Dispatch<'a> {
             + Provider<nodes::Preload<CorpusNode>>
             + ConditionalSync
             + Provider<BlobLoad>
-            + Provider<dialog_artifacts::Preload>
-            + Provider<dialog_artifacts::Speculation>
+            + Provider<dialog_corpus::Preload>
+            + Provider<dialog_corpus::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + dialog_common::Holds
             + ConditionalSync
@@ -626,8 +624,8 @@ impl<'a> Dispatch<'a> {
             + Provider<nodes::Preload<CorpusNode>>
             + ConditionalSync
             + Provider<BlobLoad>
-            + Provider<dialog_artifacts::Preload>
-            + Provider<dialog_artifacts::Speculation>
+            + Provider<dialog_corpus::Preload>
+            + Provider<dialog_corpus::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + dialog_common::Holds
             + ConditionalSync
@@ -676,8 +674,8 @@ impl<'a> Dispatch<'a> {
             + Provider<nodes::Preload<CorpusNode>>
             + ConditionalSync
             + Provider<BlobLoad>
-            + Provider<dialog_artifacts::Preload>
-            + Provider<dialog_artifacts::Speculation>
+            + Provider<dialog_corpus::Preload>
+            + Provider<dialog_corpus::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + dialog_common::Holds
             + ConditionalSync
@@ -731,8 +729,8 @@ impl<'a> Dispatch<'a> {
             + Provider<nodes::Preload<CorpusNode>>
             + ConditionalSync
             + Provider<BlobLoad>
-            + Provider<dialog_artifacts::Preload>
-            + Provider<dialog_artifacts::Speculation>
+            + Provider<dialog_corpus::Preload>
+            + Provider<dialog_corpus::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + dialog_common::Holds
             + ConditionalSync
@@ -777,8 +775,8 @@ impl<'a> Dispatch<'a> {
             + Provider<nodes::Preload<CorpusNode>>
             + ConditionalSync
             + Provider<BlobLoad>
-            + Provider<dialog_artifacts::Preload>
-            + Provider<dialog_artifacts::Speculation>
+            + Provider<dialog_corpus::Preload>
+            + Provider<dialog_corpus::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + dialog_common::Holds
             + ConditionalSync
@@ -829,16 +827,16 @@ where
         + Provider<nodes::Preload<CorpusNode>>
         + ConditionalSync
         + Provider<BlobLoad>
-        + Provider<dialog_artifacts::Preload>
-        + Provider<dialog_artifacts::Speculation>
+        + Provider<dialog_corpus::Preload>
+        + Provider<dialog_corpus::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
         + dialog_common::Holds
         + ConditionalSync
         + 'static,
 {
-    use dialog_artifacts::tree::fetch_spilled;
-    use dialog_artifacts::{EntityKey, Key, KeyViewConstruct, State};
     use dialog_common::Blake3Hash as NodeHash;
+    use dialog_corpus::tree::fetch_spilled;
+    use dialog_corpus::{EntityKey, Key, KeyViewConstruct, State};
     use dialog_search_tree::Change as TreeChange;
 
     let SourceRef::Branch(branch) = source else {
@@ -905,7 +903,7 @@ where
             continue;
         }
         lag.push(if arriving {
-            Instruction::Assert(fact, dialog_artifacts::Pick::All)
+            Instruction::Assert(fact, dialog_corpus::Pick::All)
         } else {
             Instruction::Retract(fact)
         });
@@ -948,8 +946,8 @@ where
         + Provider<nodes::Preload<CorpusNode>>
         + ConditionalSync
         + Provider<BlobLoad>
-        + Provider<dialog_artifacts::Preload>
-        + Provider<dialog_artifacts::Speculation>
+        + Provider<dialog_corpus::Preload>
+        + Provider<dialog_corpus::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
         + dialog_common::Holds
         + ConditionalSync
@@ -1185,13 +1183,13 @@ async fn emit_matches<'a>(
                 // A retracting head dissociates the exact bound
                 // triple, cardinality-independent.
                 Polarity::Retract => {
-                    dialog_artifacts::Update::dissociate(&mut head, attribute, this.clone(), value);
+                    dialog_corpus::Update::dissociate(&mut head, attribute, this.clone(), value);
                 }
                 // An asserting head writes as the field's pick says: a
                 // set appends, and a choosing pick succeeds the claim
                 // it elects, resolved against the view at commit.
                 Polarity::Assert => {
-                    dialog_artifacts::Update::associate(
+                    dialog_corpus::Update::associate(
                         &mut head,
                         attribute,
                         this.clone(),
@@ -1214,10 +1212,10 @@ async fn emit_matches<'a>(
             if is_novel(view, &instruction).await? {
                 match instruction {
                     Instruction::Assert(a, policy) => {
-                        dialog_artifacts::Update::associate(novelty, a.the, a.of, a.is, policy)
+                        dialog_corpus::Update::associate(novelty, a.the, a.of, a.is, policy)
                     }
                     Instruction::Retract(a) => {
-                        dialog_artifacts::Update::dissociate(novelty, a.the, a.of, a.is)
+                        dialog_corpus::Update::dissociate(novelty, a.the, a.of, a.is)
                     }
                 }
             }
@@ -1259,10 +1257,10 @@ mod tests {
     use crate::rules::Transient;
     use crate::{Branch, CommitError, RemoteSite, Revision};
     use anyhow::Result;
-    use dialog_artifacts::tree::CorpusNode;
-    use dialog_artifacts::{ArtifactSelector, Changes, Entity, Instruction, Value};
     use dialog_capability::{Fork, Provider};
     use dialog_common::ConditionalSync;
+    use dialog_corpus::tree::CorpusNode;
+    use dialog_corpus::{ArtifactSelector, Changes, Entity, Instruction, Value};
     use dialog_effects::archive::{Get, Put};
     use dialog_effects::blob::Read as BlobRead;
     use dialog_effects::memory::Resolve;
@@ -1287,8 +1285,8 @@ mod tests {
             + Provider<nodes::Preload<CorpusNode>>
             + ConditionalSync
             + Provider<BlobLoad>
-            + Provider<dialog_artifacts::Preload>
-            + Provider<dialog_artifacts::Speculation>
+            + Provider<dialog_corpus::Preload>
+            + Provider<dialog_corpus::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + dialog_common::Holds
             + ConditionalSync
@@ -1622,7 +1620,7 @@ mod tests {
     /// would, so the increment after a merge commits.
     #[dialog_common::test]
     async fn it_increments_an_integer_counter_after_a_pulled_count() -> Result<()> {
-        use dialog_artifacts::{Artifact, Instruction};
+        use dialog_corpus::{Artifact, Instruction};
         use futures_util::stream;
 
         let (operator, profile) = test_session_with_peer().await;
@@ -1648,7 +1646,7 @@ mod tests {
                     is: Value::SignedInt(1),
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             )]))
             .perform(&operator)
             .await?;
@@ -2872,7 +2870,7 @@ mod tests {
     /// is, and the next inducing instant catches up over both.
     #[dialog_common::test]
     async fn it_carries_the_watermark_over_a_machinery_commit() -> Result<()> {
-        use dialog_artifacts::{Artifact, Instruction};
+        use dialog_corpus::{Artifact, Instruction};
         use futures_util::stream;
 
         let (operator, profile) = test_session_with_peer().await;
@@ -2901,7 +2899,7 @@ mod tests {
                     is: Value::String(audience.into()),
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             ))
         };
 
@@ -2929,7 +2927,7 @@ mod tests {
                     is: Value::String("hello".into()),
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             )]))
             .perform(&operator)
             .await?;
@@ -2983,7 +2981,7 @@ mod tests {
     /// is a no-op — the watermark is at the head.
     #[dialog_common::test]
     async fn it_catches_up_over_a_raw_commit() -> Result<()> {
-        use dialog_artifacts::{Artifact, Instruction};
+        use dialog_corpus::{Artifact, Instruction};
         use futures_util::stream;
 
         let (operator, profile) = test_session_with_peer().await;
@@ -3009,7 +3007,7 @@ mod tests {
                     is: Value::String("hello".into()),
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             )]))
             .perform(&operator)
             .await?;
@@ -3043,7 +3041,7 @@ mod tests {
     /// conjunction completes at the instant it first exists.
     #[dialog_common::test]
     async fn it_completes_a_conjunction_across_instants() -> Result<()> {
-        use dialog_artifacts::{Artifact, Instruction};
+        use dialog_corpus::{Artifact, Instruction};
         use futures_util::stream;
 
         let (operator, profile) = test_session_with_peer().await;
@@ -3095,7 +3093,7 @@ mod tests {
                     is: Value::String("p".into()),
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             )]))
             .perform(&operator)
             .await?;
@@ -3128,7 +3126,7 @@ mod tests {
     /// facts arriving after adoption do.
     #[dialog_common::test]
     async fn it_adopts_a_branch_without_retroactive_firing() -> Result<()> {
-        use dialog_artifacts::{Artifact, Instruction};
+        use dialog_corpus::{Artifact, Instruction};
         use futures_util::stream;
 
         let (operator, profile) = test_session_with_peer().await;
@@ -3138,7 +3136,7 @@ mod tests {
         // Rule and a matching fact both land through raw commits: the
         // branch has state and rules, but no induction ever ran and no
         // watermark exists.
-        let mut install = dialog_artifacts::Changes::new();
+        let mut install = dialog_corpus::Changes::new();
         install.assert(tagger());
         let old: Entity = "doc:old".parse()?;
         branch
@@ -3154,7 +3152,7 @@ mod tests {
                     is: Value::String("old".into()),
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             )]))
             .perform(&operator)
             .await?;
@@ -3182,7 +3180,7 @@ mod tests {
                     is: Value::String("new".into()),
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             )]))
             .perform(&operator)
             .await?;
@@ -3348,8 +3346,8 @@ mod tests {
             + Provider<nodes::Preload<CorpusNode>>
             + ConditionalSync
             + Provider<BlobLoad>
-            + Provider<dialog_artifacts::Preload>
-            + Provider<dialog_artifacts::Speculation>
+            + Provider<dialog_corpus::Preload>
+            + Provider<dialog_corpus::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + dialog_common::Holds
             + ConditionalSync
@@ -3483,7 +3481,7 @@ mod tests {
             .await?;
         branch.refresh(&operator).await?;
 
-        let member: dialog_artifacts::Relation = "todo.list/N5".parse()?;
+        let member: dialog_corpus::Relation = "todo.list/N5".parse()?;
         branch
             .transaction()
             .assert(

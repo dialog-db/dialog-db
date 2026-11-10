@@ -14,7 +14,7 @@
 //!
 //! - **SQLite** modeling the dialog information model faithfully: one
 //!   `facts` table whose primary key is the EAV ordering, plus secondary
-//!   AEV and VAE indexes — the exact three orderings `dialog-artifacts`
+//!   AEV and VAE indexes — the exact three orderings `dialog-corpus`
 //!   maintains in its probabilistic search tree.
 //! - **dialog-db** through a repository branch ([`repo::DialogRepo`]):
 //!   `commit` and `select`, over both volatile (in-memory) and native
@@ -42,7 +42,7 @@ use std::str::FromStr;
 
 use anyhow::Result;
 use base58::ToBase58;
-use dialog_artifacts::{Artifact, Changes, Entity, Instruction, Relation, Update as _, Value};
+use dialog_corpus::{Artifact, Changes, Entity, Instruction, Relation, Update as _, Value};
 use dialog_peer::{Peer, Session};
 use dialog_storage::NativeTempSpace;
 use dialog_storage::provider::storage::VolatileSpace;
@@ -314,7 +314,7 @@ impl DialogFacts {
     /// Every fact matching `selector`, materialized.
     pub async fn collect(
         &self,
-        selector: dialog_artifacts::ArtifactSelector<dialog_artifacts::selector::Constrained>,
+        selector: dialog_corpus::ArtifactSelector<dialog_corpus::selector::Constrained>,
     ) -> Result<Vec<Artifact>> {
         with_repo!(self, repo => repo.collect(selector).await)
     }
@@ -345,7 +345,7 @@ pub(crate) fn instructions_for(rows: &[FactRow]) -> Result<Vec<Instruction>> {
     for row in rows {
         instructions.extend(
             artifacts_for(row)?
-                .map(|artifact| Instruction::Assert(artifact, dialog_artifacts::Pick::All)),
+                .map(|artifact| Instruction::Assert(artifact, dialog_corpus::Pick::All)),
         );
     }
     Ok(instructions)

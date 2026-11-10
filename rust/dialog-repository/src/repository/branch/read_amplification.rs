@@ -19,7 +19,7 @@
 //! ancestry includes, is measured by `context_cost_by_origins` the same
 //! way (`DIALOG_RA_MAX_ORIGINS` caps its sweep).
 
-use dialog_artifacts::tree::CorpusNode;
+use dialog_corpus::tree::CorpusNode;
 use dialog_search_tree::nodes;
 use std::env;
 use std::sync::{Arc, Mutex};
@@ -28,14 +28,14 @@ use std::time::Instant;
 use anyhow::Result;
 use futures_util::stream;
 
-use dialog_artifacts::history::{Context, context_of};
-use dialog_artifacts::{
-    ATTRIBUTE_KEY_TAG, ArchiveDelta, Artifact, BLOB_KEY_TAG, COVERAGE_KEY_TAG, ENTITY_KEY_TAG,
-    HISTORY_KEY_TAG, Instruction, VALUE_KEY_TAG, Value,
-};
 use dialog_capability::Provider;
 use dialog_common::Holds;
 use dialog_common::{Blake3Hash, ConditionalSync};
+use dialog_corpus::history::{Context, context_of};
+use dialog_corpus::{
+    ATTRIBUTE_KEY_TAG, ArchiveDelta, Artifact, BLOB_KEY_TAG, COVERAGE_KEY_TAG, ENTITY_KEY_TAG,
+    HISTORY_KEY_TAG, Instruction, VALUE_KEY_TAG, Value,
+};
 use dialog_effects::archive::Load;
 use dialog_effects::archive::prelude::CatalogScope;
 use dialog_search_tree::{FrameAttribution, Manifest};
@@ -96,7 +96,7 @@ fn assert_fact(entity: usize, value: &str) -> Instruction {
             is: Value::String(value.to_string()),
             cause: None,
         },
-        dialog_artifacts::Pick::All,
+        dialog_corpus::Pick::All,
     )
 }
 
@@ -436,9 +436,9 @@ async fn measure_shape(depth: usize) -> Result<()> {
 ///   would look like if it could defer the flush (publishing a head only at a
 ///   sync/publish point). This is the regime the buffer is designed for.
 async fn measure_write_paths(depth: usize, batches: usize) -> Result<()> {
-    use dialog_artifacts::tree::ArtifactTreeExt as _;
-    use dialog_artifacts::tree::{Stamp, WriteScope, write_instructions};
-    use dialog_artifacts::{Instruction as I, apply_buffered};
+    use dialog_corpus::tree::CorpusExt as _;
+    use dialog_corpus::tree::{Stamp, WriteScope, write_instructions};
+    use dialog_corpus::{Instruction as I, apply_buffered};
 
     let (operator, profile) = test_session_with_peer().await;
     let env = Counting::new(operator);
@@ -513,7 +513,7 @@ async fn measure_write_paths(depth: usize, batches: usize) -> Result<()> {
 
     // Buffered, flushed once at the end: the regime buffering is built for.
     let mut delta = ArchiveDelta::zero();
-    let staged = dialog_artifacts::DeltaOverlay::new(&delta, &store);
+    let staged = dialog_corpus::DeltaOverlay::new(&delta, &store);
     let mut deferred = dialog_search_tree::HitchhikerTree::open(&base);
     let started = Instant::now();
     for i in 0..batches {
@@ -554,7 +554,7 @@ async fn measure_write_paths(depth: usize, batches: usize) -> Result<()> {
 async fn measure_origins(origins: usize) -> Result<()> {
     use std::mem::size_of;
 
-    use dialog_artifacts::history::{Origin, Watermark};
+    use dialog_corpus::history::{Origin, Watermark};
 
     let (operator, profile) = test_session_with_peer().await;
     let env = Counting::new(operator);
@@ -772,8 +772,8 @@ async fn measure_first_query(origins: usize) -> Result<()> {
         .query()
         .select(AttributeQuery::from(
             Term::<Relation>::from(the!("bench/field"))
-                .of(Term::<dialog_artifacts::Entity>::from(
-                    "user:7".parse::<dialog_artifacts::Entity>()?,
+                .of(Term::<dialog_corpus::Entity>::from(
+                    "user:7".parse::<dialog_corpus::Entity>()?,
                 ))
                 .is(Term::<String>::var("is")),
         ))
@@ -1321,8 +1321,8 @@ async fn attribute_first_query(origins: usize) -> Result<()> {
         .query()
         .select(AttributeQuery::from(
             Term::<Relation>::from(the!("bench/field"))
-                .of(Term::<dialog_artifacts::Entity>::from(
-                    "user:7".parse::<dialog_artifacts::Entity>()?,
+                .of(Term::<dialog_corpus::Entity>::from(
+                    "user:7".parse::<dialog_corpus::Entity>()?,
                 ))
                 .is(Term::<String>::var("is")),
         ))

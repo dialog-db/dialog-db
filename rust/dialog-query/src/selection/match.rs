@@ -162,8 +162,8 @@ struct Frame {
 /// succession orders stored claims. A row derived by a rule stands as
 /// the fact that bound its value does.
 ///
-/// [`ArtifactView::elect`]: dialog_artifacts::ArtifactView::elect
-pub use dialog_artifacts::Standing;
+/// [`ArtifactView::elect`]: dialog_corpus::ArtifactView::elect
+pub use dialog_corpus::Standing;
 
 /// Binding order is premise-evaluation order, an artifact of the plan;
 /// two rows are the same result when they bind the same names to the

@@ -7,7 +7,7 @@ use crate::negation::Negation;
 use crate::statement::Statement;
 use crate::types::Scalar;
 use crate::{Entity, Premise, Proposition, Term};
-use dialog_artifacts::Update;
+use dialog_corpus::Update;
 use std::iter;
 use std::marker::PhantomData;
 use std::ops::Not;

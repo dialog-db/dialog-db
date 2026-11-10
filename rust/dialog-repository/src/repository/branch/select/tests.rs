@@ -5,7 +5,7 @@
 #[cfg(target_arch = "wasm32")]
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-use dialog_artifacts::tree::CorpusNode;
+use dialog_corpus::tree::CorpusNode;
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::{BlobError, Read as BlobRead};
@@ -17,13 +17,13 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use dialog_artifacts::selector::Constrained;
-use dialog_artifacts::{
-    Artifact, ArtifactSelector, Changes, DialogArtifactsError, Entity, Exporter, Instruction,
-    NameShape, Relation, Symbol, Update as _, Value, encode_value_owned,
-};
 use dialog_capability::{Fork, Provider};
 use dialog_common::{Blake3Hash, ConditionalSync};
+use dialog_corpus::selector::Constrained;
+use dialog_corpus::{
+    Artifact, ArtifactSelector, Changes, DialogCorpusError, Entity, Exporter, Instruction,
+    NameShape, Relation, Symbol, Update as _, Value, encode_value_owned,
+};
 use dialog_credentials::Credential;
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::memory::Resolve;
@@ -75,7 +75,7 @@ async fn assert_all(
         branch,
         facts
             .into_iter()
-            .map(|artifact| Instruction::Assert(artifact, dialog_artifacts::Pick::All))
+            .map(|artifact| Instruction::Assert(artifact, dialog_corpus::Pick::All))
             .collect(),
         operator,
     )
@@ -219,12 +219,12 @@ struct Collect(Arc<Mutex<Vec<Artifact>>>);
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Exporter for Collect {
-    async fn write(&mut self, artifact: &Artifact) -> Result<(), DialogArtifactsError> {
+    async fn write(&mut self, artifact: &Artifact) -> Result<(), DialogCorpusError> {
         self.0.lock().push(artifact.clone());
         Ok(())
     }
 
-    async fn close(&mut self) -> Result<(), DialogArtifactsError> {
+    async fn close(&mut self) -> Result<(), DialogCorpusError> {
         Ok(())
     }
 }
@@ -286,7 +286,7 @@ async fn it_leaves_no_key_when_assert_and_retract_a_novel_fact_in_one_batch() ->
     commit(
         &branch,
         vec![
-            Instruction::Assert(transient.clone(), dialog_artifacts::Pick::All),
+            Instruction::Assert(transient.clone(), dialog_corpus::Pick::All),
             Instruction::Retract(transient.clone()),
         ],
         &operator,
@@ -405,7 +405,7 @@ async fn it_selects_by_domain_and_name() -> Result<()> {
 /// A domain selection with a name shape yields exactly the matching half
 /// of a mixed domain: the scan ranges over the shape's contiguous
 /// sub-range (see `it_narrows_domain_ranges_by_name_shape` in
-/// `dialog_artifacts::tree`), with attributes of adjacent domains and of
+/// `dialog_corpus::tree`), with attributes of adjacent domains and of
 /// the other shape outside it.
 #[dialog_common::test]
 async fn it_selects_domain_halves_by_name_shape() -> Result<()> {
@@ -619,7 +619,7 @@ async fn it_treats_type_mismatched_values_as_non_matches_not_errors() -> Result<
     .collect::<Result<Vec<_>>>()?;
     assert_all(&branch, data, &operator).await?;
 
-    let numbers = |selected: &[dialog_artifacts::Artifact]| -> Vec<f64> {
+    let numbers = |selected: &[dialog_corpus::Artifact]| -> Vec<f64> {
         let mut numbers: Vec<f64> = selected
             .iter()
             .map(|fact| match &fact.is {
@@ -1186,7 +1186,7 @@ async fn it_can_query_efficiently_by_entity_and_value() -> Result<()> {
     branch
         .commit(stream::iter(
             data.into_iter()
-                .map(|artifact| Instruction::Assert(artifact, dialog_artifacts::Pick::All))
+                .map(|artifact| Instruction::Assert(artifact, dialog_corpus::Pick::All))
                 .collect::<Vec<_>>(),
         ))
         .canonicalize()
@@ -1240,7 +1240,7 @@ async fn it_can_query_efficiently_by_attribute_and_value() -> Result<()> {
     branch
         .commit(stream::iter(
             data.into_iter()
-                .map(|artifact| Instruction::Assert(artifact, dialog_artifacts::Pick::All))
+                .map(|artifact| Instruction::Assert(artifact, dialog_corpus::Pick::All))
                 .collect::<Vec<_>>(),
         ))
         .canonicalize()
@@ -1286,7 +1286,7 @@ async fn it_uses_indexes_to_optimize_reads() -> Result<()> {
         .commit(stream::iter(
             generate_data(512)?
                 .into_iter()
-                .map(|artifact| Instruction::Assert(artifact, dialog_artifacts::Pick::All))
+                .map(|artifact| Instruction::Assert(artifact, dialog_corpus::Pick::All))
                 .collect::<Vec<_>>(),
         ))
         .canonicalize()
@@ -1384,7 +1384,7 @@ async fn it_produces_the_same_version_with_different_insertion_order() -> Result
             artifact.the,
             artifact.of,
             artifact.is,
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         );
     }
     let mut backward = Changes::new();
@@ -1393,7 +1393,7 @@ async fn it_produces_the_same_version_with_different_insertion_order() -> Result
             artifact.the,
             artifact.of,
             artifact.is,
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         );
     }
 
@@ -1440,7 +1440,7 @@ async fn it_can_upsert_facts() -> Result<()> {
         &branch,
         vec![Instruction::Assert(
             fact("test/attribute", entity.clone(), Value::Boolean(true))?,
-            dialog_artifacts::Pick::Last,
+            dialog_corpus::Pick::Last,
         )],
         &operator,
     )
@@ -1508,7 +1508,7 @@ async fn it_avoids_unnecessary_storage_writes() -> Result<()> {
                 Entity::new()?,
                 Value::String("another value".into()),
             )?,
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         )]))
         .perform(&counting)
         .await?;
@@ -1649,7 +1649,7 @@ async fn it_replaces_a_spilled_prior() -> Result<()> {
                 &branch,
                 vec![Instruction::Assert(
                     fact("doc/body", entity.clone(), value)?,
-                    dialog_artifacts::Pick::Last,
+                    dialog_corpus::Pick::Last,
                 )],
                 &operator,
             )
@@ -1750,7 +1750,7 @@ async fn it_errors_when_a_spilled_block_is_missing() -> Result<()> {
 
     // A cold handle: its spill cache does not already hold the value.
     let cold = repo.branch("main").load().perform(&operator).await?;
-    let rows: Vec<Result<Artifact, DialogArtifactsError>> = cold
+    let rows: Vec<Result<Artifact, DialogCorpusError>> = cold
         .claims()
         .select(ArtifactSelector::new().the("doc/body".parse()?))
         .to_owned()
@@ -1759,10 +1759,7 @@ async fn it_errors_when_a_spilled_block_is_missing() -> Result<()> {
         .collect()
         .await;
     assert!(
-        matches!(
-            rows.as_slice(),
-            [Err(DialogArtifactsError::InvalidValue(_))]
-        ),
+        matches!(rows.as_slice(), [Err(DialogCorpusError::InvalidValue(_))]),
         "a missing spilled block is a clean error, got {rows:?}"
     );
 
@@ -1831,7 +1828,7 @@ async fn it_commits_identically_when_the_spine_is_reused() -> Result<()> {
             "test/value".parse()?,
             format!("entity:00000000-0000-0000-0000-{:012}", n % 40).parse()?,
             Value::String(format!("value {n}")),
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         );
 
         // The oracle opens a fresh handle (and therefore reads the root
@@ -1897,7 +1894,7 @@ async fn it_can_export_to_and_import_from_a_branch() -> Result<()> {
     let target = target_repo.branch("main").open().perform(&operator).await?;
     target
         .import(stream::iter(
-            rows.into_iter().map(Ok::<_, DialogArtifactsError>),
+            rows.into_iter().map(Ok::<_, DialogCorpusError>),
         ))
         .perform(&operator)
         .await?;

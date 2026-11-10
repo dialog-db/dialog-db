@@ -19,7 +19,7 @@
 // Allow macro-generated code to reference this crate as `dialog_query::`
 extern crate self as dialog_query;
 
-/// Re-exports from the dialog-artifacts crate.
+/// Re-exports from the dialog-corpus crate.
 pub mod artifact;
 /// Attribute definitions and schema metadata.
 pub mod attribute;
@@ -107,7 +107,7 @@ pub use merge_join::*;
 /// Unified schema-layer type system (`Type`, `Primitive`,
 /// `Refinement`, set-operations).
 pub mod type_system;
-/// Type system utilities bridging Rust types to dialog-artifacts types.
+/// Type system utilities bridging Rust types to dialog-corpus types.
 pub mod types;
 
 pub use artifact::*;
@@ -135,7 +135,7 @@ pub use resolver::*;
 pub use rule::*;
 pub use schema::*;
 // The pick a field reads under, from the artifacts crate.
-pub use dialog_artifacts::Pick;
+pub use dialog_corpus::Pick;
 pub use scope::*;
 pub use selection::*;
 pub use session::*;

@@ -21,9 +21,9 @@ use std::collections::{BTreeSet, HashMap};
 use std::env;
 
 use anyhow::Result;
-use dialog_artifacts::history::{Edition, Origin, Version, context_of};
-use dialog_artifacts::{Artifact, ArtifactSelector, Instruction, Pick, Value};
 use dialog_capability::Subject;
+use dialog_corpus::history::{Edition, Origin, Version, context_of};
+use dialog_corpus::{Artifact, ArtifactSelector, Instruction, Pick, Value};
 use dialog_effects::authority::{Identify, OperatorExt as _};
 use dialog_peer::helpers::{test_session_with_peer, unique_name};
 use futures_util::{StreamExt as _, stream};
@@ -52,7 +52,7 @@ fn assert_one(of: &str) -> Instruction {
             is: Value::String("body".to_string()),
             cause: None,
         },
-        dialog_artifacts::Pick::All,
+        dialog_corpus::Pick::All,
     )
 }
 
@@ -290,10 +290,7 @@ async fn rival_merges(greater_keeps: bool) -> Result<()> {
     assert_eq!(walkable!(k, ke), Ok(()), "the keeper's history is whole");
     let expected: BTreeSet<String> = ["post:a", "post:b", "post:a2"]
         .iter()
-        .map(|of| {
-            of.parse::<dialog_artifacts::Entity>()
-                .map(|of| of.to_string())
-        })
+        .map(|of| of.parse::<dialog_corpus::Entity>().map(|of| of.to_string()))
         .collect::<Result<_, _>>()?;
     assert_eq!(titles!(k, ke), expected, "the keeper holds every fact");
 
@@ -359,10 +356,7 @@ async fn reset_behind_the_base(separate_caches: bool, record: Record) -> Result<
     assert_eq!(walkable!(w1, &one), Ok(()), "w1's history is whole");
     let expected: BTreeSet<String> = ["post:one", "post:two"]
         .iter()
-        .map(|of| {
-            of.parse::<dialog_artifacts::Entity>()
-                .map(|of| of.to_string())
-        })
+        .map(|of| of.parse::<dialog_corpus::Entity>().map(|of| of.to_string()))
         .collect::<Result<_, _>>()?;
     assert_eq!(titles!(w1, &one), expected, "w1 holds both facts");
     Ok(())
@@ -444,10 +438,7 @@ async fn no_base(record: Record) -> Result<()> {
     assert_eq!(walkable!(w1, &one), Ok(()), "w1's history is whole");
     let expected: BTreeSet<String> = ["post:a", "post:b", "post:c", "post:d", "post:e"]
         .iter()
-        .map(|of| {
-            of.parse::<dialog_artifacts::Entity>()
-                .map(|of| of.to_string())
-        })
+        .map(|of| of.parse::<dialog_corpus::Entity>().map(|of| of.to_string()))
         .collect::<Result<_, _>>()?;
     assert_eq!(titles!(w1, &one), expected, "w1 holds every fact");
     Ok(())
@@ -516,10 +507,7 @@ async fn upstream_reset(commit_on_top: bool, record: Record) -> Result<()> {
     assert_eq!(walkable!(w1, &one), Ok(()), "w1's history is whole");
     let expected: BTreeSet<String> = facts
         .iter()
-        .map(|of| {
-            of.parse::<dialog_artifacts::Entity>()
-                .map(|of| of.to_string())
-        })
+        .map(|of| of.parse::<dialog_corpus::Entity>().map(|of| of.to_string()))
         .collect::<Result<_, _>>()?;
     assert_eq!(titles!(w1, &one), expected, "w1 keeps c");
     Ok(())
@@ -572,10 +560,7 @@ async fn it_keeps_a_replica_that_never_reset_whole_when_another_resets_and_pushe
     assert_eq!(walkable!(w3, &three), Ok(()), "w3's history is whole");
     let expected: BTreeSet<String> = ["post:a", "post:w3", "post:e"]
         .iter()
-        .map(|of| {
-            of.parse::<dialog_artifacts::Entity>()
-                .map(|of| of.to_string())
-        })
+        .map(|of| of.parse::<dialog_corpus::Entity>().map(|of| of.to_string()))
         .collect::<Result<_, _>>()?;
     assert_eq!(titles!(w3, &three), expected, "w3 keeps its own fact");
     Ok(())
@@ -635,10 +620,7 @@ async fn it_lets_the_greater_rival_push_onto_the_lesser_after_a_pull() -> Result
     assert_eq!(walkable!(b, be), Ok(()), "the lesser's history is whole");
     let expected: BTreeSet<String> = ["post:a", "post:b"]
         .iter()
-        .map(|of| {
-            of.parse::<dialog_artifacts::Entity>()
-                .map(|of| of.to_string())
-        })
+        .map(|of| of.parse::<dialog_corpus::Entity>().map(|of| of.to_string()))
         .collect::<Result<_, _>>()?;
     assert_eq!(titles!(b, be), expected, "the lesser holds every fact");
     Ok(())
@@ -716,10 +698,7 @@ async fn it_refuses_a_takeover_so_a_push_cannot_rewind_the_upstream() -> Result<
     let w2 = line!(profile, name, &two, "two");
     let expected: BTreeSet<String> = ["post:a", "post:b", "post:e"]
         .iter()
-        .map(|of| {
-            of.parse::<dialog_artifacts::Entity>()
-                .map(|of| of.to_string())
-        })
+        .map(|of| of.parse::<dialog_corpus::Entity>().map(|of| of.to_string()))
         .collect::<Result<_, _>>()?;
     assert_eq!(titles!(w2, &two), expected, "the upstream keeps b");
     Ok(())
@@ -793,10 +772,7 @@ async fn it_keeps_a_retraction_when_it_merges_from_no_base() -> Result<()> {
     assert_eq!(walkable!(w1, &one), Ok(()), "w1's history is whole");
     let expected: BTreeSet<String> = ["post:a", "post:g", "post:x"]
         .iter()
-        .map(|of| {
-            of.parse::<dialog_artifacts::Entity>()
-                .map(|of| of.to_string())
-        })
+        .map(|of| of.parse::<dialog_corpus::Entity>().map(|of| of.to_string()))
         .collect::<Result<_, _>>()?;
     assert_eq!(titles!(w1, &one), expected, "f stays retracted");
     Ok(())
@@ -834,7 +810,7 @@ async fn it_does_not_push_a_head_a_reset_left_behind_the_base() -> Result<()> {
     assert_eq!(w1.tracked(), tracked, "the refusal records no sync");
     assert_eq!(w1.based(), based, "the refusal records no base");
     let w2 = line!(profile, name, &two, "two");
-    let c = "post:c".parse::<dialog_artifacts::Entity>()?.to_string();
+    let c = "post:c".parse::<dialog_corpus::Entity>()?.to_string();
     assert!(titles!(w2, &two).contains(&c), "the upstream keeps c");
     Ok(())
 }
@@ -1253,7 +1229,7 @@ impl Claim {
         Self {
             the: the.to_string(),
             of: of
-                .parse::<dialog_artifacts::Entity>()
+                .parse::<dialog_corpus::Entity>()
                 .expect("entity parses")
                 .to_string(),
             is: is.to_string(),

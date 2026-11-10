@@ -1,10 +1,10 @@
 use super::memory::Cell;
 use crate::rules::SharedRuleCache;
 use crate::{CacheBudget, Ephemeral, RemoteFallback, ResolveError, Revision};
-use dialog_artifacts::tree::CorpusNode;
 use dialog_capability::Provider;
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::{ConditionalSync, Holds};
+use dialog_corpus::tree::CorpusNode;
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::memory;
@@ -12,16 +12,14 @@ use dialog_query::concept::query::PlanCache;
 use dialog_search_tree::nodes;
 
 use crate::repository::source::{Caches, SourceRef};
-use dialog_artifacts::Changes;
-use dialog_artifacts::DialogArtifactsError;
-use dialog_artifacts::Entity;
-use dialog_artifacts::history::Origin;
-use dialog_artifacts::history::{
-    CausalityCache, ContextCache, RevisionRecord, TreeHistory, Version,
-};
-use dialog_artifacts::tree::{ArtifactNodeCache, SpillCache};
-use dialog_artifacts::{Exporter, Importer};
 use dialog_capability::{Capability, Did, Subject};
+use dialog_corpus::Changes;
+use dialog_corpus::DialogCorpusError;
+use dialog_corpus::Entity;
+use dialog_corpus::history::Origin;
+use dialog_corpus::history::{CausalityCache, ContextCache, RevisionRecord, TreeHistory, Version};
+use dialog_corpus::tree::{CorpusCache, SpillCache};
+use dialog_corpus::{Exporter, Importer};
 use dialog_effects::authority::{Operator, OperatorExt as _};
 use dialog_query::query::Application;
 use futures_util::lock::{Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard};
@@ -130,7 +128,7 @@ mod integration_tests;
 mod read_amplification;
 
 /// Type alias for the search tree index.
-pub type Index = dialog_artifacts::Index;
+pub type Index = dialog_corpus::Index;
 
 /// A branch represents a named line of development within a repository.
 ///
@@ -161,7 +159,7 @@ pub struct Branch {
     /// query stay warm for the next, and for the next open of the branch,
     /// instead of being re-fetched from storage. Content-addressed keys make
     /// sharing across revisions safe.
-    node_cache: ArtifactNodeCache,
+    node_cache: CorpusCache,
     /// Shared cache of spilled value blocks, keyed by their 32-byte content
     /// reference. Held by the environment for every repository and carried
     /// into every select so a repeated read of the same large (spilled) value
@@ -220,7 +218,7 @@ pub struct Branch {
     /// safely misses), sparing every commit the root-frame decode and
     /// sealed-buffer bulk copies of a fresh open. Shared across clones like
     /// the caches.
-    spine: dialog_artifacts::SpineSlot,
+    spine: dialog_corpus::SpineSlot,
     /// Memo of the commit identity derived for this branch. The branch
     /// entity and origin are pure functions of (subject, name, profile,
     /// issuer), but deriving them costs blake3 hashes, a base58 render,
@@ -679,7 +677,7 @@ impl Branch {
 
     /// The recorded claim lineage at this branch's current revision, which
     /// powers claim-level conflict detection (see
-    /// [`dialog_artifacts::history::causality`]).
+    /// [`dialog_corpus::history::causality`]).
     ///
     /// History records live in the same tree as the data, so this reads the
     /// history region of the current revision's tree. A read that misses
@@ -705,7 +703,7 @@ impl Branch {
 
     /// The branch's committed history, newest first — at most `limit`
     /// entries of `(version, record)`, every revision before any of its
-    /// ancestors (see [`dialog_artifacts::history::log`]). A branch with
+    /// ancestors (see [`dialog_corpus::history::log`]). A branch with
     /// no commits logs nothing; unreplicated ancestry truncates the walk
     /// rather than failing it. Each record was verified on read, so the
     /// attribution it reports is the issuer's own signed claim.
@@ -713,7 +711,7 @@ impl Branch {
         &self,
         env: &Env,
         limit: usize,
-    ) -> Result<Vec<(Version, RevisionRecord)>, DialogArtifactsError>
+    ) -> Result<Vec<(Version, RevisionRecord)>, DialogCorpusError>
     where
         Env: Provider<ArchiveLoad>
             + Provider<nodes::Write<CorpusNode>>
@@ -749,7 +747,7 @@ impl Branch {
     /// A shared handle to this branch's node cache: the one every tree read
     /// through the environment it was opened with keeps its nodes in.
     #[cfg(test)]
-    pub(crate) fn node_cache(&self) -> ArtifactNodeCache {
+    pub(crate) fn node_cache(&self) -> CorpusCache {
         self.node_cache.clone()
     }
 
@@ -774,7 +772,7 @@ impl Branch {
     }
 
     /// The live-spine slot this branch's commits reuse.
-    pub(crate) fn spine(&self) -> &dialog_artifacts::SpineSlot {
+    pub(crate) fn spine(&self) -> &dialog_corpus::SpineSlot {
         &self.spine
     }
 

@@ -1,11 +1,9 @@
-use dialog_artifacts::history::Version;
-use dialog_artifacts::tree::CorpusNode;
-use dialog_artifacts::{
-    Datum, Key as ArtifactKey, ShipmentRef, State, shipment_ref, shipment_refs,
-};
 use dialog_capability::{Fork, Provider, Subject};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::{Buffer, ConditionalSync, Holds};
+use dialog_corpus::history::Version;
+use dialog_corpus::tree::CorpusNode;
+use dialog_corpus::{Datum, Key as ArtifactKey, ShipmentRef, State, shipment_ref, shipment_refs};
 use dialog_effects::MethodExt as _;
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::prelude::ArchiveExt as _;
@@ -318,7 +316,7 @@ async fn holds<Env: ResolveEnv>(
             let history = branch.history(env);
             let context =
                 full_context(head, &branch.contexts(), &catalog, &store, &history).await?;
-            Ok::<_, dialog_artifacts::DialogArtifactsError>(context.observes(version))
+            Ok::<_, dialog_corpus::DialogCorpusError>(context.observes(version))
         };
         answer.await.map_err(|error| match &serving {
             Some(remote) => PushError::Unreachable {
@@ -456,7 +454,7 @@ where
                 if let Some(fetched) = upstream.revision() {
                     fetched
                         .verify()
-                        .map_err(dialog_artifacts::DialogArtifactsError::from)?;
+                        .map_err(dialog_corpus::DialogCorpusError::from)?;
                     refuse_rival(branch, &revision, Some(&fetched))?;
                 }
 
@@ -891,7 +889,7 @@ const SHIPMENT_CONCURRENCY: usize = 16;
 /// attribution, otherwise `ensure_*` adjudicates with one probe.
 #[allow(clippy::too_many_arguments)]
 async fn ship<Env>(
-    shipment: Result<ShipmentRef, dialog_artifacts::DialogArtifactsError>,
+    shipment: Result<ShipmentRef, dialog_corpus::DialogCorpusError>,
     branch: &Branch,
     remote: &ConnectedReplica,
     sources: &[ConnectedReplica],
@@ -1527,7 +1525,7 @@ mod tests {
     use anyhow::Result;
     use dialog_peer::helpers::test_session_with_peer;
 
-    use dialog_artifacts::{Artifact, Instruction, Value};
+    use dialog_corpus::{Artifact, Instruction, Value};
     use futures_util::{StreamExt as _, stream};
 
     #[dialog_common::test]
@@ -1549,7 +1547,7 @@ mod tests {
         let _hash = feature
             .commit(stream::iter(vec![Instruction::Assert(
                 artifact,
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             )]))
             .perform(&operator)
             .await?;
@@ -1594,7 +1592,7 @@ mod tests {
                         is: value.clone(),
                         cause: None,
                     },
-                    dialog_artifacts::Pick::All,
+                    dialog_corpus::Pick::All,
                 ),
                 Instruction::Assert(
                     Artifact {
@@ -1603,7 +1601,7 @@ mod tests {
                         is: value.clone(),
                         cause: None,
                     },
-                    dialog_artifacts::Pick::All,
+                    dialog_corpus::Pick::All,
                 ),
             ]))
             .perform(&operator)
@@ -1617,7 +1615,7 @@ mod tests {
         let main_reloaded = repo.branch("main").load().perform(&operator).await?;
         let results: Vec<_> = main_reloaded
             .claims()
-            .select(dialog_artifacts::ArtifactSelector::new().the("doc/body".parse()?))
+            .select(dialog_corpus::ArtifactSelector::new().the("doc/body".parse()?))
             .to_owned()
             .perform(&operator)
             .await?
@@ -1666,7 +1664,7 @@ mod tests {
                     is: Value::String("Alice".to_string()),
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             )]))
             .perform(&operator)
             .await?;
@@ -1726,7 +1724,7 @@ mod tests {
                     is: Value::String("Alice".to_string()),
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             )]))
             .perform(&operator)
             .await?;
@@ -1793,7 +1791,7 @@ mod tests {
                     is: Value::String("Alice".to_string()),
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             )]))
             .perform(&operator)
             .await?;
@@ -1853,7 +1851,7 @@ mod tests {
                     is: Value::String("Existing".to_string()),
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             )]))
             .perform(&operator)
             .await?;
@@ -1867,7 +1865,7 @@ mod tests {
                     is: Value::String("New".to_string()),
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             )]))
             .perform(&operator)
             .await?;
@@ -1895,7 +1893,7 @@ mod tests {
                     is: Value::String("Main data".to_string()),
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             )]))
             .perform(&operator)
             .await?;
@@ -1911,7 +1909,7 @@ mod tests {
                     is: Value::String("feature@example.com".to_string()),
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             )]))
             .perform(&operator)
             .await?;
@@ -1988,7 +1986,7 @@ mod tests {
                     is: Value::String("Alice".into()),
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             )]))
             .perform(&operator)
             .await?;
@@ -2036,7 +2034,7 @@ mod tests {
                         is: Value::String(value.into()),
                         cause: None,
                     },
-                    dialog_artifacts::Pick::All,
+                    dialog_corpus::Pick::All,
                 )]))
                 .perform(&operator)
                 .await?;
@@ -2061,7 +2059,7 @@ mod tests {
                 is: Value::String(of.to_string()),
                 cause: None,
             },
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         )
     }
 

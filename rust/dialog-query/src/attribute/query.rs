@@ -16,10 +16,10 @@ use std::future::poll_fn;
 use std::task::Poll;
 
 use async_stream::try_stream;
-use dialog_artifacts::selector::Constrained;
-use dialog_artifacts::{ArtifactSelector, Likelihood, Preload, PreloadRequest};
 use dialog_capability::Provider;
 use dialog_common::{ConditionalSend, ConditionalSync};
+use dialog_corpus::selector::Constrained;
+use dialog_corpus::{ArtifactSelector, Likelihood, Preload, PreloadRequest};
 use futures_util::StreamExt as _;
 
 use crate::selection::{Match, Selection};

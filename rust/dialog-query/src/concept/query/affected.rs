@@ -78,7 +78,7 @@ pub enum Elected {
 
 impl Elected {
     /// Whether a cell under `the` may be read as single-valued.
-    pub fn includes(&self, the: &dialog_artifacts::Relation) -> bool {
+    pub fn includes(&self, the: &dialog_corpus::Relation) -> bool {
         match self {
             Elected::Any => true,
             Elected::Of(attributes) => {

@@ -6,9 +6,9 @@
 
 use std::sync::Arc;
 
-use dialog_artifacts::{Artifact, Index, Instruction};
 use dialog_capability::Subject;
 use dialog_common::{Blake3Hash, ConditionalSend};
+use dialog_corpus::{Artifact, Index, Instruction};
 use dialog_effects::storage::Location;
 use dialog_peer::helpers::{open_peer, test_storage, unique_name};
 use dialog_peer::{Peer, Session};
@@ -53,7 +53,7 @@ where
         .await?;
     let branch = repository.branch("main").open().perform(&session).await?;
     let changes = artifacts
-        .map(|artifact| Instruction::Assert(artifact, dialog_artifacts::Pick::All))
+        .map(|artifact| Instruction::Assert(artifact, dialog_corpus::Pick::All))
         .collect::<Vec<_>>()
         .await
         .into_iter()

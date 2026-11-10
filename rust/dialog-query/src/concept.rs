@@ -1898,7 +1898,7 @@ mod tests {
             .perform(&operator)
             .await?;
 
-        let number = Kind::from(dialog_artifacts::ValueDataType::Number);
+        let number = Kind::from(dialog_corpus::ValueDataType::Number);
         let query = AttributeQueryAll::new(
             Term::from(the!("item/size")),
             Term::<Entity>::var("item"),
@@ -1949,7 +1949,7 @@ mod tests {
             .perform(&operator)
             .await?;
 
-        let byte = Kind::from(dialog_artifacts::ValueDataType::U8);
+        let byte = Kind::from(dialog_corpus::ValueDataType::U8);
         let query = AttributeQueryAll::new(
             Term::from(the!("item/level")),
             Term::<Entity>::var("item"),

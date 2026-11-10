@@ -20,11 +20,11 @@
 //! delegation graph cannot loop the walk; `MAX_DEPTH` still bounds honest
 //! depth exactly like the certificate-store walk.
 
-use dialog_artifacts::tree::CorpusNode;
-use dialog_artifacts::{Artifact, ArtifactSelector, Entity, Value};
 use dialog_capability::access::{AuthorizeError, Certificate as _, Proof as _, TimeRange};
 use dialog_capability::{ANY_SUBJECT, Did, Fork, Provider};
 use dialog_common::{ConditionalSend, ConditionalSync};
+use dialog_corpus::tree::CorpusNode;
+use dialog_corpus::{Artifact, ArtifactSelector, Entity, Value};
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::blob::Load as BlobLoad;
@@ -1169,7 +1169,7 @@ mod tests {
         audience: &Did,
         subject: &Did,
     ) -> Result<()> {
-        use dialog_artifacts::{Instruction, Relation};
+        use dialog_corpus::{Instruction, Relation};
         use futures_util::stream;
 
         let fact = |attribute: &str, value: &str| -> Result<Instruction> {
@@ -1180,7 +1180,7 @@ mod tests {
                     is: Value::String(value.to_string()),
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             ))
         };
         let command = Command(vec!["storage".to_string()]).to_string();

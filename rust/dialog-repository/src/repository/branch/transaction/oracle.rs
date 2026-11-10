@@ -25,7 +25,7 @@ use crate::helpers::test_repo;
 use crate::repository::branch::session::{QueryEnv, QueryLayer};
 use crate::repository::source::Source;
 use anyhow::{Result, anyhow};
-use dialog_artifacts::{Entity, Pick, Relation as ArtifactsRelation, Value, make_reference};
+use dialog_corpus::{Entity, Pick, Relation as ArtifactsRelation, Value, make_reference};
 use dialog_effects::authority::Identify;
 use dialog_peer::helpers::test_session_with_peer;
 use dialog_query::attribute::Relation;

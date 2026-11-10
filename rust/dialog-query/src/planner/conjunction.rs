@@ -5,12 +5,12 @@ use crate::query::Application as _;
 use crate::selection::{Match, Selection};
 use crate::{Environment, SortOrder, multi_merge_join};
 use core::pin::Pin;
-use dialog_artifacts::selector::Constrained;
-use dialog_artifacts::{
-    ArtifactSelector, Estimate, Likelihood, Preload, PreloadRequest, encode_value_owned,
-};
 use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
+use dialog_corpus::selector::Constrained;
+use dialog_corpus::{
+    ArtifactSelector, Estimate, Likelihood, Preload, PreloadRequest, encode_value_owned,
+};
 use futures_util::{StreamExt, stream};
 use std::collections::HashSet;
 
@@ -471,7 +471,7 @@ mod tests {
         AttributeDescriptor, Cardinality, ConceptDescriptor, ConceptFieldDescriptor, ConceptQuery,
         Environment, Formula, Negation, Parameters, Premise, Proposition, Term, Type, Value,
     };
-    use dialog_artifacts::Entity;
+    use dialog_corpus::Entity;
     use dialog_peer::helpers::{test_repo, test_session_with_peer};
     use futures_util::{TryStreamExt, stream};
 

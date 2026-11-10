@@ -1,9 +1,9 @@
 //! Writing what a batch staged into the archive, each lane into its store.
 
-use dialog_artifacts::tree::CorpusNode;
-use dialog_artifacts::{ArchiveDelta, DialogArtifactsError};
 use dialog_capability::Provider;
 use dialog_common::{Buffer, ConditionalSync};
+use dialog_corpus::tree::CorpusNode;
+use dialog_corpus::{ArchiveDelta, DialogCorpusError};
 use dialog_effects::archive::prelude::CatalogScope;
 use dialog_effects::blob::Import as BlobImport;
 use dialog_search_tree::nodes;
@@ -31,7 +31,7 @@ pub(crate) async fn persist<Env>(
     catalog: &CatalogScope,
     delta: &mut ArchiveDelta,
     env: &Env,
-) -> Result<(), DialogArtifactsError>
+) -> Result<(), DialogCorpusError>
 where
     Env: Provider<nodes::Write<CorpusNode>>
         + Provider<BlobImport>
@@ -44,7 +44,7 @@ where
         .map(|blob| async move {
             write_blob(env, catalog, blob.blake3_hash(), blob.as_ref())
                 .await
-                .map_err(DialogArtifactsError::from)
+                .map_err(DialogCorpusError::from)
         })
         .buffer_unordered(BLOB_WRITES)
         .try_collect::<()>()
@@ -52,5 +52,5 @@ where
     nodes::Write::<CorpusNode>::new(catalog.clone(), delta.flush_nodes())
         .perform(env)
         .await
-        .map_err(DialogArtifactsError::from)
+        .map_err(DialogCorpusError::from)
 }

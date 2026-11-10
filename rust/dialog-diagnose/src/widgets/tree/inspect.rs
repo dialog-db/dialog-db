@@ -1,4 +1,4 @@
-use dialog_artifacts::{ATTRIBUTE_KEY_TAG, ENTITY_KEY_TAG, VALUE_KEY_TAG};
+use dialog_corpus::{ATTRIBUTE_KEY_TAG, ENTITY_KEY_TAG, VALUE_KEY_TAG};
 use ratatui::widgets::{StatefulWidget, Wrap};
 use ratatui::{prelude::*, widgets::Paragraph};
 

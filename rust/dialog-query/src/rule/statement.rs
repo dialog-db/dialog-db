@@ -26,7 +26,7 @@ use crate::artifact::{Entity, Value};
 use crate::attribute::The;
 use crate::rule::{DeductiveRule, InductiveRule, Rule};
 use crate::{Proposition, Statement, Update, the};
-use dialog_artifacts::{NameShape, Relation as ArtifactsRelation, Symbol};
+use dialog_corpus::{NameShape, Relation as ArtifactsRelation, Symbol};
 
 /// The `dialog.rule/source` body attribute, validated at compile time.
 /// Shared by both rule kinds — hydration dispatches on the decoded
@@ -270,20 +270,20 @@ impl Statement for &DeductiveRule {
             conclusion_attr(),
             rule_entity.clone(),
             Value::Entity(self.conclusion().this()),
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         );
         update.associate(
             source_attr(),
             rule_entity.clone(),
             Value::Bytes(self.encode()),
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         );
         for reads in reads_entities(self) {
             update.associate(
                 reads_attr(),
                 rule_entity.clone(),
                 Value::Entity(reads),
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             );
         }
         for derives in derives_entities(self) {
@@ -291,7 +291,7 @@ impl Statement for &DeductiveRule {
                 derives_attr(),
                 rule_entity.clone(),
                 Value::Entity(derives),
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             );
         }
     }
@@ -339,20 +339,20 @@ impl Statement for &InductiveRule {
             source_attr(),
             rule_entity.clone(),
             Value::Bytes(self.encode()),
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         );
         update.associate(
             induces_attr(),
             rule_entity.clone(),
             Value::Entity(self.conclusion().this()),
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         );
         for on in on_entities(self) {
             update.associate(
                 on_attr(),
                 rule_entity.clone(),
                 Value::Entity(on),
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             );
         }
     }

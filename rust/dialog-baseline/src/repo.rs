@@ -10,19 +10,19 @@
 //! commit path. The branch handle is opened once and held across commits —
 //! the realistic application shape, which also keeps the branch-owned record
 //! and node caches warm the way a running app would.
-use dialog_artifacts::tree::CorpusNode;
+use dialog_corpus::tree::CorpusNode;
 use dialog_effects::blob::Import as BlobImport;
 use dialog_effects::blob::Size as BlobSize;
 use dialog_search_tree::nodes;
 use std::str::FromStr;
 
 use anyhow::Result;
-use dialog_artifacts::selector::Constrained;
-use dialog_artifacts::tree::ArtifactTree;
-use dialog_artifacts::{Artifact, ArtifactSelector, Changes, Entity, Relation, Value};
 use dialog_capability::{Fork, Provider, Subject};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::{ConditionalSync, Holds};
+use dialog_corpus::selector::Constrained;
+use dialog_corpus::tree::Corpus;
+use dialog_corpus::{Artifact, ArtifactSelector, Changes, Entity, Relation, Value};
 use dialog_effects::archive::prelude::CatalogScope;
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify};
@@ -128,8 +128,8 @@ where
         + ConditionalSync
         + Provider<nodes::Write<CorpusNode>>
         + ConditionalSync
-        + Provider<dialog_artifacts::Preload>
-        + Provider<dialog_artifacts::Speculation>
+        + Provider<dialog_corpus::Preload>
+        + Provider<dialog_corpus::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
         + Holds
         + ConditionalSync
@@ -170,7 +170,7 @@ where
         for row in rows {
             let changes: Changes = artifacts_for(row)?
                 .into_iter()
-                .map(|artifact| Instruction::Assert(artifact, dialog_artifacts::Pick::All))
+                .map(|artifact| Instruction::Assert(artifact, dialog_corpus::Pick::All))
                 .collect();
             self.branch
                 .transaction()
@@ -207,12 +207,10 @@ where
     }
 
     /// The tree the branch head names.
-    pub fn tree(&self) -> ArtifactTree {
+    pub fn tree(&self) -> Corpus {
         match self.branch.revision() {
-            Some(revision) => {
-                ArtifactTree::at(self.catalog(), NodeHash::from(*revision.tree.hash()))
-            }
-            None => ArtifactTree::empty_in(self.catalog()),
+            Some(revision) => Corpus::at(self.catalog(), NodeHash::from(*revision.tree.hash())),
+            None => Corpus::empty_in(self.catalog()),
         }
     }
 

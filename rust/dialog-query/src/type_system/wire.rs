@@ -525,7 +525,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_cannot_write_a_prefix_that_misses_the_name_boundary() {
         use crate::artifact::{ArtifactSelector, Constrained};
-        use dialog_artifacts::tree::selector_range;
+        use dialog_corpus::tree::selector_range;
         use dialog_search_tree::Manifest;
 
         // What the format produces: a domain, separator included.

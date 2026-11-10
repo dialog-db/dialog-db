@@ -7,7 +7,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use anyhow::Result;
-use dialog_artifacts::{Artifact, Entity, Pick, Value};
+use dialog_corpus::{Artifact, Entity, Pick, Value};
 use dialog_query::{ConceptDescriptor, DeductiveRule};
 
 use dialog_query::query::Output as _;

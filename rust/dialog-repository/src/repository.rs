@@ -73,7 +73,7 @@ pub(crate) mod source;
 // without linking `dialog-query` or the storage/transport stack.
 // Re-exported here at their historical
 // `dialog_repository::{Revision, TreeReference}` paths.
-pub use dialog_artifacts::{Revision, TreeReference};
+pub use dialog_corpus::{Revision, TreeReference};
 pub use dialog_search_tree::LEGACY_EMPTY_ROOT;
 
 /// A repository scoped to a specific subject.
@@ -224,7 +224,7 @@ mod tests {
     use crate::helpers::connect;
     use crate::helpers::test_repo;
     use anyhow::Result;
-    use dialog_artifacts::{Artifact, ArtifactSelector, Instruction, Value};
+    use dialog_corpus::{Artifact, ArtifactSelector, Instruction, Value};
     use dialog_credentials::Extractable;
     use dialog_credentials::key::ExtractableKey;
     use dialog_peer::helpers::{test_session_with_peer, unique_name};
@@ -329,7 +329,7 @@ mod tests {
                 is: Value::String("Alice".into()),
                 cause: None,
             },
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -355,7 +355,7 @@ mod tests {
         let _hash = branch
             .commit(stream::iter(vec![Instruction::Assert(
                 artifact,
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             )]))
             .perform(&operator)
             .await?;
@@ -469,7 +469,7 @@ mod tests {
                     is: Value::String("Alice".into()),
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             ),
             Instruction::Assert(
                 Artifact {
@@ -478,7 +478,7 @@ mod tests {
                     is: Value::String("alice@example.com".into()),
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             ),
             Instruction::Assert(
                 Artifact {
@@ -487,7 +487,7 @@ mod tests {
                     is: Value::String("Bob".into()),
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             ),
         ];
 
@@ -536,7 +536,7 @@ mod tests {
                     is: Value::String("Alice".into()),
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             ),
             Instruction::Assert(
                 Artifact {
@@ -545,7 +545,7 @@ mod tests {
                     is: Value::String("Bob".into()),
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             ),
             Instruction::Assert(
                 Artifact {
@@ -554,7 +554,7 @@ mod tests {
                     is: Value::String("alice@example.com".into()),
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             ),
         ];
 
@@ -619,7 +619,7 @@ mod tests {
         branch
             .commit(stream::iter(vec![Instruction::Assert(
                 artifact.clone(),
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             )]))
             .perform(&operator)
             .await?;
@@ -1890,7 +1890,7 @@ mod tests {
             // branch's tree. Reading the branch's claims directly
             // (bypassing the QuerySession overlay) should return no
             // dialog.branch/* artifacts.
-            use dialog_artifacts::ArtifactSelector;
+            use dialog_corpus::ArtifactSelector;
             use futures_util::StreamExt as _;
 
             let (operator, profile) = test_session_with_peer().await;
@@ -2064,10 +2064,10 @@ mod tests {
             // branch and hold them in an overlay, then compare the
             // ordered `sort_key` sequence. `Cause` differs (real commit
             // vs `None`) so we don't compare full artifacts.
-            use dialog_artifacts::selector::Constrained;
-            use dialog_artifacts::{
-                ArtifactSelector, ArtifactStream, Changes, DialogArtifactsError, SortKey,
-                Update as _, Value, sort_key,
+            use dialog_corpus::selector::Constrained;
+            use dialog_corpus::{
+                ArtifactSelector, ArtifactStream, Changes, DialogCorpusError, SortKey, Update as _,
+                Value, sort_key,
             };
             use futures_util::StreamExt as _;
 
@@ -2078,8 +2078,8 @@ mod tests {
             let alice: Entity = "id:alice".parse()?;
             let bob: Entity = "id:bob".parse()?;
             let charlie: Entity = "id:charlie".parse()?;
-            let name_attr = "test/name".parse::<dialog_artifacts::Relation>()?;
-            let role_attr = "test/role".parse::<dialog_artifacts::Relation>()?;
+            let name_attr = "test/name".parse::<dialog_corpus::Relation>()?;
+            let role_attr = "test/role".parse::<dialog_corpus::Relation>()?;
 
             // Mix of:
             //   - same entity, multiple attrs
@@ -2093,7 +2093,7 @@ mod tests {
             //     (alice, role). If `sort_key` mistakenly ordered VAE
             //     output by entity it would flip these two, and this
             //     test would catch it.
-            let facts: Vec<(Entity, dialog_artifacts::Relation, Value)> = vec![
+            let facts: Vec<(Entity, dialog_corpus::Relation, Value)> = vec![
                 (
                     alice.clone(),
                     name_attr.clone(),
@@ -2138,7 +2138,7 @@ mod tests {
             // both the branch commit and the overlay from clones.
             let mut changes = Changes::new();
             for (e, a, v) in &facts {
-                changes.associate(a.clone(), e.clone(), v.clone(), dialog_artifacts::Pick::All);
+                changes.associate(a.clone(), e.clone(), v.clone(), dialog_corpus::Pick::All);
             }
 
             // Commit a clone to the branch (Changes itself is a Statement now).
@@ -2162,7 +2162,7 @@ mod tests {
                     .collect::<Vec<_>>()
                     .await
                     .into_iter()
-                    .collect::<Result<Vec<_>, DialogArtifactsError>>()?;
+                    .collect::<Result<Vec<_>, DialogCorpusError>>()?;
                 // The branch was created here, so its tree takes the format
                 // a new tree takes; the overlay is keyed under the same one.
                 let manifest = dialog_search_tree::Manifest::default();

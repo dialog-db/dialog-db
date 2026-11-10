@@ -12,9 +12,9 @@ use crate::selection::{Match, Selection};
 use crate::type_system::Type as Kind;
 use crate::types::{Any, Record};
 use crate::{Entity, EvaluationError, Parameters, Schema, Term, try_stream};
-use dialog_artifacts::history::Edition;
-use dialog_artifacts::{Artifact, ArtifactView, Cause, DialogArtifactsError, Select};
 use dialog_capability::Provider;
+use dialog_corpus::history::Edition;
+use dialog_corpus::{Artifact, ArtifactView, Cause, DialogCorpusError, Select};
 use std::fmt::Display;
 use std::fmt::{Formatter, Result as FmtResult};
 use std::pin::Pin;
@@ -23,15 +23,15 @@ use std::pin::Pin;
 type Winner = (Artifact, Option<(Edition, [u8; 32])>);
 
 /// Materializes an election winner, treating a corrupt stored row
-/// ([`DialogArtifactsError::CorruptEntry`]) as an ignorable non-result
+/// ([`DialogCorpusError::CorruptEntry`]) as an ignorable non-result
 /// (`Ok(None)`, with a warning) rather than a query failure: a corrupt or
 /// foreign-written tree entry must not poison every query that ranges over
 /// it. All other errors propagate.
-fn materialize_winner(winner: ArtifactView) -> Result<Option<Winner>, DialogArtifactsError> {
+fn materialize_winner(winner: ArtifactView) -> Result<Option<Winner>, DialogCorpusError> {
     let standing = winner.standing();
     match winner.to_owned() {
         Ok(artifact) => Ok(Some((artifact, standing))),
-        Err(DialogArtifactsError::CorruptEntry(reason)) => {
+        Err(DialogCorpusError::CorruptEntry(reason)) => {
             tracing::warn!(%reason, "ignoring corrupt stored row in election");
             Ok(None)
         }

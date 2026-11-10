@@ -29,12 +29,12 @@ use core::fmt;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 
-use dialog_artifacts::selector::Constrained;
-use dialog_artifacts::{
+use dialog_common::Blake3Hash;
+use dialog_corpus::selector::Constrained;
+use dialog_corpus::{
     Artifact, ArtifactSelector, AssetChange, Change, Changes, Entity, Instruction, Pick, Relation,
     SortKey, Statement, Update, Value, sort_key,
 };
-use dialog_common::Blake3Hash;
 use dialog_search_tree::Manifest;
 
 use super::ephemeral::{EphemeralRevision, Facts, Window};
@@ -456,8 +456,8 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
-    use dialog_artifacts::history::Edition;
-    use dialog_artifacts::{Asset, Change, Pick, Value};
+    use dialog_corpus::history::Edition;
+    use dialog_corpus::{Asset, Change, Pick, Value};
 
     fn fact(of: &str, the: &str, is: &str) -> Artifact {
         Artifact {
@@ -648,7 +648,7 @@ mod tests {
         let x = fact("id:a", "person/name", "A");
         apply(
             &mut staged,
-            Instruction::Assert(x.clone(), dialog_artifacts::Pick::All),
+            Instruction::Assert(x.clone(), dialog_corpus::Pick::All),
         );
         apply(&mut staged, Instruction::Retract(x.clone()));
         assert!(held(&staged, "id:a", "person/name").is_empty());
@@ -677,7 +677,7 @@ mod tests {
         assert_eq!(
             squash(
                 vec![
-                    Change::Assert(a(), dialog_artifacts::Pick::All),
+                    Change::Assert(a(), dialog_corpus::Pick::All),
                     Change::Retract(a())
                 ],
                 &unknown
@@ -687,7 +687,7 @@ mod tests {
         assert_eq!(
             squash(
                 vec![
-                    Change::Assert(a(), dialog_artifacts::Pick::All),
+                    Change::Assert(a(), dialog_corpus::Pick::All),
                     Change::Retract(a())
                 ],
                 &|_| false
@@ -698,12 +698,12 @@ mod tests {
         assert_eq!(
             squash(
                 vec![
-                    Change::Assert(a(), dialog_artifacts::Pick::All),
-                    Change::Assert(a(), dialog_artifacts::Pick::All)
+                    Change::Assert(a(), dialog_corpus::Pick::All),
+                    Change::Assert(a(), dialog_corpus::Pick::All)
                 ],
                 &unknown
             ),
-            vec![Change::Assert(a(), dialog_artifacts::Pick::All)]
+            vec![Change::Assert(a(), dialog_corpus::Pick::All)]
         );
         // Retract then assert keeps both: the commit retracts the
         // line's claim and asserts afresh.
@@ -711,13 +711,13 @@ mod tests {
             squash(
                 vec![
                     Change::Retract(a()),
-                    Change::Assert(a(), dialog_artifacts::Pick::All)
+                    Change::Assert(a(), dialog_corpus::Pick::All)
                 ],
                 &unknown
             ),
             vec![
                 Change::Retract(a()),
-                Change::Assert(a(), dialog_artifacts::Pick::All)
+                Change::Assert(a(), dialog_corpus::Pick::All)
             ]
         );
         // Retract, assert, retract: the second retraction cancels the
@@ -726,7 +726,7 @@ mod tests {
             squash(
                 vec![
                     Change::Retract(a()),
-                    Change::Assert(a(), dialog_artifacts::Pick::All),
+                    Change::Assert(a(), dialog_corpus::Pick::All),
                     Change::Retract(a())
                 ],
                 &unknown
@@ -737,16 +737,16 @@ mod tests {
         assert_eq!(
             squash(
                 vec![
-                    Change::Assert(a(), dialog_artifacts::Pick::All),
-                    Change::Assert(b(), dialog_artifacts::Pick::All),
-                    Change::Assert(a(), dialog_artifacts::Pick::All),
+                    Change::Assert(a(), dialog_corpus::Pick::All),
+                    Change::Assert(b(), dialog_corpus::Pick::All),
+                    Change::Assert(a(), dialog_corpus::Pick::All),
                     Change::Retract(b()),
                     Change::Retract(b())
                 ],
                 &unknown
             ),
             vec![
-                Change::Assert(a(), dialog_artifacts::Pick::All),
+                Change::Assert(a(), dialog_corpus::Pick::All),
                 Change::Retract(b())
             ]
         );
@@ -755,15 +755,15 @@ mod tests {
         assert_eq!(
             squash(
                 vec![
-                    Change::Assert(a(), dialog_artifacts::Pick::All),
-                    Change::Assert(b(), dialog_artifacts::Pick::Last),
+                    Change::Assert(a(), dialog_corpus::Pick::All),
+                    Change::Assert(b(), dialog_corpus::Pick::Last),
                     Change::Retract(b())
                 ],
                 &unknown
             ),
             vec![
-                Change::Assert(a(), dialog_artifacts::Pick::All),
-                Change::Assert(b(), dialog_artifacts::Pick::Last),
+                Change::Assert(a(), dialog_corpus::Pick::All),
+                Change::Assert(b(), dialog_corpus::Pick::Last),
                 Change::Retract(b())
             ]
         );
@@ -820,7 +820,7 @@ mod tests {
         apply(&mut staged, Instruction::Retract(x.clone()));
         apply(
             &mut staged,
-            Instruction::Assert(x.clone(), dialog_artifacts::Pick::All),
+            Instruction::Assert(x.clone(), dialog_corpus::Pick::All),
         );
         assert_eq!(
             held(&staged, "id:a", "person/name"),
@@ -836,7 +836,7 @@ mod tests {
             changes,
             vec![
                 Change::Retract(Value::String("A".into())),
-                Change::Assert(Value::String("A".into()), dialog_artifacts::Pick::All)
+                Change::Assert(Value::String("A".into()), dialog_corpus::Pick::All)
             ]
         );
     }
@@ -894,10 +894,7 @@ mod tests {
         let mut staged = Staged::default();
         apply(
             &mut staged,
-            Instruction::Assert(
-                fact("id:a", "person/name", "B"),
-                dialog_artifacts::Pick::Last,
-            ),
+            Instruction::Assert(fact("id:a", "person/name", "B"), dialog_corpus::Pick::Last),
         );
         apply(
             &mut staged,
@@ -905,10 +902,7 @@ mod tests {
         );
         apply(
             &mut staged,
-            Instruction::Assert(
-                fact("id:a", "person/name", "C"),
-                dialog_artifacts::Pick::All,
-            ),
+            Instruction::Assert(fact("id:a", "person/name", "C"), dialog_corpus::Pick::All),
         );
         assert_eq!(
             held(&staged, "id:a", "person/name"),
@@ -923,9 +917,9 @@ mod tests {
         assert_eq!(
             changes,
             vec![
-                Change::Assert(Value::String("B".into()), dialog_artifacts::Pick::Last),
+                Change::Assert(Value::String("B".into()), dialog_corpus::Pick::Last),
                 Change::Retract(Value::String("B".into())),
-                Change::Assert(Value::String("C".into()), dialog_artifacts::Pick::All)
+                Change::Assert(Value::String("C".into()), dialog_corpus::Pick::All)
             ]
         );
     }
@@ -935,18 +929,12 @@ mod tests {
         let mut staged = Staged::default();
         apply(
             &mut staged,
-            Instruction::Assert(
-                fact("id:a", "person/name", "A"),
-                dialog_artifacts::Pick::All,
-            ),
+            Instruction::Assert(fact("id:a", "person/name", "A"), dialog_corpus::Pick::All),
         );
         let view = staged.clone();
         apply(
             &mut staged,
-            Instruction::Assert(
-                fact("id:b", "person/name", "B"),
-                dialog_artifacts::Pick::All,
-            ),
+            Instruction::Assert(fact("id:b", "person/name", "B"), dialog_corpus::Pick::All),
         );
         assert!(held(&view, "id:b", "person/name").is_empty());
         assert_eq!(

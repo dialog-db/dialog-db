@@ -1,4 +1,4 @@
-use dialog_artifacts::{Artifact, DialogArtifactsError};
+use dialog_corpus::{Artifact, DialogCorpusError};
 use futures_util::{Stream, StreamExt};
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -16,7 +16,7 @@ use crate::row::CsvRow;
 /// because `csv_async` requires it on every target.
 pub struct CsvImporter {
     // bare-send-ok: dyn bound over a csv_async stream, which is Send on every target
-    inner: Pin<Box<dyn Stream<Item = Result<Artifact, DialogArtifactsError>> + Send>>,
+    inner: Pin<Box<dyn Stream<Item = Result<Artifact, DialogCorpusError>> + Send>>,
 }
 
 impl CsvImporter {
@@ -28,7 +28,7 @@ impl CsvImporter {
             .into_deserialize::<CsvRow>()
             .map(|result| match result {
                 Ok(row) => Artifact::try_from(row),
-                Err(e) => Err(DialogArtifactsError::Export(e.to_string())),
+                Err(e) => Err(DialogCorpusError::Export(e.to_string())),
             });
         Self {
             inner: Box::pin(stream),
@@ -44,7 +44,7 @@ impl<R: AsyncRead + Unpin + Send + 'static> From<R> for CsvImporter {
 }
 
 impl Stream for CsvImporter {
-    type Item = Result<Artifact, DialogArtifactsError>;
+    type Item = Result<Artifact, DialogCorpusError>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         self.inner.as_mut().poll_next(cx)

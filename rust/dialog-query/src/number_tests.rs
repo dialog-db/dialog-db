@@ -1656,7 +1656,7 @@ fn human_notation_round_trips_numbers() -> anyhow::Result<()> {
     assert!(
         matches!(
             "float:NaN".parse::<Value>(),
-            Err(crate::DialogArtifactsError::InvalidValue(reason)) if reason == "NaN is not a value"
+            Err(crate::DialogCorpusError::InvalidValue(reason)) if reason == "NaN is not a value"
         ),
         "NaN is not a value"
     );

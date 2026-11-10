@@ -15,14 +15,14 @@
 //! the two acts — adopt the upstream head, then materialize it.
 
 use core::ops::RangeInclusive;
-use dialog_artifacts::tree::CorpusNode;
+use dialog_corpus::tree::CorpusNode;
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::blob::Load as BlobLoad;
 use dialog_search_tree::nodes;
 
-use dialog_artifacts::merge::data_scope;
 use dialog_capability::{Fork, Provider};
 use dialog_common::ConditionalSync;
+use dialog_corpus::merge::data_scope;
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify};
 use dialog_effects::blob::{Import as BlobImport, Read as BlobRead};
@@ -122,8 +122,8 @@ impl Download<'_> {
             + Provider<nodes::Preload<CorpusNode>>
             + ConditionalSync
             + Provider<BlobLoad>
-            + Provider<dialog_artifacts::Preload>
-            + Provider<dialog_artifacts::Speculation>
+            + Provider<dialog_corpus::Preload>
+            + Provider<dialog_corpus::Speculation>
             + Provider<Fork<RemoteSite, BlobRead>>
             + dialog_common::Holds
             + ConditionalSync
@@ -228,8 +228,8 @@ impl<'a> PullDownload<'a> {
             + Provider<nodes::Preload<CorpusNode>>
             + ConditionalSync
             + Provider<BlobLoad>
-            + Provider<dialog_artifacts::Preload>
-            + Provider<dialog_artifacts::Speculation>
+            + Provider<dialog_corpus::Preload>
+            + Provider<dialog_corpus::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + Provider<Fork<RemoteSite, BlobRead>>
             + Provider<Connect>
@@ -267,7 +267,7 @@ mod tests {
 
     use crate::helpers::test_repo;
     use anyhow::Result;
-    use dialog_artifacts::{Artifact, Instruction, Value};
+    use dialog_corpus::{Artifact, Instruction, Value};
     use dialog_peer::helpers::test_session_with_peer;
     use futures_util::stream;
 
@@ -279,7 +279,7 @@ mod tests {
                 is: Value::String(is.to_string()),
                 cause: None,
             },
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         ))
     }
 

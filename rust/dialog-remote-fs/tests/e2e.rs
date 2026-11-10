@@ -15,8 +15,8 @@
 //! tests run on native and the web alike.
 
 use anyhow::Result;
-use dialog_artifacts::{Artifact, ArtifactSelector, Instruction, Value};
 use dialog_capability::Subject;
+use dialog_corpus::{Artifact, ArtifactSelector, Instruction, Value};
 use dialog_credentials::{Credential, Ed25519Signer, SignerCredential};
 use dialog_effects::MethodExt as _;
 use dialog_effects::Rejection;
@@ -121,7 +121,7 @@ async fn it_pushes_and_pulls_via_fs_remote() -> Result<()> {
         .integrate(
             vec![Instruction::Assert(
                 artifact("user:1", "Alice")?,
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             )]
             .into_iter()
             .collect(),
@@ -165,7 +165,7 @@ async fn it_shares_an_fs_remote_between_two_repos() -> Result<()> {
         .integrate(
             vec![Instruction::Assert(
                 artifact("user:alice", "Alice")?,
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             )]
             .into_iter()
             .collect(),
@@ -269,7 +269,7 @@ async fn it_rejects_a_stale_push_on_cas_conflict() -> Result<()> {
         .integrate(
             vec![Instruction::Assert(
                 artifact("user:alice", "Alice")?,
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             )]
             .into_iter()
             .collect(),
@@ -287,7 +287,7 @@ async fn it_rejects_a_stale_push_on_cas_conflict() -> Result<()> {
         .integrate(
             vec![Instruction::Assert(
                 artifact("user:bob", "Bob")?,
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             )]
             .into_iter()
             .collect(),

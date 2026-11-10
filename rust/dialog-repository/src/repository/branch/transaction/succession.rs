@@ -21,7 +21,7 @@
 //! as one more candidate. Writing a value the cell already holds writes
 //! nothing. At commit, a cell no rule derives is left to the tree,
 //! which elects among the cell's stored claims in the descent that
-//! writes the value ([`dialog_artifacts::Instruction::Assert`] under a
+//! writes the value ([`dialog_corpus::Instruction::Assert`] under a
 //! choosing [`Pick`]); the
 //! settlement here is for the cells rules derive, whose candidates the
 //! tree cannot see, and for a transaction's own reads. What a cell's
@@ -38,12 +38,12 @@ use crate::repository::source::Source;
 use crate::repository::staged::squash;
 use crate::rules::derives_attr;
 use crate::{CommitError, Ephemeral, Staged};
-use dialog_artifacts::history::Edition;
-use dialog_artifacts::{
+use dialog_capability::Provider;
+use dialog_corpus::history::Edition;
+use dialog_corpus::{
     Artifact, ArtifactSelector, Cause, Change, Changes, Entity, Pick,
     Relation as ArtifactsRelation, Select, Value,
 };
-use dialog_capability::Provider;
 use dialog_query::Application as _;
 use dialog_query::attribute::{AttributeDescriptor, Relation, The};
 use dialog_query::concept::query::Election;
@@ -639,8 +639,8 @@ mod tests {
     use crate::Branch;
     use crate::helpers::test_repo;
     use anyhow::Result;
-    use dialog_artifacts::history::Edition;
-    use dialog_artifacts::{
+    use dialog_corpus::history::Edition;
+    use dialog_corpus::{
         ArtifactSelector, Change, Entity, Pick, Relation as ArtifactsRelation, Value,
     };
     use dialog_credentials::Credential;
@@ -672,16 +672,16 @@ mod tests {
         assert_eq!(
             cell.settled,
             vec![
-                Change::Assert(Value::UnsignedInt(200), dialog_artifacts::Pick::All),
+                Change::Assert(Value::UnsignedInt(200), dialog_corpus::Pick::All),
                 Change::Retract(Value::UnsignedInt(200)),
-                Change::Assert(Value::UnsignedInt(300), dialog_artifacts::Pick::All),
+                Change::Assert(Value::UnsignedInt(300), dialog_corpus::Pick::All),
             ]
         );
         assert_eq!(
             cell.squashed(),
             vec![Change::Assert(
                 Value::UnsignedInt(300),
-                dialog_artifacts::Pick::All
+                dialog_corpus::Pick::All
             )]
         );
         Ok(())

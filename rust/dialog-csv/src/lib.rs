@@ -3,7 +3,7 @@
 //! CSV format support for the Dialog artifact exchange system.
 //!
 //! Provides [`CsvExporter`] and [`CsvImporter`] that implement the
-//! [`Exporter`] and [`Importer`] traits from `dialog-artifacts`.
+//! [`Exporter`] and [`Importer`] traits from `dialog-corpus`.
 //!
 //! Each CSV row represents a single artifact with columns:
 //! `the` (attribute), `of` (entity), `as` (value type), `is` (value),
@@ -19,8 +19,8 @@ pub use importer::CsvImporter;
 
 #[cfg(test)]
 mod tests {
-    use dialog_artifacts::Exporter;
-    use dialog_artifacts::{Artifact, Cause, Value};
+    use dialog_corpus::Exporter;
+    use dialog_corpus::{Artifact, Cause, Value};
     use futures_util::StreamExt;
     use std::io::Cursor;
 

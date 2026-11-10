@@ -12,10 +12,10 @@ wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 use std::cmp::Ordering;
 
 use anyhow::Result;
-use dialog_artifacts::history::HistorySelector;
-use dialog_artifacts::selector::Constrained;
-use dialog_artifacts::{
-    Artifact, ArtifactSelector, DialogArtifactsError, Entity, Instruction, NUMBER_BAND, Pick,
+use dialog_corpus::history::HistorySelector;
+use dialog_corpus::selector::Constrained;
+use dialog_corpus::{
+    Artifact, ArtifactSelector, DialogCorpusError, Entity, Instruction, NUMBER_BAND, Pick,
     Relation, Value, encode_key_value_owned,
 };
 use dialog_peer::helpers::test_session_with_peer;
@@ -1097,7 +1097,7 @@ async fn it_refuses_a_commit_that_would_write_nan() -> Result<()> {
         assert!(
             matches!(
                 &refusal,
-                Some(CommitError::Artifact(DialogArtifactsError::InvalidValue(reason)))
+                Some(CommitError::Artifact(DialogCorpusError::InvalidValue(reason)))
                     if reason == "NaN is not a value"
             ),
             "{refusal:?}"

@@ -10,7 +10,7 @@
 //! it admits both name shapes, because a dictionary's keys are
 //! symbols and a sequence's are positions.
 
-use dialog_artifacts::{Name, Relation as ArtifactsRelation};
+use dialog_corpus::{Name, Relation as ArtifactsRelation};
 
 use crate::Formula;
 use crate::formula::Input;

@@ -49,9 +49,9 @@
 //! #         + Provider<BlobRead>
 //! #         + Provider<dialog_effects::archive::Load>
 //! #         + Provider<dialog_effects::blob::Load>
-//! #         + dialog_capability::Provider<dialog_search_tree::nodes::Read<dialog_artifacts::tree::CorpusNode>>
-//! #         + dialog_capability::Provider<dialog_search_tree::nodes::Preload<dialog_artifacts::tree::CorpusNode>>
-//! #         + dialog_capability::Provider<dialog_search_tree::nodes::Write<dialog_artifacts::tree::CorpusNode>>
+//! #         + dialog_capability::Provider<dialog_search_tree::nodes::Read<dialog_corpus::tree::CorpusNode>>
+//! #         + dialog_capability::Provider<dialog_search_tree::nodes::Preload<dialog_corpus::tree::CorpusNode>>
+//! #         + dialog_capability::Provider<dialog_search_tree::nodes::Write<dialog_corpus::tree::CorpusNode>>
 //! #         + Provider<Fork<RemoteSite, Resolve>>
 //! #         + dialog_common::Holds
 //! #         + dialog_common::ConditionalSync
@@ -73,15 +73,15 @@ use crate::repository::archive::erased;
 use crate::repository::branch::asset::recorded_size;
 use crate::repository::source::SourceRef;
 use crate::{Branch, CommitError, Index, RemoteSite};
-use dialog_artifacts::tree::CorpusNode;
-use dialog_artifacts::{
-    Artifact, Asset, BlobIndexExt as _, BlobRecord, DialogArtifactsError, Entity, Instruction,
-    Relation, Value,
-};
 use dialog_capability::access::{Certificate as _, Delegation as _};
 use dialog_capability::{ANY_SUBJECT, Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::ConditionalSync;
+use dialog_corpus::tree::CorpusNode;
+use dialog_corpus::{
+    Artifact, Asset, BlobIndexExt as _, BlobRecord, DialogCorpusError, Entity, Instruction,
+    Relation, Value,
+};
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify};
@@ -156,7 +156,7 @@ impl<'a> Delegations<'a> {
 }
 
 /// One fact on the delegation's entity.
-fn field(entity: &Entity, attribute: &str, value: Value) -> Result<Artifact, DialogArtifactsError> {
+fn field(entity: &Entity, attribute: &str, value: Value) -> Result<Artifact, DialogCorpusError> {
     Ok(Artifact {
         the: Relation::try_from(attribute.to_string())?,
         of: entity.clone(),
@@ -172,7 +172,7 @@ fn field(entity: &Entity, attribute: &str, value: Value) -> Result<Artifact, Dia
 fn field_artifacts(
     entity: &Entity,
     certificate: &UcanCertificate,
-) -> Result<Vec<Artifact>, DialogArtifactsError> {
+) -> Result<Vec<Artifact>, DialogCorpusError> {
     let subject = match certificate.subject() {
         Some(did) => did.to_string(),
         None => ANY_SUBJECT.to_string(),
@@ -215,7 +215,7 @@ fn field_artifacts(
 /// A certificate's encoded envelope, as [`CommitError`].
 fn encode(certificate: &UcanCertificate) -> Result<Vec<u8>, CommitError> {
     certificate.encode().map_err(|error| {
-        CommitError::Artifact(DialogArtifactsError::InvalidValue(format!(
+        CommitError::Artifact(DialogCorpusError::InvalidValue(format!(
             "failed to encode delegation envelope: {error}"
         )))
     })
@@ -298,12 +298,12 @@ impl RetainDelegation<'_> {
 
             let entity = Entity::from_blob(&index_hash)?;
             for artifact in field_artifacts(&entity, &certificate)? {
-                instructions.push(Instruction::Assert(artifact, dialog_artifacts::Pick::All));
+                instructions.push(Instruction::Assert(artifact, dialog_corpus::Pick::All));
             }
             let envelope = Asset::stored(index_hash, bytes.len() as u64);
             instructions.push(Instruction::Assert(
                 envelope.fact()?,
-                dialog_artifacts::Pick::Last,
+                dialog_corpus::Pick::Last,
             ));
             retained.push(entity);
         }
@@ -444,8 +444,8 @@ mod tests {
     use super::*;
     use crate::{Blob, RepositoryExt as _};
     use anyhow::Result;
-    use dialog_artifacts::ArtifactSelector;
     use dialog_capability::Subject;
+    use dialog_corpus::ArtifactSelector;
     use dialog_credentials::Ed25519Signer;
     use dialog_effects::blob::BlobReader;
     use dialog_effects::storage::Location;
@@ -510,7 +510,7 @@ mod tests {
     /// has, so a replica downloading the head failed on it.
     #[dialog_common::test]
     async fn it_exports_a_branch_whose_retained_delegation_was_retracted() -> Result<()> {
-        use dialog_artifacts::{Artifact, Instruction, Value};
+        use dialog_corpus::{Artifact, Instruction, Value};
 
         let (branch, operator) = open_branch("delegation-retract-export").await?;
         let space = Ed25519Signer::generate().await?;
@@ -535,7 +535,7 @@ mod tests {
                         is: Value::UnsignedInt(fact),
                         cause: None,
                     },
-                    dialog_artifacts::Pick::All,
+                    dialog_corpus::Pick::All,
                 )
             });
             branch
@@ -790,7 +790,7 @@ mod tests {
             let hash = *sink.finish().await?.as_bytes();
             let entity = Entity::from_legacy_blob(&hash)?;
             for artifact in field_artifacts(&entity, &certificate)? {
-                instructions.push(Instruction::Assert(artifact, dialog_artifacts::Pick::All));
+                instructions.push(Instruction::Assert(artifact, dialog_corpus::Pick::All));
             }
             entries.push(BlobRecord::new(bytes.len() as u64).legacy_entry(&hash));
             legacy.push(entity);
@@ -850,7 +850,7 @@ mod tests {
                     is: Value::String("did:key:zForged".to_string()),
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             )]))
             .perform(&operator)
             .await;
@@ -858,9 +858,9 @@ mod tests {
         assert!(
             matches!(
                 result,
-                Err(CommitError::Artifact(
-                    DialogArtifactsError::ReservedRelation(_)
-                ))
+                Err(CommitError::Artifact(DialogCorpusError::ReservedRelation(
+                    _
+                )))
             ),
             "application commits must not write dialog.ucan facts"
         );

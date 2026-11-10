@@ -24,7 +24,7 @@
 use std::collections::BTreeSet;
 use std::{error, fmt};
 
-use dialog_artifacts::identity::{BOOLEAN, ENTITY, NUMBER, RECORD, SYMBOL, TEXT};
+use dialog_corpus::identity::{BOOLEAN, ENTITY, NUMBER, RECORD, SYMBOL, TEXT};
 use merkle_reference::{Reference, Type};
 use serde::Serialize;
 use serde::ser::{self, SerializeMap as _};

@@ -14,9 +14,9 @@ use crate::{
     Binding, Entity, EvaluationError, Field, Parameters, Requirement, Schema, Term, Type, Value,
     try_stream,
 };
-use dialog_artifacts::history::Edition;
-use dialog_artifacts::{Artifact, Cause, DialogArtifactsError, Select};
 use dialog_capability::Provider;
+use dialog_corpus::history::Edition;
+use dialog_corpus::{Artifact, Cause, DialogCorpusError, Select};
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 use std::fmt::{Formatter, Result as FmtResult};
@@ -422,7 +422,7 @@ impl AttributeQueryAll {
                     let standing = artifact.standing();
                     let artifact = match artifact.to_owned() {
                         Ok(artifact) => artifact,
-                        Err(DialogArtifactsError::CorruptEntry(reason)) => {
+                        Err(DialogCorpusError::CorruptEntry(reason)) => {
                             tracing::warn!(%reason, "ignoring corrupt stored row");
                             continue;
                         }

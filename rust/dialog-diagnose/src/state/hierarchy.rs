@@ -2,7 +2,7 @@
 
 use std::sync::mpsc::Sender;
 
-use dialog_artifacts::{Datum, DialogArtifactsError, Key, State};
+use dialog_corpus::{Datum, DialogCorpusError, Key, State};
 use dialog_effects::archive::prelude::CatalogScope;
 use dialog_search_tree::{Entry, Key as TreeKey, NodeBody, PersistentNode, into_owned, load_node};
 use dialog_storage::Blake3Hash;
@@ -110,7 +110,7 @@ impl ArtifactsHierarchy {
 
             tx.send(WorkerMessage::Node { hash, node }).unwrap();
 
-            Ok(()) as Result<_, DialogArtifactsError>
+            Ok(()) as Result<_, DialogCorpusError>
         });
     }
 }

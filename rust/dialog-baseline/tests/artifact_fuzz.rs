@@ -18,14 +18,12 @@
 use std::str::FromStr as _;
 
 use anyhow::Result;
-use dialog_artifacts::selector::Constrained;
-use dialog_artifacts::tree::ArtifactTree;
-use dialog_artifacts::{
-    Artifact, ArtifactSelector, Entity, Instruction, Relation, Value, sort_key,
-};
 use dialog_baseline::changes_of;
 use dialog_baseline::repo::{DialogRepo, VolatileRepo};
 use dialog_common::Blake3Hash as NodeHash;
+use dialog_corpus::selector::Constrained;
+use dialog_corpus::tree::Corpus;
+use dialog_corpus::{Artifact, ArtifactSelector, Entity, Instruction, Relation, Value, sort_key};
 use dialog_repository::TransactionBatch;
 use dialog_search_tree::Manifest;
 use futures_util::TryStreamExt as _;
@@ -83,7 +81,7 @@ fn generate(seed: u64, op_count: usize) -> Vec<Instruction> {
                     cause: None,
                 };
                 live.push(artifact.clone());
-                Instruction::Assert(artifact, dialog_artifacts::Pick::All)
+                Instruction::Assert(artifact, dialog_corpus::Pick::All)
             }
             // Replace: cardinality-one supersession (cause chains from the
             // superseded fact — the ordering-sensitive path).
@@ -104,10 +102,10 @@ fn generate(seed: u64, op_count: usize) -> Vec<Instruction> {
                 if held <= 1 {
                     live.retain(|held| !(held.the == the && held.of == of));
                     live.push(artifact.clone());
-                    Instruction::Assert(artifact, dialog_artifacts::Pick::Last)
+                    Instruction::Assert(artifact, dialog_corpus::Pick::Last)
                 } else {
                     live.push(artifact.clone());
-                    Instruction::Assert(artifact, dialog_artifacts::Pick::All)
+                    Instruction::Assert(artifact, dialog_corpus::Pick::All)
                 }
             }
             // Retract a real fact when one exists...
@@ -263,7 +261,7 @@ async fn it_converges_across_canonicalization_points_with_supersession_and_spill
             );
         }
 
-        let tree = ArtifactTree::at(
+        let tree = Corpus::at(
             repo.catalog(),
             NodeHash::from(*reference.revision().tree.hash()),
         );

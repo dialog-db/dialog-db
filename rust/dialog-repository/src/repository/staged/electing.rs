@@ -4,8 +4,8 @@
 use std::collections::BTreeMap;
 use std::ops::Bound;
 
-use dialog_artifacts::selector::Constrained;
-use dialog_artifacts::{ArtifactSelector, Entity, NameShape, Relation};
+use dialog_corpus::selector::Constrained;
+use dialog_corpus::{ArtifactSelector, Entity, NameShape, Relation};
 
 /// One entry per cell a write under a choosing pick asserted, kept
 /// past its retraction: the cells a read of a range must settle. Kept
@@ -178,7 +178,7 @@ mod tests {
             within(
                 ArtifactSelector::new()
                     .of_starting_with("id:")
-                    .with_name("name".parse::<dialog_artifacts::Name>().expect("name"))
+                    .with_name("name".parse::<dialog_corpus::Name>().expect("name"))
             ),
             vec![
                 cell("other/name", "id:c"),
@@ -198,13 +198,13 @@ mod tests {
             within(
                 ArtifactSelector::new()
                     .with_name_shape(NameShape::Position)
-                    .is(dialog_artifacts::Value::String("x".into()))
+                    .is(dialog_corpus::Value::String("x".into()))
             ),
             vec![cell("list/Mx", "id:a")],
             "a shape alone visits every cell"
         );
         assert_eq!(
-            within(ArtifactSelector::new().is(dialog_artifacts::Value::String("x".into()))).len(),
+            within(ArtifactSelector::new().is(dialog_corpus::Value::String("x".into()))).len(),
             5,
             "a value bound reads every cell"
         );

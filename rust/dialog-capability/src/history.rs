@@ -1,8 +1,8 @@
 //! The version-control identity and clock types: the plain data a revision
 //! is named by.
 //!
-//! These live in this light crate rather than in `dialog-artifacts` because
-//! [`Revision`](crate::Revision) is built from them — `dialog-artifacts`
+//! These live in this light crate rather than in `dialog-corpus` because
+//! [`Revision`](crate::Revision) is built from them — `dialog-corpus`
 //! depends on this crate, so the types its revision fields need must sit at
 //! or below this layer. They carry no dependency on the search tree, the
 //! storage stack, or the query engine: an [`Origin`] is a Blake3 hash, an
@@ -11,7 +11,7 @@
 //!
 //! The tree-facing half of version control (the `RevisionRecord` a revision
 //! writes into the artifact tree, and the history key encodings) stays in
-//! `dialog-artifacts`, which is where the `Artifact`/`Key`/`Datum` types it
+//! `dialog-corpus`, which is where the `Artifact`/`Key`/`Datum` types it
 //! is made of live.
 
 mod context;

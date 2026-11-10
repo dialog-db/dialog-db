@@ -11,7 +11,7 @@ use crate::selection::{Match, Selection};
 use crate::type_system::Type as Kind;
 use crate::types::{Any, Record};
 use crate::{Entity, EvaluationError, Parameters, Premise, Schema, Term, Value};
-use dialog_artifacts::Cause;
+use dialog_corpus::Cause;
 use serde::Serialize;
 use std::fmt::Display;
 use std::fmt::{Formatter, Result as FmtResult};

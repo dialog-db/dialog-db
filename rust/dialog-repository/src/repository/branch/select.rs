@@ -1,14 +1,13 @@
 use base58::ToBase58;
-use dialog_artifacts::selector::Constrained;
-use dialog_artifacts::tree::ArtifactTreeExt as _;
-use dialog_artifacts::tree::CorpusNode;
-use dialog_artifacts::{
-    Artifact, ArtifactSelector, ArtifactStream, ArtifactView, Datum, DialogArtifactsError, Key,
-    State,
-};
 use dialog_capability::Provider;
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::{ConditionalSend, ConditionalSync, Holds};
+use dialog_corpus::selector::Constrained;
+use dialog_corpus::tree::CorpusExt as _;
+use dialog_corpus::tree::CorpusNode;
+use dialog_corpus::{
+    Artifact, ArtifactSelector, ArtifactStream, ArtifactView, Datum, DialogCorpusError, Key, State,
+};
 use dialog_effects::archive::Get;
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::blob::Load as BlobLoad;
@@ -62,7 +61,7 @@ impl<'a> Select<'a> {
 pub(crate) async fn line_manifest<Env>(
     source: SourceRef<'_>,
     env: &Env,
-) -> Result<Manifest, DialogArtifactsError>
+) -> Result<Manifest, DialogCorpusError>
 where
     Env: Provider<ArchiveLoad>
         + Provider<nodes::Write<CorpusNode>>
@@ -100,13 +99,13 @@ impl Select<'_> {
     /// Rows stream as borrowed-access [`ArtifactView`]s; chain
     /// [`to_owned`](Self::to_owned) before this call for owned
     /// [`Artifact`]s. The per-item error type remains
-    /// [`DialogArtifactsError`] because stream items surface
+    /// [`DialogCorpusError`] because stream items surface
     /// artifact-decoding errors that the caller may want to inspect
     /// directly.
     pub async fn perform<Env>(
         self,
         env: &Env,
-    ) -> Result<impl Stream<Item = Result<ArtifactView, DialogArtifactsError>>, DialogSearchTreeError>
+    ) -> Result<impl Stream<Item = Result<ArtifactView, DialogCorpusError>>, DialogSearchTreeError>
     where
         Env: Provider<Get>
             + Provider<ArchiveLoad>
@@ -180,7 +179,7 @@ impl Select<'_> {
         self,
         store: S,
     ) -> Result<
-        impl Stream<Item = Result<ArtifactView, DialogArtifactsError>> + 's + use<'s, S>,
+        impl Stream<Item = Result<ArtifactView, DialogCorpusError>> + 's + use<'s, S>,
         DialogSearchTreeError,
     >
     where
@@ -199,7 +198,7 @@ impl Select<'_> {
     {
         let tree = self.probed_tree(&store).await?;
         // EAV/AEV/VAE dispatch + per-entry filtering lives in the shared
-        // `ArtifactTreeExt::scan` so branch scans and Changes-overlay
+        // `CorpusExt::scan` so branch scans and Changes-overlay
         // scans agree on key order — that adjacency invariant is what
         // the cardinality-one sliding window relies on.
         Ok(tree.scan(store, self.source.spill_cache(), self.selector))
@@ -237,7 +236,7 @@ impl Select<'_> {
 
     /// Estimate this selector's range size, picking a store the same way
     /// [`perform`](Self::perform) does. See [`estimate`](Self::estimate).
-    pub async fn estimate_perform<Env>(self, env: &Env) -> Result<Option<u64>, DialogArtifactsError>
+    pub async fn estimate_perform<Env>(self, env: &Env) -> Result<Option<u64>, DialogCorpusError>
     where
         Env: Provider<Get>
             + Provider<ArchiveLoad>
@@ -255,7 +254,7 @@ impl Select<'_> {
 
     /// An advisory upper-bound estimate of how many artifacts this selector's
     /// range spans, read from the range's edge paths (see
-    /// [`ArtifactTreeExt::estimate`](dialog_artifacts::tree::ArtifactTreeExt::estimate)).
+    /// [`CorpusExt::estimate`](dialog_corpus::tree::CorpusExt::estimate)).
     ///
     /// A couple of blocks per level rather than a scan, for a planner
     /// comparing scan sizes.
@@ -263,7 +262,7 @@ impl Select<'_> {
     /// `Changes` overlay, whose in-memory edits are small relative to the tree
     /// and do not change the order-of-magnitude answer a strategy choice
     /// needs. Returns `None` for an empty tree.
-    pub async fn estimate<S>(self, store: S) -> Result<Option<u64>, DialogArtifactsError>
+    pub async fn estimate<S>(self, store: S) -> Result<Option<u64>, DialogCorpusError>
     where
         S: Provider<ArchiveLoad>
             + Provider<nodes::Write<CorpusNode>>
@@ -291,10 +290,7 @@ impl Select<'_> {
     async fn execute_owned<'s, S>(
         self,
         store: S,
-    ) -> Result<
-        impl Stream<Item = Result<Artifact, DialogArtifactsError>> + 's,
-        DialogSearchTreeError,
-    >
+    ) -> Result<impl Stream<Item = Result<Artifact, DialogCorpusError>> + 's, DialogSearchTreeError>
     where
         S: Provider<ArchiveLoad>
             + Provider<nodes::Write<CorpusNode>>
@@ -336,7 +332,7 @@ impl SelectOwned<'_> {
     pub async fn perform<Env>(
         self,
         env: &Env,
-    ) -> Result<impl Stream<Item = Result<Artifact, DialogArtifactsError>>, DialogSearchTreeError>
+    ) -> Result<impl Stream<Item = Result<Artifact, DialogCorpusError>>, DialogSearchTreeError>
     where
         Env: Provider<Get>
             + Provider<ArchiveLoad>
@@ -357,10 +353,7 @@ impl SelectOwned<'_> {
     pub async fn execute<'s, S>(
         self,
         store: S,
-    ) -> Result<
-        impl Stream<Item = Result<Artifact, DialogArtifactsError>> + 's,
-        DialogSearchTreeError,
-    >
+    ) -> Result<impl Stream<Item = Result<Artifact, DialogCorpusError>> + 's, DialogSearchTreeError>
     where
         S: Provider<ArchiveLoad>
             + Provider<nodes::Write<CorpusNode>>

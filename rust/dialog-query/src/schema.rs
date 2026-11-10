@@ -10,7 +10,7 @@
 //! `Some(vt)` becomes `Type::Primitive(singleton(vt))`.
 
 use crate::type_system;
-use dialog_artifacts::Pick;
+use dialog_corpus::Pick;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};

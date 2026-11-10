@@ -8,11 +8,11 @@ use crate::term::Term;
 use crate::type_system::Type as Kind;
 use crate::types::Any;
 use crate::types::Type;
-use dialog_artifacts::{NameShape, Pick, Symbol};
+use dialog_corpus::{NameShape, Pick, Symbol};
 
 use crate::identity::{self, ATTRIBUTE, field};
 use base58::ToBase58;
-use dialog_artifacts::identity::{ENTITY, SYMBOL};
+use dialog_corpus::identity::{ENTITY, SYMBOL};
 use merkle_reference::{Reference, Type as ReferenceType};
 use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Formatter, Result as FmtResult};
@@ -110,7 +110,7 @@ impl The {
     /// `field`: a constant for one attribute, a variable refined by
     /// the domain and key kind for a collection. The refined form is
     /// what narrows a domain scan to the demanded half — see
-    /// `dialog_artifacts::NameShape`.
+    /// `dialog_corpus::NameShape`.
     ///
     /// The variable is named after the field (`<field>/the`) so two
     /// collection fields on one concept scan independently rather
@@ -1281,7 +1281,7 @@ mod collection_tests {
 
     use super::*;
     use crate::the;
-    use dialog_artifacts::NameShape;
+    use dialog_corpus::NameShape;
     use std::str::FromStr;
 
     fn domain() -> Symbol {

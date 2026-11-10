@@ -21,7 +21,7 @@ use crate::{
     Cardinality, Entity, EvaluationError, Field, Parameters, Proposition, Requirement, Schema,
     Statement, Type, Value,
 };
-use dialog_artifacts::Update;
+use dialog_corpus::Update;
 
 use crate::concept::query::adornment::Adornment;
 use crate::identity::{self, CONCEPT, field};

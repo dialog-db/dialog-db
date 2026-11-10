@@ -11,7 +11,7 @@ wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 use crate::Branch;
 use crate::helpers::test_repo;
 use anyhow::Result;
-use dialog_artifacts::{Entity, Pick, Relation as ArtifactsRelation, Value};
+use dialog_corpus::{Entity, Pick, Relation as ArtifactsRelation, Value};
 use dialog_peer::helpers::test_session_with_peer;
 use dialog_query::attribute::Relation;
 use dialog_query::query::Output as _;
@@ -257,7 +257,7 @@ async fn a_transaction_reads_back_its_own_last_write_of_a_held_value() -> Result
 /// the `all` write, so the stored 100 is never succeeded on that path.
 #[dialog_common::test]
 async fn an_integrated_batch_lands_as_the_same_writes_asserted_in_order() -> Result<()> {
-    use dialog_artifacts::{Changes, Update as _};
+    use dialog_corpus::{Changes, Update as _};
 
     let (operator, profile) = test_session_with_peer().await;
     let repo = test_repo(&operator, &profile).await;

@@ -42,7 +42,7 @@ use crate::{Constraint, Negation, Premise, Proposition, try_stream};
 const STARTS_WITH_COST: usize = 1;
 
 /// The longest lexical form a symbol can have, in bytes. Mirrors
-/// `dialog_artifacts::RELATION_LENGTH`, which is crate-private;
+/// `dialog_corpus::RELATION_LENGTH`, which is crate-private;
 /// pinned against the real validator by test.
 const SYMBOL_LEXICAL_LIMIT: usize = 64;
 

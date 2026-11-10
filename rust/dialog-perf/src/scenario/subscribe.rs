@@ -5,7 +5,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use anyhow::Result;
-use dialog_artifacts::{Artifact, Pick};
+use dialog_corpus::{Artifact, Pick};
 use dialog_query::query::Output as _;
 use dialog_query::{ConceptConclusion, ConceptQuery};
 use dialog_repository::{Branch, Delta, Subscription};

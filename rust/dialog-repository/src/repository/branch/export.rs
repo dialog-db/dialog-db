@@ -1,11 +1,11 @@
-use dialog_artifacts::tree::CorpusNode;
-use dialog_artifacts::tree::fetch_spilled;
-use dialog_artifacts::{
-    Artifact, DialogArtifactsError, EntityKey, Exporter, Key, KeyViewConstruct, State,
-};
 use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::ConditionalSync;
+use dialog_corpus::tree::CorpusNode;
+use dialog_corpus::tree::fetch_spilled;
+use dialog_corpus::{
+    Artifact, DialogCorpusError, EntityKey, Exporter, Key, KeyViewConstruct, State,
+};
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::prelude::ArchiveScope;
 use dialog_effects::archive::{Get, Put};
@@ -32,7 +32,7 @@ impl<'a, E> Export<'a, E> {
 
 impl<E: Exporter> Export<'_, E> {
     /// Execute the export, writing all artifacts to the exporter.
-    pub async fn perform<Env>(self, env: &Env) -> Result<(), DialogArtifactsError>
+    pub async fn perform<Env>(self, env: &Env) -> Result<(), DialogCorpusError>
     where
         Env: Provider<BlobRead>
             + Provider<Get>

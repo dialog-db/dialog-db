@@ -2,7 +2,7 @@
 
 CSV import/export for Dialog artifacts.
 
-Implements the `Exporter` and `Importer` traits from `dialog-artifacts`,
+Implements the `Exporter` and `Importer` traits from `dialog-corpus`,
 enabling artifacts to be serialized to and deserialized from CSV files.
 
 ## CSV format

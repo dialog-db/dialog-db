@@ -85,7 +85,7 @@ where
     ///
     /// This is what lets a caller materialize some regions of a
     /// tag-partitioned tree and leave others by reference (see
-    /// `dialog_artifacts::merge::data_scope`).
+    /// `dialog_corpus::merge::data_scope`).
     ///
     /// Pruning is conservative in the same direction as
     /// [`TreeDifference::compute_within`](crate::TreeDifference::compute_within):

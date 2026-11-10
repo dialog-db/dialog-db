@@ -22,9 +22,9 @@ use std::env;
 
 use anyhow::Result;
 
-use dialog_artifacts::history::{EDITION_CEILING, Edition, Origin, Watermark};
-use dialog_artifacts::{Artifact, DialogArtifactsError, Instruction, Value, context_entry};
 use dialog_capability::Subject;
+use dialog_corpus::history::{EDITION_CEILING, Edition, Origin, Watermark};
+use dialog_corpus::{Artifact, DialogCorpusError, Instruction, Value, context_entry};
 use dialog_effects::authority::Attest;
 use dialog_effects::storage::Location;
 use dialog_peer::helpers::{open_peer, test_session_with_peer, test_storage, unique_name};
@@ -33,8 +33,8 @@ use futures_util::stream;
 use super::super::context::{head_observes, region_agrees};
 use crate::helpers::Counting;
 use crate::{Branch, HeldCaches, PullError, RepositoryExt as _, Revision};
-use dialog_artifacts::history::ContextCache;
-use dialog_artifacts::history::context_of;
+use dialog_corpus::history::ContextCache;
+use dialog_corpus::history::context_of;
 use dialog_search_tree::Cache;
 
 fn artifact(of: &str) -> Artifact {
@@ -47,7 +47,7 @@ fn artifact(of: &str) -> Artifact {
 }
 
 fn assert_one(of: &str) -> Instruction {
-    Instruction::Assert(artifact(of), dialog_artifacts::Pick::All)
+    Instruction::Assert(artifact(of), dialog_corpus::Pick::All)
 }
 
 pub mod note {
@@ -104,7 +104,7 @@ macro_rules! passing_writers {
                         is: Value::String("passing".to_string()),
                         cause: None,
                     },
-                    dialog_artifacts::Pick::All,
+                    dialog_corpus::Pick::All,
                 )]))
                 .perform($env)
                 .await?;
@@ -470,7 +470,7 @@ async fn it_does_not_resurrect_a_deleted_fact_whose_deleter_is_only_in_the_regio
             .query()
             .select(AttributeQuery::from(
                 Term::<Relation>::from(the!("post/title"))
-                    .of(Term::<dialog_artifacts::Entity>::var("of"))
+                    .of(Term::<dialog_corpus::Entity>::var("of"))
                     .is(Term::<String>::var("is")),
             ))
             .perform(env)
@@ -607,8 +607,7 @@ async fn it_refuses_to_pull_a_head_whose_region_no_head_minted() -> Result<()> {
     let template = main.revision().expect("main has a head");
 
     let missing = repo.branch("missing").open().perform(&operator).await?;
-    let stranger: dialog_artifacts::Entity =
-        format!("branch:{}", unique_name("stranger")).parse()?;
+    let stranger: dialog_corpus::Entity = format!("branch:{}", unique_name("stranger")).parse()?;
     plant_signed!(missing, &operator, template, |head: &mut Revision| {
         head.branch = stranger.clone();
     });
@@ -661,7 +660,7 @@ async fn it_refuses_to_pull_a_head_whose_region_no_head_minted() -> Result<()> {
         assert!(
             matches!(
                 pulled,
-                Err(PullError::Artifact(DialogArtifactsError::InvalidKey(_)))
+                Err(PullError::Artifact(DialogCorpusError::InvalidKey(_)))
             ),
             "{why} must be refused; got {pulled:?}"
         );

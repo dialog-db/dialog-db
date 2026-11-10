@@ -21,12 +21,12 @@
 //! wrote: the storage rewrite, then [`Branch::upgrade_rules`], which
 //! re-installs rules under the identities this release gives them.
 
-use dialog_artifacts::tree::CorpusNode;
-use dialog_artifacts::tree::rekey::rekey_tree;
-use dialog_artifacts::{ArchiveDelta, DialogArtifactsError, NUMBER_BAND};
 use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::{ConditionalSync, Holds};
+use dialog_corpus::tree::CorpusNode;
+use dialog_corpus::tree::rekey::rekey_tree;
+use dialog_corpus::{ArchiveDelta, DialogCorpusError, NUMBER_BAND};
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify};
@@ -95,7 +95,7 @@ impl Branch {
         let manifest = tree
             .manifest(&store)
             .await
-            .map_err(DialogArtifactsError::from)?;
+            .map_err(DialogCorpusError::from)?;
         Ok(Some(manifest.value_encoding))
     }
 
@@ -197,7 +197,7 @@ impl RekeyStorage<'_> {
         let manifest = tree
             .manifest(&store)
             .await
-            .map_err(DialogArtifactsError::from)?;
+            .map_err(DialogCorpusError::from)?;
         if manifest.value_encoding == self.value_encoding {
             return Ok(None);
         }
@@ -251,8 +251,8 @@ impl Migrate<'_> {
             + Provider<nodes::Preload<CorpusNode>>
             + ConditionalSync
             + Provider<BlobLoad>
-            + Provider<dialog_artifacts::Preload>
-            + Provider<dialog_artifacts::Speculation>
+            + Provider<dialog_corpus::Preload>
+            + Provider<dialog_corpus::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + Holds
             + ConditionalSync
@@ -284,7 +284,7 @@ pub(crate) async fn aligned<Env>(
     tree: Index,
     store: &dyn TreeEnv,
     env: &Env,
-) -> Result<Index, DialogArtifactsError>
+) -> Result<Index, DialogCorpusError>
 where
     Env: Provider<Get>
         + Provider<Put>
@@ -333,7 +333,7 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use anyhow::Result;
-    use dialog_artifacts::{
+    use dialog_corpus::{
         ArtifactSelector, Entity, NUMBER_BAND, Pick, Relation as ArtifactsRelation, Value,
     };
     use dialog_peer::helpers::test_session_with_peer;

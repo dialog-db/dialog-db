@@ -56,12 +56,10 @@ use std::ops::RangeInclusive;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 
-use dialog_artifacts::history::REVISION_ATTRIBUTE;
-use dialog_artifacts::selector::Constrained;
-use dialog_artifacts::tree::selector_range;
-use dialog_artifacts::{
-    Artifact, ArtifactSelector, Entity, Key, Relation, Statement, Update, Value,
-};
+use dialog_corpus::history::REVISION_ATTRIBUTE;
+use dialog_corpus::selector::Constrained;
+use dialog_corpus::tree::selector_range;
+use dialog_corpus::{Artifact, ArtifactSelector, Entity, Key, Relation, Statement, Update, Value};
 use dialog_query::concept::descriptor::ConceptDescriptor;
 use dialog_query::concept::query::{ConceptRules, Exact, Installed, PlanCache};
 use dialog_query::error::EvaluationError;
@@ -128,7 +126,7 @@ impl Statement for Transient {
             transient_attr(),
             self.0,
             Value::Boolean(true),
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         );
     }
 

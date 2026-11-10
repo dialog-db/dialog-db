@@ -16,7 +16,7 @@
 //!
 //! - [`merge_grouped`] is the k-way merge that backs query-time
 //!   union of multiple sources. It preserves the "as-if merged into a
-//!   single physical tree" order via [`sort_key`](dialog_artifacts::sort_key)
+//!   single physical tree" order via [`sort_key`](dialog_corpus::sort_key)
 //!   and dedupes identical `(the, of, is, cause)` artifacts within
 //!   each `(the, of)` run.
 //! - [`Hidden`] + [`filter_hidden`] apply the tombstones an overlay
@@ -28,8 +28,8 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use dialog_artifacts::selector::Constrained;
-use dialog_artifacts::{ArtifactSelector, ArtifactStream, ArtifactView, Cause, SortKey, sort_key};
+use dialog_corpus::selector::Constrained;
+use dialog_corpus::{ArtifactSelector, ArtifactStream, ArtifactView, Cause, SortKey, sort_key};
 use dialog_search_tree::Manifest;
 use futures_util::{StreamExt, stream};
 
@@ -60,7 +60,7 @@ use futures_util::{StreamExt, stream};
 ///
 /// `sort_key` works as the comparator here *for any selector* because
 /// it is the one total order consistent with all three tree index
-/// layouts — see the [`SortKey`](dialog_artifacts::SortKey) docs for
+/// layouts — see the [`SortKey`](dialog_corpus::SortKey) docs for
 /// the full why. Every stream reaching this merge was produced by the
 /// same selector, so they're all already in `sort_key` order; the
 /// merge just interleaves them.
@@ -191,7 +191,7 @@ impl MergeKeys {
         self,
         view: &ArtifactView,
         manifest: &Manifest,
-    ) -> Result<SortKey, dialog_artifacts::DialogArtifactsError> {
+    ) -> Result<SortKey, dialog_corpus::DialogCorpusError> {
         match self {
             MergeKeys::Stored => view.sort_key(manifest),
             MergeKeys::Fields => Ok(sort_key(&view.to_owned()?, manifest)),
@@ -232,7 +232,7 @@ impl Hidden {
         &self,
         view: &ArtifactView,
         manifest: &Manifest,
-    ) -> Result<bool, dialog_artifacts::DialogArtifactsError> {
+    ) -> Result<bool, dialog_corpus::DialogCorpusError> {
         if self.facts.is_empty() {
             return Ok(false);
         }
@@ -288,10 +288,10 @@ mod tests {
 
     use super::*;
     use crate::Ephemeral;
-    use dialog_artifacts::ArchiveDelta;
-    use dialog_artifacts::tree::ArtifactTree;
-    use dialog_artifacts::{
-        Artifact, Changes, DialogArtifactsError, Entity, Instruction, Update as _, Value,
+    use dialog_corpus::ArchiveDelta;
+    use dialog_corpus::tree::Corpus;
+    use dialog_corpus::{
+        Artifact, Changes, DialogCorpusError, Entity, Instruction, Update as _, Value,
     };
     use dialog_search_tree::helpers::Blocks;
 
@@ -308,7 +308,7 @@ mod tests {
         Box::pin(stream::iter(
             items
                 .into_iter()
-                .map(|artifact| Ok::<_, DialogArtifactsError>(artifact.into())),
+                .map(|artifact| Ok::<_, DialogCorpusError>(artifact.into())),
         ))
     }
 
@@ -368,7 +368,7 @@ mod tests {
             "test/name".parse()?,
             alice.clone(),
             Value::String("Alice".into()),
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         );
         changes.dissociate(
             "test/name".parse()?,
@@ -405,19 +405,19 @@ mod tests {
     async fn tree_under(
         manifest: Manifest,
         facts: Vec<Artifact>,
-    ) -> anyhow::Result<(ArtifactTree, Blocks)> {
-        use dialog_artifacts::tree::ArtifactTreeExt as _;
+    ) -> anyhow::Result<(Corpus, Blocks)> {
+        use dialog_corpus::tree::CorpusExt as _;
 
         let store = Blocks::new();
         let mut delta = ArchiveDelta::zero();
-        let mut tree = ArtifactTree::empty_with_manifest(store.catalog().clone(), manifest);
+        let mut tree = Corpus::empty_with_manifest(store.catalog().clone(), manifest);
         tree.apply(
             &store,
             &mut delta,
             stream::iter(
                 facts
                     .into_iter()
-                    .map(|artifact| Instruction::Assert(artifact, dialog_artifacts::Pick::All)),
+                    .map(|artifact| Instruction::Assert(artifact, dialog_corpus::Pick::All)),
             ),
         )
         .await?;
@@ -432,8 +432,8 @@ mod tests {
     /// line.
     #[dialog_common::test]
     async fn it_merges_and_filters_lines_written_under_different_manifests() -> anyhow::Result<()> {
-        use dialog_artifacts::ArtifactSelector;
-        use dialog_artifacts::tree::{ArtifactTreeExt as _, spill_cache};
+        use dialog_corpus::ArtifactSelector;
+        use dialog_corpus::tree::{CorpusExt as _, spill_cache};
 
         let long = "x".repeat(100);
         let shared = artifact("id:a", "test/bio", &long);

@@ -11,7 +11,7 @@ use std::{
     sync::mpsc::{Receiver, channel},
 };
 
-use dialog_artifacts::{Datum, Key, State};
+use dialog_corpus::{Datum, Key, State};
 use dialog_storage::Blake3Hash;
 
 use crate::{Explored, Promise};

@@ -134,7 +134,7 @@ impl Seed {
 #[cfg(test)]
 mod tests {
     use super::Seed;
-    use dialog_artifacts::Entity;
+    use dialog_corpus::Entity;
     use dialog_credentials::key::ExtractableKey as _;
     use dialog_credentials::{Ed25519Signer, Extractable};
     use dialog_varsig::Principal as _;

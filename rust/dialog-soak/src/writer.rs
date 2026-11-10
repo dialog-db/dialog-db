@@ -37,7 +37,7 @@
 //! shape; the bulk batch is the seed's own entity facts, 2 000 of them.
 
 use anyhow::{Context as _, Result};
-use dialog_artifacts::{Artifact, Instruction, Pick, Value};
+use dialog_corpus::{Artifact, Instruction, Pick, Value};
 
 use crate::join::entity_facts;
 use crate::report::PhaseReport;

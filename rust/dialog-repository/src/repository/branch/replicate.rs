@@ -507,7 +507,7 @@ mod tests {
     use crate::helpers::connect;
     use crate::{Branch, ReplicateError, RepositoryExt as _, ResolveEnv, Revision, SiteAddress};
     use anyhow::{Result, bail};
-    use dialog_artifacts::{Artifact, Instruction, Value};
+    use dialog_corpus::{Artifact, Instruction, Value};
     use dialog_peer::helpers::{test_session_with_peer, unique_name};
     use dialog_remote_ucan::UcanAddress;
     use dialog_remote_ucan::helpers::UcanServiceAddress;
@@ -529,7 +529,7 @@ mod tests {
                     is: Value::String(name.into()),
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             )]))
             .perform(env)
             .await?;

@@ -34,7 +34,7 @@
 //! paths carry different hashes, which is the trade for never hashing
 //! the fold.
 //!
-//! [`selector_range`]: dialog_artifacts::tree::selector_range
+//! [`selector_range`]: dialog_corpus::tree::selector_range
 //! [`Branch::overlay`]: crate::Branch::overlay
 
 use std::cell::OnceCell;
@@ -43,14 +43,14 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::ops::RangeInclusive;
 use std::sync::{Arc, OnceLock};
 
-use dialog_artifacts::selector::Constrained;
-use dialog_artifacts::tree::selector_range;
-use dialog_artifacts::{
-    Artifact, ArtifactSelector, Cause, Changes, DialogArtifactsError, Entity, EntityKey,
-    Instruction, Key, KeyViewConstruct, Pick, Relation, SortKey, Standing, Statement, Update,
+use dialog_common::Blake3Hash;
+use dialog_corpus::selector::Constrained;
+use dialog_corpus::tree::selector_range;
+use dialog_corpus::{
+    Artifact, ArtifactSelector, Cause, Changes, DialogCorpusError, Entity, EntityKey, Instruction,
+    Key, KeyViewConstruct, Pick, Relation, SortKey, Standing, Statement, Update,
     artifact_index_keys, sort_key,
 };
-use dialog_common::Blake3Hash;
 use dialog_search_tree::Manifest;
 use parking_lot::RwLock;
 
@@ -669,7 +669,7 @@ impl Ephemeral {
     ///
     /// A line holds facts only, so a statement that changes an asset is
     /// refused (see [`apply`](Self::apply)).
-    pub fn assert<S: Statement>(&self, statement: S) -> Result<&Self, DialogArtifactsError> {
+    pub fn assert<S: Statement>(&self, statement: S) -> Result<&Self, DialogCorpusError> {
         let mut changes = Changes::new();
         statement.assert(&mut changes);
         self.apply(changes)?;
@@ -679,7 +679,7 @@ impl Ephemeral {
     /// Retract a statement: each of its facts is removed from the
     /// store if held here, and otherwise hidden beneath by a
     /// tombstone. Chainable. A statement that changes an asset is refused.
-    pub fn retract<S: Statement>(&self, statement: S) -> Result<&Self, DialogArtifactsError> {
+    pub fn retract<S: Statement>(&self, statement: S) -> Result<&Self, DialogCorpusError> {
         let mut changes = Changes::new();
         statement.retract(&mut changes);
         self.apply(changes)?;
@@ -690,12 +690,12 @@ impl Ephemeral {
     ///
     /// Assets are stored only by a transaction's commit. A batch that
     /// changes one is refused with
-    /// [`AssetsUnsupported`](DialogArtifactsError::AssetsUnsupported) and
+    /// [`AssetsUnsupported`](DialogCorpusError::AssetsUnsupported) and
     /// nothing in it lands, rather than landing its facts and dropping its
     /// assets.
-    pub fn apply(&self, changes: Changes) -> Result<Option<Instant>, DialogArtifactsError> {
+    pub fn apply(&self, changes: Changes) -> Result<Option<Instant>, DialogCorpusError> {
         if changes.has_assets() {
-            return Err(DialogArtifactsError::AssetsUnsupported(
+            return Err(DialogCorpusError::AssetsUnsupported(
                 "an ephemeral line".into(),
             ));
         }
@@ -727,7 +727,7 @@ impl Ephemeral {
                 fact.the.clone(),
                 fact.of.clone(),
                 fact.is.clone(),
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             );
         }
         changes
@@ -885,7 +885,7 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
-    use dialog_artifacts::Value;
+    use dialog_corpus::Value;
     use dialog_query::the;
 
     fn fact(of: &str, the_: &str, is: &str) -> Artifact {
@@ -901,16 +901,11 @@ mod tests {
     struct Claim(Artifact);
 
     impl Statement for Claim {
-        fn assert(self, update: &mut impl dialog_artifacts::Update) {
-            update.associate(
-                self.0.the,
-                self.0.of,
-                self.0.is,
-                dialog_artifacts::Pick::All,
-            );
+        fn assert(self, update: &mut impl dialog_corpus::Update) {
+            update.associate(self.0.the, self.0.of, self.0.is, dialog_corpus::Pick::All);
         }
 
-        fn retract(self, update: &mut impl dialog_artifacts::Update) {
+        fn retract(self, update: &mut impl dialog_corpus::Update) {
             update.dissociate(self.0.the, self.0.of, self.0.is);
         }
     }
@@ -965,7 +960,7 @@ mod tests {
             "person/name".parse().unwrap(),
             "id:a".parse().unwrap(),
             Value::String("C".into()),
-            dialog_artifacts::Pick::Last,
+            dialog_corpus::Pick::Last,
         );
         let succeeded = line.apply(changes).unwrap().expect("the write mints");
         assert_eq!(succeeded.retracted.len(), 1);
@@ -1002,7 +997,7 @@ mod tests {
             "person/name".parse().unwrap(),
             "id:a".parse().unwrap(),
             Value::String("B".into()),
-            dialog_artifacts::Pick::Last,
+            dialog_corpus::Pick::Last,
         );
         line.apply(replace).unwrap();
         assert_eq!(
@@ -1295,7 +1290,7 @@ mod tests {
     fn it_refuses_a_batch_that_changes_an_asset() {
         let line = Ephemeral::new();
         let before = line.revision();
-        let asset = dialog_artifacts::Asset::from(b"not a fact".to_vec());
+        let asset = dialog_corpus::Asset::from(b"not a fact".to_vec());
 
         let mut changes = Changes::new();
         the!("person/name")
@@ -1305,15 +1300,15 @@ mod tests {
         asset.clone().assert(&mut changes);
         assert!(matches!(
             line.apply(changes),
-            Err(DialogArtifactsError::AssetsUnsupported(_))
+            Err(DialogCorpusError::AssetsUnsupported(_))
         ));
         assert!(matches!(
             line.assert(asset.clone()),
-            Err(DialogArtifactsError::AssetsUnsupported(_))
+            Err(DialogCorpusError::AssetsUnsupported(_))
         ));
         assert!(matches!(
             line.retract(asset),
-            Err(DialogArtifactsError::AssetsUnsupported(_))
+            Err(DialogCorpusError::AssetsUnsupported(_))
         ));
 
         assert_eq!(line.len(), 0, "nothing in the batch landed");
@@ -1335,7 +1330,7 @@ mod tests {
                 .is(name.to_string())
                 .assert(&mut changes);
             claim("id:b", "person/name", "B").retract(&mut changes);
-            dialog_artifacts::Asset::from(b"not a fact".to_vec()).assert(&mut changes);
+            dialog_corpus::Asset::from(b"not a fact".to_vec()).assert(&mut changes);
             changes
         };
 

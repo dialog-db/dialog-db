@@ -466,7 +466,7 @@ impl<'de> Deserialize<'de> for Views {
 /// upper bound.
 ///
 /// Bounds are stored in the value's ORDER-PRESERVING encoding (see
-/// `dialog_artifacts::encode_value_owned`), so within one
+/// `dialog_corpus::encode_value_owned`), so within one
 /// `value_type` the lattice operations are plain byte comparisons and
 /// the struct stays `Eq`/`Ord`/`Hash` for the type lattice (a raw
 /// `Value` would not, floats being only partially ordered).

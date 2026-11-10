@@ -23,11 +23,11 @@
 use std::str::FromStr as _;
 
 use anyhow::Result;
-use dialog_artifacts::tree::ArtifactTree;
-use dialog_artifacts::{ArtifactSelector, Instruction, Relation};
 use dialog_baseline::repo::{DialogRepo, VolatileRepo};
 use dialog_baseline::se::{SeLog, se_instructions};
 use dialog_common::Blake3Hash as NodeHash;
+use dialog_corpus::tree::Corpus;
+use dialog_corpus::{ArtifactSelector, Instruction, Relation};
 use dialog_repository::TransactionBatch;
 
 fn txn_count() -> usize {
@@ -38,8 +38,8 @@ fn txn_count() -> usize {
 }
 
 /// The tree a staged batch's tip names.
-fn tree_of(repo: &VolatileRepo, batch: &TransactionBatch) -> ArtifactTree {
-    ArtifactTree::at(
+fn tree_of(repo: &VolatileRepo, batch: &TransactionBatch) -> Corpus {
+    Corpus::at(
         repo.catalog(),
         NodeHash::from(*batch.revision().tree.hash()),
     )
@@ -48,7 +48,7 @@ fn tree_of(repo: &VolatileRepo, batch: &TransactionBatch) -> ArtifactTree {
 /// Asserts the stored tree is shaped exactly as the canonical constructor
 /// shapes its entry set, localizing any break to a node before a root
 /// comparison reports it as an opaque hash difference.
-async fn assert_canonical(repo: &VolatileRepo, tree: &ArtifactTree, what: &str) -> Result<()> {
+async fn assert_canonical(repo: &VolatileRepo, tree: &Corpus, what: &str) -> Result<()> {
     let divergences = tree.canonical_divergences(repo.operator()).await?;
     assert_eq!(
         divergences,

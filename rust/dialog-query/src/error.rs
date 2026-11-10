@@ -5,7 +5,7 @@ use std::convert::Infallible;
 use std::error;
 use std::fmt;
 
-use crate::artifact::{ArtifactTypeError, DialogArtifactsError, Type, Value};
+use crate::artifact::{ArtifactTypeError, DialogCorpusError, Type, Value};
 use crate::attribute::Keyed;
 pub use crate::environment::Environment;
 pub use crate::proposition::Proposition;
@@ -801,8 +801,8 @@ impl From<serde_json::Error> for EvaluationError {
     }
 }
 
-impl From<DialogArtifactsError> for EvaluationError {
-    fn from(value: DialogArtifactsError) -> Self {
+impl From<DialogCorpusError> for EvaluationError {
+    fn from(value: DialogCorpusError) -> Self {
         EvaluationError::Store(format!("{value}"))
     }
 }
@@ -916,9 +916,9 @@ impl fmt::Display for OwnedInvalidIdentifier {
 
 impl error::Error for OwnedInvalidIdentifier {}
 
-impl From<OwnedInvalidIdentifier> for DialogArtifactsError {
+impl From<OwnedInvalidIdentifier> for DialogCorpusError {
     fn from(e: OwnedInvalidIdentifier) -> Self {
-        DialogArtifactsError::InvalidRelation(e.to_string())
+        DialogCorpusError::InvalidRelation(e.to_string())
     }
 }
 

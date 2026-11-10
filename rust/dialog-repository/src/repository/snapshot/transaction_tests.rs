@@ -6,11 +6,11 @@ wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
 use crate::repository::branch::context::head_context;
 use anyhow::Result;
-use dialog_artifacts::history::{History as _, Version};
-use dialog_artifacts::tree::CorpusNode;
-use dialog_artifacts::{Artifact, ArtifactSelector, Changes, Entity, Instruction, Value};
 use dialog_capability::{Fork, Provider};
 use dialog_common::{ConditionalSync, Holds};
+use dialog_corpus::history::{History as _, Version};
+use dialog_corpus::tree::CorpusNode;
+use dialog_corpus::{Artifact, ArtifactSelector, Changes, Entity, Instruction, Value};
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::Identify;
@@ -46,8 +46,8 @@ where
         + Provider<nodes::Preload<CorpusNode>>
         + ConditionalSync
         + Provider<BlobLoad>
-        + Provider<dialog_artifacts::Preload>
-        + Provider<dialog_artifacts::Speculation>
+        + Provider<dialog_corpus::Preload>
+        + Provider<dialog_corpus::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
         + dialog_common::Holds
         + ConditionalSync
@@ -84,8 +84,8 @@ where
         + Provider<nodes::Preload<CorpusNode>>
         + ConditionalSync
         + Provider<BlobLoad>
-        + Provider<dialog_artifacts::Preload>
-        + Provider<dialog_artifacts::Speculation>
+        + Provider<dialog_corpus::Preload>
+        + Provider<dialog_corpus::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
         + dialog_common::Holds
         + ConditionalSync
@@ -122,8 +122,8 @@ where
         + Provider<nodes::Preload<CorpusNode>>
         + ConditionalSync
         + Provider<BlobLoad>
-        + Provider<dialog_artifacts::Preload>
-        + Provider<dialog_artifacts::Speculation>
+        + Provider<dialog_corpus::Preload>
+        + Provider<dialog_corpus::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
         + Holds
         + ConditionalSync
@@ -149,7 +149,7 @@ where
 }
 
 /// A `user/name` statement, for transactions.
-fn name(of: &str, is: &str) -> impl dialog_artifacts::Statement {
+fn name(of: &str, is: &str) -> impl dialog_corpus::Statement {
     the!("user/name")
         .of(of.parse::<Entity>().expect("entity parses"))
         .is(is.to_string())
@@ -573,7 +573,7 @@ async fn it_rejects_writes_to_the_reserved_namespace() -> Result<()> {
     let result = snapshot
         .transaction()
         .integrate(
-            [Instruction::Assert(forged, dialog_artifacts::Pick::All)]
+            [Instruction::Assert(forged, dialog_corpus::Pick::All)]
                 .into_iter()
                 .collect(),
         )
@@ -584,7 +584,7 @@ async fn it_rejects_writes_to_the_reserved_namespace() -> Result<()> {
         matches!(
             result,
             Err(CommitError::Artifact(
-                dialog_artifacts::DialogArtifactsError::ReservedRelation(_)
+                dialog_corpus::DialogCorpusError::ReservedRelation(_)
             ))
         ),
         "writes to the reserved namespace must be refused: {result:?}"
@@ -870,7 +870,7 @@ async fn it_commits_through_a_cold_handle() -> Result<()> {
         .integrate(
             [Instruction::Assert(
                 fact("user:bob", "Bob"),
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             )]
             .into_iter()
             .collect(),

@@ -3,7 +3,7 @@ use crate::attribute::Relation;
 use crate::attribute::expression::dynamic::DynamicAttributeExpression;
 use crate::schema::Cardinality;
 use crate::statement::Statement;
-use dialog_artifacts::{Pick, Update};
+use dialog_corpus::{Pick, Update};
 
 /// A type-erased, attribute statement.
 ///
@@ -30,7 +30,7 @@ impl Statement for AttributeStatement {
                 update.associate(the.into(), self.of, value, Pick::Last);
             }
             (None, _) => {
-                update.associate(the.into(), self.of, value, dialog_artifacts::Pick::All);
+                update.associate(the.into(), self.of, value, dialog_corpus::Pick::All);
             }
         }
     }

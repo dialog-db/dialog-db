@@ -8,16 +8,16 @@ use crate::{
     Branch, CommitError, Index, PublishError, RemoteSite, RepositoryMemoryExt as _, Revision,
     Snapshot, TreeReference, origin_of,
 };
-use dialog_artifacts::ArchiveDelta;
-use dialog_artifacts::history::{
-    Context, Edition, Origin, RevisionRecord, TreeHistory, Version, extend_skips,
-};
-use dialog_artifacts::tree::CorpusNode;
-use dialog_artifacts::tree::{Stamp, WriteScope};
-use dialog_artifacts::{Datum, DialogArtifactsError, Entity, Instruction, Key, NUMBER_BAND, State};
 use dialog_capability::{Did, Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::{ConditionalSend, ConditionalSync};
+use dialog_corpus::ArchiveDelta;
+use dialog_corpus::history::{
+    Context, Edition, Origin, RevisionRecord, TreeHistory, Version, extend_skips,
+};
+use dialog_corpus::tree::CorpusNode;
+use dialog_corpus::tree::{Stamp, WriteScope};
+use dialog_corpus::{Datum, DialogCorpusError, Entity, Instruction, Key, NUMBER_BAND, State};
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify, OperatorExt};
@@ -129,7 +129,7 @@ impl<'a, Changes> Commit<'a, Changes> {
     ///
     /// ```no_run
     /// # use dialog_repository::Branch;
-    /// # use dialog_artifacts::Instruction;
+    /// # use dialog_corpus::Instruction;
     /// # use futures_util::stream;
     /// # async fn example<Env>(branch: &Branch, env: &Env, changes: Vec<Instruction>)
     /// # -> anyhow::Result<()>
@@ -684,7 +684,7 @@ where
                 let manifest = tree
                     .manifest(&store)
                     .await
-                    .map_err(DialogArtifactsError::from)?;
+                    .map_err(DialogCorpusError::from)?;
                 if manifest.value_encoding != NUMBER_BAND {
                     return Err(CommitError::NeedsMigration(format!(
                         "its tree keys values under encoding {}, and this release writes {NUMBER_BAND}",
@@ -722,7 +722,7 @@ where
         let mut delta = ArchiveDelta::zero();
         let batch = match self.amend {
             Some(_) => {
-                dialog_artifacts::BufferedBatch::amend_reusing(
+                dialog_corpus::BufferedBatch::amend_reusing(
                     source.spine(),
                     &tree,
                     &store,
@@ -733,7 +733,7 @@ where
                 .await?
             }
             None => {
-                dialog_artifacts::BufferedBatch::apply_reusing(
+                dialog_corpus::BufferedBatch::apply_reusing(
                     source.spine(),
                     &tree,
                     &store,
@@ -823,7 +823,7 @@ where
         // depend on the final root — a root cannot appear inside itself.
         //
         // The skip table (logarithmic leaps through the revision DAG for
-        // `common_ancestor` — see `dialog_artifacts::history::extend_skips`)
+        // `common_ancestor` — see `dialog_corpus::history::extend_skips`)
         // is lifted from the parent's recorded table, read out of the base
         // tree through the line's shared node cache.
         let parent = base_revision.as_ref().map(Revision::version);
@@ -873,7 +873,7 @@ where
             Some(base) => base.tree.clone(),
             None => TreeReference::from(
                 *Index::empty_root(batch.manifest())
-                    .map_err(DialogArtifactsError::from)?
+                    .map_err(DialogCorpusError::from)?
                     .as_bytes(),
             ),
         };
@@ -946,7 +946,7 @@ mod tests {
     use anyhow::Result;
     use dialog_peer::helpers::test_session_with_peer;
 
-    use dialog_artifacts::{Artifact, ArtifactSelector, Instruction, Value};
+    use dialog_corpus::{Artifact, ArtifactSelector, Instruction, Value};
     use futures_util::{StreamExt, stream};
 
     /// Two commits in sequence (no refresh between) with different entities on
@@ -976,7 +976,7 @@ mod tests {
                     is: Value::String("Alice".to_string()),
                     cause: None,
                 },
-                dialog_artifacts::Pick::Last,
+                dialog_corpus::Pick::Last,
             )]))
             .perform(&operator)
             .await?;
@@ -989,7 +989,7 @@ mod tests {
                     is: Value::String("Bob".to_string()),
                     cause: None,
                 },
-                dialog_artifacts::Pick::Last,
+                dialog_corpus::Pick::Last,
             )]))
             .perform(&operator)
             .await?;
@@ -1023,7 +1023,7 @@ mod tests {
 
         let instructions = stream::iter(vec![Instruction::Assert(
             artifact.clone(),
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         )]);
 
         let revision = branch.commit(instructions).perform(&operator).await?;
@@ -1085,7 +1085,7 @@ mod tests {
                     is: Value::String("Alice".to_string()),
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             )]))
             .perform(&operator)
             .await?;
@@ -1100,7 +1100,7 @@ mod tests {
                     is: Value::String("Bob".to_string()),
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             )]))
             .perform(&operator)
             .await;
@@ -1124,7 +1124,7 @@ mod tests {
                     is: Value::String("Bob".to_string()),
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             )]))
             .perform(&operator)
             .await?;
@@ -1160,10 +1160,10 @@ mod history_tests {
     use anyhow::Result;
     use dialog_peer::helpers::test_session_with_peer;
 
-    use dialog_artifacts::history::{
+    use dialog_corpus::history::{
         Causality, History as _, HistorySelector, causality, common_ancestor,
     };
-    use dialog_artifacts::{Artifact, Instruction, Value};
+    use dialog_corpus::{Artifact, Instruction, Value};
     use futures_util::{TryStreamExt as _, stream};
 
     fn title(of: &str, value: &str) -> Artifact {
@@ -1187,7 +1187,7 @@ mod history_tests {
         let first = branch
             .commit(stream::iter(vec![Instruction::Assert(
                 title("post:1", "Hej"),
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             )]))
             .perform(&operator)
             .await?;
@@ -1197,7 +1197,7 @@ mod history_tests {
         let second = branch
             .commit(stream::iter(vec![Instruction::Assert(
                 title("post:1", "Hi"),
-                dialog_artifacts::Pick::Last,
+                dialog_corpus::Pick::Last,
             )]))
             .perform(&operator)
             .await?;
@@ -1257,7 +1257,7 @@ mod history_tests {
         let third = branch
             .commit(stream::iter(vec![Instruction::Assert(
                 title("post:1", "Hello"),
-                dialog_artifacts::Pick::Last,
+                dialog_corpus::Pick::Last,
             )]))
             .perform(&operator)
             .await?;
@@ -1285,7 +1285,7 @@ mod history_tests {
         let revision = branch
             .commit(stream::iter(vec![Instruction::Assert(
                 title("post:1", "Hej"),
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             )]))
             .perform(&operator)
             .await?;
@@ -1318,7 +1318,7 @@ mod history_tests {
     /// lineage cannot be corrupted through the ordinary write path.
     #[dialog_common::test]
     async fn it_rejects_writes_to_the_reserved_dialog_namespace() -> Result<()> {
-        use dialog_artifacts::DialogArtifactsError;
+        use dialog_corpus::DialogCorpusError;
 
         let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
@@ -1331,8 +1331,8 @@ mod history_tests {
             cause: None,
         };
         for instruction in [
-            Instruction::Assert(forged.clone(), dialog_artifacts::Pick::All),
-            Instruction::Assert(forged.clone(), dialog_artifacts::Pick::Last),
+            Instruction::Assert(forged.clone(), dialog_corpus::Pick::All),
+            Instruction::Assert(forged.clone(), dialog_corpus::Pick::Last),
             Instruction::Retract(forged),
         ] {
             let result = branch
@@ -1343,7 +1343,7 @@ mod history_tests {
                 matches!(
                     result,
                     Err(crate::CommitError::Artifact(
-                        DialogArtifactsError::ReservedRelation(_)
+                        DialogCorpusError::ReservedRelation(_)
                     ))
                 ),
                 "writes to the reserved namespace must be refused: {result:?}"
@@ -1365,7 +1365,7 @@ mod history_tests {
         let first = branch
             .commit(stream::iter(vec![Instruction::Assert(
                 title("post:1", "Hej"),
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             )]))
             .perform(&operator)
             .await?;
@@ -1415,7 +1415,7 @@ mod history_tests {
         let first = branch
             .commit(stream::iter(vec![Instruction::Assert(
                 title("post:1", "Hej"),
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             )]))
             .perform(&operator)
             .await?;
@@ -1456,7 +1456,7 @@ mod history_tests {
         let seed = repo.branch("main").open().perform(&operator).await?;
         seed.commit(stream::iter(vec![Instruction::Assert(
             title("post:1", "Hej"),
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -1479,7 +1479,7 @@ mod history_tests {
         let raced = reasserter
             .commit(stream::iter(vec![Instruction::Assert(
                 title("post:1", "Hej"),
-                dialog_artifacts::Pick::Last,
+                dialog_corpus::Pick::Last,
             )]))
             .perform(&operator)
             .await;
@@ -1489,7 +1489,7 @@ mod history_tests {
         let reasserted = !head
             .claims()
             .select(
-                dialog_artifacts::ArtifactSelector::new()
+                dialog_corpus::ArtifactSelector::new()
                     .the("post/title".parse()?)
                     .of("post:1".parse()?),
             )
@@ -1521,15 +1521,15 @@ mod history_tests {
         let revision = branch
             .commit(stream::iter(vec![Instruction::Assert(
                 title("post:1", "Hej"),
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             )]))
             .perform(&operator)
             .await?;
 
-        // Read the datum back through the artifact tree and check the tag.
+        // Read the datum back through the corpus and check the tag.
         use crate::Index;
-        use dialog_artifacts::tree::ArtifactTreeExt as _;
         use dialog_common::Blake3Hash as NodeHash;
+        use dialog_corpus::tree::CorpusExt as _;
 
         let store = &operator;
         let tree = Index::at(

@@ -29,12 +29,12 @@ use std::str::FromStr as _;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use dialog_artifacts::selector::Constrained;
-use dialog_artifacts::{ArtifactSelector, Entity, Relation, Value};
 use dialog_baseline::metered::{Meter, Tally};
 use dialog_baseline::repo::{DialogRepo, MeteredRepo};
 use dialog_baseline::se::SeLog;
 use dialog_common::{Blake3Hash, Buffer};
+use dialog_corpus::selector::Constrained;
+use dialog_corpus::{ArtifactSelector, Entity, Relation, Value};
 
 /// Counts the branch's archive traffic and keeps the size of every
 /// distinct block it ever wrote.

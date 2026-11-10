@@ -1,6 +1,6 @@
-pub use dialog_artifacts::selector::Constrained;
-pub use dialog_artifacts::{
-    Artifact, ArtifactSelector, Cause, DialogArtifactsError, Entity, Instruction, NameShape,
+pub use dialog_corpus::selector::Constrained;
+pub use dialog_corpus::{
+    Artifact, ArtifactSelector, Cause, DialogCorpusError, Entity, Instruction, NameShape,
     Relation as ArtifactsRelation, Select, TypeError as ArtifactTypeError, Value,
     ValueDataType as Type, decode_value, encode_value_owned,
 };

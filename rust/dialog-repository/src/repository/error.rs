@@ -1,8 +1,8 @@
 use crate::{Fetched, Revision, Target, TreeReference};
-use dialog_artifacts::DialogArtifactsError;
 use dialog_capability::access::{AuthorizationFailure, AuthorizeError};
 use dialog_capability::identity::IdentityError;
 use dialog_common::Blake3Hash;
+use dialog_corpus::DialogCorpusError;
 use dialog_credentials::Ed25519SignerError;
 use dialog_effects::Rejection;
 use dialog_effects::archive::ArchiveError;
@@ -41,7 +41,7 @@ pub enum FetchRemoteBranchError {
 pub enum ObserveRemoteBranchError {
     /// The observed head is not signed by its issuer.
     #[error("Observed head does not verify: {0}")]
-    Artifact(#[from] DialogArtifactsError),
+    Artifact(#[from] DialogCorpusError),
 
     /// Reading the head recorded in the local cache failed.
     #[error("Failed to read the recorded revision from local cache: {0}")]
@@ -561,7 +561,7 @@ pub enum CommitError {
 
     /// An artifact decode during commit failed.
     #[error("Artifact decode failed during commit: {0}")]
-    Artifact(#[from] DialogArtifactsError),
+    Artifact(#[from] DialogCorpusError),
 
     /// Identifying the current authority for the new revision failed.
     #[error("Failed to identify authority for commit: {0}")]
@@ -692,7 +692,7 @@ pub enum PullError {
 
     /// An artifact decode during pull failed.
     #[error("Artifact decode failed during pull: {0}")]
-    Artifact(#[from] DialogArtifactsError),
+    Artifact(#[from] DialogCorpusError),
 
     /// Materializing the adopted head after the pull failed
     /// ([`Pull::download`](crate::Pull::download)).
@@ -821,7 +821,7 @@ pub enum PushError {
 
     /// Reading the blob differential or a blob record from the index failed.
     #[error("Artifact operation failed during push: {0}")]
-    Artifact(#[from] DialogArtifactsError),
+    Artifact(#[from] DialogCorpusError),
 
     /// Shipping a newly-referenced blob to the remote failed.
     #[error("Blob operation failed during push: {0}")]
@@ -1136,8 +1136,8 @@ mod tests {
     #[dialog_common::test]
     async fn it_preserves_artifact_reasons_through_push() {
         let tree = DialogSearchTreeError::from(DialogStorageError::Authorization(revoked()));
-        let push = PushError::Artifact(DialogArtifactsError::from(tree));
-        let PushError::Artifact(DialogArtifactsError::Authorization(reason)) = &push else {
+        let push = PushError::Artifact(DialogCorpusError::from(tree));
+        let PushError::Artifact(DialogCorpusError::Authorization(reason)) = &push else {
             panic!("the conversion flattened the reason: {push:?}");
         };
         assert!(matches!(reason, AuthorizeError::Revoked { .. }));
@@ -1233,7 +1233,7 @@ pub enum SnapshotError {
 
     /// Reading a referenced artifact failed.
     #[error(transparent)]
-    Artifact(#[from] DialogArtifactsError),
+    Artifact(#[from] DialogCorpusError),
 
     /// Accessing the archive backend failed.
     #[error(transparent)]

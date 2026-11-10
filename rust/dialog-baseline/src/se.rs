@@ -30,7 +30,7 @@
 use std::str::FromStr;
 
 use anyhow::{Context, Result};
-use dialog_artifacts::{Artifact, Entity, Instruction, Relation, Value};
+use dialog_corpus::{Artifact, Entity, Instruction, Relation, Value};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
@@ -358,9 +358,9 @@ pub fn se_instructions(commit: &[SeFact]) -> Result<Vec<Instruction>> {
             cause: None,
         };
         instructions.push(if is_multi_valued(&fact.the) {
-            Instruction::Assert(artifact, dialog_artifacts::Pick::All)
+            Instruction::Assert(artifact, dialog_corpus::Pick::All)
         } else {
-            Instruction::Assert(artifact, dialog_artifacts::Pick::Last)
+            Instruction::Assert(artifact, dialog_corpus::Pick::Last)
         });
     }
     Ok(instructions)

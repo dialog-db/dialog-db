@@ -1,4 +1,4 @@
-use dialog_artifacts::{Artifact, Datum, Key, State};
+use dialog_corpus::{Artifact, Datum, Key, State};
 use ratatui::{
     prelude::*,
     widgets::{Cell, HighlightSpacing, Row, Table},

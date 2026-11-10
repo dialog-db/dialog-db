@@ -89,7 +89,7 @@ pub(crate) fn parse(scheme: &str, uri: &str) -> Option<Reference> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dialog_artifacts::identity::{BOOLEAN, TEXT};
+    use dialog_corpus::identity::{BOOLEAN, TEXT};
 
     #[dialog_common::test]
     fn it_names_the_definition_types() {

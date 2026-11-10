@@ -65,7 +65,7 @@
 //!
 //! [`AnalyzedRule::is_entity_local`]: dialog_query::rule::analyzer::AnalyzedRule::is_entity_local
 
-use dialog_artifacts::tree::CorpusNode;
+use dialog_corpus::tree::CorpusNode;
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::Read as BlobRead;
@@ -78,14 +78,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::repository::fetch::Driven;
-use dialog_artifacts::selector::Constrained;
-use dialog_artifacts::tree::{fetch_spilled, selector_range};
-use dialog_artifacts::{
-    Artifact, ArtifactSelector, AttributeKey, Entity, EntityKey, Key, Speculation, State, ValueKey,
-};
 use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::{ConditionalSync, Holds};
+use dialog_corpus::selector::Constrained;
+use dialog_corpus::tree::{fetch_spilled, selector_range};
+use dialog_corpus::{
+    Artifact, ArtifactSelector, AttributeKey, Entity, EntityKey, Key, Speculation, State, ValueKey,
+};
 use dialog_effects::archive::prelude::ArchiveScope;
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::Identify;
@@ -527,7 +527,7 @@ async fn widened<'a>(
             fact.is.to_bytes(),
         )
     };
-    let mut cells: Vec<(Entity, dialog_artifacts::Relation)> = Vec::new();
+    let mut cells: Vec<(Entity, dialog_corpus::Relation)> = Vec::new();
     for fact in asserted.iter().chain(retracted) {
         if elected.includes(&fact.the)
             && !cells
@@ -547,14 +547,13 @@ async fn widened<'a>(
     let mut have_retracted: BTreeSet<_> = retracted.iter().map(identity).collect();
     for (of, the) in cells {
         let selector = ArtifactSelector::new().the(the).of(of);
-        let claims: Vec<Artifact> =
-            Provider::<dialog_artifacts::Select<'_>>::execute(env, selector)
-                .await
-                .map_err(|error| EvaluationError::Store(format!("cell read: {error}")))?
-                .map(|row| row.and_then(|view| view.to_owned()))
-                .try_collect()
-                .await
-                .map_err(|error| EvaluationError::Store(format!("cell read: {error}")))?;
+        let claims: Vec<Artifact> = Provider::<dialog_corpus::Select<'_>>::execute(env, selector)
+            .await
+            .map_err(|error| EvaluationError::Store(format!("cell read: {error}")))?
+            .map(|row| row.and_then(|view| view.to_owned()))
+            .try_collect()
+            .await
+            .map_err(|error| EvaluationError::Store(format!("cell read: {error}")))?;
         for claim in claims {
             let key = identity(&claim);
             if !raw_asserted.contains(&key) && have_retracted.insert(key.clone()) {
@@ -729,8 +728,8 @@ where
             + Provider<nodes::Preload<CorpusNode>>
             + ConditionalSync
             + Provider<BlobLoad>
-            + Provider<dialog_artifacts::Preload>
-            + Provider<dialog_artifacts::Speculation>
+            + Provider<dialog_corpus::Preload>
+            + Provider<dialog_corpus::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + Holds
             + ConditionalSync
@@ -849,8 +848,8 @@ where
             + Provider<nodes::Preload<CorpusNode>>
             + ConditionalSync
             + Provider<BlobLoad>
-            + Provider<dialog_artifacts::Preload>
-            + Provider<dialog_artifacts::Speculation>
+            + Provider<dialog_corpus::Preload>
+            + Provider<dialog_corpus::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + dialog_common::Holds
             + ConditionalSync
@@ -995,8 +994,8 @@ where
             + Provider<nodes::Preload<CorpusNode>>
             + ConditionalSync
             + Provider<BlobLoad>
-            + Provider<dialog_artifacts::Preload>
-            + Provider<dialog_artifacts::Speculation>
+            + Provider<dialog_corpus::Preload>
+            + Provider<dialog_corpus::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + Holds
             + ConditionalSync
@@ -1209,8 +1208,8 @@ where
             + Provider<nodes::Preload<CorpusNode>>
             + ConditionalSync
             + Provider<BlobLoad>
-            + Provider<dialog_artifacts::Preload>
-            + Provider<dialog_artifacts::Speculation>
+            + Provider<dialog_corpus::Preload>
+            + Provider<dialog_corpus::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + Holds
             + ConditionalSync
@@ -1271,8 +1270,8 @@ where
             + Provider<nodes::Preload<CorpusNode>>
             + ConditionalSync
             + Provider<BlobLoad>
-            + Provider<dialog_artifacts::Preload>
-            + Provider<dialog_artifacts::Speculation>
+            + Provider<dialog_corpus::Preload>
+            + Provider<dialog_corpus::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + Holds
             + ConditionalSync
@@ -1313,7 +1312,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use dialog_artifacts::tree::CorpusNode;
+    use dialog_corpus::tree::CorpusNode;
     use dialog_effects::archive::Load as ArchiveLoad;
     use dialog_effects::blob::Load as BlobLoad;
     use dialog_search_tree::nodes;
@@ -1324,12 +1323,12 @@ mod tests {
     use super::Delta;
     use crate::helpers::test_repo;
     use crate::{Ephemeral, RemoteSite};
-    use dialog_artifacts::{ArtifactSelector, Changes, Entity, Value};
-    use dialog_artifacts::{NameShape, Relation as ArtifactsRelation, Symbol};
     use dialog_capability::Command;
     use dialog_capability::{Fork, Provider};
     use dialog_common::Held;
     use dialog_common::{ConditionalSend, ConditionalSync, Holds};
+    use dialog_corpus::{ArtifactSelector, Changes, Entity, Value};
+    use dialog_corpus::{NameShape, Relation as ArtifactsRelation, Symbol};
     use dialog_effects::archive::{Get, Put};
     use dialog_effects::authority::AuthorityError;
     use dialog_effects::authority::Identify;
@@ -1360,7 +1359,7 @@ mod tests {
     /// incremental maintenance for the whole subscription.
     #[dialog_common::test]
     fn it_keeps_entity_pinned_attribute_scans_head_independent() -> anyhow::Result<()> {
-        use dialog_artifacts::ArtifactSelector;
+        use dialog_corpus::ArtifactSelector;
 
         let branch_entity = Entity::new()?;
         let ordinary = Entity::new()?;
@@ -1418,8 +1417,8 @@ mod tests {
             + Provider<nodes::Preload<CorpusNode>>
             + ConditionalSync
             + Provider<BlobLoad>
-            + Provider<dialog_artifacts::Preload>
-            + Provider<dialog_artifacts::Speculation>
+            + Provider<dialog_corpus::Preload>
+            + Provider<dialog_corpus::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSend
             + Holds
@@ -2802,7 +2801,7 @@ mod tests {
         //! Derived concepts + attributes shared by the incremental
         //! maintenance tests below.
 
-        use dialog_artifacts::Entity;
+        use dialog_corpus::Entity;
         use dialog_query::{Attribute, Concept};
 
         /// A badge number (`credential/badge`).
@@ -2971,7 +2970,7 @@ mod tests {
     }
 
     /// Stage the `dialog.rule/*` facts that persist a deductive rule
-    /// durably — a rule is a [`Statement`](dialog_artifacts::Statement),
+    /// durably — a rule is a [`Statement`](dialog_corpus::Statement),
     /// so installing it is asserting it.
     fn with_rule<'t>(
         transaction: crate::Transaction<&'t crate::Branch>,
@@ -4668,7 +4667,7 @@ mod tests {
     /// asserts the new one, without a recompute.
     #[dialog_common::test]
     async fn it_maintains_a_session_replace() -> anyhow::Result<()> {
-        use dialog_artifacts::{Changes, Update as _};
+        use dialog_corpus::{Changes, Update as _};
 
         let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
@@ -4681,7 +4680,7 @@ mod tests {
                 "person/name".parse().expect("attribute"),
                 here.clone(),
                 Value::String(value.into()),
-                dialog_artifacts::Pick::Last,
+                dialog_corpus::Pick::Last,
             );
             changes
         };
@@ -4900,7 +4899,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_does_not_recompute_on_unrelated_overlay_writes() -> anyhow::Result<()> {
         use crate::schema;
-        use dialog_artifacts::{Changes, Update as _};
+        use dialog_corpus::{Changes, Update as _};
         use dialog_query::Query;
 
         let (operator, profile) = test_session_with_peer().await;
@@ -4939,7 +4938,7 @@ mod tests {
                 "sync/status".parse()?,
                 here.clone(),
                 Value::String(status.into()),
-                dialog_artifacts::Pick::Last,
+                dialog_corpus::Pick::Last,
             );
             branch.overlay().assert(changes)?;
             let site = Entity::new()?;
@@ -4986,7 +4985,7 @@ mod tests {
     /// clear. None of it recomputes.
     #[dialog_common::test]
     async fn it_agrees_with_a_fresh_evaluation_through_overlay_churn() -> anyhow::Result<()> {
-        use dialog_artifacts::{Changes, Update as _};
+        use dialog_corpus::{Changes, Update as _};
 
         let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
@@ -5019,7 +5018,7 @@ mod tests {
                 "person/name".parse().expect("attribute"),
                 of.clone(),
                 Value::String(is.into()),
-                dialog_artifacts::Pick::Last,
+                dialog_corpus::Pick::Last,
             );
             changes
         };
@@ -5189,7 +5188,7 @@ mod tests {
             ..default.clone()
         };
         let alice = Entity::new()?;
-        let fact = dialog_artifacts::Artifact {
+        let fact = dialog_corpus::Artifact {
             the: "person/bio".parse()?,
             of: alice.clone(),
             is: Value::String("x".repeat(default.inline_n as usize + 1)),
@@ -5197,14 +5196,14 @@ mod tests {
         };
         let demand = super::Demand::new();
         demand.record(
-            &dialog_artifacts::ArtifactSelector::new()
+            &dialog_corpus::ArtifactSelector::new()
                 .the(fact.the.clone())
                 .is(fact.is.clone()),
             &inlining,
         );
         assert_eq!(demand.manifest(), Some(inlining.clone()));
         assert!(
-            !demand.covers(&dialog_artifacts::ValueKey::from_artifact(&fact, &default).into_key()),
+            !demand.covers(&dialog_corpus::ValueKey::from_artifact(&fact, &default).into_key()),
             "keyed under the default manifest the fact spills and falls outside the cover"
         );
 
@@ -5390,8 +5389,8 @@ mod tests {
     impl Fault for nodes::Read<CorpusNode> {}
     impl Fault for nodes::Preload<CorpusNode> {}
     impl Fault for nodes::Write<CorpusNode> {}
-    impl Fault for dialog_artifacts::Preload {}
-    impl Fault for dialog_artifacts::Speculation {}
+    impl Fault for dialog_corpus::Preload {}
+    impl Fault for dialog_corpus::Speculation {}
     impl Fault for Fork<RemoteSite, Resolve> {}
 
     /// An env that forwards to `inner` and fails every command whose

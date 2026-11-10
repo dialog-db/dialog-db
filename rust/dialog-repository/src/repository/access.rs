@@ -37,19 +37,19 @@
 //!   any not-yet-upgraded code path. A rerun after a partial failure
 //!   re-skips by content address and drains the remainder.
 
-use dialog_artifacts::tree::CorpusNode;
+use dialog_corpus::tree::CorpusNode;
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::blob::Load as BlobLoad;
 use dialog_search_tree::nodes;
 use std::collections::BTreeMap;
 
 use crate::RemoteSite;
-use dialog_artifacts::Entity;
 use dialog_capability::access::{
     Access as AccessAttenuation, AuthorizeError, Certificate as _, Export, Forget,
 };
 use dialog_capability::{Command, Fork, Provider, Resume, Subject};
 use dialog_common::{ConditionalSend, ConditionalSync, Held, Holdings, Holds};
+use dialog_corpus::Entity;
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify};
 use dialog_effects::blob::Write as BlobWrite;
@@ -329,8 +329,8 @@ mod tests {
     use super::*;
     use crate::DELEGATION_AUDIENCE;
     use anyhow::Result;
-    use dialog_artifacts::{ArtifactSelector, Value};
     use dialog_capability::access::Retain;
+    use dialog_corpus::{ArtifactSelector, Value};
     use dialog_credentials::Ed25519Signer;
     use dialog_effects::storage::Location;
     use dialog_peer::Peer;

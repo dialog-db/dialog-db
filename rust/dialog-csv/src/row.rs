@@ -1,9 +1,9 @@
 use base58::{FromBase58, ToBase58};
-use dialog_artifacts::{Artifact, Cause, Entity, Relation, Value};
+use dialog_corpus::{Artifact, Cause, Entity, Relation, Value};
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 
-use dialog_artifacts::DialogArtifactsError;
+use dialog_corpus::DialogCorpusError;
 
 /// Intermediate CSV row representation.
 ///
@@ -34,9 +34,9 @@ fn value_to_parts(value: &Value) -> (&'static str, String) {
     }
 }
 
-fn parts_to_value(value_type: &str, is: &str) -> Result<Value, DialogArtifactsError> {
-    fn parse_err<E: std::fmt::Debug>(e: E) -> DialogArtifactsError {
-        DialogArtifactsError::InvalidValue(format!("{:?}", e))
+fn parts_to_value(value_type: &str, is: &str) -> Result<Value, DialogCorpusError> {
+    fn parse_err<E: std::fmt::Debug>(e: E) -> DialogCorpusError {
+        DialogCorpusError::InvalidValue(format!("{:?}", e))
     }
 
     match value_type {
@@ -44,28 +44,28 @@ fn parts_to_value(value_type: &str, is: &str) -> Result<Value, DialogArtifactsEr
         "entity" => Ok(Value::Entity(Entity::from_str(is)?)),
         "boolean" => {
             Ok(Value::Boolean(bool::from_str(is).map_err(|e| {
-                DialogArtifactsError::InvalidValue(e.to_string())
+                DialogCorpusError::InvalidValue(e.to_string())
             })?))
         }
         "text" => Ok(Value::String(is.to_owned())),
         "natural" => {
             Ok(Value::UnsignedInt(is.parse().map_err(|e| {
-                DialogArtifactsError::InvalidValue(format!("{e}"))
+                DialogCorpusError::InvalidValue(format!("{e}"))
             })?))
         }
         "integer" => {
             Ok(Value::SignedInt(is.parse().map_err(|e| {
-                DialogArtifactsError::InvalidValue(format!("{e}"))
+                DialogCorpusError::InvalidValue(format!("{e}"))
             })?))
         }
         "float" => {
             Ok(Value::Float(is.parse().map_err(|e| {
-                DialogArtifactsError::InvalidValue(format!("{e}"))
+                DialogCorpusError::InvalidValue(format!("{e}"))
             })?))
         }
         "record" => Ok(Value::Record(is.from_base58().map_err(parse_err)?)),
         "attribute" => Ok(Value::Symbol(Relation::from_str(is)?)),
-        _ => Err(DialogArtifactsError::InvalidValue(format!(
+        _ => Err(DialogCorpusError::InvalidValue(format!(
             "unknown value type: {value_type}"
         ))),
     }
@@ -85,7 +85,7 @@ impl From<&Artifact> for CsvRow {
 }
 
 impl TryFrom<CsvRow> for Artifact {
-    type Error = DialogArtifactsError;
+    type Error = DialogCorpusError;
 
     fn try_from(row: CsvRow) -> Result<Self, Self::Error> {
         let the = Relation::from_str(&row.the)?;
@@ -96,12 +96,12 @@ impl TryFrom<CsvRow> for Artifact {
             .filter(|s| !s.is_empty())
             .map(|s| {
                 let bytes = s.from_base58().map_err(|e| {
-                    DialogArtifactsError::InvalidReference(format!("invalid base58: {:?}", e))
+                    DialogCorpusError::InvalidReference(format!("invalid base58: {:?}", e))
                 })?;
                 let mut hash = [0u8; 32];
                 let len = bytes.len().min(32);
                 hash[..len].copy_from_slice(&bytes[..len]);
-                Ok::<Cause, DialogArtifactsError>(Cause::from(hash))
+                Ok::<Cause, DialogCorpusError>(Cause::from(hash))
             })
             .transpose()?;
 

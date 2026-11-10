@@ -11,8 +11,8 @@ use crate::{
 };
 use anyhow::Result;
 use base58::ToBase58;
-use dialog_artifacts::{Artifact, Entity, Relation, Value};
 use dialog_capability::Subject;
+use dialog_corpus::{Artifact, Entity, Relation, Value};
 use dialog_credentials::{Ed25519Signer, SignerCredential};
 use dialog_effects::credential::CredentialError;
 use dialog_effects::storage::{Directory, Location};

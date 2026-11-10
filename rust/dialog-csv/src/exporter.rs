@@ -1,6 +1,6 @@
 use async_trait::async_trait;
-use dialog_artifacts::Exporter;
-use dialog_artifacts::{Artifact, DialogArtifactsError};
+use dialog_corpus::Exporter;
+use dialog_corpus::{Artifact, DialogCorpusError};
 use tokio::io::AsyncWrite;
 
 use crate::row::CsvRow;
@@ -31,15 +31,15 @@ impl<W: AsyncWrite + Unpin> From<W> for CsvExporter<W> {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 // bare-send-ok: csv_async bounds its writers on real Send on every target
 impl<W: AsyncWrite + Unpin + Send> Exporter for CsvExporter<W> {
-    async fn write(&mut self, artifact: &Artifact) -> Result<(), DialogArtifactsError> {
+    async fn write(&mut self, artifact: &Artifact) -> Result<(), DialogCorpusError> {
         let row = CsvRow::from(artifact);
         self.writer
             .serialize(row)
             .await
-            .map_err(|e| DialogArtifactsError::Export(e.to_string()))
+            .map_err(|e| DialogCorpusError::Export(e.to_string()))
     }
 
-    async fn close(&mut self) -> Result<(), DialogArtifactsError> {
+    async fn close(&mut self) -> Result<(), DialogCorpusError> {
         // Push everything the serializer buffered down to the underlying
         // writer. Without this the tail of an export sits in the internal
         // buffer, so a reader that opens the destination right after close
@@ -48,6 +48,6 @@ impl<W: AsyncWrite + Unpin + Send> Exporter for CsvExporter<W> {
         self.writer
             .flush()
             .await
-            .map_err(|e| DialogArtifactsError::Export(e.to_string()))
+            .map_err(|e| DialogCorpusError::Export(e.to_string()))
     }
 }

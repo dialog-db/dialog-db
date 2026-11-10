@@ -2,7 +2,7 @@
 
 use std::{collections::VecDeque, sync::mpsc::Sender};
 
-use dialog_artifacts::{Datum, DialogArtifactsError, Index, Key, State};
+use dialog_corpus::{Datum, DialogCorpusError, Index, Key, State};
 use dialog_search_tree::{Accessor, NodeBody, PersistentNode};
 
 use super::store::WorkerMessage;
@@ -130,7 +130,7 @@ impl ArtifactsTreeAnalysis {
 
             tx.send(WorkerMessage::Stats(stats)).unwrap();
 
-            Ok(()) as Result<_, DialogArtifactsError>
+            Ok(()) as Result<_, DialogCorpusError>
         });
     }
 }

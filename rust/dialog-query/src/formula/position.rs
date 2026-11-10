@@ -4,7 +4,7 @@
 //! carries the position as its predicate — `todo.item/<position>` of
 //! the collection entity, valued by the member — so one EAV range scan
 //! yields the members already sorted (see
-//! `notes/ordered-relations.md` and `dialog_artifacts::position`).
+//! `notes/ordered-relations.md` and `dialog_corpus::position`).
 //! These formulas are the query-side surface:
 //!
 //! - [`Position`] (`dialog/position`) derives the position for a
@@ -23,10 +23,10 @@
 //! Both are pure per-row computation — ordinary [`Formula`]s, sound
 //! under differential subscriptions with no extra machinery.
 
-use dialog_artifacts::position as fractional;
-use dialog_artifacts::position::Bias;
+use dialog_corpus::position as fractional;
+use dialog_corpus::position::Bias;
 
-use dialog_artifacts::Relation as ArtifactsRelation;
+use dialog_corpus::Relation as ArtifactsRelation;
 
 use crate::Formula;
 use crate::artifact::Entity;
@@ -113,7 +113,7 @@ impl PositionParts {
     /// projects nothing.
     pub fn compute(input: Input<Self>) -> Vec<Self> {
         match input.of.split() {
-            Ok((domain, dialog_artifacts::Name::Position(position))) => vec![PositionParts {
+            Ok((domain, dialog_corpus::Name::Position(position))) => vec![PositionParts {
                 of: input.of.clone(),
                 namespace: domain.to_string(),
                 position: position.as_str().to_string(),

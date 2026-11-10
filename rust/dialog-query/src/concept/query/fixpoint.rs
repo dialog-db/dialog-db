@@ -420,7 +420,7 @@ pub fn rank_successions(rows: &mut [Answer], field: &str) {
             }
             let standing = rows[*index]
                 .standing
-                .get_or_insert_with(|| Standing::new(None, dialog_artifacts::Cause([0; 32])));
+                .get_or_insert_with(|| Standing::new(None, dialog_corpus::Cause([0; 32])));
             standing.succession = rank[at];
         }
     }
