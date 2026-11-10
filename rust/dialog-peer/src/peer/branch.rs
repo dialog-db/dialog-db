@@ -16,13 +16,16 @@
 
 use super::{Mode, Peer};
 use core::fmt::Display;
+use dialog_artifacts::tree::CorpusNode;
 use dialog_capability::{Capability, Fork, Policy, Provider, Subject};
 use dialog_common::Blake3Hash;
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_effects::Void;
+use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::prelude::{ArchiveScope, GetBlockExt as _};
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify, OperatorExt as _};
+use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::{Import as BlobImport, Read as BlobRead};
 use dialog_effects::branch::{self as branch_fx, BranchError, BranchRecord};
 use dialog_effects::memory::{MemoryError, Publish, Resolve, Retract};
@@ -33,6 +36,7 @@ use dialog_repository::{
     Branch, LEGACY_EMPTY_ROOT, PublishError, REGISTRY, RemoteSite, RepositoryMemoryExt,
     RetractError,
 };
+use dialog_search_tree::nodes;
 
 /// The environment a branch operation runs against.
 ///
@@ -45,12 +49,20 @@ pub trait BranchEnv:
     + Provider<BlobImport>
     + Provider<Put>
     + Provider<Import>
+    + Provider<nodes::Write<CorpusNode>>
+    + ConditionalSync
     + Provider<Resolve>
     + Provider<Publish>
     + Provider<Retract>
     + Provider<Identify>
     + Provider<Attest>
-    + Provider<dialog_repository::Hydrate>
+    + Provider<ArchiveLoad>
+    + Provider<nodes::Write<CorpusNode>>
+    + ConditionalSync
+    + Provider<nodes::Read<CorpusNode>>
+    + Provider<nodes::Preload<CorpusNode>>
+    + ConditionalSync
+    + Provider<BlobLoad>
     + Provider<dialog_artifacts::Preload>
     + Provider<dialog_artifacts::Speculation>
     + Provider<Fork<RemoteSite, Resolve>>
@@ -65,12 +77,20 @@ impl<T> BranchEnv for T where
         + Provider<BlobImport>
         + Provider<Put>
         + Provider<Import>
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
         + Provider<Resolve>
         + Provider<Publish>
         + Provider<Retract>
         + Provider<Identify>
         + Provider<Attest>
-        + Provider<dialog_repository::Hydrate>
+        + Provider<ArchiveLoad>
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
+        + Provider<BlobLoad>
         + Provider<dialog_artifacts::Preload>
         + Provider<dialog_artifacts::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
@@ -100,8 +120,7 @@ where
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl<S, M: Mode> Provider<branch_fx::Create> for Peer<S, M>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
@@ -196,8 +215,7 @@ where
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl<S, M: Mode> Provider<branch_fx::List> for Peer<S, M>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
@@ -216,8 +234,7 @@ where
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl<S, M: Mode> Provider<branch_fx::Delete> for Peer<S, M>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
@@ -322,8 +339,7 @@ where
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl<S, M: Mode> Provider<branch_fx::Switch> for Peer<S, M>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,

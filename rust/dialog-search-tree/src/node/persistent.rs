@@ -221,6 +221,16 @@ where
 }
 
 impl<Key, Value> PersistentNode<Key, Value> {
+    /// Returns the content hash of this node.
+    pub fn hash(&self) -> &Blake3Hash {
+        self.buffer.blake3_hash()
+    }
+
+    /// Returns the underlying buffer containing serialized node data.
+    pub fn buffer(&self) -> &Buffer {
+        &self.buffer
+    }
+
     /// The length of this node's stored bytes: what a cache charges for
     /// holding it.
     pub(crate) fn size(&self) -> usize {
@@ -258,16 +268,6 @@ where
         Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
     >,
 {
-    /// Returns the content hash of this node.
-    pub fn hash(&self) -> &Blake3Hash {
-        self.buffer.blake3_hash()
-    }
-
-    /// Returns the underlying buffer containing serialized node data.
-    pub fn buffer(&self) -> &Buffer {
-        &self.buffer
-    }
-
     /// Converts this node into a [`Link`] referencing it, carrying the
     /// separator at the subtree's left edge.
     ///

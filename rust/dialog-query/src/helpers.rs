@@ -24,18 +24,21 @@
 // own lib under the `dialog_query` name (its extern prelude), so bare
 // `dialog_query::…` resolves to the real crate in both.
 use anyhow::Result;
-use async_trait::async_trait;
 use dialog_artifacts::selector::Constrained;
+use dialog_artifacts::tree::CorpusNode;
 use dialog_artifacts::{
-    Artifact, ArtifactSelector, ArtifactStream, DialogArtifactsError, Instruction, LoadBlob,
+    Artifact, ArtifactSelector, ArtifactStream, DialogArtifactsError, Instruction,
     Relation as ArtifactsRelation, Select, Value,
 };
 use dialog_capability::{Fork, Provider, Subject};
 use dialog_common::Buffer;
-use dialog_common::{ConditionalSync, Holds};
+use dialog_common::{ConditionalSync, Held, Holdings, Holds};
+use dialog_effects::archive::ArchiveError;
+use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify};
 use dialog_effects::blob::Import as BlobImport;
+use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::Read as BlobRead;
 use dialog_effects::blob::Size as BlobSize;
 use dialog_effects::memory::{List, Publish, Resolve};
@@ -45,11 +48,11 @@ use dialog_effects::storage::Location;
 use dialog_peer::helpers::test_owned;
 use dialog_peer::helpers::{generate_data, open_peer, test_storage, unique_name};
 use dialog_peer::{Peer, Session};
-use dialog_repository::{
-    Branch, HeldCaches, NetworkedIndex, PeersEnv, RemoteSite, Repository, RepositoryExt as _,
-};
+use dialog_repository::{Branch, HeldCaches, PeersEnv, RemoteSite, Repository, RepositoryExt as _};
+use dialog_search_tree::DialogSearchTreeError;
 use dialog_search_tree::audit as tree_audit;
-use dialog_search_tree::{DialogSearchTreeError, LoadBlock};
+use dialog_search_tree::nodes;
+
 use dialog_storage::Blake3Hash;
 use dialog_storage::dup_audit;
 use dialog_storage::provider::storage::{Storage, VolatileSpace};
@@ -306,13 +309,13 @@ pub struct JoinRun {
 ///
 /// A planned join evaluates each premise (and re-evaluates inner premises
 /// once per outer binding) through a *separate* `Provider<Select>::execute`
-/// call, and each call builds its own [`NetworkedIndex`] over the borrowed
-/// operator. To attribute every one of those block reads to a single
-/// query we cannot reuse one journaling store instance (its backend
-/// would have to outlive each per-call index borrow). Instead the journal
-/// is this small shared accumulator: each call wraps its fresh index in a
-/// [`CountingStore`] that holds a clone of the same `Arc`, so all reads
-/// fold into one counter cleared once before the query and read once after.
+/// call, and each call reads through its own [`CountingStore`] over the
+/// borrowed operator. To attribute every one of those block reads to a
+/// single query we cannot reuse one journaling store instance (its backend
+/// would have to outlive each per-call borrow). Instead the journal is this
+/// small shared accumulator: each call's [`CountingStore`] holds a clone of
+/// the same `Arc`, so all reads fold into one counter cleared once before
+/// the query and read once after.
 #[derive(Clone, Default)]
 pub struct ReadJournal {
     state: Arc<Mutex<JournalState>>,
@@ -354,31 +357,53 @@ impl ReadJournal {
 }
 
 /// A block source that records every successful load, through either lane,
-/// into a shared
-/// [`ReadJournal`] before delegating to the wrapped backend.
+/// into a shared [`ReadJournal`] before delegating to the wrapped backend.
 ///
 /// Built fresh per `Provider<Select>` call but parameterized over a cloned
 /// `ReadJournal`, so reads from every premise select accumulate together.
+/// Each one holds a node cache of its own, as the index each call read
+/// through did: a node one premise select read is answered from memory for
+/// the rest of that select, and read again by the next. A node answered from
+/// memory is not a read, so it is not counted.
 #[derive(Clone)]
 pub struct CountingStore<Backend> {
     backend: Backend,
     journal: ReadJournal,
+    holdings: Holdings,
 }
 
 impl<Backend> CountingStore<Backend> {
     fn new(backend: Backend, journal: ReadJournal) -> Self {
-        Self { backend, journal }
+        Self {
+            backend,
+            journal,
+            holdings: Holdings::default(),
+        }
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Backend> Provider<LoadBlock> for CountingStore<Backend>
+/// Holds this store's own node cache, and nothing of the backend's.
+impl<Backend> Holds for CountingStore<Backend> {
+    fn held(&self, key: &str) -> Option<Held> {
+        self.holdings.held(key)
+    }
+
+    fn hold(&self, key: String, handle: Held) {
+        self.holdings.hold(key, handle)
+    }
+
+    fn held_or(&self, key: &str, make: &dyn Fn() -> Held) -> Held {
+        self.holdings.held_or(key, make)
+    }
+}
+
+#[dialog_capability::provider]
+impl<Backend> Provider<ArchiveLoad> for CountingStore<Backend>
 where
-    Backend: Provider<LoadBlock> + ConditionalSync,
+    Backend: Provider<ArchiveLoad> + ConditionalSync,
 {
-    async fn execute(&self, load: LoadBlock) -> Result<Option<Buffer>, DialogSearchTreeError> {
-        let hash = load.hash.clone();
+    async fn execute(&self, load: ArchiveLoad) -> Result<Option<Buffer>, ArchiveError> {
+        let hash = load.digest.clone();
         let block = load.perform(&self.backend).await?;
         if block.is_some() {
             self.journal.record(hash.as_bytes());
@@ -387,14 +412,38 @@ where
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Backend> Provider<LoadBlob> for CountingStore<Backend>
+// A node read is answered through this store's own counted loads, into the
+// node cache it holds; a write goes through the backend's import and keeps
+// the nodes here.
+dialog_search_tree::reads_nodes_through_blocks!(
+    impl[Backend,] CountingStore<Backend>
+    where [Backend: Provider<ArchiveLoad> + ConditionalSync,]
+);
+dialog_search_tree::writes_nodes_through_blocks!(
+    impl[Backend,] CountingStore<Backend>
+    where [Backend: Provider<Import> + ConditionalSync,]
+);
+
+#[dialog_capability::provider]
+impl<Backend> Provider<Import> for CountingStore<Backend>
 where
-    Backend: Provider<LoadBlob> + ConditionalSync,
+    Backend: Provider<Import> + ConditionalSync,
 {
-    async fn execute(&self, load: LoadBlob) -> Result<Option<Buffer>, DialogArtifactsError> {
-        let hash = load.hash.clone();
+    async fn execute(
+        &self,
+        import: dialog_capability::Capability<Import>,
+    ) -> Result<(), ArchiveError> {
+        import.perform(&self.backend).await
+    }
+}
+
+#[dialog_capability::provider]
+impl<Backend> Provider<BlobLoad> for CountingStore<Backend>
+where
+    Backend: Provider<BlobLoad> + ConditionalSync,
+{
+    async fn execute(&self, load: BlobLoad) -> Result<Option<Buffer>, ArchiveError> {
+        let hash = load.digest.clone();
         let blob = load.perform(&self.backend).await?;
         if blob.is_some() {
             self.journal.record(hash.as_bytes());
@@ -445,15 +494,16 @@ impl<'a, Env> JoinEnv<'a, Env> {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl<'a, Env> Provider<Select<'a>> for JoinEnv<'a, Env>
 where
     Env: Provider<BlobRead>
         + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
-        + Provider<dialog_repository::Hydrate>
+        + Provider<Import>
+        + Provider<ArchiveLoad>
+        + Provider<BlobLoad>
         + Provider<dialog_artifacts::Preload>
         + Provider<dialog_artifacts::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
@@ -465,30 +515,30 @@ where
         input: ArtifactSelector<Constrained>,
     ) -> Result<ArtifactStream<'a>, DialogArtifactsError> {
         let select = self.branch.claims().select(input);
-        let store = NetworkedIndex::new(self.operator, select.catalog(), None);
+        let store = self.operator;
         let counting = CountingStore::new(store, self.journal.clone());
         let stream = select.execute(counting).await?;
         Ok(Box::pin(stream))
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl<Env: ConditionalSync> Provider<SelectRules> for JoinEnv<'_, Env> {
     async fn execute(&self, input: ConceptDescriptor) -> Result<ConceptRules, EvaluationError> {
         self.rules.acquire(&input)
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl<Env> Provider<dialog_artifacts::Estimate> for JoinEnv<'_, Env>
 where
     Env: Provider<BlobRead>
         + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
-        + Provider<dialog_repository::Hydrate>
+        + Provider<Import>
+        + Provider<ArchiveLoad>
+        + Provider<BlobLoad>
         + Provider<dialog_artifacts::Preload>
         + Provider<dialog_artifacts::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
@@ -502,7 +552,7 @@ where
         // Route the estimate's root read through the same counting store as
         // the scans, so a bench sees the block it costs.
         let select = self.branch.claims().select(input);
-        let store = NetworkedIndex::new(self.operator, select.catalog(), None);
+        let store = self.operator;
         let counting = CountingStore::new(store, self.journal.clone());
         select.estimate(counting).await
     }
@@ -510,58 +560,78 @@ where
 
 // Preload hints have no listener in the bench env: refuse them so the
 // measured read counts stay exactly the demand reads.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl<Env: ConditionalSync> Provider<dialog_artifacts::Preload> for JoinEnv<'_, Env> {
     async fn execute(&self, _input: dialog_artifacts::PreloadRequest) -> bool {
         false
     }
 }
 
-// Raw node loads for resolver premises: read the branch's archive
-// catalog through the same counting store scans use, so resolver
-// block reads land in the shared read journal too.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Env> Provider<LoadBlock> for JoinEnv<'_, Env>
+// Raw node loads for resolver premises, which ask for a block anywhere
+// the query reads: read the branch's archive catalog through the same
+// counting store scans use, so resolver block reads land in the shared
+// read journal too.
+#[dialog_capability::provider]
+impl<Env> Provider<ArchiveLoad> for JoinEnv<'_, Env>
 where
-    Env: Provider<Get>
-        + Provider<Put>
-        + Provider<Resolve>
-        + Provider<dialog_repository::Hydrate>
-        + Provider<dialog_artifacts::Preload>
-        + Provider<dialog_artifacts::Speculation>
-        + Provider<Fork<RemoteSite, Resolve>>
-        + ConditionalSync
-        + 'static,
+    Env: Provider<ArchiveLoad> + ConditionalSync,
 {
-    async fn execute(&self, load: LoadBlock) -> Result<Option<Buffer>, DialogSearchTreeError> {
-        let store = NetworkedIndex::new(self.operator, self.branch.archive().index(), None);
-        let counting = CountingStore::new(store, self.journal.clone());
-        load.perform(&counting).await
+    async fn execute(&self, load: ArchiveLoad) -> Result<Option<Buffer>, ArchiveError> {
+        let counting = CountingStore::new(self.operator, self.journal.clone());
+        ArchiveLoad {
+            catalog: self.branch.archive().index(),
+            ..load
+        }
+        .perform(&counting)
+        .await
+    }
+}
+
+// Node reads for the scans and resolver premises, through the same
+// counting store, in the branch's catalog.
+#[dialog_capability::provider]
+impl<Env> Provider<nodes::Read<CorpusNode>> for JoinEnv<'_, Env>
+where
+    Env: Provider<ArchiveLoad> + ConditionalSync,
+{
+    async fn execute(
+        &self,
+        read: nodes::Read<CorpusNode>,
+    ) -> Result<Option<CorpusNode>, DialogSearchTreeError> {
+        let counting = CountingStore::new(self.operator, self.journal.clone());
+        let mut line = read;
+        line.catalog = self.branch.archive().index();
+        line.perform(&counting).await
+    }
+}
+
+#[dialog_capability::provider]
+impl<Env> Provider<nodes::Preload<CorpusNode>> for JoinEnv<'_, Env>
+where
+    Env: Provider<ArchiveLoad> + ConditionalSync,
+{
+    async fn execute(&self, preload: nodes::Preload<CorpusNode>) {
+        let counting = CountingStore::new(self.operator, self.journal.clone());
+        let mut line = preload;
+        line.catalog = self.branch.archive().index();
+        line.perform(&counting).await
     }
 }
 
 // Spilled-value loads for `tree/value`, through the same counting store.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Env> Provider<LoadBlob> for JoinEnv<'_, Env>
+#[dialog_capability::provider]
+impl<Env> Provider<BlobLoad> for JoinEnv<'_, Env>
 where
-    Env: Provider<BlobRead>
-        + Provider<Get>
-        + Provider<Put>
-        + Provider<Resolve>
-        + Provider<dialog_repository::Hydrate>
-        + Provider<dialog_artifacts::Preload>
-        + Provider<dialog_artifacts::Speculation>
-        + Provider<Fork<RemoteSite, Resolve>>
-        + ConditionalSync
-        + 'static,
+    Env: Provider<BlobLoad> + ConditionalSync,
 {
-    async fn execute(&self, load: LoadBlob) -> Result<Option<Buffer>, DialogArtifactsError> {
-        let store = NetworkedIndex::new(self.operator, self.branch.archive().index(), None);
-        let counting = CountingStore::new(store, self.journal.clone());
-        load.perform(&counting).await
+    async fn execute(&self, load: BlobLoad) -> Result<Option<Buffer>, ArchiveError> {
+        let counting = CountingStore::new(self.operator, self.journal.clone());
+        BlobLoad {
+            archive: self.branch.archive(),
+            ..load
+        }
+        .perform(&counting)
+        .await
     }
 }
 
@@ -679,7 +749,13 @@ where
         + Provider<SpaceCreate>
         + Provider<List>
         + PeersEnv
-        + Provider<dialog_repository::Hydrate>
+        + Provider<ArchiveLoad>
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
+        + Provider<BlobLoad>
         + Provider<dialog_artifacts::Preload>
         + Provider<dialog_artifacts::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
@@ -750,7 +826,7 @@ where
             .claims()
             .select(ArtifactSelector::new().the(the))
             .to_owned();
-        let store = NetworkedIndex::new(&self.operator, select.catalog(), None);
+        let store = &self.operator;
         let journal = ReadJournal::default();
         let counting = CountingStore::new(store, journal.clone());
 
@@ -1800,7 +1876,13 @@ mod test {
             + Provider<SpaceCreate>
             + Provider<List>
             + PeersEnv
-            + Provider<dialog_repository::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
@@ -1925,7 +2007,13 @@ mod test {
             + Provider<SpaceCreate>
             + Provider<List>
             + PeersEnv
-            + Provider<dialog_repository::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
@@ -2060,7 +2148,13 @@ mod test {
             + Provider<SpaceCreate>
             + Provider<List>
             + PeersEnv
-            + Provider<dialog_repository::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
@@ -2090,8 +2184,8 @@ mod test {
             .claims()
             .select(ArtifactSelector::new().the(the))
             .to_owned();
-        let store = NetworkedIndex::new(env.operator(), select.catalog(), None);
-        let stats = distribution::capture(&root, &store).await?;
+        let store = env.operator();
+        let stats = distribution::capture(&select.catalog(), &root, store).await?;
         distribution::report(&format!("se-replay-{limit}"), &stats);
         Ok(())
     }
@@ -2437,7 +2531,13 @@ where
         + Provider<SpaceCreate>
         + Provider<List>
         + PeersEnv
-        + Provider<dialog_repository::Hydrate>
+        + Provider<ArchiveLoad>
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
+        + Provider<BlobLoad>
         + Provider<dialog_artifacts::Preload>
         + Provider<dialog_artifacts::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>

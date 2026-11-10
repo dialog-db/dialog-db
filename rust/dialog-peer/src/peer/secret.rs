@@ -1303,8 +1303,7 @@ impl<S: PeerSpace> SiteSecrets for Peer<S, Local> {
 /// space under the site's name: the peer, which does the syncing, opens
 /// it, and nothing else does. A session is refused: it writes nothing to
 /// its peer's space and is handed no key of its peer's.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl<S, M: Mode> Provider<credential::Save<SiteSecret>> for Peer<S, M>
 where
     S: PeerSpace,
@@ -1334,8 +1333,7 @@ where
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl<S, M: Mode> Provider<credential::Load<SiteSecret>> for Peer<S, M>
 where
     S: PeerSpace,
@@ -1375,8 +1373,7 @@ where
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl<S, M: Mode> Provider<credential::Retract<SiteSecret>> for Peer<S, M>
 where
     S: PeerSpace,

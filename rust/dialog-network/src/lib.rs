@@ -21,6 +21,9 @@
 mod hydrate;
 pub use hydrate::{Hydrate, HydrationLane, HydrationRequest, HydrationScheduler};
 
+mod routes;
+pub use routes::{Loan, Route, Routes, Routing};
+
 use dialog_capability::Site;
 use dialog_peer_iroh::channel::{Channel, Connect};
 use dialog_peer_iroh::site::Iroh;

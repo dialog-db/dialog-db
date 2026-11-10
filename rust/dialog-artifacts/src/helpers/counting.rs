@@ -1,16 +1,16 @@
+use dialog_capability::{Capability, Provider};
+use dialog_common::{Blake3Hash, Buffer, Held, Holds};
+use dialog_effects::archive::{self, ArchiveError, Get};
+use dialog_effects::blob;
+use dialog_search_tree::helpers::Blocks;
 use std::future::poll_fn;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::Poll;
 
-use async_trait::async_trait;
-use dialog_capability::Provider;
-use dialog_common::{Blake3Hash, Buffer};
-use dialog_search_tree::{DialogSearchTreeError, LoadBlock, MemoryBlocks};
+use crate::ArchiveDelta;
 
-use crate::{ArchiveDelta, DialogArtifactsError, LoadBlob};
-
-/// [`MemoryBlocks`] that count the loads reaching them, through both lanes,
+/// [`Blocks`] that count the reads reaching them, through both lanes,
 /// and how many were in flight at once.
 ///
 /// Every load yields once before it is answered, so loads polled
@@ -18,7 +18,7 @@ use crate::{ArchiveDelta, DialogArtifactsError, LoadBlob};
 /// [`peak_reads_in_flight`](Self::peak_reads_in_flight).
 #[derive(Clone, Default)]
 pub struct CountingBlocks {
-    blocks: MemoryBlocks,
+    blocks: Blocks,
     reads: Arc<AtomicUsize>,
     in_flight: Arc<AtomicUsize>,
     peak: Arc<AtomicUsize>,
@@ -74,24 +74,41 @@ impl CountingBlocks {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<LoadBlock> for CountingBlocks {
-    async fn execute(
-        &self,
-        LoadBlock { hash }: LoadBlock,
-    ) -> Result<Option<Buffer>, DialogSearchTreeError> {
-        Ok(self.load(&hash).await)
+/// Holds nothing, so every node read is a counted read. Wrap it in a
+/// [`Holding`](dialog_search_tree::helpers::Holding) to keep the nodes read.
+impl Holds for CountingBlocks {
+    fn held(&self, _key: &str) -> Option<Held> {
+        None
+    }
+
+    fn hold(&self, _key: String, _handle: Held) {}
+}
+
+#[dialog_capability::provider]
+impl Provider<archive::Load> for CountingBlocks {
+    async fn execute(&self, load: archive::Load) -> Result<Option<Buffer>, ArchiveError> {
+        Ok(self.load(&load.digest).await)
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<LoadBlob> for CountingBlocks {
-    async fn execute(
-        &self,
-        LoadBlob { hash }: LoadBlob,
-    ) -> Result<Option<Buffer>, DialogArtifactsError> {
-        Ok(self.load(&hash).await)
+/// A local-only read of a block counts as a read too.
+#[dialog_capability::provider]
+impl Provider<Get> for CountingBlocks {
+    async fn execute(&self, get: Capability<Get>) -> Result<Option<Vec<u8>>, ArchiveError> {
+        use dialog_effects::archive::prelude::GetExt as _;
+        Ok(self
+            .load(get.digest())
+            .await
+            .map(|block| block.as_ref().to_vec()))
+    }
+}
+
+dialog_search_tree::reads_nodes_through_blocks!(CountingBlocks);
+
+/// A spilled value is kept as a block, and its read is counted alike.
+#[dialog_capability::provider]
+impl Provider<blob::Load> for CountingBlocks {
+    async fn execute(&self, load: blob::Load) -> Result<Option<Buffer>, ArchiveError> {
+        Ok(self.load(&load.digest).await)
     }
 }

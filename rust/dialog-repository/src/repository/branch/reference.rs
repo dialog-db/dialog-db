@@ -61,6 +61,13 @@ impl BranchReference {
         self.cell("tracking")
     }
 
+    /// The cell recording the revision whose tree each sync base in
+    /// [`tracking`](Self::tracking) is. Replica-local, like the tracking
+    /// cell.
+    pub(crate) fn bases(&self) -> Cell<super::upstream::Bases> {
+        self.cell("bases")
+    }
+
     /// The cell releases before peers kept this branch's upstreams in.
     /// Read only by the upgrade that carries them into facts.
     pub(crate) fn legacy_upstream(&self) -> Cell<super::upstream::legacy::Upstreams> {

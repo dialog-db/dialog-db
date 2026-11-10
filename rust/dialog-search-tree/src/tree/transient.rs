@@ -13,17 +13,19 @@
 //! [`persist`](TransientTree::persist) is a pure bottom-up serializer: it makes
 //! no shape decisions, because the shape was already established at edit time.
 
+use crate::nodes::{Preload, Read};
 use crate::{
-    Accessor, BOTTOM_RANK, Buffer, Change, Delta, DialogSearchTreeError, Differential,
-    Distribution, Entry, Geometric, Hashed, IndexPieceOrigin, Key, Link, LoadBlock, Manifest, Node,
-    NodeCache, Novelty, NoveltyEntry, NoveltyOp, PersistentIndex, PersistentNode,
-    PersistentNodeBody, PersistentTree, PieceOrigin, Rank, SegmentEntry, Separator, TransientIndex,
-    TransientNode, TransientSegment, TreeWalker, Value, link_bounds, regroup_children,
-    regroup_children_reusing, regroup_entries, regroup_entries_reusing,
+    Accessor, BOTTOM_RANK, Change, Delta, DialogSearchTreeError, Differential, Distribution, Entry,
+    Geometric, Hashed, IndexPieceOrigin, Key, Link, Manifest, Node, Novelty, NoveltyEntry,
+    NoveltyOp, PersistentIndex, PersistentNode, PersistentNodeBody, PersistentTree, PieceOrigin,
+    Rank, SegmentEntry, Separator, TransientIndex, TransientNode, TransientSegment, TreeWalker,
+    Value, link_bounds, regroup_children, regroup_children_reusing, regroup_entries,
+    regroup_entries_reusing,
 };
 use async_stream::try_stream;
 use dialog_capability::Provider;
 use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync};
+use dialog_effects::archive::prelude::CatalogScope;
 use futures_core::Stream;
 use futures_util::StreamExt;
 use futures_util::stream::FuturesUnordered;
@@ -43,24 +45,27 @@ use std::{
 };
 
 /// How many of [`TransientTree::integrate`]'s changes are held in memory so
-/// the paths still ahead of the applier can be routed. Reads nothing itself.
-/// The window grows past this, up to [`OPEN_LOOKAHEAD_MAX`], while the
-/// pending changes name fewer than [`OPEN_WIDTH`] nodes to open.
+/// the paths still ahead of the applier can be opened together. Changes are
+/// small (a key and a value), so this is well under a megabyte. The window
+/// grows past this, up to [`OPEN_LOOKAHEAD_MAX`], while the pending changes
+/// name fewer than [`OPEN_WIDTH`] stored nodes to open.
 const OPEN_LOOKAHEAD: usize = 512;
 
 /// The most changes [`TransientTree::integrate`] holds in memory while it
-/// looks for nodes to open together. Changes are small (a key and a
-/// value), so this is a few megabytes at most.
+/// looks for nodes to open together: a few megabytes at most.
 const OPEN_LOOKAHEAD_MAX: usize = 32_768;
 
-/// How many distinct not-yet-read nodes the opening pass looks ahead for
-/// before it goes out. Changes stream in key order, so a window of a fixed
-/// number of them can land in one leaf when leaves hold hundreds of
-/// entries, and a pass that names one node reads the tree leaf by leaf,
-/// one round trip each: the serial chain a seeded device's first sync
-/// showed between its head reads and its download. Looking ahead until
-/// the window spans this many nodes makes the chain the tree's depth
-/// again, whatever the leaf size.
+/// How many distinct stored nodes the opening pass looks ahead for before
+/// it goes out. Changes stream in key order, so a window of a fixed number
+/// of them can land in one leaf when leaves hold hundreds of entries, and a
+/// pass that names one node reads the tree leaf by leaf, one round trip
+/// each: the serial chain a seeded device's first sync showed between its
+/// head reads and its download. Looking ahead until the window spans this
+/// many nodes makes the chain the tree's depth again, whatever the leaf
+/// size. The nodes are counted where the transient spine hands a path to
+/// the environment, whether or not the environment holds them: which it
+/// holds is its business, and a node it holds answers at once when the
+/// window opens.
 const OPEN_WIDTH: usize = 32;
 
 /// How many levels one opening pass walks before handing back to the
@@ -99,11 +104,13 @@ pub(crate) enum TransientRootParts<Key, Value> {
 
 /// A batch of in-place edits over a tree's [`Node`] spine.
 ///
-/// The edit holds no storage handle: like [`PersistentTree`], every method that
-/// may read from storage takes an environment providing [`LoadBlock`](crate::LoadBlock)
-/// as a parameter.
-/// It retains only the in-memory transient spine and the node cache; the new
-/// nodes a batch produces are written into a caller-owned [`Delta`] at
+/// The edit holds no storage handle: like [`PersistentTree`], it is a root
+/// under a catalog, and every method that may read from storage takes the
+/// environment it reads through as a parameter.
+/// It retains only the in-memory transient spine: nodes it reads are the
+/// catalog's, asked of the environment each method is given
+/// ([`nodes::Read`](crate::nodes::Read)), and the new nodes a batch
+/// produces are sealed into a caller-owned [`Delta`] at
 /// [`persist`](Self::persist) time, not held here.
 pub struct TransientTree<Key, Value, D = Geometric>
 where
@@ -116,7 +123,8 @@ where
     /// only by the first edit that descends into it, so opening neither awaits
     /// nor touches storage.
     root: TransientRoot<Key, Value>,
-    cache: NodeCache<Key, Value>,
+    /// The catalog the tree's blocks live in.
+    catalog: CatalogScope,
     /// The tree's format header, stamped into every node this batch persists
     /// and read by the boundary coin during reshaping. Every node in a tree
     /// carries the same manifest.
@@ -158,13 +166,13 @@ where
     /// all-zero hash (see [`LEGACY_EMPTY_ROOT`](crate::LEGACY_EMPTY_ROOT))
     /// names no node to read a format from, and opens as a new empty tree
     /// under [`Manifest::default`].
-    pub fn new(root: Blake3Hash, cache: NodeCache<Key, Value>) -> Self {
+    pub fn new(catalog: CatalogScope, root: Blake3Hash) -> Self {
         if root.as_bytes() == &crate::LEGACY_EMPTY_ROOT {
-            return Self::empty_with_manifest(cache, Manifest::default());
+            return Self::empty_with_manifest(catalog, Manifest::default());
         }
         Self {
             root: TransientRoot::Unloaded(root),
-            cache,
+            catalog,
             manifest: None,
             distribution: PhantomData,
         }
@@ -174,10 +182,10 @@ where
     /// `manifest` — no root exists to load, in memory or in storage, and
     /// persisting the batch unedited writes the canonical manifest-carrying
     /// empty node (see [`persist_empty_root`]).
-    pub fn empty_with_manifest(cache: NodeCache<Key, Value>, manifest: Manifest) -> Self {
+    pub fn empty_with_manifest(catalog: CatalogScope, manifest: Manifest) -> Self {
         Self {
             root: TransientRoot::Empty,
-            cache,
+            catalog,
             manifest: Some(manifest),
             distribution: PhantomData,
         }
@@ -191,26 +199,21 @@ where
     /// expected one and fails on a mismatch. For a caller that already knows
     /// the format and wants a tree written under another one refused rather
     /// than edited.
-    pub fn with_manifest(
-        root: Blake3Hash,
-        cache: NodeCache<Key, Value>,
-        manifest: Manifest,
-    ) -> Self {
+    pub fn with_manifest(catalog: CatalogScope, root: Blake3Hash, manifest: Manifest) -> Self {
         // A root stored by a version that recorded the empty tree as the
         // all-zero hash (see `LEGACY_EMPTY_ROOT`) opens as the empty tree.
         if root.as_bytes() == &crate::LEGACY_EMPTY_ROOT {
-            return Self::empty_with_manifest(cache, manifest);
+            return Self::empty_with_manifest(catalog, manifest);
         }
         Self {
             root: TransientRoot::Unloaded(root),
-            cache,
+            catalog,
             manifest: Some(manifest),
             distribution: PhantomData,
         }
     }
 
-    /// Creates an edit batch over an already-loaded transient `node`, sharing
-    /// `cache`. Used by the hitchhiker tree to replay leaf-bound ops directly on
+    /// Creates an edit batch over an already-loaded transient `node`. Used by the hitchhiker tree to replay leaf-bound ops directly on
     /// its live spine, with no serialization round-trip.
     ///
     /// The caller hands over a live transient node, not a hash, so there is no
@@ -219,16 +222,21 @@ where
     /// it first loads the tree's root, or was opened with when the tree was
     /// empty (see [`HitchhikerTree::persist`](crate::HitchhikerTree::persist)).
     pub(crate) fn from_loaded(
+        catalog: CatalogScope,
         node: TransientNode<Key, Value>,
-        cache: NodeCache<Key, Value>,
         manifest: Manifest,
     ) -> Self {
         Self {
             root: TransientRoot::Loaded(node),
-            cache,
+            catalog,
             manifest: Some(manifest),
             distribution: PhantomData,
         }
+    }
+
+    /// The catalog this batch's blocks live in.
+    pub fn catalog(&self) -> &CatalogScope {
+        &self.catalog
     }
 
     /// Unwraps the batch into its root: the live transient node when one was
@@ -269,7 +277,9 @@ where
         expected: Option<Manifest>,
     ) -> Result<(Option<TransientNode<Key, Value>>, Manifest), DialogSearchTreeError>
     where
-        Env: Provider<LoadBlock> + ConditionalSync,
+        Env: Provider<Read<PersistentNode<Key, Value>>>
+            + Provider<Preload<PersistentNode<Key, Value>>>
+            + ConditionalSync,
     {
         let known = || {
             expected.clone().ok_or_else(|| {
@@ -315,10 +325,12 @@ where
         storage: &Env,
     ) -> Result<Self, DialogSearchTreeError>
     where
-        Env: Provider<LoadBlock> + ConditionalSync,
+        Env: Provider<Read<PersistentNode<Key, Value>>>
+            + Provider<Preload<PersistentNode<Key, Value>>>
+            + ConditionalSync,
     {
         let entry = SegmentEntry::from(Entry::new(key, value));
-        let accessor = Accessor::new(self.cache.clone(), storage);
+        let accessor = Accessor::new(storage, &self.catalog);
         let (loaded, manifest) = Self::load(self.root, &accessor, self.manifest.take()).await?;
         self.manifest = Some(manifest.clone());
 
@@ -360,9 +372,11 @@ where
         storage: &Env,
     ) -> Result<Self, DialogSearchTreeError>
     where
-        Env: Provider<LoadBlock> + ConditionalSync,
+        Env: Provider<Read<PersistentNode<Key, Value>>>
+            + Provider<Preload<PersistentNode<Key, Value>>>
+            + ConditionalSync,
     {
-        let accessor = Accessor::new(self.cache.clone(), storage);
+        let accessor = Accessor::new(storage, &self.catalog);
         let (loaded, manifest) = Self::load(self.root, &accessor, self.manifest.take()).await?;
         self.manifest = Some(manifest.clone());
 
@@ -408,7 +422,9 @@ where
         storage: &Env,
     ) -> Result<Self, DialogSearchTreeError>
     where
-        Env: Provider<LoadBlock> + ConditionalSync,
+        Env: Provider<Read<PersistentNode<Key, Value>>>
+            + Provider<Preload<PersistentNode<Key, Value>>>
+            + ConditionalSync,
     {
         debug_assert!(self.is_unplanted(), "plant requires an empty tree");
         ops.sort_by(|a, b| a.key.cmp(&b.key));
@@ -438,7 +454,7 @@ where
         }
 
         let manifest = Self::format(&self.manifest)?;
-        let accessor = Accessor::new(self.cache.clone(), storage);
+        let accessor = Accessor::new(storage, &self.catalog);
         let pieces = regroup_entries::<Key, Value, D>(entries, Vec::new(), &manifest);
         self.root = match seal_root::<Key, Value, D, _>(pieces, 0, &manifest, &accessor).await? {
             Some(node) => TransientRoot::Loaded(node),
@@ -498,7 +514,9 @@ where
         storage: &Env,
     ) -> Result<Option<Value>, DialogSearchTreeError>
     where
-        Env: Provider<LoadBlock> + ConditionalSync,
+        Env: Provider<Read<PersistentNode<Key, Value>>>
+            + Provider<Preload<PersistentNode<Key, Value>>>
+            + ConditionalSync,
     {
         let mut node = match &self.root {
             TransientRoot::Empty => return Ok(None),
@@ -555,10 +573,12 @@ where
         storage: &Env,
     ) -> Result<Option<Value>, DialogSearchTreeError>
     where
-        Env: Provider<LoadBlock> + ConditionalSync,
+        Env: Provider<Read<PersistentNode<Key, Value>>>
+            + Provider<Preload<PersistentNode<Key, Value>>>
+            + ConditionalSync,
     {
         let subtree: PersistentTree<Key, Value, D> =
-            PersistentTree::seal(hash.clone(), self.cache.clone());
+            PersistentTree::seal(self.catalog.clone(), hash.clone());
         subtree.get(key, storage).await
     }
 
@@ -577,7 +597,9 @@ where
     ) -> impl Stream<Item = Result<Entry<Key, Value>, DialogSearchTreeError>> + ConditionalSend
     where
         R: RangeBounds<Key> + ConditionalSend,
-        Env: Provider<LoadBlock> + ConditionalSync,
+        Env: Provider<Read<PersistentNode<Key, Value>>>
+            + Provider<Preload<PersistentNode<Key, Value>>>
+            + ConditionalSync,
     {
         // The transient spine borrows `self`, but the returned stream must own
         // everything it touches. Snapshot the spine into an owned plan of steps
@@ -585,7 +607,6 @@ where
         // yield), in ascending key order, before building the stream.
         // Persistent subtrees stay as hashes, so the snapshot copies no
         // untouched node.
-        let cache = self.cache.clone();
 
         // Snapshot the range bounds to owned, cloneable form: the walker
         // consumes a range per persistent subtree, and the transient leaves are
@@ -603,13 +624,13 @@ where
             }
         };
 
+        let accessor = Accessor::new(storage, &self.catalog);
         try_stream! {
             for step in plan {
                 match step {
                     StreamStep::Persistent(hash) => {
-                        let accessor = Accessor::new(cache.clone(), storage);
                         let inner = TreeWalker::<Key, Value>::new(Some(hash))
-                            .stream(bounds.clone(), accessor);
+                            .stream(bounds.clone(), accessor.clone());
                         futures_util::pin_mut!(inner);
                         while let Some(entry) = inner.next().await {
                             yield entry?;
@@ -625,8 +646,10 @@ where
         }
     }
 
-    /// Serializes the edited tree bottom-up into `delta` and returns it as a
-    /// [`PersistentTree`], carrying the node cache forward.
+    /// Serializes the edited tree bottom-up into `delta`, as the nodes it
+    /// seals, and returns it as a [`PersistentTree`]. The nodes are the
+    /// environment's to store and keep ([`nodes::Write`](crate::nodes::Write));
+    /// until then a reader reaches them through whatever stages the delta.
     ///
     /// A batch that leaves the tree EMPTY persists to the canonical
     /// zero-entry node (the manifest with no entries — see
@@ -641,7 +664,7 @@ where
     /// storage and are never re-serialized.
     pub fn persist(
         self,
-        delta: &mut Delta<Blake3Hash, Buffer>,
+        delta: &mut Delta<Blake3Hash, PersistentNode<Key, Value>>,
     ) -> Result<PersistentTree<Key, Value, D>, DialogSearchTreeError> {
         let root = match self.root {
             // The empty tree's persisted form: the canonical
@@ -655,12 +678,12 @@ where
             // durable and is returned verbatim, touching no storage.
             TransientRoot::Unloaded(hash) => hash,
             TransientRoot::Loaded(transient) => transient
-                .persist(delta, &Self::format(&self.manifest)?, &self.cache)?
+                .persist(delta, &Self::format(&self.manifest)?)?
                 .hash()
                 .clone(),
         };
 
-        Ok(PersistentTree::seal(root, self.cache))
+        Ok(PersistentTree::seal(self.catalog, root))
     }
 
     /// Integrates a differential into this edit batch with deterministic
@@ -684,13 +707,18 @@ where
         storage: &Env,
     ) -> Result<Self, DialogSearchTreeError>
     where
-        Env: Provider<LoadBlock> + ConditionalSync,
+        Env: Provider<Read<PersistentNode<Key, Value>>>
+            + Provider<Preload<PersistentNode<Key, Value>>>
+            + ConditionalSync,
         Changes: Differential<Key, Value>,
         Value: PartialEq,
     {
         futures_util::pin_mut!(changes);
         let mut pending: VecDeque<Change<Key, Value>> = VecDeque::new();
         let mut exhausted = false;
+        // How many of the pending changes the last opening covered: the
+        // next window opens when they have all been applied.
+        let mut opened = 0usize;
         loop {
             while !exhausted && pending.len() < OPEN_LOOKAHEAD {
                 match changes.next().await {
@@ -702,28 +730,27 @@ where
                 break;
             };
 
-            // Open ahead only when this change's own descent would read.
-            // A change whose path is already in memory costs no round
-            // trip, and re-following the whole window for it would be
-            // pure CPU. The first change whose path misses is the moment
-            // the window is worth opening: its miss and every other
-            // pending miss go out together, rather than one round trip
-            // at a time as each change reaches its own.
-            if let Some(first) = self.unopened_on_path(change.key()) {
-                // Widen the window until it names enough distinct nodes
-                // to be worth a round trip, the changes run out, or the
-                // window hits its ceiling. Nothing is read meanwhile, so
-                // the stops found so far stay valid and only the changes
-                // just pulled in need routing.
-                let mut stops: HashSet<Blake3Hash> = HashSet::from([first]);
+            // Open the window ahead of the changes in it: the nodes their
+            // descents are about to read go out together, rather than one
+            // round trip at a time as each change reaches its own. Which of
+            // them are already in memory is the environment's business, so
+            // every window is opened; a node the environment holds answers
+            // at once.
+            if opened == 0 {
+                // Widen the window until it names enough distinct stored
+                // nodes to be worth a round trip, the changes run out, or
+                // the window hits its ceiling. Nothing is read meanwhile,
+                // so the stops found so far stay valid and only the
+                // changes just pulled in need routing.
+                let mut stops: HashSet<Blake3Hash> = HashSet::new();
                 let mut routed = 0;
                 loop {
-                    for change in pending.iter().skip(routed) {
-                        if let Some(stop) = self.unopened_on_path(change.key()) {
+                    for change in std::iter::once(&change).chain(pending.iter()).skip(routed) {
+                        if let Some(stop) = self.stored_on_path(change.key()) {
                             stops.insert(stop);
                         }
                     }
-                    routed = pending.len();
+                    routed = pending.len() + 1;
                     if stops.len() >= OPEN_WIDTH || exhausted || pending.len() >= OPEN_LOOKAHEAD_MAX
                     {
                         break;
@@ -741,7 +768,9 @@ where
                 }
                 self.open_pending(std::iter::once(&change).chain(pending.iter()), storage)
                     .await;
+                opened = pending.len() + 1;
             }
+            opened -= 1;
 
             match change {
                 Change::Add(entry) => match self.get(&entry.key, storage).await? {
@@ -793,40 +822,6 @@ where
         Ok(self)
     }
 
-    /// Load the not-yet-in-memory nodes the pending changes will descend
-    /// through, concurrently.
-    ///
-    /// An integration walks its tree in key order, and a change whose next
-    /// node is still held by reference reads it right there -- so a merge
-    /// reads what it needs strictly one at a time, one round trip each, with
-    /// nothing else in flight. That is the serial block loading a first sync
-    /// shows (#492).
-    ///
-    /// Routing is pure (`child_for` and an index's own `route` read no
-    /// storage), so every pending change's path can be followed through
-    /// whatever is already in memory -- the transient spine and the node
-    /// cache alike -- and the node each path stops at is known without
-    /// reading anything. Those are exactly the reads the descents are about
-    /// to make, so they go out together.
-    ///
-    /// The walk is level by level, which is what makes the gain general
-    /// rather than a property of one tree shape. Each pass fetches the
-    /// frontier the paths currently stop at, then re-follows them through
-    /// the nodes it just installed: a wide level contributes its breadth,
-    /// and a deeper descent contributes another level of breadth per pass.
-    /// A narrow tree still gains whatever breadth its levels hold.
-    ///
-    /// It reads nothing a descent would not have read: a node already in
-    /// memory is skipped, a node no pending change routes to is never
-    /// touched, and one named by many changes is read once. The set of
-    /// blocks an integration reads is therefore unchanged -- only when they
-    /// are read -- so partial replication is preserved exactly.
-    ///
-    /// Advisory: the reads go through the accessor's [`warm`](Accessor::warm)
-    /// into the shared node cache, so the `lift` that follows finds them
-    /// there, and anything missing or failing is read again by the descent
-    /// that needs it, which still owns the error and the missing-block
-    /// policy.
     /// Open the nodes the pending changes' descents are about to read,
     /// each as soon as the read that names it lands.
     ///
@@ -836,36 +831,34 @@ where
     /// nothing else in flight. That is the serial block loading a first sync
     /// shows (#492).
     ///
-    /// Routing is pure (`child_for` and an index's own `route` read no
-    /// storage), so every pending change's path can be followed through
-    /// whatever is already in memory -- the transient spine and the node
-    /// cache alike -- and the node each path stops at is known without
-    /// reading anything. Those are exactly the reads the descents are about
-    /// to make, so they go out together.
+    /// Routing through the transient spine is pure (`child_for` reads no
+    /// storage), so every pending change's path is followed through the
+    /// spine to the first stored node on it, and those nodes are read
+    /// together. The reads form a continuation queue rather than levels: the
+    /// node each path stops at is queued in change order, every queued node
+    /// is in flight at once, and when one lands the paths that stopped at it
+    /// are routed through it and their next nodes queued behind whatever is
+    /// already waiting. A path drills down as fast as its own reads return;
+    /// it never waits for a sibling's. A level-by-level walk paid a barrier
+    /// per level -- the whole level's slowest read before any path could take
+    /// its next step -- which over a capped transport is a round trip of idle
+    /// slots per level.
     ///
-    /// The reads form a continuation queue rather than levels: the node
-    /// each path stops at is queued in change order, every queued node is
-    /// in flight at once, and when one lands the paths that stopped at
-    /// it are re-followed through it and their next nodes queued behind
-    /// whatever is already waiting. A path drills down
-    /// as fast as its own reads return; it never waits for a sibling's. A
-    /// level-by-level walk paid a barrier per level -- the whole level's
-    /// slowest read before any path could take its next step -- which over
-    /// a capped transport is a round trip of idle slots per level.
+    /// Which nodes are already in memory is the environment's business, not
+    /// this pass's: a read of a node the environment holds answers at once,
+    /// so a warm window costs reads that hit and nothing crosses the wire
+    /// for it. It reads nothing a descent would not have read: a node no
+    /// pending change routes to is never touched, and one named by many
+    /// changes is read once. The set of blocks an integration reads is
+    /// therefore unchanged -- only when they are read -- so partial
+    /// replication is preserved exactly. Each path is followed at most
+    /// `OPEN_LEVELS` nodes deep per opening. The caller decides how many
+    /// changes it hands over: enough that they name `OPEN_WIDTH` stored
+    /// nodes, or all of them when the stream is short.
     ///
-    /// It reads nothing a descent would not have read: a node already in
-    /// memory is skipped, a node no pending change routes to is never
-    /// touched, and one named by many changes is read once. The set of
-    /// blocks an integration reads is therefore unchanged -- only when they
-    /// are read -- so partial replication is preserved exactly. Each path
-    /// is followed at most `OPEN_LEVELS` nodes deep per opening, the same
-    /// bound the level walk had. The caller decides how many changes it
-    /// hands over: enough that they name `OPEN_WIDTH` nodes, or all of
-    /// them when the stream is short.
-    ///
-    /// Advisory: the reads go through the accessor's [`warm`](Accessor::warm)
-    /// into the shared node cache, so the `lift` that follows finds them
-    /// there, and anything missing or failing is read again by the descent
+    /// Advisory: the reads are the environment's ordinary node reads, so an
+    /// environment that keeps nodes has them when the `lift` that follows
+    /// asks, and anything missing or failing is read again by the descent
     /// that needs it, which still owns the error and the missing-block
     /// policy. A path whose read did not land stops opening there.
     ///
@@ -875,23 +868,21 @@ where
     /// hydration scheduler's decision per remote site
     /// (`dialog_common::Scheduler`), where a demand read goes ahead of
     /// this pass and a node still queued is dropped for free if the pass
-    /// is abandoned. A cap here hid the walk's shape besides costing a
-    /// round trip per wave: a level walk under a cap smaller than a level
-    /// took the level in slices, and a slice of the next level went out
-    /// while the tail of this one was still queued, which looked like the
-    /// continuation queue without being it.
+    /// is abandoned.
     async fn open_pending<'changes, Env, Changes>(&self, changes: Changes, storage: &Env)
     where
         Key: 'changes,
         Value: 'changes,
         Changes: Iterator<Item = &'changes Change<Key, Value>>,
-        Env: Provider<LoadBlock> + ConditionalSync,
+        Env: Provider<Read<PersistentNode<Key, Value>>>
+            + Provider<Preload<PersistentNode<Key, Value>>>
+            + ConditionalSync,
     {
+        let accessor = Accessor::new(storage, &self.catalog);
         let keys: Vec<&Key> = changes.map(Change::key).collect();
         if keys.is_empty() {
             return;
         }
-        let accessor = Accessor::new(self.cache.clone(), storage);
 
         // The paths (by position in `keys`) stopped at each node not yet
         // read, and the nodes waiting for a slot, in the order the paths
@@ -912,20 +903,26 @@ where
             waiting.push(at);
         };
         for (at, key) in keys.iter().enumerate() {
-            if let Some(hash) = self.unopened_on_path(key) {
+            if let Some(hash) = self.stored_on_path(key) {
                 stop_at(at, hash, &mut stopped, &mut queue);
             }
         }
 
         // `FuturesUnordered` polls every read it holds when it is polled,
         // so on wasm -- where the request is issued BY the poll -- every
-        // queued read is on the wire at once, never one at a time.
+        // queued read is on the wire at once, never one at a time. A read
+        // that fails or finds nothing is left to the descent that needs
+        // the node, which owns the error and the missing-block policy.
         let mut reads = FuturesUnordered::new();
         loop {
             while let Some(hash) = queue.pop_front() {
-                reads.push(accessor.warm(hash));
+                let accessor = &accessor;
+                reads.push(async move {
+                    let node = accessor.load_node(&hash).await.ok().flatten();
+                    (hash, node)
+                });
             }
-            let Some(hash) = reads.next().await else {
+            let Some((hash, node)) = reads.next().await else {
                 break;
             };
             let Some(paths) = stopped.remove(&hash) else {
@@ -934,34 +931,42 @@ where
             // Nothing landed (missing or failing block): the paths that
             // stopped here stop for good, and their descents will report
             // it. Re-following them would name this node again and spin.
-            if self.cache.get_cached(&hash).is_none() {
+            let Some(node) = node else {
                 continue;
-            }
+            };
+            // A leaf ends every path that reached it: the descent reads
+            // nothing more there.
+            let crate::NodeBody::Index(index) = node.body() else {
+                continue;
+            };
             for at in paths {
                 depth[at] += 1;
                 if depth[at] >= OPEN_LEVELS {
                     continue;
                 }
-                if let Some(next) = self.unopened_on_path(keys[at]) {
-                    stop_at(at, next, &mut stopped, &mut queue);
-                }
+                let Ok(child) = index.route(keys[at].as_ref()) else {
+                    continue;
+                };
+                let Ok(next) = index.hash_at(child) else {
+                    continue;
+                };
+                stop_at(at, next.clone(), &mut stopped, &mut queue);
             }
         }
     }
 
-    /// The first node on `key`'s descent that is not in memory, or `None`
-    /// when the whole path is there (so the descent reads nothing).
+    /// The first stored node on `key`'s descent: where the transient spine
+    /// hands the path to the environment. `None` when the spine reaches a
+    /// leaf, so the descent reads nothing.
     ///
-    /// Follows exactly the route an edit takes -- the transient spine by
-    /// `child_for`, then stored nodes by their own routing -- and reads no
-    /// storage, so it can never name a node the descent would not read.
-    fn unopened_on_path(&self, key: &Key) -> Option<Blake3Hash> {
+    /// Follows exactly the route an edit takes through the spine
+    /// (`child_for`) and reads no storage, so it can never name a node the
+    /// descent would not read.
+    fn stored_on_path(&self, key: &Key) -> Option<Blake3Hash> {
         let mut node = match &self.root {
             // An empty tree has no node to descend into.
             TransientRoot::Empty => return None,
-            TransientRoot::Unloaded(hash) => {
-                return self.unopened_below(hash.clone(), key);
-            }
+            TransientRoot::Unloaded(hash) => return Some(hash.clone()),
             TransientRoot::Loaded(node) => node,
         };
 
@@ -970,37 +975,12 @@ where
                 TransientNode::Index(index) => {
                     let at = child_for::<Key, Value>(&index.children, key).ok()?;
                     match &index.children[at] {
-                        Node::Persistent(link) => {
-                            return self.unopened_below(link.node.clone(), key);
-                        }
+                        Node::Persistent(link) => return Some(link.node.clone()),
                         Node::Transient(child) => node = child,
                     }
                 }
                 // An in-memory leaf: the edit descends no further.
                 TransientNode::Segment(_) => return None,
-            }
-        }
-    }
-
-    /// Walk the STORED path from `hash` as far as the node cache covers,
-    /// returning the first node it does not hold. `None` when the path is
-    /// cached through to its leaf.
-    ///
-    /// Presence is the cache's word (a node the cache dropped is a node the
-    /// descent reads again), and a cached node was checked as it entered.
-    fn unopened_below(&self, hash: Blake3Hash, key: &Key) -> Option<Blake3Hash> {
-        let mut hash = hash;
-        loop {
-            let Some(node) = self.cache.get_cached(&hash) else {
-                return Some(hash);
-            };
-            match node.body() {
-                crate::NodeBody::Index(index) => {
-                    let at = index.route(key.as_ref()).ok()?;
-                    hash = index.hash_at(at).ok()?.clone();
-                }
-                // The leaf is cached, so this path reads nothing.
-                crate::NodeBody::Segment(_) => return None,
             }
         }
     }
@@ -1014,6 +994,9 @@ where
     /// yields the same root, byte for byte, as building a tree from scratch
     /// over the union of the pieces' entries.
     ///
+    /// Every range's source lives in `catalog`, the catalog the stitched
+    /// tree is built in.
+    ///
     /// Reads are bounded by the piece seams. Carving a range loads only the
     /// nodes on the two spines covering its bounds, and joining two adjacent
     /// pieces loads only their facing edge spines. Interior nodes of a range
@@ -1021,23 +1004,16 @@ where
     /// verbatim at persist time, so the persist delta scales with the seams,
     /// not the entry count.
     pub async fn stitch<Env>(
+        catalog: &CatalogScope,
         pieces: Vec<Piece<'_, Key, Value, D>>,
         storage: &Env,
     ) -> Result<Self, DialogSearchTreeError>
     where
-        Env: Provider<LoadBlock> + ConditionalSync,
+        Env: Provider<Read<PersistentNode<Key, Value>>>
+            + Provider<Preload<PersistentNode<Key, Value>>>
+            + ConditionalSync,
     {
-        // One cache serves the whole stitch. Nodes are content-addressed, so
-        // sharing the first source's cache (when there is one) is always safe
-        // and keeps its warm entries; the stitched tree carries it forward.
-        let cache = pieces
-            .iter()
-            .find_map(|piece| match piece {
-                Piece::Range { source, .. } => Some(source.node_cache.clone()),
-                Piece::Entries(_) => None,
-            })
-            .unwrap_or_else(NodeCache::new);
-        let accessor = Accessor::new(cache.clone(), storage);
+        let accessor = Accessor::new(storage, catalog);
 
         // The stitched tree keeps its sources' format, read from the first
         // source's root (an unpersisted empty source knows the format it was
@@ -1111,7 +1087,11 @@ where
         // the stitched tree must run under the format its nodes were
         // written with.
         if let [(_, _, Some(root))] = parts.as_slice() {
-            return Ok(TransientTree::with_manifest(root.clone(), cache, manifest));
+            return Ok(TransientTree::with_manifest(
+                catalog.clone(),
+                root.clone(),
+                manifest,
+            ));
         }
 
         // A canonical tree opens its leftmost seam at the empty separator
@@ -1189,7 +1169,10 @@ where
 
         let root = match merged {
             None => {
-                return Ok(TransientTree::empty_with_manifest(cache, manifest));
+                return Ok(TransientTree::empty_with_manifest(
+                    catalog.clone(),
+                    manifest,
+                ));
             }
             // A lone segment can only arise from degenerate single-leaf
             // sources; hand it to the leveling loop as a height-0 run so it
@@ -1223,7 +1206,7 @@ where
                 Some(node) => TransientRoot::Loaded(node),
                 None => TransientRoot::Empty,
             },
-            cache,
+            catalog: catalog.clone(),
             manifest: Some(manifest),
             distribution: PhantomData,
         })
@@ -1321,7 +1304,9 @@ where
         manifest: &Manifest,
     ) -> Result<Option<TransientNode<Key, Value>>, DialogSearchTreeError>
     where
-        Env: Provider<LoadBlock> + ConditionalSync,
+        Env: Provider<Read<PersistentNode<Key, Value>>>
+            + Provider<Preload<PersistentNode<Key, Value>>>
+            + ConditionalSync,
         D: Distribution,
     {
         // The manifest supplies the branching parameter and the length-guard
@@ -2151,7 +2136,9 @@ where
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
         + ConditionalSync,
     D: Distribution,
-    Env: Provider<LoadBlock> + ConditionalSync,
+    Env: Provider<Read<PersistentNode<Key, Value>>>
+        + Provider<Preload<PersistentNode<Key, Value>>>
+        + ConditionalSync,
 {
     let mut origins_by_remaining: Vec<(usize, Vec<IndexPieceOrigin>)> = Vec::new();
     let mut merged_any = false;
@@ -2350,7 +2337,9 @@ where
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
         + ConditionalSync,
-    Env: Provider<LoadBlock> + ConditionalSync,
+    Env: Provider<Read<PersistentNode<Key, Value>>>
+        + Provider<Preload<PersistentNode<Key, Value>>>
+        + ConditionalSync,
     D: Distribution,
 {
     if path.is_empty() || manifest.max_segment == 0 {
@@ -2452,9 +2441,11 @@ where
     // interior edits, and widens for the min-insert shape (the stream
     // cannot license a surgical apply). In debug builds every compressed
     // interior verdict is pinned against the full stream's.
-    let compressed =
-        compressed_run_quiet::<Key, Value, Env, D>(root, path, lo, hi, edit, accessor, manifest)
-            .await?;
+    let summaries =
+        piece_summaries::<Key, Value, Env, D>(root, path, lo, hi, edit, accessor, manifest).await?;
+    let compressed = summaries
+        .as_deref()
+        .and_then(|summaries| compressed_verdict::<D>(summaries, manifest));
 
     if min_insert {
         #[cfg(debug_assertions)]
@@ -2493,23 +2484,48 @@ where
         // last key (its summary is in hand after the compressed pass)
         // against the new minimum, exactly as the regroup's seal would
         // derive it. Only a LENGTH-preserving rewrite is surgical.
-        let (previous_last, stored_len) = {
+        enum Previous {
+            Known(Vec<u8>),
+            Stored(Link),
+        }
+        let (previous, stored_len) = {
             let children = &follow(root, parent_path)?.as_index()?.children;
-            let previous_last = match &children[at - 1] {
+            let previous = match &children[at - 1] {
                 Node::Transient(TransientNode::Segment(segment)) => segment
                     .entries()
                     .last()
-                    .map(|entry| entry.key.as_ref().to_vec()),
-                Node::Persistent(link) => accessor
-                    .cached(&link.node)
-                    .and_then(|piece| piece.summary(manifest))
-                    .map(|summary| summary.last_key.clone()),
+                    .map(|entry| Previous::Known(entry.key.as_ref().to_vec())),
+                Node::Persistent(link) => Some(
+                    match summaries
+                        .as_ref()
+                        .and_then(|summaries| summaries.get(at - 1 - lo))
+                    {
+                        Some(summary) => Previous::Known(summary.last_key.clone()),
+                        None => Previous::Stored(link.clone()),
+                    },
+                ),
                 Node::Transient(_) => None,
             };
-            (previous_last, children[at].separator()?.len())
+            (previous, children[at].separator()?.len())
         };
-        let Some(previous_last) = previous_last else {
-            return Ok(RunVerdict::Widen);
+        let previous_last = match previous {
+            Some(Previous::Known(key)) => key,
+            // The compressed pass summarized nothing (a sibling kept it
+            // out of both regimes): read the piece, as that pass would
+            // have.
+            Some(Previous::Stored(link)) => {
+                let piece = accessor.get_node(&link.node).await?;
+                let TransientNode::Segment(segment) =
+                    TransientNode::<Key, Value>::open(&piece, link.separator.clone())?
+                else {
+                    return Ok(RunVerdict::Widen);
+                };
+                match segment.entries().last() {
+                    Some(entry) => entry.key.as_ref().to_vec(),
+                    None => return Ok(RunVerdict::Widen),
+                }
+            }
+            None => return Ok(RunVerdict::Widen),
         };
         let separator =
             crate::distribution::cap::frame_separator(&previous_last, entry.key.as_ref(), manifest);
@@ -2572,7 +2588,9 @@ where
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
         + ConditionalSync,
-    Env: Provider<LoadBlock> + ConditionalSync,
+    Env: Provider<Read<PersistentNode<Key, Value>>>
+        + Provider<Preload<PersistentNode<Key, Value>>>
+        + ConditionalSync,
     D: Distribution,
 {
     let at = path[path.len() - 1];
@@ -2711,8 +2729,16 @@ where
 /// the run falls outside both regimes (mixed boundaries, a non-candidate
 /// boundary, an over-weight interior stretch, a transient index sibling),
 /// in which case the full entry stream decides.
+///
+/// In two parts: [`piece_summaries`] gathers each piece's summary, reading
+/// the stored pieces through the accessor, and [`compressed_verdict`]
+/// decides over them. The summaries are handed back so the caller can read
+/// a neighbouring piece's edge key from them without asking anyone again.
+///
+/// Returns `None` when a piece cannot be summarized (a transient index
+/// sibling, an edit whose key the leaf does not hold).
 #[allow(clippy::too_many_arguments)]
-async fn compressed_run_quiet<Key, Value, Env, D>(
+async fn piece_summaries<Key, Value, Env, D>(
     root: &mut TransientNode<Key, Value>,
     path: &[usize],
     lo: usize,
@@ -2720,7 +2746,10 @@ async fn compressed_run_quiet<Key, Value, Env, D>(
     edit: &Edit<Key, Value>,
     accessor: &Accessor<'_, Key, Value, Env>,
     manifest: &Manifest,
-) -> Result<Option<bool>, DialogSearchTreeError>
+) -> Result<
+    Option<Vec<std::sync::Arc<crate::distribution::summary::PieceSummary>>>,
+    DialogSearchTreeError,
+>
 where
     Key: self::Key + ConditionalSync + 'static,
     Value: self::Value + ConditionalSync + 'static,
@@ -2728,10 +2757,11 @@ where
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
         + ConditionalSync,
-    Env: Provider<LoadBlock> + ConditionalSync,
+    Env: Provider<Read<PersistentNode<Key, Value>>>
+        + Provider<Preload<PersistentNode<Key, Value>>>
+        + ConditionalSync,
     D: Distribution,
 {
-    use crate::distribution::cap;
     use crate::distribution::summary::PieceSummary;
     use std::sync::Arc;
 
@@ -2740,10 +2770,9 @@ where
 
     // Pass 1 (sync, under the tree borrow): per piece, either a ready
     // summary — transient segments and the edited piece, summarized in
-    // place, and a stored piece whose node is held with its summary — or
-    // the stored link to fetch and summarize. The edited
-    // piece gets its POST-EDIT summary, built from the open leaf with the
-    // edit applied, mirroring the full check's simulation.
+    // place — or the stored link to read and summarize. The edited piece
+    // gets its POST-EDIT summary, built from the open leaf with the edit
+    // applied, mirroring the full check's simulation.
     enum Pending {
         Ready(Arc<PieceSummary>),
         Fetch(Link),
@@ -2786,13 +2815,7 @@ where
                 ))));
             } else {
                 match child {
-                    Node::Persistent(link) => match accessor
-                        .cached(&link.node)
-                        .and_then(|piece| piece.summary(manifest))
-                    {
-                        Some(ready) => pieces.push(Pending::Ready(ready)),
-                        None => pieces.push(Pending::Fetch(link.clone())),
-                    },
+                    Node::Persistent(link) => pieces.push(Pending::Fetch(link.clone())),
                     Node::Transient(TransientNode::Segment(segment)) => {
                         let entries = segment.entries();
                         let keys: Vec<Hashed<'_>> =
@@ -2809,37 +2832,54 @@ where
         }
     }
 
-    // Pass 2 (async): fetch the stored pieces that had no summary and keep
-    // each one's with its node, so a piece is streamed only on its first
-    // touch per content change for as long as the node is held.
+    // Pass 2 (async): read the stored pieces (a read the environment
+    // answers from what it keeps, when it keeps nodes) and take the summary
+    // each node holds, or summarize it and keep the summary with the node,
+    // so a piece is streamed only on its first touch per content change
+    // for as long as the environment holds the node.
     let mut summaries: Vec<Arc<PieceSummary>> = Vec::with_capacity(pieces.len());
     for pending in pieces {
         summaries.push(match pending {
             Pending::Ready(summary) => summary,
             Pending::Fetch(link) => {
                 let persistent = accessor.get_node(&link.node).await?;
-                let TransientNode::Segment(segment) =
-                    TransientNode::<Key, Value>::open(&persistent, link.separator.clone())?
-                else {
-                    return Ok(None);
-                };
-                let entries = segment.entries();
-                let keys: Vec<Hashed<'_>> = entries.iter().map(SegmentEntry::hashed).collect();
-                let weights: Vec<usize> =
-                    entries.iter().map(|entry| entry.weight(manifest)).collect();
-                persistent.summarize(
-                    manifest,
-                    PieceSummary::build::<D>(&keys, &weights, manifest),
-                )
+                if let Some(summary) = persistent.summary(manifest) {
+                    summary
+                } else {
+                    let TransientNode::Segment(segment) =
+                        TransientNode::<Key, Value>::open(&persistent, link.separator.clone())?
+                    else {
+                        return Ok(None);
+                    };
+                    let entries = segment.entries();
+                    let keys: Vec<Hashed<'_>> = entries.iter().map(SegmentEntry::hashed).collect();
+                    let weights: Vec<usize> =
+                        entries.iter().map(|entry| entry.weight(manifest)).collect();
+                    persistent.summarize(
+                        manifest,
+                        PieceSummary::build::<D>(&keys, &weights, manifest),
+                    )
+                }
             }
         });
     }
+    Ok(Some(summaries))
+}
+
+/// The compressed check's verdict over a run's piece summaries: `Some` of
+/// an EXACT quiet/widen answer within one of the two regimes, `None` when
+/// the run falls outside both (see [`piece_summaries`]).
+fn compressed_verdict<D: Distribution>(
+    summaries: &[std::sync::Arc<crate::distribution::summary::PieceSummary>],
+    manifest: &Manifest,
+) -> Option<bool> {
+    use crate::distribution::cap;
 
     // Regime selection by the boundary seams' veto status: all vetoed is
     // the stretch regime, all accepted the ceiling regime, and a mix
     // falls back to the full stream.
     if summaries.iter().any(|summary| summary.count == 0) {
-        return Ok(None);
+        return None;
     }
     let mut vetoed_boundaries = 0usize;
     for pair in summaries.windows(2) {
@@ -2856,14 +2896,14 @@ where
         // Stretch regime: every piece fully vetoed inside, every boundary
         // a forced candidate; the plan is the stretch election alone.
         if summaries.iter().any(|summary| !summary.all_vetoed) {
-            return Ok(None);
+            return None;
         }
         let mut boundaries = Vec::with_capacity(summaries.len() - 1);
         for pair in summaries.windows(2) {
             let left = pair[0].last_key.as_slice();
             let right = pair[1].first_key.as_slice();
             if !cap::is_forced_candidate(left, right, manifest) {
-                return Ok(None);
+                return None;
             }
             boundaries.push((
                 cap::shortest_separator_len(left, right),
@@ -2878,12 +2918,12 @@ where
                 interior: summary.stretch_interior.clone(),
             })
             .collect();
-        return Ok(Some(cap::election_matches_boundaries(
+        return Some(cap::election_matches_boundaries(
             &compressed,
             &boundaries,
             manifest.max_segment as usize,
             manifest,
-        )));
+        ));
     } else if vetoed_boundaries == 0 {
         // Ceiling regime: banks reset at every (accepted) boundary, so
         // the summaries' piece-local coin verdicts are exact. A stored
@@ -2894,23 +2934,23 @@ where
         // stretches over `max_segment` could hide stretch-backstop cuts
         // the summary cannot decide: fall back.
         if manifest.frame_ceiling() == 0 {
-            return Ok(None);
+            return None;
         }
         if summaries
             .iter()
             .any(|summary| summary.max_stretch_weight > manifest.max_segment as usize)
         {
-            return Ok(None);
+            return None;
         }
         if summaries.iter().any(|summary| summary.interior_coin_cut) {
-            return Ok(Some(false));
+            return Some(false);
         }
         let mut boundaries = Vec::with_capacity(summaries.len() - 1);
         for pair in summaries.windows(2) {
             let left = pair[0].last_key.as_slice();
             let right = pair[1].first_key.as_slice();
             if !cap::is_frame_candidate(left, right, manifest) {
-                return Ok(None);
+                return None;
             }
             // The boundary seam's own coin verdict must be no-cut: a
             // natural cut here would store the short separator, not the
@@ -2920,7 +2960,7 @@ where
                 pair[0].trailing_bank + pair[0].last_weight,
                 manifest,
             ) {
-                return Ok(Some(false));
+                return Some(false);
             }
             boundaries.push((
                 cap::shortest_separator_len(left, right),
@@ -2929,7 +2969,7 @@ where
         }
         (manifest.frame_ceiling(), boundaries)
     } else {
-        return Ok(None);
+        return None;
     };
 
     let compressed: Vec<cap::CompressedPiece> = summaries
@@ -2940,12 +2980,12 @@ where
             interior: summary.frame_interior.clone(),
         })
         .collect();
-    Ok(Some(cap::election_matches_boundaries(
+    Some(cap::election_matches_boundaries(
         &compressed,
         &boundaries,
         threshold,
         manifest,
-    )))
+    ))
 }
 
 /// Widens an edit's window to the whole force-split run around the leaf at
@@ -2989,7 +3029,9 @@ where
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
         + ConditionalSync,
-    Env: Provider<LoadBlock> + ConditionalSync,
+    Env: Provider<Read<PersistentNode<Key, Value>>>
+        + Provider<Preload<PersistentNode<Key, Value>>>
+        + ConditionalSync,
 {
     if path.is_empty() {
         return Ok(None);
@@ -3172,7 +3214,9 @@ where
     Value::Archived: for<'a> CheckBytes<
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>,
-    Env: Provider<LoadBlock> + ConditionalSync,
+    Env: Provider<Read<PersistentNode<Key, Value>>>
+        + Provider<Preload<PersistentNode<Key, Value>>>
+        + ConditionalSync,
 {
     if let Node::Persistent(link) = node {
         let persistent = accessor.get_node(&link.node).await?;
@@ -3209,7 +3253,9 @@ where
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
         + ConditionalSync,
-    Env: Provider<LoadBlock> + ConditionalSync,
+    Env: Provider<Read<PersistentNode<Key, Value>>>
+        + Provider<Preload<PersistentNode<Key, Value>>>
+        + ConditionalSync,
 {
     // Find the deepest ancestor with a right sibling of the descended child, and
     // build the path to that sibling: the ancestor prefix, then the next index.
@@ -3274,7 +3320,9 @@ where
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
         + ConditionalSync,
-    Env: Provider<LoadBlock> + ConditionalSync,
+    Env: Provider<Read<PersistentNode<Key, Value>>>
+        + Provider<Preload<PersistentNode<Key, Value>>>
+        + ConditionalSync,
 {
     let mut neighbor_path: Option<Vec<usize>> = None;
     for depth in (0..path.len()).rev() {
@@ -3985,7 +4033,7 @@ fn adjust_index_origins(
 /// persisted form.
 pub(crate) fn persist_empty_root<Key, Value>(
     manifest: &Manifest,
-    delta: &mut Delta<Blake3Hash, Buffer>,
+    delta: &mut Delta<Blake3Hash, PersistentNode<Key, Value>>,
 ) -> Result<PersistentNode<Key, Value>, DialogSearchTreeError>
 where
     Key: self::Key,
@@ -4003,7 +4051,7 @@ where
     let body =
         PersistentNodeBody::from_index(PersistentIndex::from_links(Vec::new()), manifest.clone());
     let node = PersistentNode::try_from(&body)?;
-    delta.add(node.hash().clone(), node.buffer().clone());
+    delta.add(node.hash().clone(), node.clone());
     Ok(node)
 }
 
@@ -4036,7 +4084,9 @@ where
     Value::Archived: for<'a> CheckBytes<
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>,
-    Env: Provider<LoadBlock> + ConditionalSync,
+    Env: Provider<Read<PersistentNode<Key, Value>>>
+        + Provider<Preload<PersistentNode<Key, Value>>>
+        + ConditionalSync,
     D: Distribution,
 {
     if replacement.is_empty() {
@@ -4170,7 +4220,9 @@ where
     Value::Archived: for<'a> CheckBytes<
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>,
-    Env: Provider<LoadBlock> + ConditionalSync,
+    Env: Provider<Read<PersistentNode<Key, Value>>>
+        + Provider<Preload<PersistentNode<Key, Value>>>
+        + ConditionalSync,
 {
     let node: PersistentNode<Key, Value> = accessor.get_node(&root).await?;
     // A zero-entry root is the empty tree's format marker: nothing to carve.
@@ -4425,7 +4477,9 @@ where
     Value::Archived: for<'a> CheckBytes<
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>,
-    Env: Provider<LoadBlock> + ConditionalSync,
+    Env: Provider<Read<PersistentNode<Key, Value>>>
+        + Provider<Preload<PersistentNode<Key, Value>>>
+        + ConditionalSync,
 {
     let mut path = Vec::new();
     loop {
@@ -4815,18 +4869,18 @@ mod tests {
 
     use std::collections::HashSet;
 
-    use crate::MemoryBlocks;
+    use crate::helpers::Blocks;
     use crate::{Distribution, Geometric, Hashed, Manifest};
     use anyhow::Result;
     use dialog_common::Blake3Hash;
 
     use crate::{
-        Accessor, Buffer, Delta, Entry, NodeCache, PersistentNode, PersistentTree, Piece, Rank,
-        TransientTree, distribution,
+        Accessor, Buffer, Delta, Entry, PersistentNode, PersistentTree, Piece, Rank, TransientTree,
+        distribution,
     };
 
     type TestTree = PersistentTree<[u8; 4], Vec<u8>>;
-    type TestStorage = MemoryBlocks;
+    type TestStorage = Blocks;
 
     /// The geometric rank of a `u32` key, hashed the same way the tree hashes it.
     fn rank_of(key: u32) -> Rank {
@@ -4855,7 +4909,7 @@ mod tests {
     /// every operation is the history-independence baseline a single combined
     /// batch must reproduce.
     async fn sequential(keys: &[u32], storage: &mut TestStorage) -> Result<TestTree> {
-        let mut tree = TestTree::empty();
+        let mut tree = TestTree::empty_in(crate::helpers::test_catalog());
         let mut delta = Delta::zero();
         for &k in keys {
             tree = tree
@@ -4867,8 +4921,8 @@ mod tests {
             // persist created: a persist writes new nodes only into the delta,
             // never into storage, so they must be stored before the following
             // edit descends into them.
-            for (_, buffer) in delta.flush() {
-                storage.store(buffer);
+            for (_, node) in delta.flush() {
+                storage.store(node.buffer().clone());
             }
         }
         Ok(tree)
@@ -4876,12 +4930,12 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_matches_sequential_inserts() -> Result<()> {
-        let mut storage = MemoryBlocks::new();
+        let mut storage = Blocks::new();
 
         let keys: Vec<u32> = (0..500).collect();
         let expected = sequential(&keys, &mut storage).await?;
 
-        let mut edit = TestTree::empty().edit();
+        let mut edit = TestTree::empty_in(crate::helpers::test_catalog()).edit();
         for &k in &keys {
             edit = edit
                 .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), &storage)
@@ -4903,15 +4957,15 @@ mod tests {
     /// is stable across edits and readable from any node.
     #[dialog_common::test]
     async fn it_stamps_the_manifest_into_the_root_across_edits() -> Result<()> {
-        use crate::{Accessor, Manifest, NodeCache, PersistentNode};
+        use crate::{Accessor, Manifest, PersistentNode};
 
-        let mut storage = MemoryBlocks::new();
+        let mut storage = Blocks::new();
         let built = sequential(&(0..200).collect::<Vec<u32>>(), &mut storage).await?;
 
         // A fresh cache reads the persisted nodes straight from storage,
         // through a handle of its own so the edit below can keep writing.
         let reader = storage.clone();
-        let accessor = Accessor::new(NodeCache::new(), &reader);
+        let accessor = Accessor::new(&reader, &crate::helpers::test_catalog());
         let root: PersistentNode<[u8; 4], Vec<u8>> = accessor.get_node(built.root()).await?;
         assert_eq!(root.manifest()?, Manifest::default());
 
@@ -4923,8 +4977,8 @@ mod tests {
             .insert(9999u32.to_le_bytes(), vec![1], &storage)
             .await?
             .persist(&mut delta)?;
-        for (_, buffer) in delta.flush() {
-            storage.store(buffer);
+        for (_, node) in delta.flush() {
+            storage.store(node.buffer().clone());
         }
         let edited_root: PersistentNode<[u8; 4], Vec<u8>> =
             accessor.get_node(edited.root()).await?;
@@ -4962,7 +5016,7 @@ mod tests {
     /// Applies `keys` to a fresh [`Edit`] in order, then persists and returns the
     /// root hash.
     async fn batched(keys: &[u32], storage: &TestStorage) -> Result<Blake3Hash> {
-        let mut edit = TestTree::empty().edit();
+        let mut edit = TestTree::empty_in(crate::helpers::test_catalog()).edit();
         for &k in keys {
             edit = edit
                 .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), storage)
@@ -4975,7 +5029,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_matches_sequential_for_random_insert_order() -> Result<()> {
-        let mut storage = MemoryBlocks::new();
+        let mut storage = Blocks::new();
 
         for seed in 0..200u64 {
             let mut keys: Vec<u32> = (0..300).collect();
@@ -5011,8 +5065,8 @@ mod tests {
                 .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this
             // persist created.
-            for (_, buffer) in delta.flush() {
-                storage.store(buffer);
+            for (_, node) in delta.flush() {
+                storage.store(node.buffer().clone());
             }
         }
         Ok(tree)
@@ -5023,12 +5077,12 @@ mod tests {
     /// right-neighbor entry fusion.
     #[dialog_common::test]
     async fn it_matches_sequential_for_every_single_delete() -> Result<()> {
-        let mut storage = MemoryBlocks::new();
+        let mut storage = Blocks::new();
         let keys: Vec<u32> = (0..200).collect();
 
         for &victim in &keys {
             let expected = sequential_with_deletes(&keys, &[victim], &mut storage).await?;
-            let mut edit = TestTree::empty().edit();
+            let mut edit = TestTree::empty_in(crate::helpers::test_catalog()).edit();
             for &k in &keys {
                 edit = edit
                     .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), &storage)
@@ -5049,7 +5103,7 @@ mod tests {
     /// Batched deletes (50 random of 300) must match the sequential shaper.
     #[dialog_common::test]
     async fn it_matches_sequential_with_deletes() -> Result<()> {
-        let mut storage = MemoryBlocks::new();
+        let mut storage = Blocks::new();
 
         for seed in 0..200u64 {
             let keys: Vec<u32> = (0..300).collect();
@@ -5060,7 +5114,7 @@ mod tests {
 
             let expected = sequential_with_deletes(&keys, &to_delete, &mut storage).await?;
 
-            let mut edit = TestTree::empty().edit();
+            let mut edit = TestTree::empty_in(crate::helpers::test_catalog()).edit();
             for &k in &keys {
                 edit = edit
                     .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), &storage)
@@ -5087,7 +5141,7 @@ mod tests {
     /// repeatedly within a single edit.
     #[dialog_common::test]
     async fn it_matches_sequential_for_random_interleaved_ops() -> Result<()> {
-        let storage = MemoryBlocks::new();
+        let storage = Blocks::new();
 
         for seed in 0..200u64 {
             let mut rng = Rng::new(seed);
@@ -5102,7 +5156,7 @@ mod tests {
             }
 
             // Sequential reference through Tree.
-            let mut sequential = TestTree::empty();
+            let mut sequential = TestTree::empty_in(crate::helpers::test_catalog());
             let mut delta = Delta::zero();
             for &(is_insert, key) in &ops {
                 sequential = if is_insert {
@@ -5120,13 +5174,13 @@ mod tests {
                 };
                 // Flush after each persist so the next edit can load the nodes
                 // this persist created.
-                for (_, buffer) in delta.flush() {
-                    storage.store(buffer);
+                for (_, node) in delta.flush() {
+                    storage.store(node.buffer().clone());
                 }
             }
 
             // Batched through Edit.
-            let mut edit = TestTree::empty().edit();
+            let mut edit = TestTree::empty_in(crate::helpers::test_catalog()).edit();
             for &(is_insert, key) in &ops {
                 edit = if is_insert {
                     edit.insert(key.to_le_bytes(), key.to_le_bytes().to_vec(), &storage)
@@ -5152,9 +5206,9 @@ mod tests {
     /// persist or flush: reads walk the live spine, not storage.
     #[dialog_common::test]
     async fn it_reads_unflushed_insertions() -> Result<()> {
-        let storage = MemoryBlocks::new();
+        let storage = Blocks::new();
 
-        let mut edit = TestTree::empty().edit();
+        let mut edit = TestTree::empty_in(crate::helpers::test_catalog()).edit();
 
         edit = edit
             .insert(1u32.to_le_bytes(), vec![1, 2, 3], &storage)
@@ -5184,7 +5238,7 @@ mod tests {
     /// flushed tree the batch opened over) and its own in-flight keys.
     #[dialog_common::test]
     async fn it_reads_in_flight_and_stored_keys() -> Result<()> {
-        let mut storage = MemoryBlocks::new();
+        let mut storage = Blocks::new();
 
         // Build and flush a baseline of 0..5 so those keys live in storage.
         let base = sequential(&(0..5).collect::<Vec<_>>(), &mut storage).await?;
@@ -5221,7 +5275,7 @@ mod tests {
     async fn it_reads_in_flight_edits_like_persist() -> Result<()> {
         use futures_util::StreamExt;
 
-        let storage = MemoryBlocks::new();
+        let storage = Blocks::new();
 
         for seed in 0..200u64 {
             let mut rng = Rng::new(seed);
@@ -5237,7 +5291,7 @@ mod tests {
             }
 
             // Build the transient tree in flight, never persisting it here.
-            let mut transient = TestTree::empty().edit();
+            let mut transient = TestTree::empty_in(crate::helpers::test_catalog()).edit();
             for &(is_insert, key) in &ops {
                 transient = if is_insert {
                     transient
@@ -5250,7 +5304,7 @@ mod tests {
 
             // Build the same batch again and persist it, flushing to storage so
             // the persistent reference reads are fully resolvable.
-            let mut reference = TestTree::empty().edit();
+            let mut reference = TestTree::empty_in(crate::helpers::test_catalog()).edit();
             for &(is_insert, key) in &ops {
                 reference = if is_insert {
                     reference
@@ -5262,8 +5316,8 @@ mod tests {
             }
             let mut delta = Delta::zero();
             let persistent = reference.persist(&mut delta)?;
-            for (_, buffer) in delta.flush() {
-                storage.store(buffer);
+            for (_, node) in delta.flush() {
+                storage.store(node.buffer().clone());
             }
 
             // Every key in the domain (present or absent) must read identically.
@@ -5313,20 +5367,20 @@ mod tests {
     async fn it_streams_bounded_ranges_like_persist() -> Result<()> {
         use futures_util::StreamExt;
 
-        let storage = MemoryBlocks::new();
+        let storage = Blocks::new();
 
         for seed in 0..50u64 {
             let mut keys: Vec<u32> = (0..300).collect();
             Rng::new(seed).shuffle(&mut keys);
 
-            let mut transient = TestTree::empty().edit();
+            let mut transient = TestTree::empty_in(crate::helpers::test_catalog()).edit();
             for &k in &keys {
                 transient = transient
                     .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), &storage)
                     .await?;
             }
 
-            let mut reference = TestTree::empty().edit();
+            let mut reference = TestTree::empty_in(crate::helpers::test_catalog()).edit();
             for &k in &keys {
                 reference = reference
                     .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), &storage)
@@ -5334,8 +5388,8 @@ mod tests {
             }
             let mut delta = Delta::zero();
             let persistent = reference.persist(&mut delta)?;
-            for (_, buffer) in delta.flush() {
-                storage.store(buffer);
+            for (_, node) in delta.flush() {
+                storage.store(node.buffer().clone());
             }
 
             let range = 73u32.to_le_bytes()..210u32.to_le_bytes();
@@ -5371,12 +5425,12 @@ mod tests {
     /// root becomes reachable from storage alone. Used by the canonical-form
     /// tests, which compare a flushed delete result against an independent
     /// from-scratch rebuild.
-    async fn flush_into(
-        delta: &mut Delta<Blake3Hash, Buffer>,
+    async fn flush_into<K, V>(
+        delta: &mut Delta<Blake3Hash, PersistentNode<K, V>>,
         storage: &mut TestStorage,
     ) -> Result<()> {
-        for (_, buffer) in delta.flush() {
-            storage.store(buffer);
+        for (_, node) in delta.flush() {
+            storage.store(node.buffer().clone());
         }
         Ok(())
     }
@@ -5387,7 +5441,7 @@ mod tests {
     /// reshapes incorrectly cannot also corrupt the reference.
     #[dialog_common::test]
     async fn it_produces_canonical_tree_after_deleting_a_boundary_entry() -> Result<()> {
-        let mut storage = MemoryBlocks::new();
+        let mut storage = Blocks::new();
 
         let all_keys: Vec<u32> = (0..1000).collect();
         let boundaries = boundary_keys(0..1000);
@@ -5426,7 +5480,7 @@ mod tests {
     /// surviving keys directly.
     #[dialog_common::test]
     async fn it_produces_canonical_tree_after_deleting_a_non_boundary_entry() -> Result<()> {
-        let mut storage = MemoryBlocks::new();
+        let mut storage = Blocks::new();
 
         let all_keys: Vec<u32> = (0..1000).collect();
         let non_boundaries = interior_keys(0..1000);
@@ -5461,7 +5515,7 @@ mod tests {
     /// root as a direct build of the final key set.
     #[dialog_common::test]
     async fn it_produces_canonical_tree_after_bulk_deletion() -> Result<()> {
-        let mut storage = MemoryBlocks::new();
+        let mut storage = Blocks::new();
 
         let final_keys: Vec<u32> = (0..200).collect();
         let extra_keys: Vec<u32> = (200..400).collect();
@@ -5497,7 +5551,7 @@ mod tests {
     /// confirming an edit and its inverse cancel exactly.
     #[dialog_common::test]
     async fn it_restores_original_root_after_delete_then_reinsert() -> Result<()> {
-        let mut storage = MemoryBlocks::new();
+        let mut storage = Blocks::new();
 
         let all_keys: Vec<u32> = (0..500).collect();
         let original = sequential(&all_keys, &mut storage).await?;
@@ -5541,7 +5595,7 @@ mod tests {
     /// same entry set must converge to the same root (history independence).
     #[dialog_common::test]
     async fn it_converges_to_same_root_regardless_of_operation_history() -> Result<()> {
-        let mut storage = MemoryBlocks::new();
+        let mut storage = Blocks::new();
 
         // History A: insert 0..100 directly.
         let tree_a = sequential(&(0..100).collect::<Vec<_>>(), &mut storage).await?;
@@ -5587,7 +5641,7 @@ mod tests {
         }
 
         let storage = test_storage();
-        let mut tree = PersistentTree::<[u8; 8], Vec<u8>>::empty();
+        let mut tree = PersistentTree::<[u8; 8], Vec<u8>>::empty_in(crate::helpers::test_catalog());
         let mut delta = Delta::zero();
         for i in 0..5_000u32 {
             tree = tree
@@ -5595,15 +5649,18 @@ mod tests {
                 .insert(make_key(i), i.to_le_bytes().to_vec(), &storage)
                 .await?
                 .persist(&mut delta)?;
-            for (_, buffer) in delta.flush() {
-                storage.store(buffer);
+            for (_, node) in delta.flush() {
+                storage.store(node.buffer().clone());
             }
         }
 
         // Reopen cold (fresh node cache) so every touched block is a real
         // read, then edit both ends WITHOUT persisting: the spine is
         // transient at the edges and the middle stays persistent.
-        let tree = PersistentTree::<[u8; 8], Vec<u8>>::from_hash(tree.root().clone());
+        let tree = PersistentTree::<[u8; 8], Vec<u8>>::at(
+            crate::helpers::test_catalog(),
+            tree.root().clone(),
+        );
         let edit = tree
             .edit()
             .insert(make_key(0), vec![9], &storage)
@@ -5640,7 +5697,7 @@ mod tests {
     async fn it_handles_a_band_of_fully_vetoed_seams() -> Result<()> {
         const OVERSIZED: usize = 600; // above the default max_separator of 512
 
-        let storage = MemoryBlocks::new();
+        let storage = Blocks::new();
         type BandTree = PersistentTree<[u8; OVERSIZED], Vec<u8>>;
 
         // The counter sits at the TAIL: adjacent keys share the 596-byte
@@ -5653,15 +5710,15 @@ mod tests {
         };
 
         let mut delta = Delta::zero();
-        let mut tree = BandTree::empty();
+        let mut tree = BandTree::empty_in(crate::helpers::test_catalog());
         for i in 0..60u32 {
             tree = tree
                 .edit()
                 .insert(make_key(i), i.to_le_bytes().to_vec(), &storage)
                 .await?
                 .persist(&mut delta)?;
-            for (_, buffer) in delta.flush() {
-                storage.store(buffer);
+            for (_, node) in delta.flush() {
+                storage.store(node.buffer().clone());
             }
         }
 
@@ -5677,11 +5734,11 @@ mod tests {
                 .delete(&make_key(i), &storage)
                 .await?
                 .persist(&mut delta)?;
-            for (_, buffer) in delta.flush() {
-                storage.store(buffer);
+            for (_, node) in delta.flush() {
+                storage.store(node.buffer().clone());
             }
         }
-        let mut scratch = BandTree::empty();
+        let mut scratch = BandTree::empty_in(crate::helpers::test_catalog());
         for i in 0..60u32 {
             if i % 3 == 0 {
                 continue;
@@ -5691,8 +5748,8 @@ mod tests {
                 .insert(make_key(i), i.to_le_bytes().to_vec(), &storage)
                 .await?
                 .persist(&mut delta)?;
-            for (_, buffer) in delta.flush() {
-                storage.store(buffer);
+            for (_, node) in delta.flush() {
+                storage.store(node.buffer().clone());
             }
         }
         assert_eq!(
@@ -5713,7 +5770,7 @@ mod tests {
     async fn it_reads_and_edits_a_manifest_with_an_unknown_field() -> Result<()> {
         use crate::{Manifest, PersistentNodeBody};
 
-        let storage = MemoryBlocks::new();
+        let storage = Blocks::new();
         // Even code 0x40 is a shape field no build knows; value 7.
         let unknown = Manifest::decode(&[0x40, 0x01, 0x07])?;
         assert!(!unknown.extensions.is_empty());
@@ -5731,7 +5788,7 @@ mod tests {
         let root = buffer.blake3_hash().clone();
         storage.store(buffer);
 
-        let tree = TestTree::from_hash(root);
+        let tree = TestTree::at(crate::helpers::test_catalog(), root);
         assert_eq!(
             tree.manifest(&storage).await?,
             unknown,
@@ -5744,8 +5801,8 @@ mod tests {
             .insert(9u32.to_le_bytes(), 9u32.to_le_bytes().to_vec(), &storage)
             .await?
             .persist(&mut delta)?;
-        for (_, buffer) in delta.flush() {
-            storage.store(buffer);
+        for (_, node) in delta.flush() {
+            storage.store(node.buffer().clone());
         }
         assert_eq!(
             edited.manifest(&storage).await?,
@@ -5760,8 +5817,11 @@ mod tests {
         }
 
         let mut delta = Delta::zero();
-        TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(NodeCache::new(), unknown)
-            .persist(&mut delta)?;
+        TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(
+            crate::helpers::test_catalog(),
+            unknown,
+        )
+        .persist(&mut delta)?;
         Ok(())
     }
 
@@ -5773,7 +5833,7 @@ mod tests {
     async fn it_stitches_sources_written_under_different_manifests() -> Result<()> {
         use crate::{Manifest, Piece};
 
-        let storage = MemoryBlocks::new();
+        let storage = Blocks::new();
         let narrow = Manifest {
             fanout_n: 4,
             max_segment: 512,
@@ -5785,8 +5845,10 @@ mod tests {
             (narrow.clone(), 0..300u32),
             (Manifest::default(), 300..600u32),
         ] {
-            let mut edit =
-                TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(NodeCache::new(), manifest);
+            let mut edit = TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(
+                crate::helpers::test_catalog(),
+                manifest,
+            );
             for key in keys {
                 edit = edit
                     .insert(key.to_be_bytes(), key.to_be_bytes().to_vec(), &storage)
@@ -5794,13 +5856,14 @@ mod tests {
             }
             let mut delta = Delta::zero();
             let tree = edit.persist(&mut delta)?;
-            for (_, buffer) in delta.flush() {
-                storage.store(buffer);
+            for (_, node) in delta.flush() {
+                storage.store(node.buffer().clone());
             }
             sources.push(tree);
         }
 
         let stitched = TransientTree::stitch(
+            &crate::helpers::test_catalog(),
             vec![
                 Piece::Range {
                     source: &sources[0],
@@ -5816,8 +5879,8 @@ mod tests {
         .await?;
         let mut delta = Delta::zero();
         let stitched = stitched.persist(&mut delta)?;
-        for (_, buffer) in delta.flush() {
-            storage.store(buffer);
+        for (_, node) in delta.flush() {
+            storage.store(node.buffer().clone());
         }
 
         assert_eq!(stitched.manifest(&storage).await?, narrow);
@@ -5840,7 +5903,7 @@ mod tests {
     async fn it_rejects_editing_a_tree_with_a_mismatched_manifest() -> Result<()> {
         use crate::{Manifest, PersistentNodeBody};
 
-        let storage = MemoryBlocks::new();
+        let storage = Blocks::new();
 
         let foreign = Manifest {
             fanout_n: 4,
@@ -5855,10 +5918,10 @@ mod tests {
         let root = buffer.blake3_hash().clone();
         storage.store(buffer);
 
-        let tree = TestTree::from_hash(root.clone());
+        let tree = TestTree::at(crate::helpers::test_catalog(), root.clone());
         let result = TransientTree::<[u8; 4], Vec<u8>>::with_manifest(
+            crate::helpers::test_catalog(),
             root.clone(),
-            tree.node_cache(),
             Manifest::default(),
         )
         .insert(9u32.to_le_bytes(), 9u32.to_le_bytes().to_vec(), &storage)
@@ -5874,8 +5937,8 @@ mod tests {
             .insert(9u32.to_le_bytes(), 9u32.to_le_bytes().to_vec(), &storage)
             .await?
             .persist(&mut delta)?;
-        for (_, buffer) in delta.flush() {
-            storage.store(buffer);
+        for (_, node) in delta.flush() {
+            storage.store(node.buffer().clone());
         }
         assert_eq!(
             adopted.manifest(&storage).await?,
@@ -5891,7 +5954,7 @@ mod tests {
     /// batched and sequential deletes agree with each other.
     #[dialog_common::test]
     async fn it_matches_scratch_rebuild_for_random_deletes() -> Result<()> {
-        let mut storage = MemoryBlocks::new();
+        let mut storage = Blocks::new();
 
         for seed in 0..25u64 {
             let mut rng = Rng::new(seed);
@@ -5949,15 +6012,15 @@ mod tests {
         let c = encode_key(b"c", 1, 3); // interior, seam punches level 1
 
         let mut delta = Delta::zero();
-        let mut tree = SpecTree::empty();
+        let mut tree = SpecTree::empty_in(crate::helpers::test_catalog());
         for key in [a, b, c] {
             tree = tree
                 .edit()
                 .insert(key, key.to_vec(), &storage)
                 .await?
                 .persist(&mut delta)?;
-            for (_, buffer) in delta.flush() {
-                storage.store(buffer);
+            for (_, node) in delta.flush() {
+                storage.store(node.buffer().clone());
             }
         }
 
@@ -5966,19 +6029,19 @@ mod tests {
             .delete(&b, &storage)
             .await?
             .persist(&mut delta)?;
-        for (_, buffer) in delta.flush() {
-            storage.store(buffer);
+        for (_, node) in delta.flush() {
+            storage.store(node.buffer().clone());
         }
 
-        let mut scratch = SpecTree::empty();
+        let mut scratch = SpecTree::empty_in(crate::helpers::test_catalog());
         for key in [a, c] {
             scratch = scratch
                 .edit()
                 .insert(key, key.to_vec(), &storage)
                 .await?
                 .persist(&mut delta)?;
-            for (_, buffer) in delta.flush() {
-                storage.store(buffer);
+            for (_, node) in delta.flush() {
+                storage.store(node.buffer().clone());
             }
         }
 
@@ -6004,15 +6067,15 @@ mod tests {
         let b = encode_key(b"b", 1, 3); // interior, seam punches level 1
 
         let mut delta = Delta::zero();
-        let mut tree = SpecTree::empty();
+        let mut tree = SpecTree::empty_in(crate::helpers::test_catalog());
         for key in [a, b] {
             tree = tree
                 .edit()
                 .insert(key, key.to_vec(), &storage)
                 .await?
                 .persist(&mut delta)?;
-            for (_, buffer) in delta.flush() {
-                storage.store(buffer);
+            for (_, node) in delta.flush() {
+                storage.store(node.buffer().clone());
             }
         }
 
@@ -6021,19 +6084,19 @@ mod tests {
             .delete(&b, &storage)
             .await?
             .persist(&mut delta)?;
-        for (_, buffer) in delta.flush() {
-            storage.store(buffer);
+        for (_, node) in delta.flush() {
+            storage.store(node.buffer().clone());
         }
 
-        let mut scratch = SpecTree::empty();
+        let mut scratch = SpecTree::empty_in(crate::helpers::test_catalog());
         for key in [a] {
             scratch = scratch
                 .edit()
                 .insert(key, key.to_vec(), &storage)
                 .await?
                 .persist(&mut delta)?;
-            for (_, buffer) in delta.flush() {
-                storage.store(buffer);
+            for (_, node) in delta.flush() {
+                storage.store(node.buffer().clone());
             }
         }
 
@@ -6049,7 +6112,7 @@ mod tests {
     /// segment holds only itself) must still produce a canonical tree.
     #[dialog_common::test]
     async fn it_produces_canonical_tree_after_emptying_a_segment() -> Result<()> {
-        let mut storage = MemoryBlocks::new();
+        let mut storage = Blocks::new();
 
         // Construct the single-entry segment deterministically: take the first
         // two boundaries in byte order and EXCLUDE every key strictly between
@@ -6104,7 +6167,7 @@ mod tests {
     /// canonical tree.
     #[dialog_common::test]
     async fn it_produces_canonical_tree_after_deleting_first_entry() -> Result<()> {
-        let mut storage = MemoryBlocks::new();
+        let mut storage = Blocks::new();
 
         let all_keys: Vec<u32> = (0..1000).collect();
 
@@ -6144,7 +6207,7 @@ mod tests {
     /// tails at the end are left intact.
     #[dialog_common::test]
     async fn it_produces_canonical_tree_after_deleting_last_entry() -> Result<()> {
-        let mut storage = MemoryBlocks::new();
+        let mut storage = Blocks::new();
 
         let all_keys: Vec<u32> = (0..1000).collect();
 
@@ -6258,7 +6321,7 @@ mod tests {
     /// tests but fail here.
     #[dialog_common::test]
     async fn it_stores_canonical_shortest_separators() -> Result<()> {
-        let mut storage = MemoryBlocks::new();
+        let mut storage = Blocks::new();
         let keys: Vec<u32> = (0..600).collect();
         let tree = sequential(&keys, &mut storage).await?;
 
@@ -6311,7 +6374,7 @@ mod tests {
     /// separator bound sooner than the fact key for the same fact.
     #[dialog_common::test]
     async fn it_round_trips_keys_longer_than_the_separator_bound() -> Result<()> {
-        let storage = MemoryBlocks::new();
+        let storage = Blocks::new();
         // Byte pacing off: the pure geometric coin ranks a key by its hash
         // alone, which is exactly what this test pins (the retired length
         // guard). The shipped `max_segment` default swaps in the weight-paced
@@ -6338,21 +6401,26 @@ mod tests {
             keys.push(VarKey(bytes));
         }
 
-        let mut tree = VarTree::empty();
+        let mut tree = VarTree::empty_in(crate::helpers::test_catalog());
         let mut delta = Delta::zero();
         for key in &keys {
             let edit = match tree.stored_root() {
-                Some(root) => {
-                    TransientTree::with_manifest(root.clone(), tree.node_cache(), manifest.clone())
-                }
-                None => TransientTree::empty_with_manifest(tree.node_cache(), manifest.clone()),
+                Some(root) => TransientTree::with_manifest(
+                    crate::helpers::test_catalog(),
+                    root.clone(),
+                    manifest.clone(),
+                ),
+                None => TransientTree::empty_with_manifest(
+                    crate::helpers::test_catalog(),
+                    manifest.clone(),
+                ),
             };
             tree = edit
                 .insert(key.clone(), key.0.clone(), &storage)
                 .await?
                 .persist(&mut delta)?;
-            for (_, buffer) in delta.flush() {
-                storage.store(buffer);
+            for (_, node) in delta.flush() {
+                storage.store(node.buffer().clone());
             }
             delta = Delta::zero();
         }
@@ -6415,15 +6483,18 @@ mod tests {
         let mut delta = Delta::zero();
         for key in keys {
             let transient = match &tree {
-                None => TransientTree::empty_with_manifest(NodeCache::new(), manifest.clone()),
+                None => TransientTree::empty_with_manifest(
+                    crate::helpers::test_catalog(),
+                    manifest.clone(),
+                ),
                 Some(tree) => tree.edit(),
             };
             let next = transient
                 .insert(key.clone(), key.0.clone(), storage)
                 .await?
                 .persist(&mut delta)?;
-            for (_, buffer) in delta.flush() {
-                storage.store(buffer);
+            for (_, node) in delta.flush() {
+                storage.store(node.buffer().clone());
             }
             delta = Delta::zero();
             tree = Some(next);
@@ -6445,8 +6516,8 @@ mod tests {
                 .delete(key, storage)
                 .await?
                 .persist(&mut delta)?;
-            for (_, buffer) in delta.flush() {
-                storage.store(buffer);
+            for (_, node) in delta.flush() {
+                storage.store(node.buffer().clone());
             }
             delta = Delta::zero();
         }
@@ -6462,7 +6533,7 @@ mod tests {
     /// runs to stay convergent.
     #[dialog_common::test]
     async fn it_converges_on_weight_paced_trees_across_insertion_orders() -> Result<()> {
-        let mut storage = MemoryBlocks::new();
+        let mut storage = Blocks::new();
         let manifest = capped_manifest();
 
         let sorted = {
@@ -6527,7 +6598,7 @@ mod tests {
     /// set from scratch.
     #[dialog_common::test]
     async fn it_matches_rebuild_after_deletes_under_the_weight_coin() -> Result<()> {
-        let mut storage = MemoryBlocks::new();
+        let mut storage = Blocks::new();
         let manifest = capped_manifest();
 
         let sorted = {
@@ -6581,9 +6652,9 @@ mod tests {
     /// The last key of every persisted leaf segment except the global last —
     /// the set of leaf seam boundaries — collected left to right by walking
     /// the stored nodes. The shape probe the veto tests read.
-    async fn leaf_boundaries(root: &Blake3Hash, storage: &MemoryBlocks) -> Result<Vec<Vec<u8>>> {
+    async fn leaf_boundaries(root: &Blake3Hash, storage: &Blocks) -> Result<Vec<Vec<u8>>> {
         let mut boundaries: Vec<Vec<u8>> = Vec::new();
-        let accessor = Accessor::new(NodeCache::new(), storage);
+        let accessor = Accessor::new(storage, &crate::helpers::test_catalog());
         let mut frontier = vec![root.clone()];
         while !frontier.is_empty() {
             let mut next = Vec::new();
@@ -6612,7 +6683,7 @@ mod tests {
     /// seam shape differently.
     #[dialog_common::test]
     async fn it_converges_on_vetoed_clusters_across_insertion_orders() -> Result<()> {
-        let mut storage = MemoryBlocks::new();
+        let mut storage = Blocks::new();
         let manifest = Manifest {
             max_segment: 0,
             ..capped_manifest()
@@ -6697,7 +6768,7 @@ mod tests {
     /// scratch.
     #[dialog_common::test]
     async fn it_matches_rebuild_after_deletes_in_vetoed_clusters() -> Result<()> {
-        let mut storage = MemoryBlocks::new();
+        let mut storage = Blocks::new();
         let manifest = Manifest {
             max_segment: 0,
             ..capped_manifest()
@@ -6741,10 +6812,10 @@ mod tests {
     /// self-identifying by their long separators).
     async fn leaf_piece_heads(
         root: &Blake3Hash,
-        storage: &MemoryBlocks,
+        storage: &Blocks,
     ) -> Result<Vec<(usize, Vec<u8>)>> {
         let mut pieces: Vec<(usize, Vec<u8>)> = Vec::new();
-        let accessor = Accessor::new(NodeCache::new(), storage);
+        let accessor = Accessor::new(storage, &crate::helpers::test_catalog());
         let mut frontier: Vec<(Blake3Hash, usize)> = vec![(root.clone(), 0)];
         while !frontier.is_empty() {
             let mut next = Vec::new();
@@ -6771,7 +6842,7 @@ mod tests {
     /// back completely.
     #[dialog_common::test]
     async fn it_backstops_fully_vetoed_stretches_at_the_target() -> Result<()> {
-        let mut storage = MemoryBlocks::new();
+        let mut storage = Blocks::new();
         let manifest = capped_manifest();
 
         // One fully vetoed cluster several times the 512 target, plus two
@@ -6842,7 +6913,7 @@ mod tests {
     /// to add or drop a cut — never gratuitously.
     #[dialog_common::test]
     async fn it_keeps_forced_anchors_stable_under_churn() -> Result<()> {
-        let mut storage = MemoryBlocks::new();
+        let mut storage = Blocks::new();
         let manifest = capped_manifest();
 
         let cluster_key = |n: u32| {
@@ -6889,8 +6960,8 @@ mod tests {
                 transient.delete(&key, &storage).await?
             };
             tree = transient.persist(&mut delta)?;
-            for (_, buffer) in delta.flush() {
-                storage.store(buffer);
+            for (_, node) in delta.flush() {
+                storage.store(node.buffer().clone());
             }
             delta = Delta::zero();
 
@@ -6951,11 +7022,13 @@ mod tests {
     async fn leaf_weights(
         sorted: &[VarKey],
         root: &Blake3Hash,
-        storage: &MemoryBlocks,
+        storage: &Blocks,
     ) -> Result<Vec<usize>> {
         let boundaries: HashSet<Vec<u8>> =
             leaf_boundaries(root, storage).await?.into_iter().collect();
-        let manifest = VarTree::from_hash(root.clone()).manifest(storage).await?;
+        let manifest = VarTree::at(crate::helpers::test_catalog(), root.clone())
+            .manifest(storage)
+            .await?;
         let mut weights = Vec::new();
         let mut current = 0usize;
         for key in sorted {
@@ -6979,7 +7052,7 @@ mod tests {
     /// survivors' fresh build.
     #[dialog_common::test]
     async fn it_converges_on_over_ceiling_frames_across_insertion_orders() -> Result<()> {
-        let mut storage = MemoryBlocks::new();
+        let mut storage = Blocks::new();
         let manifest = ceiling_manifest(2, 0);
 
         let sorted = tails_keys("n", 60, &manifest);
@@ -7032,7 +7105,7 @@ mod tests {
     async fn it_bounds_frames_at_the_ceiling() -> Result<()> {
         for factor in [2u32, 3] {
             for selector in [0u32, 1] {
-                let mut storage = MemoryBlocks::new();
+                let mut storage = Blocks::new();
                 let manifest = ceiling_manifest(factor, selector);
                 let sorted = tails_keys("n", 90, &manifest);
                 let tree = build_incremental(&sorted, manifest.clone(), &mut storage).await?;
@@ -7060,7 +7133,7 @@ mod tests {
     /// frames — including the coin cut between them — stay byte-identical.
     #[dialog_common::test]
     async fn it_keeps_ceiling_effects_inside_the_touched_frames() -> Result<()> {
-        let mut storage = MemoryBlocks::new();
+        let mut storage = Blocks::new();
         let manifest = ceiling_manifest(2, 0);
 
         // Two over-ceiling all-tails frames separated by one heads key (a
@@ -7109,8 +7182,8 @@ mod tests {
                 transient.delete(&key, &storage).await?
             };
             tree = transient.persist(&mut delta)?;
-            for (_, buffer) in delta.flush() {
-                storage.store(buffer);
+            for (_, node) in delta.flush() {
+                storage.store(node.buffer().clone());
             }
             delta = Delta::zero();
 
@@ -7137,7 +7210,7 @@ mod tests {
     /// whatever the weight distribution.
     #[dialog_common::test]
     async fn it_anchors_frames_only_at_accepted_seams() -> Result<()> {
-        let mut storage = MemoryBlocks::new();
+        let mut storage = Blocks::new();
         let manifest = ceiling_manifest(2, 0);
 
         // A small vetoed cluster (under the 512 stretch target — three
@@ -7219,7 +7292,7 @@ mod tests {
     /// the start.
     #[dialog_common::test]
     async fn it_keeps_forced_marks_through_fast_path_updates() -> Result<()> {
-        let mut storage = MemoryBlocks::new();
+        let mut storage = Blocks::new();
         let manifest = ceiling_manifest(2, 0);
 
         // An all-tails run over the ceiling: no natural cut anywhere, so
@@ -7252,8 +7325,8 @@ mod tests {
             .insert(target.clone(), b"rewritten".to_vec(), &storage)
             .await?
             .persist(&mut delta)?;
-        for (_, buffer) in delta.flush() {
-            storage.store(buffer);
+        for (_, node) in delta.flush() {
+            storage.store(node.buffer().clone());
         }
 
         let after: Vec<(usize, Vec<u8>)> = leaf_piece_heads(updated.root(), &storage)
@@ -7268,12 +7341,15 @@ mod tests {
 
         // History-independence: a sequential build carrying the final
         // value from the start lands on the same root.
-        let fresh_storage = MemoryBlocks::new();
+        let fresh_storage = Blocks::new();
         let mut fresh: Option<VarTree> = None;
         let mut delta = Delta::zero();
         for key in &sorted {
             let transient = match &fresh {
-                None => TransientTree::empty_with_manifest(NodeCache::new(), manifest.clone()),
+                None => TransientTree::empty_with_manifest(
+                    crate::helpers::test_catalog(),
+                    manifest.clone(),
+                ),
                 Some(tree) => tree.edit(),
             };
             let value = if key == &target {
@@ -7285,8 +7361,8 @@ mod tests {
                 .insert(key.clone(), value, &fresh_storage)
                 .await?
                 .persist(&mut delta)?;
-            for (_, buffer) in delta.flush() {
-                fresh_storage.store(buffer);
+            for (_, node) in delta.flush() {
+                fresh_storage.store(node.buffer().clone());
             }
             delta = Delta::zero();
             fresh = Some(next);
@@ -7305,10 +7381,10 @@ mod tests {
     /// weight and child count. The shape probe the index-pacing tests read.
     async fn index_nodes(
         root: &Blake3Hash,
-        storage: &MemoryBlocks,
+        storage: &Blocks,
     ) -> Result<Vec<(usize, usize, usize)>> {
         let mut stats = Vec::new();
-        let accessor = Accessor::new(NodeCache::new(), storage);
+        let accessor = Accessor::new(storage, &crate::helpers::test_catalog());
         let mut frontier = vec![root.clone()];
         let mut depth = 0usize;
         while !frontier.is_empty() {
@@ -7336,10 +7412,10 @@ mod tests {
     /// reads which index-node hashes an edit leaves untouched.
     async fn node_hashes_by_depth(
         root: &Blake3Hash,
-        storage: &MemoryBlocks,
+        storage: &Blocks,
     ) -> Result<Vec<HashSet<Blake3Hash>>> {
         let mut levels: Vec<HashSet<Blake3Hash>> = Vec::new();
-        let accessor = Accessor::new(NodeCache::new(), storage);
+        let accessor = Accessor::new(storage, &crate::helpers::test_catalog());
         let mut frontier = vec![root.clone()];
         while !frontier.is_empty() {
             let mut next = Vec::new();
@@ -7366,7 +7442,7 @@ mod tests {
     /// as a byte-identical block.
     #[dialog_common::test]
     async fn it_keeps_untouched_index_pieces_persistent_through_a_frame_split() -> Result<()> {
-        let mut storage = MemoryBlocks::new();
+        let mut storage = Blocks::new();
         let manifest = ceiling_manifest(2, 1);
 
         // A tree deep enough to grow index levels the ceiling force-splits.
@@ -7404,8 +7480,8 @@ mod tests {
             .await?
             .persist(&mut delta)?;
         let mut written: HashSet<Blake3Hash> = HashSet::new();
-        for (hash, buffer) in delta.flush() {
-            storage.store(buffer);
+        for (hash, node) in delta.flush() {
+            storage.store(node.buffer().clone());
             written.insert(hash);
         }
 
@@ -7441,7 +7517,7 @@ mod tests {
     /// reaches the delta. The pass-through never suppresses a real write.
     #[dialog_common::test]
     async fn it_rebuilds_a_changed_index_piece_into_the_delta() -> Result<()> {
-        let mut storage = MemoryBlocks::new();
+        let mut storage = Blocks::new();
         let manifest = ceiling_manifest(2, 1);
 
         let sorted: Vec<VarKey> = (0..600u32)
@@ -7461,8 +7537,8 @@ mod tests {
             .await?
             .persist(&mut delta)?;
         let mut written: HashSet<Blake3Hash> = HashSet::new();
-        for (hash, buffer) in delta.flush() {
-            storage.store(buffer);
+        for (hash, node) in delta.flush() {
+            storage.store(node.buffer().clone());
             written.insert(hash);
         }
 
@@ -7497,7 +7573,7 @@ mod tests {
     /// re-stored, never what the tree IS.
     #[dialog_common::test]
     async fn it_converges_with_index_piece_reuse_over_the_ceiling() -> Result<()> {
-        let mut storage = MemoryBlocks::new();
+        let mut storage = Blocks::new();
         let manifest = ceiling_manifest(3, 1);
 
         let base: Vec<VarKey> = (0..700u32)
@@ -7514,7 +7590,7 @@ mod tests {
             let base = base.clone();
             let manifest = manifest.clone();
             async move {
-                let mut storage = MemoryBlocks::new();
+                let mut storage = Blocks::new();
                 let mut tree = build_incremental(&base, manifest, &mut storage).await?;
                 let mut delta = Delta::zero();
                 for key in &order {
@@ -7523,8 +7599,8 @@ mod tests {
                         .insert(key.clone(), key.0.clone(), &storage)
                         .await?
                         .persist(&mut delta)?;
-                    for (_, buffer) in delta.flush() {
-                        storage.store(buffer);
+                    for (_, node) in delta.flush() {
+                        storage.store(node.buffer().clone());
                     }
                     delta = Delta::zero();
                 }
@@ -7571,7 +7647,7 @@ mod tests {
     /// of the separator set.
     #[dialog_common::test]
     async fn it_converges_across_orders_at_index_levels() -> Result<()> {
-        let mut storage = MemoryBlocks::new();
+        let mut storage = Blocks::new();
         let manifest = ceiling_manifest(2, 1);
 
         let sorted: Vec<VarKey> = (0..600u32)
@@ -7615,7 +7691,7 @@ mod tests {
     /// guarantee.
     #[dialog_common::test]
     async fn it_bounds_index_nodes_at_every_level() -> Result<()> {
-        let mut storage = MemoryBlocks::new();
+        let mut storage = Blocks::new();
         let manifest = ceiling_manifest(2, 1);
 
         let sorted: Vec<VarKey> = (0..600u32)
@@ -7662,7 +7738,7 @@ mod tests {
         let deletes: Vec<VarKey> = seed.iter().skip(3).step_by(9).cloned().collect();
 
         for (factor, selector) in [(0u32, 0u32), (2, 0), (2, 1), (3, 0), (3, 1)] {
-            let mut storage = MemoryBlocks::new();
+            let mut storage = Blocks::new();
             let manifest = ceiling_manifest(factor, selector);
             let mut tree = build_incremental(&seed, manifest, &mut storage).await?;
 
@@ -7698,8 +7774,8 @@ mod tests {
                     transient.delete(&key, &storage).await?
                 };
                 tree = transient.persist(&mut delta)?;
-                for (_, buffer) in delta.flush() {
-                    storage.store(buffer);
+                for (_, node) in delta.flush() {
+                    storage.store(node.buffer().clone());
                 }
                 delta = Delta::zero();
 
@@ -7758,7 +7834,7 @@ mod tests {
     /// the stretch.
     #[dialog_common::test]
     async fn it_keeps_semantic_anchors_still_under_inserts() -> Result<()> {
-        let mut storage = MemoryBlocks::new();
+        let mut storage = Blocks::new();
         let manifest = ceiling_manifest(0, 1);
 
         let sorted = semantic_cluster();
@@ -7797,8 +7873,8 @@ mod tests {
                 .insert(key.clone(), key.0.clone(), &storage)
                 .await?
                 .persist(&mut delta)?;
-            for (_, buffer) in delta.flush() {
-                storage.store(buffer);
+            for (_, node) in delta.flush() {
+                storage.store(node.buffer().clone());
             }
             delta = Delta::zero();
         }
@@ -7817,7 +7893,7 @@ mod tests {
     /// right key (the sub-cluster's next member), not anywhere else.
     #[dialog_common::test]
     async fn it_reanchors_when_the_semantic_anchor_is_deleted() -> Result<()> {
-        let mut storage = MemoryBlocks::new();
+        let mut storage = Blocks::new();
         let manifest = ceiling_manifest(0, 1);
 
         let sorted = semantic_cluster();
@@ -7831,8 +7907,8 @@ mod tests {
             .delete(&sub_b_first, &storage)
             .await?
             .persist(&mut delta)?;
-        for (_, buffer) in delta.flush() {
-            storage.store(buffer);
+        for (_, node) in delta.flush() {
+            storage.store(node.buffer().clone());
         }
 
         let bound = manifest.max_separator as usize;
@@ -7882,7 +7958,7 @@ mod tests {
     /// incremental deletes must land on the fresh build of the survivors.
     #[dialog_common::test]
     async fn it_converges_on_composite_stretches_across_insertion_orders() -> Result<()> {
-        let mut storage = MemoryBlocks::new();
+        let mut storage = Blocks::new();
         let manifest = capped_manifest();
 
         let sorted = {
@@ -7950,7 +8026,7 @@ mod tests {
     /// byte-for-byte in place.
     #[dialog_common::test]
     async fn it_keeps_bank_effects_inside_the_enclosing_stretch() -> Result<()> {
-        let mut storage = MemoryBlocks::new();
+        let mut storage = Blocks::new();
         let manifest = capped_manifest();
 
         let sorted = {
@@ -7995,8 +8071,8 @@ mod tests {
                 transient.delete(&key, &storage).await?
             };
             tree = transient.persist(&mut delta)?;
-            for (_, buffer) in delta.flush() {
-                storage.store(buffer);
+            for (_, node) in delta.flush() {
+                storage.store(node.buffer().clone());
             }
             delta = Delta::zero();
 
@@ -8025,7 +8101,7 @@ mod tests {
     /// glue seam a ~13% key-sized flip and the clusters merged.
     #[dialog_common::test]
     async fn it_cuts_composite_stretches_at_their_glue_seams() -> Result<()> {
-        let mut storage = MemoryBlocks::new();
+        let mut storage = Blocks::new();
         let manifest = capped_manifest();
 
         let sorted = {
@@ -8065,7 +8141,7 @@ mod tests {
     /// same bytes as a fresh build of the survivors.
     #[dialog_common::test]
     async fn it_recreates_a_cut_when_a_delete_unvetoes_a_seam() -> Result<()> {
-        let mut storage = MemoryBlocks::new();
+        let mut storage = Blocks::new();
         let manifest = Manifest {
             max_segment: 0,
             ..capped_manifest()
@@ -8138,7 +8214,7 @@ mod tests {
     /// is the edit-sensitivity fear that once killed a veto variant.
     #[dialog_common::test]
     async fn it_flips_at_most_adjacent_seams_per_edit() -> Result<()> {
-        let mut storage = MemoryBlocks::new();
+        let mut storage = Blocks::new();
         let manifest = Manifest {
             max_segment: 0,
             ..capped_manifest()
@@ -8190,8 +8266,8 @@ mod tests {
                 transient.delete(&key, &storage).await?
             };
             tree = transient.persist(&mut delta)?;
-            for (_, buffer) in delta.flush() {
-                storage.store(buffer);
+            for (_, node) in delta.flush() {
+                storage.store(node.buffer().clone());
             }
             delta = Delta::zero();
 
@@ -8220,7 +8296,7 @@ mod tests {
     /// own, not the defaults. A batch that expects another format is refused.
     #[dialog_common::test]
     async fn it_preserves_a_non_default_manifest_across_an_edit() -> Result<()> {
-        let storage = MemoryBlocks::new();
+        let storage = Blocks::new();
         // Non-default in every field: a smaller branching parameter, a
         // separator bound low enough that the keys below straddle it, and a
         // spill threshold between the default and the sizes used here.
@@ -8243,12 +8319,12 @@ mod tests {
         let mut delta = Delta::zero();
         let first = key_at(0);
         let mut tree: VarTree =
-            TransientTree::empty_with_manifest(NodeCache::new(), manifest.clone())
+            TransientTree::empty_with_manifest(crate::helpers::test_catalog(), manifest.clone())
                 .insert(first.clone(), first.0.clone(), &storage)
                 .await?
                 .persist(&mut delta)?;
-        for (_, buffer) in delta.flush() {
-            storage.store(buffer);
+        for (_, node) in delta.flush() {
+            storage.store(node.buffer().clone());
         }
 
         assert_eq!(
@@ -8264,8 +8340,8 @@ mod tests {
                 .insert(key.clone(), key.0.clone(), &storage)
                 .await?
                 .persist(&mut delta)?;
-            for (_, buffer) in delta.flush() {
-                storage.store(buffer);
+            for (_, node) in delta.flush() {
+                storage.store(node.buffer().clone());
             }
         }
 
@@ -8293,8 +8369,8 @@ mod tests {
         // the failure is loud and the tree is left intact.
         let last = key_at(64);
         let reformatted = TransientTree::<VarKey, Vec<u8>>::with_manifest(
+            crate::helpers::test_catalog(),
             tree.root().clone(),
-            tree.node_cache(),
             Manifest::default(),
         )
         .insert(last.clone(), last.0.clone(), &storage)
@@ -8319,7 +8395,7 @@ mod tests {
     /// new-minimum split because equal-length keys share no long prefix.
     #[dialog_common::test]
     async fn it_keeps_prior_when_inserting_new_minimum_variable_key() -> Result<()> {
-        let mut storage = MemoryBlocks::new();
+        let mut storage = Blocks::new();
 
         // Sweep suffixes so the new-minimum `low` lands on a boundary rank at
         // least once (a boundary new-minimum insert is the trigger).
@@ -8336,7 +8412,7 @@ mod tests {
 
             // Commit 1: insert `high` and persist.
             let mut delta = Delta::zero();
-            let tree = VarTree::empty()
+            let tree = VarTree::empty_in(crate::helpers::test_catalog())
                 .edit()
                 .insert(high.clone(), high.0.clone(), &storage)
                 .await?
@@ -8387,14 +8463,14 @@ mod tests {
     /// Builds a tree over big-endian `keys` in one batch and flushes it to
     /// storage, so a stitch can read its nodes back.
     async fn stitch_source(keys: &[u32], storage: &mut TestStorage) -> Result<TestTree> {
-        let mut edit = TestTree::empty().edit();
+        let mut edit = TestTree::empty_in(crate::helpers::test_catalog()).edit();
         for &k in keys {
             edit = edit.insert(bkey(k), bkey(k).to_vec(), storage).await?;
         }
         let mut delta = Delta::zero();
         let tree = edit.persist(&mut delta)?;
-        for (_, buffer) in delta.flush() {
-            storage.store(buffer);
+        for (_, node) in delta.flush() {
+            storage.store(node.buffer().clone());
         }
         Ok(tree)
     }
@@ -8402,7 +8478,7 @@ mod tests {
     /// The from-scratch oracle for a stitch: the root of a tree built by
     /// inserting the union of the pieces' entries directly.
     async fn stitch_oracle(keys: &[u32], storage: &TestStorage) -> Result<Blake3Hash> {
-        let mut edit = TestTree::empty().edit();
+        let mut edit = TestTree::empty_in(crate::helpers::test_catalog()).edit();
         for &k in keys {
             edit = edit.insert(bkey(k), bkey(k).to_vec(), storage).await?;
         }
@@ -8416,7 +8492,7 @@ mod tests {
         pieces: Vec<Piece<'_, [u8; 4], Vec<u8>>>,
         storage: &TestStorage,
     ) -> Result<(Blake3Hash, usize)> {
-        let tree = TransientTree::stitch(pieces, storage).await?;
+        let tree = TransientTree::stitch(&crate::helpers::test_catalog(), pieces, storage).await?;
         let mut delta = Delta::zero();
         let tree = tree.persist(&mut delta)?;
         Ok((tree.root().clone(), delta.flush().count()))
@@ -8476,7 +8552,7 @@ mod tests {
     /// convergent-merge use case the stitch exists for.
     #[dialog_common::test]
     async fn it_stitches_a_start_trimmed_leftmost_piece_canonically() -> Result<()> {
-        let mut storage = MemoryBlocks::new();
+        let mut storage = Blocks::new();
         let source = stitch_source(&(0..500).collect::<Vec<u32>>(), &mut storage).await?;
 
         // Single start-trimmed piece.
@@ -8523,7 +8599,7 @@ mod tests {
     /// the tree a from-scratch build over the union of their entries produces.
     #[dialog_common::test]
     async fn it_stitches_two_disjoint_trees_canonically() -> Result<()> {
-        let mut storage = MemoryBlocks::new();
+        let mut storage = Blocks::new();
 
         // A fixed case first: evens in 0..600 next to the band 1000..1300.
         let a_keys: Vec<u32> = (0..600).step_by(2).collect();
@@ -8545,7 +8621,7 @@ mod tests {
     /// the source's middle band is dropped and replaced by the entries.
     #[dialog_common::test]
     async fn it_stitches_ranges_of_one_tree_with_explicit_entries() -> Result<()> {
-        let mut storage = MemoryBlocks::new();
+        let mut storage = Blocks::new();
         let source_keys: Vec<u32> = (0..500).collect();
         let source = stitch_source(&source_keys, &mut storage).await?;
 
@@ -8592,7 +8668,7 @@ mod tests {
     /// and re-joins mid-tree. This is the seam-churn case.
     #[dialog_common::test]
     async fn it_stitches_alternating_ranges_from_two_trees() -> Result<()> {
-        let mut storage = MemoryBlocks::new();
+        let mut storage = Blocks::new();
 
         for seed in 0..20u64 {
             let mut rng = Rng::new(seed);
@@ -8643,7 +8719,7 @@ mod tests {
     /// interiors were reused as persistent links rather than rebuilt.
     #[dialog_common::test]
     async fn it_reuses_interior_nodes_when_stitching() -> Result<()> {
-        let mut storage = MemoryBlocks::new();
+        let mut storage = Blocks::new();
 
         let a_keys: Vec<u32> = (0..1000).collect();
         let b_keys: Vec<u32> = (1_000_000..1_001_000).collect();
@@ -8677,7 +8753,7 @@ mod tests {
     /// the stitch hands back the same root and persisting writes nothing.
     #[dialog_common::test]
     async fn it_stitches_a_single_full_range_piece_to_the_source_root() -> Result<()> {
-        let mut storage = MemoryBlocks::new();
+        let mut storage = Blocks::new();
         let keys: Vec<u32> = (0..400).collect();
         let source = stitch_source(&keys, &mut storage).await?;
 
@@ -8696,7 +8772,7 @@ mod tests {
     /// whose persisted form is the canonical manifest-carrying empty node.
     #[dialog_common::test]
     async fn it_stitches_empty_pieces_to_the_empty_tree() -> Result<()> {
-        let mut storage = MemoryBlocks::new();
+        let mut storage = Blocks::new();
         let mut scratch = Delta::zero();
         let empty_root =
             super::persist_empty_root::<[u8; 4], Vec<u8>>(&Manifest::default(), &mut scratch)?
@@ -8734,7 +8810,7 @@ mod tests {
     /// key) or exactly on a segment boundary.
     #[dialog_common::test]
     async fn it_reassembles_a_source_split_at_any_key() -> Result<()> {
-        let mut storage = MemoryBlocks::new();
+        let mut storage = Blocks::new();
         let keys: Vec<u32> = (0..500).collect();
         let source = stitch_source(&keys, &mut storage).await?;
 
@@ -8769,7 +8845,7 @@ mod tests {
 mod buffer_edit_interaction_tests {
     #![allow(unexpected_cfgs)]
 
-    use crate::MemoryBlocks;
+    use crate::helpers::Blocks;
     use anyhow::Result;
     use dialog_common::Blake3Hash;
 
@@ -8777,19 +8853,22 @@ mod buffer_edit_interaction_tests {
         DistributionSimulator, SpecKey, TestStorage as SpecStorage, encode_key, test_storage,
     };
     use crate::{
-        Buffer, Change, Delta, Entry, Hashed, HitchhikerTree, NodeBody, NoveltyEntry, NoveltyOp,
+        Change, Delta, Entry, Hashed, HitchhikerTree, NodeBody, NoveltyEntry, NoveltyOp,
         PersistentNode, PersistentTree, Piece, TransientTree, tree_spec,
     };
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-    type Store = MemoryBlocks;
+    type Store = Blocks;
     type Tree = PersistentTree<[u8; 4], Vec<u8>>;
 
-    async fn settle(delta: &mut Delta<Blake3Hash, Buffer>, storage: &mut Store) -> Result<()> {
-        for (_, buffer) in delta.flush() {
-            storage.store(buffer);
+    async fn settle<K, V>(
+        delta: &mut Delta<Blake3Hash, PersistentNode<K, V>>,
+        storage: &mut Store,
+    ) -> Result<()> {
+        for (_, node) in delta.flush() {
+            storage.store(node.buffer().clone());
         }
         Ok(())
     }
@@ -8815,14 +8894,19 @@ mod buffer_edit_interaction_tests {
     /// values) one at a time under [`paced_manifest`], flushing after each.
     async fn paced_base(keys: std::ops::Range<u32>, storage: &mut Store) -> Result<Tree> {
         let manifest = paced_manifest();
-        let mut base = Tree::empty();
+        let mut base = Tree::empty_in(crate::helpers::test_catalog());
         let mut delta = Delta::zero();
         for i in keys {
             let edit = match base.stored_root() {
-                Some(root) => {
-                    TransientTree::with_manifest(root.clone(), base.node_cache(), manifest.clone())
-                }
-                None => TransientTree::empty_with_manifest(base.node_cache(), manifest.clone()),
+                Some(root) => TransientTree::with_manifest(
+                    crate::helpers::test_catalog(),
+                    root.clone(),
+                    manifest.clone(),
+                ),
+                None => TransientTree::empty_with_manifest(
+                    crate::helpers::test_catalog(),
+                    manifest.clone(),
+                ),
             };
             base = edit
                 .insert(i.to_be_bytes(), vec![i as u8], storage)
@@ -8844,7 +8928,7 @@ mod buffer_edit_interaction_tests {
     /// the same facts disagree on their roots.
     #[dialog_common::test]
     async fn it_fuses_leaves_when_a_buffered_retract_removes_a_boundary() -> Result<()> {
-        let mut storage: Store = MemoryBlocks::new();
+        let mut storage: Store = Blocks::new();
 
         // Build a branching tree and find a real boundary key: one that
         // terminates a leaf.
@@ -8901,7 +8985,7 @@ mod buffer_edit_interaction_tests {
     /// canonical build of the surviving fact set.
     #[dialog_common::test]
     async fn it_fuses_leaves_when_an_overflowing_retract_removes_a_boundary() -> Result<()> {
-        let mut storage: Store = MemoryBlocks::new();
+        let mut storage: Store = Blocks::new();
 
         let base = paced_base(0..600u32, &mut storage).await?;
 
@@ -8981,10 +9065,10 @@ mod buffer_edit_interaction_tests {
                 (rng >> 32) as u32
             };
 
-            let mut storage: Store = MemoryBlocks::new();
+            let mut storage: Store = Blocks::new();
 
             let base_keys: Vec<u32> = (0..400).map(|_| next() % 100_000).collect();
-            let mut base = Tree::empty();
+            let mut base = Tree::empty_in(crate::helpers::test_catalog());
             let mut delta = Delta::zero();
             for key in &base_keys {
                 base = base
@@ -9062,9 +9146,9 @@ mod buffer_edit_interaction_tests {
     /// reports the adopted bulk as missing.
     #[dialog_common::test]
     async fn it_preserves_buffered_ops_through_stitch() -> Result<()> {
-        let mut storage: Store = MemoryBlocks::new();
+        let mut storage: Store = Blocks::new();
 
-        let mut base = Tree::empty();
+        let mut base = Tree::empty_in(crate::helpers::test_catalog());
         let mut delta = Delta::zero();
         for i in 0..400u32 {
             base = base
@@ -9085,7 +9169,7 @@ mod buffer_edit_interaction_tests {
             let mut delta = Delta::zero();
             let root = tree.persist(&mut delta)?;
             settle(&mut delta, &mut storage).await?;
-            Tree::from_hash_with_cache(root, Default::default())
+            Tree::at(crate::helpers::test_catalog(), root)
         };
         assert_eq!(
             buffered_tree.get(&buffered_key, &storage).await?,
@@ -9097,6 +9181,7 @@ mod buffer_edit_interaction_tests {
         // exactly what the source held.
         let mut delta = Delta::zero();
         let stitched = TransientTree::<[u8; 4], Vec<u8>>::stitch(
+            &crate::helpers::test_catalog(),
             vec![Piece::Range {
                 source: &buffered_tree,
                 range: [0u8; 4]..=[0xFFu8; 4],
@@ -9121,9 +9206,9 @@ mod buffer_edit_interaction_tests {
     /// whether carving preserves buffered ops.
     #[dialog_common::test]
     async fn it_preserves_buffered_ops_through_partial_stitch() -> Result<()> {
-        let mut storage: Store = MemoryBlocks::new();
+        let mut storage: Store = Blocks::new();
 
-        let mut base = Tree::empty();
+        let mut base = Tree::empty_in(crate::helpers::test_catalog());
         let mut delta = Delta::zero();
         for i in 0..400u32 {
             base = base
@@ -9146,12 +9231,13 @@ mod buffer_edit_interaction_tests {
             let mut delta = Delta::zero();
             let root = tree.persist(&mut delta)?;
             settle(&mut delta, &mut storage).await?;
-            Tree::from_hash_with_cache(root, Default::default())
+            Tree::at(crate::helpers::test_catalog(), root)
         };
 
         // Carve the middle out: a partial range, so the spine is rebuilt.
         let mut delta = Delta::zero();
         let stitched = TransientTree::<[u8; 4], Vec<u8>>::stitch(
+            &crate::helpers::test_catalog(),
             vec![Piece::Range {
                 source: &buffered_tree,
                 range: low.to_be_bytes()..=high.to_be_bytes(),
@@ -9182,9 +9268,9 @@ mod buffer_edit_interaction_tests {
     /// the carved piece silently loses those writes.
     #[dialog_common::test]
     async fn it_preserves_buffered_ops_above_the_stored_bound_through_carve() -> Result<()> {
-        let mut storage: Store = MemoryBlocks::new();
+        let mut storage: Store = Blocks::new();
 
-        let mut base = Tree::empty();
+        let mut base = Tree::empty_in(crate::helpers::test_catalog());
         let mut delta = Delta::zero();
         for i in 0..400u32 {
             base = base
@@ -9205,7 +9291,7 @@ mod buffer_edit_interaction_tests {
             let mut delta = Delta::zero();
             let root = tree.persist(&mut delta)?;
             settle(&mut delta, &mut storage).await?;
-            Tree::from_hash_with_cache(root, Default::default())
+            Tree::at(crate::helpers::test_catalog(), root)
         };
         for key in buffered_keys {
             assert_eq!(
@@ -9219,6 +9305,7 @@ mod buffer_edit_interaction_tests {
         // whose end reaches past it, so the buffered keys are in range.
         let mut delta = Delta::zero();
         let stitched = TransientTree::<[u8; 4], Vec<u8>>::stitch(
+            &crate::helpers::test_catalog(),
             vec![Piece::Range {
                 source: &buffered_tree,
                 range: 200u32.to_be_bytes()..=[0xFFu8; 4],
@@ -9257,10 +9344,10 @@ mod buffer_edit_interaction_tests {
                 (rng >> 32) as u32
             };
 
-            let mut storage: Store = MemoryBlocks::new();
+            let mut storage: Store = Blocks::new();
 
             let base_keys: Vec<u32> = (0..500).map(|_| next() % 50_000).collect();
-            let mut base = Tree::empty();
+            let mut base = Tree::empty_in(crate::helpers::test_catalog());
             let mut delta = Delta::zero();
             for key in &base_keys {
                 base = base
@@ -9283,7 +9370,7 @@ mod buffer_edit_interaction_tests {
                 let mut delta = Delta::zero();
                 let root = buffered.persist(&mut delta)?;
                 settle(&mut delta, &mut storage).await?;
-                let source = Tree::from_hash_with_cache(root, Default::default());
+                let source = Tree::at(crate::helpers::test_catalog(), root);
 
                 // Split the key space into three adjacent pieces and stitch them
                 // back together: the result must equal the source exactly.
@@ -9291,6 +9378,7 @@ mod buffer_edit_interaction_tests {
                 let cut_b = (33_000u32).to_be_bytes();
                 let mut delta = Delta::zero();
                 let stitched = TransientTree::<[u8; 4], Vec<u8>>::stitch(
+                    &crate::helpers::test_catalog(),
                     vec![
                         Piece::Range {
                             source: &source,
@@ -9367,10 +9455,10 @@ mod buffer_edit_interaction_tests {
                 (rng >> 32) as u32
             };
 
-            let mut storage: Store = MemoryBlocks::new();
+            let mut storage: Store = Blocks::new();
 
             let base_keys: Vec<u32> = (0..400).map(|_| next() % 40_000).collect();
-            let mut base = Tree::empty();
+            let mut base = Tree::empty_in(crate::helpers::test_catalog());
             let mut delta = Delta::zero();
             for key in &base_keys {
                 base = base
@@ -9395,7 +9483,7 @@ mod buffer_edit_interaction_tests {
                 let mut delta = Delta::zero();
                 let root = buffered.persist(&mut delta)?;
                 settle(&mut delta, &mut storage).await?;
-                let buffered_tree = Tree::from_hash_with_cache(root, Default::default());
+                let buffered_tree = Tree::at(crate::helpers::test_catalog(), root);
 
                 // The canonical counterpart of the same content.
                 let mut flushed = HitchhikerTree::open(&base).with_op_buf_size(op_buf);
@@ -9489,7 +9577,7 @@ mod buffer_edit_interaction_tests {
         let observing = crate::helpers::ObservingBlocks::with_capacity(2);
         let observed = observing.clone();
         let manifest = paced_manifest();
-        let mut base = Tree::empty_with_manifest(manifest, Default::default());
+        let mut base = Tree::empty_with_manifest(crate::helpers::test_catalog(), manifest);
         let mut delta = Delta::zero();
         for i in (0..2400u32).step_by(2) {
             base = base
@@ -9497,8 +9585,8 @@ mod buffer_edit_interaction_tests {
                 .insert(i.to_be_bytes(), vec![i as u8], &observed)
                 .await?
                 .persist(&mut delta)?;
-            for (_, buffer) in delta.flush() {
-                observed.store(buffer);
+            for (_, node) in delta.flush() {
+                observed.store(node.buffer().clone());
             }
         }
         let levels = observing
@@ -9519,13 +9607,18 @@ mod buffer_edit_interaction_tests {
 
         observing.reset();
         let mut delta = Delta::zero();
-        let merged: Tree =
-            TransientTree::with_manifest(base.root().clone(), Default::default(), paced_manifest())
-                .integrate(stream, &observed)
-                .await?
-                .persist(&mut delta)?;
-        for (_, buffer) in delta.flush() {
-            observed.store(buffer);
+        // A cold node cache, so the descents must really read.
+        let cold = crate::helpers::Holding::new(&observed);
+        let merged: Tree = TransientTree::with_manifest(
+            crate::helpers::test_catalog(),
+            base.root().clone(),
+            paced_manifest(),
+        )
+        .integrate(stream, &cold)
+        .await?
+        .persist(&mut delta)?;
+        for (_, node) in delta.flush() {
+            observed.store(node.buffer().clone());
         }
 
         let overlapped = levels
@@ -9590,7 +9683,8 @@ mod buffer_edit_interaction_tests {
             frame_ceiling_factor: 0,
             ..crate::Manifest::default()
         };
-        let mut base = TransientTree::empty_with_manifest(Default::default(), manifest.clone());
+        let mut base =
+            TransientTree::empty_with_manifest(crate::helpers::test_catalog(), manifest.clone());
         for i in (0..24_000u32).step_by(2) {
             base = base
                 .insert(i.to_be_bytes(), vec![i as u8], &observed)
@@ -9598,8 +9692,8 @@ mod buffer_edit_interaction_tests {
         }
         let mut delta = Delta::zero();
         let base: Tree = base.persist(&mut delta)?;
-        for (_, buffer) in delta.flush() {
-            observed.store(buffer);
+        for (_, node) in delta.flush() {
+            observed.store(node.buffer().clone());
         }
         let levels = observing
             .levels_of::<[u8; 4], Vec<u8>>(base.root().clone())
@@ -9620,13 +9714,18 @@ mod buffer_edit_interaction_tests {
 
         observing.reset();
         let mut delta = Delta::zero();
-        let merged: Tree =
-            TransientTree::with_manifest(base.root().clone(), Default::default(), manifest)
-                .integrate(stream, &observed)
-                .await?
-                .persist(&mut delta)?;
-        for (_, buffer) in delta.flush() {
-            observed.store(buffer);
+        // A cold node cache, so the descents must really read.
+        let cold = crate::helpers::Holding::new(&observed);
+        let merged: Tree = TransientTree::with_manifest(
+            crate::helpers::test_catalog(),
+            base.root().clone(),
+            manifest,
+        )
+        .integrate(stream, &cold)
+        .await?
+        .persist(&mut delta)?;
+        for (_, node) in delta.flush() {
+            observed.store(node.buffer().clone());
         }
 
         let solo = observing.longest_solo_run();
@@ -9655,7 +9754,7 @@ mod buffer_edit_interaction_tests {
         let observing = crate::helpers::ObservingBlocks::new();
         let observed = observing.clone();
         let manifest = paced_manifest();
-        let mut base = Tree::empty_with_manifest(manifest, Default::default());
+        let mut base = Tree::empty_with_manifest(crate::helpers::test_catalog(), manifest);
         let mut delta = Delta::zero();
         for i in (0..1200u32).step_by(2) {
             base = base
@@ -9663,8 +9762,8 @@ mod buffer_edit_interaction_tests {
                 .insert(i.to_be_bytes(), vec![i as u8], &observed)
                 .await?
                 .persist(&mut delta)?;
-            for (_, buffer) in delta.flush() {
-                observed.store(buffer);
+            for (_, node) in delta.flush() {
+                observed.store(node.buffer().clone());
             }
         }
 
@@ -9683,15 +9782,20 @@ mod buffer_edit_interaction_tests {
         // A cold node cache, so the descents must really read.
         observing.reset();
         let mut delta = Delta::zero();
-        let merged: Tree =
-            TransientTree::with_manifest(base.root().clone(), Default::default(), paced_manifest())
-                .integrate(stream, &observed)
-                .await?
-                .persist(&mut delta)?;
+        // A cold node cache, so the descents must really read.
+        let cold = crate::helpers::Holding::new(&observed);
+        let merged: Tree = TransientTree::with_manifest(
+            crate::helpers::test_catalog(),
+            base.root().clone(),
+            paced_manifest(),
+        )
+        .integrate(stream, &cold)
+        .await?
+        .persist(&mut delta)?;
         let peak = observing.peak_reads_in_flight();
         let log = observing.read_log();
-        for (_, buffer) in delta.flush() {
-            observed.store(buffer);
+        for (_, node) in delta.flush() {
+            observed.store(node.buffer().clone());
         }
 
         assert!(
@@ -9737,11 +9841,16 @@ mod buffer_edit_interaction_tests {
         // may move reads earlier, never add one.
         let mut serial: std::collections::HashSet<Blake3Hash> = std::collections::HashSet::new();
         observing.reset();
+        let cold = crate::helpers::Holding::new(&observed);
         let mut tree: TransientTree<[u8; 4], Vec<u8>, crate::Geometric> =
-            TransientTree::with_manifest(base.root().clone(), Default::default(), paced_manifest());
+            TransientTree::with_manifest(
+                crate::helpers::test_catalog(),
+                base.root().clone(),
+                paced_manifest(),
+            );
         for key in &changes {
-            assert_eq!(tree.get(&key.to_be_bytes(), &observed).await?, None);
-            tree = tree.insert(key.to_be_bytes(), vec![9], &observed).await?;
+            assert_eq!(tree.get(&key.to_be_bytes(), &cold).await?, None);
+            tree = tree.insert(key.to_be_bytes(), vec![9], &cold).await?;
         }
         serial.extend(observing.read_log());
         assert_eq!(
@@ -9771,9 +9880,9 @@ mod buffer_edit_interaction_tests {
     /// must survive: only the edited key's own pending op is superseded.
     #[dialog_common::test]
     async fn it_keeps_sibling_buffered_ops_across_an_edit() -> Result<()> {
-        let mut storage: Store = MemoryBlocks::new();
+        let mut storage: Store = Blocks::new();
 
-        let mut base = Tree::empty();
+        let mut base = Tree::empty_in(crate::helpers::test_catalog());
         let mut delta = Delta::zero();
         for i in 0..400u32 {
             base = base
@@ -9794,7 +9903,7 @@ mod buffer_edit_interaction_tests {
             let mut delta = Delta::zero();
             let root = t.persist(&mut delta)?;
             settle(&mut delta, &mut storage).await?;
-            Tree::from_hash_with_cache(root, Default::default())
+            Tree::at(crate::helpers::test_catalog(), root)
         };
 
         // Edit ONE unrelated key through the canonical path.
@@ -9826,10 +9935,10 @@ mod buffer_edit_interaction_tests {
     /// there.
     #[dialog_common::test]
     async fn it_keeps_the_root_buffer_when_an_edit_reshapes_the_root() -> Result<()> {
-        let mut storage: Store = MemoryBlocks::new();
+        let mut storage: Store = Blocks::new();
 
         // A base big enough that inserts reshape the upper levels.
-        let mut base = Tree::empty();
+        let mut base = Tree::empty_in(crate::helpers::test_catalog());
         let mut delta = Delta::zero();
         for i in 0..600u32 {
             base = base
@@ -9851,7 +9960,7 @@ mod buffer_edit_interaction_tests {
         let mut delta = Delta::zero();
         let root = buffered.persist(&mut delta)?;
         settle(&mut delta, &mut storage).await?;
-        let tree = Tree::from_hash_with_cache(root, Default::default());
+        let tree = Tree::at(crate::helpers::test_catalog(), root);
 
         for &key in &buffered_keys {
             assert_eq!(
@@ -9931,7 +10040,7 @@ mod buffer_edit_interaction_tests {
     /// canonical build produces.
     #[dialog_common::test]
     async fn it_splits_a_segment_when_buffered_novelty_is_flushed() -> Result<()> {
-        let mut storage: Store = MemoryBlocks::new();
+        let mut storage: Store = Blocks::new();
 
         // A base of non-boundary keys, so the leaf the split lands in is a plain
         // open run. Paced small so it branches into several leaves under an
@@ -9945,14 +10054,19 @@ mod buffer_edit_interaction_tests {
                 ) <= crate::BOTTOM_RANK
             })
             .collect();
-        let mut base = Tree::empty();
+        let mut base = Tree::empty_in(crate::helpers::test_catalog());
         let mut delta = Delta::zero();
         for key in &base_keys {
             base = match base.stored_root() {
-                Some(root) => {
-                    TransientTree::with_manifest(root.clone(), base.node_cache(), manifest.clone())
-                }
-                None => TransientTree::empty_with_manifest(base.node_cache(), manifest.clone()),
+                Some(root) => TransientTree::with_manifest(
+                    crate::helpers::test_catalog(),
+                    root.clone(),
+                    manifest.clone(),
+                ),
+                None => TransientTree::empty_with_manifest(
+                    crate::helpers::test_catalog(),
+                    manifest.clone(),
+                ),
             }
             .insert(key.to_be_bytes(), vec![1], &storage)
             .await?
@@ -10012,7 +10126,7 @@ mod buffer_edit_interaction_tests {
     /// retract defers that, so the fuse has to happen when the op finally lands.
     #[dialog_common::test]
     async fn it_joins_segments_when_a_buffered_retraction_is_flushed() -> Result<()> {
-        let mut storage: Store = MemoryBlocks::new();
+        let mut storage: Store = Blocks::new();
 
         let base_keys: Vec<u32> = (0..400u32).collect();
         let base = paced_base(0..400u32, &mut storage).await?;
@@ -10077,9 +10191,9 @@ mod buffer_edit_interaction_tests {
     /// every read, and the edit is silently invisible.
     #[dialog_common::test]
     async fn it_lets_an_edit_override_a_buffered_op() -> Result<()> {
-        let mut storage: Store = MemoryBlocks::new();
+        let mut storage: Store = Blocks::new();
 
-        let mut base = Tree::empty();
+        let mut base = Tree::empty_in(crate::helpers::test_catalog());
         let mut delta = Delta::zero();
         for i in 0..500u32 {
             base = base
@@ -10099,7 +10213,7 @@ mod buffer_edit_interaction_tests {
         let mut delta = Delta::zero();
         let root = buffered.persist(&mut delta)?;
         settle(&mut delta, &mut storage).await?;
-        let tree = Tree::from_hash_with_cache(root, Default::default());
+        let tree = Tree::at(crate::helpers::test_catalog(), root);
 
         assert_eq!(
             tree.get(&key, &storage).await?,
@@ -10126,12 +10240,12 @@ mod buffer_edit_interaction_tests {
 
     type SpecTree = PersistentTree<SpecKey, Vec<u8>, DistributionSimulator>;
 
-    async fn flush_spec(
-        delta: &mut Delta<Blake3Hash, Buffer>,
+    async fn flush_spec<K, V>(
+        delta: &mut Delta<Blake3Hash, PersistentNode<K, V>>,
         storage: &mut SpecStorage,
     ) -> Result<()> {
-        for (_, buffer) in delta.flush() {
-            storage.store(buffer);
+        for (_, node) in delta.flush() {
+            storage.store(node.buffer().clone());
         }
         Ok(())
     }
@@ -10172,7 +10286,7 @@ mod buffer_edit_interaction_tests {
         .await
         .expect("the fixture spec is valid");
         let mut storage = spec.storage().clone();
-        let base = SpecTree::from_hash(spec.tree().root().clone());
+        let base = SpecTree::at(crate::helpers::test_catalog(), spec.tree().root().clone());
 
         let left_parked = encode_key(b"bb", 1, 1);
         let right_parked = encode_key(b"mm", 1, 1);
@@ -10204,7 +10318,7 @@ mod buffer_edit_interaction_tests {
             "fixture: both ops must sit in mid-level index buffers"
         );
 
-        let parked: SpecTree = PersistentTree::from_hash(root);
+        let parked: SpecTree = PersistentTree::at(crate::helpers::test_catalog(), root);
         assert_eq!(
             parked.get(&left_parked, &storage).await?,
             Some(vec![1]),
@@ -10265,7 +10379,7 @@ mod buffer_edit_interaction_tests {
         let b = encode_key(b"b", 1, 3); // interior, seam punches level 1
 
         let mut delta = Delta::zero();
-        let mut tree = SpecTree::empty();
+        let mut tree = SpecTree::empty_in(crate::helpers::test_catalog());
         for key in [a, b] {
             tree = tree
                 .edit()
@@ -10294,7 +10408,7 @@ mod buffer_edit_interaction_tests {
 
         // Deleting `b` empties the rightmost subtree, leaving a single-child
         // index-over-index root that `seal_root` strips.
-        let reopened: SpecTree = PersistentTree::from_hash(root);
+        let reopened: SpecTree = PersistentTree::at(crate::helpers::test_catalog(), root);
         let mut delta = Delta::zero();
         let stripped = reopened
             .edit()
@@ -10343,7 +10457,7 @@ mod buffer_edit_interaction_tests {
         .await
         .expect("the fixture spec is valid");
         let mut storage = spec.storage().clone();
-        let base = SpecTree::from_hash(spec.tree().root().clone());
+        let base = SpecTree::at(crate::helpers::test_catalog(), spec.tree().root().clone());
 
         // The probe lives under the RIGHTMOST mid-level index, the spine the
         // stitch seam below dismantles. The far key lives under the other
@@ -10383,9 +10497,10 @@ mod buffer_edit_interaction_tests {
         // Stitch the whole buffered source next to a run of entries past its
         // last key: the join runs down the source's rightmost spine, lifting
         // both the root's buffer and the mid node's seam buffer.
-        let source: SpecTree = PersistentTree::from_hash(root);
+        let source: SpecTree = PersistentTree::at(crate::helpers::test_catalog(), root);
         let after = encode_key(b"t", 1, 1);
         let stitched = TransientTree::stitch(
+            &crate::helpers::test_catalog(),
             vec![
                 Piece::Range {
                     source: &source,

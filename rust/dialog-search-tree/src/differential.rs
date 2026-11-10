@@ -10,7 +10,8 @@
 //! consumes the whole difference over a high-latency backend can opt into
 //! [`Prefetch::Eager`], which relaxes the contract at the margin (a bounded
 //! number of prunable or by-hash-reportable blocks may be read) in exchange
-//! for fetching each frontier level concurrently instead of node by node.
+//! for fetching each frontier level concurrently, ahead of what the walk is
+//! known to need.
 //!
 //! [`TreeDifference::compute`] produces a sparse representation of both trees
 //! holding only the differing regions. From it, two products are available:
@@ -20,11 +21,12 @@
 //! - [`TreeDifference::novel_nodes`]: the target-tree nodes absent from the
 //!   source tree (used to upload exactly the missing blocks to a remote).
 
+use crate::nodes::{Preload, Read};
+use dialog_capability::Provider;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
 use async_stream::try_stream;
-use dialog_capability::Provider;
 use dialog_common::{Blake3Hash, ConditionalSync};
 use futures_core::Stream;
 use futures_util::StreamExt;
@@ -37,7 +39,7 @@ use rkyv::{
 };
 
 use crate::{
-    DialogSearchTreeError, Distribution, Entry, Key, Link, LoadBlock, NodeBody, NoveltyEntry,
+    Accessor, DialogSearchTreeError, Distribution, Entry, Key, Link, NodeBody, NoveltyEntry,
     NoveltyOp, PersistentNode, PersistentTree, Separator, Value, into_owned, resolve_pending,
 };
 
@@ -50,7 +52,8 @@ const LOAD_CONCURRENCY: usize = 16;
 /// failure both come back as `None`; the comparison read that actually
 /// needs the block owns the error and the [`MissingBlocks`] policy.
 async fn preload_block<Key, Value, Env>(
-    storage: &Env,
+    storage: &Accessor<'_, Key, Value, Env>,
+    missing: MissingBlocks,
     is_target: bool,
     offset: usize,
     hash: Blake3Hash,
@@ -61,14 +64,18 @@ where
     Value::Archived: for<'a> CheckBytes<
         Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
     >,
-    Env: Provider<LoadBlock> + ConditionalSync,
+    Env: Provider<Read<PersistentNode<Key, Value>>>
+        + Provider<Preload<PersistentNode<Key, Value>>>
+        + ConditionalSync,
 {
-    let node = match LoadBlock::new(hash.clone()).perform(storage).await {
-        Ok(Some(buffer)) => PersistentNode::try_from(buffer).ok(),
-        _ => None,
-    };
+    let node = read_node(storage, &hash, missing).await.ok().flatten();
     (is_target, offset, node)
 }
+
+/// A block the loading sweep is about to read: which side it is for, its
+/// frontier slot, the reads of that side, and its hash.
+type PendingRead<'r, 'a, Key, Value, Env> =
+    (bool, usize, &'r Accessor<'a, Key, Value, Env>, Blake3Hash);
 
 /// A slot of the child-level batch in [`SparseTree::stream`]'s descent:
 /// `None` until the fetch for that position completes, then the fetch's
@@ -81,7 +88,8 @@ type FetchedChild<Key, Value> =
 /// [`preload_block`] this is not speculative — every child of a visited
 /// index is consumed — so errors are returned for the descent to own.
 async fn fetch_block<Key, Value, Env>(
-    storage: &Env,
+    storage: &Accessor<'_, Key, Value, Env>,
+    missing: MissingBlocks,
     at: usize,
     hash: Blake3Hash,
 ) -> (
@@ -94,14 +102,47 @@ where
     Value::Archived: for<'a> CheckBytes<
         Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
     >,
-    Env: Provider<LoadBlock> + ConditionalSync,
+    Env: Provider<Read<PersistentNode<Key, Value>>>
+        + Provider<Preload<PersistentNode<Key, Value>>>
+        + ConditionalSync,
 {
-    let result = match LoadBlock::new(hash.clone()).perform(storage).await {
-        Ok(Some(buffer)) => PersistentNode::try_from(buffer).map(Some),
-        Ok(None) => Ok(None),
-        Err(error) => Err(error),
-    };
-    (at, result)
+    (at, read_node(storage, &hash, missing).await)
+}
+
+/// Reads the node stored under `hash` for a comparison side whose absent
+/// blocks mean `missing`; `None` when the node is absent.
+///
+/// A [`Deny`](MissingBlocks::Deny) side reads as every tree read does
+/// ([`Accessor::load_node`]): a [`Read`](crate::nodes::Read) the
+/// environment answers from what it keeps, else from wherever it knows the
+/// subject's blocks live, hydrating a local miss.
+///
+/// A [`Boundary`](MissingBlocks::Boundary) side reads
+/// [locally](crate::nodes::Read::locally): under that policy absence is the
+/// answer the walk is asking for (where local knowledge ends), so it must be
+/// this replica's own word on whether it holds the node, and never a block
+/// fetched from a remote to answer the question. An environment that keeps
+/// nodes keeps only what its archive has (a node sealed ahead of a flush
+/// that fails is forgotten), so what it holds is that word.
+async fn read_node<Key, Value, Env>(
+    storage: &Accessor<'_, Key, Value, Env>,
+    hash: &Blake3Hash,
+    missing: MissingBlocks,
+) -> Result<Option<PersistentNode<Key, Value>>, DialogSearchTreeError>
+where
+    Key: self::Key,
+    Value: self::Value,
+    Value::Archived: for<'a> CheckBytes<
+        Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+    >,
+    Env: Provider<Read<PersistentNode<Key, Value>>>
+        + Provider<Preload<PersistentNode<Key, Value>>>
+        + ConditionalSync,
+{
+    match missing {
+        MissingBlocks::Deny => storage.load_node(hash).await,
+        MissingBlocks::Boundary => storage.local().load_node(hash).await,
+    }
 }
 
 /// How a comparison side treats a block that is absent from its storage.
@@ -125,13 +166,20 @@ where
 ///   and content-addressed uploads are idempotent); sound on the TARGET
 ///   side only when absence implies the counterparty holds the block —
 ///   the caller owns that judgement (see `dialog-repository`'s push).
+///
+/// A `Deny` side reads its nodes as every tree read does, so the nodes the
+/// environment's cache holds answer from memory and a miss loads (and may
+/// hydrate). A `Boundary` side performs [`Get`], past the cache and past
+/// hydration: the walk is asking whether the local archive holds each
+/// block, and only the archive can say.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum MissingBlocks {
     /// A missing block fails the walk (the historical behavior).
     #[default]
     Deny,
     /// A missing block bounds the walk: settle, don't descend, don't
-    /// report novel.
+    /// report novel. Reads perform [`Get`], past the node cache and any
+    /// hydration, so presence is the local archive's own word.
     Boundary,
 }
 
@@ -149,29 +197,55 @@ pub struct MissingPolicy {
 /// The choice is a latency/frugality trade, and which one wins depends on
 /// what the caller does with the difference:
 ///
-/// - [`Lazy`](Prefetch::Lazy) (the default) reads a block only at the
-///   moment the walk needs it. This is what upholds the module's
-///   frugality contract to the letter: a block the walk can settle
-///   without reading (a shared subtree that prunes once both sides
-///   surface it, a unique-range segment a novelty report names by hash)
-///   is never fetched. The cost is one backend round trip per node,
-///   serially, because each pass expands one node and restarts.
+/// - [`Lazy`](Prefetch::Lazy) (the default) reads exactly the blocks the
+///   walk needs. This is what upholds the module's frugality contract to
+///   the letter: a block the walk can settle without reading (a shared
+///   subtree that prunes once both sides surface it, a unique-range
+///   segment a novelty report names by hash) is never fetched. Each pass
+///   first plans its reads by a dry run of the walk and fetches them
+///   concurrently, so the blocks it reads cost a round trip per batch the
+///   plan finds rather than one per block.
 /// - [`Eager`](Prefetch::Eager) concurrently loads, once per pass, every
-///   frontier block that survived scope and hash pruning: one round trip
-///   per tree level instead of one per node. The sweep may read blocks
-///   the lazy walk would have skipped, so it is for consumers that go on
-///   to consume the whole difference anyway (streaming its changes for a
-///   merge or replication) over a high-latency backend, where the level
-///   parallelism dwarfs the waste. Novelty computation over partial
-///   replicas should stay lazy: its report names unique subtrees by hash
-///   without ever reading them.
+///   frontier block that survived scope and hash pruning, whether or not
+///   the walk needs it. The sweep may read blocks the lazy walk would have
+///   skipped, so it is for consumers that go on to consume the whole
+///   difference anyway (streaming its changes for a merge or replication)
+///   over a high-latency backend, where the level parallelism dwarfs the
+///   waste. Novelty computation over partial replicas should stay lazy: its
+///   report names unique subtrees by hash without ever reading them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Prefetch {
-    /// Read a block only when the walk needs it (strict frugality).
+    /// Read only the blocks the walk needs, planned and fetched a batch at a
+    /// time (strict frugality).
     #[default]
     Lazy,
     /// Load surviving frontier blocks concurrently, one sweep per pass.
     Eager,
+}
+
+/// How [`TreeDifference`]'s comparison acquires the blocks it reads: the
+/// public [`Prefetch`] choices, and in tests the walk reading block by block
+/// that planning replaced, kept as the reference the planned walk must match
+/// read for read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Reads {
+    /// Plan each pass's reads by a dry run and fetch them concurrently
+    /// ([`Prefetch::Lazy`]).
+    Planned,
+    /// Load every surviving frontier block each pass ([`Prefetch::Eager`]).
+    Eager,
+    /// Read each block when the walk reaches it.
+    #[cfg(test)]
+    Serial,
+}
+
+impl From<Prefetch> for Reads {
+    fn from(prefetch: Prefetch) -> Self {
+        match prefetch {
+            Prefetch::Lazy => Reads::Planned,
+            Prefetch::Eager => Reads::Eager,
+        }
+    }
 }
 
 /// Represents a change in the key-value store.
@@ -327,6 +401,81 @@ where
     }
 }
 
+/// What [`SparseTree::settlement`] settles a pair of buffered nodes to: the
+/// two nodes, recorded as expanded, and the ops each side holds that the
+/// other does not.
+struct Settlement<Key, Value> {
+    ours: PersistentNode<Key, Value>,
+    theirs: PersistentNode<Key, Value>,
+    ours_only: Vec<NoveltyEntry<Value>>,
+    theirs_only: Vec<NoveltyEntry<Value>>,
+}
+
+/// What [`SparseTree::expand_at`] would do to the node at a frontier slot,
+/// told from the slot alone, in the dry run of [`SparseTree::plan`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Visit {
+    /// Nothing that moves the walk: no node covers the bound, the node is
+    /// settled, or it is a segment, loaded or fetched, which loads in place.
+    /// A node whose fetch failed is idle too: the walk reads it itself.
+    Idle,
+    /// An index, loaded or fetched: it expands without a read, and the pass
+    /// restarts.
+    Expand,
+    /// A node held by reference: the walk reads it, and only then learns
+    /// whether it is a segment, which loads in place, or an index, which
+    /// expands and restarts the pass. A `deferred` read is one whose span
+    /// meets the span of a read already planned, so the walk may never make
+    /// it; a later dry run decides.
+    Read { offset: usize, deferred: bool },
+}
+
+/// The state of one dry run of the walk (see [`SparseTree::plan`]).
+struct DryRun<'p> {
+    /// Blocks whose fetch failed; the walk reads these itself.
+    attempted: &'p HashSet<Blake3Hash>,
+    /// The reads recorded so far: `(on the target side, hash)`.
+    reads: Vec<(bool, Blake3Hash)>,
+    /// The spans of reads cast outside the scan (diverging pairs), as
+    /// `(lower, upper)`, `None` above for an open span.
+    shadows: Vec<(Vec<u8>, Option<Vec<u8>>)>,
+    /// How far the shadows the scan cast reach: `None` before the first,
+    /// `Some(None)` once one is open above. The scan's bounds only grow and
+    /// every node it reads spans the current bound, so a later node's span
+    /// meets an earlier shadow exactly when it starts below the reach.
+    reach: Option<Option<Vec<u8>>>,
+}
+
+impl DryRun<'_> {
+    /// Whether the span `[lower, upper)` meets any shadow cast so far.
+    fn shadows(&self, lower: &[u8], upper: Option<&[u8]>) -> bool {
+        let reached = match &self.reach {
+            None => false,
+            Some(None) => true,
+            Some(Some(end)) => lower < end.as_slice(),
+        };
+        reached
+            || self.shadows.iter().any(|(start, end)| {
+                end.as_ref().is_none_or(|end| lower < end.as_slice())
+                    && upper.is_none_or(|upper| start.as_slice() < upper)
+            })
+    }
+
+    /// Casts the span `[lower, upper)` as a shadow.
+    fn cast(&mut self, lower: &[u8], upper: Option<&[u8]>, in_scan: bool) {
+        if !in_scan {
+            self.shadows
+                .push((lower.to_vec(), upper.map(<[u8]>::to_vec)));
+            return;
+        }
+        self.reach = match (self.reach.take(), upper) {
+            (Some(None), _) | (_, None) => Some(None),
+            (None, Some(upper)) => Some(Some(upper.to_vec())),
+            (Some(Some(end)), Some(upper)) => Some(Some(end.max(upper.to_vec()))),
+        };
+    }
+}
+
 /// A sparse, lazily loaded view over one side of a tree comparison.
 ///
 /// Holds the current frontier of nodes sorted by lower bound (a mix of
@@ -336,9 +485,11 @@ where
 struct SparseTree<'a, Key, Value, Env>
 where
     Key: self::Key,
-    Env: Provider<LoadBlock>,
+    Env: Provider<Read<PersistentNode<Key, Value>>>
+        + Provider<Preload<PersistentNode<Key, Value>>>
+        + ConditionalSync,
 {
-    storage: &'a Env,
+    storage: Accessor<'a, Key, Value, Env>,
     nodes: Vec<SparseTreeNode<Key, Value>>,
     expanded: Vec<PersistentNode<Key, Value>>,
     /// Every hash that ever entered this side's frontier, including nodes
@@ -356,6 +507,18 @@ where
     /// link names a whole unexplored subtree; a caller adjudicating what
     /// the counterparty holds starts here.
     unresolved: Vec<Link>,
+    /// Blocks fetched ahead of the walk by plan (see [`SparseTree::plan`]),
+    /// by hash, `None` for one found absent. The frontier keeps holding them
+    /// by reference, so every decision the walk makes is the one it makes
+    /// reading block by block; only its read, in
+    /// [`expand_at`](Self::expand_at), takes the block from here instead.
+    prefetched: HashMap<Blake3Hash, Option<PersistentNode<Key, Value>>>,
+    /// The lowest bound from which the frontier may differ from where the
+    /// last pass's walk saw it: the bound of the node before the first slot
+    /// an expansion, a prune or scope pruning replaced or removed, or the
+    /// empty bound when that slot was the first. A planned pass takes it to
+    /// resume where the change begins (see `compute_scoped`).
+    changed: Option<Vec<u8>>,
 }
 
 impl<'a, Key, Value, Env> SparseTree<'a, Key, Value, Env>
@@ -365,7 +528,9 @@ where
     Value::Archived: for<'b> CheckBytes<
             Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>,
-    Env: Provider<LoadBlock> + ConditionalSync,
+    Env: Provider<Read<PersistentNode<Key, Value>>>
+        + Provider<Preload<PersistentNode<Key, Value>>>
+        + ConditionalSync,
 {
     /// The frontier slots still held by reference, with their hashes: the
     /// blocks a later pass reads unless pruning settles them first.
@@ -379,6 +544,34 @@ where
                 }
                 SparseTreeNode::Loaded { .. } | SparseTreeNode::Settled { .. } => None,
             })
+    }
+
+    /// Records that the slot at `at` is about to be replaced or removed, so
+    /// the frontier may differ from the bound of the node before it on (see
+    /// [`changed`](Self::changed)).
+    fn mark_changed(&mut self, at: usize) {
+        let floor = at
+            .checked_sub(1)
+            .map(|before| self.nodes[before].lower_bound().to_vec())
+            .unwrap_or_default();
+        if self.changed.as_ref().is_none_or(|changed| floor < *changed) {
+            self.changed = Some(floor);
+        }
+    }
+
+    /// The frontier slot [`expand_at`](Self::expand_at) acts on for `bound`:
+    /// the last node whose lower bound is at or below it.
+    fn covering(&self, bound: &[u8]) -> Option<usize> {
+        self.nodes
+            .partition_point(|node| node.lower_bound() <= bound)
+            .checked_sub(1)
+    }
+
+    /// The lower bound of the node after `offset`, which bounds `offset`'s
+    /// key span from above; `None` for the frontier's last node, whose span
+    /// is open.
+    fn span_end(&self, offset: usize) -> Option<&[u8]> {
+        self.nodes.get(offset + 1).map(|node| node.lower_bound())
     }
 
     /// Installs a node fetched by the loading sweep into its frontier slot,
@@ -411,23 +604,25 @@ where
 
     /// Reads a node from storage by hash.
     async fn load(
-        storage: &Env,
+        storage: &Accessor<'a, Key, Value, Env>,
         hash: &Blake3Hash,
+        missing: MissingBlocks,
     ) -> Result<PersistentNode<Key, Value>, DialogSearchTreeError> {
-        Self::try_load(storage, hash).await?.ok_or_else(|| {
-            DialogSearchTreeError::Node(format!("Block not found in storage: {hash}"))
-        })
+        Self::try_load(storage, hash, missing)
+            .await?
+            .ok_or_else(|| {
+                DialogSearchTreeError::Node(format!("Block not found in storage: {hash}"))
+            })
     }
 
     /// Reads a node from storage by hash; `None` when the block is absent.
+    /// See [`read_node`] for how `missing` decides where the read goes.
     async fn try_load(
-        storage: &Env,
+        storage: &Accessor<'a, Key, Value, Env>,
         hash: &Blake3Hash,
+        missing: MissingBlocks,
     ) -> Result<Option<PersistentNode<Key, Value>>, DialogSearchTreeError> {
-        match LoadBlock::new(hash.clone()).perform(storage).await? {
-            Some(buffer) => Ok(Some(PersistentNode::try_from(buffer)?)),
-            None => Ok(None),
-        }
+        read_node(storage, hash, missing).await
     }
 
     /// Initializes a sparse tree from a stored root hash. The root is not
@@ -440,12 +635,12 @@ where
     /// walk while the other side's matching subtrees still prune.
     async fn from_root(
         root: Option<&Blake3Hash>,
-        storage: &'a Env,
+        storage: Accessor<'a, Key, Value, Env>,
         missing: MissingBlocks,
     ) -> Result<SparseTree<'a, Key, Value, Env>, DialogSearchTreeError> {
         if let Some(root) = root
             && missing == MissingBlocks::Boundary
-            && Self::try_load(storage, root).await?.is_none()
+            && Self::try_load(&storage, root, missing).await?.is_none()
         {
             return Ok(SparseTree {
                 storage,
@@ -459,10 +654,12 @@ where
                     // Advisory only, and unknowable for an unread root.
                     scale: crate::Scale::MAX,
                 }],
+                prefetched: HashMap::new(),
+                changed: None,
             });
         }
         let nodes = if let Some(root) = root {
-            let node: PersistentNode<Key, Value> = Self::load(storage, root).await?;
+            let node: PersistentNode<Key, Value> = Self::load(&storage, root, missing).await?;
             // A root's frontier bound must be the separator the SAME subtree
             // would carry as a link child on the other side, or equal
             // subtrees at different heights never line up. That propagated
@@ -497,6 +694,8 @@ where
             seen,
             missing,
             unresolved: vec![],
+            prefetched: HashMap::new(),
+            changed: None,
         })
     }
 
@@ -529,7 +728,12 @@ where
         let node = match &self.nodes[offset] {
             SparseTreeNode::Loaded { node, .. } => node.clone(),
             SparseTreeNode::Ref(link) | SparseTreeNode::Pending { link, .. } => {
-                match Self::try_load(self.storage, &link.node).await? {
+                // A block planning fetched ahead is read from there, once.
+                let found = match self.prefetched.remove(&link.node) {
+                    Some(found) => found,
+                    None => Self::try_load(&self.storage, &link.node, self.missing).await?,
+                };
+                match found {
                     Some(node) => node,
                     // The block is absent and absence bounds the walk: the
                     // subtree is held by reference, so nothing beneath it is
@@ -618,6 +822,7 @@ where
                 }
 
                 self.expanded.push(node);
+                self.mark_changed(offset);
                 self.nodes.splice(offset..offset + 1, children);
                 Ok(true)
             }
@@ -659,6 +864,46 @@ where
         other: &mut Self,
         other_at: usize,
     ) -> Result<bool, DialogSearchTreeError> {
+        let Some(settlement) = self.settlement(at, other, other_at)? else {
+            return Ok(false);
+        };
+        let Settlement {
+            ours,
+            theirs,
+            ours_only,
+            theirs_only,
+        } = settlement;
+
+        // Settling replaces both nodes without expanding them, so neither is
+        // recorded by the usual `expanded` path — but each node's *block* is
+        // still the only place its buffered ops live, and a peer materializing
+        // this side's tree needs it. Record both here, or `novel_nodes` reports
+        // a block set that cannot reconstruct the target (the change stream is
+        // unaffected, so the gap only shows up in push/replication).
+        self.expanded.push(ours);
+        other.expanded.push(theirs);
+
+        self.nodes[at] = SparseTreeNode::Settled {
+            lower_bound: self.nodes[at].lower_bound().to_vec(),
+            ops: ours_only,
+        };
+        other.nodes[other_at] = SparseTreeNode::Settled {
+            lower_bound: other.nodes[other_at].lower_bound().to_vec(),
+            ops: theirs_only,
+        };
+        Ok(true)
+    }
+
+    /// Whether [`settle_buffered`](Self::settle_buffered) applies to the pair,
+    /// and what it settles to, without changing either frontier. Reads nothing:
+    /// both nodes must already be loaded, so the plan of a pass (see
+    /// [`SparseTree::plan`]) decides it exactly as the walk will.
+    fn settlement(
+        &self,
+        at: usize,
+        other: &Self,
+        other_at: usize,
+    ) -> Result<Option<Settlement<Key, Value>>, DialogSearchTreeError> {
         // Settling reads a node's own buffer and replaces the frontier entry
         // wholesale, so ops an ancestor routed down to it would be lost. Decline
         // rather than rely on that state being unreachable: the fast path is an
@@ -668,7 +913,7 @@ where
                 || matches!(node, SparseTreeNode::Loaded { pending, .. } if !pending.is_empty())
         };
         if carries_inherited(&self.nodes[at]) || carries_inherited(&other.nodes[other_at]) {
-            return Ok(false);
+            return Ok(None);
         }
 
         // Settling must be free. Loading an unloaded node to discover that it
@@ -684,35 +929,32 @@ where
             SparseTreeNode::Loaded { node: theirs, .. },
         ) = (&self.nodes[at], &other.nodes[other_at])
         else {
-            return Ok(false);
+            return Ok(None);
         };
         let (ours, theirs) = (ours.clone(), theirs.clone());
 
         let (NodeBody::Index(ours_index), NodeBody::Index(theirs_index)) =
             (ours.body(), theirs.body())
         else {
-            return Ok(false);
+            return Ok(None);
         };
 
         // Identical children: every subtree below is shared, so nothing under
         // these nodes can differ.
         if ours_index.len() != theirs_index.len() {
-            return Ok(false);
+            return Ok(None);
         }
         for at in 0..ours_index.len() {
             if ours_index.hash_at(at)? != theirs_index.hash_at(at)? {
-                return Ok(false);
+                return Ok(None);
             }
             // Separators are the routing keys: identical child hashes under
             // shifted separators would route the same op to different subtrees
             // on the two sides, so require those to agree too.
             if ours_index.separator(at)? != theirs_index.separator(at)? {
-                return Ok(false);
+                return Ok(None);
             }
         }
-
-        let ours_ops = ours_index.all_novelty::<Key>()?;
-        let theirs_ops = theirs_index.all_novelty::<Key>()?;
 
         // Emitting a change for a buffered op needs to know whether the key
         // already exists below: absent means `Add`, present means `Remove(old)`
@@ -733,22 +975,27 @@ where
         // Retracts never settle: a retract of an absent key is a no-op, and of a
         // present key needs the stored value to report the removal.
         if ours_index.is_empty() {
-            return Ok(false);
+            return Ok(None);
         }
         let lowest = ours_index.separator(0)?;
         // An empty leftmost separator (the global leftmost spine under the
         // production reseparation rule) bounds nothing: no key sorts below it,
         // so no op can be proven an insert and settling never applies.
         if lowest.is_empty() {
-            return Ok(false);
+            return Ok(None);
         }
+        // Decoded only past the separator checks: a root's leftmost
+        // separator is always empty, so at a root the decode would answer a
+        // question already settled.
+        let ours_ops = ours_index.all_novelty::<Key>()?;
+        let theirs_ops = theirs_index.all_novelty::<Key>()?;
         let settleable = |ops: &[NoveltyEntry<Value>]| {
             ops.iter().all(|entry| {
                 matches!(entry.op, NoveltyOp::Assert(_)) && entry.key.as_slice() < lowest.as_slice()
             })
         };
         if !settleable(&ours_ops) || !settleable(&theirs_ops) {
-            return Ok(false);
+            return Ok(None);
         }
 
         // A buffer can hold several ops for one key, newest last, and every
@@ -785,25 +1032,321 @@ where
 
         let ours_only = retain(&ours_ops, &theirs_ops);
         let theirs_only = retain(&theirs_ops, &ours_ops);
+        Ok(Some(Settlement {
+            ours,
+            theirs,
+            ours_only,
+            theirs_only,
+        }))
+    }
 
-        // Settling replaces both nodes without expanding them, so neither is
-        // recorded by the usual `expanded` path — but each node's *block* is
-        // still the only place its buffered ops live, and a peer materializing
-        // this side's tree needs it. Record both here, or `novel_nodes` reports
-        // a block set that cannot reconstruct the target (the change stream is
-        // unaffected, so the gap only shows up in push/replication).
-        self.expanded.push(ours);
-        other.expanded.push(theirs);
+    /// Settles every pair of loaded segments the comparison left with the
+    /// same stored block on both sides, keeping only the keys their routed
+    /// ops touch.
+    ///
+    /// `prune` keeps such a pair because the ops an ancestor routed to it
+    /// differ, and the walk loads both in place. Their stored entries are
+    /// the same bytes, so an entry no op on either side covers reads the
+    /// same on both and cancels in [`TreeDifference::changes`]. Streaming
+    /// the pair would decode every one of those entries on both sides only
+    /// to drop them: a commit buffered at the root routes its ops to whole
+    /// leaves, so every scoped difference over that commit paid for every
+    /// entry of each leaf its ops landed in. Settling resolves each key
+    /// an op covers on both sides instead, its winning op where the side
+    /// has one and the stored entry where it does not, and keeps the keys
+    /// whose two resolutions differ. The entry walk then yields exactly
+    /// the changes it would have yielded from the two whole leaves.
+    ///
+    /// A scoped difference resolves only the covered keys inside its
+    /// scope: a change outside it is spillover that
+    /// [`TreeDifference::changes_within`] drops, so a pair whose ops all
+    /// fall outside settles without reading the leaf at all.
+    ///
+    /// Reads nothing: both segments are already loaded. The settled
+    /// entries keep their lower bounds, so the frontiers stay sorted, and
+    /// [`TreeDifference::novel_nodes`] skips them as it skipped the shared
+    /// blocks they replace.
+    fn settle_shared_segments(
+        source: &mut Self,
+        target: &mut Self,
+        scope: Option<&[core::ops::RangeInclusive<Key>]>,
+    ) -> Result<(), DialogSearchTreeError> {
+        let (mut ours, mut theirs) = (0, 0);
+        while ours < source.nodes.len() && theirs < target.nodes.len() {
+            match source.nodes[ours]
+                .lower_bound()
+                .cmp(target.nodes[theirs].lower_bound())
+            {
+                Ordering::Less => ours += 1,
+                Ordering::Greater => theirs += 1,
+                Ordering::Equal => {
+                    if let Some((settled_ours, settled_theirs)) =
+                        settle_shared_segment(&source.nodes[ours], &target.nodes[theirs], scope)?
+                    {
+                        source.nodes[ours] = settled_ours;
+                        target.nodes[theirs] = settled_theirs;
+                    }
+                    ours += 1;
+                    theirs += 1;
+                }
+            }
+        }
+        Ok(())
+    }
 
-        self.nodes[at] = SparseTreeNode::Settled {
-            lower_bound: self.nodes[at].lower_bound().to_vec(),
-            ops: ours_only,
+    /// Whether the walk peels this side's node at `at` before the other
+    /// side's node at `other_at`, for an equal-bound pair whose hashes differ.
+    ///
+    /// Equal lower bounds with differing hashes may be the same region at
+    /// different heights: every leftmost spine shares its ancestor's lower
+    /// bound. Peeling one side at a time lets the taller side's child line up
+    /// with (and prune) the other side's node without it ever being read.
+    /// Cheapest evidence first: a loaded index that directly links the other
+    /// side's hash is expanded for a guaranteed prune; a loaded index expands
+    /// without a storage read; otherwise the node spanning the wider key range
+    /// (per its successor's bound; the frontier tail is unbounded) is the one
+    /// containing the other, so it is peeled first.
+    fn peels_first(&self, at: usize, other: &Self, other_at: usize) -> bool {
+        let ours = &self.nodes[at];
+        let theirs = &other.nodes[other_at];
+        if theirs.hash().is_some_and(|hash| ours.links_contain(hash)) {
+            true
+        } else if ours.hash().is_some_and(|hash| theirs.links_contain(hash)) {
+            false
+        } else if ours.is_loaded_index() != theirs.is_loaded_index() {
+            ours.is_loaded_index()
+        } else if ours.is_loaded_index() {
+            false
+        } else {
+            match (self.span_end(at), other.span_end(other_at)) {
+                (None, Some(_)) => true,
+                (Some(_), None) => false,
+                (Some(ours), Some(theirs)) => ours > theirs,
+                (None, None) => false,
+            }
+        }
+    }
+
+    /// The blocks the next comparison pass reads, found without reading
+    /// any: a dry run of the walk in `compute_scoped`, over the frontier as
+    /// it stands after `prune`.
+    ///
+    /// The dry run makes the walk's decisions in the walk's order and, where
+    /// the walk would read a block, records the read and goes on. It stops
+    /// where the walk restarts the pass for certain, at a loaded index the
+    /// walk expands. A block it records may turn out to be an index, at
+    /// which the walk restarts instead of going on, and expanding the index
+    /// can prune nodes the walk would otherwise read. Expansion only reaches
+    /// nodes whose keys meet the index's own, so the dry run defers any read
+    /// of a node whose key span meets the span of a read it already
+    /// recorded: everything past those spans the walk reads once it comes
+    /// back round, because the frontier there is as the dry run saw it. A
+    /// peel is one such case: the side peeled second shares the first
+    /// side's lower bound, so the read of the first defers it.
+    ///
+    /// The caller fetches what this returns concurrently into
+    /// [`prefetched`](Self::prefetched) and plans again, until nothing is
+    /// left to read; a dry run knows what a fetched block is, so it goes on
+    /// past it as the walk will. The walk then takes each read from there,
+    /// so the blocks read are the ones it reads block by block, in a round
+    /// trip per batch rather than one per block. A block in `attempted` is
+    /// one whose fetch failed; the walk reads it again itself and owns the
+    /// error, so it is not planned again.
+    ///
+    /// The scan starts at the cursors in `resume` and leaves them at the
+    /// step that recorded its first read. A pass's frontier does not change
+    /// between its dry runs, and the scan before that step read nothing, so
+    /// it reads nothing the next time either and the next dry run of the
+    /// pass starts there. A pass starts where its walk starts (see
+    /// `compute_scoped`).
+    ///
+    /// Each read is `(on the target side, hash)`.
+    fn plan(
+        source: &Self,
+        target: &Self,
+        diverging: &[(Vec<u8>, Vec<u8>)],
+        attempted: &HashSet<Blake3Hash>,
+        resume: &mut (usize, usize),
+    ) -> Result<Vec<(bool, Blake3Hash)>, DialogSearchTreeError> {
+        let mut dry = DryRun {
+            attempted,
+            reads: Vec::new(),
+            shadows: Vec::new(),
+            reach: None,
         };
-        other.nodes[other_at] = SparseTreeNode::Settled {
-            lower_bound: other.nodes[other_at].lower_bound().to_vec(),
-            ops: theirs_only,
+
+        // The walk expands every diverging pair before it compares, and
+        // restarts if any of them was an index, so none of their reads
+        // defers another. The pairs lie anywhere in the key space, so their
+        // reads cast their shadows by span.
+        let visits: Vec<_> = diverging
+            .iter()
+            .map(|(source_bound, target_bound)| {
+                (
+                    source.visit(source_bound, None, &dry),
+                    target.visit(target_bound, None, &dry),
+                )
+            })
+            .collect();
+        let mut expands = false;
+        for (source_visit, target_visit) in visits {
+            expands |= source.take(false, source_visit, &mut dry, false);
+            expands |= target.take(true, target_visit, &mut dry, false);
+        }
+        if expands || !dry.reads.is_empty() {
+            return Ok(dry.reads);
+        }
+
+        let (mut source_idx, mut target_idx) = *resume;
+        let mut step = *resume;
+        let mut first_read = None;
+        while source_idx < source.nodes.len()
+            && target_idx < target.nodes.len()
+            && dry.reach != Some(None)
+        {
+            if first_read.is_none() && !dry.reads.is_empty() {
+                first_read = Some(step);
+            }
+            step = (source_idx, target_idx);
+            let source_bound = source.nodes[source_idx].lower_bound();
+            let target_bound = target.nodes[target_idx].lower_bound();
+            match source_bound.cmp(target_bound) {
+                Ordering::Less => {
+                    let visit = source.visit(target_bound, Some(source_idx), &dry);
+                    if source.take(false, visit, &mut dry, true) {
+                        break;
+                    }
+                    source_idx += 1;
+                }
+                Ordering::Greater => {
+                    let visit = target.visit(source_bound, Some(target_idx), &dry);
+                    if target.take(true, visit, &mut dry, true) {
+                        break;
+                    }
+                    target_idx += 1;
+                }
+                Ordering::Equal => {
+                    let source_hash = source.nodes[source_idx].hash();
+                    let target_hash = target.nodes[target_idx].hash();
+                    if source_hash.is_some() && source_hash == target_hash {
+                        // The walk reads both before it looks at either.
+                        let source_visit = source.visit(source_bound, Some(source_idx), &dry);
+                        let target_visit = target.visit(target_bound, Some(target_idx), &dry);
+                        let source_expands = source.take(false, source_visit, &mut dry, true);
+                        let target_expands = target.take(true, target_visit, &mut dry, true);
+                        if source_expands || target_expands {
+                            break;
+                        }
+                    } else if source_hash != target_hash {
+                        if source.settlement(source_idx, target, target_idx)?.is_some() {
+                            source_idx += 1;
+                            target_idx += 1;
+                            continue;
+                        }
+                        let source_first = source.peels_first(source_idx, target, target_idx);
+                        let (first, second) = if source_first {
+                            (
+                                (source, false, source_bound, source_idx),
+                                (target, true, target_bound, target_idx),
+                            )
+                        } else {
+                            (
+                                (target, true, target_bound, target_idx),
+                                (source, false, source_bound, source_idx),
+                            )
+                        };
+                        let visit = first.0.visit(first.2, Some(first.3), &dry);
+                        if first.0.take(first.1, visit, &mut dry, true) {
+                            break;
+                        }
+                        let visit = second.0.visit(second.2, Some(second.3), &dry);
+                        if second.0.take(second.1, visit, &mut dry, true) {
+                            break;
+                        }
+                    }
+                    source_idx += 1;
+                    target_idx += 1;
+                }
+            }
+        }
+        if first_read.is_none() && !dry.reads.is_empty() {
+            first_read = Some(step);
+        }
+        if let Some(first_read) = first_read {
+            *resume = first_read;
+        }
+        Ok(dry.reads)
+    }
+
+    /// What the walk's `expand_at(bound)` would do on this side, told without
+    /// reading, for the dry run of [`plan`](Self::plan). `from`, when the
+    /// scan knows it, is a slot at or below the one covering `bound`, which
+    /// is then a step or two on rather than a search away.
+    fn visit(&self, bound: &[u8], from: Option<usize>, dry: &DryRun<'_>) -> Visit {
+        let covering = match from {
+            Some(mut at) => {
+                while self
+                    .nodes
+                    .get(at + 1)
+                    .is_some_and(|next| next.lower_bound() <= bound)
+                {
+                    at += 1;
+                }
+                Some(at)
+            }
+            None => self.covering(bound),
         };
-        Ok(true)
+        let Some(offset) = covering else {
+            return Visit::Idle;
+        };
+        match &self.nodes[offset] {
+            SparseTreeNode::Settled { .. } => Visit::Idle,
+            SparseTreeNode::Loaded { node, .. } => match node.body() {
+                NodeBody::Index(_) => Visit::Expand,
+                NodeBody::Segment(_) => Visit::Idle,
+            },
+            SparseTreeNode::Ref(link) | SparseTreeNode::Pending { link, .. } => {
+                if let Some(found) = (!self.prefetched.is_empty())
+                    .then(|| self.prefetched.get(&link.node))
+                    .flatten()
+                {
+                    // Fetched already: the walk's read is free, and what it
+                    // finds is known.
+                    match found.as_ref().map(PersistentNode::body) {
+                        Some(NodeBody::Index(_)) => Visit::Expand,
+                        Some(NodeBody::Segment(_)) | None => Visit::Idle,
+                    }
+                } else if !dry.attempted.is_empty() && dry.attempted.contains(&link.node) {
+                    Visit::Idle
+                } else {
+                    Visit::Read {
+                        offset,
+                        deferred: dry
+                            .shadows(self.nodes[offset].lower_bound(), self.span_end(offset)),
+                    }
+                }
+            }
+        }
+    }
+
+    /// Applies a [`visit`](Self::visit) to the dry run: a read casts its
+    /// node's span as a shadow (onto the scan's reach when `in_scan`, else
+    /// by span) and is recorded unless it was deferred. Returns whether the
+    /// walk expands here, which ends the dry run.
+    fn take(&self, is_target: bool, visit: Visit, dry: &mut DryRun<'_>, in_scan: bool) -> bool {
+        match visit {
+            Visit::Idle => false,
+            Visit::Expand => true,
+            Visit::Read { offset, deferred } => {
+                let lower = self.nodes[offset].lower_bound();
+                let upper = self.span_end(offset);
+                dry.cast(lower, upper, in_scan);
+                if !deferred && let Some(hash) = self.nodes[offset].hash() {
+                    dry.reads.push((is_target, hash.clone()));
+                }
+                false
+            }
+        }
     }
 
     /// Removes nodes whose key span cannot intersect any range in
@@ -831,6 +1374,7 @@ where
             })
             .collect();
         let mut kept = Vec::with_capacity(self.nodes.len());
+        let mut dropped = None;
         for (node, upper) in self.nodes.drain(..).zip(uppers) {
             let lower = node.lower_bound();
             let intersects = scope.iter().any(|range| {
@@ -884,9 +1428,22 @@ where
                 };
             if intersects || pending_in_scope || buffered_in_scope {
                 kept.push(node);
+            } else if dropped.is_none() {
+                // The kept node before it bounds the change from below; the
+                // nodes between, if any, are dropped too.
+                dropped = Some(
+                    kept.last()
+                        .map(|before: &SparseTreeNode<Key, Value>| before.lower_bound().to_vec())
+                        .unwrap_or_default(),
+                );
             }
         }
         self.nodes = kept;
+        if let Some(floor) = dropped
+            && self.changed.as_ref().is_none_or(|changed| floor < *changed)
+        {
+            self.changed = Some(floor);
+        }
     }
 
     /// Removes nodes that are shared between `self` and `other`, keeping
@@ -982,6 +1539,12 @@ where
             }
         }
         drop(theirs);
+        if let Some(&first) = ours_shared.iter().min() {
+            self.mark_changed(first);
+        }
+        if let Some(&first) = theirs_shared.iter().min() {
+            other.mark_changed(first);
+        }
         let mut at = 0;
         self.nodes.retain(|_| {
             at += 1;
@@ -1049,7 +1612,7 @@ where
                     }
                     SparseTreeNode::Ref(link) | SparseTreeNode::Pending { link, .. } => {
                         let pending = pending_ops(sparse_node).to_vec();
-                        match Self::try_load(self.storage, &link.node).await? {
+                        match Self::try_load(&self.storage, &link.node, self.missing).await? {
                             Some(node) => (node, pending),
                             // Absent and absence bounds the walk: the stored
                             // entries are held by reference (not this side's
@@ -1119,7 +1682,7 @@ where
                                         let Some((at, hash)) = queue.next() else {
                                             break;
                                         };
-                                        reads.push(fetch_block(self.storage, at, hash));
+                                        reads.push(fetch_block(&self.storage, self.missing, at, hash));
                                     }
                                     match reads.next().await {
                                         Some((at, result)) => fetched[at] = Some(result),
@@ -1247,6 +1810,38 @@ fn pending_ops<Key, Value>(node: &SparseTreeNode<Key, Value>) -> &[NoveltyEntry<
     }
 }
 
+/// What planning has fetched on this thread, for the measurements that
+/// compare it with the walk reading block by block: the batches, the round
+/// trips they cost, and the most fetched blocks waiting on the walk at once.
+#[cfg(test)]
+pub(crate) mod plan_census {
+    use std::cell::Cell;
+
+    thread_local! {
+        static BATCHES: Cell<u64> = const { Cell::new(0) };
+        static ROUNDS: Cell<u64> = const { Cell::new(0) };
+        static PEAK: Cell<u64> = const { Cell::new(0) };
+    }
+
+    /// Records one fetched batch of `reads` blocks, `window` at a time, after
+    /// which `resident` fetched blocks wait for the walk.
+    pub(super) fn record(reads: usize, window: usize, resident: usize) {
+        BATCHES.with(|count| count.set(count.get() + 1));
+        ROUNDS.with(|count| count.set(count.get() + reads.div_ceil(window) as u64));
+        PEAK.with(|peak| peak.set(peak.get().max(resident as u64)));
+    }
+
+    /// Takes and resets the census: batches fetched, the round trips they
+    /// cost at the window, and the most fetched blocks held at once.
+    pub(crate) fn take() -> (u64, u64, u64) {
+        (
+            BATCHES.with(|count| count.replace(0)),
+            ROUNDS.with(|count| count.replace(0)),
+            PEAK.with(|peak| peak.replace(0)),
+        )
+    }
+}
+
 /// What the prune has done on this thread, for the oracle that checks it:
 /// how many pairs it dropped that carried routed ops, how many of those the
 /// two sides reached under different lower bounds (a seam moved beside a
@@ -1320,6 +1915,130 @@ where
     }
 }
 
+/// A frontier pair settled by [`settle_shared_segment`]: ours, then theirs.
+type SettledPair<Key, Value> = (SparseTreeNode<Key, Value>, SparseTreeNode<Key, Value>);
+
+/// The pair [`SparseTree::settle_shared_segments`] settles a frontier pair
+/// to, or `None` when the two are not the same loaded segment.
+fn settle_shared_segment<Key, Value>(
+    ours: &SparseTreeNode<Key, Value>,
+    theirs: &SparseTreeNode<Key, Value>,
+    scope: Option<&[core::ops::RangeInclusive<Key>]>,
+) -> Result<Option<SettledPair<Key, Value>>, DialogSearchTreeError>
+where
+    Key: self::Key,
+    Value: self::Value + PartialEq,
+    Value::Archived: for<'b> CheckBytes<
+            Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
+        > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>,
+{
+    let (
+        SparseTreeNode::Loaded {
+            node,
+            lower_bound: ours_bound,
+            pending: ours_pending,
+        },
+        SparseTreeNode::Loaded {
+            node: other,
+            lower_bound: theirs_bound,
+            pending: theirs_pending,
+        },
+    ) = (ours, theirs)
+    else {
+        return Ok(None);
+    };
+    if node.hash() != other.hash() {
+        return Ok(None);
+    }
+    let NodeBody::Segment(segment) = node.body() else {
+        return Ok(None);
+    };
+
+    let ours_ops = winning_ops(ours_pending);
+    let theirs_ops = winning_ops(theirs_pending);
+    fn op_at<'o, Value>(
+        ops: &'o [(Vec<u8>, NoveltyOp<Value>)],
+        key: &[u8],
+    ) -> Option<&'o NoveltyOp<Value>> {
+        ops.binary_search_by(|(candidate, _)| candidate.as_slice().cmp(key))
+            .ok()
+            .map(|at| &ops[at].1)
+    }
+    let mut keys: Vec<&[u8]> = ours_ops
+        .iter()
+        .chain(&theirs_ops)
+        .map(|(key, _)| key.as_slice())
+        .filter(|key| {
+            scope.is_none_or(|scope| {
+                scope
+                    .iter()
+                    .any(|range| *key >= range.start().as_ref() && *key <= range.end().as_ref())
+            })
+        })
+        .collect();
+    keys.sort_unstable();
+    keys.dedup();
+
+    // The stored value under each covered key, read in one pass over the
+    // segment's keys that stops past the last of them. A value is decoded
+    // only when a side has no op of its own to answer with.
+    let mut stored: Vec<Option<Value>> = vec![None; keys.len()];
+    let mut probe = 0;
+    let mut entries = segment.keys::<Key>()?;
+    while probe < keys.len() {
+        let Some((at, key)) = entries.next_key()? else {
+            break;
+        };
+        while probe < keys.len() && keys[probe] < key {
+            probe += 1;
+        }
+        if probe < keys.len() && keys[probe] == key {
+            if op_at(&ours_ops, key).is_none() || op_at(&theirs_ops, key).is_none() {
+                stored[probe] = Some(into_owned(segment.value_at(at)?)?);
+            }
+            probe += 1;
+        }
+    }
+
+    let resolve = |op: Option<&NoveltyOp<Value>>, stored: &Option<Value>| match op {
+        Some(NoveltyOp::Assert(value)) => Some(value.clone()),
+        Some(NoveltyOp::Retract) => None,
+        None => stored.clone(),
+    };
+    let mut ours_settled = Vec::new();
+    let mut theirs_settled = Vec::new();
+    for (key, stored) in keys.iter().zip(&stored) {
+        let ours_value = resolve(op_at(&ours_ops, key), stored);
+        let theirs_value = resolve(op_at(&theirs_ops, key), stored);
+        if ours_value == theirs_value {
+            continue;
+        }
+        if let Some(value) = ours_value {
+            ours_settled.push(NoveltyEntry {
+                key: key.to_vec(),
+                op: NoveltyOp::Assert(value),
+            });
+        }
+        if let Some(value) = theirs_value {
+            theirs_settled.push(NoveltyEntry {
+                key: key.to_vec(),
+                op: NoveltyOp::Assert(value),
+            });
+        }
+    }
+
+    Ok(Some((
+        SparseTreeNode::Settled {
+            lower_bound: ours_bound.clone(),
+            ops: ours_settled,
+        },
+        SparseTreeNode::Settled {
+            lower_bound: theirs_bound.clone(),
+            ops: theirs_settled,
+        },
+    )))
+}
+
 /// Reduces the ops collected along a root-to-leaf path to the winning op per
 /// key, sorted by key.
 ///
@@ -1365,7 +2084,9 @@ where
 pub struct TreeDifference<'a, Key, Value, Env>
 where
     Key: self::Key,
-    Env: Provider<LoadBlock>,
+    Env: Provider<Read<PersistentNode<Key, Value>>>
+        + Provider<Preload<PersistentNode<Key, Value>>>
+        + ConditionalSync,
 {
     source: SparseTree<'a, Key, Value, Env>,
     target: SparseTree<'a, Key, Value, Env>,
@@ -1389,7 +2110,9 @@ where
             Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
         + ConditionalSync,
-    Env: Provider<LoadBlock> + ConditionalSync,
+    Env: Provider<Read<PersistentNode<Key, Value>>>
+        + Provider<Preload<PersistentNode<Key, Value>>>
+        + ConditionalSync,
 {
     /// Computes the difference between two trees.
     ///
@@ -1443,7 +2166,7 @@ where
             target_storage,
             None,
             missing,
-            Prefetch::Lazy,
+            Reads::Planned,
         )
         .await?;
 
@@ -1518,7 +2241,7 @@ where
             target_storage,
             Some(scope),
             MissingPolicy::default(),
-            prefetch,
+            prefetch.into(),
         )
         .await
     }
@@ -1530,11 +2253,14 @@ where
         target_storage: &'a Env,
         scope: Option<&[core::ops::RangeInclusive<Key>]>,
         missing: MissingPolicy,
-        prefetch: Prefetch,
+        reads: Reads,
     ) -> Result<TreeDifference<'a, Key, Value, Env>, DialogSearchTreeError>
     where
         D: Distribution,
     {
+        let planned = reads == Reads::Planned;
+        let source_storage = source_tree.accessor(source_storage);
+        let target_storage = target_tree.accessor(target_storage);
         // Identical trees (including two empty trees) share their root
         // hash; nothing needs to be read at all.
         if source_tree.root() == target_tree.root() {
@@ -1546,6 +2272,8 @@ where
                     seen: HashSet::new(),
                     missing: missing.source,
                     unresolved: vec![],
+                    prefetched: HashMap::new(),
+                    changed: None,
                 },
                 target: SparseTree {
                     storage: target_storage,
@@ -1554,6 +2282,8 @@ where
                     seen: HashSet::new(),
                     missing: missing.target,
                     unresolved: vec![],
+                    prefetched: HashMap::new(),
+                    changed: None,
                 },
             });
         }
@@ -1564,8 +2294,16 @@ where
             SparseTree<'a, Key, Value, Env>,
             SparseTree<'a, Key, Value, Env>,
         ) = futures_util::future::try_join(
-            SparseTree::from_root(source_tree.stored_root(), source_storage, missing.source),
-            SparseTree::from_root(target_tree.stored_root(), target_storage, missing.target),
+            SparseTree::from_root(
+                source_tree.stored_root(),
+                source_storage.clone(),
+                missing.source,
+            ),
+            SparseTree::from_root(
+                target_tree.stored_root(),
+                target_storage.clone(),
+                missing.target,
+            ),
         )
         .await?;
 
@@ -1573,12 +2311,115 @@ where
         // fixed point: only differing leaf segments (and unique-range
         // subtrees) remain.
         let mut attempted: HashSet<Blake3Hash> = HashSet::new();
+        // How far the walk has got: below this bound the frontier is as the
+        // walk last left it. A walk that stops to expand and restart sets it;
+        // every change lowers it, including those of a pass that restarts
+        // after expanding diverging pairs without walking at all.
+        let mut walked: Vec<u8> = Vec::new();
         loop {
             if let Some(scope) = scope {
                 source.retain_scope(scope);
                 target.retain_scope(scope);
             }
             let diverging = source.prune(&mut target);
+
+            // Where a planned pass starts. The walk stops at its first
+            // expansion and the next pass starts over, but at any step of the
+            // walk every node before its cursors has a lower bound below
+            // both cursors' bounds, so the cursors are fixed by that bound.
+            // Below the bound the walk has got to, lowered by everything
+            // changed since, the frontier is as the walk left it, and every
+            // step it took there it would take again without reading or
+            // expanding: a block it read is loaded, an index it would have
+            // expanded it stopped at. So the dry runs and the walk resume at
+            // that bound, the walk reading nothing it would not have read
+            // starting over. Reading block by block starts over, as the
+            // reference the planned walk is held to.
+            for changed in [source.changed.take(), target.changed.take()]
+                .into_iter()
+                .flatten()
+            {
+                if changed < walked {
+                    walked = changed;
+                }
+            }
+            let start = if planned {
+                (
+                    source
+                        .nodes
+                        .partition_point(|node| node.lower_bound() < walked.as_slice()),
+                    target
+                        .nodes
+                        .partition_point(|node| node.lower_bound() < walked.as_slice()),
+                )
+            } else {
+                (0, 0)
+            };
+
+            // Plan, fetch, walk: under [`Prefetch::Lazy`] the pass first
+            // learns, by dry runs of the walk (`SparseTree::plan`), the blocks
+            // it is going to read, and fetches each batch concurrently, so the
+            // walk below reads the same blocks without waiting on them one at
+            // a time. A fetched block, or its absence, waits in its side's
+            // `prefetched` until the walk's own read takes it, so the walk
+            // decides everything as it would reading block by block,
+            // [`MissingBlocks`] policy included. A fetch that fails is left
+            // for the walk to read again and own the error.
+            if planned {
+                let mut resume = start;
+                loop {
+                    let wanted =
+                        SparseTree::plan(&source, &target, &diverging, &attempted, &mut resume)?;
+                    if wanted.is_empty() {
+                        break;
+                    }
+                    let mut wanted =
+                        wanted
+                            .into_iter()
+                            .enumerate()
+                            .map(|(at, (is_target, hash))| {
+                                let (storage, missing) = if is_target {
+                                    (&target_storage, missing.target)
+                                } else {
+                                    (&source_storage, missing.source)
+                                };
+                                (at, is_target, storage, missing, hash)
+                            });
+                    #[cfg(test)]
+                    let batch = wanted.len();
+                    let mut sides = Vec::new();
+                    let mut reads = futures_util::stream::FuturesUnordered::new();
+                    loop {
+                        while reads.len() < LOAD_CONCURRENCY {
+                            let Some((at, is_target, storage, missing, hash)) = wanted.next()
+                            else {
+                                break;
+                            };
+                            sides.push((is_target, hash.clone()));
+                            reads.push(fetch_block(storage, missing, at, hash));
+                        }
+                        let Some((at, read)) = reads.next().await else {
+                            break;
+                        };
+                        let (is_target, hash) = &sides[at];
+                        let side = if *is_target { &mut target } else { &mut source };
+                        match read {
+                            Ok(found) => {
+                                side.prefetched.insert(hash.clone(), found);
+                            }
+                            Err(_) => {
+                                attempted.insert(hash.clone());
+                            }
+                        }
+                    }
+                    #[cfg(test)]
+                    plan_census::record(
+                        batch,
+                        LOAD_CONCURRENCY,
+                        source.prefetched.len() + target.prefetched.len(),
+                    );
+                }
+            }
 
             // Every same-hash pair `prune` kept because its routed ops differ
             // is expanded now, all in this pass: their stored content is
@@ -1618,15 +2459,15 @@ where
             // `expand_at`'s own read keeps owning the error and the
             // `MissingBlocks` policy; the `attempted` set keeps a block
             // that stayed a reference from being refetched every pass.
-            let mut pending: Vec<(bool, usize, &Env, Blake3Hash)> = Vec::new();
-            if prefetch == Prefetch::Eager {
+            let mut pending: Vec<PendingRead<'_, '_, Key, Value, Env>> = Vec::new();
+            if reads == Reads::Eager {
                 for (is_target, offset, storage, hash) in source
                     .unloaded()
-                    .map(|(offset, hash)| (false, offset, source_storage, hash))
+                    .map(|(offset, hash)| (false, offset, &source_storage, hash))
                     .chain(
                         target
                             .unloaded()
-                            .map(|(offset, hash)| (true, offset, target_storage, hash)),
+                            .map(|(offset, hash)| (true, offset, &target_storage, hash)),
                     )
                 {
                     if attempted.insert(hash.clone()) {
@@ -1642,7 +2483,12 @@ where
                         let Some((is_target, offset, storage, hash)) = pending.next() else {
                             break;
                         };
-                        reads.push(preload_block(storage, is_target, offset, hash));
+                        let missing = if is_target {
+                            missing.target
+                        } else {
+                            missing.source
+                        };
+                        reads.push(preload_block(storage, missing, is_target, offset, hash));
                     }
                     match reads.next().await {
                         Some((is_target, offset, Some(node))) => {
@@ -1659,8 +2505,7 @@ where
             }
 
             let mut expanded = false;
-            let mut source_idx = 0;
-            let mut target_idx = 0;
+            let (mut source_idx, mut target_idx) = start;
 
             while source_idx < source.nodes.len() && target_idx < target.nodes.len() {
                 let source_bound = source.nodes[source_idx].lower_bound().to_vec();
@@ -1673,6 +2518,7 @@ where
                         // child seam matching the target side.
                         if source.expand_at(&target_bound).await? {
                             expanded = true;
+                            walked = core::cmp::min(&source_bound, &target_bound).clone();
                             break;
                         }
                         source_idx += 1;
@@ -1680,6 +2526,7 @@ where
                     Ordering::Greater => {
                         if target.expand_at(&source_bound).await? {
                             expanded = true;
+                            walked = core::cmp::min(&source_bound, &target_bound).clone();
                             break;
                         }
                         target_idx += 1;
@@ -1702,6 +2549,7 @@ where
                             let target_expanded = target.expand_at(&target_bound).await?;
                             if source_expanded || target_expanded {
                                 expanded = true;
+                                walked = core::cmp::min(&source_bound, &target_bound).clone();
                                 break;
                             }
                         } else if source.nodes[source_idx].hash() != target.nodes[target_idx].hash()
@@ -1722,50 +2570,9 @@ where
                             }
 
                             // Equal lower bounds with differing hashes may be
-                            // the same region at different heights: every
-                            // leftmost spine shares its ancestor's lower
-                            // bound. Peel ONE side per pass, so the taller
-                            // side's child can line up with (and prune) the
-                            // other side's node without it ever being read.
-                            // Which side to peel, cheapest evidence first:
-                            // a loaded index that directly links the other
-                            // side's hash is expanded for a guaranteed prune;
-                            // a loaded index expands without a storage read;
-                            // otherwise the node spanning the wider key range
-                            // (per its successor's bound; the frontier tail
-                            // is unbounded) is the one containing the other,
-                            // so it is peeled first.
-                            let source_node = &source.nodes[source_idx];
-                            let target_node = &target.nodes[target_idx];
-                            let source_first = if target_node
-                                .hash()
-                                .is_some_and(|hash| source_node.links_contain(hash))
-                            {
-                                true
-                            } else if source_node
-                                .hash()
-                                .is_some_and(|hash| target_node.links_contain(hash))
-                            {
-                                false
-                            } else if source_node.is_loaded_index() != target_node.is_loaded_index()
-                            {
-                                source_node.is_loaded_index()
-                            } else if source_node.is_loaded_index() {
-                                false
-                            } else {
-                                let source_next =
-                                    source.nodes.get(source_idx + 1).map(|n| n.lower_bound());
-                                let target_next =
-                                    target.nodes.get(target_idx + 1).map(|n| n.lower_bound());
-                                match (source_next, target_next) {
-                                    (None, Some(_)) => true,
-                                    (Some(_), None) => false,
-                                    (Some(source_next), Some(target_next)) => {
-                                        source_next > target_next
-                                    }
-                                    (None, None) => false,
-                                }
-                            };
+                            // the same region at different heights. Peel ONE
+                            // side per pass (see `SparseTree::peels_first`).
+                            let source_first = source.peels_first(source_idx, &target, target_idx);
                             let (first, first_bound, second, second_bound) = if source_first {
                                 (&mut source, &source_bound, &mut target, &target_bound)
                             } else {
@@ -1773,10 +2580,12 @@ where
                             };
                             if first.expand_at(first_bound).await? {
                                 expanded = true;
+                                walked = core::cmp::min(&source_bound, &target_bound).clone();
                                 break;
                             }
                             if second.expand_at(second_bound).await? {
                                 expanded = true;
+                                walked = core::cmp::min(&source_bound, &target_bound).clone();
                                 break;
                             }
                         }
@@ -1790,6 +2599,8 @@ where
                 break;
             }
         }
+
+        SparseTree::settle_shared_segments(&mut source, &mut target, scope)?;
 
         Ok(TreeDifference { source, target })
     }
@@ -1978,8 +2789,9 @@ where
                     SparseTreeNode::Loaded { node, .. } => node.clone(),
                     SparseTreeNode::Ref(link) | SparseTreeNode::Pending { link, .. } => {
                         match SparseTree::<Key, Value, Env>::try_load(
-                            self.target.storage,
+                            &self.target.storage,
                             &link.node,
+                            self.target.missing,
                         )
                         .await?
                         {
@@ -2012,7 +2824,6 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
     use anyhow::Result;
-    use async_trait::async_trait;
     use dialog_capability::Provider;
     use dialog_common::Blake3Hash;
     use futures_util::StreamExt;
@@ -2024,14 +2835,16 @@ mod tests {
     use futures_util::stream::iter;
 
     use super::{Change, TreeDifference};
+    use crate::helpers::Blocks;
     use crate::helpers::{
-        JournaledBlocks, TestStorage, Traversable as _, TraversalOrder, TreeNodes as _,
+        JournaledBlocks, NodeStream as _, TestStorage, Traversable as _, TraversalOrder,
     };
     use crate::{
-        Buffer, Delta, Entry, Link, LoadBlock, Manifest, NoveltyEntry, NoveltyOp,
+        Buffer, Delta, Entry, Link, Manifest, NoveltyEntry, NoveltyOp, PersistentNode,
         PersistentNodeBody, PersistentTree, Scale, tree_spec,
     };
-    use crate::{MemoryBlocks, Traversable as _, Visit};
+    use crate::{Traversable as _, Visit};
+    use dialog_effects::archive::{Get, Load};
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
@@ -2040,16 +2853,27 @@ mod tests {
     /// differentiation only loads blocks on differing paths.
     #[derive(Clone)]
     struct CountingBackend {
-        inner: MemoryBlocks,
+        inner: Blocks,
         reads: Arc<AtomicUsize>,
+        /// The hash of every read, in order.
+        journal: Arc<std::sync::Mutex<Vec<Blake3Hash>>>,
     }
 
     impl CountingBackend {
         fn new() -> Self {
             Self {
-                inner: MemoryBlocks::new(),
+                inner: Blocks::new(),
                 reads: Arc::new(AtomicUsize::new(0)),
+                journal: Arc::default(),
             }
+        }
+
+        /// Takes the hashes read since the last take, sorted, so two walks
+        /// that read the same blocks in another order compare equal.
+        fn take_journal(&self) -> Vec<Blake3Hash> {
+            let mut journal = core::mem::take(&mut *self.journal.lock().expect("journal lock"));
+            journal.sort();
+            journal
         }
 
         fn store(&self, block: Buffer) {
@@ -2069,17 +2893,50 @@ mod tests {
         }
     }
 
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-    impl Provider<LoadBlock> for CountingBackend {
+    impl CountingBackend {
+        fn count(&self, hash: &Blake3Hash) {
+            self.reads.fetch_add(1, AtomicOrdering::Relaxed);
+            self.journal
+                .lock()
+                .expect("journal lock")
+                .push(hash.clone());
+        }
+    }
+
+    /// Holds nothing, so every node read is a counted block read.
+    impl dialog_common::Holds for CountingBackend {
+        fn held(&self, _key: &str) -> Option<dialog_common::Held> {
+            None
+        }
+
+        fn hold(&self, _key: String, _handle: dialog_common::Held) {}
+    }
+
+    #[dialog_capability::provider]
+    impl Provider<Load> for CountingBackend {
         async fn execute(
             &self,
-            load: LoadBlock,
-        ) -> Result<Option<Buffer>, crate::DialogSearchTreeError> {
-            self.reads.fetch_add(1, AtomicOrdering::Relaxed);
+            load: Load,
+        ) -> Result<Option<Buffer>, dialog_effects::archive::ArchiveError> {
+            self.count(&load.digest);
             load.perform(&self.inner).await
         }
     }
+
+    /// A [`Get`] is a read of the block too, and counts as one.
+    #[dialog_capability::provider]
+    impl Provider<Get> for CountingBackend {
+        async fn execute(
+            &self,
+            get: dialog_capability::Capability<Get>,
+        ) -> Result<Option<Vec<u8>>, dialog_effects::archive::ArchiveError> {
+            use dialog_effects::archive::prelude::GetExt as _;
+            self.count(get.digest());
+            get.perform(&self.inner).await
+        }
+    }
+
+    crate::reads_nodes_through_blocks!(CountingBackend);
 
     type TestTree = PersistentTree<[u8; 4], Vec<u8>>;
 
@@ -2087,7 +2944,7 @@ mod tests {
         keys: impl IntoIterator<Item = (u32, Vec<u8>)>,
         storage: &mut CountingBackend,
     ) -> Result<TestTree> {
-        let mut tree = TestTree::empty();
+        let mut tree = TestTree::empty_in(crate::helpers::test_catalog());
         let mut delta = Delta::zero();
         for (key, value) in keys {
             tree = tree
@@ -2096,8 +2953,8 @@ mod tests {
                 .await?
                 .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
-            for (_, buffer) in delta.flush() {
-                storage.store(buffer);
+            for (_, node) in delta.flush() {
+                storage.store(node.buffer().clone());
             }
         }
         Ok(tree)
@@ -2112,25 +2969,26 @@ mod tests {
         manifest: Manifest,
         storage: &mut CountingBackend,
     ) -> Result<TestTree> {
-        let mut tree = TestTree::empty();
+        let mut tree = TestTree::empty_in(crate::helpers::test_catalog());
         let mut delta = Delta::zero();
         for (key, value) in keys {
             let edit = match tree.stored_root() {
                 Some(root) => crate::TransientTree::with_manifest(
+                    crate::helpers::test_catalog(),
                     root.clone(),
-                    tree.node_cache(),
                     manifest.clone(),
                 ),
-                None => {
-                    crate::TransientTree::empty_with_manifest(tree.node_cache(), manifest.clone())
-                }
+                None => crate::TransientTree::empty_with_manifest(
+                    crate::helpers::test_catalog(),
+                    manifest.clone(),
+                ),
             };
             tree = edit
                 .insert(key.to_le_bytes(), value, storage)
                 .await?
                 .persist(&mut delta)?;
-            for (_, buffer) in delta.flush() {
-                storage.store(buffer);
+            for (_, node) in delta.flush() {
+                storage.store(node.buffer().clone());
             }
         }
         Ok(tree)
@@ -2171,8 +3029,8 @@ mod tests {
                 .insert(i.to_le_bytes(), vec![1], &storage)
                 .await?
                 .persist(&mut delta)?;
-            for (_, buffer) in delta.flush() {
-                storage.store(buffer);
+            for (_, node) in delta.flush() {
+                storage.store(node.buffer().clone());
             }
         }
 
@@ -2241,8 +3099,8 @@ mod tests {
                 .insert(i.to_le_bytes(), vec![1], &storage)
                 .await?
                 .persist(&mut delta)?;
-            for (_, buffer) in delta.flush() {
-                storage.store(buffer);
+            for (_, node) in delta.flush() {
+                storage.store(node.buffer().clone());
             }
         }
 
@@ -2294,7 +3152,7 @@ mod tests {
         };
 
         let mut edit = crate::TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(
-            Default::default(),
+            crate::helpers::test_catalog(),
             custom.clone(),
         );
         for k in 0..30u32 {
@@ -2308,7 +3166,7 @@ mod tests {
 
         let mut delta = Delta::zero();
         let emptied = crate::TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(
-            Default::default(),
+            crate::helpers::test_catalog(),
             custom,
         )
         .persist(&mut delta)?;
@@ -2372,10 +3230,10 @@ mod tests {
         }
         let mut delta = Delta::zero();
         let root = tree.persist(&mut delta)?;
-        for (_, buffer) in delta.flush() {
-            storage.store(buffer);
+        for (_, node) in delta.flush() {
+            storage.store(node.buffer().clone());
         }
-        Ok(TestTree::seal(root, Default::default()))
+        Ok(TestTree::seal(crate::helpers::test_catalog(), root))
     }
 
     /// Applies `ops` to a buffered tree over `base` and canonicalizes it, so the
@@ -2397,8 +3255,8 @@ mod tests {
         }
         let mut delta = Delta::zero();
         let canonical = tree.canonicalize(storage, &mut delta).await?;
-        for (_, buffer) in delta.flush() {
-            storage.store(buffer);
+        for (_, node) in delta.flush() {
+            storage.store(node.buffer().clone());
         }
         Ok(canonical)
     }
@@ -2607,8 +3465,8 @@ mod tests {
             .integrate(changes, &storage)
             .await?
             .persist(&mut delta)?;
-        for (_, buffer) in delta.flush() {
-            storage.store(buffer);
+        for (_, node) in delta.flush() {
+            storage.store(node.buffer().clone());
         }
         assert_eq!(
             merged.root(),
@@ -2637,8 +3495,8 @@ mod tests {
             .insert(1000u32.to_le_bytes(), vec![0xFF], &storage)
             .await?
             .persist(&mut delta)?;
-        for (_, buffer) in delta.flush() {
-            storage.store(buffer);
+        for (_, node) in delta.flush() {
+            storage.store(node.buffer().clone());
         }
 
         storage.reset();
@@ -2679,8 +3537,8 @@ mod tests {
                 .insert(key.to_le_bytes(), vec![0xAB], &storage)
                 .await?
                 .persist(&mut delta)?;
-            for (_, buffer) in delta.flush() {
-                storage.store(buffer);
+            for (_, node) in delta.flush() {
+                storage.store(node.buffer().clone());
             }
         }
 
@@ -2726,12 +3584,12 @@ mod tests {
         Ok(())
     }
 
-    /// The eager sweep actually overlaps its frontier reads: with a
-    /// backend that yields once per read, concurrent fetches stack up
-    /// in flight, while the lazy comparison never has more than one
-    /// read outstanding.
+    /// The planned walk and the eager sweep actually overlap their reads:
+    /// with a backend that yields once per read, concurrent fetches stack up
+    /// in flight, while the walk reading block by block, which planning
+    /// replaced, never has more than one read outstanding.
     #[dialog_common::test]
-    async fn it_overlaps_frontier_reads_when_eager() -> Result<()> {
+    async fn it_overlaps_frontier_reads() -> Result<()> {
         use std::future::Future;
         use std::pin::Pin;
         use std::task::{Context, Poll};
@@ -2754,7 +3612,7 @@ mod tests {
 
         #[derive(Clone)]
         struct GaugeBackend {
-            inner: MemoryBlocks,
+            inner: Blocks,
             in_flight: Arc<AtomicUsize>,
             max_in_flight: Arc<AtomicUsize>,
         }
@@ -2765,13 +3623,21 @@ mod tests {
             }
         }
 
-        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-        impl Provider<LoadBlock> for GaugeBackend {
+        /// Holds nothing, so every node read is a gauged block read.
+        impl dialog_common::Holds for GaugeBackend {
+            fn held(&self, _key: &str) -> Option<dialog_common::Held> {
+                None
+            }
+
+            fn hold(&self, _key: String, _handle: dialog_common::Held) {}
+        }
+
+        #[dialog_capability::provider]
+        impl Provider<Load> for GaugeBackend {
             async fn execute(
                 &self,
-                load: LoadBlock,
-            ) -> Result<Option<Buffer>, crate::DialogSearchTreeError> {
+                load: Load,
+            ) -> Result<Option<Buffer>, dialog_effects::archive::ArchiveError> {
                 let now = self.in_flight.fetch_add(1, AtomicOrdering::Relaxed) + 1;
                 self.max_in_flight.fetch_max(now, AtomicOrdering::Relaxed);
                 YieldOnce(false).await;
@@ -2781,15 +3647,32 @@ mod tests {
             }
         }
 
+        #[dialog_capability::provider]
+        impl Provider<Get> for GaugeBackend {
+            async fn execute(
+                &self,
+                get: dialog_capability::Capability<Get>,
+            ) -> Result<Option<Vec<u8>>, dialog_effects::archive::ArchiveError> {
+                let now = self.in_flight.fetch_add(1, AtomicOrdering::Relaxed) + 1;
+                self.max_in_flight.fetch_max(now, AtomicOrdering::Relaxed);
+                YieldOnce(false).await;
+                let result = get.perform(&self.inner).await;
+                self.in_flight.fetch_sub(1, AtomicOrdering::Relaxed);
+                result
+            }
+        }
+
+        crate::reads_nodes_through_blocks!(GaugeBackend);
+
         let in_flight = Arc::new(AtomicUsize::new(0));
         let max_in_flight = Arc::new(AtomicUsize::new(0));
         let storage = GaugeBackend {
-            inner: MemoryBlocks::new(),
+            inner: Blocks::new(),
             in_flight: in_flight.clone(),
             max_in_flight: max_in_flight.clone(),
         };
 
-        let mut tree = TestTree::empty();
+        let mut tree = TestTree::empty_in(crate::helpers::test_catalog());
         let mut delta = Delta::zero();
         for key in 0..2000u32 {
             tree = tree
@@ -2797,8 +3680,8 @@ mod tests {
                 .insert(key.to_le_bytes(), vec![key as u8], &storage)
                 .await?
                 .persist(&mut delta)?;
-            for (_, buffer) in delta.flush() {
-                storage.store(buffer);
+            for (_, node) in delta.flush() {
+                storage.store(node.buffer().clone());
             }
         }
         let base = tree.clone();
@@ -2810,19 +3693,36 @@ mod tests {
                 .insert(key.to_le_bytes(), vec![0xCD], &storage)
                 .await?
                 .persist(&mut delta)?;
-            for (_, buffer) in delta.flush() {
-                storage.store(buffer);
+            for (_, node) in delta.flush() {
+                storage.store(node.buffer().clone());
             }
         }
 
         let scope = [[0u8; 4]..=[0xFF; 4]];
 
         max_in_flight.store(0, AtomicOrdering::Relaxed);
-        TreeDifference::compute_within(&base, &tree, &storage, &storage, &scope).await?;
+        TreeDifference::compute_scoped(
+            &base,
+            &tree,
+            &storage,
+            &storage,
+            Some(&scope),
+            super::MissingPolicy::default(),
+            super::Reads::Serial,
+        )
+        .await?;
         assert!(
             max_in_flight.load(AtomicOrdering::Relaxed) <= 2,
-            "the lazy comparison reads one block at a time past the two \
-             roots, which load together"
+            "the walk reading block by block reads one at a time past the \
+             two roots, which load together"
+        );
+
+        max_in_flight.store(0, AtomicOrdering::Relaxed);
+        TreeDifference::compute_within(&base, &tree, &storage, &storage, &scope).await?;
+        assert!(
+            max_in_flight.load(AtomicOrdering::Relaxed) > 2,
+            "the planned walk overlaps the reads it plans, {} at most",
+            max_in_flight.load(AtomicOrdering::Relaxed)
         );
 
         max_in_flight.store(0, AtomicOrdering::Relaxed);
@@ -2859,8 +3759,8 @@ mod tests {
             .insert(99u32.to_le_bytes(), vec![1], &storage)
             .await?
             .persist(&mut delta_ours)?;
-        for (_, buffer) in delta_ours.flush() {
-            storage.store(buffer);
+        for (_, node) in delta_ours.flush() {
+            storage.store(node.buffer().clone());
         }
 
         let mut theirs = base.clone();
@@ -2870,8 +3770,8 @@ mod tests {
             .insert(99u32.to_le_bytes(), vec![2], &storage)
             .await?
             .persist(&mut delta_theirs)?;
-        for (_, buffer) in delta_theirs.flush() {
-            storage.store(buffer);
+        for (_, node) in delta_theirs.flush() {
+            storage.store(node.buffer().clone());
         }
 
         // Integrate their changes into ours, and our changes into theirs;
@@ -2894,11 +3794,11 @@ mod tests {
             .await?
             .persist(&mut delta_merged_theirs)?;
 
-        for (_, buffer) in delta_merged_ours.flush() {
-            storage.store(buffer);
+        for (_, node) in delta_merged_ours.flush() {
+            storage.store(node.buffer().clone());
         }
-        for (_, buffer) in delta_merged_theirs.flush() {
-            storage.store(buffer);
+        for (_, node) in delta_merged_theirs.flush() {
+            storage.store(node.buffer().clone());
         }
 
         assert_eq!(
@@ -2928,16 +3828,21 @@ mod tests {
                 .await?
                 .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
-            for (_, buffer) in delta.flush() {
-                storage.store(buffer);
+            for (_, node) in delta.flush() {
+                storage.store(node.buffer().clone());
             }
         }
 
         // A "remote" that already has the base tree.
         let remote = CountingBackend::new();
         {
-            let difference =
-                TreeDifference::compute(&TestTree::empty(), &base, &storage, &storage).await?;
+            let difference = TreeDifference::compute(
+                &TestTree::empty_in(crate::helpers::test_catalog()),
+                &base,
+                &storage,
+                &storage,
+            )
+            .await?;
             let nodes = difference.novel_nodes();
             futures_util::pin_mut!(nodes);
             while let Some(node) = nodes.next().await {
@@ -2959,7 +3864,7 @@ mod tests {
         assert!(uploaded > 0, "extension must produce novel nodes");
 
         // The remote can now read the full extended tree.
-        let restored = TestTree::from_hash(extended.root().clone());
+        let restored = TestTree::at(crate::helpers::test_catalog(), extended.root().clone());
         for (key, value) in (0..1020u32).map(|i| (i, vec![i as u8])) {
             assert_eq!(
                 restored.get(&key.to_le_bytes(), &remote).await?,
@@ -2968,6 +3873,137 @@ mod tests {
             );
         }
 
+        Ok(())
+    }
+
+    /// A replica that holds only what it minted, over an environment that
+    /// hydrates a local miss from an origin holding everything.
+    struct Hydrating {
+        local: Blocks,
+        origin: Blocks,
+        hydrated: Arc<AtomicUsize>,
+    }
+
+    impl dialog_common::Holds for Hydrating {
+        fn held(&self, _key: &str) -> Option<dialog_common::Held> {
+            None
+        }
+
+        fn hold(&self, _key: String, _handle: dialog_common::Held) {}
+    }
+
+    /// A load reads the local blocks, else fetches from the origin; a
+    /// [local](Load::locally) load reads the local blocks and nothing else,
+    /// as every provider answers it.
+    #[dialog_capability::provider]
+    impl Provider<Load> for Hydrating {
+        async fn execute(
+            &self,
+            load: Load,
+        ) -> Result<Option<Buffer>, dialog_effects::archive::ArchiveError> {
+            if let Some(block) = self.local.get(&load.digest) {
+                return Ok(Some(block));
+            }
+            if load.local {
+                return Ok(None);
+            }
+            let fetched = self.origin.get(&load.digest);
+            if fetched.is_some() {
+                self.hydrated.fetch_add(1, AtomicOrdering::Relaxed);
+            }
+            Ok(fetched)
+        }
+    }
+
+    /// A get reads the local blocks and nothing else.
+    #[dialog_capability::provider]
+    impl Provider<Get> for Hydrating {
+        async fn execute(
+            &self,
+            get: dialog_capability::Capability<Get>,
+        ) -> Result<Option<Vec<u8>>, dialog_effects::archive::ArchiveError> {
+            get.perform(&self.local).await
+        }
+    }
+
+    crate::reads_nodes_through_blocks!(Hydrating);
+
+    /// A [`MissingBlocks::Boundary`] side asks whether this replica holds
+    /// each node, so every read it makes is local and never hydrates: over
+    /// an environment that would hydrate every other miss, the walk still
+    /// stops at what the replica holds and reports exactly what it minted,
+    /// and not one block is fetched to answer it. The same walk under the
+    /// default policy reads from anywhere, and so hydrates the nodes it
+    /// needs.
+    #[dialog_common::test]
+    async fn it_never_hydrates_a_boundary_read() -> Result<()> {
+        use super::{MissingBlocks, MissingPolicy};
+
+        let mut origin = CountingBackend::new();
+        let entries: Vec<(u32, Vec<u8>)> = (0..1000u32).map(|i| (i, vec![i as u8])).collect();
+        let base = build(entries, &mut origin).await?;
+        let mut extended = base.clone();
+        let mut delta = Delta::zero();
+        for i in 1000..1020u32 {
+            extended = extended
+                .edit()
+                .insert(i.to_le_bytes(), vec![i as u8], &origin)
+                .await?
+                .persist(&mut delta)?;
+            for (_, node) in delta.flush() {
+                origin.store(node.buffer().clone());
+            }
+        }
+
+        let device = Hydrating {
+            local: Blocks::new(),
+            origin: origin.inner.clone(),
+            hydrated: Arc::new(AtomicUsize::new(0)),
+        };
+        let mut minted: HashSet<Blake3Hash> = HashSet::new();
+        {
+            let difference = TreeDifference::compute(&base, &extended, &origin, &origin).await?;
+            let nodes = difference.novel_nodes();
+            futures_util::pin_mut!(nodes);
+            while let Some(node) = nodes.next().await {
+                let node = node?;
+                minted.insert(node.hash().clone());
+                device.local.store(node.buffer().clone());
+            }
+        }
+
+        let difference = TreeDifference::compute_with(
+            &base,
+            &extended,
+            &device,
+            &device,
+            MissingPolicy {
+                source: MissingBlocks::Boundary,
+                target: MissingBlocks::Boundary,
+            },
+        )
+        .await?;
+        let nodes = difference.novel_nodes();
+        futures_util::pin_mut!(nodes);
+        let mut reported: HashSet<Blake3Hash> = HashSet::new();
+        while let Some(node) = nodes.next().await {
+            reported.insert(node?.hash().clone());
+        }
+        assert_eq!(
+            reported, minted,
+            "bounded novelty is what the replica holds"
+        );
+        assert_eq!(
+            device.hydrated.load(AtomicOrdering::Relaxed),
+            0,
+            "a boundary read never hydrates"
+        );
+
+        TreeDifference::compute(&base, &extended, &device, &device).await?;
+        assert!(
+            device.hydrated.load(AtomicOrdering::Relaxed) > 0,
+            "the default policy loads, and a load hydrates"
+        );
         Ok(())
     }
 
@@ -2993,8 +4029,8 @@ mod tests {
                 .insert(i.to_le_bytes(), vec![i as u8], &origin)
                 .await?
                 .persist(&mut delta)?;
-            for (_, buffer) in delta.flush() {
-                origin.store(buffer);
+            for (_, node) in delta.flush() {
+                origin.store(node.buffer().clone());
             }
         }
 
@@ -3049,8 +4085,13 @@ mod tests {
         // the whole extended tree — the same-remote push contract.
         let peer = CountingBackend::new();
         {
-            let difference =
-                TreeDifference::compute(&TestTree::empty(), &base, &origin, &origin).await?;
+            let difference = TreeDifference::compute(
+                &TestTree::empty_in(crate::helpers::test_catalog()),
+                &base,
+                &origin,
+                &origin,
+            )
+            .await?;
             let nodes = difference.novel_nodes();
             futures_util::pin_mut!(nodes);
             while let Some(node) = nodes.next().await {
@@ -3062,7 +4103,7 @@ mod tests {
             let block = device.get(hash).expect("reported node is held");
             peer.store(block);
         }
-        let restored = TestTree::from_hash(extended.root().clone());
+        let restored = TestTree::at(crate::helpers::test_catalog(), extended.root().clone());
         for (key, value) in (0..1020u32).map(|i| (i, vec![i as u8])) {
             assert_eq!(
                 restored.get(&key.to_le_bytes(), &peer).await?,
@@ -3074,13 +4115,13 @@ mod tests {
         Ok(())
     }
 
-    fn journaled_storage(backend: &MemoryBlocks) -> TestStorage {
+    fn journaled_storage(backend: &Blocks) -> TestStorage {
         JournaledBlocks::over(backend.clone())
     }
 
     #[dialog_common::test]
     async fn test_diff_shared_left_subtree() -> Result<()> {
-        let backend = MemoryBlocks::new();
+        let backend = Blocks::new();
         let storage_a = journaled_storage(&backend);
         let storage_b = journaled_storage(&backend);
 
@@ -3116,7 +4157,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn test_diff_fully_disjoint_trees() -> Result<()> {
-        let backend = MemoryBlocks::new();
+        let backend = Blocks::new();
         let storage = journaled_storage(&backend);
 
         // Scenario: Trees have completely different key ranges - NO shared segments
@@ -3150,7 +4191,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn test_diff_subset_superset() -> Result<()> {
-        let backend = MemoryBlocks::new();
+        let backend = Blocks::new();
         let storage_a = journaled_storage(&backend);
         let storage_b = journaled_storage(&backend);
 
@@ -3186,7 +4227,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn test_diff_single_key_change() -> Result<()> {
-        let backend = MemoryBlocks::new();
+        let backend = Blocks::new();
         let storage_a = journaled_storage(&backend);
         let storage_b = journaled_storage(&backend);
 
@@ -3224,7 +4265,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn test_diff_different_heights() -> Result<()> {
-        let backend = MemoryBlocks::new();
+        let backend = Blocks::new();
         let storage_a = journaled_storage(&backend);
         let storage_b = journaled_storage(&backend);
 
@@ -3260,7 +4301,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn test_diff_different_heights_reverse() -> Result<()> {
-        let backend = MemoryBlocks::new();
+        let backend = Blocks::new();
         let storage_a = journaled_storage(&backend);
         let storage_b = journaled_storage(&backend);
 
@@ -3302,7 +4343,7 @@ mod tests {
     // incomplete store, the second a damaged one.
     #[dialog_common::test]
     async fn it_reports_absent_nodes_instead_of_failing() -> Result<()> {
-        let backend = MemoryBlocks::new();
+        let backend = Blocks::new();
         let storage = journaled_storage(&backend);
         let spec = tree_spec![
             [     ..e]
@@ -3332,7 +4373,7 @@ mod tests {
         // root is unreachable, so the walk reports exactly that and stops:
         // everything below an absent node is unreachable by definition, and
         // a gap-tolerant walk does not pretend otherwise.
-        let empty = MemoryBlocks::new();
+        let empty = Blocks::new();
         let elsewhere = journaled_storage(&empty);
         let visits: Vec<_> = spec.tree().traverse_available(&elsewhere).collect().await;
         assert_eq!(visits.len(), 1, "an unreachable root ends the walk");
@@ -3355,7 +4396,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_returns_all_target_nodes_when_source_is_empty() -> Result<()> {
         // When source is empty, all target nodes are novel
-        let backend = MemoryBlocks::new();
+        let backend = Blocks::new();
         let storage_source = journaled_storage(&backend);
         let storage_target = journaled_storage(&backend);
 
@@ -3401,7 +4442,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_returns_no_nodes_when_target_is_empty() -> Result<()> {
         // When target is empty, no nodes are novel
-        let backend = MemoryBlocks::new();
+        let backend = Blocks::new();
         let storage_source = journaled_storage(&backend);
         let storage_target = journaled_storage(&backend);
 
@@ -3440,7 +4481,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_returns_no_nodes_when_both_trees_are_empty() -> Result<()> {
-        let backend = MemoryBlocks::new();
+        let backend = Blocks::new();
         let storage_source = journaled_storage(&backend);
         let storage_target = journaled_storage(&backend);
 
@@ -3472,7 +4513,7 @@ mod tests {
         // root lazily, so not even the roots are read (the probabilistic search tree's
         // eager root load marked these as reads; the search tree improves
         // on that with a zero-read fast path).
-        let backend = MemoryBlocks::new();
+        let backend = Blocks::new();
         let storage_source = journaled_storage(&backend);
         let storage_target = journaled_storage(&backend);
 
@@ -3518,7 +4559,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_excludes_shared_subtrees_from_novel_nodes() -> Result<()> {
         // When trees share a subtree (same hash), that subtree is NOT novel
-        let backend = MemoryBlocks::new();
+        let backend = Blocks::new();
         let storage_source = journaled_storage(&backend);
         let storage_target = journaled_storage(&backend);
 
@@ -3587,7 +4628,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_handles_trees_with_different_heights() -> Result<()> {
         // Target taller than source
-        let backend = MemoryBlocks::new();
+        let backend = Blocks::new();
         let storage_source = journaled_storage(&backend);
         let storage_target = journaled_storage(&backend);
 
@@ -3663,7 +4704,7 @@ mod tests {
         //
         // IMPORTANT: Both trees must share the same backend so that identical
         // content produces identical hashes (content-addressed storage).
-        let backend = MemoryBlocks::new();
+        let backend = Blocks::new();
         let storage_source = journaled_storage(&backend);
         let storage_target = journaled_storage(&backend);
 
@@ -3716,7 +4757,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_returns_all_target_nodes_for_disjoint_trees() -> Result<()> {
         // Trees with completely different content - all target nodes are novel
-        let backend = MemoryBlocks::new();
+        let backend = Blocks::new();
         let storage_source = journaled_storage(&backend);
         let storage_target = journaled_storage(&backend);
 
@@ -3774,7 +4815,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_returns_unique_novel_nodes() -> Result<()> {
         // Verify that novel_nodes() never returns duplicates
-        let backend = MemoryBlocks::new();
+        let backend = Blocks::new();
         let storage_source = journaled_storage(&backend);
         let storage_target = journaled_storage(&backend);
 
@@ -3822,7 +4863,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_returns_novel_nodes_for_different_segments() -> Result<()> {
         // Simplest case: single segment trees with different content
-        let backend = MemoryBlocks::new();
+        let backend = Blocks::new();
         let storage_source = journaled_storage(&backend);
         let storage_target = journaled_storage(&backend);
 
@@ -3861,7 +4902,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_prunes_shared_deep_subtrees() -> Result<()> {
         // 3-level trees where the left subtree is shared but right differs
-        let backend = MemoryBlocks::new();
+        let backend = Blocks::new();
         let storage_source = journaled_storage(&backend);
         let storage_target = journaled_storage(&backend);
 
@@ -3940,12 +4981,12 @@ mod tests {
         Blake3Hash::hash(bytes.as_slice())
     }
 
-    async fn flush(
-        delta: &mut Delta<Blake3Hash, Buffer>,
+    async fn flush<K, V>(
+        delta: &mut Delta<Blake3Hash, PersistentNode<K, V>>,
         storage: &mut CountingBackend,
     ) -> Result<()> {
-        for (_, buffer) in delta.flush() {
-            storage.store(buffer);
+        for (_, node) in delta.flush() {
+            storage.store(node.buffer().clone());
         }
         Ok(())
     }
@@ -4031,7 +5072,7 @@ mod tests {
     async fn test_differentiate_empty_to_populated() -> Result<()> {
         let mut storage = CountingBackend::new();
         let tree1 = build([(1, vec![10]), (2, vec![20])], &mut storage).await?;
-        let tree2 = TestTree::empty();
+        let tree2 = TestTree::empty_in(crate::helpers::test_catalog());
 
         let changes = collect_changes(&tree2, &tree1, &storage).await?;
 
@@ -4051,7 +5092,7 @@ mod tests {
     #[dialog_common::test]
     async fn test_differentiate_populated_to_empty() -> Result<()> {
         let mut storage = CountingBackend::new();
-        let tree1 = TestTree::empty();
+        let tree1 = TestTree::empty_in(crate::helpers::test_catalog());
         let tree2 = build([(1, vec![10]), (2, vec![20])], &mut storage).await?;
 
         let changes = collect_changes(&tree2, &tree1, &storage).await?;
@@ -4102,8 +5143,8 @@ mod tests {
     #[dialog_common::test]
     async fn test_differentiate_both_empty() -> Result<()> {
         let storage = CountingBackend::new();
-        let tree1 = TestTree::empty();
-        let tree2 = TestTree::empty();
+        let tree1 = TestTree::empty_in(crate::helpers::test_catalog());
+        let tree2 = TestTree::empty_in(crate::helpers::test_catalog());
 
         let changes = collect_changes(&tree2, &tree1, &storage).await?;
         assert_eq!(changes.len(), 0, "Both empty trees should have no changes");
@@ -4391,7 +5432,7 @@ mod tests {
 
         // Both replicas exchange their changes (relative to an empty tree,
         // so each side ships its full state as adds).
-        let empty_tree = TestTree::empty();
+        let empty_tree = TestTree::empty_in(crate::helpers::test_catalog());
         let changes_a = collect_changes(&empty_tree, &tree_a, &storage).await?;
         let changes_b = collect_changes(&empty_tree, &tree_b, &storage).await?;
 
@@ -4434,7 +5475,7 @@ mod tests {
     async fn test_roundtrip_empty_to_populated() -> Result<()> {
         let mut storage = CountingBackend::new();
         let target = build([(1, vec![10]), (2, vec![20]), (3, vec![30])], &mut storage).await?;
-        let mut start = TestTree::empty();
+        let mut start = TestTree::empty_in(crate::helpers::test_catalog());
 
         let changes = collect_changes(&start, &target, &storage).await?;
         let mut delta = Delta::zero();
@@ -4458,7 +5499,7 @@ mod tests {
     #[dialog_common::test]
     async fn test_roundtrip_populated_to_empty() -> Result<()> {
         let mut storage = CountingBackend::new();
-        let target = TestTree::empty();
+        let target = TestTree::empty_in(crate::helpers::test_catalog());
         let mut start = build([(1, vec![10]), (2, vec![20]), (3, vec![30])], &mut storage).await?;
 
         let changes = collect_changes(&start, &target, &storage).await?;
@@ -4580,10 +5621,10 @@ mod tests {
         }
         let mut delta = Delta::zero();
         let root = tree.persist(&mut delta)?;
-        for (_, buffer) in delta.flush() {
-            storage.store(buffer);
+        for (_, node) in delta.flush() {
+            storage.store(node.buffer().clone());
         }
-        Ok(TestTree::seal(root, Default::default()))
+        Ok(TestTree::seal(crate::helpers::test_catalog(), root))
     }
 
     /// A fact buffered at the root must sync without descending the tree.
@@ -4749,7 +5790,7 @@ mod tests {
                 [if i % 2 == 0 { 1 } else { 5 }, b[1], b[2], b[3]]
             })
             .collect();
-        let mut base = TestTree::empty();
+        let mut base = TestTree::empty_in(crate::helpers::test_catalog());
         let mut delta = Delta::zero();
         for key in &base_keys {
             base = base
@@ -4757,8 +5798,8 @@ mod tests {
                 .insert(*key, key.to_vec(), &storage)
                 .await?
                 .persist(&mut delta)?;
-            for (_, buffer) in delta.flush() {
-                storage.store(buffer);
+            for (_, node) in delta.flush() {
+                storage.store(node.buffer().clone());
             }
         }
 
@@ -4770,10 +5811,10 @@ mod tests {
         buffered = buffered.insert(in_tag_5, vec![55], &storage).await?;
         let mut delta = Delta::zero();
         let root = buffered.persist(&mut delta)?;
-        for (_, buffer) in delta.flush() {
-            storage.store(buffer);
+        for (_, node) in delta.flush() {
+            storage.store(node.buffer().clone());
         }
-        let next = TestTree::from_hash_with_cache(root, Default::default());
+        let next = TestTree::at(crate::helpers::test_catalog(), root);
 
         for (tag, key) in [(1u8, in_tag_1), (5u8, in_tag_5)] {
             let scope = [[tag, 0, 0, 0]..=[tag, 0xFF, 0xFF, 0xFF]];
@@ -4876,7 +5917,7 @@ mod tests {
                 [0x10, b[1], b[2], b[3]]
             })
             .collect();
-        let mut base = TestTree::empty();
+        let mut base = TestTree::empty_in(crate::helpers::test_catalog());
         let mut delta = Delta::zero();
         for key in &base_keys {
             base = base
@@ -4884,8 +5925,8 @@ mod tests {
                 .insert(*key, key.to_vec(), &storage)
                 .await?
                 .persist(&mut delta)?;
-            for (_, buffer) in delta.flush() {
-                storage.store(buffer);
+            for (_, node) in delta.flush() {
+                storage.store(node.buffer().clone());
             }
         }
 
@@ -4899,10 +5940,10 @@ mod tests {
                 .await?;
             let mut delta = Delta::zero();
             let root = tree.persist(&mut delta)?;
-            for (_, buffer) in delta.flush() {
-                storage.store(buffer);
+            for (_, node) in delta.flush() {
+                storage.store(node.buffer().clone());
             }
-            TestTree::from_hash_with_cache(root, Default::default())
+            TestTree::at(crate::helpers::test_catalog(), root)
         };
 
         // Scope covering only the beyond-the-bound region.
@@ -4982,12 +6023,12 @@ mod tests {
     async fn sync_flush_regimes() -> Result<()> {
         use std::time::Instant;
 
-        async fn settle(
-            delta: &mut Delta<Blake3Hash, Buffer>,
+        async fn settle<K, V>(
+            delta: &mut Delta<Blake3Hash, PersistentNode<K, V>>,
             storage: &mut CountingBackend,
         ) -> Result<()> {
-            for (_, buffer) in delta.flush() {
-                storage.store(buffer);
+            for (_, node) in delta.flush() {
+                storage.store(node.buffer().clone());
             }
             Ok(())
         }
@@ -5010,7 +6051,7 @@ mod tests {
                 tree.canonicalize(storage, &mut delta).await?
             } else {
                 let root = tree.persist(&mut delta)?;
-                TestTree::seal(root, Default::default())
+                TestTree::seal(crate::helpers::test_catalog(), root)
             };
             settle(&mut delta, storage).await?;
             Ok(result)
@@ -5092,7 +6133,7 @@ mod tests {
         keys: impl IntoIterator<Item = ([u8; 4], Vec<u8>)>,
         storage: &mut CountingBackend,
     ) -> Result<TestTree> {
-        let mut tree = TestTree::empty();
+        let mut tree = TestTree::empty_in(crate::helpers::test_catalog());
         let mut delta = Delta::zero();
         for (key, value) in keys {
             tree = tree
@@ -5100,8 +6141,8 @@ mod tests {
                 .insert(key, value, storage)
                 .await?
                 .persist(&mut delta)?;
-            for (_, buffer) in delta.flush() {
-                storage.store(buffer);
+            for (_, node) in delta.flush() {
+                storage.store(node.buffer().clone());
             }
         }
         Ok(tree)
@@ -5123,10 +6164,10 @@ mod tests {
         }
         let mut delta = Delta::zero();
         let root = tree.persist(&mut delta)?;
-        for (_, buffer) in delta.flush() {
-            storage.store(buffer);
+        for (_, node) in delta.flush() {
+            storage.store(node.buffer().clone());
         }
-        Ok(TestTree::seal(root, Default::default()))
+        Ok(TestTree::seal(crate::helpers::test_catalog(), root))
     }
 
     async fn canonical_bytes(
@@ -5145,8 +6186,8 @@ mod tests {
         }
         let mut delta = Delta::zero();
         let canonical = tree.canonicalize(storage, &mut delta).await?;
-        for (_, buffer) in delta.flush() {
-            storage.store(buffer);
+        for (_, node) in delta.flush() {
+            storage.store(node.buffer().clone());
         }
         Ok(canonical)
     }
@@ -5616,8 +6657,13 @@ mod tests {
             // A "remote" seeded with the whole base tree.
             let remote = CountingBackend::new();
             {
-                let difference =
-                    TreeDifference::compute(&TestTree::empty(), &base, &storage, &storage).await?;
+                let difference = TreeDifference::compute(
+                    &TestTree::empty_in(crate::helpers::test_catalog()),
+                    &base,
+                    &storage,
+                    &storage,
+                )
+                .await?;
                 let stream = difference.novel_nodes();
                 futures_util::pin_mut!(stream);
                 while let Some(node) = stream.next().await {
@@ -5647,7 +6693,7 @@ mod tests {
                     .try_collect::<Vec<_>>()
                     .await?
             };
-            let restored = TestTree::from_hash(target.root().clone());
+            let restored = TestTree::at(crate::helpers::test_catalog(), target.root().clone());
             let actual: Vec<([u8; 4], Vec<u8>)> = {
                 let stream = restored.stream(&remote);
                 futures_util::pin_mut!(stream);
@@ -5698,7 +6744,7 @@ mod tests {
         let root = Buffer::from(root.as_bytes()?);
         let hash = root.blake3_hash().clone();
         storage.store(root);
-        Ok(TestTree::from_hash(hash))
+        Ok(TestTree::at(crate::helpers::test_catalog(), hash))
     }
 
     fn assert_op(key: [u8; 4], value: Vec<u8>) -> NoveltyEntry<Vec<u8>> {
@@ -5884,6 +6930,139 @@ mod tests {
         Ok(())
     }
 
+    /// Two sides holding the same stored leaf, differing only in the ops
+    /// routed to it, settle to the keys those ops cover: the entry walk
+    /// decodes nothing else of the leaf, and yields exactly the changes a
+    /// difference of the canonicalized trees yields, in the same order.
+    /// Before, the walk streamed every stored entry of the leaf on both
+    /// sides, so a scoped difference paid for the whole leaf its ops landed
+    /// in, whatever its scope.
+    #[dialog_common::test]
+    async fn it_settles_a_shared_leaf_to_the_keys_its_ops_cover() -> Result<()> {
+        let mut storage = CountingBackend::new();
+        let manifest = Manifest {
+            max_segment: 512,
+            frame_ceiling_factor: 0,
+            ..Manifest::default()
+        };
+        let base = build_with_manifest(
+            (0..2_000u32).map(|i| (i, vec![i as u8])),
+            manifest,
+            &mut storage,
+        )
+        .await?;
+
+        // Keys are little-endian, so `10 + 256 * n` sort next to each other
+        // and land in one leaf; past 2,000 they are absent from the base.
+        let key = |n: u32| 10 + 256 * n;
+        let source_ops = vec![
+            // An op both sides hold cancels.
+            (true, key(0), vec![7]),
+            // The same key asserted with different values.
+            (true, key(1), vec![1]),
+            // A stored key retracted on one side only.
+            (false, key(2), vec![]),
+            // A stored key overwritten on one side only.
+            (true, key(4), vec![5]),
+            // An absent key retracted: nothing to report.
+            (false, key(10), vec![]),
+        ];
+        let target_ops = vec![
+            (true, key(0), vec![7]),
+            (true, key(1), vec![2]),
+            (false, key(3), vec![]),
+            // An absent key inserted.
+            (true, key(9), vec![3]),
+        ];
+        let source = buffered(&base, &source_ops, 1_000_000, &mut storage).await?;
+        let target = buffered(&base, &target_ops, 1_000_000, &mut storage).await?;
+        let source_canonical = canonicalized(&base, &source_ops, 1, &mut storage).await?;
+        let target_canonical = canonicalized(&base, &target_ops, 1, &mut storage).await?;
+
+        let flat = |changes: Vec<Change<[u8; 4], Vec<u8>>>| {
+            changes
+                .into_iter()
+                .map(|change| match change {
+                    Change::Add(entry) => (true, entry.key, entry.value),
+                    Change::Remove(entry) => (false, entry.key, entry.value),
+                })
+                .collect::<Vec<_>>()
+        };
+        let settled = flat(collect_changes(&source, &target, &storage).await?);
+        let canonical =
+            flat(collect_changes(&source_canonical, &target_canonical, &storage).await?);
+        let bytes = |n: u32| key(n).to_le_bytes();
+        assert_eq!(
+            settled,
+            vec![
+                (false, bytes(1), vec![1]),
+                (true, bytes(1), vec![2]),
+                (true, bytes(2), vec![key(2) as u8]),
+                (false, bytes(3), vec![key(3) as u8]),
+                (false, bytes(4), vec![5]),
+                (true, bytes(4), vec![key(4) as u8]),
+                (true, bytes(9), vec![3]),
+            ],
+            "each covered key resolves to its winning op or its stored entry"
+        );
+        assert_eq!(
+            settled, canonical,
+            "settling changes nothing a difference reports"
+        );
+
+        // Scoped, only the covered keys inside the scope resolve. A scope
+        // inside the leaf that covers no op's key reports nothing.
+        for (scope, expected) in [
+            (
+                vec![bytes(1)..=bytes(1)],
+                vec![(false, bytes(1), vec![1]), (true, bytes(1), vec![2])],
+            ),
+            (vec![bytes(5)..=bytes(8)], vec![]),
+        ] {
+            let scoped = flat(collect_scoped_changes(&source, &target, &scope, &storage).await?);
+            let canonical = flat(
+                collect_scoped_changes(&source_canonical, &target_canonical, &scope, &storage)
+                    .await?,
+            );
+            assert_eq!(scoped, expected, "scope {scope:?}");
+            assert_eq!(scoped, canonical, "scope {scope:?}");
+        }
+
+        let difference = TreeDifference::compute(&source, &target, &storage, &storage).await?;
+        let loaded_segment = |node: &super::SparseTreeNode<[u8; 4], Vec<u8>>| match node {
+            super::SparseTreeNode::Loaded { node, .. }
+                if matches!(node.body(), crate::NodeBody::Segment(_)) =>
+            {
+                Some(node.hash().clone())
+            }
+            _ => None,
+        };
+        let theirs: HashSet<Blake3Hash> = difference
+            .target
+            .nodes
+            .iter()
+            .filter_map(loaded_segment)
+            .collect();
+        assert!(
+            difference
+                .source
+                .nodes
+                .iter()
+                .filter_map(loaded_segment)
+                .all(|hash| !theirs.contains(&hash)),
+            "no leaf both sides share is left for the entry walk to stream"
+        );
+        assert!(
+            difference
+                .target
+                .nodes
+                .iter()
+                .any(|node| matches!(node, super::SparseTreeNode::Settled { .. })),
+            "the shared leaf the ops landed in is settled"
+        );
+        Ok(())
+    }
+
     /// Every block reachable from `root` in `storage`, root first.
     fn reachable(root: &Blake3Hash, storage: &CountingBackend) -> Result<Vec<Buffer>> {
         let mut blocks = Vec::new();
@@ -5929,6 +7108,436 @@ mod tests {
             }
         }
         Ok(levels)
+    }
+
+    /// One side of a difference, as text to compare: every frontier node
+    /// (its kind, bound, hash and ops), the expanded nodes, the hashes seen
+    /// and the unresolved links.
+    fn side_state(
+        side: &super::SparseTree<'_, [u8; 4], Vec<u8>, CountingBackend>,
+    ) -> (
+        Vec<String>,
+        Vec<Blake3Hash>,
+        Vec<Blake3Hash>,
+        Vec<Blake3Hash>,
+    ) {
+        let frontier = side
+            .nodes
+            .iter()
+            .map(|node| match node {
+                super::SparseTreeNode::Loaded {
+                    node,
+                    lower_bound,
+                    pending,
+                } => format!("loaded {lower_bound:?} {} {pending:?}", node.hash()),
+                super::SparseTreeNode::Ref(link) => {
+                    format!("ref {:?} {}", link.separator, link.node)
+                }
+                super::SparseTreeNode::Pending { link, pending } => {
+                    format!("pending {:?} {} {pending:?}", link.separator, link.node)
+                }
+                super::SparseTreeNode::Settled { lower_bound, ops } => {
+                    format!("settled {lower_bound:?} {ops:?}")
+                }
+            })
+            .collect();
+        let expanded = side
+            .expanded
+            .iter()
+            .map(|node| node.hash().clone())
+            .collect();
+        let mut seen: Vec<_> = side.seen.iter().cloned().collect();
+        seen.sort();
+        let unresolved = side
+            .unresolved
+            .iter()
+            .map(|link| link.node.clone())
+            .collect();
+        (frontier, expanded, seen, unresolved)
+    }
+
+    /// What [`walk_outcome`] shows of a difference: the blocks read from
+    /// each side's storage (sorted), both sides' state, the changes in order,
+    /// the novel nodes and the target's unresolved links.
+    type WalkOutcome = (
+        Vec<Blake3Hash>,
+        Vec<Blake3Hash>,
+        String,
+        String,
+        String,
+        String,
+    );
+
+    /// Everything a difference computed with `reads` shows. Unscoped, the
+    /// target is expanded as [`TreeDifference::compute_with`] expands it for
+    /// `novel_nodes`. An error stands in for whatever it cut short.
+    async fn walk_outcome(
+        source: &TestTree,
+        target: &TestTree,
+        source_storage: &CountingBackend,
+        target_storage: &CountingBackend,
+        scope: Option<&[core::ops::RangeInclusive<[u8; 4]>]>,
+        missing: super::MissingPolicy,
+        reads: super::Reads,
+    ) -> WalkOutcome {
+        source_storage.take_journal();
+        target_storage.take_journal();
+        let computed = TreeDifference::compute_scoped(
+            source,
+            target,
+            source_storage,
+            target_storage,
+            scope,
+            missing,
+            reads,
+        )
+        .await;
+        let failed = |error: String| {
+            (
+                source_storage.take_journal(),
+                target_storage.take_journal(),
+                error,
+                String::new(),
+                String::new(),
+                String::new(),
+            )
+        };
+        let mut difference = match computed {
+            Ok(difference) => difference,
+            Err(error) => return failed(format!("error {error}")),
+        };
+        if scope.is_none() {
+            let mut index = 0;
+            while index < difference.target.nodes.len() {
+                let bound = difference.target.nodes[index].lower_bound().to_vec();
+                match difference.target.expand_at(&bound).await {
+                    Ok(true) => {}
+                    Ok(false) => index += 1,
+                    Err(error) => return failed(format!("expansion error {error}")),
+                }
+            }
+        }
+        let source_read = source_storage.take_journal();
+        let target_read = target_storage.take_journal();
+        let state = format!(
+            "{:?}\n{:?}",
+            side_state(&difference.source),
+            side_state(&difference.target)
+        );
+        let changes: Vec<Result<Change<[u8; 4], Vec<u8>>, _>> = match scope {
+            Some(scope) => difference.changes_within(scope).collect().await,
+            None => difference.changes().collect().await,
+        };
+        let changes = format!(
+            "{:?}",
+            changes
+                .iter()
+                .map(|change| match change {
+                    Ok(Change::Add(entry)) => format!("+{:?}={:?}", entry.key, entry.value),
+                    Ok(Change::Remove(entry)) => format!("-{:?}={:?}", entry.key, entry.value),
+                    Err(error) => format!("error {error}"),
+                })
+                .collect::<Vec<_>>()
+        );
+        let novel: Vec<Result<crate::PersistentNode<[u8; 4], Vec<u8>>, _>> =
+            difference.novel_nodes().collect().await;
+        let novel = format!(
+            "{:?}",
+            novel
+                .iter()
+                .map(|node| match node {
+                    Ok(node) => node.hash().to_string(),
+                    Err(error) => format!("error {error}"),
+                })
+                .collect::<Vec<_>>()
+        );
+        let unresolved = format!(
+            "{:?}",
+            difference
+                .unresolved_target()
+                .iter()
+                .map(|link| link.node.to_string())
+                .collect::<Vec<_>>()
+        );
+        (source_read, target_read, state, changes, novel, unresolved)
+    }
+
+    /// Where two walk outcomes differ, or `None` when they agree in full.
+    fn outcome_divergence(serial: &WalkOutcome, planned: &WalkOutcome) -> Option<String> {
+        (serial != planned).then(|| {
+            let parts = [
+                serial.0 == planned.0,
+                serial.1 == planned.1,
+                serial.2 == planned.2,
+                serial.3 == planned.3,
+                serial.4 == planned.4,
+                serial.5 == planned.5,
+            ];
+            format!(
+                "equal [source reads, target reads, state, changes, novel, unresolved] = {parts:?}"
+            )
+        })
+    }
+
+    /// Asserts the planned walk is indistinguishable from the serial one:
+    /// the same blocks read from each side's storage, as often, the same
+    /// state on both sides, the same changes in order, the same novel nodes
+    /// and the same unresolved links. Planning moves when a block is read,
+    /// never which blocks are, nor anything the walk decides.
+    async fn assert_planned_reads_match(
+        source: &TestTree,
+        target: &TestTree,
+        source_storage: &CountingBackend,
+        target_storage: &CountingBackend,
+        scope: Option<&[core::ops::RangeInclusive<[u8; 4]>]>,
+        missing: super::MissingPolicy,
+        context: &str,
+    ) -> Result<()> {
+        let serial = walk_outcome(
+            source,
+            target,
+            source_storage,
+            target_storage,
+            scope,
+            missing,
+            super::Reads::Serial,
+        )
+        .await;
+        let planned = walk_outcome(
+            source,
+            target,
+            source_storage,
+            target_storage,
+            scope,
+            missing,
+            super::Reads::Planned,
+        )
+        .await;
+        if let Some(divergence) = outcome_divergence(&serial, &planned) {
+            panic!("{context}: the planned walk must be the serial walk: {divergence}");
+        }
+        Ok(())
+    }
+
+    /// The planned walk against the serial one, over what the oracle's
+    /// shared store does not reach: each tree in its own store, a scoped
+    /// difference, and the missing-block boundary on both sides (push's
+    /// policy) over stores holding a random two thirds of either side's
+    /// blocks, in every combination, both ways. Each run compares
+    /// everything [`walk_outcome`] shows. `DIALOG_DIFF_PLANNED_CASES` runs
+    /// more for a longer local soak.
+    #[dialog_common::test]
+    async fn it_walks_as_it_would_reading_block_by_block() -> Result<()> {
+        use super::{MissingBlocks, MissingPolicy, Reads};
+        let cases: u64 = std::env::var("DIALOG_DIFF_PLANNED_CASES")
+            .ok()
+            .and_then(|cases| cases.parse().ok())
+            .unwrap_or(150);
+        let mut failures = Vec::new();
+        for seed in 0..cases {
+            let mut rng = 0x5EED_1234_ABCD_9876u64 ^ seed.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            let mut next = move || {
+                rng ^= rng << 13;
+                rng ^= rng >> 7;
+                rng ^= rng << 17;
+                (rng >> 32) as u32
+            };
+            let mut storage = CountingBackend::new();
+            let manifest = Manifest {
+                max_segment: [256u32, 512, 2_048][next() as usize % 3],
+                frame_ceiling_factor: 0,
+                ..Manifest::default()
+            };
+            let rotated = next().is_multiple_of(3);
+            let key =
+                move |index: u32| -> u32 { if rotated { index.rotate_left(8) } else { index } };
+            let base_size = 50 + next() % 3_000;
+            let keyspace = base_size + 300;
+            let base = build_with_manifest(
+                (0..base_size).map(|i| (key(i), vec![(i % 251) as u8])),
+                manifest,
+                &mut storage,
+            )
+            .await?;
+            let hot: Vec<u32> = match next() % 3 {
+                0 => (0..1 + next() % 40)
+                    .map(|_| key(next() % keyspace))
+                    .collect(),
+                _ => Vec::new(),
+            };
+            let values: u32 = if next().is_multiple_of(2) { 4 } else { 251 };
+            let ops = |count: u32, next: &mut dyn FnMut() -> u32| {
+                (0..count)
+                    .map(|_| {
+                        let insert = !next().is_multiple_of(3);
+                        let at = if hot.is_empty() {
+                            key(next() % keyspace)
+                        } else {
+                            hot[next() as usize % hot.len()]
+                        };
+                        (insert, at, vec![(next() % values) as u8])
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let buffer_size =
+                |next: &mut dyn FnMut() -> u32| [1usize, 8, 64, 1_000_000][next() as usize % 4];
+            let mut target_base = base.clone();
+            if next().is_multiple_of(3) {
+                let edges = leaf_edges(&base, &storage)?;
+                let edits: Vec<(bool, u32, Vec<u8>)> = (0..5 + next() % 30)
+                    .map(|_| {
+                        let edge = u32::from_le_bytes(edges[next() as usize % edges.len()]);
+                        match next() % 2 {
+                            0 => (false, edge, vec![]),
+                            _ => (true, edge.wrapping_add(1 << 24), vec![7]),
+                        }
+                    })
+                    .collect();
+                target_base =
+                    canonicalized(&base, &edits, buffer_size(&mut next), &mut storage).await?;
+            }
+            let rounds: Vec<_> = (0..1 + next() % 4)
+                .map(|_| {
+                    let count = next() % 60;
+                    ops(count, &mut next)
+                })
+                .collect();
+            let mut source = base.clone();
+            for round in &rounds {
+                source = buffered(&source, round, buffer_size(&mut next), &mut storage).await?;
+            }
+            let mut target = target_base.clone();
+            for round in &rounds {
+                target = buffered(&target, round, buffer_size(&mut next), &mut storage).await?;
+            }
+            let source_count = next() % 6;
+            let source_ops = ops(source_count, &mut next);
+            source = buffered(&source, &source_ops, buffer_size(&mut next), &mut storage).await?;
+            let target_count = if next().is_multiple_of(4) {
+                base_size / 2 + next() % (base_size * 2)
+            } else {
+                1 + next() % 8
+            };
+            let target_ops = ops(target_count, &mut next);
+            target = buffered(&target, &target_ops, buffer_size(&mut next), &mut storage).await?;
+
+            let source_blocks = reachable(source.root(), &storage)?;
+            let target_blocks = reachable(target.root(), &storage)?;
+            let (full_source, full_target, partial_source, partial_target) = (
+                CountingBackend::new(),
+                CountingBackend::new(),
+                CountingBackend::new(),
+                CountingBackend::new(),
+            );
+            for block in &source_blocks {
+                full_source.store(block.clone());
+                if !next().is_multiple_of(3) {
+                    partial_source.store(block.clone());
+                }
+            }
+            for block in &target_blocks {
+                full_target.store(block.clone());
+                if !next().is_multiple_of(3) {
+                    partial_target.store(block.clone());
+                }
+            }
+            let bounds: Vec<u32> = (0..keyspace).map(key).collect();
+            let scope: Vec<core::ops::RangeInclusive<[u8; 4]>> = (0..1 + next() % 2)
+                .map(|_| {
+                    let mut ends = [
+                        bounds[next() as usize % bounds.len()].to_le_bytes(),
+                        bounds[next() as usize % bounds.len()].to_le_bytes(),
+                    ];
+                    ends.sort();
+                    ends[0]..=ends[1]
+                })
+                .collect();
+            let both = MissingPolicy {
+                source: MissingBlocks::Boundary,
+                target: MissingBlocks::Boundary,
+            };
+            type Run<'r> = (
+                &'r str,
+                &'r CountingBackend,
+                &'r CountingBackend,
+                Option<&'r [core::ops::RangeInclusive<[u8; 4]>]>,
+                MissingPolicy,
+            );
+            let runs: Vec<Run<'_>> = vec![
+                (
+                    "deny, distinct stores",
+                    &full_source,
+                    &full_target,
+                    None,
+                    MissingPolicy::default(),
+                ),
+                (
+                    "deny, scoped",
+                    &full_source,
+                    &full_target,
+                    Some(&scope[..]),
+                    MissingPolicy::default(),
+                ),
+                (
+                    "boundary both, partial both",
+                    &partial_source,
+                    &partial_target,
+                    None,
+                    both,
+                ),
+                (
+                    "boundary both, partial source",
+                    &partial_source,
+                    &full_target,
+                    None,
+                    both,
+                ),
+                (
+                    "boundary both, partial target",
+                    &full_source,
+                    &partial_target,
+                    None,
+                    both,
+                ),
+            ];
+            for (label, source_storage, target_storage, scope, missing) in runs {
+                for (from, to, from_storage, to_storage, way) in [
+                    (&source, &target, source_storage, target_storage, "forward"),
+                    (&target, &source, target_storage, source_storage, "reverse"),
+                ] {
+                    let serial = walk_outcome(
+                        from,
+                        to,
+                        from_storage,
+                        to_storage,
+                        scope,
+                        missing,
+                        Reads::Serial,
+                    )
+                    .await;
+                    let planned = walk_outcome(
+                        from,
+                        to,
+                        from_storage,
+                        to_storage,
+                        scope,
+                        missing,
+                        Reads::Planned,
+                    )
+                    .await;
+                    if let Some(divergence) = outcome_divergence(&serial, &planned) {
+                        failures.push(format!("seed {seed}, {label}, {way}: {divergence}"));
+                    }
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "{} divergences:\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
+        Ok(())
     }
 
     /// **The pruning oracle.** Random trees with random buffered ops, the
@@ -6157,6 +7766,18 @@ mod tests {
                 reverse,
                 "seed {seed}: and so must the difference the other way"
             );
+            for (from, to, way) in [(&source, &target, "forward"), (&target, &source, "reverse")] {
+                assert_planned_reads_match(
+                    from,
+                    to,
+                    &storage,
+                    &storage,
+                    None,
+                    MissingPolicy::default(),
+                    &format!("seed {seed}, {way}"),
+                )
+                .await?;
+            }
 
             // Scoped, lazily and eagerly: scope pruning runs before the prune.
             let bounds: Vec<u32> = universe.iter().copied().collect();
@@ -6175,6 +7796,16 @@ mod tests {
                 .filter(|(at, _)| scope.iter().any(|range| range.contains(at)))
                 .map(|(at, change)| (*at, change.clone()))
                 .collect();
+            assert_planned_reads_match(
+                &source,
+                &target,
+                &storage,
+                &storage,
+                Some(&scope),
+                MissingPolicy::default(),
+                &format!("seed {seed}, scoped"),
+            )
+            .await?;
             let lazy = collect_scoped_changes(&source, &target, &scope, &storage).await?;
             assert_eq!(
                 normalize(&lazy),
@@ -6209,7 +7840,7 @@ mod tests {
             while let Some(node) = nodes.next().await {
                 remote.store(node?.buffer().clone());
             }
-            let restored = TestTree::from_hash(target.root().clone());
+            let restored = TestTree::at(crate::helpers::test_catalog(), target.root().clone());
             for (at, value) in &target_values {
                 assert_eq!(
                     &restored.get(at, &remote).await?,
@@ -6230,6 +7861,20 @@ mod tests {
             for block in &source_blocks {
                 remote.store(block.clone());
             }
+            let boundary = MissingPolicy {
+                source: MissingBlocks::Boundary,
+                target: MissingBlocks::Deny,
+            };
+            assert_planned_reads_match(
+                &source,
+                &target,
+                &partial,
+                &storage,
+                None,
+                boundary,
+                &format!("seed {seed}, boundary"),
+            )
+            .await?;
             let difference = TreeDifference::compute_with(
                 &source,
                 &target,
@@ -6292,6 +7937,11 @@ mod tests {
     /// one-op change and for a change spread across the key space: reads,
     /// and wall time. Run by hand (`--ignored --nocapture`) to compare
     /// builds; it asserts nothing about time.
+    ///
+    /// It also sets the planned walk beside the serial one it replaced: the
+    /// walk alone (the CPU the dry runs add, over storage in memory), the
+    /// round trips (one per read serially, one per window of each batch
+    /// planned), and the most fetched blocks held waiting on the walk.
     #[dialog_common::test]
     #[ignore = "a measurement, run by hand"]
     async fn it_measures_the_difference_over_a_large_buffered_tree() -> Result<()> {
@@ -6301,10 +7951,12 @@ mod tests {
             frame_ceiling_factor: 0,
             ..Manifest::default()
         };
-        let mut base = TestTree::empty();
+        let base: TestTree;
         {
-            let mut edit =
-                crate::TransientTree::empty_with_manifest(base.node_cache(), manifest.clone());
+            let mut edit = crate::TransientTree::empty_with_manifest(
+                crate::helpers::test_catalog(),
+                manifest.clone(),
+            );
             for i in 0..120_000u32 {
                 edit = edit
                     .insert(i.to_le_bytes(), vec![(i % 251) as u8], &storage)
@@ -6312,8 +7964,8 @@ mod tests {
             }
             let mut delta = Delta::zero();
             base = edit.persist(&mut delta)?;
-            for (_, buffer) in delta.flush() {
-                storage.store(buffer);
+            for (_, node) in delta.flush() {
+                storage.store(node.buffer().clone());
             }
         }
         let shared_ops: Vec<(bool, u32, Vec<u8>)> =
@@ -6336,6 +7988,50 @@ mod tests {
                     changes.len(),
                     storage.reads(),
                     elapsed,
+                );
+            }
+            for planned in [false, true] {
+                let mut times = Vec::new();
+                let mut census = (0, 0, 0, 0);
+                for _ in 0..7 {
+                    storage.reset();
+                    super::plan_census::take();
+                    let started = std::time::Instant::now();
+                    let difference = TreeDifference::compute_scoped(
+                        &shared,
+                        target,
+                        &storage,
+                        &storage,
+                        None,
+                        super::MissingPolicy::default(),
+                        if planned {
+                            super::Reads::Planned
+                        } else {
+                            super::Reads::Serial
+                        },
+                    )
+                    .await?;
+                    times.push(started.elapsed());
+                    drop(difference);
+                    let (batches, rounds, peak) = super::plan_census::take();
+                    census = (storage.reads(), batches, rounds, peak);
+                }
+                times.sort();
+                let (reads, batches, rounds, peak) = census;
+                // The roots are one round trip either way; serially every
+                // other read is one more.
+                let round_trips = if planned {
+                    1 + rounds as usize
+                } else {
+                    1 + reads.saturating_sub(2)
+                };
+                eprintln!(
+                    "{label}, {} walk: {reads} reads, {round_trips} round trips, {batches} \
+                     batches, peak {peak} fetched blocks held; walk median {:?} (min {:?}, max {:?})",
+                    if planned { "planned" } else { "serial" },
+                    times[times.len() / 2],
+                    times[0],
+                    times[times.len() - 1],
                 );
             }
         }

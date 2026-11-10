@@ -31,7 +31,7 @@ impl FileSystem {
     }
 }
 
-#[async_trait::async_trait]
+#[dialog_capability::provider]
 impl Provider<Load<Credential>> for FileSystem {
     async fn execute(
         &self,
@@ -48,7 +48,7 @@ impl Provider<Load<Credential>> for FileSystem {
     }
 }
 
-#[async_trait::async_trait]
+#[dialog_capability::provider]
 impl Provider<Save<Credential>> for FileSystem {
     async fn execute(&self, input: Capability<Save<Credential>>) -> Result<(), CredentialError> {
         let handle = self.credential_key(input.address())?;
@@ -63,7 +63,7 @@ impl Provider<Save<Credential>> for FileSystem {
     }
 }
 
-#[async_trait::async_trait]
+#[dialog_capability::provider]
 impl Provider<Retract<Credential>> for FileSystem {
     async fn execute(&self, input: Capability<Retract<Credential>>) -> Result<(), CredentialError> {
         let handle = self.credential_key(input.address())?;
@@ -72,7 +72,7 @@ impl Provider<Retract<Credential>> for FileSystem {
     }
 }
 
-#[async_trait::async_trait]
+#[dialog_capability::provider]
 impl Provider<Load<Secret>> for FileSystem {
     async fn execute(&self, input: Capability<Load<Secret>>) -> Result<Secret, CredentialError> {
         let handle = self.credential_site(input.address().as_str())?;
@@ -81,7 +81,7 @@ impl Provider<Load<Secret>> for FileSystem {
     }
 }
 
-#[async_trait::async_trait]
+#[dialog_capability::provider]
 impl Provider<Save<Secret>> for FileSystem {
     async fn execute(&self, input: Capability<Save<Secret>>) -> Result<(), CredentialError> {
         let handle = self.credential_site(input.address().as_str())?;
@@ -90,7 +90,7 @@ impl Provider<Save<Secret>> for FileSystem {
     }
 }
 
-#[async_trait::async_trait]
+#[dialog_capability::provider]
 impl Provider<Retract<Secret>> for FileSystem {
     async fn execute(&self, input: Capability<Retract<Secret>>) -> Result<(), CredentialError> {
         let handle = self.credential_site(input.address().as_str())?;

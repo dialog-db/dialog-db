@@ -46,6 +46,13 @@ fn salary(of: &Entity, value: u32, policy: Pick) -> AttributeStatement {
 }
 
 /// `org/salary` of `of` read under `select`, sorted.
+/// Of two salaries that stand equal, the one a `last` read returns: the
+/// one whose value hashes greater (`Value::tiebreak`).
+fn tie_winner(a: u32, b: u32) -> u32 {
+    let hash = |salary: u32| Value::UnsignedInt(salary.into()).tiebreak();
+    if hash(a) >= hash(b) { a } else { b }
+}
+
 fn salary_query(of: &Entity, select: &str) -> ConceptQuery {
     let predicate: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
         "salary": { "the": "org/salary", "as": "natural:", "pick": select }
@@ -479,10 +486,11 @@ async fn a_transaction_that_retracts_an_overlay_row_reads_what_its_commit_leaves
 /// an empty cell of a relation a rule derives (so the transactor, not
 /// the tree, settles it). The two `all` writes stand at the same
 /// edition, and the `last` write succeeds the one a `last` read
-/// returns among them: "a tie falls to the value's bytes", the greater
-/// value. The transactor breaks the tie by the hash of each fact
-/// instead, so for some value pairs it retracts the claim a reader
-/// would not have returned.
+/// returns among them: the one whose value hashes greater. A transactor
+/// that broke the tie any other way (by the hash of each fact, or by the
+/// value) retracted, for some value pairs, the claim a reader would not
+/// have returned. The pairs include one whose hashes order it the other
+/// way round from its values.
 #[dialog_common::test]
 async fn a_last_write_succeeds_the_claim_a_last_read_returns_among_equals() -> Result<()> {
     let (operator, profile) = test_session_with_peer().await;
@@ -523,14 +531,15 @@ async fn a_last_write_succeeds_the_claim_a_last_read_returns_among_equals() -> R
             .await?;
         let branch = repo.branch(&name).open().perform(&operator).await?;
         let stored = read_branch(&branch, &operator, &alice, "all").await?;
-        let loser = first.min(second) as u64;
+        let winner = tie_winner(first, second);
+        let loser = if winner == first { second } else { first } as u64;
         if stored != vec![1, loser] {
             wrong.push((first, second, stored));
         }
     }
     assert!(
         wrong.is_empty(),
-        "the greater of two equal-standing claims is what `last` returns, and what the write succeeds; these pairs retracted the other: {wrong:?}"
+        "of two equal-standing claims, `last` returns the one whose value hashes greater, and the write succeeds it; these pairs retracted the other: {wrong:?}"
     );
     Ok(())
 }
@@ -721,12 +730,16 @@ async fn read_through_commit(
 }
 
 /// "A transaction reads what its commit will leave." The line holds 3
-/// and 5. A `max` write of 4 succeeds 5, and an `all` write then writes
-/// 5 back: the commit lands 5 at its own edition, the newest of the
-/// cell, so a `last` read returns it. The transaction read the line's
-/// older row of 5 instead and returned 4.
+/// and 6. A `max` write of 4 succeeds 6, and an `all` write then writes
+/// 6 back: the commit lands 4 and 6 at its own edition, the newest of
+/// the cell, standing equal, and 6 hashes greater, so a `last` read
+/// returns 6. The transaction read the line's older row of 6 instead and
+/// returned 4.
 #[dialog_common::test]
 async fn a_value_written_back_after_its_succession_reads_as_the_commit_leaves_it() -> Result<()> {
+    // The written-back value must win the tie, or a transaction that
+    // returned the `max` write's value would pass.
+    assert_eq!(tie_winner(4, 6), 6, "6 hashes greater than 4");
     let (operator, profile) = test_session_with_peer().await;
     let repo = test_repo(&operator, &profile).await;
     let branch = repo.branch("main").open().perform(&operator).await?;
@@ -734,7 +747,7 @@ async fn a_value_written_back_after_its_succession_reads_as_the_commit_leaves_it
     branch
         .transaction()
         .assert(salary(&alice, 3, Pick::All))
-        .assert(salary(&alice, 5, Pick::All))
+        .assert(salary(&alice, 6, Pick::All))
         .commit()
         .publish()
         .perform(&operator)
@@ -742,13 +755,13 @@ async fn a_value_written_back_after_its_succession_reads_as_the_commit_leaves_it
     let transaction = branch
         .transaction()
         .assert(salary(&alice, 4, Pick::Max))
-        .assert(salary(&alice, 5, Pick::All));
+        .assert(salary(&alice, 6, Pick::All));
     let (read, committed) =
         read_through_commit(&branch, transaction, &operator, &alice, "last").await?;
     assert_eq!(
         committed,
-        vec![5],
-        "the commit lands 5 at the newest edition"
+        vec![6],
+        "the commit lands 4 and 6 at the newest edition, and 6 wins the tie"
     );
     assert_eq!(read, committed, "the transaction read what its commit left");
     Ok(())

@@ -8,8 +8,7 @@ use std::env;
 use std::ops::Deref;
 
 use async_trait::async_trait;
-use dialog_capability::{Command, Provider};
-use dialog_common::ConditionalSync;
+use dialog_capability::{Command, Provider, Resume};
 use dialog_effects::storage::{Directory, Location};
 
 use crate::provider::{FileSystem, FileSystemError, Space, Storage};
@@ -67,16 +66,13 @@ impl Deref for TempFileSystem {
 /// Forward every command the wrapped [`FileSystem`] can handle. Keeps
 /// [`TempFileSystem`] in sync as the inner [`FileSystem`] gains (or
 /// loses) [`Provider`] impls without touching this file.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<C> Provider<C> for TempFileSystem
 where
     C: Command,
-    C::Input: ConditionalSync + 'static,
-    FileSystem: Provider<C> + ConditionalSync,
+    FileSystem: Provider<C>,
 {
-    async fn execute(&self, input: C::Input) -> C::Output {
-        self.inner.execute(input).await
+    fn execute(&self, input: C::Input) -> Resume<'_, C::Output> {
+        self.inner.execute(input)
     }
 }
 

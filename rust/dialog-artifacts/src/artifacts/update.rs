@@ -78,10 +78,12 @@ pub enum Pick {
     Top(Vec<Value>),
 }
 
-/// The standing of a claim: the deepest revision version it carries, as
-/// the edition and the hash of that version, and its cause. Ordered as
-/// an election orders claims: a versioned claim beats an unversioned
-/// one, a deeper version a shallower, then the cause decides.
+/// The standing of a candidate: the deepest revision version the claim
+/// behind it carries, as the edition and the hash of that version, its
+/// cause, and how far past that claim the candidate stands. Ordered as
+/// an election orders candidates: a versioned claim beats an
+/// unversioned one, a deeper version a shallower, then the cause
+/// decides, then a successor beats what it succeeds.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Standing {
     /// The deepest revision version the claim carries, as its edition
@@ -90,15 +92,39 @@ pub struct Standing {
     pub version: Option<(Edition, [u8; 32])>,
     /// The claim's cause.
     pub cause: Cause,
+    /// How many rewrites stand between the claim and this candidate:
+    /// zero for the claim itself, one for the conclusion of a rule
+    /// whose body read the claim and derived another value for its
+    /// cell, and one more for each conclusion that rewrites that one in
+    /// turn. Rewrites that read each other back, a cycle, share one
+    /// rank, so they stand as concurrent candidates. A derived
+    /// successor stands strictly after what it succeeds, as a written
+    /// one does, and before every claim of a newer version.
+    pub succession: u32,
+}
+
+impl Standing {
+    /// The standing of a claim: at `version`, with `cause`, succeeded
+    /// by nothing.
+    pub fn new(version: Option<(Edition, [u8; 32])>, cause: Cause) -> Self {
+        Standing {
+            version,
+            cause,
+            succession: 0,
+        }
+    }
 }
 
 impl Ord for Standing {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.version.cmp(&other.version).then_with(|| {
-            self.cause
-                .partial_cmp(&other.cause)
-                .unwrap_or(Ordering::Equal)
-        })
+        self.version
+            .cmp(&other.version)
+            .then_with(|| {
+                self.cause
+                    .partial_cmp(&other.cause)
+                    .unwrap_or(Ordering::Equal)
+            })
+            .then_with(|| self.succession.cmp(&other.succession))
     }
 }
 
@@ -112,13 +138,12 @@ impl PartialOrd for Standing {
 /// latter absent for a candidate no fact stands behind.
 pub type Contender<'a> = (&'a Value, Option<&'a Standing>);
 
-/// Whether `candidate` orders after `incumbent` by value alone: the
-/// values' own order where they have one, their encoding's otherwise.
+/// Whether `candidate` wins a tie `incumbent` stands equal in: the
+/// greater [`Value::tiebreak`], the hash of the value, not the value
+/// itself, so the outcome favours no value over another. Equal values
+/// never beat each other.
 pub(crate) fn value_beats(candidate: &Value, incumbent: &Value) -> bool {
-    match candidate.partial_cmp(incumbent) {
-        Some(ordering) => ordering.is_gt(),
-        None => encode_value_owned(candidate) > encode_value_owned(incumbent),
-    }
+    candidate.tiebreak() > incumbent.tiebreak()
 }
 
 impl Display for Pick {
@@ -185,8 +210,10 @@ impl Pick {
     }
 
     /// Whether `candidate` is the newer of two claims: the greater
-    /// standing, then the greater value. This is the whole of `last`,
-    /// and what every other pick falls back to among equals.
+    /// standing, then, between claims that stand equal (two values one
+    /// revision wrote under one cause), the greater hash of the value
+    /// ([`Value::tiebreak`]). This is the whole of `last`, and what every
+    /// other pick falls back to among equals.
     pub fn newer(candidate: Contender<'_>, incumbent: Contender<'_>) -> bool {
         candidate.1 > incumbent.1
             || (candidate.1 == incumbent.1 && value_beats(candidate.0, incumbent.0))
@@ -879,6 +906,80 @@ impl Statement for Changes {
 
 #[cfg(test)]
 mod tests {
+    /// A successor stands strictly after the claim it succeeds and
+    /// before any claim of a newer version or cause, however the
+    /// values compare: the order a `last` election runs on.
+    #[dialog_common::test]
+    fn a_successor_stands_after_its_claim_and_before_a_newer_one() {
+        use super::{Cause, Edition, Pick, Standing, Value};
+        let claim = Standing::new(Some((Edition::new(3), [1; 32])), Cause([1; 32]));
+        let at = |succession: u32| Standing {
+            succession,
+            ..claim.clone()
+        };
+        let (successor, twice) = (at(1), at(2));
+        let newer_cause = Standing::new(Some((Edition::new(3), [1; 32])), Cause([2; 32]));
+        let newer_version = Standing::new(Some((Edition::new(4), [0; 32])), Cause([0; 32]));
+        assert!(successor > claim);
+        assert!(twice > successor);
+        assert!(newer_cause > twice);
+        assert!(newer_version > twice);
+        assert_eq!(successor.succession, 1);
+        assert_eq!(twice.succession, 2);
+        // The successor's lesser value does not hold it back.
+        let (todo, triage) = (Value::String("todo".into()), Value::String("triage".into()));
+        assert!(Pick::newer(
+            (&todo, Some(&successor)),
+            (&triage, Some(&claim))
+        ));
+        assert!(!Pick::newer(
+            (&triage, Some(&claim)),
+            (&todo, Some(&successor))
+        ));
+    }
+
+    /// Between claims that stand equal, `last` elects by the hash of the
+    /// value, not by the value: of two values whose hashes order them the
+    /// other way round from their own order, the one with the greater
+    /// hash wins, whichever is folded first. One value held by two types
+    /// (the natural 3 and the float 3.0) is a tie neither wins.
+    #[dialog_common::test]
+    fn an_equal_standing_ties_by_the_hash_of_the_value() {
+        use super::{Cause, Edition, Pick, Standing, Value};
+        let standing = Standing::new(Some((Edition::new(3), [1; 32])), Cause([1; 32]));
+        let texts: Vec<Value> = (b'a'..=b'z')
+            .map(|letter| Value::String(char::from(letter).to_string()))
+            .collect();
+        let (lesser, greater) = texts
+            .iter()
+            .flat_map(|a| texts.iter().map(move |b| (a, b)))
+            .find(|(a, b)| a < b && a.tiebreak() > b.tiebreak())
+            .expect("two letters whose hashes order them the other way");
+        assert!(Pick::newer(
+            (lesser, Some(&standing)),
+            (greater, Some(&standing))
+        ));
+        assert!(!Pick::newer(
+            (greater, Some(&standing)),
+            (lesser, Some(&standing))
+        ));
+        let claims = [(greater, Some(&standing)), (lesser, Some(&standing))];
+        assert_eq!(Pick::Last.elect(claims), Some(1));
+        let claims = [(lesser, Some(&standing)), (greater, Some(&standing))];
+        assert_eq!(Pick::Last.elect(claims), Some(0));
+
+        let (natural, float) = (Value::UnsignedInt(3), Value::Float(3.0));
+        assert_eq!(natural.tiebreak(), float.tiebreak());
+        assert!(!Pick::newer(
+            (&natural, Some(&standing)),
+            (&float, Some(&standing))
+        ));
+        assert!(!Pick::newer(
+            (&float, Some(&standing)),
+            (&natural, Some(&standing))
+        ));
+    }
+
     /// The instructions of a batch come in entity then attribute order,
     /// a cell's in the order they were recorded, however the facts were
     /// recorded: the batch the tree is handed is the same from one

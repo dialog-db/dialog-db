@@ -1,6 +1,7 @@
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use dialog_common::helpers::BenchData;
-use dialog_search_tree::{Delta, MemoryBlocks, PersistentTree};
+use dialog_search_tree::helpers::Blocks;
+use dialog_search_tree::{Delta, PersistentTree};
 
 const BENCH_SEED: u64 = 42;
 
@@ -15,8 +16,11 @@ fn bench_delete(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, &size| {
             b.to_async(tokio::runtime::Runtime::new().unwrap())
                 .iter(|| async {
-                    let storage = MemoryBlocks::new();
-                    let mut tree = PersistentTree::<[u8; 16], Vec<u8>>::empty();
+                    let blocks = Blocks::new();
+                    let storage = dialog_search_tree::helpers::Holding::new(&blocks);
+                    let mut tree = PersistentTree::<[u8; 16], Vec<u8>>::empty_in(
+                        dialog_search_tree::helpers::test_catalog(),
+                    );
                     let mut delta = Delta::zero();
 
                     // Insert all keys
@@ -29,8 +33,8 @@ fn bench_delete(c: &mut Criterion) {
                             .persist(&mut delta)
                             .unwrap();
                         // Flush after each persist so the next edit can load the nodes this persist created.
-                        for (_, buffer) in delta.flush() {
-                            storage.store(buffer);
+                        for (_, node) in delta.flush() {
+                            storage.store(node.buffer().clone());
                         }
                     }
 
@@ -44,8 +48,8 @@ fn bench_delete(c: &mut Criterion) {
                             .persist(&mut delta)
                             .unwrap();
                         // Flush after each persist so the next edit can load the nodes this persist created.
-                        for (_, buffer) in delta.flush() {
-                            storage.store(buffer);
+                        for (_, node) in delta.flush() {
+                            storage.store(node.buffer().clone());
                         }
                     }
                 });

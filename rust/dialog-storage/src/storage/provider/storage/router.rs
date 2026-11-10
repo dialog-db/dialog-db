@@ -3,11 +3,9 @@
 //! Routes capability effects to the correct space provider based on the
 //! subject DID extracted from the capability.
 
-use std::sync::Arc;
-
-use async_trait::async_trait;
 use dialog_capability::{Capability, Did, Effect, Provider, StorageError};
 use dialog_common::{ConditionalSend, ConditionalSync};
+use std::sync::Arc;
 
 use crate::resource::Pool;
 
@@ -36,13 +34,12 @@ impl<T, E: From<StorageError>> FromSubjectNotFound for Result<T, E> {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl<S, Fx> Provider<Fx> for Router<S>
 where
-    S: Provider<Fx> + ConditionalSync + Clone,
+    S: Provider<Fx> + ConditionalSend + ConditionalSync + Clone,
     Fx: Effect + ConditionalSend + 'static,
-    Fx::Output: FromSubjectNotFound,
+    Fx::Output: FromSubjectNotFound + ConditionalSend,
     Capability<Fx>: ConditionalSend,
     Self: ConditionalSend + ConditionalSync,
 {

@@ -12,9 +12,8 @@
 use std::collections::BTreeMap;
 
 use dialog_common::helpers::BenchData;
-use dialog_search_tree::{
-    Delta, Distribution, Hashed, MemoryBlocks, PersistentNode, PersistentTree, Rank,
-};
+use dialog_search_tree::helpers::Blocks;
+use dialog_search_tree::{Delta, Distribution, Hashed, PersistentNode, PersistentTree, Rank};
 
 const BENCH_SEED: u64 = 42;
 const SIZES: [usize; 2] = [10_000, 50_000];
@@ -36,14 +35,14 @@ impl<const M: u64> Distribution for Threshold<M> {
     }
 }
 
-async fn build<D: Distribution>(
-    size: usize,
-) -> (PersistentTree<[u8; 16], Vec<u8>, D>, MemoryBlocks) {
+async fn build<D: Distribution>(size: usize) -> (PersistentTree<[u8; 16], Vec<u8>, D>, Blocks) {
     let mut data = BenchData::new(BENCH_SEED);
     let keys = data.random_buffers::<16>(size);
     let values = data.random_buffers::<32>(size);
-    let storage = MemoryBlocks::new();
-    let mut tree = PersistentTree::<[u8; 16], Vec<u8>, D>::empty();
+    let storage = Blocks::new();
+    let mut tree = PersistentTree::<[u8; 16], Vec<u8>, D>::empty_in(
+        dialog_search_tree::helpers::test_catalog(),
+    );
     let mut delta = Delta::zero();
     for (k, v) in keys.iter().zip(values.iter()) {
         tree = tree
@@ -54,8 +53,8 @@ async fn build<D: Distribution>(
             .persist(&mut delta)
             .unwrap();
         // Flush after each persist so the next edit can load the nodes this persist created.
-        for (_, buffer) in delta.flush() {
-            storage.store(buffer);
+        for (_, node) in delta.flush() {
+            storage.store(node.buffer().clone());
         }
     }
     (tree, storage)

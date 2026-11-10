@@ -12,9 +12,9 @@
 //! stored node carries beyond its canonical form is the byte cost of the
 //! buffered ops riding on it.
 
-use dialog_capability::Provider;
-use dialog_common::{Blake3Hash as NodeHash, ConditionalSync};
-use dialog_search_tree::LoadBlock;
+use crate::reads::*;
+use dialog_common::Blake3Hash as NodeHash;
+use dialog_effects::archive::prelude::CatalogScope;
 use std::env;
 
 use dialog_search_tree::{Manifest, PersistentNode, PersistentNodeBody};
@@ -76,16 +76,22 @@ pub struct NodeStat {
 /// by a tree. A tree with nothing persisted yields an empty capture: the
 /// all-zero root earlier versions stored for an empty tree, or the root an
 /// empty tree derives from its format before its first persist
-/// ([`ArtifactTree::empty`](super::ArtifactTree::empty)), which no archive
-/// holds yet. Nodes load through `env` as [`LoadBlock`]s, verified against
+/// ([`ArtifactTree::empty_in`](super::ArtifactTree::empty_in)), which no
+/// archive holds yet. Nodes are the blocks of `catalog`, loaded through `env`
+/// ([`load_node`](dialog_search_tree::load_node)), so a node
+/// the store keeps is read from memory and every other is verified against
 /// the hash asked for; spilled values and history records outside the tree
 /// are never touched.
 pub async fn capture<Env>(
+    catalog: &CatalogScope,
     root: &Blake3Hash,
     env: &Env,
 ) -> Result<Vec<NodeStat>, DialogArtifactsError>
 where
-    Env: Provider<LoadBlock> + ConditionalSync,
+    Env: Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
+        + ConditionalSync,
 {
     let mut stats: Vec<(usize, NodeStat)> = Vec::new();
     if root == dialog_common::NULL_BLAKE3_HASH.as_bytes() {
@@ -93,10 +99,13 @@ where
     }
     let unpersisted_empty = super::ArtifactTree::empty_root(&Manifest::default())?;
     if root == unpersisted_empty.as_bytes()
-        && LoadBlock::new(NodeHash::from(*root))
-            .perform(env)
-            .await?
-            .is_none()
+        && dialog_search_tree::load_node::<Key, State<Datum>, _>(
+            env,
+            catalog,
+            &NodeHash::from(*root),
+        )
+        .await?
+        .is_none()
     {
         return Ok(Vec::new());
     }
@@ -106,14 +115,13 @@ where
     while !frontier.is_empty() {
         let mut next = Vec::new();
         for hash in &frontier {
-            let bytes = LoadBlock::new(NodeHash::from(*hash))
-                .perform(env)
-                .await?
-                .ok_or_else(|| {
-                    DialogArtifactsError::Tree(format!("tree node missing at depth {depth}"))
-                })?;
-            let size = bytes.as_ref().len();
-            let node = PersistentNode::<Key, State<Datum>>::try_from(bytes)?;
+            let node: PersistentNode<Key, State<Datum>> =
+                dialog_search_tree::load_node(env, catalog, &NodeHash::from(*hash))
+                    .await?
+                    .ok_or_else(|| {
+                        DialogArtifactsError::Tree(format!("tree node missing at depth {depth}"))
+                    })?;
+            let size = node.buffer().as_ref().len();
             let stat = if let Ok(index) = node.as_index() {
                 let bound = node.manifest()?.max_separator as usize;
                 let mut forced_links = 0usize;
@@ -342,6 +350,10 @@ pub fn report(label: &str, stats: &[NodeStat]) {
 
 #[cfg(test)]
 mod tests {
+    use dialog_capability::Provider;
+    use dialog_common::{Buffer, Held, Holds};
+    use dialog_effects::archive::{ArchiveError, Load};
+    use dialog_search_tree::helpers::test_catalog;
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
@@ -349,12 +361,12 @@ mod tests {
     use crate::tree::{ArtifactTree, ArtifactTreeExt as _};
     use crate::{ArchiveDelta, Artifact, Entity, Instruction, Value};
 
-    use dialog_search_tree::MemoryBlocks;
+    use dialog_search_tree::helpers::Blocks;
     use futures_util::stream;
 
     /// Persists a one-fact tree into `blocks` and returns its root.
-    async fn persist(blocks: &MemoryBlocks, name: &str) -> anyhow::Result<Blake3Hash> {
-        let mut tree = ArtifactTree::empty();
+    async fn persist(blocks: &Blocks, name: &str) -> anyhow::Result<Blake3Hash> {
+        let mut tree = ArtifactTree::empty_in(test_catalog());
         let mut delta = ArchiveDelta::zero();
         tree.apply(
             blocks,
@@ -374,20 +386,52 @@ mod tests {
         Ok(*tree.root().as_bytes())
     }
 
+    /// Blocks that answer a load of `asked` with `impostor`'s bytes: a
+    /// store returning a well-formed node that is not the one asked for.
+    struct Impostor {
+        blocks: Blocks,
+        asked: NodeHash,
+        impostor: Buffer,
+    }
+
+    impl Holds for Impostor {
+        fn held(&self, _key: &str) -> Option<Held> {
+            None
+        }
+
+        fn hold(&self, _key: String, _handle: Held) {}
+    }
+
+    #[dialog_capability::provider]
+    impl Provider<Load> for Impostor {
+        async fn execute(&self, load: Load) -> Result<Option<Buffer>, ArchiveError> {
+            if load.digest == self.asked {
+                return Ok(Some(self.impostor.clone()));
+            }
+            load.perform(&self.blocks).await
+        }
+    }
+
+    dialog_search_tree::reads_nodes_through_blocks!(Impostor);
+
     /// A store that answers with a well-formed node that is not the one
     /// asked for is refused: capture measures the tree it was asked about
     /// or fails, never another tree's nodes.
     #[dialog_common::test]
     async fn it_refuses_a_node_that_is_not_the_one_asked_for() -> anyhow::Result<()> {
-        let blocks = MemoryBlocks::new();
+        let blocks = Blocks::new();
         let asked = persist(&blocks, "Alice").await?;
         let other = persist(&blocks, "Bob").await?;
         let impostor = blocks
             .get(&NodeHash::from(other))
             .expect("the other tree's root is stored");
-        blocks.corrupt(NodeHash::from(asked), impostor.as_ref().to_vec());
+        let store = Impostor {
+            blocks: blocks.clone(),
+            asked: NodeHash::from(asked),
+            impostor,
+        };
 
-        let captured = capture(&asked, &blocks).await;
+        let captured = capture(&test_catalog(), &asked, &store).await;
 
         assert!(
             matches!(&captured, Err(DialogArtifactsError::Tree(message)) if message.contains("did not match")),
@@ -401,11 +445,19 @@ mod tests {
     /// new empty tree derives from its format before its first persist.
     #[dialog_common::test]
     async fn it_captures_nothing_for_an_unpersisted_empty_tree() -> anyhow::Result<()> {
-        let store = MemoryBlocks::new();
-        assert!(capture(&[0u8; 32], &store).await?.is_empty());
-        let empty = ArtifactTree::empty();
+        let store = Blocks::new();
+        assert!(
+            capture(&test_catalog(), &[0u8; 32], &store)
+                .await?
+                .is_empty()
+        );
+        let empty = ArtifactTree::empty_in(test_catalog());
         assert_ne!(empty.root().as_bytes(), &[0u8; 32]);
-        assert!(capture(empty.root().as_bytes(), &store).await?.is_empty());
+        assert!(
+            capture(&test_catalog(), empty.root().as_bytes(), &store)
+                .await?
+                .is_empty()
+        );
         Ok(())
     }
 }

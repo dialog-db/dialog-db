@@ -30,6 +30,9 @@
 //! # }
 //! ```
 
+use crate::nodes::{Preload, Read};
+use dialog_capability::Provider;
+use dialog_effects::archive::{Get, Load};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     fmt::Debug,
@@ -37,7 +40,6 @@ use std::{
 };
 
 use async_stream::try_stream;
-use dialog_capability::Provider;
 use dialog_common::{Blake3Hash, ConditionalSync};
 use futures_core::Stream;
 use futures_util::StreamExt;
@@ -56,9 +58,10 @@ mod blocks;
 pub use blocks::*;
 
 use crate::{
-    Delta, DialogSearchTreeError, Distribution, Hashed, Key, LoadBlock, Manifest, MemoryBlocks,
-    NodeBody, PersistentNode, PersistentTree, Rank, Value,
+    Accessor, Delta, DialogSearchTreeError, Distribution, Hashed, Key, Manifest, NodeBody,
+    PersistentNode, PersistentTree, Rank, Value,
 };
+use dialog_effects::archive::prelude::CatalogScope;
 
 /// Traversal order for tree iteration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -150,7 +153,9 @@ where
         storage: &'a Env,
     ) -> impl Stream<Item = Result<PersistentNode<Key, Value>, DialogSearchTreeError>> + 'a
     where
-        Env: Provider<LoadBlock> + ConditionalSync;
+        Env: Provider<Read<PersistentNode<Key, Value>>>
+            + Provider<Preload<PersistentNode<Key, Value>>>
+            + ConditionalSync;
 }
 
 impl<Key, Value, D> Traversable<Key, Value> for PersistentTree<Key, Value, D>
@@ -172,7 +177,9 @@ where
         storage: &'a Env,
     ) -> impl Stream<Item = Result<PersistentNode<Key, Value>, DialogSearchTreeError>> + 'a
     where
-        Env: Provider<LoadBlock> + ConditionalSync,
+        Env: Provider<Read<PersistentNode<Key, Value>>>
+            + Provider<Preload<PersistentNode<Key, Value>>>
+            + ConditionalSync,
     {
         let root = self.stored_root().cloned();
 
@@ -182,7 +189,7 @@ where
                 queue.enqueue([root]);
 
                 while let Some(hash) = queue.dequeue() {
-                    let node = load_node::<Key, Value, Env>(storage, &hash).await?;
+                    let node = load_node::<Key, Value, Env>(storage, self.catalog(), &hash).await?;
 
                     if let NodeBody::Index(index) = node.body() {
                         let children = index
@@ -200,33 +207,30 @@ where
     }
 }
 
-/// Reads a node from storage by hash.
+/// Reads a node of `catalog` through `storage` by hash.
 async fn load_node<Key, Value, Env>(
     storage: &Env,
+    catalog: &CatalogScope,
     hash: &Blake3Hash,
 ) -> Result<PersistentNode<Key, Value>, DialogSearchTreeError>
 where
-    Key: self::Key,
-    Value: self::Value,
+    Key: self::Key + dialog_common::ConditionalSend + ConditionalSync + 'static,
+    Value: self::Value + ConditionalSync + 'static,
     Value::Archived: for<'b> CheckBytes<
             Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>,
-    Env: Provider<LoadBlock> + ConditionalSync,
+    Env: Provider<Read<PersistentNode<Key, Value>>>
+        + Provider<Preload<PersistentNode<Key, Value>>>
+        + ConditionalSync,
 {
-    let buffer = LoadBlock::new(hash.clone())
-        .perform(storage)
-        .await?
-        .ok_or_else(|| {
-            DialogSearchTreeError::Node(format!("Block not found in storage: {hash}"))
-        })?;
-    PersistentNode::try_from(buffer)
+    Accessor::new(storage, catalog).get_node(hash).await
 }
 
 /// A stream of tree nodes.
 ///
 /// This trait is implemented for any stream that yields `Result<Node<...>, Error>`.
-/// Import this trait to use extension methods like [`into_hash_set`](TreeNodes::into_hash_set).
-pub trait TreeNodes<Key, Value>:
+/// Import this trait to use extension methods like [`into_hash_set`](NodeStream::into_hash_set).
+pub trait NodeStream<Key, Value>:
     Stream<Item = Result<PersistentNode<Key, Value>, DialogSearchTreeError>>
 where
     Key: self::Key,
@@ -238,7 +242,7 @@ where
     fn into_hash_set(self) -> impl std::future::Future<Output = HashSet<Blake3Hash>>;
 }
 
-impl<Key, Value, S> TreeNodes<Key, Value> for S
+impl<Key, Value, S> NodeStream<Key, Value> for S
 where
     Key: self::Key,
     Value: self::Value,
@@ -297,8 +301,9 @@ pub async fn yield_once() {
     .await
 }
 
-/// [`MemoryBlocks`] that record the loads that reach them, in order, and how
-/// many of them were in flight at once.
+/// [`Blocks`] that record the reads that reach them, in order, and how
+/// many of them were in flight at once. A [`Load`] and a [`Get`] are
+/// recorded alike: both are a read of the block.
 ///
 /// Every read yields once before it is answered, so reads issued by work that
 /// is polled concurrently are genuinely in flight together and their overlap
@@ -307,7 +312,7 @@ pub async fn yield_once() {
 /// touched, in the order it touched them, and how often.
 #[derive(Clone, Default)]
 pub struct ObservingBlocks {
-    blocks: MemoryBlocks,
+    blocks: Blocks,
     reads: Arc<Mutex<Reads>>,
     /// Reads admitted at once; `0` is unlimited. See
     /// [`with_capacity`](Self::with_capacity).
@@ -484,13 +489,19 @@ impl ObservingBlocks {
 }
 
 impl ObservingBlocks {
+    /// The blocks underneath, which read without being observed.
+    pub fn blocks(&self) -> &Blocks {
+        &self.blocks
+    }
+
     /// Keeps `block` under its content hash, without observing it.
     pub fn store(&self, block: dialog_common::Buffer) {
         self.blocks.store(block);
     }
 
-    /// Keeps every block `delta` holds, emptying it, without observing it.
-    pub fn flush(&self, delta: &mut Delta<Blake3Hash, dialog_common::Buffer>) {
+    /// Keeps the block of every node `delta` holds, emptying it, without
+    /// observing it.
+    pub fn flush<Key, Value>(&self, delta: &mut Delta<Blake3Hash, PersistentNode<Key, Value>>) {
         self.blocks.flush(delta);
     }
 
@@ -500,13 +511,18 @@ impl ObservingBlocks {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl Provider<LoadBlock> for ObservingBlocks {
-    async fn execute(
-        &self,
-        LoadBlock { hash }: LoadBlock,
-    ) -> Result<Option<dialog_common::Buffer>, DialogSearchTreeError> {
+/// Holds nothing, so every node read is an observed block read.
+impl dialog_common::Holds for ObservingBlocks {
+    fn held(&self, _key: &str) -> Option<dialog_common::Held> {
+        None
+    }
+
+    fn hold(&self, _key: String, _handle: dialog_common::Held) {}
+}
+
+impl ObservingBlocks {
+    /// One observed read of the block `hash` names.
+    async fn observe(&self, hash: Blake3Hash) -> Option<dialog_common::Buffer> {
         self.reads
             .lock()
             .events
@@ -534,7 +550,45 @@ impl Provider<LoadBlock> for ObservingBlocks {
             reads.events.push((hash, ReadEvent::Completed));
         }
 
-        Ok(block)
+        block
+    }
+}
+
+#[dialog_capability::provider]
+impl Provider<Load> for ObservingBlocks {
+    async fn execute(
+        &self,
+        load: Load,
+    ) -> Result<Option<dialog_common::Buffer>, dialog_effects::archive::ArchiveError> {
+        Ok(self.observe(load.digest).await)
+    }
+}
+
+crate::reads_nodes_through_blocks!(ObservingBlocks);
+
+#[dialog_capability::provider]
+impl Provider<Get> for ObservingBlocks {
+    async fn execute(
+        &self,
+        get: dialog_capability::Capability<Get>,
+    ) -> Result<Option<Vec<u8>>, dialog_effects::archive::ArchiveError> {
+        use dialog_effects::archive::prelude::GetExt as _;
+        Ok(self
+            .observe(get.digest().clone())
+            .await
+            .map(|block| block.as_ref().to_vec()))
+    }
+}
+
+/// A spilled value read is observed like a block read: these keep a value
+/// as a block of their catalog.
+#[dialog_capability::provider]
+impl Provider<dialog_effects::blob::Load> for ObservingBlocks {
+    async fn execute(
+        &self,
+        load: dialog_effects::blob::Load,
+    ) -> Result<Option<dialog_common::Buffer>, dialog_effects::archive::ArchiveError> {
+        Ok(self.observe(load.digest).await)
     }
 }
 
@@ -789,7 +843,7 @@ impl TreeDescriptor {
         if self.0.is_empty() {
             return Ok(TreeSpec {
                 spec: Vec::new(),
-                tree: TestTree::empty(),
+                tree: TestTree::empty_in(test_catalog()),
                 storage,
             });
         }
@@ -859,20 +913,18 @@ impl TreeDescriptor {
             frame_ceiling_factor: 0,
             ..Manifest::default()
         };
-        let mut tree = TestTree::empty();
+        let mut tree = TestTree::empty_in(test_catalog());
         let mut delta = Delta::zero();
         for key in &collection {
             let leaf_rank = if leaf_boundaries.contains(key) { 2 } else { 1 };
             let seam_rank = seam_ranks.get(key).copied().unwrap_or(1);
             let edit = match tree.stored_root() {
                 Some(root) => crate::TransientTree::with_manifest(
+                    test_catalog(),
                     root.clone(),
-                    tree.node_cache(),
                     manifest.clone(),
                 ),
-                None => {
-                    crate::TransientTree::empty_with_manifest(tree.node_cache(), manifest.clone())
-                }
+                None => crate::TransientTree::empty_with_manifest(test_catalog(), manifest.clone()),
             };
             tree = edit
                 .insert(encode_key(key, leaf_rank, seam_rank), key.clone(), &storage)
@@ -897,9 +949,9 @@ impl TreeDescriptor {
         }
 
         // Reload the tree from its hash so the root is freshly loaded during
-        // differentials (the build tree's node cache is dropped with it), and
+        // differentials, and
         // re-enable journaling to track root and differential reads.
-        let tree = TestTree::from_hash(root);
+        let tree = TestTree::at(test_catalog(), root);
         storage.enable_journal();
 
         Ok(TreeSpec {
@@ -951,7 +1003,8 @@ impl TreeDescriptor {
         height: usize,
         expected_ops: &HashMap<(Vec<u8>, usize), Expect>,
     ) -> Result<SpecKey, DialogSearchTreeError> {
-        let node = load_node::<SpecKey, Vec<u8>, TestStorage>(storage, hash).await?;
+        let node =
+            load_node::<SpecKey, Vec<u8>, TestStorage>(storage, &test_catalog(), hash).await?;
 
         let upper_bound: SpecKey = match node.body() {
             NodeBody::Segment(segment) => SpecKey::try_from_bytes(&segment.last_key::<SpecKey>()?)?,
@@ -1085,7 +1138,9 @@ impl TreeSpec {
         is_last: bool,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'a>> {
         Box::pin(async move {
-            let Ok(node) = load_node::<SpecKey, Vec<u8>, TestStorage>(storage, hash).await else {
+            let Ok(node) =
+                load_node::<SpecKey, Vec<u8>, TestStorage>(storage, &test_catalog(), hash).await
+            else {
                 output.push_str(&format!("{prefix}(missing node {hash})\n"));
                 return;
             };

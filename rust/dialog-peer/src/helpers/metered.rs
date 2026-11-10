@@ -1,23 +1,24 @@
 //! An operator that reports every archive block moved through it.
 //!
 //! The repository reads and writes blocks through archive effects: `Get`
-//! for a read, `Put` and `Import` for writes. [`Metered`] wraps an operator
+//! (or the `Load` that reads through it) for a read, `Put` and `Import`
+//! for writes. [`Metered`] wraps an operator
 //! and hands each block's bytes to a [`Meter`] on the way through, so a
 //! measurement sees exactly what a commit or query moved, beneath every
 //! cache the branch keeps. Every other effect passes through untouched.
 
+use dialog_artifacts::tree::CorpusNode;
+use dialog_capability::{Capability, Command, Provider, Resume};
+use dialog_common::{Buffer, ConditionalSend, ConditionalSync, Held, Holds};
+use dialog_effects::archive::prelude::{ImportExt as _, PutExt as _};
+use dialog_effects::archive::{ArchiveError, Get, Import, Load, Put};
+use dialog_search_tree::nodes;
 use std::any::Any;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use async_trait::async_trait;
-use dialog_capability::{Capability, Command, Provider};
-use dialog_common::{ConditionalSend, ConditionalSync, Held, Holds};
-use dialog_effects::archive::prelude::{ImportExt as _, PutExt as _};
-use dialog_effects::archive::{ArchiveError, Get, Import, Put};
-
 /// Observes the archive blocks an operator moves.
-pub trait Meter: ConditionalSync {
+pub trait Meter: ConditionalSend + ConditionalSync {
     /// A block was written.
     fn wrote(&self, block: &[u8]);
     /// A block was read.
@@ -100,17 +101,45 @@ impl<Env: Holds, M> Holds for Metered<Env, M> {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+/// A request's answer as the output of the command `C` it was performed
+/// as: the two are the same type, told apart only at run time.
+fn answered<C: Command>(output: impl Any) -> C::Output
+where
+    C::Output: 'static,
+{
+    let mut output = Some(output);
+    (&mut output as &mut dyn Any)
+        .downcast_mut::<Option<C::Output>>()
+        .and_then(Option::take)
+        .expect("a request answers with its own output")
+}
+
 impl<C, Env, M> Provider<C> for Metered<Env, M>
 where
     C: Command + 'static,
     C::Input: ConditionalSend + 'static,
-    C::Output: 'static,
-    Env: Provider<C> + ConditionalSync,
+    C::Output: ConditionalSend + 'static,
+    Env: Provider<C> + Provider<Load> + Provider<Import> + Holds + ConditionalSync,
     M: Meter,
 {
-    async fn execute(&self, input: C::Input) -> C::Output {
+    fn execute(&self, input: C::Input) -> Resume<'_, C::Output> {
+        // A node request is answered here, through this wrapper's own
+        // loads and imports, so every block a tree reads or writes is
+        // metered as the read or write it is. A node the env holds is at
+        // hand, unmetered: no block is read for it.
+        let mut input = Some(input);
+        let slot = &mut input as &mut dyn Any;
+        if let Some(read) = slot.downcast_mut::<Option<nodes::Read<CorpusNode>>>() {
+            let read = read.take().expect("the input is taken once");
+            return read.through_held_blocks(self).map(answered::<C>);
+        } else if let Some(preload) = slot.downcast_mut::<Option<nodes::Preload<CorpusNode>>>() {
+            let preload = preload.take().expect("the input is taken once");
+            return preload.through_held_blocks(self).map(answered::<C>);
+        } else if let Some(write) = slot.downcast_mut::<Option<nodes::Write<CorpusNode>>>() {
+            let write = write.take().expect("the input is taken once");
+            return write.through_held_blocks(self).map(answered::<C>);
+        }
+        let input = input.expect("the input is taken only by a node request");
         // Archive effects are told apart by type: the blanket impl is what
         // lets every other effect pass through, so the few this meters are
         // recognized at run time rather than by their own impls.
@@ -122,14 +151,26 @@ where
                 self.meter.wrote(block.as_ref());
             }
         }
-        let reads = input_of.is::<Capability<Get>>();
-        let output = self.inner.execute(input).await;
-        if reads
-            && let Some(Ok(Some(block))) =
-                (&output as &dyn Any).downcast_ref::<Result<Option<Vec<u8>>, ArchiveError>>()
-        {
-            self.meter.read(block);
+        // A block is read by a `Get`, or by the `Load` a reader performs to
+        // have it from wherever the env reaches it: the env answers that
+        // beneath this wrapper, so the load is metered as its read.
+        let reads = input_of.is::<Capability<Get>>() || input_of.is::<Load>();
+        let output = Provider::<C>::execute(&self.inner, input);
+        if !reads {
+            return output;
         }
-        output
+        output.map(|output| {
+            let output_of = &output as &dyn Any;
+            if let Some(Ok(Some(block))) =
+                output_of.downcast_ref::<Result<Option<Vec<u8>>, ArchiveError>>()
+            {
+                self.meter.read(block);
+            } else if let Some(Ok(Some(block))) =
+                output_of.downcast_ref::<Result<Option<Buffer>, ArchiveError>>()
+            {
+                self.meter.read(block.as_ref());
+            }
+            output
+        })
     }
 }

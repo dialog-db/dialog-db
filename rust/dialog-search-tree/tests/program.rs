@@ -25,9 +25,10 @@
 
 use anyhow::Result;
 use dialog_common::Blake3Hash;
-use dialog_search_tree::{Buffer, Delta, HitchhikerTree, MemoryBlocks, PersistentTree};
+use dialog_search_tree::helpers::Blocks;
+use dialog_search_tree::{Delta, HitchhikerTree, PersistentNode, PersistentTree};
 
-type Store = MemoryBlocks;
+type Store = Blocks;
 type Tree = PersistentTree<[u8; 4], Vec<u8>>;
 
 /// One write op. Keys are `u32` big-endian so byte order is key order;
@@ -110,9 +111,12 @@ fn generate(seed: u64, op_count: usize) -> Program {
     Program { ops, checkpoints }
 }
 
-async fn settle(delta: &mut Delta<Blake3Hash, Buffer>, storage: &mut Store) -> Result<()> {
-    for (_, buffer) in delta.flush() {
-        storage.store(buffer);
+async fn settle<K, V>(
+    delta: &mut Delta<Blake3Hash, PersistentNode<K, V>>,
+    storage: &mut Store,
+) -> Result<()> {
+    for (_, node) in delta.flush() {
+        storage.store(node.buffer().clone());
     }
     Ok(())
 }
@@ -131,8 +135,8 @@ async fn checkpoint_root(tree: &Tree, storage: &Store, label: &str) -> Result<Bl
 
 /// Canonical sequential edits: persist + settle every op.
 async fn run_canonical(program: &Program) -> Result<Vec<Blake3Hash>> {
-    let mut storage: Store = MemoryBlocks::new();
-    let mut tree = Tree::empty();
+    let mut storage: Store = Blocks::new();
+    let mut tree = Tree::empty_in(dialog_search_tree::helpers::test_catalog());
     let mut roots = Vec::new();
     for (at, op) in program.ops.iter().enumerate() {
         let mut delta = Delta::zero();
@@ -165,8 +169,8 @@ async fn run_buffered(
     op_buf: Option<usize>,
     persist_every: usize,
 ) -> Result<Vec<Blake3Hash>> {
-    let mut storage: Store = MemoryBlocks::new();
-    let mut tree = Tree::empty();
+    let mut storage: Store = Blocks::new();
+    let mut tree = Tree::empty_in(dialog_search_tree::helpers::test_catalog());
     let mut roots = Vec::new();
     let open = |tree: &Tree, op_buf: Option<usize>| {
         let buffered = HitchhikerTree::open(tree);
@@ -207,7 +211,7 @@ async fn run_buffered(
             let mut delta = Delta::zero();
             let root = buffered.persist(&mut delta)?;
             settle(&mut delta, &mut storage).await?;
-            tree = Tree::from_hash_with_cache(root, Default::default());
+            tree = Tree::at(dialog_search_tree::helpers::test_catalog(), root);
             buffered = open(&tree, op_buf);
         }
     }

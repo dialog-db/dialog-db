@@ -1,3 +1,4 @@
+use dialog_artifacts::tree::CorpusNode;
 use dialog_artifacts::tree::fetch_spilled;
 use dialog_artifacts::{
     Artifact, DialogArtifactsError, EntityKey, Exporter, Key, KeyViewConstruct, State,
@@ -5,13 +6,17 @@ use dialog_artifacts::{
 use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::ConditionalSync;
+use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::prelude::ArchiveScope;
 use dialog_effects::archive::{Get, Put};
+use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::Read as BlobRead;
 use dialog_effects::memory::Resolve;
+use dialog_search_tree::nodes;
 use futures_util::TryStreamExt;
 
-use crate::{Branch, Index, NetworkedIndex, RemoteSite};
+use crate::repository::archive::erased;
+use crate::{Branch, Index, RemoteSite};
 
 /// Command struct for exporting all artifacts from a branch.
 pub struct Export<'a, E> {
@@ -33,23 +38,29 @@ impl<E: Exporter> Export<'_, E> {
             + Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + Provider<BlobLoad>
             + Provider<Fork<RemoteSite, Resolve>>
+            + dialog_common::Holds
             + ConditionalSync
             + 'static,
     {
         let branch = self.branch;
         let mut exporter = self.exporter;
 
-        let remote = branch.fallback();
-
-        let catalog = ArchiveScope::new(branch.subject()).index();
-        let store = NetworkedIndex::erased(env, catalog, remote);
+        let archive = ArchiveScope::new(branch.subject());
+        let catalog = archive.index();
+        let store = erased(env);
 
         let tree = match branch.revision() {
-            Some(revision) => Index::from_hash(NodeHash::from(*revision.tree.hash())),
+            Some(revision) => Index::at(catalog, NodeHash::from(*revision.tree.hash())),
             // No revision, no tree: the export streams nothing.
-            None => Index::empty(),
+            None => Index::empty_in(catalog),
         };
 
         let range = <EntityKey<Key> as KeyViewConstruct>::min().into_key()
@@ -57,14 +68,14 @@ impl<E: Exporter> Export<'_, E> {
 
         // Keep the raw backend to fetch spilled value blocks by reference; the
         // bridge below only reads tree nodes.
-        let raw_store = store.clone();
+        let raw_store = store;
         let tree_store = store;
         let stream = tree.stream_range(range, &tree_store);
         tokio::pin!(stream);
 
         while let Some(entry) = stream.try_next().await? {
             if let State::Added(datum) = &entry.value {
-                let spilled = fetch_spilled(&raw_store, &entry.key).await?;
+                let spilled = fetch_spilled(&raw_store, &archive, &entry.key).await?;
                 let artifact = Artifact::from_key_datum_with_value(&entry.key, datum, spilled)?;
                 exporter.write(&artifact).await?;
             }

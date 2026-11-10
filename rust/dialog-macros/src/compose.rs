@@ -139,25 +139,23 @@ fn generate_struct(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream>
             provider_impls.push(quote! {
                 #(#cfg_attrs)*
                 #[allow(clippy::absolute_paths)]
-                #[cfg_attr(not(target_arch = "wasm32"), ::async_trait::async_trait)]
-                #[cfg_attr(target_arch = "wasm32", ::async_trait::async_trait(?Send))]
                 impl #impl_generics ::dialog_capability::Provider<#command>
                     for #struct_name #ty_generics
                 where
                     #existing_predicates
                     #command: ::dialog_capability::Command,
-                    <#command as ::dialog_capability::Command>::Input: ::dialog_common::ConditionalSend,
-                    #field_ty: ::dialog_capability::Provider<#command>
-                        + ::dialog_common::ConditionalSync,
-                    Self: ::dialog_common::ConditionalSend + ::dialog_common::ConditionalSync,
+                    #field_ty: ::dialog_capability::Provider<#command>,
                 {
-                    async fn execute(
+                    fn execute(
                         &self,
                         input: <#command as ::dialog_capability::Command>::Input,
-                    ) -> <#command as ::dialog_capability::Command>::Output {
+                    ) -> ::dialog_capability::Resume<
+                        '_,
+                        <#command as ::dialog_capability::Command>::Output,
+                    > {
                         <#field_ty as ::dialog_capability::Provider<#command>>::execute(
                             &self.#field_name, input
-                        ).await
+                        )
                     }
                 }
             });
@@ -280,7 +278,7 @@ fn generate_enum(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                     Self::#variant_name(inner) => {
                         <#inner_ty as ::dialog_capability::Provider<#command>>::execute(
                             inner, input
-                        ).await
+                        )
                     }
                 }
             })
@@ -288,20 +286,19 @@ fn generate_enum(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
 
         provider_impls.push(quote! {
             #[allow(clippy::absolute_paths)]
-            #[cfg_attr(not(target_arch = "wasm32"), ::async_trait::async_trait)]
-            #[cfg_attr(target_arch = "wasm32", ::async_trait::async_trait(?Send))]
             impl #impl_generics ::dialog_capability::Provider<#command>
                 for #enum_name #ty_generics
             where
                 #existing_predicates
                 #command: ::dialog_capability::Command,
-                <#command as ::dialog_capability::Command>::Input: ::dialog_common::ConditionalSend,
-                Self: ::dialog_common::ConditionalSend + ::dialog_common::ConditionalSync,
             {
-                async fn execute(
+                fn execute(
                     &self,
                     input: <#command as ::dialog_capability::Command>::Input,
-                ) -> <#command as ::dialog_capability::Command>::Output {
+                ) -> ::dialog_capability::Resume<
+                    '_,
+                    <#command as ::dialog_capability::Command>::Output,
+                > {
                     match self {
                         #(#match_arms)*
                     }

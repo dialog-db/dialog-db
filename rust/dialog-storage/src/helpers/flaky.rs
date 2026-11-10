@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use dialog_capability::{Capability, Provider};
-use dialog_common::ConditionalSync;
+use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_effects::memory::prelude::PublishExt as _;
 use dialog_effects::memory::{
     Current, Edition, List, MemoryError, Publish, Resolve, Retract, Version,
@@ -94,8 +94,7 @@ impl<M> Flaky<M> {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl<M> Provider<Publish> for Flaky<M>
 where
     M: Provider<Publish> + ConditionalSync,
@@ -111,8 +110,7 @@ where
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl<M> Provider<Resolve> for Flaky<M>
 where
     M: Provider<Resolve> + ConditionalSync,
@@ -125,8 +123,7 @@ where
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl<M> Provider<Retract> for Flaky<M>
 where
     M: Provider<Retract> + ConditionalSync,
@@ -136,8 +133,7 @@ where
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl<M> Provider<List> for Flaky<M>
 where
     M: Provider<List> + ConditionalSync,
@@ -151,7 +147,7 @@ where
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<M> Resource<Location> for Flaky<M>
 where
-    M: Resource<Location> + ConditionalSync,
+    M: Resource<Location> + ConditionalSend + ConditionalSync,
 {
     type Error = M::Error;
 

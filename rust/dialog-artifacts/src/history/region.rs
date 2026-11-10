@@ -11,14 +11,14 @@
 //! origin's head) writes the entries it changes. [`region_writes`] is the
 //! one place that decides which those are.
 
+use crate::reads::*;
 use dialog_common::ConditionalSync;
 use futures_util::StreamExt as _;
 
 use crate::merge::context_scope;
 use crate::tree::ArtifactTree;
 use crate::{
-    ArchiveReader, Datum, DialogArtifactsError, Key, State, context_entry, context_key,
-    read_context_entry,
+    Datum, DialogArtifactsError, Key, State, context_entry, context_key, read_context_entry,
 };
 
 use super::{Context, Origin, Version, Watermark};
@@ -35,7 +35,13 @@ use super::{Context, Origin, Version, Watermark};
 /// a region at all.
 pub async fn context_in<S>(tree: &ArtifactTree, store: &S) -> Result<Context, DialogArtifactsError>
 where
-    S: ArchiveReader + Clone + ConditionalSync,
+    S: Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
+        + Provider<blob::Load>
+        + ConditionalSync
+        + Clone
+        + ConditionalSync,
 {
     let [range] = context_scope();
     let entries = tree.stream_range(range, store);
@@ -61,7 +67,13 @@ pub async fn region_entry<S>(
     store: &S,
 ) -> Result<Option<Watermark>, DialogArtifactsError>
 where
-    S: ArchiveReader + Clone + ConditionalSync,
+    S: Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
+        + Provider<blob::Load>
+        + ConditionalSync
+        + Clone
+        + ConditionalSync,
 {
     let key = context_key(origin);
     match tree.get(&key, store).await? {

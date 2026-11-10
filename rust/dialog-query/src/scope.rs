@@ -5,16 +5,19 @@
 //! environment provides: range scans ([`Select`]) with demand
 //! recording, rule discovery ([`SelectRules`]), idempotent
 //! content-addressed loads for resolver premises (tree nodes through
-//! [`LoadBlock`], spilled values through [`LoadBlob`]), and
+//! [`archive::Load`], spilled values through [`blob::Load`]), and
 //! advisory replication hints ([`Preload`]) for ranges evaluation
 //! expects to need. It also holds what evaluation keeps between
 //! queries ([`Holds`]): the outputs of formulas that ask to be cached.
 //! `Scope` names that bundle once so premise evaluation signatures stay
 //! stable as effects are added.
 
-use dialog_artifacts::{Estimate, LoadBlob, LoadBlock, Preload, Select};
+use dialog_artifacts::tree::CorpusNode;
+use dialog_artifacts::{Estimate, Preload, Select};
 use dialog_capability::Provider;
 use dialog_common::{ConditionalSync, Holds};
+use dialog_effects::{archive, blob};
+use dialog_search_tree::nodes;
 
 use crate::recall::BodyMemo;
 use crate::source::SelectRules;
@@ -27,8 +30,11 @@ use crate::source::SelectRules;
 pub trait Scope<'a>:
     Provider<Select<'a>>
     + Provider<SelectRules>
-    + Provider<LoadBlock>
-    + Provider<LoadBlob>
+    + Provider<archive::Load>
+    + Provider<nodes::Read<CorpusNode>>
+    + Provider<nodes::Preload<CorpusNode>>
+    + ConditionalSync
+    + Provider<blob::Load>
     + Provider<Preload>
     + Provider<Estimate>
     + BodyMemo
@@ -40,8 +46,11 @@ pub trait Scope<'a>:
 impl<'a, T> Scope<'a> for T where
     T: Provider<Select<'a>>
         + Provider<SelectRules>
-        + Provider<LoadBlock>
-        + Provider<LoadBlob>
+        + Provider<archive::Load>
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
+        + Provider<blob::Load>
         + Provider<Preload>
         + Provider<Estimate>
         + BodyMemo

@@ -1,5 +1,6 @@
 use std::sync::{Arc, Mutex};
 
+use crate::repository::archive::routes;
 use crate::{Branch, BranchReference, Ephemeral, HeldCaches, ResolveError};
 use dialog_capability::Provider;
 use dialog_common::Holds;
@@ -48,19 +49,26 @@ impl OpenBranch {
         let tracking = self.branch.tracking();
         tracking.resolve().perform(env).await?;
 
+        let bases = self.branch.bases();
+        bases.resolve().perform(env).await?;
+
         let induction = self.branch.induction();
         induction.resolve().perform(env).await?;
 
-        let caches = HeldCaches::of(env).branch(&self.branch);
+        let held = HeldCaches::of(env);
+        let caches = held.branch(&self.branch);
+        let writer = Branch::writer_of(env, &self.branch);
 
-        Ok(Branch {
-            writer: Branch::writer_of(env, &self.branch),
+        let branch = Branch {
+            writer: writer.clone(),
             reference: self.branch,
             revision,
             tracking,
+            bases,
             induction,
             node_cache: caches.nodes,
             spill_cache: caches.spills,
+            cache_limits: caches.limits,
             rule_cache: caches.rules,
             plan_cache: caches.plans,
             causality_cache: caches.causality,
@@ -73,7 +81,13 @@ impl OpenBranch {
             layer_metadata_cache: caches.metadata,
             overlay: Ephemeral::default(),
             answers: Arc::default(),
-        })
+            routes: held.routes(),
+        };
+        // From here on a miss of this repository's blocks through `env`
+        // hydrates from what the branch tracks, for as long as a handle of
+        // it is open.
+        routes::register(branch.routes(), &branch, &writer);
+        Ok(branch)
     }
 }
 
@@ -116,8 +130,7 @@ mod tests {
         }
     }
 
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    #[dialog_capability::provider]
     impl Provider<Resolve> for Holding {
         async fn execute(
             &self,

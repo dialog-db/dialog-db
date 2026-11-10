@@ -292,8 +292,8 @@ pub async fn accept<S, Resolver, Revocations>(
     responder: Arc<Responder<S, Resolver, Revocations>>,
 ) where
     S: Store + ConditionalSend + 'static,
-    Resolver: Provider<Resolve> + ConditionalSync + 'static,
-    Revocations: RevocationChecker + ConditionalSync + 'static,
+    Resolver: Provider<Resolve> + ConditionalSend + ConditionalSync + 'static,
+    Revocations: RevocationChecker + ConditionalSend + ConditionalSync + 'static,
 {
     while let Some(incoming) = endpoint.accept().await {
         let responder = responder.clone();
@@ -320,8 +320,8 @@ async fn serve_connection<S, Resolver, Revocations>(
     responder: Arc<Responder<S, Resolver, Revocations>>,
 ) where
     S: Store + ConditionalSend + 'static,
-    Resolver: Provider<Resolve> + ConditionalSync + 'static,
-    Revocations: RevocationChecker + ConditionalSync + 'static,
+    Resolver: Provider<Resolve> + ConditionalSend + ConditionalSync + 'static,
+    Revocations: RevocationChecker + ConditionalSend + ConditionalSync + 'static,
 {
     let peer = connection.remote_id();
 
@@ -363,8 +363,8 @@ async fn serve_stream<S, Resolver, Revocations>(
 ) -> Result<(), ChannelError>
 where
     S: Store + ConditionalSend + 'static,
-    Resolver: Provider<Resolve> + ConditionalSync + 'static,
-    Revocations: RevocationChecker + ConditionalSync + 'static,
+    Resolver: Provider<Resolve> + ConditionalSend + ConditionalSync + 'static,
+    Revocations: RevocationChecker + ConditionalSend + ConditionalSync + 'static,
 {
     let request = read_frame("request", transfer).await?;
 
@@ -441,6 +441,12 @@ fn performed(answer: Result<BlobAnswer, dialog_effects::blob::BlobError>) -> Res
 
 // Native-only: these bind real endpoints and drive them from a tokio
 // runtime. What the browser path needs proving against is a data
-// channel, which no runner here has.
-#[cfg(all(test, not(target_arch = "wasm32")))]
+// channel, which no runner here has. Behind `iroh-tests` because one of
+// them runs iroh's relay server.
+#[cfg(all(test, feature = "iroh-tests", not(target_arch = "wasm32")))]
 mod tests;
+
+// Native-only for the same reason, and behind their own feature because
+// they reach n0's relays and address lookup over the internet.
+#[cfg(all(test, feature = "iroh-network-tests", not(target_arch = "wasm32")))]
+mod network_tests;

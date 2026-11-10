@@ -7,7 +7,9 @@ license.workspace = true
 
 [features]
 default = []
-helpers = []
+# The test environments, and the node layer's answers for the test stores of
+# `dialog-storage`.
+helpers = ["dialog-storage/helpers"]
 # Counts the hashes the shaping paths ask for and compute, and attributes
 # duplicate block stores, for measurement harnesses. Off, the counters are
 # not compiled.
@@ -19,6 +21,7 @@ web-integration-tests = []
 tracing = { workspace = true }
 dialog-capability = { workspace = true }
 dialog-common = { workspace = true }
+dialog-effects = { workspace = true }
 dialog-macros = { workspace = true }
 dialog-storage = { workspace = true }
 anyhow = { workspace = true }
@@ -44,6 +47,9 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync", "macros", "rt"] }
 
 [dev-dependencies]
+# The integration tests, benches and examples read their trees through the
+# test archive in `helpers`.
+dialog-search-tree = { path = ".", features = ["helpers"] }
 dialog-common = { workspace = true, features = ["helpers"] }
 dialog-storage = { workspace = true, features = ["helpers"] }
 futures-util = { workspace = true }

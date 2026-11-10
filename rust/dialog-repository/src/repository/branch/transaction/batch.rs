@@ -31,6 +31,7 @@ use crate::{
     SelectQuery, Snapshot, SnapshotClaims, Staged, TransactionQuery, origin_of,
 };
 use dialog_artifacts::history::{CausalityCache, Context, ContextCache, RevisionRecord, Version};
+use dialog_artifacts::tree::CorpusNode;
 use dialog_artifacts::tree::WriteScope;
 use dialog_artifacts::{
     Artifact, ArtifactSelector, Change, Changes, Entity, Statement, Update as _,
@@ -38,14 +39,17 @@ use dialog_artifacts::{
 use dialog_capability::history::Origin;
 use dialog_capability::{Did, Fork, Provider};
 use dialog_common::{ConditionalSync, Holds};
+use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify, OperatorExt as _};
 use dialog_effects::blob::Import as BlobImport;
+use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::Read as BlobRead;
 use dialog_effects::blob::Size as BlobSize;
 use dialog_effects::memory::{Current, Publish, Resolve, Version as MemoryVersion};
 use dialog_query::query::Application;
 use dialog_search_tree::Cache;
+use dialog_search_tree::nodes;
 use std::sync::Arc;
 
 /// A staged chain of commits on a branch: minted, persisted, invisible.
@@ -170,6 +174,12 @@ impl TransactionBatch {
     /// head to.
     pub fn revision(&self) -> Revision {
         self.snapshot.revision()
+    }
+
+    /// The caches the staged view reads and commits through.
+    #[cfg(test)]
+    pub(crate) fn caches(&self) -> &Caches {
+        self.snapshot.caches()
     }
 
     /// The transient facts inductive rules concluded while this chain
@@ -412,11 +422,19 @@ impl TransactionPublish<&Branch> {
             + Provider<BlobRead>
             + Provider<Put>
             + Provider<Import>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
             + Provider<Resolve>
             + Provider<Publish>
             + Provider<Identify>
             + Provider<Attest>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
@@ -440,11 +458,19 @@ impl TransactionPublish<TransactionBatch> {
             + Provider<BlobRead>
             + Provider<Put>
             + Provider<Import>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
             + Provider<Resolve>
             + Provider<Publish>
             + Provider<Identify>
             + Provider<Attest>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
@@ -482,10 +508,18 @@ impl TransactionCommit<&Branch> {
             + Provider<BlobRead>
             + Provider<Put>
             + Provider<Import>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
             + Provider<Resolve>
             + Provider<Identify>
             + Provider<Attest>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
@@ -527,11 +561,13 @@ impl TransactionCommit<&Branch> {
 
         // Version-keyed memos are batch-local (see the field docs on
         // `TransactionBatch::snapshot`); content-keyed caches stay
-        // shared with the branch.
+        // shared with the branch. The batch-local ones are sized by the
+        // budget the branch's caches were built with.
+        let entries = branch.caches().limits.entry_capacity();
         let caches = Caches {
-            causality: CausalityCache::new(),
-            contexts: ContextCache::new(),
-            records: Cache::new(),
+            causality: CausalityCache::with_capacity(entries),
+            contexts: ContextCache::with_capacity(entries),
+            records: Cache::with_capacity(entries),
             ..branch.caches()
         };
 
@@ -593,10 +629,18 @@ impl TransactionCommit<TransactionBatch> {
             + Provider<BlobRead>
             + Provider<Put>
             + Provider<Import>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
             + Provider<Resolve>
             + Provider<Identify>
             + Provider<Attest>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
@@ -708,10 +752,18 @@ where
         + Provider<BlobRead>
         + Provider<Put>
         + Provider<Import>
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
         + Provider<Resolve>
         + Provider<Identify>
         + Provider<Attest>
-        + Provider<crate::Hydrate>
+        + Provider<ArchiveLoad>
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
+        + Provider<BlobLoad>
         + Provider<dialog_artifacts::Preload>
         + Provider<dialog_artifacts::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>

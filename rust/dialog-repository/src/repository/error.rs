@@ -699,6 +699,31 @@ pub enum PullError {
     #[error("Download after pull failed: {0}")]
     Download(#[from] DownloadError),
 
+    /// The upstream's head is another revision under the version of this
+    /// branch's own head (#705): a replica writing with this branch's key
+    /// built on the same head as this one and minted the same version over
+    /// another tree. Every context that holds one of the two claims the
+    /// other, so neither can be merged into the other without dropping a
+    /// write; the pull is refused and writes nothing (see
+    /// [`PushError::WriterRacedItself`]). One key's writers must write
+    /// one at a time; concurrent writers each need a key of their own.
+    /// To recover, drop this head's write: pull the upstream into a
+    /// replica that has not written, and write again there.
+    #[error(
+        "Branch {branch}'s head {}@{} has a rival on the upstream: another replica writing as \
+         this one minted the same version over another tree (ours {:?}, theirs {:?}). One key \
+         must not write concurrently from two replicas; give each writer its own key",
+        .ours.edition, .ours.origin(), .ours.tree, .theirs.tree
+    )]
+    WriterRacedItself {
+        /// The local branch whose pull was refused.
+        branch: String,
+        /// This branch's head.
+        ours: Box<Revision>,
+        /// The upstream's head, of the same version over another tree.
+        theirs: Box<Revision>,
+    },
+
     /// The branch's upstreams could not be resolved.
     #[error(transparent)]
     Upstreams(#[from] ResolveUpstreamsError),
@@ -732,8 +757,11 @@ pub enum PushError {
     },
 
     /// Push was rejected because the upstream has advanced since the
-    /// last sync. The local branch must integrate upstream changes
-    /// (e.g. via `pull`) before pushing again.
+    /// last sync, or because the local head does not hold the upstream's
+    /// head, as after a reset to an older revision, so publishing it would
+    /// move the upstream back. The local branch must integrate upstream
+    /// changes (e.g. via `pull`) before pushing again. In the second case
+    /// `expected` and `actual` can name the same tree.
     #[error(
         "Non-fast-forward push of branch {branch}: expected upstream tree {expected:?}, found {actual:?}"
     )]
@@ -807,6 +835,30 @@ pub enum PushError {
     /// push failed.
     #[error("Remote archive operation failed during push: {0}")]
     Archive(#[from] ArchiveError),
+
+    /// The upstream's head is another revision under the version of this
+    /// branch's own head (#705): a replica writing with this branch's key
+    /// built on the same head as this one and minted the same version over
+    /// another tree. Publishing this head would replace the other and drop
+    /// its write; the push is refused and sends nothing (see
+    /// [`PullError::WriterRacedItself`]). One key's writers must write one
+    /// at a time; concurrent writers each need a key of their own.
+    /// To recover, drop this head's write: pull the upstream into a
+    /// replica that has not written, and write again there.
+    #[error(
+        "Branch {branch}'s head {}@{} has a rival on the upstream: another replica writing as \
+         this one minted the same version over another tree (ours {:?}, theirs {:?}). One key \
+         must not write concurrently from two replicas; give each writer its own key",
+        .ours.edition, .ours.origin(), .ours.tree, .theirs.tree
+    )]
+    WriterRacedItself {
+        /// The local branch whose push was refused.
+        branch: String,
+        /// This branch's head.
+        ours: Box<Revision>,
+        /// The upstream's head, of the same version over another tree.
+        theirs: Box<Revision>,
+    },
 
     /// The branch's upstreams could not be resolved.
     #[error(transparent)]

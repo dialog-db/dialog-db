@@ -6,7 +6,8 @@ use crate::ArchiveDelta;
 use crate::tree::{ArtifactTree, ArtifactTreeExt as _, SpillCache};
 use crate::{Artifact, Changes, Entity, Instruction, Pick, Relation, Update as _, Value};
 use anyhow::Result;
-use dialog_search_tree::MemoryBlocks;
+use dialog_search_tree::helpers::Blocks;
+use dialog_search_tree::helpers::test_catalog;
 use futures_util::{TryStreamExt as _, stream};
 
 use super::{Edition, HistorySelector, Origin, TreeHistory, Version};
@@ -22,7 +23,7 @@ fn version(edition: u64) -> Version {
 
 async fn apply(
     tree: &mut ArtifactTree,
-    store: &MemoryBlocks,
+    store: &Blocks,
     version: Version,
     instructions: Vec<Instruction>,
 ) -> Result<bool> {
@@ -36,7 +37,7 @@ async fn apply(
 
 async fn held(
     tree: &ArtifactTree,
-    store: &MemoryBlocks,
+    store: &Blocks,
     of: &Entity,
     the: &Relation,
 ) -> Result<Vec<u128>> {
@@ -69,7 +70,7 @@ async fn held(
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
 async fn a_batch_lands_a_cells_writes_in_the_order_they_were_recorded() -> Result<()> {
-    let store = MemoryBlocks::new();
+    let store = Blocks::new();
     let entity = Entity::new()?;
     let the: Relation = "org/salary".parse()?;
     let salary = |value: u32| Artifact {
@@ -78,7 +79,7 @@ async fn a_batch_lands_a_cells_writes_in_the_order_they_were_recorded() -> Resul
         is: Value::UnsignedInt(value.into()),
         cause: None,
     };
-    let mut tree = ArtifactTree::empty();
+    let mut tree = ArtifactTree::empty_in(test_catalog());
     apply(
         &mut tree,
         &store,
@@ -151,7 +152,7 @@ async fn a_batch_lands_a_cells_writes_in_the_order_they_were_recorded() -> Resul
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
 async fn a_claim_succeeded_within_its_own_batch_leaves_no_standing_record() -> Result<()> {
-    let store = MemoryBlocks::new();
+    let store = Blocks::new();
     let entity = Entity::new()?;
     let the: Relation = "org/salary".parse()?;
     let salary = |value: u32| Artifact {
@@ -160,7 +161,7 @@ async fn a_claim_succeeded_within_its_own_batch_leaves_no_standing_record() -> R
         is: Value::UnsignedInt(value.into()),
         cause: None,
     };
-    let mut tree = ArtifactTree::empty();
+    let mut tree = ArtifactTree::empty_in(test_catalog());
     apply(
         &mut tree,
         &store,

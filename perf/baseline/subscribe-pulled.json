@@ -1,0 +1,24 @@
+{
+  "scenario": "subscribe-pulled",
+  "size": 200,
+  "profile": "release",
+  "outcome": {
+    "changed": 1,
+    "subscriptions": 201
+  },
+  "counters": {
+    "archive.get": 1,
+    "archive.get.bytes": 3832,
+    "archive.put": 0,
+    "archive.put.bytes": 0,
+    "span.apply_batch_reusing": 0,
+    "span.buffer_records": 0,
+    "span.commit": 0,
+    "span.resolve_bundle": 1,
+    "span.resolve_rules": 2,
+    "span.seal_batch": 0,
+    "span.settle": 0,
+    "span.write_instructions": 0
+  },
+  "instructions": 37537493
+}

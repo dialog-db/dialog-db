@@ -1,7 +1,6 @@
 //! Archive capability provider for IndexedDB.
 
 use super::{IndexedDb, to_uint8array};
-use async_trait::async_trait;
 use base58::ToBase58;
 use dialog_capability::{Capability, Provider};
 use dialog_effects::archive::prelude::{GetExt, ImportExt, PutExt};
@@ -21,7 +20,7 @@ impl From<super::IndexedDbError> for ArchiveError {
     }
 }
 
-#[async_trait(?Send)]
+#[dialog_capability::provider]
 impl Provider<Get> for IndexedDb {
     async fn execute(&self, effect: Capability<Get>) -> Result<Option<Vec<u8>>, ArchiveError> {
         let catalog = effect.catalog();
@@ -50,7 +49,7 @@ impl Provider<Get> for IndexedDb {
     }
 }
 
-#[async_trait(?Send)]
+#[dialog_capability::provider]
 impl Provider<Put> for IndexedDb {
     async fn execute(&self, effect: Capability<Put>) -> Result<(), ArchiveError> {
         let catalog = effect.catalog();
@@ -74,7 +73,7 @@ impl Provider<Put> for IndexedDb {
     }
 }
 
-#[async_trait(?Send)]
+#[dialog_capability::provider]
 impl Provider<Import> for IndexedDb {
     async fn execute(&self, effect: Capability<Import>) -> Result<(), ArchiveError> {
         let catalog = effect.catalog();

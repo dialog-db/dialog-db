@@ -23,7 +23,7 @@ pub(crate) mod branch;
 pub use branch::*;
 
 mod caches;
-pub use caches::HeldCaches;
+pub use caches::{CacheBudget, HeldCaches};
 
 mod create;
 pub use create::*;
@@ -1963,7 +1963,7 @@ mod tests {
             let select = branch
                 .claims()
                 .select(ArtifactSelector::new().the("dialog.branch/name".parse()?));
-            let store = crate::NetworkedIndex::new(&operator, select.catalog(), None);
+            let store = &operator;
             let stream = select.execute(store).await?;
             let leaked: Vec<_> = stream.collect::<Vec<_>>().await;
 
@@ -2241,7 +2241,7 @@ mod tests {
                 // we see tree-order output without auto-metadata noise.
                 // The branch's search tree is the order ground truth.
                 let select = branch.claims().select(sel.clone());
-                let store = crate::NetworkedIndex::new(&operator, select.catalog(), None);
+                let store = &operator;
                 let branch_stream: ArtifactStream<'_> = Box::pin(select.execute(store).await?);
                 let branch_order = keys_from_stream(branch_stream).await?;
 

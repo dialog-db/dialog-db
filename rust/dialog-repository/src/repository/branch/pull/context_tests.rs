@@ -2,6 +2,11 @@
 //! context region holds every origin's watermark exactly except the head's
 //! own, which the head's edition brings up to date.
 //!
+//! The resets here move heads back, or onto a line that lacks the
+//! writer's own commits, through `Reset::perform_unchecked`: a release
+//! before #682 resets any way, so its replicas still produce those heads,
+//! and the region has to stay exact under them.
+//!
 //! One test per way a head is minted or installed, each checking the region
 //! the way a reader that remembers nothing would read it
 //! ([`region_agrees`]): brought up to the head, it equals the ancestry walk
@@ -27,10 +32,9 @@ use futures_util::stream;
 
 use super::super::context::{head_observes, region_agrees};
 use crate::helpers::Counting;
-use crate::{Branch, NetworkedIndex, PullError, RepositoryExt as _, Revision};
+use crate::{Branch, HeldCaches, PullError, RepositoryExt as _, Revision};
 use dialog_artifacts::history::ContextCache;
 use dialog_artifacts::history::context_of;
-use dialog_artifacts::tree::ArtifactNodeCache;
 use dialog_search_tree::Cache;
 
 fn artifact(of: &str) -> Artifact {
@@ -118,7 +122,10 @@ macro_rules! plant_signed {
         let edit: &dyn Fn(&mut Revision) = &$edit;
         edit(&mut head);
         head.signature = Attest::new(head.payload()).perform($operator).await?;
-        $branch.reset(head.clone()).perform($operator).await?;
+        $branch
+            .reset(head.clone())
+            .perform_unchecked($operator)
+            .await?;
         head
     }};
 }
@@ -295,7 +302,7 @@ async fn it_keeps_the_region_exact_through_amend_reset_and_adoption() -> Result<
     commit!(reset, &operator, "post:r0");
     reset
         .reset(main.revision().expect("main has a head"))
-        .perform(&operator)
+        .perform_unchecked(&operator)
         .await?;
     region_agrees(&reset, &operator, "a reset").await?;
     commit!(reset, &operator, "post:r1");
@@ -406,6 +413,11 @@ async fn it_reads_the_upstreams_region_to_fast_forward_across_origins() -> Resul
         ours.revision().expect("we have a head").origin()
     );
 
+    // The writer is a session of the same peer, so its commits kept their
+    // nodes in the node cache the device's env holds too. Let the
+    // repository's nodes go, so the pull reads as a device that has not
+    // seen the upstream's new head does.
+    HeldCaches::of(&device).release(ours.of());
     device.reset();
     ours.pull().perform(&device).await?;
     assert_eq!(ours.revision(), main.revision(), "a fast-forward");
@@ -763,15 +775,20 @@ async fn it_answers_observes_after_a_takeover_at_zero_reads() -> Result<()> {
         .clone()
         .expect("the joiner adopted a head")
         .version();
-    let store = NetworkedIndex::new(&device, joiner.archive().index(), joiner.fallback());
+    // The env holds the node cache every read through it keeps blocks in,
+    // so the repository's nodes are let go of for a reader that remembers
+    // none (the branch handles keep their record caches).
+    HeldCaches::of(&device).release(joiner.of());
+    let store = &device;
+    let catalog = joiner.archive().index();
     device.reset();
     let seen = head_observes(
         &ours,
         &theirs,
         &ContextCache::new(),
         &joiner.records(),
+        &catalog,
         &store,
-        &ArtifactNodeCache::new(),
     )
     .await?;
     assert_eq!(seen, Some(true));
@@ -786,8 +803,8 @@ async fn it_answers_observes_after_a_takeover_at_zero_reads() -> Result<()> {
         &theirs,
         &ContextCache::new(),
         &Cache::new(),
+        &catalog,
         &store,
-        &ArtifactNodeCache::new(),
     )
     .await?;
     assert_eq!(seen, Some(true));
@@ -915,7 +932,7 @@ async fn it_counts_a_takeover_exactly_after_a_reset_to_an_adopted_head() -> Resu
     commit!(b, &bob, "post:u");
     let u = b.revision().expect("U");
 
-    a.reset(x).perform(&alice).await?;
+    a.reset(x).perform_unchecked(&alice).await?;
     a.pull().from(&b).perform(&alice).await?;
     assert_eq!(a.revision().as_ref(), Some(&u), "a fast-forward to U");
     assert!(
@@ -958,7 +975,7 @@ async fn it_counts_a_takeover_exactly_after_a_reset_to_its_own_head() -> Result<
     commit!(b, &bob, "post:u");
     let u = b.revision().expect("U");
 
-    a.reset(l1).perform(&alice).await?;
+    a.reset(l1).perform_unchecked(&alice).await?;
     a.pull().from(&b).perform(&alice).await?;
     assert_eq!(a.revision().as_ref(), Some(&u), "a fast-forward to U");
     commit!(a, &alice, "post:a3");
@@ -994,7 +1011,7 @@ async fn it_counts_a_takeover_exactly_after_a_reset_and_a_restart() -> Result<()
     b.pull().from(&a).perform(&bob).await?;
     commit!(b, &bob, "post:u");
     let u = b.revision().expect("U");
-    a.reset(l1).perform(&alice).await?;
+    a.reset(l1).perform_unchecked(&alice).await?;
     a.pull().from(&b).perform(&alice).await?;
     assert_eq!(a.revision().as_ref(), Some(&u), "a's head is U");
 
@@ -1062,7 +1079,7 @@ async fn it_counts_a_takeover_exactly_after_every_head_move() -> Result<()> {
     // A reset to b's older head, then a fast-forward to b's newest.
     b.pull().from(&a).perform(&bob).await?;
     commit!(b, &bob, "post:b2");
-    a.reset(older).perform(&alice).await?;
+    a.reset(older).perform_unchecked(&alice).await?;
     assert_exact_count!(&a, &alice, "a reset to an older head");
     a.pull().from(&b).perform(&alice).await?;
     assert_exact_count!(&a, &alice, "a pull after a reset");
@@ -1088,15 +1105,10 @@ async fn it_counts_a_takeover_exactly_after_every_head_move() -> Result<()> {
 /// across three writers of one space: at every head a writer mints or
 /// adopts, the signed count is the walked count. A restart reopens the
 /// peer over the same storage, so commits after it have no context
-/// remembered from the pulls before it and take the region path.
-///
-/// Two known holes in the history are kept out of what this checks, both
-/// #673. Settling rival merges can leave a head whose ancestry walk fails,
-/// and three writers reach that by commits and pulls alone: such a head
-/// has no walked count to compare against, so it is counted and skipped,
-/// and the test asserts most heads were checked. Resets are left to the
-/// deterministic tests above, since a pull after one leaves such a head
-/// every time in this crate's own tests.
+/// remembered from the pulls before it and take the region path. Every
+/// head's ancestry walks, so every head is checked. Resets are left to the
+/// deterministic tests above and to the interleavings in
+/// `sync_base_tests`.
 #[dialog_common::test]
 async fn it_signs_walked_counts_under_random_interleavings() -> Result<()> {
     let seeds: u64 = env::var("DIALOG_COUNT_INTERLEAVINGS")
@@ -1105,19 +1117,17 @@ async fn it_signs_walked_counts_under_random_interleavings() -> Result<()> {
         .unwrap_or(6);
     let steps = 32;
     let (mut commits, mut takeovers, mut merges, mut restarts) = (0, 0, 0, 0);
-    let (mut checked, mut holes) = (0u64, 0u64);
-    // Whether `line`'s head has a walkable ancestry: false for a head
-    // carrying #673's hole, which no count can be checked against.
-    async fn walkable<Env>(line: &Branch, env: &Env) -> Result<bool>
+    let mut checked = 0u64;
+    // `line`'s head's ancestry walks to the end.
+    async fn walk<Env>(line: &Branch, env: &Env, what: &str) -> Result<()>
     where
         Env: crate::ResolveEnv,
     {
         let head = line.revision().expect("the branch has a head");
-        match context_of(&head.version(), &line.history(env)).await {
-            Ok(_) => Ok(true),
-            Err(DialogArtifactsError::IncompleteHistory(_)) => Ok(false),
-            Err(error) => Err(error.into()),
-        }
+        context_of(&head.version(), &line.history(env))
+            .await
+            .map_err(|error| anyhow::anyhow!("{what}: the history is whole: {error}"))?;
+        Ok(())
     }
     for seed in 0..seeds {
         let storage = test_storage().await;
@@ -1172,12 +1182,9 @@ async fn it_signs_walked_counts_under_random_interleavings() -> Result<()> {
                 if parent.is_some_and(|parent| parent.origin() != head.origin()) {
                     takeovers += 1;
                 }
-                if walkable(line, env).await? {
-                    assert_exact_count!(line, env, what);
-                    checked += 1;
-                } else {
-                    holes += 1;
-                }
+                walk(line, env, &what).await?;
+                assert_exact_count!(line, env, what);
+                checked += 1;
             } else {
                 let from = &lines[(at + 1 + next(2) as usize) % 3];
                 let Some(theirs) = from.revision() else {
@@ -1191,22 +1198,15 @@ async fn it_signs_walked_counts_under_random_interleavings() -> Result<()> {
                 if Some(&after) != before.as_ref() && after != theirs {
                     merges += 1;
                 }
-                if walkable(line, env).await? {
-                    assert_exact_count!(line, env, what);
-                    checked += 1;
-                } else {
-                    holes += 1;
-                }
+                walk(line, env, &what).await?;
+                assert_exact_count!(line, env, what);
+                checked += 1;
             }
         }
     }
     eprintln!(
-        "{seeds} seeds: {commits} commits ({takeovers} takeovers), {merges} merges, {restarts} restarts; {checked} heads checked, {holes} skipped for #673"
+        "{seeds} seeds: {commits} commits ({takeovers} takeovers), {merges} merges, {restarts} restarts; {checked} heads checked"
     );
-    assert!(takeovers > 0 && merges > 0 && restarts > 0);
-    assert!(
-        holes * 4 < checked,
-        "most heads are checked: {checked} checked, {holes} skipped"
-    );
+    assert!(takeovers > 0 && merges > 0 && restarts > 0 && checked > 0);
     Ok(())
 }

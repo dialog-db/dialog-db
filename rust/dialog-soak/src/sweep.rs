@@ -1,13 +1,21 @@
-//! The sweep: run the join scenario across network profiles (and
-//! optionally tree branching factors), one process per configuration,
-//! keeping the median run per configuration as its report.
+//! The sweep: run each scenario across network profiles (and optionally
+//! tree branching factors), one process per configuration, keeping the
+//! median run per configuration as its report.
 //!
 //! Each configuration runs in its own child process because the tree
 //! manifest override is read once per process (`DIALOG_TREE_FANOUT_N`).
-//! Run-to-run leaf-boundary wobble (randomized identities shifting leaf
-//! seams) moves a block or two between phases, so every configuration
-//! runs `repeats` times and keeps the run with the median lazy-join
-//! modeled time — the report the regression gate compares.
+//! Every configuration runs `repeats` times and keeps the run with the
+//! median lazy-join modeled time: the report the regression gate compares.
+//!
+//! What the repeats measure depends on the [`Seeding`]. Under a fixed seed
+//! (the per-PR gate) every run mints the same identities and writes the
+//! same tree, so the sweep requires its repeats to agree: the same seeded
+//! root everywhere, and on the unshaped profile the same requests, bytes,
+//! duplicates and blob opens in every phase (see `reproduced`). A
+//! disagreement means something the seed does not reach moved the tree,
+//! and fails the sweep. Under random seeding (the nightly) each
+//! run draws its own identities, which move leaf seams and with them a
+//! block or two between phases: the spread the median absorbs.
 
 use std::fs;
 use std::path::PathBuf;
@@ -16,6 +24,7 @@ use std::process::Command;
 use anyhow::{Context as _, Result};
 
 use crate::report::Report;
+use crate::scenario::{Kind, SEED_VARIABLE, Seeding};
 
 /// Configuration for one sweep.
 #[derive(Debug, Clone)]
@@ -28,11 +37,15 @@ pub struct SweepConfig {
     pub commits: usize,
     /// Runs per configuration; the median by lazy-join time is kept.
     pub repeats: usize,
+    /// Scenarios to sweep.
+    pub scenarios: Vec<Kind>,
     /// Network profile names (`none`, `localhost`, `broadband`, ...).
     pub networks: Vec<String>,
     /// Tree branching factors to sweep (`DIALOG_TREE_FANOUT_N`); empty
     /// sweeps only the default.
     pub fanouts: Vec<u8>,
+    /// The seed each run takes.
+    pub seeding: Seeding,
 }
 
 /// Modeled lazy-join time: the sum of every phase but `download`.
@@ -45,15 +58,71 @@ fn lazy_ms(report: &Report) -> u64 {
         .sum()
 }
 
+/// Check that runs of one seed repeated each other: the same seeded root,
+/// and on the unshaped profile the same requests, duplicates, blob opens
+/// and bytes in every phase.
+///
+/// The chain is not held to it. Every count of what a phase fetched
+/// repeats exactly, but which round one fetch goes out in still moves for
+/// one phase of the join (`filtered`, by one, in about one run in ten):
+/// something in the process that the seed does not reach decides whether
+/// a read-ahead joins the round of the read beside it. The compare's
+/// slack holds the chain instead.
+fn reproduced(runs: &[Report], seed: u64) -> Result<()> {
+    let Some((first, rest)) = runs.split_first() else {
+        return Ok(());
+    };
+    for run in rest {
+        anyhow::ensure!(
+            run.seeded_root == first.seeded_root,
+            "seed {seed} seeded two different trees ({:?} and {:?}): \
+             something the seed does not reach moved the tree",
+            first.seeded_root,
+            run.seeded_root
+        );
+        if run.network != "none" {
+            continue;
+        }
+        for (expected, phase) in first.phases.iter().zip(&run.phases) {
+            let counts = |phase: &crate::report::PhaseReport| {
+                (
+                    phase.traffic.requests,
+                    phase.duplicate_requests,
+                    phase.blob_requests,
+                    phase.traffic.bytes,
+                )
+            };
+            anyhow::ensure!(
+                counts(expected) == counts(phase),
+                "seed {seed} ran phase {} two ways (requests, duplicates, blobs, \
+                 bytes): {:?} and {:?}",
+                phase.name,
+                counts(expected),
+                counts(phase)
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Run one configuration `repeats` times in child processes and return
 /// the median run's report.
-fn run_config(config: &SweepConfig, network: &str, fanout: Option<u8>) -> Result<Report> {
+fn run_config(
+    config: &SweepConfig,
+    scenario: Kind,
+    network: &str,
+    fanout: Option<u8>,
+) -> Result<Report> {
     let exe = std::env::current_exe().context("resolving the soak binary")?;
     let mut runs = Vec::with_capacity(config.repeats);
     for _ in 0..config.repeats {
+        let seed = config.seeding.draw()?;
         let mut command = Command::new(&exe);
+        command.env(SEED_VARIABLE, seed.to_string());
         command
             .arg("run")
+            .arg("--scenario")
+            .arg(scenario.label())
             .arg("--network")
             .arg(network)
             .arg("--entities")
@@ -67,12 +136,16 @@ fn run_config(config: &SweepConfig, network: &str, fanout: Option<u8>) -> Result
         let output = command.output().context("spawning a soak run")?;
         anyhow::ensure!(
             output.status.success(),
-            "soak run failed for network {network}: {}",
+            "soak run failed for scenario {scenario} on network {network}: {}",
             String::from_utf8_lossy(&output.stderr)
         );
         let report: Report =
             serde_json::from_slice(&output.stdout).context("parsing a soak run's report")?;
         runs.push(report);
+    }
+    if let Seeding::Fixed(seed) = config.seeding {
+        reproduced(&runs, seed)
+            .with_context(|| format!("scenario {scenario} on network {network}"))?;
     }
     runs.sort_by_key(lazy_ms);
     Ok(runs.swap_remove(runs.len() / 2))
@@ -91,21 +164,23 @@ pub fn sweep(config: &SweepConfig) -> Result<String> {
     };
 
     let mut written = Vec::new();
-    for network in &config.networks {
-        for fanout in &fanouts {
-            let name = match fanout {
-                Some(fanout) => format!("join-{network}-fanout{fanout}"),
-                None => format!("join-{network}"),
-            };
-            eprintln!(
-                "== {name} (entities={} commits={}, {} repeats)",
-                config.entities, config.commits, config.repeats
-            );
-            let report = run_config(config, network, *fanout)?;
-            let path = config.out_dir.join(format!("{name}.json"));
-            fs::write(&path, serde_json::to_string_pretty(&report)?)
-                .with_context(|| format!("writing {}", path.display()))?;
-            written.push((name, report));
+    for scenario in &config.scenarios {
+        for network in &config.networks {
+            for fanout in &fanouts {
+                let name = match fanout {
+                    Some(fanout) => format!("{scenario}-{network}-fanout{fanout}"),
+                    None => format!("{scenario}-{network}"),
+                };
+                eprintln!(
+                    "== {name} (entities={} commits={}, {} repeats)",
+                    config.entities, config.commits, config.repeats
+                );
+                let report = run_config(config, *scenario, network, *fanout)?;
+                let path = config.out_dir.join(format!("{name}.json"));
+                fs::write(&path, serde_json::to_string_pretty(&report)?)
+                    .with_context(|| format!("writing {}", path.display()))?;
+                written.push((name, report));
+            }
         }
     }
 
@@ -113,22 +188,23 @@ pub fn sweep(config: &SweepConfig) -> Result<String> {
     use std::fmt::Write as _;
     let _ = writeln!(
         table,
-        "| {:<34} | {:<10} | {:>8} | {:>6} | {:>5} | {:>8} |",
-        "config", "phase", "virt ms", "reqs", "dup", "KiB"
+        "| {:<34} | {:<12} | {:>8} | {:>5} | {:>6} | {:>5} | {:>8} |",
+        "config", "phase", "virt ms", "chain", "reqs", "dup", "KiB"
     );
     let _ = writeln!(
         table,
-        "|{:-<36}|{:-<12}|{:-<10}|{:-<8}|{:-<7}|{:-<10}|",
-        "", "", "", "", "", ""
+        "|{:-<36}|{:-<14}|{:-<10}|{:-<7}|{:-<8}|{:-<7}|{:-<10}|",
+        "", "", "", "", "", "", ""
     );
     for (name, report) in &written {
         for phase in &report.phases {
             let _ = writeln!(
                 table,
-                "| {:<34} | {:<10} | {:>8} | {:>6} | {:>5} | {:>8} |",
+                "| {:<34} | {:<12} | {:>8} | {:>5} | {:>6} | {:>5} | {:>8} |",
                 name,
                 phase.name,
                 phase.virtual_ms,
+                phase.round_trips.unwrap_or(0),
                 phase.traffic.requests,
                 phase.duplicate_requests,
                 phase.traffic.bytes / 1024

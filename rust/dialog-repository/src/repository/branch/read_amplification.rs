@@ -19,6 +19,8 @@
 //! ancestry includes, is measured by `context_cost_by_origins` the same
 //! way (`DIALOG_RA_MAX_ORIGINS` caps its sweep).
 
+use dialog_artifacts::tree::CorpusNode;
+use dialog_search_tree::nodes;
 use std::env;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -28,12 +30,15 @@ use futures_util::stream;
 
 use dialog_artifacts::history::{Context, context_of};
 use dialog_artifacts::{
-    ATTRIBUTE_KEY_TAG, ArchiveDelta, Artifact, BLOB_KEY_TAG, COVERAGE_KEY_TAG, Datum,
-    ENTITY_KEY_TAG, HISTORY_KEY_TAG, Instruction, Key, State, VALUE_KEY_TAG, Value,
+    ATTRIBUTE_KEY_TAG, ArchiveDelta, Artifact, BLOB_KEY_TAG, COVERAGE_KEY_TAG, ENTITY_KEY_TAG,
+    HISTORY_KEY_TAG, Instruction, VALUE_KEY_TAG, Value,
 };
 use dialog_capability::Provider;
+use dialog_common::Holds;
 use dialog_common::{Blake3Hash, ConditionalSync};
-use dialog_search_tree::{FrameAttribution, LoadBlock, Manifest, PersistentNode};
+use dialog_effects::archive::Load;
+use dialog_effects::archive::prelude::CatalogScope;
+use dialog_search_tree::{FrameAttribution, Manifest};
 
 use crate::RepositoryExt as _;
 use crate::helpers::{Counting, prune_unreachable as prune};
@@ -377,8 +382,12 @@ async fn measure_shape(depth: usize) -> Result<()> {
     }
 
     let root = main.revision().expect("committed").tree;
-    let store = crate::NetworkedIndex::new(&env, main.archive().index(), None);
-    let tree = crate::Index::from_hash(dialog_common::Blake3Hash::from(*root.hash()));
+    let store = &env;
+    let catalog = main.archive().index();
+    let tree = crate::Index::at(
+        catalog.clone(),
+        dialog_common::Blake3Hash::from(*root.hash()),
+    );
     let tree_store = store;
 
     let entries = {
@@ -393,7 +402,7 @@ async fn measure_shape(depth: usize) -> Result<()> {
         count
     };
 
-    let empty = crate::Index::empty();
+    let empty = crate::Index::empty_in(catalog);
     let difference = TreeDifference::compute(&empty, &tree, &tree_store, &tree_store).await?;
     let nodes = {
         use futures_util::StreamExt as _;
@@ -449,7 +458,10 @@ async fn measure_write_paths(depth: usize, batches: usize) -> Result<()> {
     }
 
     let root = main.revision().expect("committed").tree;
-    let base = crate::Index::from_hash(dialog_common::Blake3Hash::from(*root.hash()));
+    let base = crate::Index::at(
+        main.archive().index(),
+        dialog_common::Blake3Hash::from(*root.hash()),
+    );
 
     // One fact per batch: the interactive-commit shape, where the fixed
     // per-batch costs are least amortized and buffering has the most to prove.
@@ -469,7 +481,7 @@ async fn measure_write_paths(depth: usize, batches: usize) -> Result<()> {
     }
 
     // Canonical: reshape per batch, exactly what the commit path does today.
-    let store = crate::NetworkedIndex::new(&env, main.archive().index(), None);
+    let store = &env;
     let mut canonical = base.clone();
     let started = Instant::now();
     for i in 0..batches {
@@ -518,7 +530,7 @@ async fn measure_write_paths(depth: usize, batches: usize) -> Result<()> {
         .await?;
         deferred = next;
     }
-    let _ = deferred.canonicalize(&staged, delta.blocks()).await?;
+    let _ = deferred.canonicalize(&staged, delta.nodes()).await?;
     let deferred_ms = started.elapsed().as_millis();
     persist!(delta);
 
@@ -747,10 +759,13 @@ async fn measure_first_query(origins: usize) -> Result<()> {
     let cache = adopter.node_cache();
     let before = cache.bytes();
     reader.reset();
-    let store = crate::NetworkedIndex::new(&reader, adopter.archive().index(), None);
-    crate::Index::from_hash_with_cache(Blake3Hash::from(*head.tree.hash()), cache.clone())
-        .manifest(&store)
-        .await?;
+    let store = &reader;
+    crate::Index::at(
+        adopter.archive().index(),
+        Blake3Hash::from(*head.tree.hash()),
+    )
+    .manifest(&store)
+    .await?;
     let root = cache.bytes() - before;
 
     let rows: Vec<Claim> = adopter
@@ -1092,9 +1107,6 @@ async fn current_costs() -> Result<()> {
     Ok(())
 }
 
-/// The node type the artifact tree persists, read back for attribution.
-type ArtifactNode = PersistentNode<Key, State<Datum>>;
-
 /// Records the length and hash of every archive block the operator moves,
 /// beneath every cache, so a block a commit wrote or a query read can be
 /// fetched again by hash and attributed.
@@ -1140,14 +1152,26 @@ impl Meter for Recorder {
 
 /// The node stored under `hash`, read through `store`, with its bytes
 /// attributed; `None` when the block is not a tree node.
-async fn attribute_block<Env>(store: &Env, hash: &Blake3Hash) -> Result<Option<FrameAttribution>>
+async fn attribute_block<Env>(
+    store: &Env,
+    catalog: &CatalogScope,
+    hash: &Blake3Hash,
+) -> Result<Option<FrameAttribution>>
 where
-    Env: Provider<LoadBlock> + ConditionalSync,
+    Env: Provider<Load>
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
+        + Holds
+        + ConditionalSync,
 {
-    let Some(buffer) = LoadBlock::new(hash.clone()).perform(store).await? else {
+    let Some(buffer) = Load::new(catalog.clone(), hash.clone())
+        .perform(store)
+        .await?
+    else {
         anyhow::bail!("block {hash} is not in the archive");
     };
-    let Ok(node) = ArtifactNode::try_from(buffer) else {
+    let Ok(node) = CorpusNode::try_from(buffer) else {
         return Ok(None);
     };
     let manifest = node.manifest()?;
@@ -1318,15 +1342,16 @@ async fn attribute_first_query(origins: usize) -> Result<()> {
         "the first block the query reads is the root"
     );
 
-    let store = crate::NetworkedIndex::new(&reader, adopter.archive().index(), None);
+    let store = &reader;
+    let catalog = adopter.archive().index();
     for (at, (len, hash)) in reads.iter().enumerate() {
-        match attribute_block(&store, hash).await? {
+        match attribute_block(&store, &catalog, hash).await? {
             Some(frame) => {
-                let node = LoadBlock::new(hash.clone())
+                let node = Load::new(catalog.clone(), hash.clone())
                     .perform(&store)
                     .await?
                     .expect("just read");
-                let manifest = ArtifactNode::try_from(node)?.manifest()?;
+                let manifest = CorpusNode::try_from(node)?.manifest()?;
                 let label = if at == 0 {
                     format!("root ({len} bytes)")
                 } else {
@@ -1390,19 +1415,20 @@ async fn attribute_crowd(origins: usize) -> Result<()> {
         .perform(&env)
         .await?;
 
-    let store = crate::NetworkedIndex::new(&env, main.archive().index(), None);
+    let store = &env;
+    let catalog = main.archive().index();
     let root_of =
         |branch: &crate::Branch| Blake3Hash::from(*branch.revision().expect("a head").tree.hash());
     let manifest = {
         let hash = root_of(&main);
-        let node = LoadBlock::new(hash)
+        let node = Load::new(catalog.clone(), hash)
             .perform(&store)
             .await?
             .expect("the root is stored");
-        ArtifactNode::try_from(node)?.manifest()?
+        CorpusNode::try_from(node)?.manifest()?
     };
 
-    let start = attribute_block(&store, &root_of(&main))
+    let start = attribute_block(&store, &catalog, &root_of(&main))
         .await?
         .expect("the root is a tree node");
     let mut largest_root = (0usize, start.clone());
@@ -1422,7 +1448,7 @@ async fn attribute_crowd(origins: usize) -> Result<()> {
             .perform(&env)
             .await?;
         let puts = recorder.puts();
-        let root = attribute_block(&store, &root_of(&main))
+        let root = attribute_block(&store, &catalog, &root_of(&main))
             .await?
             .expect("the root is a tree node");
         let biggest = puts.iter().max_by_key(|(len, _)| *len);
@@ -1459,7 +1485,7 @@ async fn attribute_crowd(origins: usize) -> Result<()> {
         &manifest,
     );
     if let Some((commit, len, hash)) = largest_block {
-        match attribute_block(&store, &hash).await? {
+        match attribute_block(&store, &catalog, &hash).await? {
             Some(frame) => print_attribution(
                 &format!("largest block written (commit {commit}, {len} bytes)"),
                 &frame,

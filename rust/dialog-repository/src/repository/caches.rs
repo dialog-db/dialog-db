@@ -22,8 +22,13 @@
 //!   onto attributes, selecting rules and query plans are pure functions
 //!   of content, and none answers which rules a repository holds, so two
 //!   repositories with the same rules decode and plan them once.
+//! - **Spilled values, for the whole environment.** One cache under one
+//!   byte budget, however many repositories are open. A spilled value is
+//!   addressed by its content, so a block cached for one repository is
+//!   the same bytes for any; a repository reads it only by a reference
+//!   its own tree carries.
 //! - **Everything else addressed by content or version, per repository:**
-//!   spilled values, causal verdicts, contexts, revision records. Every
+//!   causal verdicts, contexts, revision records, rewritten trees. Every
 //!   branch of a repository shares them.
 //! - **What is tagged by a line's rules or head, per branch:** assembled
 //!   rule sets, the rules set aside, rule discovery and the trigger
@@ -47,6 +52,10 @@
 //!   one set shares the writers too: a session of a peer writes to its
 //!   peer's archive, and its handles must take turns with the peer's.
 //!
+//! How large each cache may grow is set when the set is built (see
+//! [`CacheBudget`]); a snapshot or transaction batch made through an
+//! environment holding the set sizes its own caches by the same budget.
+//!
 //! One set is for one archive. Environments over different storages must
 //! not share a set: a node one archive holds would answer a read of
 //! another that does not, and a release or clear would reach them both.
@@ -56,12 +65,12 @@ use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use dialog_artifacts::history::{CausalityCache, ContextCache, RevisionRecord, Version};
-use dialog_artifacts::tree::{ArtifactNodeCache, SpillCache, spill_cache};
+use dialog_artifacts::tree::{ArtifactNodeCache, SPILL_CACHE_BUDGET, SpillCache};
 use dialog_artifacts::{SpineSlot, WeakSpineSlot};
 use dialog_common::{Blake3Hash, Holds, held_key};
-use dialog_query::concept::query::PlanCache;
-use dialog_query::formula::FormulaCache;
-use dialog_search_tree::{Cache, NODE_CACHE_BUDGET, NodeCache, Scope};
+use dialog_query::concept::query::{PLAN_CACHE_CAPACITY, PlanCache};
+use dialog_query::formula::{FORMULA_CACHE_CAPACITY, FormulaCache};
+use dialog_search_tree::{CACHE_CAPACITY, Cache, NODE_CACHE_BUDGET, NodeCache, Scope};
 use dialog_varsig::Did;
 
 use super::branch::{LayerMetadataMemo, Writer, Writers};
@@ -77,10 +86,141 @@ fn scope(repository: &Did) -> Scope {
     Scope::named(repository.to_string().as_bytes())
 }
 
+/// How large each cache an environment holds may grow, and the builder
+/// of a [`HeldCaches`] that keeps to it.
+///
+/// Byte budgets bound the caches whose entries vary without limit in
+/// size (tree nodes, spilled values); entry counts bound the rest. Each
+/// starts at the size every environment used before it could be chosen,
+/// so a budget that sets nothing builds exactly the caches
+/// [`HeldCaches::new`] does:
+///
+/// ```no_run
+/// # use dialog_repository::HeldCaches;
+/// # fn configure(env: &impl dialog_common::Holds) {
+/// const MIB: usize = 1024 * 1024;
+/// HeldCaches::builder()
+///     .nodes(24 * MIB) // every repository's tree nodes together
+///     .spills(4 * MIB) // every repository's spilled values together
+///     .entries(512) // per repository: verdicts, contexts, records, rewrites
+///     .rules(512) // rule content, for the environment
+///     .plans(1024) // query plans, for the environment
+///     .formulas(1024) // formula outputs, for the environment
+///     .build()
+///     .hold(env);
+/// # }
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CacheBudget {
+    nodes: usize,
+    spills: usize,
+    entries: usize,
+    rules: usize,
+    plans: usize,
+    formulas: usize,
+}
+
+impl Default for CacheBudget {
+    fn default() -> Self {
+        Self {
+            nodes: NODE_CACHE_BUDGET,
+            spills: SPILL_CACHE_BUDGET,
+            entries: CACHE_CAPACITY,
+            rules: CACHE_CAPACITY,
+            plans: PLAN_CACHE_CAPACITY,
+            formulas: FORMULA_CACHE_CAPACITY,
+        }
+    }
+}
+
+impl CacheBudget {
+    /// Hold at most `bytes` of stored tree nodes, for every repository
+    /// together. With no room for a node, nothing is kept and every read
+    /// goes to the archive.
+    pub fn nodes(mut self, bytes: usize) -> Self {
+        self.nodes = bytes;
+        self
+    }
+
+    /// Hold at most `bytes` of spilled values, for every repository
+    /// together. A value larger than the whole budget is read every time
+    /// and never kept.
+    pub fn spills(mut self, bytes: usize) -> Self {
+        self.spills = bytes;
+        self
+    }
+
+    /// Remember at most `n` entries in each of a repository's causal
+    /// verdicts (of each kind), contexts, revision records and rewritten
+    /// trees, and in the same caches of a snapshot or transaction batch.
+    /// Zero is raised to one.
+    pub fn entries(mut self, n: usize) -> Self {
+        self.entries = n;
+        self
+    }
+
+    /// Remember at most `n` entries in each cache of rule content (heads,
+    /// deductive and inductive bodies, selecting rules), for the
+    /// environment. Zero is raised to one.
+    pub fn rules(mut self, n: usize) -> Self {
+        self.rules = n;
+        self
+    }
+
+    /// Remember at most `n` query plans, for the environment. Zero is
+    /// raised to one.
+    pub fn plans(mut self, n: usize) -> Self {
+        self.plans = n;
+        self
+    }
+
+    /// Remember at most `n` outputs of cached formulas. Zero is raised to
+    /// one.
+    pub fn formulas(mut self, n: usize) -> Self {
+        self.formulas = n;
+        self
+    }
+
+    /// The bytes of tree nodes held at most.
+    pub fn node_bytes(&self) -> usize {
+        self.nodes
+    }
+
+    /// The bytes of spilled values held at most.
+    pub fn spill_bytes(&self) -> usize {
+        self.spills
+    }
+
+    /// The entries each version- or content-keyed cache of a repository
+    /// remembers at most.
+    pub fn entry_capacity(&self) -> usize {
+        self.entries
+    }
+
+    /// The entries each cache of rule content remembers at most.
+    pub fn rule_capacity(&self) -> usize {
+        self.rules
+    }
+
+    /// The query plans remembered at most.
+    pub fn plan_capacity(&self) -> usize {
+        self.plans
+    }
+
+    /// The formula outputs remembered at most.
+    pub fn formula_capacity(&self) -> usize {
+        self.formulas
+    }
+
+    /// Caches that keep to this budget.
+    pub fn build(self) -> HeldCaches {
+        HeldCaches::within(self, FormulaCache::with_capacity(self.formulas))
+    }
+}
+
 /// What the branches of one repository share, and what each keeps to
 /// itself.
 struct Repository {
-    spills: SpillCache,
     causality: CausalityCache,
     contexts: ContextCache,
     records: Cache<Version, RevisionRecord>,
@@ -94,25 +234,38 @@ struct Repository {
 }
 
 impl Repository {
-    fn new() -> Self {
+    fn new(budget: &CacheBudget) -> Self {
         Self {
-            spills: spill_cache(),
-            causality: CausalityCache::new(),
-            contexts: ContextCache::new(),
-            records: Cache::new(),
-            rewrites: Cache::new(),
+            causality: CausalityCache::with_capacity(budget.entries),
+            contexts: ContextCache::with_capacity(budget.entries),
+            records: Cache::with_capacity(budget.entries),
+            rewrites: Cache::with_capacity(budget.entries),
             branches: Mutex::default(),
         }
+    }
+
+    /// How many entries its entry-bounded caches remember now.
+    fn entries(&self) -> usize {
+        self.causality.len() + self.contexts.len() + self.records.len() + self.rewrites.len()
     }
 }
 
 /// What every repository opened through an environment shares: rule
 /// content and query plans, pure functions of content that answer
 /// nothing about what a repository holds.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 struct Shared {
     content: Arc<RuleContent>,
     plans: PlanCache,
+}
+
+impl Shared {
+    fn new(budget: &CacheBudget) -> Self {
+        Self {
+            content: Arc::new(RuleContent::with_capacity(budget.rules)),
+            plans: PlanCache::with_capacity(budget.plans),
+        }
+    }
 }
 
 /// The caches an environment holds for the repositories opened through it.
@@ -129,13 +282,20 @@ struct Shared {
 /// # }
 /// ```
 ///
+/// To bound every cache it holds, not only the nodes, build it from a
+/// [`CacheBudget`] (see [`builder`](Self::builder)).
+///
 /// Clones share the caches. A set may be held by more than one environment
 /// over the same storage, which then share everything in it, the writers
 /// of their branches included.
 #[derive(Clone)]
 pub struct HeldCaches {
+    /// How large each cache may grow.
+    limits: CacheBudget,
     /// Tree nodes of every repository, each reading through its own scope.
     nodes: ArtifactNodeCache,
+    /// Spilled values of every repository, by content.
+    spills: SpillCache,
     /// The outputs of formulas marked `#[formula(cached)]`.
     formulas: FormulaCache,
     /// The rule content and plans every repository shares.
@@ -146,13 +306,17 @@ pub struct HeldCaches {
     /// this set, by branch. Not a cache: untouched by `release` and
     /// `clear`, and gone with its last handle.
     writers: Arc<Writers>,
+    /// Where the repositories' blocks hydrate from, as their open branches
+    /// registered. Not a cache: untouched by `release` and `clear`.
+    routes: crate::Routes,
 }
 
 impl fmt::Debug for HeldCaches {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("HeldCaches")
-            .field("budget", &self.budget())
+            .field("limits", &self.limits)
             .field("bytes", &self.bytes())
+            .field("entries", &self.entries())
             .field("repositories", &self.repositories().len())
             .field("formulas", &self.formulas.len())
             .finish()
@@ -166,42 +330,79 @@ impl Default for HeldCaches {
 }
 
 impl HeldCaches {
-    /// Caches holding up to [`NODE_CACHE_BUDGET`] bytes of tree nodes.
+    /// Caches holding up to [`NODE_CACHE_BUDGET`] bytes of tree nodes,
+    /// with every other cache at its default size ([`CacheBudget::default`]).
     pub fn new() -> Self {
-        Self::with_budget(NODE_CACHE_BUDGET)
+        CacheBudget::default().build()
     }
 
     /// Caches holding up to `bytes` of stored tree nodes, for every
-    /// repository together. With no room for a node, nothing is kept and
-    /// every read goes to the archive.
+    /// repository together, with every other cache at its default size.
+    /// With no room for a node, nothing is kept and every read goes to
+    /// the archive.
     pub fn with_budget(bytes: usize) -> Self {
-        Self::with_formulas(bytes, FormulaCache::new())
+        CacheBudget::default().nodes(bytes).build()
     }
 
-    fn with_formulas(bytes: usize, formulas: FormulaCache) -> Self {
+    /// A budget at the default sizes, to set the size of each cache and
+    /// [`build`](CacheBudget::build) the caches that keep to it.
+    pub fn builder() -> CacheBudget {
+        CacheBudget::default()
+    }
+
+    fn within(limits: CacheBudget, formulas: FormulaCache) -> Self {
         Self {
-            nodes: NodeCache::with_budget(bytes),
+            limits: CacheBudget {
+                formulas: formulas.capacity(),
+                ..limits
+            },
+            nodes: NodeCache::with_budget(limits.nodes),
+            spills: SpillCache::with_budget(limits.spills),
             formulas,
-            shared: Arc::default(),
+            shared: Arc::new(Mutex::new(Shared::new(&limits))),
             repositories: Arc::default(),
             writers: Arc::default(),
+            routes: crate::Routes::new(),
         }
     }
 
     /// The caches `env` holds, made with the default budget if it holds
     /// none yet.
-    pub fn of<Env: Holds>(env: &Env) -> Self {
+    pub fn of<Env: Holds + ?Sized>(env: &Env) -> Self {
         // Queries may have run through `env` before anything was opened,
         // with a formula cache of their own: these caches take that one.
+        let key = held_key::<Self>(HELD);
+        if let Some(caches) = env
+            .held(&key)
+            .and_then(|held| held.downcast_ref::<Self>().cloned())
+        {
+            return caches;
+        }
         let formulas = FormulaCache::of(env);
-        env.held_or(&held_key::<Self>(HELD), &|| {
-            Arc::new(Self::with_formulas(NODE_CACHE_BUDGET, formulas.clone()))
-        })
-        .downcast_ref::<Self>()
-        .cloned()
-        // Only if something else is held under the key: caches of the
-        // caller's own, which reuse nothing and break nothing.
-        .unwrap_or_default()
+        // So are routes branches registered before any caches were held,
+        // and the nodes trees read through `env` kept before then.
+        let routes = crate::Routes::of(env);
+        let nodes = ArtifactNodeCache::held_by(env);
+        let caches = env
+            .held_or(&key, &|| {
+                let mut caches = Self::within(CacheBudget::default(), formulas.clone());
+                caches.routes = routes.clone();
+                if let Some(nodes) = &nodes {
+                    caches.nodes = nodes.clone();
+                    caches.limits.nodes = nodes.budget();
+                }
+                Arc::new(caches)
+            })
+            .downcast_ref::<Self>()
+            .cloned()
+            // Only if something else is held under the key: caches of the
+            // caller's own, which reuse nothing and break nothing.
+            .unwrap_or_default();
+        // A tree reads the node cache `env` holds (`NodeCache::of`): it is
+        // this one, so a node a branch's read kept answers every tree read
+        // through `env`, and the budget, release and clear here govern it.
+        caches.nodes.hold(env);
+        caches
     }
 
     /// Have `env` hold these caches, in place of any it held.
@@ -210,7 +411,15 @@ impl HeldCaches {
     /// opened from here on uses these.
     pub fn hold<Env: Holds>(&self, env: &Env) {
         env.hold(held_key::<Self>(HELD), Arc::new(self.clone()));
+        self.nodes.hold(env);
         self.formulas.hold(env);
+        self.routes.hold(env);
+    }
+
+    /// Where the repositories opened through an environment holding these
+    /// caches hydrate their blocks from (see [`Routes`](crate::Routes)).
+    pub fn routes(&self) -> crate::Routes {
+        self.routes.clone()
     }
 
     /// The outputs of cached formulas these caches remember.
@@ -218,14 +427,49 @@ impl HeldCaches {
         &self.formulas
     }
 
+    /// How large each of these caches may grow.
+    pub fn limits(&self) -> CacheBudget {
+        self.limits
+    }
+
     /// The bytes of tree nodes these caches may hold.
     pub fn budget(&self) -> usize {
         self.nodes.budget()
     }
 
-    /// The bytes of tree nodes held now, for every repository.
+    /// The bytes held now by every byte-bounded cache, for every
+    /// repository: tree nodes and spilled values. The entry-bounded
+    /// caches are counted by [`entries`](Self::entries) instead.
     pub fn bytes(&self) -> usize {
-        self.nodes.bytes()
+        self.nodes.bytes() + self.spills.bytes()
+    }
+
+    /// The bytes of spilled values held now, for every repository.
+    pub fn spill_bytes(&self) -> usize {
+        self.spills.bytes()
+    }
+
+    /// How many entries the entry-bounded caches remember now: every
+    /// repository's causal verdicts, contexts, revision records and
+    /// rewritten trees, the rule content and plans every repository
+    /// shares, and the outputs of cached formulas. A count, not a size:
+    /// the entries vary in size.
+    ///
+    /// What each branch keeps by its rules root (assembled rule sets and
+    /// rule discovery) is not counted; it is bounded by the branch's own
+    /// rules, not by the budget.
+    pub fn entries(&self) -> usize {
+        let shared = self
+            .shared
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone();
+        let repositories: usize = self
+            .lock()
+            .values()
+            .map(|repository| repository.entries())
+            .sum();
+        repositories + shared.content.len() + shared.plans.len() + self.formulas.len()
     }
 
     /// How many branches of `repository` a spine is held for: those with
@@ -254,8 +498,10 @@ impl HeldCaches {
     /// Let go of everything held for `repository`: its nodes that no other
     /// repository holds, and every cache of its own and of its branches.
     /// The rule content and plans every repository shares stay, since
-    /// nothing in them is the repository's; [`clear`](Self::clear) lets
-    /// them go.
+    /// nothing in them is the repository's, and so do the spilled values:
+    /// one cache holds them for every repository, by content, and does not
+    /// record which repository read a value in. They age out under the
+    /// spill budget; [`clear`](Self::clear) lets all of them go.
     ///
     /// A branch of it that is still open keeps working: it reads its nodes
     /// again, and keeps the other caches it was opened with. The next open
@@ -277,9 +523,10 @@ impl HeldCaches {
         *self
             .shared
             .lock()
-            .unwrap_or_else(|poison| poison.into_inner()) = Shared::default();
+            .unwrap_or_else(|poison| poison.into_inner()) = Shared::new(&self.limits);
         self.lock().clear();
         self.nodes.clear();
+        self.spills.clear();
         self.formulas.clear();
     }
 
@@ -299,7 +546,7 @@ impl HeldCaches {
         let repository = self
             .lock()
             .entry(branch.of().to_string())
-            .or_insert_with(|| Arc::new(Repository::new()))
+            .or_insert_with(|| Arc::new(Repository::new(&self.limits)))
             .clone();
         let (rules, spine, metadata) = {
             let mut branches = repository
@@ -327,7 +574,7 @@ impl HeldCaches {
         };
         Caches {
             nodes: self.nodes.scoped(scope(branch.of())),
-            spills: repository.spills.clone(),
+            spills: self.spills.clone(),
             rules,
             plans: shared.plans,
             causality: repository.causality.clone(),
@@ -336,12 +583,45 @@ impl HeldCaches {
             rewrites: repository.rewrites.clone(),
             spine,
             metadata,
+            limits: self.limits,
+        }
+    }
+
+    /// Cold caches for a snapshot of `repository` taken through an
+    /// environment holding these, sized by their budget.
+    ///
+    /// What is addressed by content alone (tree nodes, spilled values,
+    /// rule content and plans) is these caches' own, so the snapshot adds
+    /// nothing to what they may hold; what is keyed by version (causal
+    /// verdicts, contexts, revision records, rewrites) and the rule sets of
+    /// the snapshot's line start empty, each at most the budget's entries.
+    pub(crate) fn cold(&self, repository: &Did) -> Caches {
+        let shared = self
+            .shared
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone();
+        let entries = self.limits.entries;
+        Caches {
+            nodes: self.nodes.scoped(scope(repository)),
+            spills: self.spills.clone(),
+            rules: Arc::new(RuleCache::sharing(shared.content)),
+            plans: shared.plans,
+            causality: CausalityCache::with_capacity(entries),
+            contexts: ContextCache::with_capacity(entries),
+            records: Cache::with_capacity(entries),
+            rewrites: Cache::with_capacity(entries),
+            spine: SpineSlot::new(),
+            metadata: LayerMetadataMemo::default(),
+            limits: self.limits,
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use dialog_effects::archive::Load as ArchiveLoad;
+    use dialog_effects::blob::Load as BlobLoad;
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
@@ -359,7 +639,13 @@ mod tests {
     use dialog_peer::{Peer, PeerSpace, Session};
     use futures_util::stream;
 
-    use super::HeldCaches;
+    use dialog_artifacts::tree::SPILL_CACHE_BUDGET;
+    use dialog_query::concept::query::PLAN_CACHE_CAPACITY;
+    use dialog_query::formula::FORMULA_CACHE_CAPACITY;
+    use dialog_query::the;
+    use dialog_search_tree::{CACHE_CAPACITY, NODE_CACHE_BUDGET};
+
+    use super::{CacheBudget, HeldCaches};
     use crate::helpers::test_repo;
     use crate::registry::RegistryEnv;
     use crate::{Branch, CommitError, RemoteSite, Repository};
@@ -389,8 +675,7 @@ mod tests {
     macro_rules! delegate_provider {
         ($($command:ty),+ $(,)?) => {
             $(
-                #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-                #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+                #[dialog_capability::provider]
                 impl<P> Provider<$command> for RefusingImport<P>
                 where
                     P: Provider<$command> + ConditionalSync,
@@ -415,12 +700,23 @@ mod tests {
         Publish,
         BlobRead,
         BlobImport,
-        crate::Hydrate,
+        ArchiveLoad,
+        BlobLoad,
         Fork<RemoteSite, Resolve>,
     );
 
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    // The node requests are answered through this env's own loads and
+    // imports, so a write meets the refusal.
+    dialog_search_tree::reads_nodes_through_blocks!(
+        impl[P,] RefusingImport<P>
+        where [P: Provider<ArchiveLoad> + Holds + ConditionalSync,]
+    );
+    dialog_search_tree::writes_nodes_through_blocks!(
+        impl[P,] RefusingImport<P>
+        where [P: Holds + ConditionalSync,]
+    );
+
+    #[dialog_capability::provider]
     impl<P: ConditionalSync> Provider<Import> for RefusingImport<P> {
         async fn execute(&self, _input: <Import as Command>::Input) -> <Import as Command>::Output {
             Err(ArchiveError::Storage(
@@ -719,6 +1015,183 @@ mod tests {
 
         assert!(main.node_cache().is_empty());
         assert!(main.node_cache().get_cached(&root).is_none());
+        Ok(())
+    }
+
+    /// A budget that sets nothing is today's sizes, and so are the caches
+    /// [`HeldCaches::new`] and [`HeldCaches::with_budget`] build: every
+    /// default is the constant each cache was fixed at before it could be
+    /// chosen.
+    #[dialog_common::test]
+    fn it_builds_todays_caches_from_a_budget_that_sets_nothing() -> Result<()> {
+        let defaults = HeldCaches::builder();
+        assert_eq!(defaults, CacheBudget::default());
+        assert_eq!(defaults.node_bytes(), NODE_CACHE_BUDGET);
+        assert_eq!(defaults.spill_bytes(), SPILL_CACHE_BUDGET);
+        assert_eq!(defaults.entry_capacity(), CACHE_CAPACITY);
+        assert_eq!(defaults.rule_capacity(), CACHE_CAPACITY);
+        assert_eq!(defaults.plan_capacity(), PLAN_CACHE_CAPACITY);
+        assert_eq!(defaults.formula_capacity(), FORMULA_CACHE_CAPACITY);
+
+        let caches = HeldCaches::new();
+        assert_eq!(caches.limits(), defaults);
+        assert_eq!(caches.budget(), NODE_CACHE_BUDGET);
+        assert_eq!(caches.spills.budget(), SPILL_CACHE_BUDGET);
+        assert_eq!(caches.formulas().capacity(), FORMULA_CACHE_CAPACITY);
+        let shared = caches.shared.lock().unwrap().clone();
+        assert_eq!(shared.content.capacity(), CACHE_CAPACITY);
+        assert_eq!(shared.plans.capacity(), PLAN_CACHE_CAPACITY);
+        let repository = super::Repository::new(&caches.limits());
+        assert_eq!(repository.records.capacity(), CACHE_CAPACITY);
+        assert_eq!(repository.rewrites.capacity(), CACHE_CAPACITY);
+
+        assert_eq!(
+            HeldCaches::with_budget(1024).limits(),
+            defaults.nodes(1024),
+            "with_budget sets the nodes alone"
+        );
+        Ok(())
+    }
+
+    /// Every cap the builder sets reaches the cache it names: a repository's
+    /// entry-bounded caches hold `entries` and evict past them, and the
+    /// rule content, plans and formula outputs hold what they were given.
+    #[dialog_common::test]
+    async fn it_keeps_each_cache_to_the_cap_the_builder_set() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let caches = HeldCaches::builder()
+            .nodes(4096)
+            .spills(2048)
+            .entries(2)
+            .rules(3)
+            .plans(4)
+            .formulas(5)
+            .build();
+        caches.hold(&operator);
+        let repository = test_repo(&operator, &profile).await;
+        commit(&repository, &operator).await?;
+
+        let opened = caches.branch(&repository.branch("main"));
+        assert_eq!(opened.records.capacity(), 2);
+        for key in 0..3u8 {
+            opened
+                .rewrites
+                .insert(NodeHash::from([key; 32]), NodeHash::from([key; 32]));
+        }
+        assert_eq!(opened.rewrites.len(), 2, "the third entry evicts one");
+        assert_eq!(opened.limits.entry_capacity(), 2);
+
+        assert_eq!(caches.budget(), 4096);
+        assert_eq!(opened.spills.budget(), 2048);
+        assert_eq!(opened.plans.capacity(), 4);
+        let shared = caches.shared.lock().unwrap().clone();
+        assert_eq!(shared.content.capacity(), 3);
+        assert_eq!(caches.formulas().capacity(), 5);
+        assert!(
+            caches.entries() >= 2,
+            "the entries held are counted: {}",
+            caches.entries()
+        );
+        Ok(())
+    }
+
+    /// One spill budget bounds every repository together: two repositories
+    /// read through one cache, a block one put in is evicted by a block the
+    /// other put in once they do not both fit, and `bytes` counts it.
+    /// Releasing a repository leaves the spilled values, which are kept
+    /// for every repository by content; clearing lets them go.
+    #[dialog_common::test]
+    async fn it_shares_one_spill_budget_among_repositories() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let caches = HeldCaches::builder().spills(1000).build();
+        caches.hold(&operator);
+        let ours = test_repo(&operator, &profile).await;
+        let theirs = test_repo(&operator, &profile).await;
+        let our_spills = caches.branch(&ours.branch("main")).spills;
+        let their_spills = caches.branch(&theirs.branch("main")).spills;
+
+        our_spills.insert([1; 32], vec![1; 600]);
+        assert_eq!(
+            their_spills.get(&[1; 32]),
+            Some(vec![1; 600]),
+            "both read the one cache"
+        );
+        their_spills.insert([2; 32], vec![2; 600]);
+        assert_eq!(caches.spill_bytes(), 600, "the budget holds one block");
+        assert!(our_spills.get(&[1; 32]).is_none(), "the older block went");
+        assert_eq!(caches.bytes(), caches.nodes.bytes() + 600);
+
+        caches.release(&theirs.did());
+        assert_eq!(
+            our_spills.get(&[2; 32]),
+            Some(vec![2; 600]),
+            "release keeps spilled values"
+        );
+        caches.clear();
+        assert_eq!(caches.spill_bytes(), 0);
+        Ok(())
+    }
+
+    /// A snapshot taken through an environment holding budgeted caches
+    /// keeps to the budget: its caches keyed by version hold the budget's
+    /// entries, and it reads spilled values, rule content and plans
+    /// through the environment's own. A snapshot taken without the
+    /// environment keeps today's sizes.
+    #[dialog_common::test]
+    async fn it_sizes_a_snapshot_by_the_budget_of_its_environment() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let caches = HeldCaches::builder()
+            .spills(1000)
+            .entries(2)
+            .rules(3)
+            .plans(4)
+            .build();
+        caches.hold(&operator);
+        let repository = test_repo(&operator, &profile).await;
+        let (main, _) = commit(&repository, &operator).await?;
+        let revision = main.revision().expect("the commit set a head");
+
+        let snapshot = repository.snapshot_in(&operator, revision.clone());
+        let held = snapshot.caches();
+        assert_eq!(held.records.capacity(), 2);
+        assert_eq!(held.rewrites.capacity(), 2);
+        assert_eq!(held.plans.capacity(), 4);
+        assert_eq!(held.spills.budget(), 1000);
+        held.spills.insert([3; 32], vec![3; 10]);
+        assert_eq!(caches.spill_bytes(), 10, "the snapshot's spills are held");
+        assert!(
+            held.records.is_empty(),
+            "what is keyed by version starts cold"
+        );
+
+        let unbudgeted = repository.snapshot(revision);
+        assert_eq!(unbudgeted.caches().records.capacity(), CACHE_CAPACITY);
+        assert_eq!(unbudgeted.caches().spills.budget(), SPILL_CACHE_BUDGET);
+        Ok(())
+    }
+
+    /// The caches a transaction batch keeps to itself are sized by the
+    /// budget of the branch it was staged from.
+    #[dialog_common::test]
+    async fn it_sizes_a_batch_by_the_budget_of_its_branch() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        HeldCaches::builder().entries(2).build().hold(&operator);
+        let repository = test_repo(&operator, &profile).await;
+        let main = repository.branch("main").open().perform(&operator).await?;
+
+        let batch = main
+            .transaction()
+            .assert(
+                the!("user/name")
+                    .of("user:1".parse::<dialog_artifacts::Entity>()?)
+                    .is("Alice".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        assert_eq!(batch.caches().records.capacity(), 2);
+        assert_eq!(batch.caches().limits.entry_capacity(), 2);
         Ok(())
     }
 }

@@ -1,30 +1,40 @@
+use dialog_artifacts::history::Version;
+use dialog_artifacts::tree::CorpusNode;
 use dialog_artifacts::{
-    Datum, Key as ArtifactKey, LoadBlob, ShipmentRef, State, shipment_ref, shipment_refs,
+    Datum, Key as ArtifactKey, ShipmentRef, State, shipment_ref, shipment_refs,
 };
 use dialog_capability::{Fork, Provider, Subject};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::{Buffer, ConditionalSync, Holds};
 use dialog_effects::MethodExt as _;
+use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::prelude::ArchiveExt as _;
 use dialog_effects::archive::prelude::{CatalogExt as _, GetBlockExt as _};
 use dialog_effects::archive::{Get, Put};
+use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::prelude::{ArchiveBlobExt as _, ReadBlobExt as _, WriteBlobExt as _};
 use dialog_effects::blob::{BlobError, BlobReader, Import as BlobImport, Read as BlobRead};
 use dialog_effects::memory::{Current, Publish, Resolve};
+use dialog_search_tree::nodes;
 use dialog_search_tree::{
-    MissingBlocks, MissingPolicy, NodeBody, NoveltyOp, PersistentNode, TreeDifference, into_owned,
+    Accessor, MissingBlocks, MissingPolicy, NodeBody, NoveltyOp, PersistentNode, Reading,
+    TreeDifference, into_owned,
 };
+use dialog_storage::provider::load::{load_spill, read_all};
 use futures_util::{StreamExt as _, TryStreamExt as _, stream};
 use std::collections::HashSet;
 
+use super::context::{full_context, head_observes, rival};
 use super::resolve::resolve;
+use super::upstream::Target;
+use crate::RemoteFallback;
 use crate::ResolveEnv;
-use crate::repository::archive::local::read_all;
-use crate::repository::archive::networked::fill_import;
+use crate::repository::archive::{erased, fill_import};
 use crate::repository::remote::Step;
 use crate::{
-    Branch, ConnectedReplica, Index, LocalIndex, PublishError, PublishRemoteBranchError, PushError,
-    RemoteEdition, RemoteSite, RepositoryMemoryExt, Revision, Upstream, UpstreamBranch,
+    Branch, ConnectedReplica, Index, PublishError, PublishRemoteBranchError, PushError,
+    RemoteEdition, RemoteSite, RepositoryMemoryExt, Revision, TreeReference, Upstream,
+    UpstreamBranch,
 };
 use futures_util::future::join_all;
 
@@ -113,7 +123,8 @@ impl Push<'_> {
     /// - `Ok(Some(revision))` — pushed; upstream now at `revision`.
     /// - `Ok(None)` — nothing to push (branch has no local revision).
     /// - `Err(PushError::NonFastForward)` — upstream has moved since
-    ///   the last sync; pull to integrate before pushing again.
+    ///   the last sync, or our head does not hold the upstream's (a reset
+    ///   moved it behind); pull to integrate before pushing again.
     ///
     /// For remote upstream, bytes land on the remote in reference order
     /// — blob bytes and spilled values, then by-reference frontier
@@ -209,6 +220,132 @@ impl Push<'_> {
     }
 }
 
+/// Refuse to push `head` over `theirs` when `theirs` is a rival of it: a
+/// revision under our head's own version over another tree, minted by a
+/// replica writing with our key on the head we built on (#705). Our head's
+/// context claims the rival's version, so [`holds`] would take the push
+/// for a fast-forward once a pull moved the sync base to the rival's tree,
+/// and the rival's write would be replaced. No pull can settle it either
+/// (see [`PullError::WriterRacedItself`](crate::PullError::WriterRacedItself)),
+/// so the push says so rather than asking for one. Decided before anything
+/// is sent, from the two heads in hand, at no read.
+fn refuse_rival(
+    branch: &Branch,
+    head: &Revision,
+    theirs: Option<&Revision>,
+) -> Result<(), PushError> {
+    match theirs {
+        Some(theirs) if rival(head, theirs) => Err(PushError::WriterRacedItself {
+            branch: branch.name().to_string(),
+            ours: Box::new(head.clone()),
+            theirs: Box::new(theirs.clone()),
+        }),
+        _ => Ok(()),
+    }
+}
+
+/// Whether our `head` holds the upstream's head `theirs`, so that a push of
+/// it moves the upstream forward. The upstream's tree matching the sync
+/// base does not settle it: a reset can leave our head behind a base the
+/// upstream has not moved from, and a push from there would rewind the
+/// upstream to it, dropping what only the base held.
+///
+/// Our head holds `theirs` when its context observes `theirs`, or when
+/// `theirs` is exactly the sync base recorded with `upstream` and our head
+/// observes the head that held the base when the sync recorded it (see
+/// `Bases::held`). The second is a head kept against a rival merge: it holds
+/// the rival's data without its revision, and pushing it over the rival,
+/// which nothing has built on, drops only the rival's own record. A head a
+/// reset moved does not observe the recorded holder, so it stays refused.
+/// The holder is for pushes only: a pull that took it as holding the base
+/// would merge as if the rival's own record were already in our head, and
+/// never import it.
+///
+/// Each answer is one entry of our context: our own tree, the memo, our
+/// edition when the version is of our origin, or one point read of our
+/// tree's region, through the store that serves our head's blocks (which
+/// can be a remote's, when the head was adopted by root and its region not
+/// read since). When that remote cannot be read, as offline, the push fails
+/// with [`PushError::Unreachable`] saying it could not confirm our head
+/// holds the upstream's, and writes nothing. Once the remote answers, the
+/// same push reads the entry and lands; the read is kept locally, so a
+/// later check of the same entry answers offline. A head minted before heads carried a region is
+/// answered by its full context. The edition answer assumes our origin's revisions form
+/// one chain, which a reset to a head without our last mint followed by a
+/// commit breaks (#682): such a head can pass for holding an upstream head
+/// of our origin that it does not hold.
+async fn holds<Env: ResolveEnv>(
+    branch: &Branch,
+    head: &Revision,
+    theirs: &Revision,
+    upstream: &Upstream,
+    base: Option<&TreeReference>,
+    env: &Env,
+) -> Result<bool, PushError> {
+    if head.tree == theirs.tree {
+        return Ok(true);
+    }
+    let fallback = branch.fallback();
+    // The remote that serves what our head holds by reference, if any:
+    // when a read through it fails, the push could not tell whether our
+    // head holds the upstream's, and says so rather than passing on the
+    // read's error. A read served once is written back locally.
+    let serving = match &fallback {
+        RemoteFallback::Remote(remote) => Some(remote.name()),
+        RemoteFallback::Unavailable { remote, .. } => Some(remote.clone()),
+        RemoteFallback::None => None,
+    };
+    let store = erased(env);
+    let catalog = branch.archive().index();
+    let target = match upstream.target() {
+        Target::Local(name) => format!("branch {name}"),
+        Target::Remote(entity) => format!("upstream {entity}"),
+    };
+    let observes = async |version: &Version| -> Result<bool, PushError> {
+        let answer = async {
+            if let Some(seen) = head_observes(
+                head,
+                version,
+                &branch.contexts(),
+                &branch.records(),
+                &catalog,
+                &store,
+            )
+            .await?
+            {
+                return Ok(seen);
+            }
+            let history = branch.history(env);
+            let context =
+                full_context(head, &branch.contexts(), &catalog, &store, &history).await?;
+            Ok::<_, dialog_artifacts::DialogArtifactsError>(context.observes(version))
+        };
+        answer.await.map_err(|error| match &serving {
+            Some(remote) => PushError::Unreachable {
+                upstream: remote.clone(),
+                reason: format!(
+                    "could not confirm that branch {}'s head holds the head of {target}: \
+                     reading what the head holds by reference from {remote} failed: {error}",
+                    branch.name(),
+                ),
+            },
+            None => error.into(),
+        })
+    };
+    if observes(&theirs.version()).await? {
+        return Ok(true);
+    }
+    let settled = base.filter(|base| **base == theirs.tree).and_then(|base| {
+        branch
+            .based()
+            .held(&upstream.target(), base, &theirs.version())
+    });
+    match settled {
+        Some(held) => observes(&held).await,
+        None => Ok(false),
+    }
+}
+
 /// Push `branch` to one upstream, fast-forward only.
 async fn push_upstream<Env>(
     branch: &Branch,
@@ -254,8 +391,26 @@ where
                     .perform(env)
                     .await?;
 
-                let current = target.revision().map(|r| r.tree);
-                if current != base {
+                let theirs = target.revision();
+                refuse_rival(branch, &revision, theirs.as_ref())?;
+                let current = theirs.as_ref().map(|r| r.tree.clone());
+                // The tree check first: a push it refuses reads nothing.
+                let forward = current == base
+                    && match &theirs {
+                        Some(theirs) => {
+                            holds(
+                                branch,
+                                &revision,
+                                theirs,
+                                &upstream_state,
+                                base.as_ref(),
+                                env,
+                            )
+                            .await?
+                        }
+                        None => true,
+                    };
+                if current != base || !forward {
                     return Err(PushError::NonFastForward {
                         branch: branch.name().to_string(),
                         expected: base,
@@ -263,7 +418,10 @@ where
                     });
                 }
 
-                target.reset(revision.clone()).perform(env).await?;
+                target
+                    .reset(revision.clone())
+                    .perform_unchecked(env)
+                    .await?;
             }
             Upstream::Unreachable { target, reason, .. } => {
                 return Err(PushError::Unreachable {
@@ -299,6 +457,7 @@ where
                     fetched
                         .verify()
                         .map_err(dialog_artifacts::DialogArtifactsError::from)?;
+                    refuse_rival(branch, &revision, Some(&fetched))?;
                 }
 
                 let current = upstream.revision().map(|r| r.tree);
@@ -309,7 +468,23 @@ where
                 // push fast-forwards from here rather than being refused
                 // for a base the remote has moved past to our own head.
                 let landed = current.as_ref() == Some(&revision.tree);
-                if !landed && current != base {
+                // The tree check first: a push it refuses reads nothing.
+                let forward = current == base
+                    && match upstream.revision() {
+                        Some(theirs) if !landed => {
+                            holds(
+                                branch,
+                                &revision,
+                                &theirs,
+                                &upstream_state,
+                                base.as_ref(),
+                                env,
+                            )
+                            .await?
+                        }
+                        _ => true,
+                    };
+                if !landed && (current != base || !forward) {
                     return Err(PushError::NonFastForward {
                         branch: branch.name().to_string(),
                         expected: base,
@@ -348,14 +523,17 @@ where
                         target: MissingBlocks::Boundary,
                     };
 
+                    // Both sides are boundaries, so the difference reads
+                    // the local archive's own word on every node (`Get`)
+                    // and never hydrates: absence is what it asks about.
                     let index = branch.archive().index();
-                    let store = LocalIndex::new(env, index.clone());
                     let base_tree = match &base {
-                        Some(base) => Index::from_hash(NodeHash::from(*base.hash())),
-                        None => Index::empty(),
+                        Some(base) => Index::at(index.clone(), NodeHash::from(*base.hash())),
+                        None => Index::empty_in(index.clone()),
                     };
-                    let current_tree = Index::from_hash(NodeHash::from(*revision.tree.hash()));
-                    let tree_store = store;
+                    let current_tree =
+                        Index::at(index.clone(), NodeHash::from(*revision.tree.hash()));
+                    let tree_store = erased(env);
                     let difference = TreeDifference::compute_with(
                         &base_tree,
                         &current_tree,
@@ -419,19 +597,8 @@ where
                     // the sign-in path this loop awaited each shipment in turn
                     // and measured as the single largest cost of the push (one
                     // round trip per spilled value, one after another).
-                    let blob_store = LocalIndex::new(env, index.clone());
                     let shipments = shipment_refs(&difference)
-                        .map(|shipment| {
-                            ship(
-                                shipment,
-                                branch,
-                                remote,
-                                &blob_store,
-                                &sources,
-                                sole_remote,
-                                env,
-                            )
-                        })
+                        .map(|shipment| ship(shipment, branch, remote, &sources, sole_remote, env))
                         .buffer_unordered(SHIPMENT_CONCURRENCY)
                         .try_collect::<()>();
                     // Boxed like the node upload below: the stream carries the
@@ -600,6 +767,18 @@ where
         }
         publish?;
 
+        // The revision whose tree the new base is, the head pushed, which
+        // holds it.
+        branch
+            .record_base::<_, PushError>(
+                target,
+                revision.tree.clone(),
+                revision.version(),
+                revision.version(),
+                env,
+            )
+            .await?;
+
         Ok(Some(revision))
     }
 }
@@ -715,7 +894,6 @@ async fn ship<Env>(
     shipment: Result<ShipmentRef, dialog_artifacts::DialogArtifactsError>,
     branch: &Branch,
     remote: &ConnectedReplica,
-    blob_store: &LocalIndex<'_, Env>,
     sources: &[ConnectedReplica],
     sole_remote: bool,
     env: &Env,
@@ -726,7 +904,13 @@ where
         + Provider<Resolve>
         + Provider<BlobRead>
         + Provider<Fork<RemoteSite, Get>>
-        + Provider<crate::Hydrate>
+        + Provider<ArchiveLoad>
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
+        + Provider<BlobLoad>
         + Provider<Fork<RemoteSite, Put>>
         + Provider<Fork<RemoteSite, BlobImport>>
         + Provider<Fork<RemoteSite, BlobRead>>
@@ -813,7 +997,11 @@ where
         // -> remote blob import, verified against that reference.
         ShipmentRef::SpilledValue(reference) => {
             let digest = NodeHash::from(reference);
-            let bytes = match LoadBlob::new(digest.clone()).perform(blob_store).await? {
+            // What this replica holds of it, locally only: a value held by
+            // reference is not this replica's to ship, so it must not be
+            // fetched to find out.
+            let local = BlobLoad::new(branch.archive(), digest.clone());
+            let bytes = match load_spill(env, &local).await? {
                 Some(bytes) => bytes,
                 // Held by reference: not this replica's to ship. Sole
                 // remote -> the target has it by attribution; otherwise
@@ -919,8 +1107,7 @@ where
         + 'static,
 {
     if let LocalCopy::Unprobed = local
-        && let Some(bytes) = LocalIndex::new(env, branch.archive().index())
-            .load_blob(digest)
+        && let Some(bytes) = load_spill(env, &BlobLoad::new(branch.archive(), digest.clone()))
             .await
             .map_err(|error| dialog_search_tree::DialogSearchTreeError::Storage(error.into()))?
     {
@@ -1035,29 +1222,47 @@ where
         .map_err(PushError::from)
 }
 
-/// A block's bytes from wherever this replica can reach them: the local
-/// archive first (free), then each source remote in order.
-async fn block_from_anywhere<Env>(
+/// A tree node from wherever this replica can reach it: the local archive
+/// first, read through the branch's node cache (free when the cache holds
+/// it), then each source remote in order.
+///
+/// A node a remote serves is parsed and handed back, never kept: it is
+/// streamed through to the target, so the local archive does not hold it,
+/// and the branch's cache keeps only what its archive holds.
+async fn node_from_anywhere<Env>(
     hash: &NodeHash,
     branch: &Branch,
     sources: &[ConnectedReplica],
     env: &Env,
-) -> Result<Option<Vec<u8>>, PushError>
+) -> Result<Option<PersistentNode<ArtifactKey, State<Datum>>>, PushError>
 where
-    Env:
-        Provider<Get> + Provider<Put> + Provider<Fork<RemoteSite, Get>> + ConditionalSync + 'static,
+    Env: Provider<Get>
+        + Provider<Put>
+        + Provider<ArchiveLoad>
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
+        + Provider<Fork<RemoteSite, Get>>
+        + Holds
+        + ConditionalSync
+        + 'static,
 {
-    let local = LocalIndex::new(env, branch.archive().index());
-    if let Some(bytes) = local
-        .load(hash)
-        .await
-        .map_err(|error| dialog_search_tree::DialogSearchTreeError::Storage(error.into()))?
-    {
-        return Ok(Some(bytes.into_vec()));
+    // The local read is local only: the node cache, then the archive's
+    // own `Get` (a local load). A node this replica holds by reference
+    // must not be hydrated to answer, since what is forwarded is streamed
+    // through and the local archive keeps none of it.
+    let local = Accessor::new(env, &branch.archive().index()).reading(Reading {
+        local: true,
+        ..Reading::default()
+    });
+    if let Some(node) = local.load_node(hash).await? {
+        return Ok(Some(node));
     }
     for source in sources {
         if let Some(bytes) = remote_block(hash, source, env).await? {
-            return Ok(Some(bytes));
+            return Ok(Some(PersistentNode::try_from(Buffer::from(bytes))?));
         }
     }
     Ok(None)
@@ -1200,10 +1405,17 @@ where
         + Provider<Resolve>
         + Provider<BlobRead>
         + Provider<Fork<RemoteSite, Get>>
-        + Provider<crate::Hydrate>
+        + Provider<ArchiveLoad>
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
+        + Provider<BlobLoad>
         + Provider<Fork<RemoteSite, Put>>
         + Provider<Fork<RemoteSite, BlobRead>>
         + Provider<Fork<RemoteSite, BlobImport>>
+        + dialog_common::Holds
         + ConditionalSync
         + 'static,
 {
@@ -1221,16 +1433,14 @@ where
                 if target_may_have && remote_has_block(&hash, target, env).await? {
                     continue;
                 }
-                let Some(bytes) = block_from_anywhere(&hash, branch, sources, env).await? else {
+                let Some(node) = node_from_anywhere(&hash, branch, sources, env).await? else {
                     return Err(dialog_search_tree::DialogSearchTreeError::Node(format!(
                         "node {hash} is referenced by the head but reachable from no store: \
                          not local, not on the push target, not on any tracked remote"
                     ))
                     .into());
                 };
-                let node = PersistentNode::<ArtifactKey, State<Datum>>::try_from(Buffer::from(
-                    bytes.clone(),
-                ))?;
+                let bytes = node.buffer().as_ref().to_vec();
 
                 // The entries this node carries (stored in a segment,
                 // buffered in an index) may name blob bytes and spilled
@@ -1840,6 +2050,91 @@ mod tests {
                 );
             }
         }
+        Ok(())
+    }
+
+    fn post(of: &str) -> Instruction {
+        Instruction::Assert(
+            Artifact {
+                the: "post/title".parse().expect("attribute parses"),
+                of: of.parse().expect("entity parses"),
+                is: Value::String(of.to_string()),
+                cause: None,
+            },
+            dialog_artifacts::Pick::All,
+        )
+    }
+
+    /// A head of the upstream that is another revision under the version
+    /// of our own head (#705) is neither pushed over nor pulled in: a push
+    /// would replace it, and a pull would take it as seen, so either way
+    /// its write would be dropped. Both are refused as a writer racing
+    /// itself, and neither moves a head or a sync base.
+    ///
+    /// Two replicas writing with one key mint such a pair (the integration
+    /// test `it_refuses_a_write_racing_a_replica_sharing_its_key` runs that
+    /// against a remote); here one writer mints it by rewinding, as a
+    /// release before #682 still can (`perform_unchecked`), which is the
+    /// shape a local upstream can be given in one process.
+    #[dialog_common::test]
+    async fn it_refuses_to_push_over_a_rival_head_of_its_own_version() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let main = repo.branch("main").open().perform(&operator).await?;
+        let feature = repo.branch("feature").open().perform(&operator).await?;
+        feature.set_upstream(&main).perform(&operator).await?;
+
+        feature
+            .commit(stream::iter(vec![post("post:base")]))
+            .perform(&operator)
+            .await?;
+        let base = feature.revision().expect("a head");
+        feature.push().perform(&operator).await?;
+        feature
+            .commit(stream::iter(vec![post("post:pushed")]))
+            .perform(&operator)
+            .await?;
+        let pushed = feature.revision().expect("a head");
+        feature.push().perform(&operator).await?;
+
+        // Back to the base, and a commit there mints the pushed head's
+        // version again, over another tree.
+        feature.reset(base).perform_unchecked(&operator).await?;
+        feature
+            .commit(stream::iter(vec![post("post:rival")]))
+            .perform(&operator)
+            .await?;
+        let rival = feature.revision().expect("a head");
+        assert_eq!(rival.version(), pushed.version());
+        assert_ne!(rival.tree, pushed.tree);
+        let tracked = feature.tracked();
+
+        let refused = feature.push().perform(&operator).await;
+        assert!(
+            matches!(
+                &refused,
+                Err(PushError::WriterRacedItself { ours, theirs, .. })
+                    if **ours == rival && **theirs == pushed
+            ),
+            "the push over the rival head is refused: {refused:?}"
+        );
+        let refused = feature.pull().perform(&operator).await;
+        assert!(
+            matches!(
+                &refused,
+                Err(crate::PullError::WriterRacedItself { ours, theirs, .. })
+                    if **ours == rival && **theirs == pushed
+            ),
+            "the pull of the rival head is refused: {refused:?}"
+        );
+
+        let upstream = repo.branch("main").open().perform(&operator).await?;
+        assert_eq!(upstream.revision(), Some(pushed), "the upstream stays");
+        let stored = repo.branch("feature").open().perform(&operator).await?;
+        assert_eq!(stored.revision().as_ref(), Some(&rival), "our head stays");
+        assert_eq!(feature.revision(), Some(rival));
+        assert_eq!(stored.tracked(), tracked, "our sync base stays");
+        assert_eq!(feature.tracked(), tracked);
         Ok(())
     }
 }

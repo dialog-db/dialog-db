@@ -8,12 +8,20 @@
 //! The sync/join soak CLI.
 //!
 //! ```text
-//! soak run --network mobile          # one scenario run (JSON to stdout)
-//! soak sweep --out-dir target/soak   # profiles x repeats, median reports
+//! soak run --network mobile          # one join run (JSON to stdout)
+//! soak run --scenario writer         # another scenario
+//! soak sweep --out-dir target/soak   # scenarios x profiles x repeats, median reports
 //! soak compare soak/baseline target/soak   # regression gate
 //! soak compare --base target/soak-base target/soak \
 //!     --markdown target/soak-delta.md      # against the commit landed on
 //! ```
+//!
+//! Every identity a run mints derives from one seed, `DIALOG_SOAK_SEED`
+//! (a number; unset is a fixed default), so a run with the same seed
+//! writes the same tree and repeats its counts exactly. `sweep` passes it
+//! to each run, or with `DIALOG_SOAK_SEED=random` draws a fresh one per
+//! run (the nightly); every report records its `seed`, and
+//! `DIALOG_SOAK_SEED=<seed> soak run ...` replays that run.
 //!
 //! `run` executes under tokio's paused test clock by default: simulated
 //! delays complete instantly while virtual time advances by exactly the
@@ -28,7 +36,7 @@ use std::time::Duration;
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 use dialog_remote_fs::simulation::NetworkShape;
-use dialog_soak::{Against, JoinScenario, SweepConfig, compare_dirs, run_join, sweep};
+use dialog_soak::{Against, Kind, Scenario, Seeding, SweepConfig, compare_dirs, run, sweep};
 
 /// Sync/join soak harness over a simulated network.
 #[derive(Debug, Parser)]
@@ -40,9 +48,9 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Run the join scenario once and print its JSON report to stdout.
+    /// Run one scenario once and print its JSON report to stdout.
     Run(RunArgs),
-    /// Run the scenario across network profiles, keeping each
+    /// Run the scenarios across network profiles, keeping each
     /// configuration's median run as its report.
     Sweep(SweepArgs),
     /// Compare two sweep directories and fail on regressions.
@@ -51,6 +59,10 @@ enum Command {
 
 #[derive(Debug, Args)]
 struct RunArgs {
+    /// Scenario: join, catchup or writer.
+    #[arg(long, default_value = "join")]
+    scenario: Kind,
+
     /// Network preset: none, localhost, broadband, mobile, browser,
     /// intercontinental, or custom (with --latency-ms/--auth-ms/
     /// --bandwidth-mbps/--connections).
@@ -119,6 +131,10 @@ struct SweepArgs {
     /// Runs per configuration; the median by lazy-join time is kept.
     #[arg(long, default_value_t = 3)]
     repeats: usize,
+
+    /// Scenarios to sweep: join, catchup, writer.
+    #[arg(long, value_delimiter = ',', default_values_t = Kind::ALL)]
+    scenarios: Vec<Kind>,
 
     /// Network profiles to sweep. `none` runs unshaped: its request
     /// counts are deterministic and the regression gate holds them tight.
@@ -213,26 +229,28 @@ fn preset(name: &str, run: &RunArgs) -> Result<(Option<NetworkShape>, String)> {
     Ok((network, name.to_string()))
 }
 
-fn run(args: RunArgs) -> Result<()> {
+fn run_once(args: RunArgs) -> Result<()> {
     let (network, network_label) = preset(&args.network, &args)?;
-    let scenario = JoinScenario {
+    let scenario = Scenario {
+        kind: args.scenario,
         entities: args.entities,
         commits: args.commits,
         members: args.members,
         network,
         network_label,
         vault_dir: args.vault_dir.clone().unwrap_or_else(std::env::temp_dir),
+        seed: Seeding::from_env()?.draw()?,
     };
 
+    // Paused from the start, so the paused clock and the timer it drives
+    // share their origin: paused later, the clock sits a real-time
+    // fraction of a millisecond off the timer's ticks, and a tick's
+    // deadline rounds differently from one run to the next.
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
+        .start_paused(!args.real_time)
         .build()?;
-    let report = runtime.block_on(async {
-        if !args.real_time {
-            tokio::time::pause();
-        }
-        run_join(scenario).await
-    })?;
+    let report = runtime.block_on(run(scenario))?;
 
     if !args.json_only {
         eprintln!("{}", report.table());
@@ -244,7 +262,7 @@ fn run(args: RunArgs) -> Result<()> {
 fn main() -> Result<ExitCode> {
     match Cli::parse().command {
         Command::Run(args) => {
-            run(args)?;
+            run_once(args)?;
             Ok(ExitCode::SUCCESS)
         }
         Command::Sweep(args) => {
@@ -253,8 +271,10 @@ fn main() -> Result<ExitCode> {
                 entities: args.entities,
                 commits: args.commits,
                 repeats: args.repeats,
+                scenarios: args.scenarios,
                 networks: args.networks,
                 fanouts: args.fanouts,
+                seeding: Seeding::from_env()?,
             })?;
             eprintln!("reports written to {}", args.out_dir.display());
             eprintln!("{table}");

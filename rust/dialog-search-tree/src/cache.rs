@@ -12,7 +12,22 @@ use std::hash::Hash;
 #[cfg(target_arch = "wasm32")]
 use std::{cell::RefCell, rc::Rc};
 
-const CACHE_CAPACITY: usize = 2048;
+/// How many entries a [`Cache`] holds when no capacity is named.
+pub const CACHE_CAPACITY: usize = 2048;
+
+/// The fewest entries a shard of a native [`Cache`] is given.
+///
+/// A sharded cache bounds each shard on its own, at least one entry each,
+/// so a capacity below the shard count would hold one entry per shard, more
+/// than it was asked to. The shard count therefore shrinks with the
+/// capacity, down to one; [`CACHE_CAPACITY`] and anything larger keep all
+/// sixteen.
+#[cfg(not(target_arch = "wasm32"))]
+const ENTRIES_PER_SHARD: usize = 128;
+
+/// The most shards a native [`Cache`] splits into.
+#[cfg(not(target_arch = "wasm32"))]
+const MAX_SHARDS: usize = 16;
 
 /// A thread-safe cache for storing frequently accessed values.
 ///
@@ -28,8 +43,8 @@ const CACHE_CAPACITY: usize = 2048;
 #[derive(Clone)]
 pub struct Cache<K, V>
 where
-    K: Eq + Hash + Clone + ConditionalSync,
-    V: Clone + ConditionalSync,
+    K: Eq + Hash + Clone + ConditionalSend + ConditionalSync,
+    V: Clone + ConditionalSend + ConditionalSync,
 {
     #[cfg(not(target_arch = "wasm32"))]
     cache: SieveCache<K, V>,
@@ -43,8 +58,8 @@ where
 
 impl<K, V> std::fmt::Debug for Cache<K, V>
 where
-    K: Eq + Hash + Clone + ConditionalSync,
-    V: Clone + ConditionalSync,
+    K: Eq + Hash + Clone + ConditionalSend + ConditionalSync,
+    V: Clone + ConditionalSend + ConditionalSync,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut debug_struct = f.debug_struct("Cache");
@@ -60,8 +75,8 @@ where
 
 impl<K, V> Default for Cache<K, V>
 where
-    K: Eq + Hash + Clone + ConditionalSync,
-    V: Clone + ConditionalSync,
+    K: Eq + Hash + Clone + ConditionalSend + ConditionalSync,
+    V: Clone + ConditionalSend + ConditionalSync,
 {
     fn default() -> Self {
         Self::new()
@@ -84,9 +99,17 @@ where
     /// value blocks), since the cache bounds entry COUNT, not total bytes: a
     /// large count cap over large values can hold a lot of memory.
     pub fn with_capacity(capacity: usize) -> Self {
-        // SAFETY: `SieveCache` only returns an error if the capacity is 0; a
-        // zero capacity is coerced to 1 so this never panics.
-        let cache = SieveCache::new(capacity.max(1)).unwrap();
+        let capacity = capacity.max(1);
+        // SAFETY: `SieveCache` only returns an error if the capacity or the
+        // shard count is 0; both are at least 1 here, so this never panics.
+        #[cfg(not(target_arch = "wasm32"))]
+        let cache = SieveCache::with_shards(
+            capacity,
+            (capacity / ENTRIES_PER_SHARD).clamp(1, MAX_SHARDS),
+        )
+        .unwrap();
+        #[cfg(target_arch = "wasm32")]
+        let cache = SieveCache::new(capacity).unwrap();
 
         Self {
             #[cfg(not(target_arch = "wasm32"))]
@@ -135,6 +158,31 @@ where
     /// instead of guessing.
     pub fn get_cached(&self, key: &K) -> Option<V> {
         self.get(key)
+    }
+
+    /// How many entries the cache may hold.
+    pub fn capacity(&self) -> usize {
+        #[cfg(not(target_arch = "wasm32"))]
+        let capacity = self.cache.capacity();
+        #[cfg(target_arch = "wasm32")]
+        let capacity = self.cache.borrow().capacity();
+
+        capacity
+    }
+
+    /// How many entries the cache holds now.
+    pub fn len(&self) -> usize {
+        #[cfg(not(target_arch = "wasm32"))]
+        let len = self.cache.len();
+        #[cfg(target_arch = "wasm32")]
+        let len = self.cache.borrow().len();
+
+        len
+    }
+
+    /// Whether the cache holds nothing.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     /// Retrieves a value from the cache, if it is cached.
@@ -200,6 +248,24 @@ mod tests {
 
         drop(parked);
         assert_eq!(cache.get(&7), Some(70));
+        Ok(())
+    }
+
+    /// A cache holds no more entries than it was asked to, however small
+    /// the capacity: a third entry into a cache of two evicts one.
+    #[dialog_common::test]
+    async fn it_holds_no_more_entries_than_its_capacity() -> Result<()> {
+        let cache = Cache::<u32, u32>::with_capacity(2);
+        assert_eq!(cache.capacity(), 2);
+        for key in 0..3 {
+            cache.insert(key, key);
+        }
+        assert_eq!(cache.len(), 2);
+        assert_eq!(
+            Cache::<u32, u32>::new().capacity(),
+            super::CACHE_CAPACITY,
+            "a cache with no named capacity keeps the default"
+        );
         Ok(())
     }
 

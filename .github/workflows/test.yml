@@ -42,7 +42,7 @@ jobs:
     steps:
       - uses: cisagov/action-disable-apparmor@v1
       - uses: actions/checkout@v4
-      - uses: wimpysworld/nothing-but-nix@main
+      - uses: wimpysworld/nothing-but-nix@687c797a730352432950c707ab493fcc951818d7 # v10; v11 and main put TMPDIR under /nix/tmp, which breaks the Nix installer
         with:
           root-safe-haven: '16384'
       - uses: cachix/install-nix-action@v31
@@ -83,7 +83,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 2
-      - uses: wimpysworld/nothing-but-nix@main
+      - uses: wimpysworld/nothing-but-nix@687c797a730352432950c707ab493fcc951818d7 # v10; v11 and main put TMPDIR under /nix/tmp, which breaks the Nix installer
         with:
           root-safe-haven: '16384'
       - uses: cachix/install-nix-action@v31
@@ -152,8 +152,8 @@ jobs:
   # shaped profiles (broadband, mobile, ...) stay on the nightly sweep
   # (nightly-soak.yml); see issue #642 for the gate this is the first
   # step of. On a pull request it is also compared against the base
-  # commit's sweep, as the Perf gate is, but report-only until the
-  # harness's identities are deterministic (see soak:check in flake.nix).
+  # commit's sweep, as the Perf gate is. Both sweeps run under the same
+  # fixed seed, so their counts are exact (see soak:check in flake.nix).
   soak_sync:
     name: 'Replication gate'
     needs: ['lint_nix']
@@ -164,7 +164,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 2
-      - uses: wimpysworld/nothing-but-nix@main
+      - uses: wimpysworld/nothing-but-nix@687c797a730352432950c707ab493fcc951818d7 # v10; v11 and main put TMPDIR under /nix/tmp, which breaks the Nix installer
         with:
           root-safe-haven: '16384'
       - uses: cachix/install-nix-action@v31
@@ -290,7 +290,7 @@ jobs:
       # SEE: https://github.com/actions/runner-images/issues/10015
       - uses: cisagov/action-disable-apparmor@v1
       - uses: actions/checkout@v4
-      - uses: wimpysworld/nothing-but-nix@main
+      - uses: wimpysworld/nothing-but-nix@687c797a730352432950c707ab493fcc951818d7 # v10; v11 and main put TMPDIR under /nix/tmp, which breaks the Nix installer
         with:
           root-safe-haven: '16384'
       - uses: cachix/install-nix-action@v31

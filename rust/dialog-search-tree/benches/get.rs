@@ -1,6 +1,7 @@
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use dialog_common::helpers::BenchData;
-use dialog_search_tree::{Delta, MemoryBlocks, PersistentTree};
+use dialog_search_tree::helpers::Blocks;
+use dialog_search_tree::{Delta, PersistentTree};
 
 const BENCH_SEED: u64 = 42;
 
@@ -14,9 +15,14 @@ fn bench_get(c: &mut Criterion) {
 
         // Setup: create a tree with data
         let runtime = tokio::runtime::Runtime::new().unwrap();
-        let (tree, storage, keys) = runtime.block_on(async {
-            let storage = MemoryBlocks::new();
-            let mut tree = PersistentTree::<[u8; 16], Vec<u8>>::empty();
+        // The nodes the build seals are kept, as a tree read through a
+        // store with a node cache finds them.
+        let blocks = Blocks::new();
+        let storage = dialog_search_tree::helpers::Holding::new(&blocks);
+        let (tree, keys) = runtime.block_on(async {
+            let mut tree = PersistentTree::<[u8; 16], Vec<u8>>::empty_in(
+                dialog_search_tree::helpers::test_catalog(),
+            );
             let mut delta = Delta::zero();
 
             for (key, value) in keys.iter().zip(values.iter()) {
@@ -28,12 +34,12 @@ fn bench_get(c: &mut Criterion) {
                     .persist(&mut delta)
                     .unwrap();
                 // Flush after each persist so the next edit can load the nodes this persist created.
-                for (_, buffer) in delta.flush() {
-                    storage.store(buffer);
+                for (_, node) in delta.flush() {
+                    storage.store(node.buffer().clone());
                 }
             }
 
-            (tree, storage, keys)
+            (tree, keys)
         });
 
         group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, _| {

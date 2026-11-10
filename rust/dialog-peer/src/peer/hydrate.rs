@@ -1,9 +1,13 @@
-//! The operator's own [`Hydrate`] provider: on-demand replication as an
-//! effect of the environment.
+//! The operator's own [`Load`] and [`Hydrate`] providers: on-demand
+//! replication as an effect of the environment.
 //!
-//! The caller ([`NetworkedIndex`](dialog_repository::NetworkedIndex))
-//! resolves the routing per call and performs [`Hydrate`], borrowing the
-//! operator for exactly the duration of the perform. The sharing lives
+//! A reader performs [`Load`] (or [`BlobLoad`] for a spilled value) on the
+//! peer. The peer answers from its storage, and on a miss routes the read
+//! to the remotes the subject's open branches registered (see
+//! [`Routes`](dialog_repository::Routes)) and performs [`Hydrate`] on
+//! itself, borrowing itself for exactly the duration of the perform. With
+//! no route registered for the subject, a miss is a miss. [`Get`] is the
+//! storage's alone and never hydrates. The sharing lives
 //! here: concurrent hydrations of one digest anywhere in the process —
 //! queries, subscriptions, transaction queries, pull — join one shared
 //! fetch-and-write-back through the operator's digest-keyed flight.
@@ -23,18 +27,26 @@
 //! by priority (demand before speculative warming), then arrival. The
 //! readers keep no widths of their own.
 
+use dialog_effects::blob::Load as BlobLoad;
+use dialog_search_tree::nodes;
 use std::sync::Arc;
 
-use dialog_capability::{Fork, Provider};
+use dialog_capability::{Fork, Provider, Resume};
+use dialog_common::{Buffer, Holds};
 use dialog_common::{ConditionalSend, ConditionalSync};
+use dialog_effects::archive::Load;
 use dialog_effects::archive::{ArchiveError, Get, Put};
 use dialog_effects::blob::{Import as BlobImport, Read as BlobRead};
-use dialog_repository::{Hydrate, HydrationRequest, RemoteSite, hydrate};
+use dialog_repository::{
+    Hydrate, HydrationRequest, RemoteSite, hydrate, load_blob_or_hydrate, load_or_hydrate,
+};
 
 use super::{Mode, Peer};
+use dialog_artifacts::tree::CorpusNode;
+use dialog_search_tree::DialogSearchTreeError;
+use dialog_storage::provider::storage::Storage;
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl<S, M: Mode> Provider<Hydrate> for Peer<S, M>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
@@ -72,5 +84,71 @@ where
             })
             .await;
         outcome.map_err(ArchiveError::Storage)
+    }
+}
+
+#[dialog_capability::provider]
+impl<S, M: Mode> Provider<Load> for Peer<S, M>
+where
+    S: Clone + ConditionalSend + ConditionalSync + 'static,
+    Self: Provider<Get> + Provider<Hydrate> + Holds + ConditionalSync,
+{
+    async fn execute(&self, load: Load) -> Result<Option<Buffer>, ArchiveError> {
+        load_or_hydrate(self, load).await
+    }
+}
+
+// The node layer: a tree read through the peer asks for nodes, and the
+// peer answers from the node cache it holds, its storage (the mounted
+// space's archive, in whatever form it keeps nodes), or a hydration from
+// the routes the subject's branches registered.
+/// A node the peer's cache holds is answered at once.
+impl<S, M: Mode> Provider<nodes::Read<CorpusNode>> for Peer<S, M>
+where
+    S: Clone + ConditionalSend + ConditionalSync + 'static,
+    Storage<S>: Provider<nodes::Read<CorpusNode>> + ConditionalSync,
+    Self: Provider<Hydrate> + Holds + ConditionalSync,
+{
+    fn execute(
+        &self,
+        read: nodes::Read<CorpusNode>,
+    ) -> Resume<'_, Result<Option<CorpusNode>, DialogSearchTreeError>> {
+        dialog_repository::read_node_or_hydrate(self, &self.storage, read)
+    }
+}
+
+impl<S, M: Mode> Provider<nodes::Preload<CorpusNode>> for Peer<S, M>
+where
+    S: Clone + ConditionalSend + ConditionalSync + 'static,
+    Storage<S>: Provider<nodes::Read<CorpusNode>> + ConditionalSync,
+    Self: Provider<Hydrate> + Holds + ConditionalSync,
+{
+    fn execute(&self, preload: nodes::Preload<CorpusNode>) -> Resume<'_, ()> {
+        dialog_repository::preload_node_or_hydrate(self, &self.storage, preload)
+    }
+}
+
+impl<S, M: Mode> Provider<nodes::Write<CorpusNode>> for Peer<S, M>
+where
+    S: Clone + ConditionalSend + ConditionalSync + 'static,
+    Storage<S>: Provider<nodes::Write<CorpusNode>> + ConditionalSync,
+    Self: Holds + ConditionalSync,
+{
+    fn execute(
+        &self,
+        write: nodes::Write<CorpusNode>,
+    ) -> Resume<'_, Result<(), DialogSearchTreeError>> {
+        dialog_repository::write_nodes(self, &self.storage, write)
+    }
+}
+
+#[dialog_capability::provider]
+impl<S, M: Mode> Provider<BlobLoad> for Peer<S, M>
+where
+    S: Clone + ConditionalSend + ConditionalSync + 'static,
+    Self: Provider<Get> + Provider<BlobRead> + Provider<Hydrate> + Holds + ConditionalSync,
+{
+    async fn execute(&self, load: BlobLoad) -> Result<Option<Buffer>, ArchiveError> {
+        load_blob_or_hydrate(self, load).await
     }
 }

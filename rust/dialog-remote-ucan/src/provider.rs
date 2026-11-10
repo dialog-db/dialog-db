@@ -56,8 +56,7 @@ where
         .await
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<ForkInvocation<UcanSite, Get>> for UcanSite {
     async fn execute(
         &self,
@@ -66,7 +65,12 @@ impl Provider<ForkInvocation<UcanSite, Get>> for UcanSite {
         if invocation.address.exchange() == Exchange::Permit {
             return through_permits(self, invocation).await;
         }
-        let answer = direct::invoke(&invocation.address, &invocation.authorization, None).await?;
+        let answer = direct::read(
+            self.answer(),
+            &invocation.address,
+            &invocation.authorization,
+        )
+        .await?;
         match answer {
             answer if answer.is_success() => Ok(Some(answer.bytes().await?)),
             answer if answer.status == 404 => Ok(None),
@@ -79,8 +83,7 @@ impl Provider<ForkInvocation<UcanSite, Get>> for UcanSite {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<ForkInvocation<UcanSite, Put>> for UcanSite {
     async fn execute(&self, invocation: ForkInvocation<UcanSite, Put>) -> Result<(), ArchiveError> {
         if invocation.address.exchange() == Exchange::Permit {
@@ -88,6 +91,7 @@ impl Provider<ForkInvocation<UcanSite, Put>> for UcanSite {
         }
         let payload = invocation.capability.content().to_vec();
         let answer = direct::invoke(
+            self.answer(),
             &invocation.address,
             &invocation.authorization,
             Some(payload),
@@ -104,8 +108,7 @@ impl Provider<ForkInvocation<UcanSite, Put>> for UcanSite {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<ForkInvocation<UcanSite, Resolve>> for UcanSite {
     async fn execute(
         &self,
@@ -133,8 +136,7 @@ impl Provider<ForkInvocation<UcanSite, Resolve>> for UcanSite {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<ForkInvocation<UcanSite, Publish>> for UcanSite {
     async fn execute(
         &self,
@@ -166,8 +168,7 @@ impl Provider<ForkInvocation<UcanSite, Publish>> for UcanSite {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<ForkInvocation<UcanSite, Retract>> for UcanSite {
     async fn execute(
         &self,
@@ -194,8 +195,7 @@ impl Provider<ForkInvocation<UcanSite, Retract>> for UcanSite {
 
 /// A blob read answers with the bytes, the range the invocation asked
 /// for when it asked for one, as chunks off the wire.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<ForkInvocation<UcanSite, Read>> for UcanSite {
     async fn execute(
         &self,
@@ -204,7 +204,12 @@ impl Provider<ForkInvocation<UcanSite, Read>> for UcanSite {
         if invocation.address.exchange() == Exchange::Permit {
             return through_permits(self, invocation).await;
         }
-        let answer = direct::invoke(&invocation.address, &invocation.authorization, None).await?;
+        let answer = direct::read(
+            self.answer(),
+            &invocation.address,
+            &invocation.authorization,
+        )
+        .await?;
         match answer {
             answer if answer.is_success() => Ok(answer.source()),
             answer if answer.status == 404 => Err(BlobError::NotFound(
@@ -222,8 +227,7 @@ impl Provider<ForkInvocation<UcanSite, Read>> for UcanSite {
 /// A blob import is written into a sink that sends the bytes when it
 /// is finished: the digest is bound in the invocation, so the bytes are
 /// checked against it before anything is sent.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<ForkInvocation<UcanSite, Import>> for UcanSite {
     async fn execute(
         &self,
@@ -233,6 +237,7 @@ impl Provider<ForkInvocation<UcanSite, Import>> for UcanSite {
             return through_permits(self, invocation).await;
         }
         Ok(Box::new(Upload {
+            answer: self.answer(),
             invocation,
             buffer: Vec::new(),
         }))
@@ -242,6 +247,8 @@ impl Provider<ForkInvocation<UcanSite, Import>> for UcanSite {
 /// Gathers a blob's bytes and sends them, in the request that proves
 /// the import, once they have been checked against the declared digest.
 struct Upload {
+    /// How long the request waits for its answer (see [`direct::deadline`]).
+    answer: std::time::Duration,
     invocation: ForkInvocation<UcanSite, Import>,
     buffer: Vec<u8>,
 }
@@ -255,7 +262,11 @@ impl BlobSink for Upload {
     }
 
     async fn finish(self: Box<Self>) -> Result<Blake3Hash, BlobError> {
-        let Upload { invocation, buffer } = *self;
+        let Upload {
+            answer: within,
+            invocation,
+            buffer,
+        } = *self;
         let expected = invocation.capability.digest().clone();
         let hash = Blake3Hash::hash(&buffer);
         if hash != expected {
@@ -264,8 +275,13 @@ impl BlobSink for Upload {
                 actual: hash.as_bytes().to_base58(),
             });
         }
-        let answer =
-            direct::invoke(&invocation.address, &invocation.authorization, Some(buffer)).await?;
+        let answer = direct::invoke(
+            within,
+            &invocation.address,
+            &invocation.authorization,
+            Some(buffer),
+        )
+        .await?;
         match answer {
             answer if answer.is_success() => Ok(hash),
             answer if answer.is_refusal() => Err(answer.refusal().await.into()),
@@ -281,8 +297,7 @@ impl BlobSink for Upload {
 /// every watch of a cell in the same space: a service that names no
 /// socket cannot follow a cell, and a watch there is refused, so the cell
 /// is read by resolving it again.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<ForkInvocation<UcanSite, Watch>> for UcanSite {
     async fn execute(
         &self,
@@ -328,7 +343,7 @@ async fn exchange(
     payload: Option<Vec<u8>>,
 ) -> Result<direct::Answer, S3Error> {
     let Some(socket) = address.socket() else {
-        return direct::invoke(address, authorization, payload)
+        return direct::invoke(site.answer(), address, authorization, payload)
             .await
             .map_err(unanswered);
     };
@@ -338,7 +353,7 @@ async fn exchange(
         .connect(&per_space(socket, chain.subject().as_str()))
         .await
     else {
-        return direct::invoke(address, authorization, payload)
+        return direct::invoke(site.answer(), address, authorization, payload)
             .await
             .map_err(unanswered);
     };
@@ -356,7 +371,7 @@ async fn exchange(
         Ok(other) => Err(S3Error::Rejected(Rejection::Unclassified {
             detail: format!("the service answered an invocation with {other:?}"),
         })),
-        Err(Failed::NotSent) => direct::invoke(address, authorization, payload)
+        Err(Failed::NotSent) => direct::invoke(site.answer(), address, authorization, payload)
             .await
             .map_err(unanswered),
         Err(Failed::Lost(error)) => Err(S3Error::Rejected(Rejection::unavailable(format!(

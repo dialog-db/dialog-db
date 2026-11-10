@@ -41,9 +41,10 @@
 //! receiver's own snapshot and context — nothing about the sender's
 //! state beyond the differential itself.
 
-use crate::{ArchiveReader, LoadBlob};
+use crate::reads::*;
 use core::ops::RangeInclusive;
 use dialog_capability::Provider;
+use dialog_effects::archive::prelude::ArchiveScope;
 use std::collections::BTreeSet;
 use std::fmt::Display;
 use std::iter::repeat_n;
@@ -246,7 +247,14 @@ pub fn screen_history<'a, Backend, C>(
     storage: Backend,
 ) -> impl Differential<Key, State<Datum>> + 'a
 where
-    Backend: ArchiveReader + Clone + dialog_common::ConditionalSync + 'a,
+    Backend: Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
+        + Provider<blob::Load>
+        + ConditionalSync
+        + Clone
+        + dialog_common::ConditionalSync
+        + 'a,
     C: Differential<Key, State<Datum>> + 'a,
 {
     use futures_util::{StreamExt as _, TryStreamExt as _, stream};
@@ -272,7 +280,13 @@ async fn screen_record<Backend>(
     storage: &Backend,
 ) -> Result<Vec<Change<Key, State<Datum>>>, DialogSearchTreeError>
 where
-    Backend: ArchiveReader + Clone + dialog_common::ConditionalSync,
+    Backend: Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
+        + Provider<blob::Load>
+        + ConditionalSync
+        + Clone
+        + dialog_common::ConditionalSync,
 {
     let entry = match change {
         Change::Add(entry) => entry,
@@ -450,15 +464,16 @@ where
 ///
 /// A record whose value spilled out of its key (a tree whose `inline_n`
 /// is below the record's size) is read back from `store`, the raw block
-/// backend the differential's tree is read through.
+/// backend the differential's tree is read through, from `archive`'s blobs.
 pub fn observe_revisions<'a, C, S>(
     changes: C,
     observed: Arc<Mutex<BTreeSet<Version>>>,
     store: S,
+    archive: ArchiveScope,
 ) -> impl Differential<Key, State<Datum>> + 'a
 where
     C: Differential<Key, State<Datum>> + 'a,
-    S: Provider<LoadBlob> + ConditionalSync + 'a,
+    S: Provider<blob::Load> + ConditionalSync + 'a,
 {
     async_stream::try_stream! {
         futures_util::pin_mut!(changes);
@@ -492,7 +507,7 @@ where
                         }
                     }
                     ValueRef::Spilled { .. } => {
-                        let spilled = fetch_spilled(&store, &entry.key)
+                        let spilled = fetch_spilled(&store, &archive, &entry.key)
                             .await
                             .map_err(|error| {
                                 DialogSearchTreeError::Node(format!(
@@ -871,8 +886,9 @@ mod screen_tests {
     use crate::tree::ArtifactTreeExt as _;
     use crate::{Artifact, Entity, Instruction, Relation, Value};
     use anyhow::Result;
-    use dialog_search_tree::MemoryBlocks;
+    use dialog_search_tree::helpers::Blocks;
     use dialog_search_tree::helpers::ObservingBlocks;
+    use dialog_search_tree::helpers::test_catalog;
     use futures_util::{StreamExt as _, stream};
 
     #[cfg(target_arch = "wasm32")]
@@ -880,7 +896,7 @@ mod screen_tests {
 
     /// Writes everything `delta` staged into `store`, and mirrors it into
     /// `observing` so reads through it can be counted.
-    fn mirror(delta: &mut ArchiveDelta, store: &MemoryBlocks, observing: &ObservingBlocks) {
+    fn mirror(delta: &mut ArchiveDelta, store: &Blocks, observing: &ObservingBlocks) {
         let blocks: Vec<_> = delta.flush_blocks().collect();
         let blobs: Vec<_> = delta.flush_blobs().collect();
         for block in blocks.into_iter().chain(blobs) {
@@ -904,7 +920,7 @@ mod screen_tests {
         // Built through the tree's own store, mirrored block for block into
         // the observing backend the screen reads through.
         let observing = ObservingBlocks::new();
-        let store = MemoryBlocks::new();
+        let store = Blocks::new();
         let the: Relation = "task/label".parse()?;
         let writer = Version::new(Origin::from([1u8; 32]), Edition::new(0));
         let retractor = Version::new(Origin::from([2u8; 32]), Edition::new(1));
@@ -920,7 +936,7 @@ mod screen_tests {
                 })
             })
             .collect::<Result<_>>()?;
-        let mut local = ArtifactTree::empty();
+        let mut local = ArtifactTree::empty_in(test_catalog());
         let mut delta = ArchiveDelta::zero();
         local
             .apply_versioned(
@@ -976,7 +992,7 @@ mod screen_tests {
 
         // Screen against a COLD copy of the receiver's tree, so every slot
         // scan has to read.
-        let cold = ArtifactTree::from_hash(local.root().clone());
+        let cold = ArtifactTree::at(test_catalog(), local.root().clone());
         observing.reset();
         let screened = screen_history(
             stream::iter(incoming.into_iter().map(Ok)),

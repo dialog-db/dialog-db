@@ -1,13 +1,20 @@
-use std::any::type_name;
+use dialog_artifacts::tree::{ArtifactNodeCache, CorpusNode};
+use dialog_effects::archive::ArchiveError;
+use dialog_effects::archive::Load as ArchiveLoad;
+use dialog_effects::blob::Load as BlobLoad;
+use dialog_search_tree::DialogSearchTreeError;
+use dialog_search_tree::nodes;
+use std::any::{Any, type_name};
 use std::collections::BTreeMap;
+use std::fmt;
 use std::future::poll_fn;
 use std::sync::Arc;
 use std::task::Poll;
 
-use dialog_capability::{Command, Provider, Subject};
+use dialog_capability::{Command, Provider, Resume, Subject};
 use dialog_common::{Blake3Hash, Buffer, ConditionalSend, ConditionalSync};
-use dialog_effects::archive::Get;
 use dialog_effects::archive::prelude::ArchiveScope;
+use dialog_effects::archive::{Get, Import};
 use dialog_search_tree::{NodeBody, PersistentNode};
 use parking_lot::Mutex;
 use std::collections::HashSet;
@@ -83,7 +90,8 @@ use dialog_credentials::Credential;
 #[cfg(test)]
 use dialog_effects::archive::prelude::DEFAULT_CATALOG;
 #[cfg(test)]
-use dialog_effects::blob::{Import as BlobImport, Read as BlobRead};
+use dialog_effects::blob::Import as BlobImport;
+use dialog_effects::blob::Read as BlobRead;
 #[cfg(test)]
 use dialog_peer::{Mode, Peer, PeerSpace, Session};
 #[cfg(test)]
@@ -162,9 +170,18 @@ where
         + Provider<Identify>
         + Provider<Attest>
         + Provider<Import>
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
         + Provider<Write>
-        + Provider<crate::Hydrate>
+        + Provider<ArchiveLoad>
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
+        + Provider<BlobLoad>
         + Provider<Fork<Network, Resolve>>
+        + dialog_common::Holds
         + ConditionalSync
         + 'static,
 {
@@ -217,9 +234,10 @@ where
 }
 
 #[cfg(test)]
+#[cfg(test)]
 use dialog_capability::Fork;
 #[cfg(test)]
-use dialog_effects::archive::{Import, Put};
+use dialog_effects::archive::Put;
 #[cfg(test)]
 use dialog_effects::authority::{Attest, Identify};
 #[cfg(test)]
@@ -244,12 +262,126 @@ use dialog_network::Network;
 /// flight together.
 ///
 /// Clones share the tally.
-#[derive(Debug, Clone)]
+///
+/// A load ([`archive::Load`](dialog_effects::archive::Load) or
+/// [`blob::Load`](dialog_effects::blob::Load)) is answered here, the way a
+/// peer answers it ([`load_or_hydrate`](crate::load_or_hydrate)), through
+/// this wrapper's own `Get` and `Hydrate`: so every block a load reads is
+/// tallied as the `Get` it is, and every miss that goes to a remote as the
+/// `Hydrate` it costs, exactly as when readers performed those themselves.
+#[derive(Clone)]
 pub struct Counting<P> {
     inner: P,
     counts: Arc<Mutex<BTreeMap<&'static str, u64>>>,
     reads: Arc<Mutex<InFlight>>,
     forks: Arc<Mutex<InFlight>>,
+    loads: Loads<P>,
+}
+
+impl<P: fmt::Debug> fmt::Debug for Counting<P> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Counting")
+            .field("inner", &self.inner)
+            .field("counts", &self.counts)
+            .finish_non_exhaustive()
+    }
+}
+
+/// A load's answer.
+type Loaded<'a> = Resume<'a, Result<Option<Buffer>, ArchiveError>>;
+/// A node read's answer.
+type NodeRead<'a> = Resume<'a, Result<Option<CorpusNode>, DialogSearchTreeError>>;
+/// A node write's answer.
+type NodesWritten<'a> = Resume<'a, Result<(), DialogSearchTreeError>>;
+
+/// How a [`Counting`] answers the two loads through itself, fixed when it
+/// is built, where the wrapped env's capabilities are known.
+struct Loads<P> {
+    block: for<'a> fn(&'a Counting<P>, ArchiveLoad) -> Loaded<'a>,
+    blob: for<'a> fn(&'a Counting<P>, BlobLoad) -> Loaded<'a>,
+    read: for<'a> fn(&'a Counting<P>, nodes::Read<CorpusNode>) -> NodeRead<'a>,
+    preload: for<'a> fn(&'a Counting<P>, nodes::Preload<CorpusNode>) -> Resume<'a, ()>,
+    write: for<'a> fn(&'a Counting<P>, nodes::Write<CorpusNode>) -> NodesWritten<'a>,
+}
+
+impl<P> Clone for Loads<P> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<P> Copy for Loads<P> {}
+
+/// The [`Hydrate`](crate::Hydrate) half of a counting env's capabilities:
+/// what [`Counting::new`] needs of the env it wraps to answer loads through
+/// itself.
+pub trait CountedLoads:
+    Provider<Get>
+    + Provider<Import>
+    + Provider<BlobRead>
+    + Provider<crate::Hydrate>
+    + dialog_common::Holds
+    + ConditionalSync
+    + 'static
+{
+}
+
+impl<T> CountedLoads for T where
+    T: Provider<Get>
+        + Provider<Import>
+        + Provider<BlobRead>
+        + Provider<crate::Hydrate>
+        + dialog_common::Holds
+        + ConditionalSync
+        + 'static
+{
+}
+
+fn load_block<P: CountedLoads>(env: &Counting<P>, load: ArchiveLoad) -> Loaded<'_> {
+    Resume::later(crate::load_or_hydrate(env, load))
+}
+
+// The node requests are answered through this env's own loads and
+// imports, so every block a node read or write touches is tallied as the
+// `Get`, `Hydrate` or `Import` it is. A node the env holds is at hand,
+// uncounted: no block is read for it.
+fn read_node<P: CountedLoads>(env: &Counting<P>, read: nodes::Read<CorpusNode>) -> NodeRead<'_> {
+    let Some(cache) = ArtifactNodeCache::of(env, read.catalog.subject()) else {
+        return read.through_loader(|load| crate::load_or_hydrate(env, load), None);
+    };
+    if let Some(node) = cache.get_cached(&read.name) {
+        return Resume::now(Ok(Some(node)));
+    }
+    Resume::later(async move {
+        read.through_loader(|load| crate::load_or_hydrate(env, load), Some(&cache))
+            .await
+    })
+}
+
+fn preload_node<P: CountedLoads>(
+    env: &Counting<P>,
+    preload: nodes::Preload<CorpusNode>,
+) -> Resume<'_, ()> {
+    if ArtifactNodeCache::of(env, preload.catalog.subject()).is_none() {
+        return Resume::now(());
+    }
+    match read_node(env, preload.read()).into_now() {
+        Ok(_) => Resume::now(()),
+        Err(reading) => Resume::later(async move {
+            let _ = reading.await;
+        }),
+    }
+}
+
+fn write_nodes<P: CountedLoads>(
+    env: &Counting<P>,
+    write: nodes::Write<CorpusNode>,
+) -> NodesWritten<'_> {
+    write.through_held_blocks(env)
+}
+
+fn load_blob<P: CountedLoads>(env: &Counting<P>, load: BlobLoad) -> Loaded<'_> {
+    Resume::later(crate::load_blob_or_hydrate(env, load))
 }
 
 impl<P: dialog_common::Holds> dialog_common::Holds for Counting<P> {
@@ -293,7 +425,7 @@ async fn yield_once() {
     .await
 }
 
-impl<P> Counting<P> {
+impl<P: CountedLoads> Counting<P> {
     /// Wrap `inner`, starting with an empty tally.
     pub fn new(inner: P) -> Self {
         Self {
@@ -301,9 +433,18 @@ impl<P> Counting<P> {
             counts: Arc::new(Mutex::new(BTreeMap::new())),
             reads: Arc::new(Mutex::new(InFlight::default())),
             forks: Arc::new(Mutex::new(InFlight::default())),
+            loads: Loads {
+                block: load_block::<P>,
+                blob: load_blob::<P>,
+                read: read_node::<P>,
+                preload: preload_node::<P>,
+                write: write_nodes::<P>,
+            },
         }
     }
+}
 
+impl<P> Counting<P> {
     /// The greatest number of block reads ever in flight at once since
     /// the last [`reset`](Self::reset).
     ///
@@ -374,15 +515,61 @@ impl<P> Counting<P> {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+/// A request's answer as the output of the command `C` it was performed
+/// as: the two are the same type, told apart only at run time.
+fn answered<C: Command>(output: impl Any) -> C::Output
+where
+    C::Output: 'static,
+{
+    let mut output = Some(output);
+    (&mut output as &mut dyn Any)
+        .downcast_mut::<Option<C::Output>>()
+        .and_then(Option::take)
+        .expect("a request answers with its own output")
+}
+
 impl<C, P> Provider<C> for Counting<P>
 where
     C: Command + 'static,
-    C::Input: ConditionalSend,
+    C::Input: ConditionalSend + 'static,
+    C::Output: ConditionalSend + 'static,
     P: Provider<C> + ConditionalSync,
 {
-    async fn execute(&self, input: C::Input) -> C::Output {
+    fn execute(&self, input: C::Input) -> Resume<'_, C::Output> {
+        // A load is answered through this env's own reads (see the type's
+        // docs), and tallied by what it reads, not as itself.
+        let mut input = Some(input);
+        let slot = &mut input as &mut dyn Any;
+        if let Some(load) = slot.downcast_mut::<Option<ArchiveLoad>>() {
+            let load = load.take().expect("the input is taken once");
+            return (self.loads.block)(self, load).map(answered::<C>);
+        } else if let Some(load) = slot.downcast_mut::<Option<BlobLoad>>() {
+            let load = load.take().expect("the input is taken once");
+            return (self.loads.blob)(self, load).map(answered::<C>);
+        } else if let Some(read) = slot.downcast_mut::<Option<nodes::Read<CorpusNode>>>() {
+            let read = read.take().expect("the input is taken once");
+            return (self.loads.read)(self, read).map(answered::<C>);
+        } else if let Some(preload) = slot.downcast_mut::<Option<nodes::Preload<CorpusNode>>>() {
+            let preload = preload.take().expect("the input is taken once");
+            return (self.loads.preload)(self, preload).map(answered::<C>);
+        } else if let Some(write) = slot.downcast_mut::<Option<nodes::Write<CorpusNode>>>() {
+            let write = write.take().expect("the input is taken once");
+            return (self.loads.write)(self, write).map(answered::<C>);
+        }
+        let input = input.expect("the input is taken only by a load");
+        Resume::later(self.counted(input))
+    }
+}
+
+impl<P> Counting<P> {
+    /// Performs `input` on the wrapped env, tallied as the command it is
+    /// and, for what crosses to a store or a remote, as one more read in
+    /// flight while it runs.
+    async fn counted<C>(&self, input: C::Input) -> C::Output
+    where
+        C: Command + 'static,
+        P: Provider<C> + ConditionalSync,
+    {
         let name = type_name::<C>();
         *self.counts.lock().entry(name).or_insert(0) += 1;
 

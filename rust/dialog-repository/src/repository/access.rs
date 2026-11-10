@@ -37,6 +37,10 @@
 //!   any not-yet-upgraded code path. A rerun after a partial failure
 //!   re-skips by content address and drains the remainder.
 
+use dialog_artifacts::tree::CorpusNode;
+use dialog_effects::archive::Load as ArchiveLoad;
+use dialog_effects::blob::Load as BlobLoad;
+use dialog_search_tree::nodes;
 use std::collections::BTreeMap;
 
 use crate::RemoteSite;
@@ -44,7 +48,7 @@ use dialog_artifacts::Entity;
 use dialog_capability::access::{
     Access as AccessAttenuation, AuthorizeError, Certificate as _, Export, Forget,
 };
-use dialog_capability::{Command, Fork, Provider, Subject};
+use dialog_capability::{Command, Fork, Provider, Resume, Subject};
 use dialog_common::{ConditionalSend, ConditionalSync, Held, Holdings, Holds};
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify};
@@ -113,20 +117,16 @@ impl<S: Clone> Holds for MigrateEnv<S> {
 
 macro_rules! migrate_storage {
     ($($effect:ty),+ $(,)?) => {$(
-        #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-        #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
         impl<S> Provider<$effect> for MigrateEnv<S>
         where
-            S: Clone + ConditionalSend + ConditionalSync + 'static,
-            <$effect as Command>::Input: ConditionalSend,
+            S: Clone,
             Storage<S>: Provider<$effect>,
-            Self: ConditionalSync,
         {
-            async fn execute(
+            fn execute(
                 &self,
                 input: <$effect as Command>::Input,
-            ) -> <$effect as Command>::Output {
-                Provider::<$effect>::execute(&self.storage, input).await
+            ) -> Resume<'_, <$effect as Command>::Output> {
+                Provider::<$effect>::execute(&self.storage, input)
             }
         }
     )+};
@@ -134,32 +134,41 @@ macro_rules! migrate_storage {
 
 macro_rules! migrate_authority {
     ($($effect:ty),+ $(,)?) => {$(
-        #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-        #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
         impl<S> Provider<$effect> for MigrateEnv<S>
         where
-            S: Clone + ConditionalSend + ConditionalSync + 'static,
-            <$effect as Command>::Input: ConditionalSend,
+            S: Clone,
             Authority: Provider<$effect>,
-            Self: ConditionalSync,
         {
-            async fn execute(
+            fn execute(
                 &self,
                 input: <$effect as Command>::Input,
-            ) -> <$effect as Command>::Output {
-                Provider::<$effect>::execute(&self.authority, input).await
+            ) -> Resume<'_, <$effect as Command>::Output> {
+                Provider::<$effect>::execute(&self.authority, input)
             }
         }
     )+};
 }
 
+// Migration is a local operation: a load is answered as the read, by
+// the storage, and hydrates from nowhere.
 migrate_storage!(
-    Get, Put, Import, Resolve, Publish, BlobRead, BlobWrite, BlobImport
+    Get,
+    Put,
+    Import,
+    Resolve,
+    Publish,
+    BlobRead,
+    BlobWrite,
+    BlobImport,
+    ArchiveLoad,
+    BlobLoad,
+    nodes::Read<CorpusNode>,
+    nodes::Preload<CorpusNode>,
+    nodes::Write<CorpusNode>,
 );
 migrate_authority!(Identify, Attest);
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl<S> Provider<Fork<RemoteSite, Get>> for MigrateEnv<S>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
@@ -173,8 +182,7 @@ where
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl<S> Provider<Fork<RemoteSite, BlobRead>> for MigrateEnv<S>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
@@ -188,31 +196,7 @@ where
     }
 }
 
-// Hydration under migration is the plain, unshared read: the local
-// check runs, and the remote leg degrades to the fork stub above
-// (migration is a local operation).
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<S> Provider<crate::Hydrate> for MigrateEnv<S>
-where
-    S: Clone + ConditionalSend + ConditionalSync + 'static,
-    Self: Provider<Get>
-        + Provider<Put>
-        + Provider<BlobRead>
-        + Provider<BlobImport>
-        + ConditionalSync
-        + 'static,
-{
-    async fn execute(
-        &self,
-        input: <crate::Hydrate as Command>::Input,
-    ) -> <crate::Hydrate as Command>::Output {
-        crate::hydrate(self, input).await
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl<S> Provider<Fork<RemoteSite, Resolve>> for MigrateEnv<S>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
@@ -261,6 +245,9 @@ impl MigrateCertificates {
             + Provider<BlobRead>
             + Provider<BlobWrite>
             + Provider<BlobImport>
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + Provider<nodes::Write<CorpusNode>>
             + Clone
             + 'static,
         Storage<S>: Provider<Export<Ucan>> + Provider<Forget<Ucan>> + ConditionalSync,

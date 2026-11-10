@@ -23,39 +23,50 @@
 //! The tree uses a three-tier storage architecture:
 //!
 //! 1. **Delta Buffer**: Newly created or modified nodes are held in an
-//!    in-memory delta buffer. Reads will check the delta before accessing
-//!    storage.
+//!    in-memory delta buffer until the caller hands them to the environment
+//!    to store ([`nodes::Write`]).
 //!
-//! 2. **Node Cache**: Nodes retrieved from storage are cached in memory to
-//!    avoid redundant storage operations. The cache is shared across tree
-//!    versions.
+//! 2. **Environment**: a tree is a root under a catalog
+//!    ([`CatalogScope`](dialog_effects::archive::prelude::CatalogScope)), and
+//!    it asks the environment it reads through for its nodes by name
+//!    ([`nodes::Read`], behind [`load_node`] and the [`Accessor`] an
+//!    operation opens), and asks it to make nodes it will read soon cheap
+//!    ([`nodes::Preload`]). Where a node comes from (a cache the environment
+//!    holds, its store in whatever form that keeps nodes, a remote it
+//!    hydrates from) is the environment's concern; the tree holds no nodes
+//!    and looks up no cache.
 //!
-//! 3. **Environment**: nodes the cache does not hold are loaded by their
-//!    [`Blake3Hash`](dialog_common::Blake3Hash) through the [`LoadBlock`] command the caller's environment
-//!    provides. Where the bytes come from is the environment's concern; the
-//!    tree checks each loaded block against the hash it asked for.
+//! 3. **Translation**: an environment whose store keeps blocks answers the
+//!    requests through [`nodes::Read::through_blocks`] and friends, which
+//!    load a block, check it against the name it was asked under, and decode
+//!    it; a store that keeps nodes in a form of its own answers them itself.
 //!
 //! Tree modifications (insert, delete) accumulate in a caller-owned [`Delta`].
-//! Each [`persist`](TransientTree::persist) writes new nodes into that delta,
-//! and you call [`Delta::flush`] and store the returned buffers to persist
-//! changes. Unflushed changes remain queryable but are lost when the delta is
-//! dropped. [`MemoryBlocks`] provides [`LoadBlock`] over blocks held in memory.
+//! Each [`persist`](TransientTree::persist) seals new nodes into that delta,
+//! and you call [`Delta::flush`] and hand the nodes to the environment
+//! ([`nodes::Write`]) to persist changes. Unflushed changes are lost when
+//! the delta is dropped.
 //!
-//! Basic usage:
+//! Basic usage, over a volatile store:
 //!
 //! ```
 //! # tokio_test::block_on(async {
-//! use dialog_search_tree::{Delta, MemoryBlocks, PersistentTree};
+//! use dialog_capability::{Subject, did};
+//! use dialog_effects::archive::prelude::ArchiveScope;
+//! use dialog_search_tree::{Delta, PersistentTree, nodes};
+//! use dialog_storage::provider::Volatile;
 //!
-//! let storage = MemoryBlocks::new();
-//! let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
+//! let storage = Volatile::new();
+//! let catalog = ArchiveScope::new(Subject::from(did!("key:z6MkTree"))).index();
+//! let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(catalog.clone());
 //! let mut delta = Delta::zero();
 //!
 //! // Insert entries
 //! tree = tree.edit().insert([0, 0, 0, 1], vec![1, 2, 3], &storage).await.unwrap().persist(&mut delta).unwrap();
 //!
-//! // Flush the persisted nodes into storage so reads can resolve them
-//! storage.flush(&mut delta);
+//! // Write the persisted nodes into the catalog so reads can resolve them
+//! let nodes: Vec<_> = delta.flush().map(|(_, node)| node).collect();
+//! nodes::Write::new(catalog.clone(), nodes).perform(&storage).await.unwrap();
 //!
 //! // Retrieve entries
 //! let value = tree.get(&[0, 0, 0, 1], &storage).await.unwrap();
@@ -67,10 +78,14 @@
 //!
 //! ```
 //! # tokio_test::block_on(async {
-//! use dialog_search_tree::{Delta, MemoryBlocks, PersistentTree};
+//! use dialog_capability::{Subject, did};
+//! use dialog_effects::archive::prelude::ArchiveScope;
+//! use dialog_search_tree::{Delta, PersistentTree, nodes};
+//! use dialog_storage::provider::Volatile;
 //!
-//! let storage = MemoryBlocks::new();
-//! let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
+//! let storage = Volatile::new();
+//! let catalog = ArchiveScope::new(Subject::from(did!("key:z6MkTree"))).index();
+//! let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(catalog.clone());
 //! let mut delta = Delta::zero();
 //!
 //! // Make several modifications. Each persist writes its new nodes into the
@@ -78,14 +93,15 @@
 //! // store the new nodes before the next edit descends into them.
 //! for i in 0..10u32 {
 //!     tree = tree.edit().insert(i.to_le_bytes(), vec![i as u8], &storage).await.unwrap().persist(&mut delta).unwrap();
-//!     storage.flush(&mut delta);
+//!     let nodes: Vec<_> = delta.flush().map(|(_, node)| node).collect();
+//!     nodes::Write::new(catalog.clone(), nodes).perform(&storage).await.unwrap();
 //! }
 //!
 //! let root_hash = tree.root().clone();
 //!
-//! // After flushing, the tree can be reconstructed from its root hash
-//! // by loading nodes from storage as needed
-//! let tree = PersistentTree::<[u8; 4], Vec<u8>>::from_hash(root_hash);
+//! // After flushing, the tree can be reconstructed from its root hash in
+//! // its catalog, loading nodes from storage as needed
+//! let tree = PersistentTree::<[u8; 4], Vec<u8>>::at(catalog, root_hash);
 //! assert_eq!(tree.get(&5u32.to_le_bytes(), &storage).await.unwrap(), Some(vec![5]));
 //! assert_eq!(tree.get(&9u32.to_le_bytes(), &storage).await.unwrap(), Some(vec![9]));
 //! # })
@@ -95,23 +111,31 @@
 //!
 //! ```
 //! # tokio_test::block_on(async {
-//! use dialog_search_tree::{Delta, MemoryBlocks, PersistentTree};
+//! use dialog_capability::{Subject, did};
+//! use dialog_effects::archive::prelude::ArchiveScope;
+//! use dialog_search_tree::{Delta, PersistentTree, nodes};
+//! use dialog_storage::provider::Volatile;
 //!
-//! let storage = MemoryBlocks::new();
-//! let tree_v1 = PersistentTree::<[u8; 4], Vec<u8>>::empty();
+//! let storage = Volatile::new();
+//! let catalog = ArchiveScope::new(Subject::from(did!("key:z6MkTree"))).index();
+//! let flush = async |delta: &mut Delta<_, _>| {
+//!     let nodes: Vec<_> = delta.flush().map(|(_, node)| node).collect();
+//!     nodes::Write::new(catalog.clone(), nodes).perform(&storage).await.unwrap();
+//! };
+//! let tree_v1 = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(catalog.clone());
 //! let mut delta = Delta::zero();
 //!
 //! // Create version 1 with some data. Each persist writes its new nodes into
 //! // the delta, so flush after each one before the next edit descends into them.
 //! let tree_v1 = tree_v1.edit().insert([0, 0, 0, 1], vec![1], &storage).await.unwrap().persist(&mut delta).unwrap();
-//! storage.flush(&mut delta);
+//! flush(&mut delta).await;
 //! let tree_v1 = tree_v1.edit().insert([0, 0, 0, 2], vec![2], &storage).await.unwrap().persist(&mut delta).unwrap();
-//! storage.flush(&mut delta);
+//! flush(&mut delta).await;
 //!
 //! // Create version 2 by modifying version 1
 //! // Note: tree_v1 remains unchanged
 //! let tree_v2 = tree_v1.edit().insert([0, 0, 0, 3], vec![3], &storage).await.unwrap().persist(&mut delta).unwrap();
-//! storage.flush(&mut delta);
+//! flush(&mut delta).await;
 //!
 //! // Both versions can be queried independently
 //! assert_eq!(tree_v1.get(&[0, 0, 0, 3], &storage).await.unwrap(), None);
@@ -125,6 +149,8 @@
 
 mod accessor;
 pub use accessor::*;
+
+pub mod nodes;
 
 pub use dialog_common::Buffer;
 
@@ -148,12 +174,6 @@ pub use entry::*;
 
 mod node;
 pub use node::*;
-
-mod load;
-pub use load::*;
-
-mod memory;
-pub use memory::*;
 
 mod traversal;
 pub use traversal::*;

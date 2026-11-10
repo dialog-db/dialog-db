@@ -5,7 +5,17 @@
 
 #[cfg(target_arch = "wasm32")]
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+#[cfg(not(feature = "web-integration-tests"))]
+use dialog_artifacts::tree::CorpusNode;
+#[cfg(not(feature = "web-integration-tests"))]
+use dialog_effects::archive::Load as ArchiveLoad;
+#[cfg(not(feature = "web-integration-tests"))]
+use dialog_effects::archive::prelude::CatalogScope;
+#[cfg(not(feature = "web-integration-tests"))]
+use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::storage::Location;
+#[cfg(not(feature = "web-integration-tests"))]
+use dialog_search_tree::nodes;
 
 use dialog_effects::MethodExt as _;
 use dialog_effects::archive::prelude::{ArchiveExt as _, ArchiveScope};
@@ -16,8 +26,8 @@ use crate::contact;
 use crate::helpers::connect;
 use crate::schema::DidExt as _;
 use crate::{
-    Blob, Branch, Index, Item, NetworkedIndex, Repository, RepositoryExt as _, Revision,
-    SiteAddress, SnapshotError, peer_did,
+    Blob, Branch, Index, Item, Repository, RepositoryExt as _, Revision, SiteAddress,
+    SnapshotError, peer_did,
 };
 use anyhow::{Context as _, Result};
 use dialog_artifacts::Asset;
@@ -34,7 +44,8 @@ use dialog_credentials::SignerCredential;
 use dialog_effects::blob::BlobError;
 use dialog_effects::peer::prelude::*;
 use dialog_peer::helpers::{
-    open_peer, test_grant, test_session_with_peer, test_state, test_storage, unique_name,
+    Seed, open_peer, open_peer_as, test_grant, test_session_with_peer, test_state, test_storage,
+    unique_name,
 };
 // The first-contact rig builds its sites on temp storage; native-only
 // like every test that does.
@@ -1752,6 +1763,177 @@ async fn it_pushes_and_pulls_data_between_repos(s3: S3Address) -> Result<()> {
     Ok(())
 }
 
+/// A push after a reset behind the sync base is refused, not taken for a
+/// fast-forward. Bob pushes B and then C; Alice pulls C, resets to B, and
+/// pushes. The remote still sits at Alice's sync base, so the tree check
+/// alone would publish B over C and drop C's fact. Alice's head does not
+/// hold the remote's, so the push is refused and the remote keeps C.
+#[dialog_common::test]
+async fn it_does_not_rewind_a_remote_with_a_head_a_reset_left_behind(s3: S3Address) -> Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let (alice_repo, alice) = setup_repo_with_s3_remote(&operator, &profile, &s3, "alice").await?;
+    let fact = |of: &str| {
+        Instruction::Assert(
+            Artifact {
+                the: "user/name".parse().expect("attribute parses"),
+                of: of.parse().expect("entity parses"),
+                is: Value::String("x".into()),
+                cause: None,
+            },
+            dialog_artifacts::Pick::All,
+        )
+    };
+    alice
+        .commit(stream::iter(vec![fact("user:a")]))
+        .perform(&operator)
+        .await?;
+    alice.push().perform(&operator).await?;
+
+    let bob_repo = profile
+        .space(unique_name("bob"))
+        .open()
+        .perform(&operator)
+        .await?;
+    let origin = connect("origin", s3_site_address(&s3), alice_repo.did(), &operator).await?;
+    let bob = bob_repo.branch("main").open().perform(&operator).await?;
+    let remote_branch = origin.branch("main").open().perform(&operator).await?;
+    bob.set_upstream(remote_branch).perform(&operator).await?;
+    bob.pull().perform(&operator).await?;
+    bob.commit(stream::iter(vec![fact("user:b")]))
+        .perform(&operator)
+        .await?;
+    bob.push().perform(&operator).await?;
+    let b = bob.revision().context("bob has a head")?;
+    bob.commit(stream::iter(vec![fact("user:c")]))
+        .perform(&operator)
+        .await?;
+    bob.push().perform(&operator).await?;
+    let c = bob.revision().context("bob has a head")?;
+
+    alice.pull().perform(&operator).await?;
+    assert_eq!(
+        alice.revision().as_ref(),
+        Some(&c),
+        "alice fast-forwards to C"
+    );
+    // Back to B, as a release before #682 still can (`perform_unchecked`).
+    alice.reset(b).perform_unchecked(&operator).await?;
+    let tracked = alice.tracked();
+    let pushed = alice.push().perform(&operator).await;
+    assert!(
+        matches!(pushed, Err(crate::PushError::NonFastForward { .. })),
+        "the push is refused: {pushed:?}"
+    );
+    assert_eq!(alice.tracked(), tracked, "the refusal records no sync");
+
+    let remote = origin.branch("main").open().perform(&operator).await?;
+    remote.fetch().perform(&operator).await?;
+    assert_eq!(
+        remote.revision().map(|head| head.tree),
+        Some(c.tree),
+        "the remote keeps C"
+    );
+    Ok(())
+}
+
+/// A push that cannot confirm our head holds the upstream's head, because
+/// the remote serving our head's blocks cannot be read, is refused with
+/// `PushError::Unreachable` and writes nothing; once the remote answers,
+/// the same push lands.
+///
+/// Bob's `main` adopts Alice's `S` by root from his local `staging`, which
+/// records `S` as staging's base, then resets forward to Alice's `H`, which
+/// holds `S`. Bob's archive holds none of `H`'s blocks, so whether `H`
+/// holds `S` is one read of `H`'s region through the remote. The remote is
+/// made unreadable by swapping its credential for a wrong one, which it
+/// answers with 403, as it would a lost connection, and restored after.
+#[dialog_common::test]
+async fn it_refuses_a_push_it_cannot_confirm_while_the_remote_is_unreachable(
+    s3: S3Address,
+) -> Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let (alice_repo, alice) = setup_repo_with_s3_remote(&operator, &profile, &s3, "alice").await?;
+    let fact = |of: &str| {
+        Instruction::Assert(
+            Artifact {
+                the: "user/name".parse().expect("attribute parses"),
+                of: of.parse().expect("entity parses"),
+                is: Value::String("x".into()),
+                cause: None,
+            },
+            dialog_artifacts::Pick::All,
+        )
+    };
+    let side = alice_repo.branch("side").open().perform(&operator).await?;
+    side.commit(stream::iter(vec![fact("user:s")]))
+        .perform(&operator)
+        .await?;
+    let s = side.revision().context("S")?;
+    alice.pull().from(&side).perform(&operator).await?;
+    alice
+        .commit(stream::iter(vec![fact("user:h")]))
+        .perform(&operator)
+        .await?;
+    let h = alice.revision().context("H")?;
+    alice.push().perform(&operator).await?;
+
+    let bob_repo = profile
+        .space(unique_name("bob"))
+        .open()
+        .perform(&operator)
+        .await?;
+    let origin = connect("origin", s3_site_address(&s3), alice_repo.did(), &operator).await?;
+    let bob = bob_repo.branch("main").open().perform(&operator).await?;
+    let remote_branch = origin.branch("main").open().perform(&operator).await?;
+    bob.set_upstream(remote_branch).perform(&operator).await?;
+    let staging = bob_repo.branch("staging").open().perform(&operator).await?;
+    staging.reset(s.clone()).perform(&operator).await?;
+    bob.pull().from(&staging).perform(&operator).await?;
+    assert_eq!(bob.revision().as_ref(), Some(&s), "bob adopts S by root");
+    // Forward to H without reading it, as a release before #682 resets
+    // (`perform_unchecked`): this release's reset reads H's region to check
+    // that H holds S, which would leave nothing for the push to read.
+    bob.reset(h.clone()).perform_unchecked(&operator).await?;
+
+    let credential = |secret: String| {
+        let (profile, s3) = (&profile, &s3);
+        async move {
+            profile
+                .secrets()
+                .site(s3_site_address(s3))
+                .save(S3Credential::new(&s3.access_key_id, &secret))
+                .perform(profile)
+                .await
+        }
+    };
+    credential("not the secret".into()).await?;
+    let (tracked, based) = (bob.tracked(), bob.based());
+    let pushed = bob.push().to(&staging).perform(&operator).await;
+    assert!(
+        matches!(pushed, Err(crate::PushError::Unreachable { .. })),
+        "a push it cannot confirm is refused as unreachable: {pushed:?}"
+    );
+    assert_eq!(
+        bob.revision().as_ref(),
+        Some(&h),
+        "the refusal leaves our head"
+    );
+    assert_eq!(bob.tracked(), tracked, "the refusal records no sync");
+    assert_eq!(bob.based(), based, "the refusal records no base");
+    let staging = bob_repo.branch("staging").open().perform(&operator).await?;
+    assert_eq!(staging.revision().as_ref(), Some(&s), "staging keeps S");
+
+    credential(s3.secret_access_key.clone()).await?;
+    bob.push().to(&staging).perform(&operator).await?;
+    let staging = bob_repo.branch("staging").open().perform(&operator).await?;
+    assert_eq!(
+        staging.revision().as_ref(),
+        Some(&h),
+        "once the remote answers, the push lands"
+    );
+    Ok(())
+}
+
 /// A one-off pull from a remote branch that is not an upstream leaves
 /// what it pulled readable: reads cannot fall back to that remote, so
 /// the pull brings what it adopts.
@@ -2005,8 +2187,8 @@ async fn it_keeps_a_retraction_through_a_concurrent_pull(s3: S3Address) -> Resul
 /// The everyday device cycle: a quiet replica pulls (scenario-3
 /// fast-forward adoption — the head lands by root, zero block reads),
 /// commits something of its own, and pushes. The push's novelty diff
-/// walks base against current through the LOCAL archive only
-/// (`LocalIndex`, no remote fallback), and where the trees differ it
+/// walks base against current through the LOCAL archive only (both sides
+/// boundaries, read by `Get`, never hydrating), and where the trees differ it
 /// descends into base-side nodes the adoption never fetched — failing
 /// `Tree operation failed during push: Problem accessing node: Blob not
 /// found` even though the missing nodes live on the very remote being
@@ -2291,17 +2473,16 @@ async fn it_bridges_foreign_bulk_to_a_second_remote(s3: S3Address) -> Result<()>
 macro_rules! delegate_provider {
     ($($command:ty),+ $(,)?) => {
         $(
-            #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-            #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
             impl<P> Provider<$command> for AbortOnRemoteBlobImport<P>
             where
-                P: Provider<$command> + dialog_common::ConditionalSync,
+                P: Provider<$command>,
             {
-                async fn execute(
+                fn execute(
                     &self,
                     input: <$command as dialog_capability::Command>::Input,
-                ) -> <$command as dialog_capability::Command>::Output {
-                    self.inner.execute(input).await
+                ) -> dialog_capability::Resume<'_, <$command as dialog_capability::Command>::Output>
+                {
+                    self.inner.execute(input)
                 }
             }
         )+
@@ -2349,7 +2530,11 @@ delegate_provider!(
     dialog_effects::memory::Publish,
     dialog_effects::blob::Read,
     dialog_effects::blob::Import,
-    crate::Hydrate,
+    ArchiveLoad,
+    BlobLoad,
+    nodes::Read<CorpusNode>,
+    nodes::Preload<CorpusNode>,
+    nodes::Write<CorpusNode>,
     Fork<RemoteSite, dialog_effects::archive::Get>,
     Fork<RemoteSite, dialog_effects::archive::Put>,
     Fork<RemoteSite, dialog_effects::memory::Resolve>,
@@ -2358,8 +2543,7 @@ delegate_provider!(
 );
 
 #[cfg(not(feature = "web-integration-tests"))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl<P> Provider<Fork<RemoteSite, BlobImportEffect>> for AbortOnRemoteBlobImport<P>
 where
     P: dialog_common::ConditionalSync,
@@ -2381,13 +2565,13 @@ where
 /// blocks they reference are all present too. This must hold after ANY
 /// prefix of a push, aborted pushes included: it is what entitles a
 /// later pusher to prune a whole subtree on one positive existence
-/// probe. The head is walked through `index` (the pusher's archive,
+/// probe. The head is walked in `catalog` (the pusher's archive,
 /// optionally hydrating through a source remote), never trusting the
 /// remote under test for its own audit.
 #[cfg(not(feature = "web-integration-tests"))]
 async fn assert_remote_closure_complete(
     operator: &Peer<VolatileSpace, dialog_peer::Session>,
-    index: NetworkedIndex<'_, Peer<VolatileSpace, dialog_peer::Session>>,
+    catalog: CatalogScope,
     head: NodeHash,
     remote: &ConnectedReplica,
 ) -> Result<()> {
@@ -2395,8 +2579,8 @@ async fn assert_remote_closure_complete(
     // and the blob/spill references its entries carry (stored entries in
     // a segment, buffered ops in an index node — both are bytes of the
     // node that holds them).
-    let storage = index;
-    let tree = Index::from_hash(head);
+    let storage = operator;
+    let tree = Index::at(catalog, head);
     let mut nodes: Vec<(NodeHash, Vec<NodeHash>, Vec<ShipmentRef>)> = Vec::new();
     let visits = tree.traverse_available(&storage);
     futures_util::pin_mut!(visits);
@@ -2583,7 +2767,7 @@ async fn it_leaves_an_aborted_push_closure_complete(s3: S3Address) -> Result<()>
         .perform(&operator)
         .await?;
     let head = NodeHash::from(*branch.revision().expect("committed").tree.hash());
-    let index = NetworkedIndex::new(&operator, branch.archive().index(), None);
+    let index = branch.archive().index();
     assert_remote_closure_complete(&operator, index, head, &origin).await?;
 
     Ok(())
@@ -2697,11 +2881,7 @@ async fn it_leaves_an_aborted_bridge_push_closure_complete(s3: S3Address) -> Res
     // Audit B against the full head, hydrating the walk through A (the
     // bridge holds the adopted region only by reference).
     let head = NodeHash::from(*bridge_branch.revision().expect("committed").tree.hash());
-    let index = NetworkedIndex::new(
-        &operator,
-        bridge_branch.archive().index(),
-        Some(origin_a.clone()),
-    );
+    let index = bridge_branch.archive().index();
     assert_remote_closure_complete(&operator, index, head, &origin_b).await?;
 
     Ok(())
@@ -3301,7 +3481,7 @@ async fn it_downloads_the_account_branch_on_login(ucan: UcanS3Address) -> Result
     // Every retained delegation's envelope must now be readable from the
     // device's LOCAL blob provider — no remote reach in this env.
     use dialog_artifacts::ArtifactSelector;
-    let store = super::blob::index_store(&device_branch, &device_operator).await;
+    let store = &device_operator;
     let facts: Vec<_> = crate::Select::new(
         &device_branch,
         ArtifactSelector::new().the(crate::DELEGATION_AUDIENCE.parse().unwrap()),
@@ -4202,9 +4382,8 @@ async fn raw_spill_references<C: dialog_varsig::Principal>(
     revision: &Revision,
 ) -> Result<(HashSet<NodeHash>, HashSet<NodeHash>)> {
     let catalog = ArchiveScope::new(repository.subject()).index();
-    let index = NetworkedIndex::new(env, catalog, None);
-    let storage = index;
-    let tree = Index::from_hash(NodeHash::from(*revision.tree.hash()));
+    let storage = env;
+    let tree = Index::at(catalog, NodeHash::from(*revision.tree.hash()));
 
     let mut current = HashSet::new();
     let mut history = HashSet::new();
@@ -4537,7 +4716,13 @@ async fn it_never_waits_on_its_own_fetch_when_the_access_head_ran_ahead_of_the_a
 
     // The head runs ahead of the archive: the account's revision, none
     // of its nodes. Every proof from here has to fetch to read.
-    device_branch.reset(head).perform(&device_operator).await?;
+    // Planted with `perform_unchecked`: the device's own access head is
+    // not in the account's, and the point here is a head whose nodes the
+    // archive lacks, not how it got there.
+    device_branch
+        .reset(head)
+        .perform_unchecked(&device_operator)
+        .await?;
 
     let outcome = timeout(
         Duration::from_secs(30),
@@ -5079,12 +5264,16 @@ async fn it_downloads_serially_while_pushing_concurrently(ucan: UcanS3Address) -
     // root-to-leaf and each level's read names the next, so depth bounds
     // how many fetches CANNOT overlap however wide the fan-out is.
     let head = NodeHash::from(*replica.revision().expect("pulled").tree.hash());
-    let depth_index = NetworkedIndex::new(&replica_operator, replica.archive().index(), None);
-    let depth_storage = depth_index;
+    use dialog_effects::archive::Load;
+    let depth_storage = &replica_operator;
+    let depth_catalog = replica.archive().index();
     let mut depth = 0usize;
     let mut at = Some(head);
     while let Some(hash) = at.take() {
-        let Some(bytes) = depth_storage.load(&hash).await? else {
+        let Some(bytes) = Load::new(depth_catalog.clone(), hash)
+            .perform(depth_storage)
+            .await?
+        else {
             break;
         };
         depth += 1;
@@ -5243,8 +5432,11 @@ async fn it_downloads_delegation_blobs_concurrently(ucan: UcanS3Address) -> Resu
     }
     // Device links and space index rows: the ordinary facts that sit
     // beside the delegations on a real profile branch, so the download
-    // walks a tree of mixed content rather than one uniform region.
-    let rows: Vec<_> = (0..160)
+    // walks a tree of mixed content rather than one uniform region, and
+    // enough of them that the tree is many blocks, not a handful: the
+    // guard below on the blocks the download moves must not sit one
+    // block above what a small tree would give.
+    let rows: Vec<_> = (0..480)
         .map(|i| {
             Instruction::Assert(
                 Artifact {
@@ -5333,9 +5525,16 @@ async fn it_downloads_delegation_blobs_concurrently(ucan: UcanS3Address) -> Resu
         "the replica materialized without one remote fetch, so it was not \
          cold and this measured local reads"
     );
+    // What the download moved: the blocks it fetched from the remote.
+    // Local reads are not that measure any more. A block is read from
+    // the local store once, before it hydrates, and never again for the
+    // merge or the walk, so `reads` counts the tree's blocks and nothing
+    // else; on a tree of nine blocks it sat one above a floor of eight
+    // and wasm's scheduling put it on the other side.
     assert!(
-        reads > 8,
-        "the download must move a real tree to measure anything (got {reads})"
+        hydrations > 8,
+        "the download must move a real tree to measure anything (fetched \
+         {hydrations} blocks from the remote, read {reads} locally)"
     );
     assert!(
         blob_reads > 0,
@@ -6287,6 +6486,333 @@ async fn it_does_not_ship_an_asset_retracted_through_blob_retract(s3: S3Address)
     assert!(
         matches!(probe, Err(BlobError::NotFound(_))),
         "the retracted asset's bytes were not shipped"
+    );
+    Ok(())
+}
+
+/// One replica of a repository that acts as a principal another replica
+/// acts as too: the profile key `seed` derives, the session key derived
+/// from it, and the repository key `seed` derives, opened on storage of
+/// its own and tracking `main` at the S3 remote. Two of these share
+/// nothing local, as two stateless workers holding one key do, yet mint
+/// under one origin: the origin derives from the branch entity (subject,
+/// profile, branch name) and the issuer, and all four are the same.
+struct SameKeyReplica {
+    operator: Peer<VolatileSpace, dialog_peer::Session>,
+    repo: Repository<SignerCredential>,
+    branch: Branch,
+}
+
+impl SameKeyReplica {
+    /// `main` as this replica's storage holds it, through a fresh handle.
+    async fn stored(&self) -> Result<Branch> {
+        Ok(self
+            .repo
+            .branch("main")
+            .open()
+            .perform(&self.operator)
+            .await?)
+    }
+
+    async fn write(&self, of: &str, body: &str) -> Result<Revision> {
+        self.branch
+            .commit(stream::iter(vec![note(of, body)]))
+            .perform(&self.operator)
+            .await?;
+        self.branch.revision().context("the commit set a head")
+    }
+}
+
+async fn same_key_replica(seed: &Seed, s3: &S3Address) -> Result<SameKeyReplica> {
+    let credential = seed.credential("profile").await?;
+    let profile = open_peer_as(
+        test_storage().await,
+        Location::profile(format!("same-key-{:016x}", seed.value())),
+        credential,
+    )
+    .await?;
+    let operator = profile
+        .session(b"worker")
+        .space(profile.state())
+        .allow(Subject::any())
+        .await?;
+    let repo = profile
+        .space(format!("same-key-repo-{:016x}", seed.value()))
+        .create()
+        .with_credential(seed.signer("repository").await?)
+        .perform(&operator)
+        .await?;
+    let site = s3_site_address(s3);
+    profile
+        .secrets()
+        .site(&site)
+        .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
+        .perform(&profile)
+        .await?;
+    let origin = connect("origin", site, repo.did(), &operator).await?;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    let remote_branch = origin.branch("main").open().perform(&operator).await?;
+    branch
+        .set_upstream(remote_branch)
+        .perform(&operator)
+        .await?;
+    Ok(SameKeyReplica {
+        operator,
+        repo,
+        branch,
+    })
+}
+
+/// A replica acting as another principal, with no head of its own, that
+/// has pulled `main` of `subject` from the S3 remote: it adopts the
+/// remote's head as it is.
+async fn remote_reader(
+    s3: &S3Address,
+    subject: &dialog_capability::Did,
+) -> Result<(Peer<VolatileSpace, dialog_peer::Session>, Branch)> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = profile
+        .space(unique_name("same-key-reader"))
+        .open()
+        .perform(&operator)
+        .await?;
+    profile
+        .secrets()
+        .site(s3_site_address(s3))
+        .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
+        .perform(&profile)
+        .await?;
+    let origin = connect("origin", s3_site_address(s3), subject.clone(), &operator).await?;
+    let reader = repo.branch("main").open().perform(&operator).await?;
+    reader
+        .set_upstream(origin.branch("main").open().perform(&operator).await?)
+        .perform(&operator)
+        .await?;
+    reader.pull().perform(&operator).await?;
+    Ok((operator, reader))
+}
+
+fn note(of: &str, body: &str) -> Instruction {
+    Instruction::Assert(
+        Artifact {
+            the: "note/body".parse().expect("attribute parses"),
+            of: of.parse().expect("entity parses"),
+            is: Value::String(body.into()),
+            cause: None,
+        },
+        dialog_artifacts::Pick::All,
+    )
+}
+
+/// The notes `branch` holds, by entity.
+async fn notes(
+    branch: &Branch,
+    env: &Peer<VolatileSpace, dialog_peer::Session>,
+) -> Result<Vec<String>> {
+    let mut notes = branch
+        .claims()
+        .select(ArtifactSelector::new().the("note/body".parse()?))
+        .to_owned()
+        .perform(env)
+        .await?
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .map(|artifact| artifact.map(|artifact| artifact.of.to_string()))
+        .collect::<Result<Vec<_>, _>>()?;
+    notes.sort();
+    Ok(notes)
+}
+
+/// Push `branch`, and when the remote moved under it, pull and push
+/// again, as a sync loop does: the loop a writer runs before it reports
+/// its write synced. Yields how many pushes the remote refused.
+async fn sync(
+    branch: &Branch,
+    operator: &Peer<VolatileSpace, dialog_peer::Session>,
+) -> Result<usize> {
+    for refused in 0..3 {
+        match branch.push().perform(operator).await {
+            Ok(_) => return Ok(refused),
+            Err(crate::PushError::NonFastForward { .. }) => {
+                branch.pull().perform(operator).await?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    anyhow::bail!("the push kept losing to the remote")
+}
+
+/// Two replicas writing with one key on one repository, with no local
+/// state in common (two stateless workers holding the same signing key),
+/// both build on the remote's head at edition N and each commits a
+/// different fact. Each commit mints version `(O, N+1)`: the origin `O`
+/// derives from the branch entity and the issuer, which the two share,
+/// and the edition from the base, which they share too. The tree is not
+/// part of the version (#705).
+///
+/// A's sync lands. Before #705, B's push was refused as not a
+/// fast-forward, B's pull took A's head as seen (the "nothing new" gate
+/// answers a same-origin question from editions alone), kept B's head and
+/// moved the sync base to A's tree, and B's next push replaced A's head:
+/// both writers were told their write synced and the remote held only
+/// B's. Now B's push is refused as a writer racing itself, and so is the
+/// pull a sync loop would run next, and neither writes anything: B's head
+/// and sync base stay as they were, in memory and in storage, and the
+/// remote keeps A's head. B's write is not lost silently: written again
+/// on a replica that has not written, it lands on top of A's, and the
+/// remote holds both.
+#[dialog_common::test]
+async fn it_refuses_a_write_racing_a_replica_sharing_its_key(s3: S3Address) -> Result<()> {
+    let seed = Seed::new(0x5a3e_155e);
+    let a = same_key_replica(&seed, &s3).await?;
+    let b = same_key_replica(&seed, &s3).await?;
+
+    // The remote's head at edition N, which both replicas build on.
+    a.write("note:base", "base").await?;
+    a.branch.push().perform(&a.operator).await?;
+    b.branch.pull().perform(&b.operator).await?;
+    assert_eq!(
+        a.branch.revision(),
+        b.branch.revision(),
+        "both replicas start from the remote's head"
+    );
+
+    // Each writes a fact of its own on that head.
+    let a_head = a.write("note:a", "from A").await?;
+    let b_head = b.write("note:b", "from B").await?;
+    assert_eq!(
+        a_head.version(),
+        b_head.version(),
+        "the two commits mint one version"
+    );
+    assert_ne!(a_head.tree, b_head.tree, "over two different trees");
+
+    assert_eq!(sync(&a.branch, &a.operator).await?, 0, "A's push lands");
+
+    let tracked = b.branch.tracked();
+    let pushed = b.branch.push().perform(&b.operator).await;
+    assert!(
+        matches!(
+            &pushed,
+            Err(crate::PushError::WriterRacedItself { ours, theirs, .. })
+                if **ours == b_head && **theirs == a_head
+        ),
+        "B's push over A's head of its own version is refused: {pushed:?}"
+    );
+    let pulled = b.branch.pull().perform(&b.operator).await;
+    assert!(
+        matches!(
+            &pulled,
+            Err(crate::PullError::WriterRacedItself { ours, theirs, .. })
+                if **ours == b_head && **theirs == a_head
+        ),
+        "B's pull of A's head of its own version is refused: {pulled:?}"
+    );
+
+    // Neither refusal wrote anything: not B's head, not its sync base,
+    // not the remote.
+    assert_eq!(
+        b.branch.revision().as_ref(),
+        Some(&b_head),
+        "B's head stays"
+    );
+    assert_eq!(b.branch.tracked(), tracked, "B's sync base stays");
+    let stored = b.stored().await?;
+    assert_eq!(
+        stored.revision().as_ref(),
+        Some(&b_head),
+        "B's stored head stays"
+    );
+    assert_eq!(stored.tracked(), tracked, "B's stored sync base stays");
+    let (operator_c, c) = remote_reader(&s3, b.branch.of()).await?;
+    assert_eq!(
+        c.revision().as_ref(),
+        Some(&a_head),
+        "the remote keeps A's head"
+    );
+    assert_eq!(
+        notes(&c, &operator_c).await?,
+        vec!["note:a".to_string(), "note:base".to_string()],
+        "the remote holds A's write and nothing of B's"
+    );
+
+    // B's write, made again on a replica of the same key that has not
+    // written, builds on A's head and lands.
+    let retry = same_key_replica(&seed, &s3).await?;
+    retry.branch.pull().perform(&retry.operator).await?;
+    assert_eq!(retry.branch.revision().as_ref(), Some(&a_head));
+    retry.write("note:b", "from B").await?;
+    assert_eq!(
+        sync(&retry.branch, &retry.operator).await?,
+        0,
+        "the write made again lands"
+    );
+    c.pull().perform(&operator_c).await?;
+    assert_eq!(
+        notes(&c, &operator_c).await?,
+        vec![
+            "note:a".to_string(),
+            "note:b".to_string(),
+            "note:base".to_string()
+        ],
+        "the remote holds both writes"
+    );
+    Ok(())
+}
+
+/// The pull side of `it_refuses_a_write_racing_a_replica_sharing_its_key`,
+/// asked first: B pulls before it pushes, and the remote's head is A's,
+/// of B's own head's version over another tree.
+///
+/// Every context that holds one of the two heads claims the other, and
+/// the "nothing new" gate answers a same-origin question from editions
+/// alone (`head_observes`), so before #705 the pull kept B's head,
+/// merged nothing, and moved the sync base to A's tree. Now the two heads
+/// are compared first (`rival`), and the pull is refused before it
+/// writes anything.
+#[dialog_common::test]
+async fn it_does_not_take_a_rival_head_of_one_version_as_seen(s3: S3Address) -> Result<()> {
+    use super::context::rival;
+
+    let seed = Seed::new(0x5a3e_155f);
+    let a = same_key_replica(&seed, &s3).await?;
+    let b = same_key_replica(&seed, &s3).await?;
+
+    a.write("note:base", "base").await?;
+    a.branch.push().perform(&a.operator).await?;
+    b.branch.pull().perform(&b.operator).await?;
+    let a_head = a.write("note:a", "from A").await?;
+    let b_head = b.write("note:b", "from B").await?;
+    assert_eq!(a_head.version(), b_head.version());
+    assert_ne!(a_head.tree, b_head.tree);
+    assert!(rival(&b_head, &a_head) && rival(&a_head, &b_head));
+    assert!(!rival(&b_head, &b_head), "a head is not its own rival");
+    a.branch.push().perform(&a.operator).await?;
+
+    let tracked = b.branch.tracked();
+    let pulled = b.branch.pull().perform(&b.operator).await;
+    assert!(
+        matches!(
+            &pulled,
+            Err(crate::PullError::WriterRacedItself { ours, theirs, .. })
+                if **ours == b_head && **theirs == a_head
+        ),
+        "B's pull of A's head of its own version is refused: {pulled:?}"
+    );
+    assert_eq!(
+        b.branch.revision().as_ref(),
+        Some(&b_head),
+        "B's head stays"
+    );
+    assert_eq!(b.branch.tracked(), tracked, "B's sync base stays");
+    let stored = b.stored().await?;
+    assert_eq!(stored.revision().as_ref(), Some(&b_head));
+    assert_eq!(stored.tracked(), tracked);
+    assert_eq!(
+        notes(&b.branch, &b.operator).await?,
+        vec!["note:b".to_string(), "note:base".to_string()],
+        "nothing of A's head was merged into B's"
     );
     Ok(())
 }

@@ -1,7 +1,8 @@
+use crate::reads::*;
 use crate::tree::{ArtifactTree, ArtifactTreeExt as _};
 use crate::{
-    ArchiveDelta, ArchiveReader, Artifact, Datum, DeltaOverlay, DialogArtifactsError, Entity,
-    Relation, State, Value,
+    ArchiveDelta, Artifact, Datum, DeltaOverlay, DialogArtifactsError, Entity, Relation, State,
+    Value,
     key::{EncodedValue, artifact_index_keys_with},
 };
 use dialog_search_tree::Manifest;
@@ -58,7 +59,12 @@ impl DelegationRecord {
         delta: &ArchiveDelta,
     ) -> Result<bool, DialogArtifactsError>
     where
-        S: ArchiveReader + Clone,
+        S: Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + Provider<blob::Load>
+            + ConditionalSend
+            + ConditionalSync
+            + Clone,
     {
         let the = Relation::try_from(DELEGATION_ATTRIBUTE.to_string())?;
         let staged = DeltaOverlay::new(delta, store);

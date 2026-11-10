@@ -3,9 +3,9 @@
 //! manifest it was written under.
 
 use dialog_common::{Blake3Hash, Buffer};
+use dialog_search_tree::helpers::Blocks;
 use dialog_search_tree::{
-    Delta, HitchhikerTree, LEGACY_LAYOUT, Manifest, MemoryBlocks, PersistentNode, PersistentTree,
-    TAGGED_LAYOUT,
+    Delta, HitchhikerTree, LEGACY_LAYOUT, Manifest, PersistentNode, PersistentTree, TAGGED_LAYOUT,
 };
 
 type Tree = PersistentTree<[u8; 4], Vec<u8>>;
@@ -29,8 +29,8 @@ struct Fixture {
     nodes: Vec<Vec<u8>>,
 }
 
-async fn load(fixture: &Fixture) -> anyhow::Result<MemoryBlocks> {
-    let storage = MemoryBlocks::new();
+async fn load(fixture: &Fixture) -> anyhow::Result<Blocks> {
+    let storage = Blocks::new();
     for node in &fixture.nodes {
         storage.store(Buffer::from(node.clone()));
     }
@@ -90,7 +90,10 @@ async fn it_reads_trees_written_in_the_legacy_layout() -> anyhow::Result<()> {
                 fixture.name
             );
         }
-        let tree = Tree::from_hash(fixture.root.clone());
+        let tree = Tree::at(
+            dialog_search_tree::helpers::test_catalog(),
+            fixture.root.clone(),
+        );
         assert_eq!(
             tree.manifest(&storage).await?,
             fixture.manifest,
@@ -133,7 +136,10 @@ async fn it_edits_trees_written_in_the_legacy_layout() -> anyhow::Result<()> {
     for fixture in fixtures() {
         for buffered in [false, true] {
             let storage = load(&fixture).await?;
-            let tree = Tree::from_hash(fixture.root.clone());
+            let tree = Tree::at(
+                dialog_search_tree::helpers::test_catalog(),
+                fixture.root.clone(),
+            );
             let added = [1000u32, 1001, 1002];
             let mut delta = Delta::zero();
             let root = if buffered {
@@ -160,10 +166,10 @@ async fn it_edits_trees_written_in_the_legacy_layout() -> anyhow::Result<()> {
                     "{}: an edit writes tagged nodes",
                     fixture.name
                 );
-                storage.store(buffer);
+                storage.store(buffer.buffer().clone());
             }
 
-            let edited = Tree::from_hash(root);
+            let edited = Tree::at(dialog_search_tree::helpers::test_catalog(), root);
             assert_eq!(
                 edited.manifest(&storage).await?,
                 fixture.manifest,

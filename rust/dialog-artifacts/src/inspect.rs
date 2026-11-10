@@ -1,8 +1,8 @@
-//! Tree-node inspection: pure decoders over node blocks the tree's
-//! [`LoadBlock`] command fetches.
+//! Tree-node inspection: pure decoders over node blocks an
+//! [`archive::Load`](dialog_effects::archive::Load) fetches.
 //!
 //! Together these back the query engine's tree procedures (`tree/node`,
-//! `tree/span`, `tree/key`, `tree/manifest`): [`LoadBlock`] fetches a raw
+//! `tree/span`, `tree/key`, `tree/manifest`): a `Load` fetches a raw
 //! node block by content hash through the evaluation environment, and
 //! the `inspect_*` functions project the node's *logical model* out of
 //! the fetched bytes without touching storage:
@@ -18,11 +18,11 @@
 //!
 //! # Why this is sound under differential subscriptions
 //!
-//! [`LoadBlock`] is *idempotent*: a node block is content-addressed, so the
+//! A `Load` of a node is *idempotent*: a node block is content-addressed, so the
 //! bytes behind a hash — and therefore every row projected from them —
 //! can never change. A different tree is a different hash. This includes
 //! buffered novelty: a node's hash covers the ops riding on it. Rows
-//! derived through `LoadBlock` are permanent; they can become unnecessary,
+//! derived through a `Load` are permanent; they can become unnecessary,
 //! never wrong, so no invalidation machinery is required for them. The
 //! only mutable fact in the domain is "what is the current root?", which
 //! reaches queries as an ordinary tracked fact (`dialog.branch/tree`),
@@ -30,9 +30,8 @@
 //! cached here?"): that answer changes without a commit, is *not*
 //! idempotent, and must not be served through this module.
 
-#[cfg(doc)]
-use dialog_search_tree::LoadBlock;
-use dialog_search_tree::{Buffer, Distribution, Geometric, Hashed, Manifest, PersistentNode, Rank};
+use crate::tree::CorpusNode;
+use dialog_search_tree::{Buffer, Distribution, Geometric, Hashed, Manifest, Rank};
 use dialog_storage::Blake3Hash;
 use rkyv::deserialize;
 use rkyv::rancor::Error as RkyvError;
@@ -44,12 +43,9 @@ use crate::{
     KeyView, State, VALUE_KEY_TAG, Value, ValueKey, decode_value,
 };
 
-/// The raw content hash a [`LoadBlock`] resolves: the same 32 bytes a
+/// The raw content hash a node's `Load` resolves: the same 32 bytes a
 /// revision's tree reference and an index span's child hash carry.
 pub type NodeReference = Blake3Hash;
-
-/// The node type the artifact tree persists, instantiated for inspection.
-type ArtifactNode = PersistentNode<Key, State<Datum>>;
 
 /// Structural description of one persisted node.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -193,7 +189,7 @@ pub struct ManifestSummary {
 /// Decode the node behind `bytes` into its [`NodeSummary`].
 pub fn inspect_node(bytes: Vec<u8>) -> Result<NodeSummary, DialogArtifactsError> {
     let size = bytes.len() as u64;
-    let node = ArtifactNode::try_from(Buffer::from(bytes))?;
+    let node = CorpusNode::try_from(Buffer::from(bytes))?;
     let scale = node.scale().as_u8() as u64;
 
     Ok(match node.as_index() {
@@ -221,7 +217,7 @@ pub fn inspect_node(bytes: Vec<u8>) -> Result<NodeSummary, DialogArtifactsError>
 /// span, in key order. A segment has no spans and yields an empty
 /// vector (not an error — queries union over mixed levels).
 pub fn inspect_spans(bytes: Vec<u8>) -> Result<Vec<SpanSummary>, DialogArtifactsError> {
-    let node = ArtifactNode::try_from(Buffer::from(bytes))?;
+    let node = CorpusNode::try_from(Buffer::from(bytes))?;
     let Ok(index) = node.as_index() else {
         return Ok(Vec::new());
     };
@@ -262,7 +258,7 @@ pub fn inspect_spans(bytes: Vec<u8>) -> Result<Vec<SpanSummary>, DialogArtifacts
 /// entry, in entry order. An index node has no entries and yields an
 /// empty vector.
 pub fn inspect_keys(bytes: Vec<u8>) -> Result<Vec<KeySummary>, DialogArtifactsError> {
-    let node = ArtifactNode::try_from(Buffer::from(bytes))?;
+    let node = CorpusNode::try_from(Buffer::from(bytes))?;
     if node.as_index().is_ok() {
         return Ok(Vec::new());
     }
@@ -285,7 +281,7 @@ pub fn inspect_keys(bytes: Vec<u8>) -> Result<Vec<KeySummary>, DialogArtifactsEr
 /// (with empty metadata) so counts line up. An index node yields an
 /// empty vector.
 pub fn inspect_entries(bytes: Vec<u8>) -> Result<Vec<EntrySummary>, DialogArtifactsError> {
-    let node = ArtifactNode::try_from(Buffer::from(bytes))?;
+    let node = CorpusNode::try_from(Buffer::from(bytes))?;
     if node.as_index().is_ok() {
         return Ok(Vec::new());
     }
@@ -348,7 +344,7 @@ pub fn inspect_entries(bytes: Vec<u8>) -> Result<Vec<EntrySummary>, DialogArtifa
 /// per blob-index entry. Non-blob entries (and index nodes) yield no
 /// rows.
 pub fn inspect_blob_records(bytes: Vec<u8>) -> Result<Vec<BlobEntrySummary>, DialogArtifactsError> {
-    let node = ArtifactNode::try_from(Buffer::from(bytes))?;
+    let node = CorpusNode::try_from(Buffer::from(bytes))?;
     if node.as_index().is_ok() {
         return Ok(Vec::new());
     }
@@ -375,7 +371,7 @@ pub fn inspect_blob_records(bytes: Vec<u8>) -> Result<Vec<BlobEntrySummary>, Dia
 
 /// Decode the manifest embedded in the node behind `bytes`.
 pub fn inspect_manifest(bytes: Vec<u8>) -> Result<ManifestSummary, DialogArtifactsError> {
-    let node = ArtifactNode::try_from(Buffer::from(bytes))?;
+    let node = CorpusNode::try_from(Buffer::from(bytes))?;
     let manifest: Manifest = node.manifest()?;
     Ok(ManifestSummary {
         version: node.layout_version(),

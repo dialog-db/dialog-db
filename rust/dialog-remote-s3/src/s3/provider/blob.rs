@@ -30,8 +30,7 @@ type ByteStream = Pin<Box<dyn ByteChunks>>;
 
 // --- Fork entry points: redeem the authorization, then execute over S3 -----
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<ForkInvocation<S3, Read>> for S3 {
     async fn execute(&self, input: ForkInvocation<S3, Read>) -> Result<BlobReader, BlobError> {
         input
@@ -44,8 +43,7 @@ impl Provider<ForkInvocation<S3, Read>> for S3 {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<ForkInvocation<S3, Import>> for S3 {
     async fn execute(&self, input: ForkInvocation<S3, Import>) -> Result<BlobWriter, BlobError> {
         input
@@ -60,8 +58,7 @@ impl Provider<ForkInvocation<S3, Import>> for S3 {
 
 // --- HTTP execution ---------------------------------------------------------
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<S3Invocation<Read>> for S3 {
     async fn execute(&self, input: S3Invocation<Read>) -> Result<BlobReader, BlobError> {
         let mut permit = input.permit;
@@ -102,8 +99,7 @@ impl Provider<S3Invocation<Read>> for S3 {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<S3Invocation<Import>> for S3 {
     async fn execute(&self, input: S3Invocation<Import>) -> Result<BlobWriter, BlobError> {
         Ok(Box::new(S3BlobSink {

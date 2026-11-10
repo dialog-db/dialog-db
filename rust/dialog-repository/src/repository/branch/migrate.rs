@@ -21,23 +21,27 @@
 //! wrote: the storage rewrite, then [`Branch::upgrade_rules`], which
 //! re-installs rules under the identities this release gives them.
 
+use dialog_artifacts::tree::CorpusNode;
 use dialog_artifacts::tree::rekey::rekey_tree;
 use dialog_artifacts::{ArchiveDelta, DialogArtifactsError, NUMBER_BAND};
 use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::{ConditionalSync, Holds};
+use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify};
 use dialog_effects::blob::Import as BlobImport;
+use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::Read as BlobRead;
 use dialog_effects::blob::Size as BlobSize;
 use dialog_effects::memory::{Publish, Resolve};
 use dialog_search_tree::Manifest;
+use dialog_search_tree::nodes;
 use futures_util::stream;
 
-use crate::repository::archive::networked::Reads;
 use crate::repository::archive::persist;
-use crate::{Branch, CommitError, Index, NetworkedIndex, RemoteSite, Revision, RulesUpgraded};
+use crate::repository::archive::{TreeEnv, erased};
+use crate::{Branch, CommitError, Index, RemoteSite, Revision, RulesUpgraded};
 
 /// What [`Branch::migrate`] did.
 #[derive(Debug, Clone, Default)]
@@ -68,17 +72,26 @@ impl Branch {
         Env: Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + Provider<BlobLoad>
             + Provider<Fork<RemoteSite, Resolve>>
+            + dialog_common::Holds
             + ConditionalSync
             + 'static,
     {
         let Some(revision) = self.revision() else {
             return Ok(None);
         };
-        let store = NetworkedIndex::new(env, self.archive().index(), self.fallback());
-        let tree =
-            Index::from_hash_with_cache(NodeHash::from(*revision.tree.hash()), self.node_cache());
+        let store = erased(env);
+        let tree = Index::at(
+            self.archive().index(),
+            NodeHash::from(*revision.tree.hash()),
+        );
         let manifest = tree
             .manifest(&store)
             .await
@@ -94,8 +107,15 @@ impl Branch {
         Env: Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + Provider<BlobLoad>
             + Provider<Fork<RemoteSite, Resolve>>
+            + dialog_common::Holds
             + ConditionalSync
             + 'static,
     {
@@ -149,12 +169,21 @@ impl RekeyStorage<'_> {
             + Provider<Get>
             + Provider<Put>
             + Provider<Import>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
             + Provider<Resolve>
             + Provider<Publish>
             + Provider<Identify>
             + Provider<Attest>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + Provider<BlobLoad>
             + Provider<Fork<RemoteSite, Resolve>>
+            + dialog_common::Holds
             + ConditionalSync
             + 'static,
     {
@@ -162,9 +191,9 @@ impl RekeyStorage<'_> {
         let Some(revision) = branch.revision() else {
             return Ok(None);
         };
-        let store = NetworkedIndex::erased(env, branch.archive().index(), branch.fallback());
-        let tree =
-            Index::from_hash_with_cache(NodeHash::from(*revision.tree.hash()), branch.node_cache());
+        let store = erased(env);
+        let catalog = branch.archive().index();
+        let tree = Index::at(catalog.clone(), NodeHash::from(*revision.tree.hash()));
         let manifest = tree
             .manifest(&store)
             .await
@@ -179,14 +208,8 @@ impl RekeyStorage<'_> {
         // The rewrite's nodes are persisted before the revision that
         // names them is minted: a revision points only at durable blocks.
         let mut delta = ArchiveDelta::zero();
-        let rewritten = rekey_tree(&tree, &store, &mut delta, target, branch.node_cache()).await?;
-        persist(
-            &branch.archive().index(),
-            &branch.node_cache(),
-            &mut delta,
-            env,
-        )
-        .await?;
+        let rewritten = rekey_tree(&tree, &store, &mut delta, target).await?;
+        persist(&catalog, &mut delta, env).await?;
         // Boxed: the commit is a large future, and this one runs once.
         let revision = Box::pin(
             branch
@@ -215,11 +238,19 @@ impl Migrate<'_> {
             + Provider<BlobRead>
             + Provider<Put>
             + Provider<Import>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
             + Provider<Resolve>
             + Provider<Publish>
             + Provider<Identify>
             + Provider<Attest>
-            + Provider<crate::Hydrate>
+            + Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
@@ -251,42 +282,45 @@ impl Migrate<'_> {
 pub(crate) async fn aligned<Env>(
     branch: &Branch,
     tree: Index,
-    store: &NetworkedIndex<'_, dyn Reads>,
+    store: &dyn TreeEnv,
     env: &Env,
 ) -> Result<Index, DialogArtifactsError>
 where
     Env: Provider<Get>
         + Provider<Put>
         + Provider<Import>
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
         + Provider<BlobImport>
         + Provider<BlobRead>
         + Provider<Resolve>
-        + Provider<crate::Hydrate>
+        + Provider<ArchiveLoad>
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
+        + Provider<BlobLoad>
         + Provider<Fork<RemoteSite, Resolve>>
+        + dialog_common::Holds
         + ConditionalSync
         + 'static,
 {
-    let manifest = tree.manifest(store).await?;
+    let manifest = tree.manifest(&store).await?;
     if manifest.value_encoding == NUMBER_BAND {
         return Ok(tree);
     }
     let root = tree.root().clone();
     if let Some(rewritten) = branch.rewrites().get_cached(&root) {
-        return Ok(Index::from_hash_with_cache(rewritten, branch.node_cache()));
+        return Ok(tree.with_root(rewritten));
     }
     let target = Manifest {
         value_encoding: NUMBER_BAND,
         ..manifest
     };
     let mut delta = ArchiveDelta::zero();
-    let rewritten = rekey_tree(&tree, store, &mut delta, target, branch.node_cache()).await?;
-    persist(
-        &branch.archive().index(),
-        &branch.node_cache(),
-        &mut delta,
-        env,
-    )
-    .await?;
+    let rewritten = rekey_tree(&tree, &store, &mut delta, target).await?;
+    persist(tree.catalog(), &mut delta, env).await?;
     branch.rewrites().insert(root, rewritten.root().clone());
     Ok(rewritten)
 }

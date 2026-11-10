@@ -81,6 +81,8 @@ pub use secret::{
 };
 pub use upgrade::{Step, StepBound, StepFuture, Upgraded};
 
+use dialog_artifacts::tree::CorpusNode;
+use dialog_search_tree::nodes;
 use dialog_ucan_core::subject::Subject as UcanSubject;
 use std::collections::HashMap;
 use std::fmt;
@@ -129,8 +131,7 @@ pub(crate) fn default_discovery() -> Arc<dyn Discovery> {
     Arc::new(CachingResolver::new(WebResolver::new()))
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl<S: Clone + ConditionalSend + ConditionalSync, M: Mode> Provider<Discover> for Peer<S, M> {
     async fn execute(&self, input: Discover) -> Result<Vec<Service>, ResolveError> {
         self.inner.discovery.execute(input).await
@@ -138,8 +139,8 @@ impl<S: Clone + ConditionalSend + ConditionalSync, M: Mode> Provider<Discover> f
 }
 
 /// The space provider bound a peer's storage must satisfy for the peer
-/// to provide every effect, including the remote forks, and to mount its
-/// home at a location.
+/// to provide every effect, including the remote forks and the node
+/// layer's requests a tree makes, and to mount its home at a location.
 pub trait PeerSpace:
     SpaceProvider
     + Resource<Location, Error: fmt::Display>
@@ -147,6 +148,9 @@ pub trait PeerSpace:
     + Provider<blob::Size>
     + Provider<blob::Write>
     + Provider<blob::Import>
+    + Provider<nodes::Read<CorpusNode>>
+    + Provider<nodes::Preload<CorpusNode>>
+    + Provider<nodes::Write<CorpusNode>>
     + Clone
     + ConditionalSend
     + ConditionalSync
@@ -161,6 +165,9 @@ impl<T> PeerSpace for T where
         + Provider<blob::Size>
         + Provider<blob::Write>
         + Provider<blob::Import>
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + Provider<nodes::Write<CorpusNode>>
         + Clone
         + ConditionalSend
         + ConditionalSync
@@ -524,6 +531,15 @@ impl<S: Clone, M: Mode> Peer<S, M> {
     /// Build the authority chain for a given subject DID.
     pub fn build_authority(&self, subject: Did) -> Capability<AuthOperator> {
         self.authority.build_authority(subject)
+    }
+}
+
+impl<S: Clone, M: Mode> Peer<S, M> {
+    /// The storage this peer's spaces are mounted in, for the peer's own
+    /// providers to read and write through; a session's handle reaches it
+    /// here too, since what it does with it is governed by its grants.
+    pub(crate) fn mounted(&self) -> &Storage<S> {
+        &self.storage
     }
 }
 

@@ -20,6 +20,8 @@ anyhow = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 dialog-artifacts = { workspace = true }
 dialog-capability = { workspace = true }
+# The seeded entropy every run draws from (`helpers::entropy`).
+dialog-common = { workspace = true, features = ["helpers"] }
 dialog-credentials = { workspace = true }
 dialog-effects = { workspace = true }
 dialog-peer = { workspace = true, features = ["helpers"] }
@@ -28,6 +30,7 @@ dialog-remote-fs = { workspace = true }
 dialog-repository = { workspace = true }
 dialog-search-tree = { workspace = true }
 dialog-storage = { workspace = true }
+dialog-ucan = { workspace = true }
 dialog-varsig = { workspace = true }
 futures-util = { workspace = true }
 serde = { workspace = true, features = ["derive"] }

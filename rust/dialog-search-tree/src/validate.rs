@@ -49,6 +49,7 @@
 //! key …" at the causing edit. Cost is O(n) in entries plus one in-memory
 //! rebuild; no reference store, no second persist.
 
+use crate::nodes::{Preload, Read};
 use dialog_capability::Provider;
 use dialog_common::{Blake3Hash, ConditionalSync};
 use rkyv::{
@@ -62,8 +63,8 @@ use rkyv::{
 };
 
 use crate::{
-    Accessor, DialogSearchTreeError, Distribution, Key, LoadBlock, NodeBody, NoveltyEntry,
-    NoveltyOp, PersistentNode, PersistentTree, TransientTree, Value, into_owned,
+    Accessor, DialogSearchTreeError, Distribution, Key, NodeBody, NoveltyEntry, NoveltyOp,
+    PersistentNode, PersistentTree, TransientTree, Value, into_owned,
 };
 
 /// Renders a separator for a violation message: a bounded hex prefix, so
@@ -106,7 +107,10 @@ where
         storage: &Env,
     ) -> Result<Vec<String>, DialogSearchTreeError>
     where
-        Env: Provider<LoadBlock> + Clone + ConditionalSync,
+        Env: Provider<Read<PersistentNode<K, V>>>
+            + Provider<Preload<PersistentNode<K, V>>>
+            + ConditionalSync
+            + Clone,
     {
         // An unpersisted empty tree has no stored form to validate; it is
         // trivially canonical.
@@ -114,7 +118,7 @@ where
             return Ok(Vec::new());
         }
         let manifest = self.manifest(storage).await?;
-        let accessor: Accessor<'_, K, V, Env> = Accessor::new(Default::default(), storage);
+        let accessor: Accessor<'_, K, V, Env> = Accessor::new(storage, self.catalog());
 
         // The empty tree's node: canonical exactly when it is byte-identical
         // to the fixed zero-entry encoding for its manifest — under every
@@ -184,9 +188,10 @@ where
         }
 
         // The canonical constructor, over the same entries, in memory.
-        let expected = TransientTree::<K, V, D>::empty_with_manifest(Default::default(), manifest)
-            .plant(entries, storage)
-            .await?;
+        let expected =
+            TransientTree::<K, V, D>::empty_with_manifest(self.catalog().clone(), manifest)
+                .plant(entries, storage)
+                .await?;
         let expected_levels = expected.level_separators()?;
 
         if stored_levels.len() != expected_levels.len() {
@@ -225,23 +230,24 @@ where
 mod tests {
     #![allow(unexpected_cfgs)]
 
-    use crate::MemoryBlocks;
+    use crate::helpers::Blocks;
     use anyhow::Result;
     use dialog_common::Blake3Hash;
 
-    use crate::{
-        Buffer, Delta, HitchhikerTree, Manifest, NodeCache, PersistentTree, TransientTree,
-    };
+    use crate::{Delta, HitchhikerTree, Manifest, PersistentTree, TransientTree};
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-    type Store = MemoryBlocks;
+    type Store = Blocks;
     type Tree = PersistentTree<[u8; 4], Vec<u8>>;
 
-    async fn settle(delta: &mut Delta<Blake3Hash, Buffer>, storage: &mut Store) -> Result<()> {
-        for (_, buffer) in delta.flush() {
-            storage.store(buffer);
+    async fn settle(
+        delta: &mut Delta<Blake3Hash, crate::PersistentNode<[u8; 4], Vec<u8>>>,
+        storage: &mut Store,
+    ) -> Result<()> {
+        for (_, node) in delta.flush() {
+            storage.store(node.buffer().clone());
         }
         Ok(())
     }
@@ -252,8 +258,8 @@ mod tests {
     /// independent plant constructor.
     #[dialog_common::test]
     async fn it_validates_canonically_edited_trees_clean() -> Result<()> {
-        let mut storage: Store = MemoryBlocks::new();
-        let mut tree = Tree::empty();
+        let mut storage: Store = Blocks::new();
+        let mut tree = Tree::empty_in(crate::helpers::test_catalog());
         for i in 0..250u32 {
             let key = (i * 37 % 1000).to_be_bytes();
             let mut delta = Delta::zero();
@@ -281,8 +287,9 @@ mod tests {
     /// settle every op into the same shape the plant constructor derives.
     #[dialog_common::test]
     async fn it_validates_canonicalized_buffered_trees_clean() -> Result<()> {
-        let mut storage: Store = MemoryBlocks::new();
-        let mut buffered = HitchhikerTree::open(&Tree::empty()).with_op_buf_size(8);
+        let mut storage: Store = Blocks::new();
+        let mut buffered = HitchhikerTree::open(&Tree::empty_in(crate::helpers::test_catalog()))
+            .with_op_buf_size(8);
         for i in 0..300u32 {
             let key = (i * 17 % 700).to_be_bytes();
             buffered = buffered.insert(key, vec![i as u8, 3], &storage).await?;
@@ -305,14 +312,14 @@ mod tests {
     /// fully-flushed check.
     #[dialog_common::test]
     async fn it_flags_buffered_roots_as_non_canonical() -> Result<()> {
-        let mut storage: Store = MemoryBlocks::new();
+        let mut storage: Store = Blocks::new();
         // Seed enough entries through the canonical path that the tree has
         // real depth, then buffer a few writes with the DEFAULT op buffer:
         // they stay parked in the root's novelty, which is exactly the
         // published-but-not-canonical form the property excludes. (A tiny
         // op buffer would cascade every op to the leaves and publish a form
         // that genuinely IS canonical — the validator correctly accepts it.)
-        let mut tree = Tree::empty();
+        let mut tree = Tree::empty_in(crate::helpers::test_catalog());
         for i in 0..200u32 {
             let key = (i * 13 % 400).to_be_bytes();
             let mut delta = Delta::zero();
@@ -331,7 +338,7 @@ mod tests {
         let mut delta = Delta::zero();
         let root = buffered.persist(&mut delta)?;
         settle(&mut delta, &mut storage).await?;
-        let tree = Tree::from_hash_with_cache(root, Default::default());
+        let tree = Tree::at(crate::helpers::test_catalog(), root);
 
         let divergences = tree.canonical_divergences(&storage).await?;
         assert!(
@@ -349,7 +356,7 @@ mod tests {
     /// for its manifest is flagged.
     #[dialog_common::test]
     async fn it_validates_the_empty_node_by_manifest() -> Result<()> {
-        let mut storage: Store = MemoryBlocks::new();
+        let mut storage: Store = Blocks::new();
 
         // The canonical empty node, produced by the production persist
         // path, under a custom manifest and under the default.
@@ -361,9 +368,11 @@ mod tests {
             Manifest::default(),
         ] {
             let mut delta = Delta::zero();
-            let emptied =
-                TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(NodeCache::new(), manifest)
-                    .persist(&mut delta)?;
+            let emptied = TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(
+                crate::helpers::test_catalog(),
+                manifest,
+            )
+            .persist(&mut delta)?;
             settle(&mut delta, &mut storage).await?;
             assert!(emptied.stored_root().is_some());
             assert_eq!(

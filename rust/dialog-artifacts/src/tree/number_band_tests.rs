@@ -6,7 +6,8 @@
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-use dialog_search_tree::{Manifest, MemoryBlocks, NodeCache, PersistentTree};
+use dialog_search_tree::helpers::test_catalog;
+use dialog_search_tree::{Manifest, PersistentTree, helpers::Blocks};
 use futures_util::{TryStreamExt as _, stream};
 
 use super::{ArtifactTree, ArtifactTreeExt as _, SpillCache};
@@ -19,16 +20,13 @@ use crate::{
 };
 
 /// A tree written under `value_encoding`, holding `facts`.
-async fn tree(
-    value_encoding: u32,
-    facts: Vec<Artifact>,
-) -> anyhow::Result<(ArtifactTree, MemoryBlocks)> {
-    let store = MemoryBlocks::new();
+async fn tree(value_encoding: u32, facts: Vec<Artifact>) -> anyhow::Result<(ArtifactTree, Blocks)> {
+    let store = Blocks::new();
     let manifest = Manifest {
         value_encoding,
         ..Manifest::default()
     };
-    let mut tree: ArtifactTree = PersistentTree::empty_with_manifest(manifest, NodeCache::new());
+    let mut tree: ArtifactTree = PersistentTree::empty_with_manifest(test_catalog(), manifest);
     let mut delta = ArchiveDelta::zero();
     let instructions = facts
         .into_iter()
@@ -60,7 +58,7 @@ fn sizes(values: &[Value]) -> anyhow::Result<Vec<Artifact>> {
 
 async fn values(
     tree: &ArtifactTree,
-    store: &MemoryBlocks,
+    store: &Blocks,
     selector: ArtifactSelector<Constrained>,
 ) -> anyhow::Result<Vec<Value>> {
     let rows: Vec<Artifact> = tree

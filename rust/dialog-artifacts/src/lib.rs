@@ -25,13 +25,16 @@
 //! use dialog_artifacts::{
 //!     ArchiveDelta, Artifact, ArtifactSelector, Entity, Instruction, Relation, Value,
 //! };
-//! use dialog_search_tree::MemoryBlocks;
+//! use dialog_capability::{Subject, did};
+//! use dialog_effects::archive::prelude::ArchiveScope;
+//! use dialog_storage::provider::Volatile;
 //! use futures_util::{StreamExt, stream};
 //!
 //! // Any environment that loads blocks and blobs will do; this one keeps
-//! // them in memory.
-//! let blocks = MemoryBlocks::new();
-//! let mut index = ArtifactTree::empty();
+//! // them in memory. The index lives in a catalog of a subject's archive.
+//! let blocks = Volatile::new();
+//! let catalog = ArchiveScope::new(Subject::from(did!("key:z6MkIndex"))).index();
+//! let mut index = ArtifactTree::empty_in(catalog.clone());
 //! let mut delta = ArchiveDelta::zero();
 //!
 //! // Assert an artifact: the new nodes (and any spilled value) are staged
@@ -45,7 +48,11 @@
 //! index
 //!     .apply(&blocks, &mut delta, stream::iter(vec![Instruction::Assert(artifact, dialog_artifacts::Pick::All)]))
 //!     .await?;
-//! delta.flush_into(&blocks);
+//! // A value spilled before values moved to the blob store is read from
+//! // the catalog too, so this stand-in for a commit writes both lanes there.
+//! let mut staged: Vec<_> = delta.flush_blocks().collect();
+//! staged.extend(delta.flush_blobs());
+//! catalog.import(staged).perform(&blocks).await?;
 //!
 //! // Query the index
 //! let selector = ArtifactSelector::new().the(Relation::from_str("profile/name")?);
@@ -60,6 +67,16 @@
 
 mod archive;
 pub use archive::*;
+
+/// What a read bound names, for this crate's modules to import at once
+/// without colliding with what they import themselves.
+mod reads {
+    pub use crate::tree::CorpusNode;
+    pub use dialog_capability::Provider;
+    pub use dialog_common::{ConditionalSend, ConditionalSync};
+    pub use dialog_effects::blob;
+    pub use dialog_search_tree::nodes;
+}
 
 mod artifacts;
 pub use artifacts::*;

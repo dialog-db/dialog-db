@@ -3,6 +3,9 @@ use std::str::FromStr;
 pub mod metered;
 pub use metered::{Meter, Metered, Tally};
 
+pub mod seed;
+pub use seed::Seed;
+
 use crate::{
     Allowance, Mode, OpenCredential, Peer, PeerError, PeerSpace, Session, SpaceVaultExt as _,
 };

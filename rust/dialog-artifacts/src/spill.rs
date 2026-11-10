@@ -10,14 +10,13 @@
 //! differential and names exactly the spilled value blocks newly referenced
 //! between two tree versions, so push can ship them alongside the novel nodes.
 
-use crate::ArchiveReader;
+use crate::reads::*;
 use std::collections::HashSet;
 use std::str::from_utf8;
 
 use async_stream::try_stream;
-use dialog_capability::Provider;
-use dialog_common::{ConditionalSend, ConditionalSync};
-use dialog_search_tree::{Change, LoadBlock, TreeDifference};
+use dialog_common::ConditionalSend;
+use dialog_search_tree::{Change, TreeDifference};
 use dialog_storage::Blake3Hash;
 use futures_util::Stream;
 
@@ -174,7 +173,10 @@ pub fn shipment_refs<'a, Env>(
     difference: &'a TreeDifference<'a, Key, State<Datum>, Env>,
 ) -> impl Stream<Item = Result<ShipmentRef, DialogArtifactsError>> + 'a + ConditionalSend
 where
-    Env: Provider<LoadBlock> + ConditionalSync,
+    Env: Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
+        + ConditionalSync,
 {
     try_stream! {
         let changes = difference.changes();
@@ -217,7 +219,14 @@ pub fn spilled_refs<'s, S>(
     store: S,
 ) -> impl Stream<Item = Result<Blake3Hash, DialogArtifactsError>> + 's + ConditionalSend
 where
-    S: ArchiveReader + Clone + 's,
+    S: Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
+        + Provider<blob::Load>
+        + ConditionalSend
+        + ConditionalSync
+        + Clone
+        + 's,
 {
     let storage = store;
     try_stream! {
@@ -234,6 +243,7 @@ where
 
 #[cfg(test)]
 mod tests {
+    use dialog_search_tree::helpers::test_catalog;
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
@@ -241,7 +251,7 @@ mod tests {
     use crate::ArchiveDelta;
     use crate::tree::ArtifactTreeExt;
     use crate::{Artifact, Instruction, Value};
-    use dialog_search_tree::MemoryBlocks;
+    use dialog_search_tree::helpers::Blocks;
     use futures_util::{TryStreamExt, stream};
 
     #[dialog_common::test]
@@ -250,11 +260,11 @@ mod tests {
         let value = Value::String("z".repeat(inline_n + 1));
         let reference = value.to_reference();
 
-        let store = MemoryBlocks::new();
+        let store = Blocks::new();
         let mut delta = ArchiveDelta::zero();
 
         // Base: empty.
-        let base = ArtifactTree::empty();
+        let base = ArtifactTree::empty_in(test_catalog());
 
         // Current: one spilling fact (touches all three EAV/AEV/VAE orderings).
         let mut current = base.clone();
@@ -300,11 +310,11 @@ mod tests {
             cause: None,
         };
 
-        let store = MemoryBlocks::new();
+        let store = Blocks::new();
         let mut delta = ArchiveDelta::zero();
 
         // Base: the spilled fact is asserted.
-        let mut base = ArtifactTree::empty();
+        let mut base = ArtifactTree::empty_in(test_catalog());
         base.apply(
             &store,
             &mut delta,
@@ -359,11 +369,11 @@ mod tests {
         };
         let reference = artifact.is.to_reference();
 
-        let store = MemoryBlocks::new();
+        let store = Blocks::new();
         let mut delta = ArchiveDelta::zero();
 
         // Base: what the remote already has — nothing.
-        let base = ArtifactTree::empty();
+        let base = ArtifactTree::empty_in(test_catalog());
 
         // Locally: assert the spilling fact, then retract it, each its own
         // version-tagged commit, before pushing either.
@@ -420,10 +430,10 @@ mod tests {
             cause: None,
         };
 
-        let store = MemoryBlocks::new();
+        let store = Blocks::new();
         let mut delta = ArchiveDelta::zero();
 
-        let base = ArtifactTree::empty();
+        let base = ArtifactTree::empty_in(test_catalog());
         let mut current = base.clone();
         current
             .apply_versioned(
@@ -458,10 +468,10 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_ignores_inline_values() -> Result<(), DialogArtifactsError> {
-        let store = MemoryBlocks::new();
+        let store = Blocks::new();
         let mut delta = ArchiveDelta::zero();
 
-        let base = ArtifactTree::empty();
+        let base = ArtifactTree::empty_in(test_catalog());
         let mut current = base.clone();
         current
             .apply(

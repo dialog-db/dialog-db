@@ -118,6 +118,14 @@ pub struct Report {
     pub vault_files: u64,
     /// Total bytes in the remote vault after seeding.
     pub vault_bytes: u64,
+    /// The seed the run's identities derived from (`DIALOG_SOAK_SEED`
+    /// replays it); `None` in a report recorded before runs were seeded.
+    #[serde(default)]
+    pub seed: Option<u64>,
+    /// The tree root of the seeded space's head, hex: one seed writes one
+    /// root, so two runs that differ here did not run the same tree.
+    #[serde(default)]
+    pub seeded_root: Option<String>,
     /// The measured phases, in execution order.
     pub phases: Vec<PhaseReport>,
 }
