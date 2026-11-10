@@ -65,9 +65,11 @@
 //!
 //! [`AnalyzedRule::is_entity_local`]: dialog_query::rule::analyzer::AnalyzedRule::is_entity_local
 
+use dialog_artifacts::tree::CorpusNode;
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::Read as BlobRead;
+use dialog_search_tree::nodes;
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::ops::RangeInclusive;
@@ -721,6 +723,11 @@ where
             + Provider<Resolve>
             + Provider<Identify>
             + Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
@@ -836,6 +843,11 @@ where
             + Provider<Put>
             + Provider<Resolve>
             + Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
@@ -977,6 +989,11 @@ where
             + Provider<Resolve>
             + Provider<Identify>
             + Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
@@ -1186,6 +1203,11 @@ where
             + Provider<Resolve>
             + Provider<Identify>
             + Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
@@ -1243,6 +1265,11 @@ where
             + Provider<Resolve>
             + Provider<Identify>
             + Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
@@ -1286,8 +1313,10 @@ where
 
 #[cfg(test)]
 mod tests {
+    use dialog_artifacts::tree::CorpusNode;
     use dialog_effects::archive::Load as ArchiveLoad;
     use dialog_effects::blob::Load as BlobLoad;
+    use dialog_search_tree::nodes;
 
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
@@ -1295,7 +1324,6 @@ mod tests {
     use super::Delta;
     use crate::helpers::test_repo;
     use crate::{Ephemeral, RemoteSite};
-    use async_trait::async_trait;
     use dialog_artifacts::{ArtifactSelector, Changes, Entity, Value};
     use dialog_artifacts::{NameShape, Relation as ArtifactsRelation, Symbol};
     use dialog_capability::Command;
@@ -1384,6 +1412,11 @@ mod tests {
             + Provider<Resolve>
             + Provider<Identify>
             + Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
@@ -5354,6 +5387,9 @@ mod tests {
     impl Fault for Resolve {}
     impl Fault for ArchiveLoad {}
     impl Fault for BlobLoad {}
+    impl Fault for nodes::Read<CorpusNode> {}
+    impl Fault for nodes::Preload<CorpusNode> {}
+    impl Fault for nodes::Write<CorpusNode> {}
     impl Fault for dialog_artifacts::Preload {}
     impl Fault for dialog_artifacts::Speculation {}
     impl Fault for Fork<RemoteSite, Resolve> {}
@@ -5397,12 +5433,12 @@ mod tests {
         }
     }
 
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[dialog_capability::provider]
     impl<C, P> Provider<C> for Unreliable<P>
     where
         C: Fault + 'static,
         C::Input: ConditionalSend,
+        C::Output: ConditionalSend,
         P: Provider<C> + ConditionalSync,
     {
         async fn execute(&self, input: C::Input) -> C::Output {

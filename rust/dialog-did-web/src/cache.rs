@@ -166,8 +166,7 @@ impl<P> CachingResolver<P> {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl<P> Provider<Resolve> for CachingResolver<P>
 where
     P: Provider<Resolve> + ConditionalSync,
@@ -187,8 +186,7 @@ where
 /// its addresses stop answering, rarely enough that the fetch is the right
 /// answer, and the cache's bound is sized for the verifiers every
 /// verification asks for.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl<P> Provider<Discover> for CachingResolver<P>
 where
     P: Provider<Discover> + ConditionalSync,

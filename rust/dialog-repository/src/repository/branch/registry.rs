@@ -13,6 +13,7 @@
 //! it goes through the same [`machinery`](super::Commit::machinery)
 //! scope, beside the delegation records that already use it.
 
+use dialog_artifacts::tree::CorpusNode;
 use dialog_artifacts::{Changes, DialogArtifactsError, Entity, Statement};
 use dialog_capability::{Capability, Fork, Provider, Subject};
 use dialog_common::{ConditionalSync, Holds};
@@ -23,6 +24,7 @@ use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::{Import as BlobImport, Read as BlobRead};
 use dialog_effects::memory::{Publish, Resolve};
 use dialog_query::{Output as _, Query, Term};
+use dialog_search_tree::nodes;
 use futures_util::stream;
 use std::sync::Arc;
 
@@ -38,11 +40,18 @@ pub trait RegistryEnv:
     + Provider<BlobImport>
     + Provider<Put>
     + Provider<Import>
+    + Provider<nodes::Write<CorpusNode>>
+    + ConditionalSync
     + Provider<Resolve>
     + Provider<Publish>
     + Provider<Identify>
     + Provider<Attest>
     + Provider<ArchiveLoad>
+    + Provider<nodes::Write<CorpusNode>>
+    + ConditionalSync
+    + Provider<nodes::Read<CorpusNode>>
+    + Provider<nodes::Preload<CorpusNode>>
+    + ConditionalSync
     + Provider<BlobLoad>
     + Provider<dialog_artifacts::Preload>
     + Provider<dialog_artifacts::Speculation>
@@ -59,11 +68,18 @@ impl<T> RegistryEnv for T where
         + Provider<BlobImport>
         + Provider<Put>
         + Provider<Import>
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
         + Provider<Resolve>
         + Provider<Publish>
         + Provider<Identify>
         + Provider<Attest>
         + Provider<ArchiveLoad>
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
         + Provider<BlobLoad>
         + Provider<dialog_artifacts::Preload>
         + Provider<dialog_artifacts::Speculation>

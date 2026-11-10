@@ -88,7 +88,10 @@ pub async fn capture<Env>(
     env: &Env,
 ) -> Result<Vec<NodeStat>, DialogArtifactsError>
 where
-    Env: Provider<archive::Load> + Holds + ConditionalSync,
+    Env: Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
+        + ConditionalSync,
 {
     let mut stats: Vec<(usize, NodeStat)> = Vec::new();
     if root == dialog_common::NULL_BLAKE3_HASH.as_bytes() {
@@ -399,8 +402,7 @@ mod tests {
         fn hold(&self, _key: String, _handle: Held) {}
     }
 
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    #[dialog_capability::provider]
     impl Provider<Load> for Impostor {
         async fn execute(&self, load: Load) -> Result<Option<Buffer>, ArchiveError> {
             if load.digest == self.asked {
@@ -409,6 +411,8 @@ mod tests {
             load.perform(&self.blocks).await
         }
     }
+
+    dialog_search_tree::reads_nodes_through_blocks!(Impostor);
 
     /// A store that answers with a well-formed node that is not the one
     /// asked for is refused: capture measures the tree it was asked about

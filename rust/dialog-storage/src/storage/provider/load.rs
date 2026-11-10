@@ -79,8 +79,7 @@ pub fn archive_error(error: BlobError) -> ArchiveError {
 /// [`blob::Load`] from what it holds.
 macro_rules! loads_locally {
     ($store:ty) => {
-        #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-        #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+        #[dialog_capability::provider]
         impl dialog_capability::Provider<dialog_effects::archive::Load> for $store {
             async fn execute(
                 &self,
@@ -93,8 +92,7 @@ macro_rules! loads_locally {
     ($store:ty, blobs) => {
         loads_locally!($store);
 
-        #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-        #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+        #[dialog_capability::provider]
         impl dialog_capability::Provider<dialog_effects::blob::Load> for $store {
             async fn execute(
                 &self,

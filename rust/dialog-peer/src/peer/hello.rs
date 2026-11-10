@@ -20,8 +20,7 @@ use dialog_repository::spaces;
 
 use super::{Mode, Peer};
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl<S, M: Mode> Provider<Hello> for Peer<S, M>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
@@ -36,8 +35,7 @@ where
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl<S, M: Mode> Provider<Spaces> for Peer<S, M>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,

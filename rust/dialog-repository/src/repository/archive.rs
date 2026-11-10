@@ -1,12 +1,15 @@
 //! Reading a branch's tree through archive capabilities.
 //!
-//! A tree reads its nodes and spilled values by performing
-//! [`Load`](dialog_effects::archive::Load) and
-//! [`blob::Load`](dialog_effects::blob::Load) on the environment with the
-//! branch's catalog. What is here is how an environment answers those:
+//! A tree reads its nodes by performing the node layer's requests
+//! ([`dialog_search_tree::nodes`]) on the environment with the branch's
+//! catalog, and its spilled values by performing
+//! [`blob::Load`](dialog_effects::blob::Load); a reader of blocks performs
+//! [`Load`](dialog_effects::archive::Load). What is here is how an
+//! environment answers those:
 //!
 //! - [`hydrate`] -- a local miss hydrates from where the subject's blocks
-//!   live
+//!   live, and a node read is answered from the cache the environment
+//!   holds, its store, or a hydrated block
 //! - [`routes`] -- where that is, as the subject's open branches register
 
 /// A local read miss hydrates from the routes registered for its subject.
@@ -20,14 +23,16 @@ pub use routes::{Routes, Routing};
 mod persist;
 pub(crate) use persist::persist;
 
+use dialog_artifacts::tree::CorpusNode;
 use dialog_capability::Provider;
 use dialog_common::{ConditionalSync, Holds};
 use dialog_effects::archive::{Get, Load};
 use dialog_effects::blob::Load as BlobLoad;
+use dialog_search_tree::nodes;
 
-/// What a tree read needs of the environment it reads through, as one
-/// trait object: the loads of both lanes, the local read a difference's
-/// boundary side performs, and the node cache it holds.
+/// What a tree read or commit needs of the environment it goes through, as
+/// one trait object: the node layer's reads and write, the loads of both
+/// lanes, the local read of a block, and the handles it holds.
 ///
 /// The tree code a read or a commit runs is generic over the environment
 /// it reads through. Read through each concrete environment, that code is
@@ -43,12 +48,31 @@ use dialog_effects::blob::Load as BlobLoad;
 /// an outlives bound on it then cannot be shown, and every provider that
 /// commits stops being `Send` (rust-lang/rust#100013).
 pub(crate) trait TreeEnv:
-    Provider<Get> + Provider<Load> + Provider<BlobLoad> + Holds + ConditionalSync
+    Provider<nodes::Read<CorpusNode>>
+    + Provider<nodes::Preload<CorpusNode>>
+    + ConditionalSync
+    + Provider<nodes::Write<CorpusNode>>
+    + ConditionalSync
+    + Provider<Get>
+    + Provider<Load>
+    + Provider<BlobLoad>
+    + Holds
+    + ConditionalSync
 {
 }
 
 impl<T> TreeEnv for T where
-    T: Provider<Get> + Provider<Load> + Provider<BlobLoad> + Holds + ConditionalSync + ?Sized
+    T: Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
+        + Provider<Get>
+        + Provider<Load>
+        + Provider<BlobLoad>
+        + Holds
+        + ConditionalSync
+        + ?Sized
 {
 }
 

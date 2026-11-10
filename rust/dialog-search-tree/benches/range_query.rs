@@ -38,11 +38,11 @@ fn bench_range_query(c: &mut Criterion) {
                 .insert(*key, value.to_vec(), &storage)
                 .await
                 .unwrap()
-                .persist(&mut delta, &storage)
+                .persist(&mut delta)
                 .unwrap();
             // Flush after each persist so the next edit can load the nodes this persist created.
-            for (_, buffer) in delta.flush() {
-                storage.store(buffer);
+            for (_, node) in delta.flush() {
+                storage.store(node.buffer().clone());
             }
         }
 

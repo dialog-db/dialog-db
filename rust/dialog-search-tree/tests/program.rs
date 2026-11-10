@@ -26,7 +26,7 @@
 use anyhow::Result;
 use dialog_common::Blake3Hash;
 use dialog_search_tree::helpers::Blocks;
-use dialog_search_tree::{Buffer, Delta, HitchhikerTree, PersistentTree};
+use dialog_search_tree::{Delta, HitchhikerTree, PersistentNode, PersistentTree};
 
 type Store = Blocks;
 type Tree = PersistentTree<[u8; 4], Vec<u8>>;
@@ -111,9 +111,12 @@ fn generate(seed: u64, op_count: usize) -> Program {
     Program { ops, checkpoints }
 }
 
-async fn settle(delta: &mut Delta<Blake3Hash, Buffer>, storage: &mut Store) -> Result<()> {
-    for (_, buffer) in delta.flush() {
-        storage.store(buffer);
+async fn settle<K, V>(
+    delta: &mut Delta<Blake3Hash, PersistentNode<K, V>>,
+    storage: &mut Store,
+) -> Result<()> {
+    for (_, node) in delta.flush() {
+        storage.store(node.buffer().clone());
     }
     Ok(())
 }
@@ -149,7 +152,7 @@ async fn run_canonical(program: &Program) -> Result<Vec<Blake3Hash>> {
             }
             Op::Delete(key) => edit.delete(&key.to_be_bytes(), &storage).await?,
         }
-        .persist(&mut delta, &storage)?;
+        .persist(&mut delta)?;
         settle(&mut delta, &mut storage).await?;
         if program.checkpoints.contains(&(at + 1)) {
             roots.push(checkpoint_root(&tree, &storage, "canonical").await?);
@@ -206,7 +209,7 @@ async fn run_buffered(
             // Publish the buffered form and reopen over it: the persisted
             // spine round-trip every real commit performs.
             let mut delta = Delta::zero();
-            let root = buffered.persist(&mut delta, &storage)?;
+            let root = buffered.persist(&mut delta)?;
             settle(&mut delta, &mut storage).await?;
             tree = Tree::at(dialog_search_tree::helpers::test_catalog(), root);
             buffered = open(&tree, op_buf);

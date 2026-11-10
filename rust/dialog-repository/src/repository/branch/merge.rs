@@ -13,10 +13,12 @@
 //! racing itself on one branch mints the same edition twice, and the
 //! loser's version is already taken; that race is refused instead.
 
+use dialog_artifacts::tree::CorpusNode;
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::blob::Import as BlobImport;
 use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::Read as BlobRead;
+use dialog_search_tree::nodes;
 use std::collections::BTreeSet;
 use std::mem;
 use std::sync::{Arc, Mutex};
@@ -56,11 +58,18 @@ where
         + Provider<Get>
         + Provider<Put>
         + Provider<Import>
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
         + Provider<Resolve>
         + Provider<Publish>
         + Provider<Identify>
         + Provider<Attest>
         + Provider<ArchiveLoad>
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
         + Provider<BlobLoad>
         + dialog_common::Holds
         + ConditionalSync
@@ -121,10 +130,17 @@ where
         + Provider<Get>
         + Provider<Put>
         + Provider<Import>
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
         + Provider<Resolve>
         + Provider<Identify>
         + Provider<Attest>
         + Provider<ArchiveLoad>
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
         + Provider<BlobLoad>
         + dialog_common::Holds
         + ConditionalSync
@@ -184,7 +200,7 @@ where
             .integrate(futures_util::StreamExt::chain(history, data), &tree_store),
     )
     .await?
-    .persist(delta.blocks(), &tree_store)?;
+    .persist(delta.nodes())?;
 
     // The merged tree started as theirs, so its context region is what
     // theirs held.

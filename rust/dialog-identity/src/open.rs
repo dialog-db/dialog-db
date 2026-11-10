@@ -191,16 +191,14 @@ mod tests {
         create_called: AtomicBool,
     }
 
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    #[dialog_capability::provider]
     impl Provider<Load> for FailingLoad {
         async fn execute(&self, _input: Capability<Load>) -> Result<Credential, StorageError> {
             Err(StorageError::Storage("database unavailable".into()))
         }
     }
 
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    #[dialog_capability::provider]
     impl Provider<Create> for FailingLoad {
         async fn execute(&self, _input: Capability<Create>) -> Result<Credential, StorageError> {
             self.create_called.store(true, Ordering::SeqCst);

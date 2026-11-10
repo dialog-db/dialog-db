@@ -12,8 +12,7 @@ use dialog_varsig::Principal;
 
 use super::Volatile;
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<Load<Credential>> for Volatile
 where
     Self: ConditionalSend + ConditionalSync,
@@ -41,8 +40,7 @@ where
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<Save<Credential>> for Volatile
 where
     Self: ConditionalSend + ConditionalSync,
@@ -64,8 +62,7 @@ where
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<Retract<Credential>> for Volatile
 where
     Self: ConditionalSend + ConditionalSync,
@@ -83,8 +80,7 @@ where
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<Load<Secret>> for Volatile
 where
     Self: ConditionalSend + ConditionalSync,
@@ -103,8 +99,7 @@ where
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<Save<Secret>> for Volatile
 where
     Self: ConditionalSend + ConditionalSync,
@@ -121,8 +116,7 @@ where
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<Retract<Secret>> for Volatile
 where
     Self: ConditionalSend + ConditionalSync,

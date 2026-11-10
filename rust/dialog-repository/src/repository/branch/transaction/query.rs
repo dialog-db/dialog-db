@@ -50,6 +50,7 @@
 //! query, not an optional composition.
 
 use dialog_artifacts::DialogArtifactsError;
+use dialog_artifacts::tree::CorpusNode;
 use dialog_capability::{Fork, Provider};
 use dialog_common::{ConditionalSync, Holds};
 use dialog_effects::archive::Load as ArchiveLoad;
@@ -59,6 +60,7 @@ use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::Read as BlobRead;
 use dialog_effects::memory::Resolve;
 use dialog_query::query::{Application, Output};
+use dialog_search_tree::nodes;
 
 use crate::repository::branch::QueryLayer;
 use crate::repository::branch::session::QueryEnv;
@@ -125,6 +127,11 @@ impl<'a, Q: Application> TransactionSelectQuery<'a, Q> {
             + Provider<Resolve>
             + Provider<Identify>
             + Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>

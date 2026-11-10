@@ -187,6 +187,10 @@ DialogDB's approach to time where facts exist in causal timelines rather than a 
 
 ## Indexing & Storage
 
+### Corpus
+
+The body of claims a branch holds, as the tree that stores them: every fact the transactor has incorporated, keyed for the entity-, attribute- and value-ordered scans. The word is the storage side of what `dialog-artifacts` holds today (`ArtifactTree` is the corpus; `CorpusNode` is a node of it), and the name that side will carry when the crate is renamed. A corpus is one revision's worth: a query pins the one its branch stood at when it began.
+
 ### EAV Index (Entity-Attribute-Value)
 
 Primary index optimized for retrieving all attributes of a given entity. This index efficiently answers questions like "What do we know about entity X?" by organizing facts with entity as the primary sort key.
