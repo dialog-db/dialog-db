@@ -481,6 +481,20 @@ Outside the rubric, every reader rated the notation 3 of 5, and 9 of 10 named `!
 
 **Decision.** The design reads; take it into `design.md`. Keep the prelude as the definition, not as teaching. Two questions go to the maintainer: whether `!` keeps its three readings or a premise names the stored read, and what a same-tick query sees of a `!` head that does not commit.
 
+## 2026-11-10 — What `!` means, case by case
+
+**Question.** R17 readers named `!` as most confusing. Which of its readings stay?
+
+**Method.** Maintainer's decisions on the cases R17 readers raised.
+
+**Results.**
+- `!` never appears in a premise. A premise matches what holds now; the prelude reads the stored part under its own name.
+- A head with `!` always derives into the next tick. What is committed is decided by the top-level form that set it off: a form with `!` is committed with everything its rules derive, a form without `!` lists what was derived in its result.
+- A query sees what is derived into this tick, not what is derived into the next.
+- A concept's `!` lasting until retracted and a modifier's lasting one tick is tested in R18: writing every concept through `(assert! (todo todo:9c1e …))`, with `assert`'s entity optional and the content's `id` when left out.
+
+**Decision.** Taken; R18 [planned](results/r18-plan.md) before any reader ran.
+
 ## How to reproduce
 
 1. Take a variant's prompt from its round's results file and save it as `<variant>.txt`.
