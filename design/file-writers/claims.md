@@ -73,4 +73,5 @@
 | key ranges are less data to hold than the facts a scan matched, and less precise, since a scan covers a wider range than its candidate matches | opinion | Irakli, 2026-11-10 | - |
 | a read set of matched triples misses a fact newly asserted into a scanned range that would now match (a phantom), which a rule picking a field's latest value or matching on absence depends on | fact | the phantom problem; `Pick::Last` in `rust/dialog-repository/src/repository/branch/transaction/induce.rs` reads whether a newer fact exists | holds |
 | recording each scan's range and pattern, diffing the trees over the ranges and testing changed facts against the patterns is precise about values and catches phantoms | hypothesis | the agent's proposal; confirmed by tests of a value change, a phantom and an unrelated change in range, each against a commit that read them | open |
+| a commit that finds its branch's head moved always replays its operation over the latest head; avoiding the replay when reads do not overlap is a separate topic | opinion | Irakli, 2026-11-10: a scope decision | - |
 

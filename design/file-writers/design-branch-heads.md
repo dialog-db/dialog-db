@@ -26,23 +26,9 @@ integration indexes them.
 | what a slot holds | no slot: the head record holds the whole value | the value inline, in a slot of the capacity the cell was created with (Irakli). A value that outgrows it is a separate, rare operation, like deleting the cell and creating it again: a new slot of a larger capacity at a new offset, an index change like any create. The old slot is left forwarding to the new one, written under the cell's lock, so a reader holding the old offset follows it once until the index has the new one. The slot carries the value's hash, which is the cell's edition, so a compare-and-swap compares the slot without reading the value. Cells do not accrete: an update writes over the slot and keeps no history | the cell's file holds the whole value |
 | what integration does to cells | indexes the head records | adds cells created since to the index, and removes deleted ones; never touches an existing slot | nothing |
 
-## The read-set check
+## When the head moved
 
-A commit that finds its branch's head moved replays only if what it read
-changed. What it records as "what it read" decides how often it replays,
-and whether it can miss a change.
-
-| criterion \ approach | Key ranges: each scan's range of keys | Matched triples: the facts that ended up bound to variables (Irakli) | Ranges as a filter, patterns as the test: each scan's range and the pattern it matched with; the two trees are diffed over the ranges, and each changed fact is tested against the pattern |
-|---|---|---|---|
-| what a commit holds | two keys a scan | 🟡 every fact matched: a scan of 300 issues holds 300 | two keys and a pattern a scan |
-| a change to a value it read | caught | caught | caught |
-| a fact asserted into a range it scanned, which would now match (a phantom) | caught | 🔴 missed: no triple it read changed, yet the result would have; a rule picking a field's latest value (`Pick::Last`), or matching on absence, reads exactly this | caught: the new fact is in the diff, and matches the pattern |
-| replays for a change it did not depend on | 🟡 any change in a wide range forces one | few | few: a changed fact in the range that does not match the pattern is passed over |
-| what validating costs | the difference over the ranges | a lookup of each fact read in the new tree | the difference over the ranges (`TreeDifference` reads only the paths that differ), then one pattern test a changed fact |
-
-In every case, the result of the check:
-
-- nothing it read changed: its writes go onto the latest tree as they are,
-  and it publishes with the new parent;
-- something changed: it replays its operation over the latest head, and
-  tries again.
+A commit that finds its branch's head moved since it started replays its
+operation over the latest head and tries again, always. Skipping the
+replay when nothing it read changed is a topic of its own:
+[replay-avoidance](../replay-avoidance.md).

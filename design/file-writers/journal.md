@@ -5,7 +5,7 @@
 |  | Understanding | Activity |
 |---|---|---|
 | **Status** | Two processes advancing two branches of one space share no lock on main and take turns on one file lock with the file archive. Irakli requires that they not wait on one another. Cells live outside the file, a file each. | Directing: a matrix of four approaches, Irakli's candidate among them. |
-| **Agenda** | Whether ranges as a filter and patterns as the test is the read set. Calibrating the slot's inline size. Then the next implementation decisions: extent claiming, integration. Whether "one file" means one file at rest, with side files while writers overlap. How a head's compare-and-swap works against a pending head record. The `?` cells in the matrix. | Ask who integrates; then the web; then the cells question. |
+| **Agenda** | The implementation decisions left: claiming and recording extents, the cell index and its two tables, what integration does to extents and per-commit node records. Calibrating a cell's capacity. | Then the next implementation decisions: extent claiming, integration. Whether "one file" means one file at rest, with side files while writers overlap. How a head's compare-and-swap works against a pending head record. The `?` cells in the matrix. | Ask who integrates; then the web; then the cells question. |
 
 ## 2026-11-10, Describing: the topic opens
 
@@ -315,3 +315,12 @@ against the pattern.
 
 **Decided.** Not decided; three options in the read-set section of
 [design-branch-heads.md](design-branch-heads.md).
+
+**Asked.** Irakli: handle the read set separately; here just rerun, and
+separately develop a system that captures what was considered, to avoid a
+rerun when there is no overlap.
+
+**Decided.** Scope: a commit that finds its branch's head moved always
+replays its operation over the latest head. Replay avoidance is its own
+topic, [replay-avoidance](../replay-avoidance.md), with the options and the
+phantom analysis moved there.

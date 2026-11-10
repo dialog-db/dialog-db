@@ -65,3 +65,6 @@ its own branch, `worker/design-large-transactions`.
 - [Writers on separate branches wait on one another in the file archive](file-writers.md):
   **Designing.** One file, an extent per writer: processes on separate
   branches write without waiting on one another, as they do on main.
+- [A commit that lost its branch's race replays even when nothing it read changed](replay-avoidance.md):
+  **Describing.** Split out of file-writers: capturing what a transaction
+  considered, so a replay is skipped when nothing it read overlaps.
