@@ -1702,6 +1702,7 @@ dependencies = [
  "dialog-effects",
  "dialog-peer",
  "dialog-query",
+ "dialog-remote-s3",
  "dialog-repository",
  "dialog-storage",
  "futures-util",

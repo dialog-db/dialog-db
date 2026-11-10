@@ -14,6 +14,7 @@ use crate::env::{Env, assert_all, concept, entity, fact, text};
 
 mod commit;
 mod export;
+mod member;
 mod number;
 mod read;
 mod replica;
@@ -155,6 +156,14 @@ pub fn catalog() -> Vec<Spec> {
             volatile: false,
             cross_cpu_pct: 0.0,
             prepare: |size| Box::pin(read::join(size)),
+        },
+        Spec {
+            name: "query-member",
+            size: 2000,
+            about: "on a member that tracks a remote and holds every block, one cold read of every entity's name and role, then the names of one role: the reads that warm ahead of demand",
+            volatile: false,
+            cross_cpu_pct: 0.0,
+            prepare: |size| Box::pin(member::view(size)),
         },
         Spec {
             name: "rule-scan",

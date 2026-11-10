@@ -278,9 +278,12 @@ where
                                 let upper =
                                     links.get(at + 1).map(|next| next.separator.as_slice());
                                 let buffered = match index.buffer_for(at) {
-                                    Some(buffer) => buffer
+                                    Some(buffer) => {
+                                        drop(tracing::trace_span!("scope_buffer_decode"));
+                                        buffer
                                         .any_key::<Key>(&in_scope)
-                                        .unwrap_or(true),
+                                        .unwrap_or(true)
+                                    }
                                     None => false,
                                 };
                                 if buffered

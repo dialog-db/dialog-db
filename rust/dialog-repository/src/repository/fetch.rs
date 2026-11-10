@@ -205,6 +205,9 @@ async fn warm_source(
     if !routes.fetches(source.as_ref().subject().did()) {
         return Ok(());
     }
+    // Counted by whoever subscribes (the perf harness counts spans by
+    // name): a walk started, and below, each node it visited.
+    drop(tracing::trace_span!("warm_walk"));
     let catalog = ArchiveScope::new(source.as_ref().subject()).index();
     let storage: &dyn TreeEnv = env;
     // Every load the walk performs is ranked at the hint's likelihood.
@@ -223,6 +226,7 @@ async fn warm_source(
         if visit.is_err() {
             break;
         }
+        drop(tracing::trace_span!("warm_node"));
     }
     Ok(())
 }
