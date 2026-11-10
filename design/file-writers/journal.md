@@ -4,8 +4,8 @@
 
 |  | Understanding | Activity |
 |---|---|---|
-| **Status** | Two processes advancing two branches of one space share no lock on main and take turns on one file lock with the file archive. Irakli requires that they not wait on one another. Cells live outside the file, a file each. | Directing: a matrix of four approaches, Irakli's candidate among them. |
-| **Agenda** | The implementation decisions left: claiming and recording extents, the cell index and its two tables, what integration does to extents and per-commit node records. Calibrating a cell's capacity. | Then the next implementation decisions: extent claiming, integration. Whether "one file" means one file at rest, with side files while writers overlap. How a head's compare-and-swap works against a pending head record. The `?` cells in the matrix. | Ask who integrates; then the web; then the cells question. |
+| **Status** | Direction chosen: one file, an extent per writer, native only (the web keeps IndexedDB). Writers never wait on one another's writes; claiming an extent takes a short lock once per extent filled. Two coordination points: integration, by the committer after its commit, and branch updates, under a byte-range lock per cell. Cells are slots at offsets an index names, of a capacity set at creation, written over in place; a moved head always means a replay. | Designing: branch heads and cells decided in design-branch-heads.md. |
+| **Agenda** | How extents are claimed and recorded; the cell index and its two tables; what integration does to extents and per-commit node records; a cell's default capacity. Replay avoidance is its own topic. | The next implementation decision: claiming extents. |
 
 ## 2026-11-10, Describing: the topic opens
 
