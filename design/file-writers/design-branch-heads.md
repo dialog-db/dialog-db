@@ -28,7 +28,12 @@ integration indexes them.
 
 ## When the head moved
 
-A commit that finds its branch's head moved since it started replays its
-operation over the latest head and tries again, always. Skipping the
+A commit that finds its branch's head moved since it started applies the
+same commit over the latest head and tries again, always: its instructions,
+with the versions they carry minted afresh against that head (the rules run
+again, as on any commit). What this needs is that ability, applying a
+commit with updated versions; today a commit's instructions are a stream
+the mint consumes, so after a failed publish there is nothing left to
+apply, and the commit has to keep them until it publishes. Skipping the
 replay when nothing it read changed is a topic of its own:
 [replay-avoidance](../replay-avoidance.md).

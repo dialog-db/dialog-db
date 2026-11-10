@@ -5,7 +5,7 @@
 |  | Understanding | Activity |
 |---|---|---|
 | **Status** | Direction chosen: one file, an extent per writer, native only (the web keeps IndexedDB). Writers never wait on one another's writes; claiming an extent takes a short lock once per extent filled. Two coordination points: integration, by the committer after its commit, and branch updates, under a byte-range lock per cell. Cells are slots at offsets an index names, of a capacity set at creation, written over in place; a moved head always means a replay. | Designing: branch heads and cells decided in design-branch-heads.md. |
-| **Agenda** | How extents are claimed and recorded; the cell index and its two tables; what integration does to extents and per-commit node records; a cell's default capacity. Replay avoidance is its own topic. | The next implementation decision: claiming extents. |
+| **Agenda** | Applying a commit with updated versions over a moved head, keeping its instructions until it publishes. How extents are claimed and recorded; the cell index and its two tables; what integration does to extents and per-commit node records; a cell's default capacity. Replay avoidance is its own topic. | The next implementation decision: claiming extents. |
 
 ## 2026-11-10, Describing: the topic opens
 
@@ -324,3 +324,14 @@ rerun when there is no overlap.
 replays its operation over the latest head. Replay avoidance is its own
 topic, [replay-avoidance](../replay-avoidance.md), with the options and the
 phantom analysis moved there.
+
+**Asked.** Continue with extents, or stop? Irakli: here we just need the
+ability to apply a commit with updated versions.
+
+**Learned.** A retry is applying the same commit's instructions over the
+latest head, its versions minted afresh against it. Today the mint
+consumes a commit's instructions as a stream, so a failed publish leaves
+nothing to apply again; the commit has to keep them until it publishes.
+
+**Decided.** The retry is that capability: apply a commit with updated
+versions over the latest head.
