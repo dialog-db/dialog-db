@@ -299,7 +299,75 @@ async fn land<'a, Env: ResolveEnv>(
 ///
 /// Unless `confirm_upstream`, a remote upstream is not asked for its head:
 /// the one last known for it is merged (see [`Pull::assuming_upstream`]).
+///
+/// A head the merge would adopt is followed to before it is handed back
+/// (see [`follow`]), so the reads this replica answers from its own blocks
+/// it still answers from them once the head lands.
 pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
+    branch: &'a Branch,
+    upstream: Upstream,
+    confirm_upstream: bool,
+    env: &Env,
+) -> Result<PreparedPull<'a>, PullError> {
+    let prepared = Box::pin(merge_upstream(
+        branch,
+        upstream.clone(),
+        confirm_upstream,
+        env,
+    ))
+    .await?;
+    if let PreparedPull::Merged(merged) = &prepared {
+        follow(branch, &upstream, &merged.new_revision, env).await?;
+    }
+    Ok(prepared)
+}
+
+/// Read what this replica holds of its head, as `adopted` has it, before
+/// the head moves there.
+///
+/// A head adopted by root (a fast-forward, a rival settled, a reset
+/// brought forward) reads none of its tree, so everything the upstream
+/// changed is held by reference once the head lands, wherever it is. A
+/// read this replica answered from its own blocks then waits on the peer
+/// that holds the block, and fails without one. Read first, those reads
+/// stay on the head held until the adopted one answers them as it did,
+/// and a read that fails leaves the head where it was.
+///
+/// Only the nodes a read would reach on its way to a key this replica
+/// holds a leaf for are read (see
+/// [`PersistentTree::follow`](dialog_search_tree::PersistentTree::follow)):
+/// a region it never read stays by reference, so the cost of a pull stays
+/// independent of upstream churn there. A merge mints the nodes it
+/// changes and reads the rest of what it merged, so for one this finds
+/// most of what it asks for held. A replica with no head holds nothing to
+/// follow, and adopts by reference.
+async fn follow<Env: ResolveEnv>(
+    branch: &Branch,
+    upstream: &Upstream,
+    adopted: &Revision,
+    env: &Env,
+) -> Result<(), PullError> {
+    let Some(held) = branch.revision() else {
+        return Ok(());
+    };
+    if held.tree == adopted.tree {
+        return Ok(());
+    }
+    // The upstream may be one the branch does not track: lend its route,
+    // as the merge did, so what the walk misses is fetched from the peer
+    // that holds it.
+    let _loan = routes::lend(branch.routes(), branch.of(), &upstream.fallback());
+    let catalog = branch.archive().index();
+    let at = |tree: &TreeReference| Index::at(catalog.clone(), NodeHash::from(*tree.hash()));
+    at(&adopted.tree)
+        .follow(&at(&held.tree), erased(env))
+        .await?;
+    Ok(())
+}
+
+/// The merge of [`prepare_upstream`]: everything but following to the
+/// head it would adopt.
+async fn merge_upstream<'a, Env: ResolveEnv>(
     branch: &'a Branch,
     upstream: Upstream,
     confirm_upstream: bool,
