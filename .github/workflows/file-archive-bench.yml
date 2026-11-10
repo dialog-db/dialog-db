@@ -1,0 +1,69 @@
+name: 'File archive against main'
+
+# Measures the team-of-six bench for main's `fs` and this branch's file
+# store on one runner, and reports the tables in the job summary. It does
+# not gate: the Perf and Replication gates are unchanged.
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/file-archive-bench.yml'
+      - 'research/single-file-format/bench/**'
+      - 'rust/dialog-archive-file/**'
+      - 'rust/dialog-baseline/examples/tonk_bench.rs'
+      - 'rust/dialog-baseline/examples/tonk/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    name: 'File archive against main'
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 150
+    steps:
+      - uses: cisagov/action-disable-apparmor@v1
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: wimpysworld/nothing-but-nix@687c797a730352432950c707ab493fcc951818d7 # v10; v11 and main put TMPDIR under /nix/tmp, which breaks the Nix installer
+        with:
+          root-safe-haven: '16384'
+      - uses: cachix/install-nix-action@v31
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+      - uses: cachix/cachix-action@v16
+        with:
+          name: tonk-ops
+          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+          skipPush: true
+      - name: Build both and run the bench
+        shell: bash
+        run: |
+          sudo mkdir -p /nix/cargo /nix/bench
+          sudo chown "$(id -u):$(id -g)" /nix/cargo /nix/bench
+          nix develop --accept-flake-config \
+            --set-env-var CARGO_HOME /nix/cargo \
+            --set-env-var TMPDIR /nix/bench \
+            --command bash research/single-file-format/bench/ci.sh /nix/bench/out
+      - name: Report
+        if: always()
+        shell: bash
+        run: |
+          if test -f /nix/bench/out/summary.md; then
+            cat /nix/bench/out/summary.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'The bench did not finish: see the step above.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: file-archive-bench
+          path: |
+            /nix/bench/out/summary.md
+            /nix/bench/out/runs
+          if-no-files-found: warn
