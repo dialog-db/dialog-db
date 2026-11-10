@@ -17,7 +17,8 @@ What we tried, what it measured, and what we decided, newest last. The [idea](..
 - **R20:** naming a modifier after its concept, `(todo/add! …)`, removed the request for a modifier mark (3 of 5 readers to 0 of 5); what readers name now is the top-level `!` deciding the commit, and 7 of 10 proposed `(commit …)`.
 - **R21:** explaining `!` as "without it an assertion is scoped to the transaction, with it global" removed the request for `(commit …)` and lost nothing; Roc's "effect" removed it too but made readers reject a bare fact.
 - **R22:** with every write a command and `assert` and `retract` the only commands that change a concept, every reader scored 17 of 17; a rule both retracting and asserting, and retracting one value, read 5 of 5. Readers still name the rule head's `!`.
-- **Next:** decide whether rule heads carry `!`; then take the design into `design.md`.
+- **R23:** with `!` as induction only and the commit decided by submitting a document as a query or a transaction, 8 of 10 readers preferred it to a top-level `!`, and one of five named `!` most confusing, the first time since R17 it was not all.
+- **Next:** take the design into `design.md`.
 - **Open:** whether commands are asserted or written; what a rule head that names no entity lands on; whether questions stay calls with variables or become rules into a domain-call head; text literals; optional parameters. The design's Open list has the rest.
 
 ## Datasets
@@ -627,6 +628,24 @@ The complaint about `!` narrowed. Readers no longer name premises or the commit;
 - Committing is per document, so one form's `!` keeps what the whole run lands. Two ways to say it are open: a `!` at the top level makes the document a transaction; or the document carries no top-level `!` and is submitted as a query or a transaction, with `assert` and `retract` the commands whose facts land, so `!` remains only on a head that re-issues a command.
 
 **Decision.** R23 [planned](results/r23-plan.md) before any reader ran, to compare the two and ask readers which they prefer.
+
+## 2026-11-10 — R23: readers prefer the mode, 8 to 2, and stop naming `!`
+
+**Question.** The one [planned](results/r23-plan.md): with `!` as induction, should the commit be said by a `!` at the top level, or by submitting the document as a query or a transaction?
+
+**Method.** As planned: two documents, five readers each; at the end each reader saw a summary of the other and chose.
+
+**Results.** [r23](results/r23.md). Both read, 18 of 18 medians; inductive recursion, 10 of 10. 8 of 10 readers chose `mode`, including three of the five who had just worked in `syntax`. Their reasons: `!` keeps one meaning; one document can be run as a query and then as a transaction; a stray `!` cannot turn a read into a write. The two who chose `syntax` wanted a rule to say in its text what it lands. Every `syntax` reader named `!` most confusing, as every round since R17; one `mode` reader did.
+
+```mermaid
+xychart-beta
+  title "Readers naming ! most confusing (of 5 per document)"
+  x-axis ["R19 base", "R20 slash", "R21 scope", "R22 command", "R23 syntax", "R23 mode"]
+  y-axis "readers" 0 --> 5
+  bar [5, 5, 5, 5, 5, 1]
+```
+
+**Decision.** For the maintainer: take `mode`. `!` marks induction only, top-level forms never carry it, a document is submitted as a query or a transaction, and a top-level `rule` or `concept` in a transaction is installed. The open cost is the one the `syntax` readers named: a rule head's `(assert …)` lands only when the run is a transaction.
 
 ## How to reproduce
 
