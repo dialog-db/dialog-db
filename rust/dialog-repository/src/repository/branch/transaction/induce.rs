@@ -1076,7 +1076,12 @@ enum Seeding {
     Grouped,
 }
 
-/// The matches a seeded firing of `rule` finds for `rows`.
+/// The matches a seeded firing of `rule` finds for `rows`, in the order
+/// seeding the rows one by one finds them: a group's matches stand at
+/// its first row, and a row seeded alone after its group found nothing
+/// stands at its own. The order is what [`emit_matches`] writes in, and
+/// two matches writing one transient cell under `last` are decided by
+/// it: the later replaces the earlier.
 async fn seeded_matches<'a>(
     rule: &InductiveRule,
     rows: &[Artifact],
@@ -1094,16 +1099,18 @@ async fn seeded_matches<'a>(
             Seeding::Grouped => seed_groups(query, rows),
             Seeding::PerRow => (0..rows.len()).map(|at| vec![at]).collect(),
         };
+        // What each group or row found, keyed by the row it stands at.
+        let mut found: Vec<(usize, Vec<Match>)> = Vec::with_capacity(groups.len());
         for group in groups {
             #[cfg(test)]
             if seeding == Seeding::Grouped {
                 oracle::count(if group.len() > 1 { 1 } else { group.len() });
             }
             if group.len() > 1 {
-                let found =
+                let together =
                     evaluate_seed(rule, query, group.iter().map(|&at| &rows[at]), view).await?;
-                if !found.is_empty() {
-                    matches.extend(found);
+                if !together.is_empty() {
+                    found.push((group[0], together));
                     continue;
                 }
             }
@@ -1112,9 +1119,14 @@ async fn seeded_matches<'a>(
                 oracle::count(group.len());
             }
             for at in group {
-                matches.extend(evaluate_seed(rule, query, [&rows[at]], view).await?);
+                found.push((at, evaluate_seed(rule, query, [&rows[at]], view).await?));
             }
         }
+        // Groups come in the order of their first rows, so only rows
+        // seeded alone after their group found nothing are out of
+        // place; a stable sort puts them back between the others.
+        found.sort_by_key(|(at, _)| *at);
+        matches.extend(found.into_iter().flat_map(|(_, found)| found));
     }
     Ok(matches)
 }
@@ -1156,6 +1168,10 @@ async fn evaluate_seed<'a, 'r>(
 /// either way [`seeded_matches`] seeds the rows one by one, which is
 /// what it did before. No assumption about which layer a read elects
 /// from is made here: the engine's own seeded read checks it.
+///
+/// Groups come in the order of their first rows, and the rows of a
+/// group in their own order, so the matches keep the order seeding the
+/// rows one by one finds them in.
 fn seed_groups(query: &dialog_query::ConceptQuery, rows: &[Artifact]) -> Vec<Vec<usize>> {
     let mut groups: Vec<Vec<usize>> = Vec::new();
     let mut together: BTreeMap<&Entity, (Vec<usize>, BTreeSet<&str>, bool)> = BTreeMap::new();
@@ -1192,6 +1208,7 @@ fn seed_groups(query: &dialog_query::ConceptQuery, rows: &[Artifact]) -> Vec<Vec
             groups.push(members);
         }
     }
+    groups.sort_by_key(|group| group[0]);
     groups
 }
 
