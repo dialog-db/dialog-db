@@ -40,10 +40,12 @@ space take the same file's one writer turn, so processes on separate
 branches serialize behind each other, and the archive cannot be used where
 such processes run.
 
-Not yet settled: whether processes on the *same* branch, which already
-coordinate on that branch's head, must also write without waiting on each
-other; and whether branch heads, or memory cells generally, belong in the
-file, a second question with its own problem not yet stated.
+And a space should be one file, as a SQLite database is: blocks and
+branch heads together. A head kept apart from its blocks is a second thing
+to copy, back up, and keep consistent with them.
+
+Two processes on the same branch already meet at that branch's head; they
+need not meet anywhere else.
 
 ## Approach
 

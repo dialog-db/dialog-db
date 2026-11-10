@@ -33,4 +33,8 @@
 | a single process writing alone should write into the file directly, with no loose blocks or integrator | opinion | Irakli, 2026-11-10 | - |
 | a process cannot know it is the only one, but a non-blocking try of the writer lock tells it whether anyone is writing at that moment, which is all a write needs | fact | `flock(LOCK_EX \| LOCK_NB)`, POSIX `fcntl` `F_SETLK`: they return at once instead of waiting | holds |
 | with one process, trying the turn always succeeds, so the single-process path is today's append | hypothesis | confirmed by a run with one writer that writes no loose block | open |
+| integration is done by each committer after its commit, or by some other deterministic process | opinion | Irakli, 2026-11-10 | - |
+| a space is just a file, as SQLite's database is | opinion | Irakli, 2026-11-10 | - |
+| SQLite in WAL mode keeps a `-wal` and a `-shm` file beside the database while it is open, and folds them in (and deletes them) when the last connection closes | fact | [wal.html](https://www.sqlite.org/wal.html); [tempfiles.html](https://www.sqlite.org/tempfiles.html) | holds |
+| heads in the file and writers that never wait on another branch cannot both hold if a head update has to take the file's turn; they can if a head update that misses the turn is kept beside the file, under a lock of its branch's own, until it is folded in | hypothesis | follows from the requirement; refuted if a pending head record cannot be compare-and-swapped and folded in without the file's turn | open |
 

@@ -5,7 +5,7 @@
 |  | Understanding | Activity |
 |---|---|---|
 | **Status** | Two processes advancing two branches of one space share no lock on main and take turns on one file lock with the file archive. Irakli requires that they not wait on one another. Cells live outside the file, a file each. | Directing: a matrix of four approaches, Irakli's candidate among them. |
-| **Agenda** | Whether the integrator is a task in the writer's process or a process of its own. The `?` cells in the matrix. What keeping cells in the file would let someone do that they cannot now. | Ask who integrates; then the web; then the cells question. |
+| **Agenda** | Whether "one file" means one file at rest, with side files while writers overlap. How a head's compare-and-swap works against a pending head record. The `?` cells in the matrix. | Ask who integrates; then the web; then the cells question. |
 
 ## 2026-11-10, Describing: the topic opens
 
@@ -131,3 +131,21 @@ of the integrating, so a background integrator runs only when no writer
 comes.
 
 **Decided.** Not decided; the column is in the matrix.
+
+**Asked.** Who integrates? Irakli: either each committer, once it has
+committed, waits and performs the integration, or some deterministic
+process does. What would heads in the file buy? Irakli: he likes SQLite's
+approach of just a file.
+
+**Learned.** The two answers conflict as stated: heads in the one file
+make a head update take the file's turn, where branches would meet again.
+SQLite itself is one file only at rest; open in WAL mode it keeps `-wal`
+and `-shm` beside it. Read the same way here: at rest, one file holding
+blocks and heads; while writers overlap, loose blocks, and per branch a
+lock file and a pending head record, folded in under that branch's lock.
+
+**Decided.** Integration is the committer's: once its commit is published,
+it waits for the turn, off the commit, and folds in what it left loose;
+closing a space waits for it; a process that dies leaves its blocks to the
+next writer with the turn. A space is one file, heads included, on Irakli's
+say-so. Open: whether "one file" may mean one file at rest.
