@@ -5,7 +5,7 @@
 |  | Understanding | Activity |
 |---|---|---|
 | **Status** | Two processes advancing two branches of one space share no lock on main and take turns on one file lock with the file archive. Irakli requires that they not wait on one another. Cells live outside the file, a file each. | Directing: a matrix of four approaches, Irakli's candidate among them. |
-| **Agenda** | What a commit records as its read set, and its cost. How many branches the slot table holds. Then the next implementation decisions: extent claiming, integration. Whether "one file" means one file at rest, with side files while writers overlap. How a head's compare-and-swap works against a pending head record. The `?` cells in the matrix. | Ask who integrates; then the web; then the cells question. |
+| **Agenda** | What a cell's slot holds: the value, of a fixed size, or a pointer to a record. What a commit records as its read set, and its cost. Then the next implementation decisions: extent claiming, integration. Whether "one file" means one file at rest, with side files while writers overlap. How a head's compare-and-swap works against a pending head record. The `?` cells in the matrix. | Ask who integrates; then the web; then the cells question. |
 
 ## 2026-11-10, Describing: the topic opens
 
@@ -232,3 +232,23 @@ updates. A commit that loses its race replays only if what it read
 changed. First implementation decision opened:
 [design-branch-heads.md](design-branch-heads.md), a slot per branch as the
 candidate. Open: the read set, and how many branches the slot table holds.
+
+**Asked.** (The read set waits.) Irakli: do for memory cells what is done
+for blocks. An index maps each cell to the byte offset of its slot, say
+branch A at offset 6, where its value (a 32-byte hash, or whatever size)
+is written. The index changes only when cells are created or deleted, as
+two tables swapped in turn. A branch update writes only the cell's bytes;
+a reader goes to the extents only for a cell new since the index was
+written, and otherwise reads the slot at once.
+
+**Learned.** That generalizes the branch slot to every memory cell, with no
+fixed table: the index is what grows. Two things the slot has to handle: a
+branch cell's value is a `Revision` of a few hundred bytes, not 32, and
+other cells vary more; and a write of more than 8 aligned bytes in place can
+tear, by a crash or under a reader, so a slot needs two halves written in
+turn, each with a sequence and a checksum, the reader taking the newer
+whole one.
+
+**Decided.** The slot-per-cell design, with the cell index, replaces the
+slot table in [design-branch-heads.md](design-branch-heads.md). Open: what
+a slot holds.

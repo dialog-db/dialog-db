@@ -58,4 +58,7 @@
 | `fdatasync` of a file flushes all of its dirty data, so making a head durable in the one file also makes durable every earlier append it builds on | fact | POSIX `fdatasync`; Linux `fdatasync(2)` | holds |
 | a reader can find every node not yet indexed by reading only per-commit node records (hash to offset) appended since it last looked, not the frames | hypothesis | follows from the design; confirmed by a run that keeps integration off and measures a reader's cost per commit it catches up on | open |
 | a difference restricted to the ranges a transaction read decides whether it must replay, and costs only the paths that differ | hypothesis | `TreeDifference` reads only differing paths (`rust/dialog-search-tree/src/differential.rs`); what a read set is, and its cost, is not designed | open |
+| memory cells kept as blocks are: an index of each cell's byte offset, changed only when cells are created or deleted, as two tables swapped in turn; a cell's slot written over in place on update; readers go to the extents only for a cell created since the index was written | opinion | Irakli, 2026-11-10 | - |
+| a branch cell holds a `Revision` of variable length: the branch's identifier, the issuer's DID, the tree's hash, an edition, an optional context and a flag | fact | `rust/dialog-capability/src/identity/revision.rs` | holds |
+| a write of more than 8 aligned bytes in place is not atomic against a crash or a reader of the mapping | fact | hardware: atomic stores are at most 8 (or 16) aligned bytes; a page written back can tear at the sector | holds |
 
