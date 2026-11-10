@@ -5,7 +5,7 @@
 |  | Understanding | Activity |
 |---|---|---|
 | **Status** | Two processes advancing two branches of one space share no lock on main and take turns on one file lock with the file archive. Irakli requires that they not wait on one another. Cells live outside the file, a file each. | Directing: a matrix of four approaches, Irakli's candidate among them. |
-| **Agenda** | Whether the web is in scope for this decision (every column but the owner's is open or blocked there). Whether "one file" means one file at rest, with side files while writers overlap. How a head's compare-and-swap works against a pending head record. The `?` cells in the matrix. | Ask who integrates; then the web; then the cells question. |
+| **Agenda** | What a commit records as its read set, and its cost. How many branches the slot table holds. Then the next implementation decisions: extent claiming, integration. Whether "one file" means one file at rest, with side files while writers overlap. How a head's compare-and-swap works against a pending head record. The `?` cells in the matrix. | Ask who integrates; then the web; then the cells question. |
 
 ## 2026-11-10, Describing: the topic opens
 
@@ -208,3 +208,27 @@ rules replay as given.
 
 **Decided.** A commit that loses the race retries the same operation over
 the new head, in a loop the library runs.
+
+## 2026-11-10, Designing: the direction, and how a head becomes visible
+
+**Asked.** Is the web in scope? Irakli: on the web we will likely keep
+IndexedDB; leave it alone. He sees two coordination points: integration
+into the archive, and updating branches. A branch update that finds the
+head moved replays only if what the transaction read changed; otherwise it
+updates the versions. And: how does a branch update become visible to the
+next query or transaction without blocking on integration?
+
+**Learned.** Visibility needs two things findable without the file's
+index: the latest head, and the nodes it names. A slot per branch in the
+header region, updated in place under the branch's byte-range lock, gives
+the first in one read; a small per-commit record of node hashes and
+offsets, kept in an in-memory map by each reader until integration, gives
+the second. One file also orders durability: `fdatasync` makes everything
+appended before a head durable with it.
+
+**Decided.** The direction: one file, an extent per writer, native only;
+the web keeps IndexedDB. Two coordination points, integration and branch
+updates. A commit that loses its race replays only if what it read
+changed. First implementation decision opened:
+[design-branch-heads.md](design-branch-heads.md), a slot per branch as the
+candidate. Open: the read set, and how many branches the slot table holds.

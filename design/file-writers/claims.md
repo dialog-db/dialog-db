@@ -53,4 +53,9 @@
 | a commit that loses the race retries the same operation over the new head, instead of failing; the model is changing to do this | opinion | Irakli, 2026-11-10 | - |
 | replaying an operation re-reads through its rules: a command is an asserted event, and the rules that derive its writes are evaluated at commit against the head being built on | fact | `rust/dialog-repository/src/repository/branch/transaction/induce.rs`; research/single-file-format/journal.md, 2026-11-06, "tonk-team's commands, run from dialog alone" | holds |
 | a write the caller computed outside the rules, from an earlier read, is replayed as given, not recomputed | fact | follows from replaying the operation's instructions | holds |
+| the web is out of this decision: it keeps IndexedDB | opinion | Irakli, 2026-11-10 | - |
+| a commit that loses its branch's race replays only if what it read has changed; otherwise its writes go onto the latest head with new versions | opinion | Irakli, 2026-11-10 | - |
+| `fdatasync` of a file flushes all of its dirty data, so making a head durable in the one file also makes durable every earlier append it builds on | fact | POSIX `fdatasync`; Linux `fdatasync(2)` | holds |
+| a reader can find every node not yet indexed by reading only per-commit node records (hash to offset) appended since it last looked, not the frames | hypothesis | follows from the design; confirmed by a run that keeps integration off and measures a reader's cost per commit it catches up on | open |
+| a difference restricted to the ranges a transaction read decides whether it must replay, and costs only the paths that differ | hypothesis | `TreeDifference` reads only differing paths (`rust/dialog-search-tree/src/differential.rs`); what a read set is, and its cost, is not designed | open |
 

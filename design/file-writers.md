@@ -1,6 +1,6 @@
 # Writers on separate branches wait on one another in the file archive
 
-**Phase: Directing.**
+**Phase: Designing.**
 
 ## Description
 
@@ -49,7 +49,23 @@ need not meet anywhere else.
 
 ## Approach
 
-Not chosen yet. Irakli's candidate: writers write blocks, as main's `fs`
-archive does, and an integrator folds them into the space's file; queries
-look in both. The approaches and the criteria that decide between them are
-in [direction.md](file-writers/direction.md).
+One file, an extent per writer, on native platforms (the web keeps
+IndexedDB). A writer claims an extent of the space's file by a byte-range
+lock and appends its records there without waiting on anyone; claiming an
+extent takes a short lock once per extent filled. There are two points of
+coordination:
+
+1. **Integration into the archive.** Whoever next gets the file's turn
+   indexes the extents written since; the records are already in place, so
+   nothing is copied. A writer that left records unindexed does it after
+   its commit, off the commit.
+2. **Updating a branch.** Under the branch's own byte-range lock, a writer
+   compares the head with the one it started from. If another writer moved
+   it, a check of what the transaction read decides: nothing changed, and
+   its writes go onto the latest head as they are; something changed, and
+   it replays its operation over the latest head. Either way it tries
+   again.
+
+How a branch update becomes visible before integration:
+[design-branch-heads.md](file-writers/design-branch-heads.md). The
+approaches weighed: [direction.md](file-writers/direction.md).
