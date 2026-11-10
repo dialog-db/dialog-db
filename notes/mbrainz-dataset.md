@@ -42,7 +42,7 @@ Shape to aim for, mirroring how the data actually accumulated: an artist created
 Note MusicBrainz has a genuine edit history in `mbdump-edit.tar.bz2`. Worth checking whether it can drive realistic commit boundaries instead of synthesizing them, which would make the dataset genuinely history-derived rather than history-shaped.
 
 ### 4. Hosting
-If the target size exceeds what belongs in the main repo, a separate repo under the `dialog-db` org. Consider: git LFS versus release artifacts versus a plain fetch script with a checksum. A fetch script keeps the repo small and makes the provenance explicit, at the cost of needing network in CI.
+If the target size exceeds what belongs in the main repo, a separate repo under the `dialog-db` org. Consider: git LFS versus release assets versus a plain fetch script with a checksum. A fetch script keeps the repo small and makes the provenance explicit, at the cost of needing network in CI.
 
 ## Licensing
 

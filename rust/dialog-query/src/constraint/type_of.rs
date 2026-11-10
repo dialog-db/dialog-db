@@ -21,7 +21,7 @@ use std::fmt;
 use std::fmt::Display;
 use std::ops::Not;
 
-use crate::artifact::Type as ValueType;
+use crate::corpus::Type as ValueType;
 use crate::error::EvaluationError;
 use crate::selection::Selection;
 use crate::type_system::Primitive;

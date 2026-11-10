@@ -5,7 +5,7 @@
 //! a mapping between formula parameter names and their corresponding terms in
 //! the evaluation context.
 
-use crate::artifact::ArtifactTypeError;
+use crate::corpus::CorpusTypeError;
 use crate::error::EvaluationError;
 use crate::formula::query::FormulaQuery;
 use crate::selection::Match;
@@ -40,7 +40,7 @@ impl Bindings {
     }
 
     /// Read a typed value from the bindings using a parameter name
-    pub fn read<T: TryFrom<Value, Error = ArtifactTypeError>>(
+    pub fn read<T: TryFrom<Value, Error = CorpusTypeError>>(
         &mut self,
         key: &str,
     ) -> Result<T, EvaluationError> {

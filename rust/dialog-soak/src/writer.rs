@@ -37,7 +37,7 @@
 //! shape; the bulk batch is the seed's own entity facts, 2 000 of them.
 
 use anyhow::{Context as _, Result};
-use dialog_artifacts::{Artifact, Instruction, Pick, Value};
+use dialog_corpus::{Fact, Instruction, Pick, Value};
 
 use crate::join::entity_facts;
 use crate::report::PhaseReport;
@@ -49,7 +49,7 @@ pub const BULK_FACTS: usize = 2_000;
 /// One new entity's title: the single fact a small commit carries.
 fn title(index: usize) -> Result<Instruction> {
     Ok(Instruction::Assert(
-        Artifact {
+        Fact {
             the: "bug/title".parse()?,
             of: format!("bug:{index}").parse()?,
             is: Value::String(format!("Bug #{index}: filed from the writer")),

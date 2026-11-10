@@ -5,7 +5,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use anyhow::Result;
-use dialog_artifacts::{Artifact, Pick};
+use dialog_corpus::{Fact, Pick};
 use dialog_query::query::Output as _;
 use dialog_query::{ConceptConclusion, ConceptQuery};
 use dialog_repository::{Branch, Delta, Subscription};
@@ -109,7 +109,7 @@ impl Prepared for Fanout {
 }
 
 /// The two facts of note `index`.
-fn note_facts(index: usize) -> [Artifact; 2] {
+fn note_facts(index: usize) -> [Fact; 2] {
     let this = entity("note", index);
     [
         fact(&this, "note/title", text(format!("Note {index}"))),
@@ -125,7 +125,7 @@ fn note_facts(index: usize) -> [Artifact; 2] {
 
 /// The two facts of a note written elsewhere, as the measured commits add
 /// it: short, so the commit's cost is the note and not its text.
-fn added_note(index: usize) -> [Artifact; 2] {
+fn added_note(index: usize) -> [Fact; 2] {
     let this = entity("note", index);
     [
         fact(&this, "note/title", text("new")),

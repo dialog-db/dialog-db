@@ -32,7 +32,7 @@ fn it_parses_attribute_formal_notation() {
     assert_eq!(attr.description(), "Name of the person");
     assert_eq!(
         attr.content_type(),
-        Some(dialog_query::artifact::Type::String)
+        Some(dialog_query::corpus::Type::String)
     );
     assert_eq!(attr.cardinality(), dialog_query::Cardinality::One);
 
@@ -47,7 +47,7 @@ fn it_parses_attribute_formal_notation() {
 
 #[dialog_common::test]
 fn it_parses_attribute_value_types() {
-    use dialog_query::artifact::Type;
+    use dialog_query::corpus::Type;
     // Each type is named by its entity; the names the release before
     // type entities wrote are still read.
     let types = [

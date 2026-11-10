@@ -16,7 +16,7 @@ Three properties the engine should have, none of which it had at the chapter's s
    re-walking syntax.
 2. **A rule that exists is valid.** Analysis is the constructor: type inference, the safety checks, and
    the dependency structure all run before a rule can be obtained, so every downstream consumer holds a
-   rule that is *plannable by construction*. The analysis artifacts (the SIPS) are retained as data,
+   rule that is *plannable by construction*. The analysis facts (the SIPS) are retained as data,
    because the demand-driven incremental work consumes them.
 3. **Optionality is structural.** The correctness of optional (`maybe`) fields must not depend on plan
    order, field names, or runtime guard interactions; the contracts live in the shape of the
@@ -25,7 +25,7 @@ Three properties the engine should have, none of which it had at the chapter's s
 ## Prior state, and what was wrong with it
 
 - Evaluation walked the syntactic AST: `Premise`/`Proposition` carried `evaluate`, so there was no
-  compiled artifact between "parsed rule" and "running stream".
+  compiled form between "parsed rule" and "running stream".
 - Rule construction ran **plan-then-analyze**: the dependency graph was computed *from the already
   ordered steps* and then discarded. Analysis could validate but produced nothing anyone consumed; the
   SIPS the magic-sets literature builds everything on existed only transiently.
@@ -65,7 +65,7 @@ Evaluation dispatches on the variant.
 
 ### One SIPS, two halves, cost apart
 
-The magic-sets SIPS `(≺, f)` is realized as two retained artifacts: the `DependencyGraph` (`≺`, the
+The magic-sets SIPS `(≺, f)` is realized as two retained facts: the `DependencyGraph` (`≺`, the
 dependency index: which premise binds what each premise needs) and `feasibility::categorize`/`feasible`
 (`f`, the binding function: given the bound set, what a premise binds, or which variables it still
 needs, named in `Infeasible::NeedsAll`). Cost is deliberately *not* part of either: the planner asks

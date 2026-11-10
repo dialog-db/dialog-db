@@ -34,7 +34,7 @@
 //! paths carry different hashes, which is the trade for never hashing
 //! the fold.
 //!
-//! [`selector_range`]: dialog_artifacts::tree::selector_range
+//! [`selector_range`]: dialog_corpus::tree::selector_range
 //! [`Branch::overlay`]: crate::Branch::overlay
 
 use std::cell::OnceCell;
@@ -43,14 +43,13 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::ops::RangeInclusive;
 use std::sync::{Arc, OnceLock};
 
-use dialog_artifacts::selector::Constrained;
-use dialog_artifacts::tree::selector_range;
-use dialog_artifacts::{
-    Artifact, ArtifactSelector, Cause, Changes, DialogArtifactsError, Entity, EntityKey,
-    Instruction, Key, KeyViewConstruct, Pick, Relation, SortKey, Standing, Statement, Update,
-    artifact_index_keys, sort_key,
-};
 use dialog_common::Blake3Hash;
+use dialog_corpus::selector::Constrained;
+use dialog_corpus::tree::selector_range;
+use dialog_corpus::{
+    Cause, Changes, DialogCorpusError, Entity, EntityKey, Fact, Instruction, Key, KeyViewConstruct,
+    Pick, Relation, Selector, SortKey, Standing, Statement, Update, fact_index_keys, sort_key,
+};
 use dialog_search_tree::Manifest;
 use parking_lot::RwLock;
 
@@ -103,17 +102,17 @@ pub struct Instant {
     /// The chained hash after this instant.
     pub hash: Blake3Hash,
     /// Facts that became readable: stored, or un-shadowed beneath.
-    pub asserted: Vec<Artifact>,
+    pub asserted: Vec<Fact>,
     /// Facts that stopped being readable: removed, or shadowed
     /// beneath by a tombstone.
-    pub retracted: Vec<Artifact>,
+    pub retracted: Vec<Fact>,
     /// How the line held each fact this instant moved, before it did,
     /// one entry per fact: what undoing the instant restores
     /// ([`Ephemeral::rewound`]). The readable moves above do not
     /// determine it, since a fact both stored and hidden reports a
     /// removal like one merely stored, and clearing the line reports
     /// it removed and un-hidden at once.
-    pub found: Vec<(Artifact, Hold)>,
+    pub found: Vec<(Fact, Hold)>,
 }
 
 /// A memory-backed line. Cheap to clone: clones share the store, so a
@@ -134,7 +133,7 @@ struct State {
     /// updated in place (copied only while a reader holds it), so a
     /// read never copies the set and a write never rebuilds it.
     tombstones: Arc<HashSet<SortKey>>,
-    shadowed: HashMap<SortKey, Artifact>,
+    shadowed: HashMap<SortKey, Fact>,
     sequence: u64,
     hash: Blake3Hash,
     /// The most recent instants, oldest first, at most
@@ -160,8 +159,8 @@ impl Default for State {
 }
 
 /// The three index keys of a fact under `manifest`.
-fn index_keys(fact: &Artifact, manifest: &Manifest) -> [Key; 3] {
-    let (entity, attribute, value) = artifact_index_keys(fact, manifest);
+fn index_keys(fact: &Fact, manifest: &Manifest) -> [Key; 3] {
+    let (entity, attribute, value) = fact_index_keys(fact, manifest);
     [entity, attribute, value]
 }
 
@@ -171,7 +170,7 @@ fn index_keys(fact: &Artifact, manifest: &Manifest) -> [Key; 3] {
 /// [`Ephemeral`] and a transaction's [`Staged`](crate::Staged) store.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Facts {
-    map: BTreeMap<Key, Artifact>,
+    map: BTreeMap<Key, Fact>,
     /// How many held facts each attribute has. A read names an
     /// attribute far more often than not, and most stores (a query's
     /// metadata, a session overlay) hold none of the ones it names, so
@@ -190,13 +189,13 @@ impl Facts {
     }
 
     /// Whether this exact triple is held.
-    pub(crate) fn holds(&self, fact: &Artifact) -> bool {
+    pub(crate) fn holds(&self, fact: &Fact) -> bool {
         self.map
-            .contains_key(&EntityKey::from_artifact(fact, &self.manifest).into_key())
+            .contains_key(&EntityKey::from_fact(fact, &self.manifest).into_key())
     }
 
     /// Hold `fact`. Returns whether it was not held before.
-    pub(crate) fn insert(&mut self, fact: Artifact) -> bool {
+    pub(crate) fn insert(&mut self, fact: Fact) -> bool {
         let [entity, attribute, value] = index_keys(&fact, &self.manifest);
         if self.map.contains_key(&entity) {
             return false;
@@ -209,7 +208,7 @@ impl Facts {
     }
 
     /// Drop `fact`. Returns whether it was held.
-    pub(crate) fn remove(&mut self, fact: &Artifact) -> bool {
+    pub(crate) fn remove(&mut self, fact: &Fact) -> bool {
         if !self.holds(fact) {
             return false;
         }
@@ -226,19 +225,19 @@ impl Facts {
     }
 
     /// Every held fact at an `(entity, attribute)` cell.
-    pub(crate) fn cell(&self, of: &Entity, the: &Relation) -> Vec<Artifact> {
-        self.scan(&ArtifactSelector::new().of(of.clone()).the(the.clone()))
+    pub(crate) fn cell(&self, of: &Entity, the: &Relation) -> Vec<Fact> {
+        self.scan(&Selector::new().of(of.clone()).the(the.clone()))
     }
 
     /// The facts a selector matches, in the store's own key order.
-    pub(crate) fn scan(&self, selector: &ArtifactSelector<Constrained>) -> Vec<Artifact> {
+    pub(crate) fn scan(&self, selector: &Selector<Constrained>) -> Vec<Fact> {
         self.scan_within(&Window::new(selector))
     }
 
     /// The facts a window's selector matches, in the store's own key
     /// order. A store with no fact of the selector's attribute answers
     /// without building the range.
-    fn scan_within(&self, window: &Window<'_>) -> Vec<Artifact> {
+    fn scan_within(&self, window: &Window<'_>) -> Vec<Fact> {
         if self.map.is_empty() {
             return Vec::new();
         }
@@ -260,15 +259,15 @@ impl Facts {
     /// only the order of values within a cell can change.
     pub(crate) fn select(
         &self,
-        selector: &ArtifactSelector<Constrained>,
+        selector: &Selector<Constrained>,
         manifest: &Manifest,
-    ) -> Vec<Artifact> {
+    ) -> Vec<Fact> {
         self.select_within(&Window::new(selector), manifest)
     }
 
     /// [`select`](Self::select) over a window shared with the other
     /// stores one read meets, so the range is built once per read.
-    pub(crate) fn select_within(&self, window: &Window<'_>, manifest: &Manifest) -> Vec<Artifact> {
+    pub(crate) fn select_within(&self, window: &Window<'_>, manifest: &Manifest) -> Vec<Fact> {
         let mut rows = self.scan_within(window);
         if !rows.is_empty() && *manifest != self.manifest {
             let range = selector_range(window.selector, manifest);
@@ -287,11 +286,8 @@ impl Facts {
     /// [`RuleKey`](crate::rules::RuleKey)). Equal for stores holding and
     /// hiding the same rule facts, however they came to, and `None` for a
     /// store with none, which names no rule set.
-    pub(crate) fn rules<'h>(
-        &self,
-        hidden: impl Iterator<Item = &'h Artifact>,
-    ) -> Option<Blake3Hash> {
-        let row = |polarity: u8, fact: &Artifact| {
+    pub(crate) fn rules<'h>(&self, hidden: impl Iterator<Item = &'h Fact>) -> Option<Blake3Hash> {
+        let row = |polarity: u8, fact: &Fact| {
             let (the, of, tail) = sort_key(fact, &self.manifest);
             let mut row = vec![polarity];
             for part in [&the, &of, &tail] {
@@ -303,7 +299,7 @@ impl Facts {
         };
         let mut rows: Vec<Vec<u8>> = Vec::new();
         for the in self.attributes.keys().filter(|the| is_rule_attribute(the)) {
-            for fact in self.scan(&ArtifactSelector::new().the(the.clone())) {
+            for fact in self.scan(&Selector::new().the(the.clone())) {
                 rows.push(row(b'+', &fact));
             }
         }
@@ -318,7 +314,7 @@ impl Facts {
     }
 
     /// Every held fact once, in entity order.
-    pub(crate) fn iter(&self) -> impl Iterator<Item = &Artifact> {
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &Fact> {
         self.map
             .range(
                 <EntityKey<Key> as KeyViewConstruct>::min().into_key()
@@ -344,12 +340,12 @@ impl Facts {
 /// window builds the range at most once per read instead of once per
 /// store.
 pub(crate) struct Window<'s> {
-    selector: &'s ArtifactSelector<Constrained>,
+    selector: &'s Selector<Constrained>,
     range: OnceCell<(Manifest, RangeInclusive<Key>)>,
 }
 
 impl<'s> Window<'s> {
-    pub(crate) fn new(selector: &'s ArtifactSelector<Constrained>) -> Self {
+    pub(crate) fn new(selector: &'s Selector<Constrained>) -> Self {
         Self {
             selector,
             range: OnceCell::new(),
@@ -373,8 +369,8 @@ impl<'s> Window<'s> {
 
 /// The delta one write is accumulating, before it is minted.
 struct Delta {
-    asserted: Vec<Artifact>,
-    retracted: Vec<Artifact>,
+    asserted: Vec<Fact>,
+    retracted: Vec<Fact>,
     /// Whether to record how the line held each fact the write moves.
     /// A session line records, since a subscription rewinds it by what
     /// its instants found ([`Ephemeral::rewound`]); a line built for
@@ -384,7 +380,7 @@ struct Delta {
     record: bool,
     /// How the line held each fact the write touches, as of its first
     /// touch, keyed to record each fact once.
-    found: Vec<(Artifact, Hold)>,
+    found: Vec<(Fact, Hold)>,
     touched: HashSet<SortKey>,
 }
 
@@ -415,7 +411,7 @@ impl Delta {
 
 impl State {
     /// How this line holds `fact`, whose sort key is `key`, now.
-    fn hold(&self, fact: &Artifact, key: &SortKey) -> Hold {
+    fn hold(&self, fact: &Fact, key: &SortKey) -> Hold {
         Hold {
             stored: self.facts.holds(fact),
             hidden: self.shadowed.contains_key(key),
@@ -424,7 +420,7 @@ impl State {
 
     /// Record how `fact` is held before a write first moves it, when
     /// the write records.
-    fn note(&self, fact: &Artifact, delta: &mut Delta) {
+    fn note(&self, fact: &Fact, delta: &mut Delta) {
         if !delta.record {
             return;
         }
@@ -435,14 +431,14 @@ impl State {
         }
     }
 
-    fn insert(&mut self, fact: Artifact, delta: &mut Delta) {
+    fn insert(&mut self, fact: Fact, delta: &mut Delta) {
         self.note(&fact, delta);
         if self.facts.insert(fact.clone()) {
             delta.asserted.push(fact);
         }
     }
 
-    fn remove(&mut self, fact: &Artifact, delta: &mut Delta) -> bool {
+    fn remove(&mut self, fact: &Fact, delta: &mut Delta) -> bool {
         self.note(fact, delta);
         if !self.facts.remove(fact) {
             return false;
@@ -454,7 +450,7 @@ impl State {
     /// Hide `fact` beneath this line, if it is not hidden already. A
     /// tombstone is a change readers see (the fact disappears), so it
     /// is reported as retracted.
-    fn shadow(&mut self, fact: Artifact, delta: &mut Delta) {
+    fn shadow(&mut self, fact: Fact, delta: &mut Delta) {
         let key = sort_key(&fact, self.facts.manifest());
         if self.shadowed.contains_key(&key) {
             return;
@@ -478,7 +474,7 @@ impl State {
 
     /// Hold `fact` as `hold`: store or remove it, hide or show it,
     /// whichever of the two differ from how it is held now.
-    fn restore(&mut self, fact: &Artifact, hold: Hold, delta: &mut Delta) {
+    fn restore(&mut self, fact: &Fact, hold: Hold, delta: &mut Delta) {
         let now = self.hold(fact, &sort_key(fact, self.facts.manifest()));
         if hold.stored && !now.stored {
             self.insert(fact.clone(), delta);
@@ -500,7 +496,7 @@ impl State {
             // Transients carry no version, so the election orders them by
             // cause, then value.
             Instruction::Assert(fact, policy) => {
-                let cell: Vec<Artifact> = self.facts.cell(&fact.of, &fact.the);
+                let cell: Vec<Fact> = self.facts.cell(&fact.of, &fact.the);
                 if cell.iter().any(|prior| prior.is == fact.is) {
                     return;
                 }
@@ -669,7 +665,7 @@ impl Ephemeral {
     ///
     /// A line holds facts only, so a statement that changes an asset is
     /// refused (see [`apply`](Self::apply)).
-    pub fn assert<S: Statement>(&self, statement: S) -> Result<&Self, DialogArtifactsError> {
+    pub fn assert<S: Statement>(&self, statement: S) -> Result<&Self, DialogCorpusError> {
         let mut changes = Changes::new();
         statement.assert(&mut changes);
         self.apply(changes)?;
@@ -679,7 +675,7 @@ impl Ephemeral {
     /// Retract a statement: each of its facts is removed from the
     /// store if held here, and otherwise hidden beneath by a
     /// tombstone. Chainable. A statement that changes an asset is refused.
-    pub fn retract<S: Statement>(&self, statement: S) -> Result<&Self, DialogArtifactsError> {
+    pub fn retract<S: Statement>(&self, statement: S) -> Result<&Self, DialogCorpusError> {
         let mut changes = Changes::new();
         statement.retract(&mut changes);
         self.apply(changes)?;
@@ -690,12 +686,12 @@ impl Ephemeral {
     ///
     /// Assets are stored only by a transaction's commit. A batch that
     /// changes one is refused with
-    /// [`AssetsUnsupported`](DialogArtifactsError::AssetsUnsupported) and
+    /// [`AssetsUnsupported`](DialogCorpusError::AssetsUnsupported) and
     /// nothing in it lands, rather than landing its facts and dropping its
     /// assets.
-    pub fn apply(&self, changes: Changes) -> Result<Option<Instant>, DialogArtifactsError> {
+    pub fn apply(&self, changes: Changes) -> Result<Option<Instant>, DialogCorpusError> {
         if changes.has_assets() {
-            return Err(DialogArtifactsError::AssetsUnsupported(
+            return Err(DialogCorpusError::AssetsUnsupported(
                 "an ephemeral line".into(),
             ));
         }
@@ -727,7 +723,7 @@ impl Ephemeral {
                 fact.the.clone(),
                 fact.of.clone(),
                 fact.is.clone(),
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             );
         }
         changes
@@ -740,7 +736,7 @@ impl Ephemeral {
     pub fn retain_entities<F: FnMut(&Entity) -> bool>(&self, mut keep: F) -> bool {
         let mut state = self.state.write();
         let mut delta = Delta::recorded();
-        let dropped: Vec<Artifact> = state
+        let dropped: Vec<Fact> = state
             .facts
             .iter()
             .filter(|fact| !keep(&fact.of))
@@ -765,7 +761,7 @@ impl Ephemeral {
     pub fn clear(&self) -> &Self {
         let mut state = self.state.write();
         let mut delta = Delta::recorded();
-        let held: Vec<Artifact> = state.facts.iter().cloned().collect();
+        let held: Vec<Fact> = state.facts.iter().cloned().collect();
         for fact in held {
             state.remove(&fact, &mut delta);
         }
@@ -854,7 +850,7 @@ impl Ephemeral {
     /// The facts a selector matches, in the order a tree scan of the
     /// same selector would produce them under the store's own format.
     /// For rows merged with a tree's, see [`select`](Self::select).
-    pub fn scan(&self, selector: &ArtifactSelector<Constrained>) -> Vec<Artifact> {
+    pub fn scan(&self, selector: &Selector<Constrained>) -> Vec<Fact> {
         self.state.read().facts.scan(selector)
     }
 
@@ -864,17 +860,13 @@ impl Ephemeral {
     /// only in their value tail, so under another format than the
     /// store's own the rows are re-keyed, and only the order of values
     /// within a cell can change.
-    pub fn select(
-        &self,
-        selector: &ArtifactSelector<Constrained>,
-        manifest: &Manifest,
-    ) -> Vec<Artifact> {
+    pub fn select(&self, selector: &Selector<Constrained>, manifest: &Manifest) -> Vec<Fact> {
         self.state.read().facts.select(selector, manifest)
     }
 
     /// [`select`](Self::select) over a window shared with the other
     /// stores one read meets.
-    pub(crate) fn select_within(&self, window: &Window<'_>, manifest: &Manifest) -> Vec<Artifact> {
+    pub(crate) fn select_within(&self, window: &Window<'_>, manifest: &Manifest) -> Vec<Fact> {
         self.state.read().facts.select_within(window, manifest)
     }
 }
@@ -885,11 +877,11 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
-    use dialog_artifacts::Value;
+    use dialog_corpus::Value;
     use dialog_query::the;
 
-    fn fact(of: &str, the_: &str, is: &str) -> Artifact {
-        Artifact {
+    fn fact(of: &str, the_: &str, is: &str) -> Fact {
+        Fact {
             the: the_.parse().expect("attribute"),
             of: of.parse().expect("entity"),
             is: Value::String(is.into()),
@@ -898,19 +890,14 @@ mod tests {
     }
 
     /// A raw fact as a statement.
-    struct Claim(Artifact);
+    struct Claim(Fact);
 
     impl Statement for Claim {
-        fn assert(self, update: &mut impl dialog_artifacts::Update) {
-            update.associate(
-                self.0.the,
-                self.0.of,
-                self.0.is,
-                dialog_artifacts::Pick::All,
-            );
+        fn assert(self, update: &mut impl dialog_corpus::Update) {
+            update.associate(self.0.the, self.0.of, self.0.is, dialog_corpus::Pick::All);
         }
 
-        fn retract(self, update: &mut impl dialog_artifacts::Update) {
+        fn retract(self, update: &mut impl dialog_corpus::Update) {
             update.dissociate(self.0.the, self.0.of, self.0.is);
         }
     }
@@ -920,7 +907,7 @@ mod tests {
     }
 
     fn values(line: &Ephemeral, of: &str, the_: &str) -> Vec<Value> {
-        let selector = ArtifactSelector::new()
+        let selector = Selector::new()
             .of(of.parse().expect("entity"))
             .the(the_.parse().expect("attribute"));
         line.scan(&selector).into_iter().map(|f| f.is).collect()
@@ -965,7 +952,7 @@ mod tests {
             "person/name".parse().unwrap(),
             "id:a".parse().unwrap(),
             Value::String("C".into()),
-            dialog_artifacts::Pick::Last,
+            dialog_corpus::Pick::Last,
         );
         let succeeded = line.apply(changes).unwrap().expect("the write mints");
         assert_eq!(succeeded.retracted.len(), 1);
@@ -985,14 +972,13 @@ mod tests {
     #[dialog_common::test]
     fn it_reads_an_attribute_through_every_write_to_it() {
         let names = |line: &Ephemeral| -> Vec<Value> {
-            line.scan(&ArtifactSelector::new().the("person/name".parse().unwrap()))
+            line.scan(&Selector::new().the("person/name".parse().unwrap()))
                 .into_iter()
                 .map(|fact| fact.is)
                 .collect()
         };
-        let roles = |line: &Ephemeral| {
-            line.scan(&ArtifactSelector::new().the("person/role".parse().unwrap()))
-        };
+        let roles =
+            |line: &Ephemeral| line.scan(&Selector::new().the("person/role".parse().unwrap()));
         let line = Ephemeral::new();
         line.assert(claim("id:a", "person/name", "A")).unwrap();
         assert_eq!(names(&line), vec![Value::String("A".into())]);
@@ -1002,7 +988,7 @@ mod tests {
             "person/name".parse().unwrap(),
             "id:a".parse().unwrap(),
             Value::String("B".into()),
-            dialog_artifacts::Pick::Last,
+            dialog_corpus::Pick::Last,
         );
         line.apply(replace).unwrap();
         assert_eq!(
@@ -1139,14 +1125,14 @@ mod tests {
         }
         // Attribute scan: entity order within the attribute.
         let by_attr: Vec<String> = line
-            .scan(&ArtifactSelector::new().the("person/name".parse().unwrap()))
+            .scan(&Selector::new().the("person/name".parse().unwrap()))
             .into_iter()
             .map(|f| f.of.to_string())
             .collect();
         assert_eq!(by_attr, vec!["id:a", "id:b"]);
         // Entity scan: attribute order within the entity.
         let by_entity: Vec<String> = line
-            .scan(&ArtifactSelector::new().of("id:a".parse().unwrap()))
+            .scan(&Selector::new().of("id:a".parse().unwrap()))
             .into_iter()
             .map(|f| f.the.to_string())
             .collect();
@@ -1154,7 +1140,7 @@ mod tests {
         // Value scan: every entity holding the value.
         let by_value: Vec<String> = line
             .scan(
-                &ArtifactSelector::new()
+                &Selector::new()
                     .the("person/role".parse().unwrap())
                     .is(Value::String("Admin".into())),
             )
@@ -1165,7 +1151,7 @@ mod tests {
         // Exact triple.
         assert_eq!(
             line.scan(
-                &ArtifactSelector::new()
+                &Selector::new()
                     .of("id:b".parse().unwrap())
                     .the("person/name".parse().unwrap())
                     .is(Value::String("Bob".into()))
@@ -1277,7 +1263,7 @@ mod tests {
             "the store's own format shares its set"
         );
 
-        let selector = ArtifactSelector::new().of("id:b".parse().unwrap());
+        let selector = Selector::new().of("id:b".parse().unwrap());
         let rows: Vec<Vec<u8>> = line
             .select(&selector, &spilling)
             .iter()
@@ -1295,7 +1281,7 @@ mod tests {
     fn it_refuses_a_batch_that_changes_an_asset() {
         let line = Ephemeral::new();
         let before = line.revision();
-        let asset = dialog_artifacts::Asset::from(b"not a fact".to_vec());
+        let asset = dialog_corpus::Asset::from(b"not a fact".to_vec());
 
         let mut changes = Changes::new();
         the!("person/name")
@@ -1305,15 +1291,15 @@ mod tests {
         asset.clone().assert(&mut changes);
         assert!(matches!(
             line.apply(changes),
-            Err(DialogArtifactsError::AssetsUnsupported(_))
+            Err(DialogCorpusError::AssetsUnsupported(_))
         ));
         assert!(matches!(
             line.assert(asset.clone()),
-            Err(DialogArtifactsError::AssetsUnsupported(_))
+            Err(DialogCorpusError::AssetsUnsupported(_))
         ));
         assert!(matches!(
             line.retract(asset),
-            Err(DialogArtifactsError::AssetsUnsupported(_))
+            Err(DialogCorpusError::AssetsUnsupported(_))
         ));
 
         assert_eq!(line.len(), 0, "nothing in the batch landed");
@@ -1335,7 +1321,7 @@ mod tests {
                 .is(name.to_string())
                 .assert(&mut changes);
             claim("id:b", "person/name", "B").retract(&mut changes);
-            dialog_artifacts::Asset::from(b"not a fact".to_vec()).assert(&mut changes);
+            dialog_corpus::Asset::from(b"not a fact".to_vec()).assert(&mut changes);
             changes
         };
 

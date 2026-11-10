@@ -2322,7 +2322,7 @@ mod tests {
 
     /// A buffered range scan must yield exactly what the canonical tree yields.
     ///
-    /// This is the property the artifact layer's read-modify-write instructions
+    /// This is the property the fact layer's read-modify-write instructions
     /// depend on: `Replace` scans an (entity, attribute) slot to find the priors
     /// it must supersede, so a scan blind to the buffers would miss a prior that
     /// a recent write only buffered.

@@ -23,9 +23,9 @@
 pub mod unifier;
 pub mod wire;
 
-use crate::artifact::Type as ValueType;
-use crate::artifact::Value;
-use crate::artifact::{decode_value, encode_value_owned};
+use crate::corpus::Type as ValueType;
+use crate::corpus::Value;
+use crate::corpus::{decode_value, encode_value_owned};
 use serde::de::Error as DeError;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::cmp::Ordering;
@@ -355,7 +355,7 @@ impl Display for ConceptRef {
     }
 }
 
-pub use crate::artifact::NameShape;
+pub use crate::corpus::NameShape;
 
 /// A value-level constraint layered onto a primitive membership
 /// set. The meet of two refinements is their conjunction (both
@@ -466,7 +466,7 @@ impl<'de> Deserialize<'de> for Views {
 /// upper bound.
 ///
 /// Bounds are stored in the value's ORDER-PRESERVING encoding (see
-/// `dialog_artifacts::encode_value_owned`), so within one
+/// `dialog_corpus::encode_value_owned`), so within one
 /// `value_type` the lattice operations are plain byte comparisons and
 /// the struct stays `Eq`/`Ord`/`Hash` for the type lattice (a raw
 /// `Value` would not, floats being only partially ordered).

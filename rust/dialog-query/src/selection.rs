@@ -37,7 +37,7 @@ impl<S> Selection for S where S: Stream<Item = Result<Match, EvaluationError>> +
 mod tests {
     use super::*;
     use crate::Term;
-    use crate::artifact::{Entity, Value};
+    use crate::corpus::{Entity, Value};
     use crate::error::EvaluationError;
     use futures_util::TryStreamExt;
 

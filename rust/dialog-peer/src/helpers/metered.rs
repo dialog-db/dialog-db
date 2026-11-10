@@ -7,9 +7,9 @@
 //! measurement sees exactly what a commit or query moved, beneath every
 //! cache the branch keeps. Every other effect passes through untouched.
 
-use dialog_artifacts::tree::CorpusNode;
 use dialog_capability::{Capability, Command, Provider, Resume};
 use dialog_common::{Buffer, ConditionalSend, ConditionalSync, Held, Holds};
+use dialog_corpus::tree::CorpusNode;
 use dialog_effects::archive::prelude::{ImportExt as _, PutExt as _};
 use dialog_effects::archive::{ArchiveError, Get, Import, Load, Put};
 use dialog_search_tree::nodes;

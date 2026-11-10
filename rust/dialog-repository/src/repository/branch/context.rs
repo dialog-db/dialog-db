@@ -8,18 +8,18 @@
 //! map, so this resolves it once per head, from the branch's memo when it
 //! can, and remembers it there.
 
-use dialog_artifacts::tree::CorpusNode;
+use dialog_corpus::tree::CorpusNode;
 use dialog_search_tree::nodes;
 use std::sync::Arc;
 
-use dialog_artifacts::history::{
-    Context, ContextCache, Held, History, RevisionRecord, Version, Watermark, context_in,
-    region_entry, region_writes,
-};
-use dialog_artifacts::{Datum, DialogArtifactsError, Key, State, context_entry};
 use dialog_capability::Provider;
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::{ConditionalSync, Holds};
+use dialog_corpus::history::{
+    Context, ContextCache, Held, History, RevisionRecord, Version, Watermark, context_in,
+    region_entry, region_writes,
+};
+use dialog_corpus::{Datum, DialogCorpusError, Key, State, context_entry};
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::prelude::CatalogScope;
 use dialog_effects::blob::Load as BlobLoad;
@@ -30,7 +30,7 @@ use crate::{Index, Revision};
 #[cfg(test)]
 use crate::repository::source::SourceRef;
 #[cfg(test)]
-use dialog_artifacts::history::context_of;
+use dialog_corpus::history::context_of;
 
 /// The full context `head` publishes, or `None` for a head minted before
 /// heads carried one.
@@ -48,7 +48,7 @@ pub(crate) async fn published_context<S>(
     contexts: &ContextCache,
     catalog: &CatalogScope,
     store: &S,
-) -> Result<Option<Arc<Context>>, DialogArtifactsError>
+) -> Result<Option<Arc<Context>>, DialogCorpusError>
 where
     S: Provider<ArchiveLoad>
         + Provider<nodes::Write<CorpusNode>>
@@ -124,7 +124,7 @@ pub(crate) async fn head_observes<S>(
     records: &Cache<Version, RevisionRecord>,
     catalog: &CatalogScope,
     store: &S,
-) -> Result<Option<bool>, DialogArtifactsError>
+) -> Result<Option<bool>, DialogCorpusError>
 where
     S: Provider<ArchiveLoad>
         + Provider<nodes::Write<CorpusNode>>
@@ -172,7 +172,7 @@ pub(crate) async fn full_context<S, H>(
     catalog: &CatalogScope,
     store: &S,
     history: &H,
-) -> Result<Arc<Context>, DialogArtifactsError>
+) -> Result<Arc<Context>, DialogCorpusError>
 where
     S: Provider<ArchiveLoad>
         + Provider<nodes::Write<CorpusNode>>
@@ -243,7 +243,7 @@ pub(crate) async fn successor<S, H>(
     catalog: &CatalogScope,
     store: &S,
     history: impl FnOnce() -> H,
-) -> Result<Successor, DialogArtifactsError>
+) -> Result<Successor, DialogCorpusError>
 where
     S: Provider<ArchiveLoad>
         + Provider<nodes::Write<CorpusNode>>
@@ -334,7 +334,7 @@ pub(crate) fn held<'a>(head: &Revision, context: &'a Context) -> Option<Held<'a>
 pub(crate) async fn head_context<'a, Env>(
     source: impl Into<SourceRef<'a>>,
     env: &Env,
-) -> Result<Arc<Context>, DialogArtifactsError>
+) -> Result<Arc<Context>, DialogCorpusError>
 where
     Env: Provider<ArchiveLoad>
         + Provider<nodes::Write<CorpusNode>>
@@ -349,7 +349,7 @@ where
     let source = source.into();
     let head = source
         .revision()
-        .ok_or_else(|| DialogArtifactsError::InvalidKey("the line has no head".into()))?;
+        .ok_or_else(|| DialogCorpusError::InvalidKey("the line has no head".into()))?;
     full_context(
         &head,
         &source.contexts(),
@@ -371,7 +371,7 @@ pub(crate) async fn region_agrees<'a, Env>(
     source: impl Into<SourceRef<'a>>,
     env: &Env,
     what: &str,
-) -> Result<(Context, Context), DialogArtifactsError>
+) -> Result<(Context, Context), DialogCorpusError>
 where
     Env: Provider<ArchiveLoad>
         + Provider<nodes::Write<CorpusNode>>
@@ -386,7 +386,7 @@ where
     let source = source.into();
     let head = source
         .revision()
-        .ok_or_else(|| DialogArtifactsError::InvalidKey("the line has no head".into()))?;
+        .ok_or_else(|| DialogCorpusError::InvalidKey("the line has no head".into()))?;
     assert!(
         head.region && head.context.is_none(),
         "{what}: the head keeps its context in its tree's region"

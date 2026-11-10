@@ -133,7 +133,7 @@ mod employee {
 `Attribute::of(...).is(...)` constructs a statement that can be asserted or retracted:
 
 ```rs
-let mut session = Session::open(artifacts);
+let mut session = Session::open(facts);
 let mut edit = session.edit();
 
 // Assert single attributes
