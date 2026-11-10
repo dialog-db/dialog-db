@@ -162,17 +162,17 @@ pub fn catalog() -> Vec<Spec> {
             size: 2000,
             about: "on a member that tracks a remote and holds every block, one cold read of every entity's name and role, then the names of one role: the reads that warm ahead of demand",
             volatile: false,
-            // Three CI sweeps of #767: 115,986,589 (387f06b) and 115,829,922
-            // (18d5a61) on a Xeon Platinum 8370C, flags 662b464ced6baa9c,
-            // and 115,729,243 (6587a02) on an EPYC 9V45, flags
-            // 060ba73ad866d3a8. Across the models it moves 0.09% to 0.22%,
-            // within one 0.135%: under the 0.2% floor. blake3, verifying
-            // the 1.5 MB its 32 cold loads read (12% of the phase),
-            // retired 13,672,977 instructions on both models. On the same
-            // EPYC sweep first-query moved +3.65% against the Intel base,
-            // nearly all of it in glibc's `_int_malloc` (+63 K of +64 K);
-            // here `_int_malloc` is 6.9% of the phase and moved -53 K.
-            cross_cpu_pct: 0.0,
+            // Four CI sweeps of #767 (instructions, then `_int_malloc`
+            // inclusive):
+            //   387f06b  Xeon Platinum 8370C  662b464ced6baa9c  115,986,589  8,068,511
+            //   18d5a61  Xeon Platinum 8370C  662b464ced6baa9c  115,829,922  7,974,892
+            //   6587a02  EPYC 9V45            060ba73ad866d3a8  115,729,243  7,921,637
+            //   d152a84  EPYC 7763            d14bb80d302b2adf  116,264,748  8,118,501
+            // 0.46% across all four less 0.135% within the 8370C pair,
+            // rounded as #653 rounds. blake3, verifying the 1.5 MB its 32
+            // cold loads read (12% of the phase), retired 13,672,977 on
+            // every model; the allocator moved by up to 197 K.
+            cross_cpu_pct: 0.3,
             prepare: |size| Box::pin(member::view(size)),
         },
         Spec {
