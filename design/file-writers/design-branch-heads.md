@@ -23,7 +23,7 @@ integration indexes them.
 | durability of what a head builds on | `fdatasync` of the one file covers every earlier append | 🟢 the same: making a head durable makes everything appended before it durable, another writer's commit included | 🔴 the head's file and every block file it names are synced apart |
 | a space at rest is one file | 🟢 | 🟢 | 🔴 a file per branch |
 | how many cells | no limit | 🟢 no fixed limit: the index names any number of slots, and grows when cells are created | no limit |
-| what a slot holds | | ? a cell's value is variable: a branch head is a `Revision` (branch identifier, issuer DID, tree hash, edition, optional context), a few hundred bytes, and other cells vary more. Either the value itself in a slot of a fixed size, larger values spilling to a record; or a pointer to a record in an extent (its offset, length and hash) | |
+| what a slot holds | no slot: the head record holds the whole value | ? a cell's value is variable: a branch head is a `Revision` (branch identifier, issuer DID, tree hash, edition, optional context), a few hundred bytes, and other cells vary more. Either the value itself in a slot of a fixed size, larger values spilling to a record; or a pointer to a record in an extent (its offset, length and hash) | the cell's file holds the whole value |
 | what integration does to cells | indexes the head records | adds cells created since to the index, and removes deleted ones; never touches an existing slot | nothing |
 
 ## The read-set check
