@@ -13,3 +13,8 @@
 | branches contending on one file does not feel right | opinion | Irakli, 2026-11-10 | - |
 | processes on separate branches must not wait on one another to write; serializing them disqualifies the file archive from those uses | opinion | Irakli, 2026-11-10: a requirement, and it decides the topic's scope | - |
 | branch heads, or memory cells generally, belong in the space's file | opinion | Irakli, 2026-11-10 (what it would buy is not yet said) | - |
+| the single-file stores surveyed (SQLite WAL, LMDB, BoltDB, Bitcask) take one writer at a time | fact | [prior-art.md](prior-art.md), each store's documentation | holds |
+| the stores surveyed that let writers run at once (git, Delta Lake, Iceberg, Jujutsu) land each writer's data where no other writer writes, and coordinate only publication, per ref or per table | fact | [prior-art.md](prior-art.md) | holds |
+| git's object store is main's `fs` archive plus background packing: loose objects written without a lock, packed later, read from both | fact | [prior-art.md](prior-art.md); gitrepository-layout, git-repack | holds |
+| a landing file per writer (process or session) is what the surveyed designs use; one per branch would make same-branch writers take turns on it | hypothesis | follows from the survey; refuted if a surveyed store lands data per branch without serializing that branch's writers | open |
+

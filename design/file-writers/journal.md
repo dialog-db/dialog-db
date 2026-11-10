@@ -48,3 +48,13 @@ matters is superseded by that requirement, not tested.
 **Decided.** The requirement, on Irakli's say-so: processes on separate
 branches of one space write without waiting on one another. The problem
 statement in the top story says so. Open: the same branch, and the cells.
+
+**Asked.** Irakli: is there something to learn from other databases here?
+
+**Learned.** [prior-art.md](prior-art.md). The single-file stores take one
+writer at a time. The stores that let writers run at once write each
+writer's data where nobody else writes and coordinate only publication, by
+the unit that conflicts (a ref, a table), then integrate later, with
+readers looking in both. Git's object store is main's `fs` archive plus the
+packing it lacks, and is close to the proposal in this topic. The landing
+place in all of them belongs to a writer, not a branch.
