@@ -5,7 +5,7 @@
 |  | Understanding | Activity |
 |---|---|---|
 | **Status** | Two processes advancing two branches of one space share no lock on main and take turns on one file lock with the file archive. Irakli requires that they not wait on one another. Cells live outside the file, a file each. | Directing: a matrix of four approaches, Irakli's candidate among them. |
-| **Agenda** | Whether an STM retry replays the same instructions or re-runs the caller's transaction. Whether "one file" means one file at rest, with side files while writers overlap. How a head's compare-and-swap works against a pending head record. The `?` cells in the matrix. | Ask who integrates; then the web; then the cells question. |
+| **Agenda** | Whether the web is in scope for this decision (every column but the owner's is open or blocked there). Whether "one file" means one file at rest, with side files while writers overlap. How a head's compare-and-swap works against a pending head record. The `?` cells in the matrix. | Ask who integrates; then the web; then the cells question. |
 
 ## 2026-11-10, Describing: the topic opens
 
@@ -195,3 +195,16 @@ unreferenced blocks behind in the writer's extent.
 **Decided.** The once-per-extent wait is acceptable, on Irakli's say-so.
 Writers on one branch retry over the latest head, in a loop the library
 runs. Open: replay the instructions, or re-run the caller's transaction.
+
+**Asked.** Replay the instructions, or re-run the caller's transaction?
+Irakli: failing is the current behaviour; the model is changing so that,
+instead of failing, a commit retries the same operation over the new head.
+
+**Learned.** Replaying the operation is close to re-running the
+transaction in dialog: a command is an asserted event, and the rules that
+derive its writes run at commit against the head being built on, so a
+retry re-reads through them. Only writes the caller computed outside the
+rules replay as given.
+
+**Decided.** A commit that loses the race retries the same operation over
+the new head, in a loop the library runs.
