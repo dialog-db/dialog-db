@@ -162,6 +162,13 @@ pub fn catalog() -> Vec<Spec> {
             size: 2000,
             about: "on a member that tracks a remote and holds every block, one cold read of every entity's name and role, then the names of one role: the reads that warm ahead of demand",
             volatile: false,
+            // Unmeasured across CPU models: its two CI sweeps (#767, heads
+            // 387f06b and 18d5a61) both ran on a Xeon Platinum 8370C,
+            // flags 662b464ced6baa9c, and differ by 0.135% (115,986,589
+            // and 115,829,922). The runtime dispatch that could move it is
+            // blake3, verifying the 1.5 MB its 32 cold loads read: 12% of
+            // the phase. first-query spends 65% of its phase in the same
+            // verification and measured under 0.2% across models (#653).
             cross_cpu_pct: 0.0,
             prepare: |size| Box::pin(member::view(size)),
         },
