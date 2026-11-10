@@ -16,7 +16,8 @@ What we tried, what it measured, and what we decided, newest last. The [idea](..
 - **R19:** with no content identity, every reader created through a command and updated the same entity, and none named identity; ground facts at the top level and `fresh` read 15 of 15. No framing of `!` moved it; what readers name now is modifiers spelled like concepts.
 - **R20:** naming a modifier after its concept, `(todo/add! …)`, removed the request for a modifier mark (3 of 5 readers to 0 of 5); what readers name now is the top-level `!` deciding the commit, and 7 of 10 proposed `(commit …)`.
 - **R21:** explaining `!` as "without it an assertion is scoped to the transaction, with it global" removed the request for `(commit …)` and lost nothing; Roc's "effect" removed it too but made readers reject a bare fact.
-- **Next:** take the design into `design.md` with the `scope` wording.
+- **R22:** with every write a command and `assert` and `retract` the only commands that change a concept, every reader scored 17 of 17; a rule both retracting and asserting, and retracting one value, read 5 of 5. Readers still name the rule head's `!`.
+- **Next:** decide whether rule heads carry `!`; then take the design into `design.md`.
 - **Open:** whether commands are asserted or written; what a rule head that names no entity lands on; whether questions stay calls with variables or become rules into a domain-call head; text literals; optional parameters. The design's Open list has the rest.
 
 ## Datasets
@@ -603,6 +604,16 @@ The complaint about `!` narrowed. Readers no longer name premises or the commit;
 - `!` makes a command global; without it a command is scoped to the transaction.
 
 **Decision.** Taken; R22 [planned](results/r22-plan.md) before any reader ran.
+
+## 2026-11-10 — R22: commands read best so far; what is left is the rule head's `!`
+
+**Question.** The one [planned](results/r22-plan.md): with every write a command, `assert` and `retract` the only ones that change a concept, and `retract` taking fields, does the notation hold, and does it read better?
+
+**Method.** As planned: R21's `scope` document against the `command` design, five readers each, two tasks added.
+
+**Results.** [r22](results/r22.md). Every `command` reader scored 17 of 17, the first round where every reader of a variant got every item; `baseline` 16. Taking back one value and a rule that both retracts and asserts read 5 of 5 with commands; with `baseline` every reader found no form for the first, and four wrote the second as two rules. All ten still rated 3, and still name `!`; for commands, three of five name the same thing, a rule head whose `!` is global only when its trigger was.
+
+**Decision.** Take the command design. The rule head is the next question: R21 and R22 readers keep asking that a head say its own scope. One answer is that a head never says it, because it always inherits its trigger's: rule heads lose `!`, commands a rule issues take effect after the tick, and same-tick derivation is a view. That is for the maintainer.
 
 ## How to reproduce
 
