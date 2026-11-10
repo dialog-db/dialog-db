@@ -2277,6 +2277,149 @@ async fn it_pushes_novelty_after_adopting_the_upstream_head_by_reference(
     Ok(())
 }
 
+/// A replica reads from its own blocks, once it adopted a head another
+/// device moved, the fact it read from them before.
+///
+/// A fast-forward adopts the upstream head by root and reads none of its
+/// tree, so everything the other device changed was left on the remote,
+/// wherever it was. The next read of a fact this replica had just read
+/// then waited on the remote, and failed without one: a page rendered
+/// from the device's own store a moment before did not render offline.
+/// The pull now follows the head it adopts (`PersistentTree::follow`): it
+/// reads what changed along the paths this replica holds a leaf of before
+/// the head moves, and leaves what the replica never read by reference.
+#[dialog_common::test]
+async fn it_reads_what_it_held_after_adopting_a_head_another_device_moved(
+    s3: S3Address,
+) -> Result<()> {
+    use crate::helpers::Counting;
+
+    let (operator, profile) = test_session_with_peer().await;
+    let named = |entity: String, name: String| {
+        Instruction::Assert(
+            Artifact {
+                the: "user/name".parse().expect("valid attribute"),
+                of: entity.parse().expect("valid entity"),
+                is: Value::String(name),
+                cause: None,
+            },
+            dialog_artifacts::Pick::All,
+        )
+    };
+    let residents = |batch: usize| {
+        (0..75)
+            .map(|i| named(format!("user:{batch}-{i}"), format!("resident-{batch}-{i}")))
+            .collect::<Vec<_>>()
+    };
+
+    // Device A gives the subject enough history that the tree has real
+    // depth, and publishes it.
+    let (alice_repo, alice_branch) =
+        setup_repo_with_s3_remote(&operator, &profile, &s3, "follow-a").await?;
+    for batch in 0..4 {
+        alice_branch
+            .commit(stream::iter(residents(batch)))
+            .perform(&operator)
+            .await?;
+    }
+    alice_branch.push().perform(&operator).await?;
+
+    // Device B, same subject, fresh archive: the pull adopts A's head.
+    let env = Counting::new(operator.clone());
+    let bob_repo = profile
+        .space(unique_name("follow-b"))
+        .open()
+        .perform(&env)
+        .await?;
+    let origin = connect("origin", s3_site_address(&s3), alice_repo.did(), &env).await?;
+    let bob_branch = bob_repo.branch("main").open().perform(&env).await?;
+    let remote_branch = origin.branch("main").open().perform(&env).await?;
+    bob_branch.set_upstream(remote_branch).perform(&env).await?;
+    bob_branch
+        .pull()
+        .perform(&env)
+        .await?
+        .expect("head adopted");
+
+    // The names B reads of one resident, and how many blocks it fetched
+    // from the remote to read them.
+    let names_of = |entity: &'static str| {
+        let (env, bob_branch) = (&env, &bob_branch);
+        async move {
+            env.reset();
+            let facts: Vec<_> = bob_branch
+                .claims()
+                .select(
+                    ArtifactSelector::new()
+                        .the("user/name".parse()?)
+                        .of(entity.parse()?),
+                )
+                .to_owned()
+                .perform(env)
+                .await?
+                .collect::<Vec<_>>()
+                .await
+                .into_iter()
+                .collect::<Result<Vec<_>, _>>()?;
+            let names: Vec<Value> = facts.into_iter().map(|fact| fact.is).collect();
+            anyhow::Ok((names, env.count("Hydrate")))
+        }
+    };
+    let (names, fetched) = names_of("user:0-0").await?;
+    assert_eq!(names, vec![Value::String("resident-0-0".into())]);
+    assert!(fetched > 0, "B holds none of the tree until it reads");
+    let (_, fetched) = names_of("user:0-0").await?;
+    assert_eq!(fetched, 0, "B holds what it read");
+
+    // A renames the resident B read, settles many more where B never
+    // read, and publishes. B adopts the head.
+    alice_branch
+        .commit(stream::iter(vec![named(
+            "user:0-0".into(),
+            "renamed".into(),
+        )]))
+        .perform(&operator)
+        .await?;
+    for batch in 4..12 {
+        alice_branch
+            .commit(stream::iter(residents(batch)))
+            .perform(&operator)
+            .await?;
+    }
+    alice_branch.push().perform(&operator).await?;
+    let adopted = bob_branch
+        .pull()
+        .perform(&env)
+        .await?
+        .expect("head adopted");
+    assert_eq!(
+        Some(adopted.tree),
+        alice_branch.revision().map(|revision| revision.tree),
+        "the fixture must adopt A's head by root, or it no longer covers \
+         the head a merge would have read"
+    );
+
+    let (names, fetched) = names_of("user:0-0").await?;
+    assert!(
+        names.contains(&Value::String("renamed".into())),
+        "B reads the adopted head: {names:?}"
+    );
+    assert_eq!(
+        fetched, 0,
+        "what B read from its own blocks before the pull, it reads from \
+         them after"
+    );
+
+    let (names, fetched) = names_of("user:9-9").await?;
+    assert_eq!(names, vec![Value::String("resident-9-9".into())]);
+    assert!(
+        fetched > 0,
+        "what B never read was left by reference, and is fetched on demand"
+    );
+
+    Ok(())
+}
+
 /// A head carrying bulk adopted by reference from one remote pushes to a
 /// second remote, with the pusher acting as a bridge: content the target
 /// lacks is fetched from the remote that holds it and streamed through,
