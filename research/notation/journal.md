@@ -14,7 +14,8 @@ What we tried, what it measured, and what we decided, newest last. The [idea](..
 - **R17:** the modifier design (commands as modifiers, `!` as mutation, `assert` and `retract` as modifiers) read right from a card: 125 of 130 points, every item passing. Every reader rated it 3 of 5, and 9 of 10 named `!` as the most confusing thing.
 - **R18:** with no `!` in premises and committing decided by the invocation, both documents read (medians 14 and 15 of 15), but ratings stayed at 3 and 7 of 10 still named `!`; writing concepts through `assert!` did not beat `todo!`.
 - **R19:** with no content identity, every reader created through a command and updated the same entity, and none named identity; ground facts at the top level and `fresh` read 15 of 15. No framing of `!` moved it; what readers name now is modifiers spelled like concepts.
-- **Next:** decide whether modifiers get a mark of their own; then take the design into `design.md`.
+- **R20:** naming a modifier after its concept, `(todo/add! …)`, removed the request for a modifier mark (3 of 5 readers to 0 of 5); what readers name now is the top-level `!` deciding the commit, and 7 of 10 proposed `(commit …)`.
+- **Next:** decide how a commit is spelled; then take the design into `design.md`.
 - **Open:** whether commands are asserted or written; what a rule head that names no entity lands on; whether questions stay calls with variables or become rules into a domain-call head; text literals; optional parameters. The design's Open list has the rest.
 
 ## Datasets
@@ -567,6 +568,16 @@ The complaint about `!` narrowed. Readers no longer name premises or the commit;
 **Results.** R17 to R19 showed a one-field change as an attribute write, `(xyz.todo/state! todo:9c1e is: :done)`, though the design reads and writes domains: `(xyz.todo! todo:9c1e state: :done)`. Readers copied it: it is R17's and R18's item 6 and most of R19's item 5. The behavior those items measured, an update naming its entity and not creating, does not depend on the spelling, so the tallies stand; the spelling they credited is not the design's.
 
 **Decision.** From R20 the documents write fields through the domain and do not say "attribute". R20's first ten readers were stopped before answering and discarded.
+
+## 2026-11-10 — R20: `(todo/add! …)` ends the modifier complaint; what is left is the commit
+
+**Question.** The one [planned](results/r20-plan.md): does naming a modifier after its concept, `(todo/add! list: … text: …)`, read better than `(add! (todo …))`?
+
+**Method.** As planned, with the documents writing fields through domains after the correction above: two documents, five readers each.
+
+**Results.** [r20](results/r20.md). Both read, medians 15 of 15. By the bar `slash` did not win, since all ten readers still name `!`. What they name split by document. Three of five `nested` readers asked for a mark on modifiers, as R19's did; no `slash` reader did. All five `slash` readers named only the top-level `!` deciding the commit, and all five proposed spelling it as a word: `(commit (todo/add …))`. Across both, seven of ten proposed that word. No reader confused a command with a domain write.
+
+**Decision.** For the maintainer: take `(todo/add! …)`, which removed the complaint it was aimed at with no cost the round showed; and whether a commit is spelled `!` at the top level or as a word, which is now the one thing readers name.
 
 ## How to reproduce
 
