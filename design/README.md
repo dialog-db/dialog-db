@@ -62,3 +62,6 @@ Backtracking moves a topic to an earlier phase and says so in its journal.
 
 Bringing a large dataset into a replica (large transactions) is a topic on
 its own branch, `worker/design-large-transactions`.
+- [Writers to one space's file, and where branch heads live](file-writers.md):
+  **Describing.** Writers of a space take turns on one file; cells live
+  outside it. Whether either is a problem, and for whom, is not yet stated.
