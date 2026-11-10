@@ -14,6 +14,38 @@ says how to cut a release.
 
 ## Unreleased
 
+### A prefetch hint a query took but did not finish is resumed by the next query
+
+[#770](https://github.com/dialog-db/dialog-db/pull/770), argued in
+[notes/fetch-scheduler.md](./notes/fetch-scheduler.md) ("A hint outlives
+the driver that took it").
+
+Every evaluation (a query, a subscription, a query inside a transaction)
+drives the env's queue of prefetch hints while it is polled, walking each
+hinted range so its blocks are local before a read asks for them. A hint
+it took lived only in that evaluation: when its stream ended or was
+dropped, an unfinished walk was dropped with it and no later evaluation
+saw the hint again. Now an evaluation that ends with walks unfinished
+hands their hints back to the queue, and whichever evaluation runs next
+resumes them. A resumed walk starts again from the root, but what earlier
+attempts fetched is already local, so it gets further each time.
+
+What this changes for you:
+
+- On a replica whose remote is slow relative to its queries, a hinted
+  range is fetched in full across the queries that follow, where before
+  it stayed partly remote and the range's own read fetched the rest.
+- `PreloadQueue::pending()` counts a hint a dropped evaluation handed
+  back; it no longer drops to zero the moment a driver takes a hint whose
+  walk never ends inside that evaluation.
+- A hint handed back goes through the same path as a new one: refused
+  with a zero `FetchBudget`, not enqueued twice while the same selector is
+  pending, and behind fresher hints under the same 1,024-per-rank bound.
+
+Why: speculation should be driven by whichever consumer is running, not
+lost with the one that popped it; on wasm a query regularly ended before
+its walk did, so the hint it existed for was wasted.
+
 ### A read's warm walk picks children by the read's own routing, and decodes no buffer
 
 Refs [#762](https://github.com/dialog-db/dialog-db/issues/762).
