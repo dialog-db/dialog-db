@@ -19,7 +19,8 @@ What we tried, what it measured, and what we decided, newest last. The [idea](..
 - **R22:** with every write a command and `assert` and `retract` the only commands that change a concept, every reader scored 17 of 17; a rule both retracting and asserting, and retracting one value, read 5 of 5. Readers still name the rule head's `!`.
 - **R23:** with `!` as induction only and the commit decided by submitting a document as a query or a transaction, 8 of 10 readers preferred it to a top-level `!`, and one of five named `!` most confusing, the first time since R17 it was not all.
 - **R24:** `query`, `select`, `find` and `(? …)` read the same, 19 of 19 medians, and every reader chose its own; only readers of the others named `query`'s clash with the submission mode.
-- **Next:** pick the question form's word; take the design into `design.md`, with an inductive head shown in an example.
+- **R25:** cold, with no documentation, the four words read the same again: 31 of 35 points and 11 of 15 word points each, and no reader took `select` for a projection, `find` for one match or `?` for a variable. Readers expect an undeclared concept to be empty, not an error (16 of 20), and 19 of 20 could not tell what `id` does.
+- **Next:** the maintainer picks the question form's word; take the design into `design.md`, with an inductive rule head shown in an example and the undeclared-concept error and `id` stated.
 - **Open:** whether commands are asserted or written; what a rule head that names no entity lands on; whether questions stay calls with variables or become rules into a domain-call head; text literals; optional parameters. The design's Open list has the rest.
 
 ## Datasets
@@ -656,7 +657,17 @@ xychart-beta
 
 **Results.** [r24](results/r24.md). Every median 19 of 19; every reader read a question inside a transaction right. All twenty chose the word they had read, so neither scores nor choices separate the words. The one asymmetry: none of the `query` readers saw the clash with the submission mode, and all fifteen of the others named it as the reason not to use `query`. Thirteen of twenty found that the document never shows where `!` goes on a rule head.
 
-**Decision.** For the maintainer: the words are equal for this reader, so the choice is the design's. The clash argues against `query`, and only readers without it could see it. The spec must show an inductive head, `(remind! (todo ?t))`, in an example.
+**Decision.** For the maintainer: the words are equal for this reader, so the choice is the design's. The clash argues against `query`, and only readers without it could see it. The spec must show an inductive rule head in an example, `(rule (remind! (todo ?t)) (when …))`; `!` stays out of top-level forms.
+
+## 2026-11-10 — R25: with no documentation, the four words still read the same
+
+**Question.** The one [planned](results/r25-plan.md): shown only code, does a reader read `query`, `select`, `find` or `(? …)` as a question that changes nothing, and does any of them invite a reading the design does not mean?
+
+**Method.** As planned: four samples (a declared concept and a question, a command and a rule, an undeclared concept, a domain read), no documentation, five readers per word.
+
+**Results.** [r25](results/r25.md). Every word scored 31 of 35 and 11 of 15 on the items a word can change; each lost only the undeclared-concept item, four times of five. No word invited a wrong reading. What the samples left open was the same for every word: 16 of 20 readers expected an undeclared concept to give an empty result, 19 of 20 could not tell what `id` does, and all 20 read `add` as writing the to-do itself.
+
+**Decision.** For the maintainer, as R24 left it: neither reading the spec nor reading cold separates the words, so the choice is the design's. Two cold-read rounds with no difference say this test cannot decide the word; it should not be run a third time. The spec must say that an undeclared concept is an error, what `id` returns, and that a command's facts are not kept.
 
 ## How to reproduce
 
