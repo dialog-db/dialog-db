@@ -22,6 +22,9 @@
 //!   Dialog. The floor every other variant is a ratio to.
 //! - `facts`: each transaction is one fact `(doc, text/change, bytes)`
 //!   asserted under `Pick::All`, through the repository's commit path.
+//! - `batch`: one fact `(doc, text/batch, bytes)` per flush under
+//!   `Pick::All`, its value every change since the previous flush in the
+//!   raw floor's encoding.
 //! - `doc`: one fact `(doc, text/content, text)` under `Pick::Last`, the
 //!   whole current text, replaced on each commit.
 //! - `region-canonical`: each change inserted straight into a
@@ -35,7 +38,7 @@
 //! distinct timestamp second), `pause:<s>` (a commit wherever the next
 //! transaction is at least `s` seconds later).
 //!
-//! With `--sync` (facts and doc only), each agent of the trace is a
+//! With `--sync` (facts and batch only), each agent of the trace is a
 //! replica of its own, mounted on a shared remote (the soak's local
 //! directory remote, whose transfer tally counts every request and byte).
 //! At the end of each flush window every replica that typed in it commits
@@ -320,7 +323,7 @@ impl Store {
     }
 
     fn classify(&self, block: &[u8]) {
-        use dialog_artifacts::inspect::{inspect_keys, inspect_node};
+        use dialog_artifacts::inspect::{inspect_keys, inspect_node, inspect_spans};
         let Ok(node) = inspect_node(block.to_vec()) else {
             return;
         };
@@ -329,6 +332,21 @@ impl Store {
             let entry = tally.breakdown.entry("index".into()).or_default();
             entry.0 += node.novelty;
             entry.1 += block.len() as f64;
+            // The buffered ops by the region of the span they ride on (a
+            // span's separator starts with its region's key tag; the
+            // leftmost span has none and starts the entity region).
+            if let Ok(spans) = inspect_spans(block.to_vec()) {
+                for span in spans {
+                    if span.novelty > 0 {
+                        let tag = tag_name(span.separator.first().copied().unwrap_or(0));
+                        let entry = tally
+                            .breakdown
+                            .entry(format!("buffered:{tag}"))
+                            .or_default();
+                        entry.0 += span.novelty;
+                    }
+                }
+            }
             return;
         }
         let Ok(keys) = inspect_keys(block.to_vec()) else {
@@ -336,21 +354,43 @@ impl Store {
         };
         let share = block.len() as f64 / keys.len().max(1) as f64;
         for key in keys {
-            let tag = match key.key.first() {
-                Some(0) => "entity",
-                Some(1) => "attribute",
-                Some(2) => "value",
-                Some(3) => "history",
-                Some(4) => "blob",
-                Some(5) => "coverage",
-                Some(6) => "context",
-                _ => "other",
-            };
+            let tag = tag_name(key.key.first().copied().unwrap_or(u8::MAX));
             let entry = tally.breakdown.entry(tag.into()).or_default();
             entry.0 += 1;
             entry.1 += share;
             entry.2 += key.key.len() as u64;
         }
+    }
+
+    /// The breakdown so far, as `kind -> (entries or novelty ops, bytes)`.
+    fn parts(&self) -> std::collections::BTreeMap<String, (u64, f64)> {
+        let tally = self.inner.lock().expect("the store tally");
+        tally
+            .breakdown
+            .iter()
+            .map(|(name, (count, bytes, _))| (name.clone(), (*count, *bytes)))
+            .collect()
+    }
+
+    /// What `after` adds to `before`, per kind.
+    fn parts_since(
+        before: &std::collections::BTreeMap<String, (u64, f64)>,
+        after: &std::collections::BTreeMap<String, (u64, f64)>,
+    ) -> serde_json::Value {
+        after
+            .iter()
+            .filter_map(|(name, (count, bytes))| {
+                let (was_count, was_bytes) = before.get(name).copied().unwrap_or((0, 0.0));
+                let bytes = (bytes - was_bytes).round() as u64;
+                (bytes > 0 || count > &was_count).then(|| {
+                    (
+                        name.clone(),
+                        json!({ "count": count - was_count, "bytes": bytes }),
+                    )
+                })
+            })
+            .collect::<serde_json::Map<_, _>>()
+            .into()
     }
 
     fn breakdown(&self) -> serde_json::Value {
@@ -405,6 +445,20 @@ impl Meter for Store {
             tally.blobs += 1;
             tally.blob_bytes += size;
         }
+    }
+}
+
+/// The region a key tag names.
+fn tag_name(tag: u8) -> &'static str {
+    match tag {
+        0 => "entity",
+        1 => "attribute",
+        2 => "value",
+        3 => "history",
+        4 => "blob",
+        5 => "coverage",
+        6 => "context",
+        _ => "other",
     }
 }
 
@@ -521,6 +575,45 @@ async fn speculate_nothing(operator: &Operator) {
 
 fn doc() -> Result<dialog_artifacts::Entity> {
     Ok(DOC.parse()?)
+}
+
+/// One fact carrying every change in `indices`, concatenated in the raw
+/// floor's encoding: a flush as a single value that accumulates.
+fn batch_fact(trace: &Trace, indices: &[usize]) -> Result<Instruction> {
+    let mut value = Vec::new();
+    for index in indices {
+        value.extend(encode_change(trace, *index));
+    }
+    Ok(Instruction::Assert(
+        Artifact {
+            the: "text/batch".parse()?,
+            of: doc()?,
+            is: Value::Bytes(value),
+            cause: None,
+        },
+        Pick::All,
+    ))
+}
+
+/// The instructions a flush of `indices` commits under `variant`.
+fn flush_instructions(trace: &Trace, variant: &str, indices: &[usize]) -> Result<Vec<Instruction>> {
+    match variant {
+        "facts" => indices
+            .iter()
+            .map(|index| change_fact(trace, *index))
+            .collect(),
+        "batch" => Ok(vec![batch_fact(trace, indices)?]),
+        other => bail!("--sync replays facts or batch, not {other}"),
+    }
+}
+
+/// The attribute a variant's text lands under.
+fn attribute_of(variant: &str) -> &'static str {
+    match variant {
+        "facts" => "text/change",
+        "batch" => "text/batch",
+        _ => "text/content",
+    }
 }
 
 fn change_fact(trace: &Trace, index: usize) -> Result<Instruction> {
@@ -666,25 +759,34 @@ async fn single(
     let mut text = Vec::new();
     let mut durations = Vec::new();
     let mut per_commit_bytes = Vec::new();
+    // With the breakdown on: each commit's bytes, split by node kind.
+    let breakdown = std::env::var_os("TEXT_E1_BREAKDOWN").is_some();
+    let mut per_commit_parts = Vec::new();
     // Cumulative bytes written after each tenth of the trace.
     let mut series = Vec::new();
     let tenth = trace.txns.len().div_ceil(10);
     for window in windows(trace, flush) {
         let end = window.end;
-        let mut changes = Vec::new();
-        for index in window.clone() {
-            apply(&mut text, &trace.txns[index]);
-            if variant == "facts" {
-                changes.push(change_fact(trace, index)?);
-            }
+        let indices: Vec<usize> = window.clone().collect();
+        for index in &indices {
+            apply(&mut text, &trace.txns[*index]);
         }
-        if variant == "doc" {
-            changes.push(content_fact(&text)?);
-        }
+        let changes = if variant == "doc" {
+            vec![content_fact(&text)?]
+        } else {
+            flush_instructions(trace, variant, &indices)?
+        };
         let (_, before, _, _) = client.meter().snapshot();
+        let parts = client.meter().parts();
         durations.push(commit(&branch, &client, changes).await?);
         let (_, after, _, _) = client.meter().snapshot();
         per_commit_bytes.push(after - before);
+        if breakdown {
+            per_commit_parts.push((
+                after - before,
+                Store::parts_since(&parts, &client.meter().parts()),
+            ));
+        }
         while series.len() < 10 && end >= ((series.len() + 1) * tenth).min(trace.txns.len()) {
             series.push(json!([end, after]));
         }
@@ -696,13 +798,14 @@ async fn single(
     branch.push().perform(&client).await?;
     let push = simulation::tally().since(&before);
     let live = live_size(site).await?;
-    let attribute = if variant == "facts" {
-        "text/change"
-    } else {
-        "text/content"
-    };
-    let (claims, value_bytes) = read_back(&branch, &client, attribute).await?;
+    let (claims, value_bytes) = read_back(&branch, &client, attribute_of(variant)).await?;
     per_commit_bytes.sort_unstable();
+    // The commit whose bytes are the median, split by what its new nodes
+    // hold: the per-commit floor, attributed.
+    per_commit_parts.sort_by_key(|(bytes, _)| *bytes);
+    let median_commit = per_commit_parts
+        .get(per_commit_parts.len() / 2)
+        .map(|(bytes, parts)| json!({ "bytes": bytes, "parts": parts }));
     Ok(json!({
         "written": {
             "bytes": unique_bytes,
@@ -722,6 +825,7 @@ async fn single(
         "timing": timing(&durations),
         "text_len": text.len(),
         "read_back": { "claims": claims, "value_bytes": value_bytes },
+        "median_commit": median_commit,
     }))
 }
 
@@ -733,9 +837,6 @@ async fn replicated(
     flush: Flush,
     site: &Site,
 ) -> Result<serde_json::Value> {
-    if variant != "facts" {
-        bail!("--sync replays the facts variant only");
-    }
     let mut replicas = Vec::new();
     for agent in 0..trace.agents {
         replicas.push(site.mount(&format!("text-agent-{agent}")).await?);
@@ -745,12 +846,13 @@ async fn replicated(
     let mut sync_time = Duration::ZERO;
     let mut rounds = 0u64;
     for window in windows(trace, flush) {
-        let mut pending: Vec<Vec<Instruction>> = (0..trace.agents).map(|_| Vec::new()).collect();
+        let mut pending: Vec<Vec<usize>> = (0..trace.agents).map(|_| Vec::new()).collect();
         for index in window {
-            pending[trace.txns[index].agent].push(change_fact(trace, index)?);
+            pending[trace.txns[index].agent].push(index);
         }
-        for (agent, changes) in pending.into_iter().enumerate() {
-            if !changes.is_empty() {
+        for (agent, indices) in pending.into_iter().enumerate() {
+            if !indices.is_empty() {
+                let changes = flush_instructions(trace, variant, &indices)?;
                 let (branch, client) = &replicas[agent];
                 durations.push(commit(branch, client, changes).await?);
             }
@@ -785,7 +887,7 @@ async fn replicated(
     let live = live_size(site).await?;
     let mut changes = Vec::new();
     for (branch, client) in &replicas {
-        changes.push(read_back(branch, client, "text/change").await?.0);
+        changes.push(read_back(branch, client, attribute_of(variant)).await?);
     }
     Ok(json!({
         "rounds": rounds,
@@ -930,7 +1032,8 @@ fn args() -> Result<Args> {
     }
     Ok(Args {
         trace: trace.context("--trace <file.json.gz>")?,
-        variant: variant.context("--variant raw|facts|doc|region-canonical|region-buffered")?,
+        variant: variant
+            .context("--variant raw|facts|batch|doc|region-canonical|region-buffered")?,
         flush,
         sync,
         vault_dir,
@@ -960,7 +1063,7 @@ async fn main() -> Result<()> {
     let started = Instant::now();
     let result = match args.variant.as_str() {
         "raw" => json!({}),
-        "facts" | "doc" => {
+        "facts" | "batch" | "doc" => {
             let site = Site::open(&args.vault_dir).await?;
             if args.sync {
                 replicated(&trace, &args.variant, args.flush, &site).await?

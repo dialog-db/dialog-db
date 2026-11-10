@@ -48,3 +48,14 @@ for name in friendsforever clownschool; do
   if [ "$name" = clownschool ]; then prefix_time=(second); fi
   EXTRA="--limit $prefix" "$run" "$trace" "$results/$name-sync-prefix.jsonl" facts all 100 10 1 "${prefix_time[@]}" --sync
 done
+
+# H9: one batch fact per flush, single replica and synced.
+for name in friendsforever clownschool; do
+  trace=$traces/$name.json.gz
+  policies=(all 1000 100)
+  if [ "$name" = clownschool ]; then policies=(all second pause:2 pause:5); fi
+  "$run" "$trace" "$results/$name-batch.jsonl" batch "${policies[@]}"
+  "$run" "$trace" "$results/$name-batch-sync.jsonl" batch "${policies[@]}" --sync
+  TEXT_E1_BREAKDOWN=1 EXTRA="--limit $prefix" "$run" "$trace" "$results/$name-batch-prefix.jsonl" batch 1
+  EXTRA="--limit $prefix" "$run" "$trace" "$results/$name-batch-sync-prefix.jsonl" batch 1 --sync
+done
