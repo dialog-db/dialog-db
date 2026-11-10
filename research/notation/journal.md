@@ -558,6 +558,16 @@ The complaint about `!` narrowed. Readers no longer name premises or the commit;
 
 **Decision.** Content identity stays gone. Keep `baseline`'s explanation of `!`; drop `commit`. Two questions for the maintainer: whether modifiers get a mark of their own, and whether a top-level form may compute an entity with a ground formula, `(xyz.todo/state! (id list: list:home text: "Call mom") is: :done)`, which would let an update skip the read.
 
+## 2026-11-10 — The R17 to R19 documents wrote one field as an attribute
+
+**Question.** Do the documents match the design?
+
+**Method.** Maintainer's correction.
+
+**Results.** R17 to R19 showed a one-field change as an attribute write, `(xyz.todo/state! todo:9c1e is: :done)`, though the design reads and writes domains: `(xyz.todo! todo:9c1e state: :done)`. Readers copied it: it is R17's and R18's item 6 and most of R19's item 5. The behavior those items measured, an update naming its entity and not creating, does not depend on the spelling, so the tallies stand; the spelling they credited is not the design's.
+
+**Decision.** From R20 the documents write fields through the domain and do not say "attribute". R20's first ten readers were stopped before answering and discarded.
+
 ## How to reproduce
 
 1. Take a variant's prompt from its round's results file and save it as `<variant>.txt`.
