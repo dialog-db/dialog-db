@@ -82,6 +82,28 @@ fn extract_parameters(source: &Match, terms: &Parameters) -> Result<Match, Evalu
     Ok(matched)
 }
 
+/// The entities that a plan already answered, for each row it was evaluated
+/// for. A row is held with its entities, so that its address stays its own
+/// for as long as it is a key here.
+#[derive(Default)]
+struct Answered(HashMap<usize, (Arc<Match>, HashSet<Vec<u8>>)>);
+
+impl Answered {
+    /// Whether `result` is a second row of its entity for `caller`. The
+    /// first row of an entity is recorded, and is no repeat.
+    fn repeats(&mut self, caller: &Arc<Match>, result: &Match) -> Result<bool, EvaluationError> {
+        let Ok(Binding::Present(this)) = result.lookup(&Term::<Any>::var("this")) else {
+            return Ok(false);
+        };
+        let entity = entity_key(&this)?;
+        let (_, entities) = self
+            .0
+            .entry(Arc::as_ptr(caller) as usize)
+            .or_insert_with(|| (caller.clone(), HashSet::new()));
+        Ok(!entities.insert(entity))
+    }
+}
+
 /// The type the caller's value term reads through, when it is a typed
 /// variable. An attribute's type is part of which attribute it is, so
 /// to a variable of a type a value of another type is a fact of
@@ -668,14 +690,23 @@ impl ConceptQuery {
             // answered this way only when its rule's body yields at most
             // one row per entity, which is then each attribute's one
             // candidate and so what every election picks.
+            //
+            // A body can also yield several rows for one entity that all
+            // hold the same fields of the head, when each field follows
+            // from the entity (`DeductiveRule::head_determined`): the rule
+            // of a window of a log reads one row for each entry that holds
+            // a message, and each field from the message. Its rows, with
+            // each repeat of an entity dropped, are that same one candidate
+            // for each attribute.
             if let Some(exact) = rules.exact()
-                && (app.predicate.attribute_field().is_some() || exact.rule.single_valued())
+                && let Some(repeats) = app.exactly(exact)
                 && stored_absent(&exact.attributes, env).await?
                 && let Some(plan) = rules.plan_exact(&app.terms, &first)
             {
                 let elect = app.election(&rules);
                 let rows = stream::iter([Ok(first)]).chain(selection);
-                for await merged in app.through(&plan, rows, env, elect, widen) {
+                let rows = Box::pin(rows);
+                for await merged in app.through_erased(&plan, rows, env, elect, widen, repeats) {
                     yield merged?;
                 }
                 return;
@@ -770,9 +801,12 @@ impl ConceptQuery {
         Env: crate::Scope<'a>,
     {
         // Erased at the entry; see `evaluate`.
-        self.through_erased(plan, Box::pin(rows), env, elect, widen)
+        self.through_erased(plan, Box::pin(rows), env, elect, widen, false)
     }
 
+    /// [`through`](Self::through), with `repeats` as whether the plan can
+    /// yield a row of one entity more than once for one row of `rows`. Each
+    /// such repeat is dropped, so one row leaves for each entity.
     fn through_erased<'a, Env>(
         &self,
         plan: &Disjunction,
@@ -780,6 +814,7 @@ impl ConceptQuery {
         env: &'a Env,
         elect: Option<Election>,
         widen: bool,
+        repeats: bool,
     ) -> Pin<Box<dyn Selection + 'a>>
     where
         Env: crate::Scope<'a>,
@@ -813,6 +848,7 @@ impl ConceptQuery {
             Ok(inner.within(caller))
         });
         let results = plan.clone().evaluate(scoped, env);
+        let mut answered = Answered::default();
         if elect.is_none() && !widen {
             return Box::pin(results.filter_map(move |result| {
                 let merged = result.and_then(|mut result| {
@@ -821,6 +857,9 @@ impl ConceptQuery {
                             "a concept's result lost the row it was evaluated for".to_string(),
                         )
                     })?;
+                    if repeats && answered.repeats(&caller, &result)? {
+                        return Ok(None);
+                    }
                     merge_parameters(&caller, &result, &back)
                         .map_err(|e| EvaluationError::Store(e.to_string()))
                 });
@@ -855,6 +894,9 @@ impl ConceptQuery {
                 }
                 matched.insert(caller_id);
                 if elect.is_none() {
+                    if repeats && answered.repeats(&caller, &result)? {
+                        continue;
+                    }
                     let merged = merge_parameters(&caller, &result, &back)
                         .map_err(|e| EvaluationError::Store(e.to_string()))?;
                     if let Some(merged) = merged {
@@ -1130,6 +1172,24 @@ impl ConceptQuery {
             return None;
         }
         Some(election)
+    }
+
+    /// Whether the rows of the covering rule `exact` are this concept's
+    /// answer, and if so whether a row of one entity can repeat among them.
+    ///
+    /// They are the answer with no repeat for an attribute concept, whose
+    /// rows are elected for each entity, and for a body that yields at most
+    /// one row for each entity. They are the answer once each repeat is
+    /// dropped for a body that determines each field of the head from the
+    /// entity (see [`DeductiveRule::head_determined`]).
+    fn exactly(&self, exact: &Exact) -> Option<bool> {
+        if self.predicate.attribute_field().is_some() || exact.rule.single_valued() {
+            Some(false)
+        } else if exact.rule.head_determined() {
+            Some(true)
+        } else {
+            None
+        }
     }
 
     /// The fields whose scans can take a bound that this call proved, with
