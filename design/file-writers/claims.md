@@ -7,6 +7,8 @@
 | the single-file design keeps branch heads and credentials outside the file, and lists one integrating process as an option, not started | fact | research/single-file-format/design.md, "Not in this design" | holds |
 | no measurement so far has two branches of one replica writing at once: in the bench each member is a replica with a file of its own | fact | `rust/dialog-baseline/examples/tonk_bench.rs`; research/single-file-format/journal.md | holds |
 | a file run writes 23,144 `flock` calls (0.75 s of a 53 s run) and 472 `fdatasync` (0.44 s), none of them waiting on another writer | fact | research/single-file-format/journal.md, 2026-11-10, "the push behind main is this disk's" | holds |
+| on main, two processes advancing two branches share no lock: each block is a content-addressed file written atomically and skipped if present, each head a cell of its own | fact | `rust/dialog-storage/src/storage/provider/fs/archive.rs` (`Put`, `Import`); `fs/memory.rs` | holds |
+| with the file archive, two processes advancing two branches of one space take turns on the file's writer lock | fact | `rust/dialog-archive-file/src/archive.rs` (`Exclusive::take` in the append path) | holds |
 | branches of one space writing at once wait on each other's turn enough to matter | hypothesis | confirmed if a commit's latency with k writers on k branches of one file grows with k at the k a session really has; refuted if it stays flat there. Not measured | open |
 | branches contending on one file does not feel right | opinion | Irakli, 2026-11-10 | - |
 | branch heads, or memory cells generally, belong in the space's file | opinion | Irakli, 2026-11-10 (what it would buy is not yet said) | - |

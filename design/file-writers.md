@@ -20,6 +20,13 @@ look at both. He would also like branch heads, or memory cells generally,
 kept in the same file archive, perhaps as a tree of their own built with
 the same techniques as the blocks, or as something more specific.
 
+The situation Irakli has in mind: two processes advance two branches of
+one space independently and at the same time. On main they share nothing a
+write waits on: each block is a content-addressed file of its own, written
+atomically and skipped if it exists, and each head is a cell of its own
+under its own lock. With the single-file archive, both processes append to
+one file and take turns on its lock.
+
 The single-file design already names the integrator as an option and leaves
 it unstarted, and keeps branch heads and credentials out of the file
 ([design.md, "Not in this design"](../research/single-file-format/design.md)).
