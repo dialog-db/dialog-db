@@ -104,3 +104,16 @@ taking the lock back if there are any.
 
 **Decided.** The scheduling, on Irakli's say-so, into the matrix's "who
 integrates" row. Open: where the spawned integrator runs.
+
+**Asked.** A task in the writer's process, or a process of its own?
+Irakli: detaching into the background.
+
+**Learned.** Git can detach because git is the binary it re-runs; a library
+cannot do that alone, and on the web and iOS there is no process to launch.
+So "in the background" is a task off the commit in the writer's process,
+resumed by the next process if this one exits, or a detached process where
+the host program gives dialog a command to run.
+
+**Decided.** Integration runs in the background, off the commit. Open:
+whether a task that dies with its process is enough, or integration has to
+outlive the writer.
