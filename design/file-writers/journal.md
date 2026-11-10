@@ -335,3 +335,18 @@ nothing to apply again; the commit has to keep them until it publishes.
 
 **Decided.** The retry is that capability: apply a commit with updated
 versions over the latest head.
+
+**Asked.** The open items, with candidates and what would decide each.
+Irakli: something simple. On a cell's creation, add 20% to the size of its
+content and call it the capacity; an update that needs more marks the cell
+unpublished, telling readers to read it from the extents, or creates it
+over; or a spill, if more capacity is needed.
+
+**Learned.** No measurement is needed for the capacity. The two ways past
+it differ in what readers do: an unpublished slot sends every reader of the
+cell to the extents until integration gives it a new slot, an index
+change; a spill keeps the slot and the index as they are, at one more read
+for that cell.
+
+**Decided.** Capacity is the content's size at creation plus 20%. Open:
+which of the two an update past it does.
