@@ -30,9 +30,12 @@ rows are seeded one by one, as before. Every other row seeds alone.
 
 What this changes for you:
 
-- What induction derives is unchanged. In this crate's tests every
-  seeded firing also seeds its rows one by one and checks that the heads
-  are the same.
+- What induction writes is unchanged. The matches of one firing keep
+  the order seeding the rows one by one finds them in, so when two of
+  them write one transient cell under `last`, the same one wins. In
+  this crate's tests every seeded firing also seeds its rows one by one,
+  writes those matches the same way, and checks that the novelty and
+  transients are the same.
 - A command whose event names several fields of a premise evaluates the
   rule once. On a tonk-shaped replica, a warm command's median fell from
   6.9–8.7 ms to 4.7–5.9 ms; 1,861 of 1,900 groups found their match
