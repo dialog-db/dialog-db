@@ -13,7 +13,8 @@ What we tried, what it measured, and what we decided, newest last. The [idea](..
 - **Settled after R16:** a write through a concept passes every parameter, and leaving one out is a compile error; a top-level call is `assert`, `assert!` or `query` by whether it has variables and a `!`; the `!` means retained; records in the entity's place are dropped for `(id {…})`; picks stay part of the attribute; a concept body holds only attribute lines and constraints.
 - **R17:** the modifier design (commands as modifiers, `!` as mutation, `assert` and `retract` as modifiers) read right from a card: 125 of 130 points, every item passing. Every reader rated it 3 of 5, and 9 of 10 named `!` as the most confusing thing.
 - **R18:** with no `!` in premises and committing decided by the invocation, both documents read (medians 14 and 15 of 15), but ratings stayed at 3 and 7 of 10 still named `!`; writing concepts through `assert!` did not beat `todo!`.
-- **Next:** take the design into `design.md`, with the card's `assert` hole fixed.
+- **R19:** with no content identity, every reader created through a command and updated the same entity, and none named identity; ground facts at the top level and `fresh` read 15 of 15. No framing of `!` moved it; what readers name now is modifiers spelled like concepts.
+- **Next:** decide whether modifiers get a mark of their own; then take the design into `design.md`.
 - **Open:** whether commands are asserted or written; what a rule head that names no entity lands on; whether questions stay calls with variables or become rules into a domain-call head; text literals; optional parameters. The design's Open list has the rest.
 
 ## Datasets
@@ -534,6 +535,28 @@ The complaints changed. Premises are gone; what readers name now is that a top-l
 - Two framings of `!` to test against R18's: a commit, where only a top-level commit moves the branch; and induction, where an inductive rule fires only on inductive assertions and the evaluator reports what it would have done. No document mentions the next tick, which readers found confusing; a third framing, `!` read as *next*, was dropped before any reader ran.
 
 **Decision.** Taken; R19 [planned](results/r19-plan.md) before any reader ran.
+
+## 2026-11-10 — R19: content identity is gone; what is left of `!` is modifiers spelled like concepts
+
+**Question.** The one [planned](results/r19-plan.md): with no content identity and ground facts allowed at the top level, do readers still trip on identity, and does a commit or an induction framing of `!` read better than R18's?
+
+**Method.** As planned: three documents, five readers each, all started at once, scored by the committed rubric. No document mentioned the next tick.
+
+**Results.** [r19](results/r19.md).
+
+```mermaid
+xychart-beta
+  title "Readers naming content identity most confusing (of 10 or 15)"
+  x-axis ["R17", "R18", "R19"]
+  y-axis "readers" 0 --> 4
+  bar [1, 3, 0]
+```
+
+220 of 225 points. Every reader created the to-do through a command and updated the same entity; nobody names identity any more. `fresh`, a fact with no entity, a bare ground fact and a variable at the top level all read, 15 of 15. The `commit` framing lost item 10 for all five of its readers: "a top-level commit moves the branch with every commit its rules make" read as taking the commits a bare `add` set off. `induction` and `baseline` scored 15 of 15. No framing moved `!`.
+
+The complaint about `!` narrowed. Readers no longer name premises or the commit; they name `add!` and `todo!` being spelled alike while one lasts a tick and the other is stored. Eleven of fifteen proposed marking modifiers, six with a sigil (`@add`). Ten of fifteen updated by reading the entity back with a `query`, because a top-level form cannot use `id`.
+
+**Decision.** Content identity stays gone. Keep `baseline`'s explanation of `!`; drop `commit`. Two questions for the maintainer: whether modifiers get a mark of their own, and whether a top-level form may compute an entity with a ground formula, `(xyz.todo/state! (id list: list:home text: "Call mom") is: :done)`, which would let an update skip the read.
 
 ## How to reproduce
 
