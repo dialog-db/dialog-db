@@ -1,7 +1,14 @@
 # The search tree reads through capabilities
 
-Status: taken. Step two after the store-held node cache (#730); lands
-in #735.
+Status: taken, then superseded in part. Step two after the store-held
+node cache (#730); landed in #735. The design topic
+[`design/tree-node-reads.md`](../design/tree-node-reads.md) moved the tree
+off `Load` for its nodes: a tree now performs the node layer's requests
+(`dialog_search_tree::nodes`) and the environment answers them, consulting
+the cache it holds itself. What this note says about `Load`, `Get` and
+hydration still holds for readers of blocks; what it says about the tree
+finding the cache through `Holds` and persist keeping sealed nodes no
+longer does.
 
 ## Context
 

@@ -1,3 +1,4 @@
+use dialog_artifacts::tree::CorpusNode;
 use dialog_artifacts::tree::fetch_spilled;
 use dialog_artifacts::{
     Artifact, DialogArtifactsError, EntityKey, Exporter, Key, KeyViewConstruct, State,
@@ -11,6 +12,7 @@ use dialog_effects::archive::{Get, Put};
 use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::Read as BlobRead;
 use dialog_effects::memory::Resolve;
+use dialog_search_tree::nodes;
 use futures_util::TryStreamExt;
 
 use crate::repository::archive::erased;
@@ -37,6 +39,11 @@ impl<E: Exporter> Export<'_, E> {
             + Provider<Put>
             + Provider<Resolve>
             + Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
             + Provider<Fork<RemoteSite, Resolve>>
             + dialog_common::Holds

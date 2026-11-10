@@ -67,8 +67,7 @@ impl<'a, Env> Connection<'a, Env> {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl<Env, E, T, Error> Provider<E> for Connection<'_, Env>
 where
     E: Effect<Output = Result<T, Error>> + Clone + ConditionalSend + ConditionalSync + 'static,
@@ -233,8 +232,7 @@ mod tests {
         sent: AtomicUsize,
     }
 
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    #[dialog_capability::provider]
     impl Provider<Fork<RemoteSite, Publish>> for Timeouts {
         async fn execute(&self, _input: Fork<RemoteSite, Publish>) -> Result<Version, MemoryError> {
             self.sent.fetch_add(1, Ordering::Relaxed);

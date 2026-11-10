@@ -48,9 +48,9 @@
 //! index
 //!     .apply(&blocks, &mut delta, stream::iter(vec![Instruction::Assert(artifact, dialog_artifacts::Pick::All)]))
 //!     .await?;
-//! let mut staged: Vec<_> = delta.flush_blocks().collect();
 //! // A value spilled before values moved to the blob store is read from
 //! // the catalog too, so this stand-in for a commit writes both lanes there.
+//! let mut staged: Vec<_> = delta.flush_blocks().collect();
 //! staged.extend(delta.flush_blobs());
 //! catalog.import(staged).perform(&blocks).await?;
 //!
@@ -71,9 +71,11 @@ pub use archive::*;
 /// What a read bound names, for this crate's modules to import at once
 /// without colliding with what they import themselves.
 mod reads {
+    pub use crate::tree::CorpusNode;
     pub use dialog_capability::Provider;
-    pub use dialog_common::{ConditionalSend, ConditionalSync, Holds};
-    pub use dialog_effects::{archive, blob};
+    pub use dialog_common::{ConditionalSend, ConditionalSync};
+    pub use dialog_effects::blob;
+    pub use dialog_search_tree::nodes;
 }
 
 mod artifacts;

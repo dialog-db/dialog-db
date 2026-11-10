@@ -158,10 +158,10 @@ pub fn blob_changes<'s, S>(
     store: S,
 ) -> impl Stream<Item = Result<BlobChange, DialogArtifactsError>> + 's + ConditionalSend
 where
-    S: Provider<archive::Load>
-        + Provider<archive::Get>
+    S: Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
         + Provider<blob::Load>
-        + Holds
         + ConditionalSend
         + ConditionalSync
         + Clone
@@ -198,9 +198,10 @@ pub trait BlobIndexExt {
         hash: &Blake3Hash,
     ) -> Result<Option<BlobRecord>, DialogArtifactsError>
     where
-        S: Provider<archive::Load>
+        S: Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<blob::Load>
-            + Holds
             + ConditionalSend
             + ConditionalSync
             + Clone;
@@ -218,9 +219,10 @@ pub trait BlobIndexExt {
         hash: &Blake3Hash,
     ) -> Result<Option<u64>, DialogArtifactsError>
     where
-        S: Provider<archive::Load>
+        S: Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<blob::Load>
-            + Holds
             + ConditionalSend
             + ConditionalSync
             + Clone;
@@ -235,9 +237,10 @@ pub trait BlobIndexExt {
         hash: &Blake3Hash,
     ) -> Result<Option<u64>, DialogArtifactsError>
     where
-        S: Provider<archive::Load>
+        S: Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<blob::Load>
-            + Holds
             + ConditionalSend
             + ConditionalSync
             + Clone;
@@ -245,9 +248,10 @@ pub trait BlobIndexExt {
     /// Whether the index references a blob.
     async fn has_blob<S>(&self, store: &S, hash: &Blake3Hash) -> Result<bool, DialogArtifactsError>
     where
-        S: Provider<archive::Load>
+        S: Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<blob::Load>
-            + Holds
             + ConditionalSend
             + ConditionalSync
             + Clone,
@@ -265,9 +269,10 @@ pub trait BlobIndexExt {
     ) -> impl Stream<Item = Result<(Blake3Hash, BlobRecord), DialogArtifactsError>> + 's + ConditionalSend
     where
         Self: Sized,
-        S: Provider<archive::Load>
+        S: Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<blob::Load>
-            + Holds
             + ConditionalSend
             + ConditionalSync
             + Clone
@@ -283,9 +288,10 @@ impl BlobIndexExt for ArtifactTree {
         hash: &Blake3Hash,
     ) -> Result<Option<BlobRecord>, DialogArtifactsError>
     where
-        S: Provider<archive::Load>
+        S: Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<blob::Load>
-            + Holds
             + ConditionalSend
             + ConditionalSync
             + Clone,
@@ -304,9 +310,10 @@ impl BlobIndexExt for ArtifactTree {
         hash: &Blake3Hash,
     ) -> Result<Option<u64>, DialogArtifactsError>
     where
-        S: Provider<archive::Load>
+        S: Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<blob::Load>
-            + Holds
             + ConditionalSend
             + ConditionalSync
             + Clone,
@@ -323,9 +330,10 @@ impl BlobIndexExt for ArtifactTree {
         hash: &Blake3Hash,
     ) -> Result<Option<u64>, DialogArtifactsError>
     where
-        S: Provider<archive::Load>
+        S: Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<blob::Load>
-            + Holds
             + ConditionalSend
             + ConditionalSync
             + Clone,
@@ -353,9 +361,10 @@ impl BlobIndexExt for ArtifactTree {
     ) -> impl Stream<Item = Result<(Blake3Hash, BlobRecord), DialogArtifactsError>> + 's + ConditionalSend
     where
         Self: Sized,
-        S: Provider<archive::Load>
+        S: Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<blob::Load>
-            + Holds
             + ConditionalSend
             + ConditionalSync
             + Clone
@@ -425,7 +434,7 @@ mod tests {
     ) -> Result<(), DialogArtifactsError> {
         let mut delta = ArchiveDelta::zero();
         let transient = tree.edit().insert(key, state, store).await?;
-        *tree = transient.persist(delta.blocks(), store)?;
+        *tree = transient.persist(delta.nodes())?;
         delta.flush_into(store);
         Ok(())
     }

@@ -23,28 +23,29 @@
 //! The tree uses a three-tier storage architecture:
 //!
 //! 1. **Delta Buffer**: Newly created or modified nodes are held in an
-//!    in-memory delta buffer until the caller flushes them into storage.
+//!    in-memory delta buffer until the caller hands them to the environment
+//!    to store ([`nodes::Write`]).
 //!
-//! 2. **Node Cache**: the environment a tree reads through may hold a
-//!    [`NodeCache`] ([`NodeCache::of`]), so a node is checked once and read
-//!    from memory after that, by every tree and every version read through
-//!    that environment. The tree itself holds no nodes, and a persist keeps
-//!    the nodes it seals in the same cache.
-//!
-//! 3. **Environment**: a tree is a root under a catalog
+//! 2. **Environment**: a tree is a root under a catalog
 //!    ([`CatalogScope`](dialog_effects::archive::prelude::CatalogScope)), and
-//!    a node the cache does not hold is the block its
-//!    [`Blake3Hash`](dialog_common::Blake3Hash) names in that catalog, read by
-//!    performing [`Load`](dialog_effects::archive::Load) on the environment
-//!    ([`load_node`]). Where the bytes come from (the local archive, or a
-//!    remote the environment hydrates from) is the environment's concern;
-//!    the tree checks each loaded block against the hash it asked for.
+//!    it asks the environment it reads through for its nodes by name
+//!    ([`nodes::Read`], behind [`load_node`] and the [`Accessor`] an
+//!    operation opens), and asks it to make nodes it will read soon cheap
+//!    ([`nodes::Preload`]). Where a node comes from (a cache the environment
+//!    holds, its store in whatever form that keeps nodes, a remote it
+//!    hydrates from) is the environment's concern; the tree holds no nodes
+//!    and looks up no cache.
+//!
+//! 3. **Translation**: an environment whose store keeps blocks answers the
+//!    requests through [`nodes::Read::through_blocks`] and friends, which
+//!    load a block, check it against the name it was asked under, and decode
+//!    it; a store that keeps nodes in a form of its own answers them itself.
 //!
 //! Tree modifications (insert, delete) accumulate in a caller-owned [`Delta`].
-//! Each [`persist`](TransientTree::persist) writes new nodes into that delta,
-//! and you call [`Delta::flush`] and store the returned buffers to persist
-//! changes. Unflushed changes remain queryable but are lost when the delta is
-//! dropped.
+//! Each [`persist`](TransientTree::persist) seals new nodes into that delta,
+//! and you call [`Delta::flush`] and hand the nodes to the environment
+//! ([`nodes::Write`]) to persist changes. Unflushed changes are lost when
+//! the delta is dropped.
 //!
 //! Basic usage, over a volatile store:
 //!
@@ -52,7 +53,7 @@
 //! # tokio_test::block_on(async {
 //! use dialog_capability::{Subject, did};
 //! use dialog_effects::archive::prelude::ArchiveScope;
-//! use dialog_search_tree::{Delta, PersistentTree};
+//! use dialog_search_tree::{Delta, PersistentTree, nodes};
 //! use dialog_storage::provider::Volatile;
 //!
 //! let storage = Volatile::new();
@@ -61,11 +62,11 @@
 //! let mut delta = Delta::zero();
 //!
 //! // Insert entries
-//! tree = tree.edit().insert([0, 0, 0, 1], vec![1, 2, 3], &storage).await.unwrap().persist(&mut delta, &storage).unwrap();
+//! tree = tree.edit().insert([0, 0, 0, 1], vec![1, 2, 3], &storage).await.unwrap().persist(&mut delta).unwrap();
 //!
-//! // Flush the persisted nodes into the catalog so reads can resolve them
-//! let blocks: Vec<_> = delta.flush().map(|(_, block)| block).collect();
-//! catalog.import(blocks).perform(&storage).await.unwrap();
+//! // Write the persisted nodes into the catalog so reads can resolve them
+//! let nodes: Vec<_> = delta.flush().map(|(_, node)| node).collect();
+//! nodes::Write::new(catalog.clone(), nodes).perform(&storage).await.unwrap();
 //!
 //! // Retrieve entries
 //! let value = tree.get(&[0, 0, 0, 1], &storage).await.unwrap();
@@ -79,7 +80,7 @@
 //! # tokio_test::block_on(async {
 //! use dialog_capability::{Subject, did};
 //! use dialog_effects::archive::prelude::ArchiveScope;
-//! use dialog_search_tree::{Delta, PersistentTree};
+//! use dialog_search_tree::{Delta, PersistentTree, nodes};
 //! use dialog_storage::provider::Volatile;
 //!
 //! let storage = Volatile::new();
@@ -91,9 +92,9 @@
 //! // caller-owned delta rather than into storage, so flush after each one to
 //! // store the new nodes before the next edit descends into them.
 //! for i in 0..10u32 {
-//!     tree = tree.edit().insert(i.to_le_bytes(), vec![i as u8], &storage).await.unwrap().persist(&mut delta, &storage).unwrap();
-//!     let blocks: Vec<_> = delta.flush().map(|(_, block)| block).collect();
-//!     catalog.import(blocks).perform(&storage).await.unwrap();
+//!     tree = tree.edit().insert(i.to_le_bytes(), vec![i as u8], &storage).await.unwrap().persist(&mut delta).unwrap();
+//!     let nodes: Vec<_> = delta.flush().map(|(_, node)| node).collect();
+//!     nodes::Write::new(catalog.clone(), nodes).perform(&storage).await.unwrap();
 //! }
 //!
 //! let root_hash = tree.root().clone();
@@ -112,28 +113,28 @@
 //! # tokio_test::block_on(async {
 //! use dialog_capability::{Subject, did};
 //! use dialog_effects::archive::prelude::ArchiveScope;
-//! use dialog_search_tree::{Delta, PersistentTree};
+//! use dialog_search_tree::{Delta, PersistentTree, nodes};
 //! use dialog_storage::provider::Volatile;
 //!
 //! let storage = Volatile::new();
 //! let catalog = ArchiveScope::new(Subject::from(did!("key:z6MkTree"))).index();
 //! let flush = async |delta: &mut Delta<_, _>| {
-//!     let blocks: Vec<_> = delta.flush().map(|(_, block)| block).collect();
-//!     catalog.import(blocks).perform(&storage).await.unwrap();
+//!     let nodes: Vec<_> = delta.flush().map(|(_, node)| node).collect();
+//!     nodes::Write::new(catalog.clone(), nodes).perform(&storage).await.unwrap();
 //! };
 //! let tree_v1 = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(catalog.clone());
 //! let mut delta = Delta::zero();
 //!
 //! // Create version 1 with some data. Each persist writes its new nodes into
 //! // the delta, so flush after each one before the next edit descends into them.
-//! let tree_v1 = tree_v1.edit().insert([0, 0, 0, 1], vec![1], &storage).await.unwrap().persist(&mut delta, &storage).unwrap();
+//! let tree_v1 = tree_v1.edit().insert([0, 0, 0, 1], vec![1], &storage).await.unwrap().persist(&mut delta).unwrap();
 //! flush(&mut delta).await;
-//! let tree_v1 = tree_v1.edit().insert([0, 0, 0, 2], vec![2], &storage).await.unwrap().persist(&mut delta, &storage).unwrap();
+//! let tree_v1 = tree_v1.edit().insert([0, 0, 0, 2], vec![2], &storage).await.unwrap().persist(&mut delta).unwrap();
 //! flush(&mut delta).await;
 //!
 //! // Create version 2 by modifying version 1
 //! // Note: tree_v1 remains unchanged
-//! let tree_v2 = tree_v1.edit().insert([0, 0, 0, 3], vec![3], &storage).await.unwrap().persist(&mut delta, &storage).unwrap();
+//! let tree_v2 = tree_v1.edit().insert([0, 0, 0, 3], vec![3], &storage).await.unwrap().persist(&mut delta).unwrap();
 //! flush(&mut delta).await;
 //!
 //! // Both versions can be queried independently
@@ -149,13 +150,7 @@
 mod accessor;
 pub use accessor::*;
 
-/// What a tree's read bound names, for this crate's modules to import at
-/// once without colliding with what they import themselves.
-mod reads {
-    pub use dialog_capability::Provider;
-    pub use dialog_common::Holds;
-    pub use dialog_effects::archive::{Get, Load};
-}
+pub mod nodes;
 
 pub use dialog_common::Buffer;
 

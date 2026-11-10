@@ -615,8 +615,7 @@ struct Opening<'a, S: Clone> {
     holdings: &'a Holdings,
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl<S: Clone> Provider<Resolve> for Opening<'_, S>
 where
     Storage<S>: Provider<Resolve> + ConditionalSync,

@@ -1,19 +1,16 @@
 //! Archive providers for S3.
 
-use std::sync::Arc;
-
-use async_trait::async_trait;
 use dialog_capability::ForkInvocation;
 use dialog_capability::Provider;
 use dialog_capability::access::AuthorizeError;
 use dialog_effects::archive::*;
 use reqwest::StatusCode;
+use std::sync::Arc;
 
 use crate::S3Error;
 use crate::s3::{S3, S3Invocation};
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<ForkInvocation<S3, Get>> for S3 {
     async fn execute(
         &self,
@@ -29,8 +26,7 @@ impl Provider<ForkInvocation<S3, Get>> for S3 {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<S3Invocation<Get>> for S3 {
     async fn execute(&self, input: S3Invocation<Get>) -> Result<Option<Vec<u8>>, ArchiveError> {
         // Concurrent readers of one block through this site join a single
@@ -68,8 +64,7 @@ impl Provider<S3Invocation<Get>> for S3 {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<ForkInvocation<S3, Put>> for S3 {
     async fn execute(&self, input: ForkInvocation<S3, Put>) -> Result<(), ArchiveError> {
         input
@@ -173,8 +168,7 @@ mod tests {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<S3Invocation<Put>> for S3 {
     async fn execute(&self, input: S3Invocation<Put>) -> Result<(), ArchiveError> {
         let put = input.capability.into_effect();
