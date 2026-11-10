@@ -1047,11 +1047,22 @@ async fn fire_seeded<'a>(
 ) -> Result<(), CommitError> {
     let matches = seeded_matches(rule, rows, view, Seeding::Grouped).await?;
     #[cfg(test)]
-    oracle::agrees(rule, rows, view, &matches).await?;
-    if matches.is_empty() {
-        return Ok(());
+    let before = (novelty.clone(), transients.clone());
+    if !matches.is_empty() {
+        emit_matches(rule, transient_head, matches, view, novelty, transients).await?;
     }
-    emit_matches(rule, transient_head, matches, view, novelty, transients).await
+    #[cfg(test)]
+    oracle::agrees(
+        rule,
+        transient_head,
+        rows,
+        view,
+        before,
+        novelty,
+        transients,
+    )
+    .await?;
+    Ok(())
 }
 
 /// How [`seeded_matches`] binds a premise's rows.
@@ -1414,18 +1425,22 @@ async fn is_novel<'a>(view: &QueryEnv<'a>, instruction: &Instruction) -> Result<
 }
 
 /// A differential check, in tests only: every seeded firing also seeds
-/// its rows one by one, and the heads the two would write must be the
-/// same. It runs under every test that commits through a rule, so the
+/// its rows one by one, writes those matches through the same emission
+/// against the same frozen view, and what the two write must be the
+/// same, novelty and transients alike. Comparing what is written, not
+/// the heads found, sees the order of the matches too: two transient
+/// writes to one cell under `last` are decided by which comes later.
+/// It runs under every test that commits through a rule, so the
 /// equivalence [`seed_groups`] argues for is checked wherever those
 /// tests reach, not only where a test was written for it.
 #[cfg(test)]
 mod oracle {
-    use super::{InductiveRule, QueryEnv, Seeding, seeded_matches, written_heads};
+    use super::{InductiveRule, QueryEnv, Seeding, emit_matches, seeded_matches};
     use crate::CommitError;
-    use dialog_artifacts::Artifact;
-    use dialog_query::Match;
+    use dialog_artifacts::{Artifact, Changes};
     use std::cell::Cell;
 
+    // Per thread: the test runtime drives each test on one thread.
     thread_local! {
         static EVALUATIONS: Cell<usize> = const { Cell::new(0) };
     }
@@ -1441,20 +1456,39 @@ mod oracle {
         EVALUATIONS.with(|evaluations| evaluations.replace(0))
     }
 
-    /// Seeding the rows of `rows` one by one finds the heads `grouped`
-    /// finds; panics with both sets when it does not.
+    /// Seeding the rows of `rows` one by one, from the `before` the
+    /// grouped firing started from, writes the `novelty` and
+    /// `transients` the grouped firing wrote; panics with both when it
+    /// does not.
     pub(super) async fn agrees(
         rule: &InductiveRule,
+        transient_head: bool,
         rows: &[Artifact],
         view: &QueryEnv<'_>,
-        grouped: &[Match],
+        before: (Changes, Changes),
+        novelty: &Changes,
+        transients: &Changes,
     ) -> Result<(), CommitError> {
         let per_row = seeded_matches(rule, rows, view, Seeding::PerRow).await?;
-        let expected: hashbrown::HashSet<_> = written_heads(rule, &per_row)?.into_iter().collect();
-        let found: hashbrown::HashSet<_> = written_heads(rule, grouped)?.into_iter().collect();
+        let (mut expected_novelty, mut expected_transients) = before;
+        if !per_row.is_empty() {
+            emit_matches(
+                rule,
+                transient_head,
+                per_row,
+                view,
+                &mut expected_novelty,
+                &mut expected_transients,
+            )
+            .await?;
+        }
         assert_eq!(
-            found, expected,
-            "grouped seeding must write the heads seeding row by row writes"
+            novelty, &expected_novelty,
+            "grouped seeding must write the novelty seeding row by row writes"
+        );
+        assert_eq!(
+            transients, &expected_transients,
+            "grouped seeding must write the transients seeding row by row writes"
         );
         Ok(())
     }
