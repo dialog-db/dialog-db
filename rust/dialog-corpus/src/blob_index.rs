@@ -1,0 +1,563 @@
+//! The blob index: how trees written before assets recorded their blobs.
+//!
+//! The blob index is the fifth ordering carried in the corpus (see
+//! [`BlobKey`]). Each entry maps a blob hash to a small, content-derived
+//! [`BlobRecord`], the blob's size.
+//!
+//! The index is retired. A line records stored content with an asset's
+//! `dialog.asset/size` fact, and nothing adds an index entry any more. The
+//! entries trees already hold are still read, wherever content is vouched
+//! for, sized, or shipped, so a blob written before the switch stays
+//! readable, hydratable and replicated. An entry can still be retracted,
+//! as the last thing done to it: a retraction writes a tombstone over it.
+//!
+//! The record rides the tree's shared `State<Datum>` value: blob keys occupy a
+//! tag range disjoint from the EAV/AEV/VAE indexes, so a blob entry's `Datum`
+//! is never seen by the fact scan. The encoding is hidden behind
+//! [`BlobRecord`]'s conversions so callers deal in `{version, size}`, not raw
+//! `Datum` fields, and a leading version byte lets the record grow.
+
+use crate::Blake3Hash;
+use crate::reads::*;
+use async_stream::try_stream;
+use async_trait::async_trait;
+use dialog_common::ConditionalSend;
+use dialog_search_tree::TreeDifference;
+use futures_util::Stream;
+
+use crate::{
+    ASSET_SIZE, BlobKey, Datum, DialogCorpusError, Entity, Relation, State, Value,
+    spill::{ShipmentRef, shipment_refs},
+    tree::{Corpus, CorpusExt},
+};
+
+/// Current [`BlobRecord`] encoding version.
+pub const BLOB_RECORD_VERSION: u8 = 1;
+
+/// Number of bytes in the version-1 record encoding: one version byte plus a
+/// big-endian `u64` size.
+const BLOB_RECORD_V1_LEN: usize = 1 + 8;
+
+/// Intrinsic, content-derived metadata stored for a blob in the blob index.
+///
+/// Versioned so new intrinsic fields can be added without a tree-wide
+/// migration: a reader switches on the leading version byte.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BlobRecord {
+    /// Encoding version of this record.
+    pub version: u8,
+    /// Total size of the blob in bytes.
+    pub size: u64,
+}
+
+impl BlobRecord {
+    /// A record for a blob of `size` bytes, at the current encoding version.
+    pub fn new(size: u64) -> Self {
+        Self {
+            version: BLOB_RECORD_VERSION,
+            size,
+        }
+    }
+
+    /// Encode this record as the tree value stored against a blob key.
+    #[cfg(any(test, feature = "helpers"))]
+    fn into_state(self) -> State<Datum> {
+        let mut value = Vec::with_capacity(BLOB_RECORD_V1_LEN);
+        value.push(self.version);
+        value.extend_from_slice(&self.size.to_be_bytes());
+        // Blob entries carry only the record in `blob`; blob keys never reach
+        // the fact scan, so the reconstruction fields do not apply.
+        State::Added(Datum {
+            cause: None,
+            blob: Some(value),
+            version: None,
+            collapsed: Vec::new(),
+            supersedes: Vec::new(),
+            retraction: false,
+        })
+    }
+
+    /// The tree entry a tree written before the index was retired holds for
+    /// this blob, to build such a tree in a test.
+    #[cfg(any(test, feature = "helpers"))]
+    pub fn legacy_entry(self, hash: &Blake3Hash) -> (crate::Key, State<Datum>) {
+        (BlobKey::new(hash).into_key(), self.into_state())
+    }
+
+    /// The tombstone entry retracting a blob reference, for callers
+    /// appending machinery entries to an open batch (see
+    /// `BufferedBatch::record`).
+    ///
+    /// The tombstone is written rather than the entry deleted, so the
+    /// removal replicates and merges like a fact retraction instead of
+    /// being resurrected by a union with an older tree. The blob's bytes
+    /// are not touched.
+    pub fn retract_entry(hash: &Blake3Hash) -> (crate::Key, State<Datum>) {
+        (BlobKey::new(hash).into_key(), State::Removed)
+    }
+
+    /// Decode a blob record from a tree value. `Removed` (a retracted entry)
+    /// decodes to `None`.
+    pub(crate) fn from_state(state: &State<Datum>) -> Result<Option<Self>, DialogCorpusError> {
+        let datum = match state {
+            State::Added(datum) => datum,
+            State::Removed => return Ok(None),
+        };
+        let bytes = datum.blob.as_deref().unwrap_or(&[]);
+        match bytes.first().copied() {
+            Some(BLOB_RECORD_VERSION) if bytes.len() == BLOB_RECORD_V1_LEN => {
+                let size = u64::from_be_bytes(
+                    bytes[1..BLOB_RECORD_V1_LEN]
+                        .try_into()
+                        .expect("checked length"),
+                );
+                Ok(Some(Self {
+                    version: BLOB_RECORD_VERSION,
+                    size,
+                }))
+            }
+            Some(version) => Err(DialogCorpusError::MalformedIndex(format!(
+                "unsupported blob record version {version} ({} bytes)",
+                bytes.len()
+            ))),
+            None => Err(DialogCorpusError::MalformedIndex(
+                "empty blob record".to_string(),
+            )),
+        }
+    }
+}
+
+/// A change to the blob index between two tree versions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlobChange {
+    /// A blob newly referenced in the target tree — a candidate to upload.
+    Added(Blake3Hash),
+    /// A blob reference removed in the target tree.
+    Removed(Blake3Hash),
+}
+
+impl BlobChange {
+    /// The blob hash this change concerns.
+    pub fn hash(&self) -> &Blake3Hash {
+        match self {
+            BlobChange::Added(hash) | BlobChange::Removed(hash) => hash,
+        }
+    }
+}
+
+/// Stream the blob-index differences between two tree versions, in hash order.
+///
+/// Runs the search-tree differential and keeps only entries in the `BLOB` tag
+/// range, so the result names exactly the blobs added or removed between
+/// `checkpoint` and `current` — the set push must ship (additions) without
+/// re-reading subtrees that did not change. Both trees must be readable from
+/// `store`.
+pub fn blob_changes<'s, S>(
+    checkpoint: Corpus,
+    current: Corpus,
+    store: S,
+) -> impl Stream<Item = Result<BlobChange, DialogCorpusError>> + 's + ConditionalSend
+where
+    S: Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSend
+        + ConditionalSync
+        + Clone
+        + 's,
+{
+    let storage = store;
+    try_stream! {
+        let difference = TreeDifference::compute(&checkpoint, &current, &storage, &storage).await?;
+        let refs = shipment_refs(&difference);
+        tokio::pin!(refs);
+        for await item in refs {
+            match item? {
+                ShipmentRef::BlobAdded { hash, .. } => yield BlobChange::Added(hash),
+                ShipmentRef::BlobRemoved(hash) => yield BlobChange::Removed(hash),
+                ShipmentRef::SpilledValue(_) => {}
+            }
+        }
+    }
+}
+
+/// Blob-index reads on a [`Corpus`].
+///
+/// An extension trait for the same reason as
+/// [`CorpusExt`](crate::tree::CorpusExt): `Corpus` aliases a
+/// foreign `PersistentTree`. The index is read only: see the
+/// [module docs](self).
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+pub trait BlobIndexExt {
+    /// Look up a blob's record, or `None` if it is not in the index.
+    async fn get_blob<S>(
+        &self,
+        store: &S,
+        hash: &Blake3Hash,
+    ) -> Result<Option<BlobRecord>, DialogCorpusError>
+    where
+        S: Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSend
+            + ConditionalSync
+            + Clone;
+
+    /// The size of the content this tree vouches for under `hash`, by an
+    /// asset's `dialog.asset/size` fact or, in a tree written before the
+    /// index was retired, by a blob-index entry, or `None` when it vouches
+    /// for no such content.
+    ///
+    /// This is the question a blob read asks before hydrating bytes it does
+    /// not hold, and the size it declares when it does.
+    async fn content_size<S>(
+        &self,
+        store: &S,
+        hash: &Blake3Hash,
+    ) -> Result<Option<u64>, DialogCorpusError>
+    where
+        S: Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + Provider<blob::Load>
+            + ConditionalSend
+            + ConditionalSync
+            + Clone;
+
+    /// The size an asset's `dialog.asset/size` fact records for `hash`, or
+    /// `None` when this tree records no such asset. Unlike
+    /// [`content_size`](BlobIndexExt::content_size), this never consults
+    /// the blob index.
+    async fn asset_size<S>(
+        &self,
+        store: &S,
+        hash: &Blake3Hash,
+    ) -> Result<Option<u64>, DialogCorpusError>
+    where
+        S: Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + Provider<blob::Load>
+            + ConditionalSend
+            + ConditionalSync
+            + Clone;
+
+    /// Whether the index references a blob.
+    async fn has_blob<S>(&self, store: &S, hash: &Blake3Hash) -> Result<bool, DialogCorpusError>
+    where
+        S: Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSend
+            + ConditionalSync
+            + Clone,
+    {
+        Ok(self.get_blob(store, hash).await?.is_some())
+    }
+
+    /// Stream every referenced blob and its record, in hash order.
+    ///
+    /// Consumes `self` (the tree is moved into the returned stream to pin its
+    /// root); `store` backs it.
+    fn list_blobs<'s, S>(
+        self,
+        store: S,
+    ) -> impl Stream<Item = Result<(Blake3Hash, BlobRecord), DialogCorpusError>> + 's + ConditionalSend
+    where
+        Self: Sized,
+        S: Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSend
+            + ConditionalSync
+            + Clone
+            + 's;
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl BlobIndexExt for Corpus {
+    async fn get_blob<S>(
+        &self,
+        store: &S,
+        hash: &Blake3Hash,
+    ) -> Result<Option<BlobRecord>, DialogCorpusError>
+    where
+        S: Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSend
+            + ConditionalSync
+            + Clone,
+    {
+        let storage = store.clone();
+        let key = BlobKey::new(hash).into_key();
+        match self.get(&key, &storage).await? {
+            Some(state) => BlobRecord::from_state(&state),
+            None => Ok(None),
+        }
+    }
+
+    async fn content_size<S>(
+        &self,
+        store: &S,
+        hash: &Blake3Hash,
+    ) -> Result<Option<u64>, DialogCorpusError>
+    where
+        S: Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + Provider<blob::Load>
+            + ConditionalSend
+            + ConditionalSync
+            + Clone,
+    {
+        if let Some(size) = self.asset_size(store, hash).await? {
+            return Ok(Some(size));
+        }
+        Ok(self.get_blob(store, hash).await?.map(|record| record.size))
+    }
+
+    async fn asset_size<S>(
+        &self,
+        store: &S,
+        hash: &Blake3Hash,
+    ) -> Result<Option<u64>, DialogCorpusError>
+    where
+        S: Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + Provider<blob::Load>
+            + ConditionalSend
+            + ConditionalSync
+            + Clone,
+    {
+        let entity = Entity::from_blob(hash)?;
+        let attribute: Relation = ASSET_SIZE.parse()?;
+        for fact in self
+            .select_record(store.clone(), &entity, &attribute)
+            .await?
+        {
+            // A tree keying numbers in one band reads the size back as an
+            // integer.
+            match fact.is {
+                Value::UnsignedInt(size) => return Ok(u64::try_from(size).ok()),
+                Value::SignedInt(size) => return Ok(u64::try_from(size).ok()),
+                _ => {}
+            }
+        }
+        Ok(None)
+    }
+
+    fn list_blobs<'s, S>(
+        self,
+        store: S,
+    ) -> impl Stream<Item = Result<(Blake3Hash, BlobRecord), DialogCorpusError>> + 's + ConditionalSend
+    where
+        Self: Sized,
+        S: Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSend
+            + ConditionalSync
+            + Clone
+            + 's,
+    {
+        let tree: Corpus = self;
+        let storage = store;
+        try_stream! {
+            let range = BlobKey::min().into_key()..=BlobKey::max().into_key();
+            let stream = tree.stream_range(range, &storage);
+            tokio::pin!(stream);
+            for await item in stream {
+                let entry = item?;
+                if let Some(record) = BlobRecord::from_state(&entry.value)? {
+                    let hash = BlobKey(entry.key).blob_hash();
+                    yield (hash, record);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use dialog_search_tree::helpers::test_catalog;
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    use super::*;
+    use crate::ArchiveDelta;
+    use dialog_search_tree::helpers::Blocks;
+
+    use futures_util::TryStreamExt;
+
+    fn hash(seed: u8) -> Blake3Hash {
+        [seed; 32]
+    }
+
+    /// Write an index entry the way a tree written before the index was
+    /// retired holds one.
+    async fn put_legacy(
+        tree: &mut Corpus,
+        store: &Blocks,
+        hash: &Blake3Hash,
+        record: BlobRecord,
+    ) -> Result<(), DialogCorpusError> {
+        let (key, state) = record.legacy_entry(hash);
+        write(tree, store, key, state).await
+    }
+
+    /// Retract an index entry, as a [`BlobRecord::retract_entry`] in a
+    /// commit does.
+    async fn retract(
+        tree: &mut Corpus,
+        store: &Blocks,
+        hash: &Blake3Hash,
+    ) -> Result<(), DialogCorpusError> {
+        let (key, state) = BlobRecord::retract_entry(hash);
+        write(tree, store, key, state).await
+    }
+
+    async fn write(
+        tree: &mut Corpus,
+        store: &Blocks,
+        key: crate::Key,
+        state: State<Datum>,
+    ) -> Result<(), DialogCorpusError> {
+        let mut delta = ArchiveDelta::zero();
+        let transient = tree.edit().insert(key, state, store).await?;
+        *tree = transient.persist(delta.nodes())?;
+        delta.flush_into(store);
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_round_trips_a_blob_record() -> Result<(), DialogCorpusError> {
+        let store = Blocks::new();
+        let mut tree = Corpus::empty_in(test_catalog());
+
+        put_legacy(&mut tree, &store, &hash(1), BlobRecord::new(4096)).await?;
+
+        assert_eq!(
+            tree.get_blob(&store, &hash(1)).await?,
+            Some(BlobRecord::new(4096))
+        );
+        assert!(tree.has_blob(&store, &hash(1)).await?);
+        assert_eq!(tree.get_blob(&store, &hash(2)).await?, None);
+        assert!(!tree.has_blob(&store, &hash(2)).await?);
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_lists_blobs_in_hash_order() -> Result<(), DialogCorpusError> {
+        let store = Blocks::new();
+        let mut tree = Corpus::empty_in(test_catalog());
+
+        for seed in [3u8, 1, 2] {
+            put_legacy(&mut tree, &store, &hash(seed), BlobRecord::new(seed as u64)).await?;
+        }
+
+        let listed: Vec<_> = tree.list_blobs(store).try_collect().await?;
+        assert_eq!(
+            listed,
+            vec![
+                (hash(1), BlobRecord::new(1)),
+                (hash(2), BlobRecord::new(2)),
+                (hash(3), BlobRecord::new(3)),
+            ]
+        );
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_retracts_a_blob_reference() -> Result<(), DialogCorpusError> {
+        let store = Blocks::new();
+        let mut tree = Corpus::empty_in(test_catalog());
+
+        for seed in [1u8, 2] {
+            put_legacy(&mut tree, &store, &hash(seed), BlobRecord::new(seed as u64)).await?;
+        }
+
+        retract(&mut tree, &store, &hash(1)).await?;
+
+        assert_eq!(tree.get_blob(&store, &hash(1)).await?, None);
+        assert!(!tree.has_blob(&store, &hash(1)).await?);
+
+        // The other reference is untouched, and listing skips the tombstone.
+        assert_eq!(
+            tree.get_blob(&store, &hash(2)).await?,
+            Some(BlobRecord::new(2))
+        );
+        let listed: Vec<_> = tree.list_blobs(store).try_collect().await?;
+        assert_eq!(listed, vec![(hash(2), BlobRecord::new(2))]);
+        Ok(())
+    }
+
+    /// Content a tree written before the index was retired recorded only
+    /// in the index is still vouched for, by the entry's size, until the
+    /// entry is retracted. No asset fact names it.
+    #[dialog_common::test]
+    async fn it_sizes_content_only_a_legacy_entry_records() -> Result<(), DialogCorpusError> {
+        let store = Blocks::new();
+        let mut tree = Corpus::empty_in(test_catalog());
+
+        put_legacy(&mut tree, &store, &hash(1), BlobRecord::new(10)).await?;
+        assert_eq!(tree.content_size(&store, &hash(1)).await?, Some(10));
+        assert_eq!(tree.asset_size(&store, &hash(1)).await?, None);
+
+        retract(&mut tree, &store, &hash(1)).await?;
+        assert_eq!(tree.content_size(&store, &hash(1)).await?, None);
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_surfaces_a_retraction_as_removed_in_the_differential()
+    -> Result<(), DialogCorpusError> {
+        let store = Blocks::new();
+
+        let mut checkpoint = Corpus::empty_in(test_catalog());
+        put_legacy(&mut checkpoint, &store, &hash(1), BlobRecord::new(10)).await?;
+
+        let mut current = checkpoint.clone();
+        retract(&mut current, &store, &hash(1)).await?;
+
+        let changes: Vec<_> = blob_changes(checkpoint, current, store)
+            .try_collect()
+            .await?;
+        assert_eq!(changes, vec![BlobChange::Removed(hash(1))]);
+        Ok(())
+    }
+
+    /// Retracting a hash the index never referenced writes a tombstone and
+    /// stays a no-op for readers and for shipment: the differential's added
+    /// tombstone decodes to `None`, which `shipment_ref` classifies as
+    /// nothing to ship.
+    #[dialog_common::test]
+    async fn it_ships_nothing_for_a_retraction_of_an_unreferenced_blob()
+    -> Result<(), DialogCorpusError> {
+        let store = Blocks::new();
+
+        let checkpoint = Corpus::empty_in(test_catalog());
+        let mut current = checkpoint.clone();
+        retract(&mut current, &store, &hash(9)).await?;
+
+        assert_eq!(current.get_blob(&store, &hash(9)).await?, None);
+        let changes: Vec<_> = blob_changes(checkpoint, current, store)
+            .try_collect()
+            .await?;
+        assert!(changes.is_empty(), "nothing to un-ship: {changes:?}");
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_detects_newly_referenced_blobs_from_the_differential()
+    -> Result<(), DialogCorpusError> {
+        let store = Blocks::new();
+
+        // Checkpoint references blob A.
+        let mut checkpoint = Corpus::empty_in(test_catalog());
+        put_legacy(&mut checkpoint, &store, &hash(1), BlobRecord::new(10)).await?;
+
+        // Current adds blob B and keeps A.
+        let mut current = checkpoint.clone();
+        put_legacy(&mut current, &store, &hash(2), BlobRecord::new(20)).await?;
+
+        let changes: Vec<_> = blob_changes(checkpoint, current, store)
+            .try_collect()
+            .await?;
+        assert_eq!(changes, vec![BlobChange::Added(hash(2))]);
+        Ok(())
+    }
+}

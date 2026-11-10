@@ -35,8 +35,8 @@
 //! evicted to bound memory, never for correctness — eviction just
 //! re-pays planning, it cannot return a wrong plan.
 
-use crate::artifact::Entity;
 use crate::concept::query::adornment::Adornment;
+use crate::corpus::Entity;
 use crate::planner::Conjunction;
 use crate::rule::deductive::DeductiveRule;
 

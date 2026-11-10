@@ -27,9 +27,9 @@
 //! [`DeductiveRule::apply`](crate::DeductiveRule), which binds
 //! concrete values into the head.
 
-use crate::artifact::Type as ValueType;
 use crate::concept::descriptor::ConceptDescriptor;
 use crate::constraint::Constraint;
+use crate::corpus::Type as ValueType;
 use crate::error::{AnalysisError, TypeError};
 use crate::planner::categorize;
 use crate::premise::Negation;
@@ -180,7 +180,7 @@ impl DependencyGraph {
 /// reorders), the rule-wide inferred type environment, and a
 /// per-premise dependency graph.
 ///
-/// This is the artifact of analysis. The planner reads it (or its
+/// This is the fact of analysis. The planner reads it (or its
 /// pieces) to build per-step plans; future iterations of the
 /// planner can consume the dependency graph directly to avoid
 /// re-walking schemas on every iteration.
@@ -590,9 +590,9 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
-    use crate::artifact::{Entity, Type as ValueType};
     use crate::attribute::AttributeDescriptor;
     use crate::attribute::query::AttributeQuery;
+    use crate::corpus::{Entity, Type as ValueType};
     use crate::formula::Formula;
     use crate::formula::string::Length;
     use crate::optional::OptionalAttributeQuery;

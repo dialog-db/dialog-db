@@ -15,7 +15,7 @@
 //! returns the asset naming them, which is then asserted:
 //!
 //! ```no_run
-//! # use dialog_artifacts::Asset;
+//! # use dialog_corpus::Asset;
 //! # use dialog_effects::blob::BlobError;
 //! # use dialog_repository::Branch;
 //! # async fn example<Env>(
@@ -44,10 +44,10 @@ use crate::repository::archive::erased;
 use crate::repository::archive::write_blob;
 use crate::repository::source::{Live, View};
 use crate::{Branch, CommitError, Index, Snapshot};
-use dialog_artifacts::tree::CorpusNode;
-use dialog_artifacts::{Asset, AssetChange, BlobIndexExt as _, Instruction};
 use dialog_capability::Provider;
 use dialog_common::{Blake3Hash, Blake3Hash as NodeHash, ConditionalSend, ConditionalSync};
+use dialog_corpus::tree::CorpusNode;
+use dialog_corpus::{Asset, AssetChange, BlobIndexExt as _, Instruction};
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::blob::Load as BlobLoad;
@@ -185,7 +185,7 @@ where
                 // so re-asserting a recorded asset mints nothing.
                 instructions.push(Instruction::Assert(
                     asset.fact()?,
-                    dialog_artifacts::Pick::Last,
+                    dialog_corpus::Pick::Last,
                 ));
             }
             AssetChange::Discard(asset) => {
@@ -324,9 +324,9 @@ mod tests {
     use crate::repository::source::Live;
     use crate::{Blob, Branch, CommitError};
     use anyhow::Result;
-    use dialog_artifacts::{
-        ASSET_SIZE, Artifact, ArtifactSelector, Asset, Changes, DialogArtifactsError, Entity,
-        Relation, Update as _, Value,
+    use dialog_corpus::{
+        ASSET_SIZE, Asset, Changes, DialogCorpusError, Entity, Fact, Relation, Selector,
+        Update as _, Value,
     };
     use dialog_effects::blob::{BlobError, BlobReader};
     use dialog_peer::helpers::test_session_with_peer;
@@ -357,7 +357,7 @@ mod tests {
             avatar(),
             alice(),
             Value::Entity(content),
-            dialog_artifacts::Pick::Last,
+            dialog_corpus::Pick::Last,
         );
         facts
     }
@@ -371,10 +371,10 @@ mod tests {
         branch: &Branch,
         operator: &Peer<VolatileSpace, Session>,
         entity: &Entity,
-    ) -> Result<Vec<Artifact>> {
+    ) -> Result<Vec<Fact>> {
         Ok(branch
             .claims()
-            .select(ArtifactSelector::new().of(entity.clone()))
+            .select(Selector::new().of(entity.clone()))
             .to_owned()
             .perform(operator)
             .await?
@@ -616,9 +616,7 @@ mod tests {
         assert!(
             matches!(
                 refused,
-                Err(CommitError::Artifact(
-                    DialogArtifactsError::AssetsUnsupported(_)
-                ))
+                Err(CommitError::Fact(DialogCorpusError::AssetsUnsupported(_)))
             ),
             "got {refused:?}"
         );
@@ -934,7 +932,7 @@ mod tests {
             fact.the,
             fact.of,
             Value::UnsignedInt(1_000_000),
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         );
         let refused = branch
             .transaction()
@@ -945,9 +943,7 @@ mod tests {
             .await;
         assert!(matches!(
             refused,
-            Err(CommitError::Artifact(
-                DialogArtifactsError::ReservedRelation(_)
-            ))
+            Err(CommitError::Fact(DialogCorpusError::ReservedRelation(_)))
         ));
         Ok(())
     }

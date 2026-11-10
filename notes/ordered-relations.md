@@ -1,7 +1,7 @@
 # Ordered Relations via Deterministically Biased Fractional Indexing
 
 Status: **core implemented** — the position primitive
-(`dialog_artifacts::position`), the `dialog/position` and
+(`dialog_corpus::position`), the `dialog/position` and
 `dialog/position-parts` formulas, and an end-to-end ordered-list test
 (one prefix scan, sorted) have landed; see "What landed" below.
 Originally: **proposed**. Evaluation of
@@ -157,14 +157,14 @@ Two properties come along for free:
   the notebook's answer, enforced by the index itself.
 - **Subscription soundness with zero new machinery.** Positions are
   ordinary committed facts. Prefix selectors
-  (`ArtifactSelector::the_starting_with`) already exist and already
+  (`Selector::the_starting_with`) already exist and already
   record demand ranges; the cover-gated diff, incremental maintenance,
   and standing subscriptions treat an ordered collection like any other
   fact range. Nothing in the ordering design touches an invariant.
 
 ### Constraints found in the current code
 
-- **`ATTRIBUTE_LENGTH = 64`** (`dialog-artifacts/src/key.rs:84`), and
+- **`ATTRIBUTE_LENGTH = 64`** (`dialog-corpus/src/key.rs:84`), and
   `Attribute` must contain `/` and be NUL-free — otherwise free-form.
   So the position budget is `64 − len(namespace) − 1` bytes (~50 for
   realistic namespaces). The POC's major/minor headroom makes
@@ -193,7 +193,7 @@ Two properties come along for free:
 
 ## What landed
 
-- **`dialog_artifacts::position`** — the Rust port:
+- **`dialog_corpus::position`** — the Rust port:
   `Position` (validated, canonical, byte-ordered), `Bias::derive`,
   `insert(bias, after, before)` with explicit open bounds. Three
   deliberate departures from the JS POC, each documented in the
@@ -255,7 +255,7 @@ originally did:
   pays —
   - `Attribute` reshaped as a **(domain, name) `Symbol` pair** with
     `.split()`, and the selector grows two slots —
-    `ArtifactSelector::with_domain(d).with_name(n)` — so *domain-only*
+    `Selector::with_domain(d).with_name(n)` — so *domain-only*
     selection is the first-class "all facts under this domain" scan,
     no string-prefix construction involved.
   - `Directory<T: Scalar>` — a `Symbol`-keyed collection as a concept
@@ -330,7 +330,7 @@ onto the existing one-slot selector rather than the spike's two-slot
 reshape (which would have forced the storage-layer `AttributePattern`
 churn #338 itself walked back):
 
-- **`Symbol`** (`dialog-artifacts/src/artifacts/symbol.rs`): the
+- **`Symbol`** (`dialog-corpus/src/model/symbol.rs`): the
   spike's validated identifier, unchanged rules (lowercase start;
   lowercase/digits/hyphens/dots; no `/`; ≤63 bytes) — which, combined
   with uppercase-only majors, makes the two name shapes disjoint by
@@ -352,7 +352,7 @@ churn #338 itself walked back):
   domain is already present the builder tightens the pair to an exact
   attribute, a point lookup.
 - **`Directory<T>` / `Sequence<T>`**
-  (`dialog-artifacts/src/collection.rs`): the twin keyed views over a
+  (`dialog-corpus/src/collection.rs`): the twin keyed views over a
   domain scan — `BTreeMap<Symbol, T>` and `BTreeMap<Position, T>`,
   each with an `admit(attribute, value)` classifier so one pass over
   a mixed domain fills both. `Sequence` iterates in list order and
@@ -369,14 +369,14 @@ churn #338 itself walked back):
   item — so the schema-level `as: {"directory": "Entity"}` story
   becomes desugaring onto refinements when concept fields grow the
   aggregation step, not a composite revival. `Directory`/`Sequence`
-  live at the artifacts layer as the aggregation targets, and
+  live at the facts layer as the aggregation targets, and
   concept-field aggregation remains the realize-layer follow-up the
   spike itself deferred.
 - **Name-shape refinement** (`dialog-query/src/type_system.rs`): the
   directory distinction, expressed in the current lattice's own
   vocabulary. `Refinement` grows a third constraint alongside
   `prefix` and `conforms`: `name_shape: Option<NameShape>` with
-  `Symbol | Position` — the discriminant of the artifact layer's
+  `Symbol | Position` — the discriminant of the fact layer's
   `Name` sum lifted into the type system. The meet requires
   agreement (a name is never both shapes, so conflicting pins are an
   empty type), the join keeps only a shared pin, inclusion orders
@@ -396,7 +396,7 @@ churn #338 itself walked back):
   is for premises that want one half; a consumer of both halves
   leaves the shape unpinned — one scan, classified per row
   downstream (the `Directory`/`Sequence` `admit` split).
-- **Name-shape scan narrowing** (`ArtifactSelector::with_name_shape`
+- **Name-shape scan narrowing** (`Selector::with_name_shape`
   + `apply_prefix_bounds`): the shape constraint reaches the key
   range itself. Uppercase-only majors made the shapes not merely
   disjoint but *range-separable*: within a domain, every position
@@ -424,7 +424,7 @@ churn #338 itself walked back):
 Phased so each step is useful alone:
 
 1. **The position primitive** — a Rust port of `position.js` in
-   `dialog-artifacts` (`position.rs`): `between(after, before, bias)
+   `dialog-corpus` (`position.rs`): `between(after, before, bias)
    → position`, where `bias` is the member entity's reference bytes;
    deterministic, order-preserving, attribute-legal alphabet;
    explicit `min`/`max` boundary handling for head/tail/empty

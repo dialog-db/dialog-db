@@ -182,7 +182,7 @@ impl Display for Equality {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::artifact::Type as ValueType;
+    use crate::corpus::Type as ValueType;
     use crate::selection::Match;
     use futures_util::TryStreamExt;
 

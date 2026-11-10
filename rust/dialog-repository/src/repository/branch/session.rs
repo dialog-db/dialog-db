@@ -6,17 +6,16 @@ use std::cell::Cell;
 use std::collections::HashSet;
 use std::iter::once;
 
-use dialog_artifacts::history::Edition;
-use dialog_artifacts::selector::Constrained;
-use dialog_artifacts::tree::CorpusNode;
-use dialog_artifacts::{
-    Artifact, ArtifactSelector, ArtifactStream, ArtifactView, Changes, DialogArtifactsError,
-    Entity, Estimate, Likelihood, Preload, PreloadRequest, Select, SortKey, Speculation, Statement,
-    sort_key,
-};
-use dialog_artifacts::{Relation as ArtifactsRelation, Standing, Value};
 use dialog_capability::{Capability, Fork, Provider, Resume, Subject};
 use dialog_common::{Blake3Hash, Buffer, ConditionalSync, Held, Holds};
+use dialog_corpus::history::Edition;
+use dialog_corpus::selector::Constrained;
+use dialog_corpus::tree::CorpusNode;
+use dialog_corpus::{
+    Changes, DialogCorpusError, Entity, Estimate, Fact, FactStream, FactView, Likelihood, Preload,
+    PreloadRequest, Select, Selector, SortKey, Speculation, Statement, sort_key,
+};
+use dialog_corpus::{Relation as CorpusRelation, Standing, Value};
 use dialog_effects::archive::{ArchiveError, Get, Put};
 use dialog_effects::authority::{Identify, Operator, OperatorExt as _};
 use dialog_effects::memory::Resolve;
@@ -91,7 +90,7 @@ use crate::{Branch, Ephemeral, RemoteSite, Snapshot, Staged};
 /// ```no_run
 /// # use dialog_repository::{Branch, Snapshot};
 /// # use dialog_query::query::Application;
-/// # fn example<Q: Application>(branch: &Branch, snapshot: &Snapshot, query: Q, facts: dialog_artifacts::Changes) {
+/// # fn example<Q: Application>(branch: &Branch, snapshot: &Snapshot, query: Q, facts: dialog_corpus::Changes) {
 /// let layer = branch
 ///     .query()
 ///     .join(snapshot)                 // another line
@@ -396,7 +395,7 @@ impl<'a, Q: Application> SelectQuery<'a, Q> {
             let operator = Identify
                 .perform(env)
                 .await
-                .map_err(|e| DialogArtifactsError::Storage(format!("identify: {e}")))?;
+                .map_err(|e| DialogCorpusError::Storage(format!("identify: {e}")))?;
 
             // The query's lines, pinned once here: every select the
             // query performs and the metadata it folds in name the
@@ -655,8 +654,8 @@ impl<'a> QueryEnv<'a> {
     /// [`ReadSettlement`]: super::transaction::ReadSettlement
     async fn settle_within(
         &self,
-        input: &ArtifactSelector<Constrained>,
-    ) -> Result<Vec<(usize, Vec<CellSettlement>)>, DialogArtifactsError> {
+        input: &Selector<Constrained>,
+    ) -> Result<Vec<(usize, Vec<CellSettlement>)>, DialogCorpusError> {
         let layers = self.layers();
         let mut settled: Vec<(usize, Vec<CellSettlement>)> = Vec::new();
         let mut observed: Option<ReadObservation> = None;
@@ -669,7 +668,7 @@ impl<'a> QueryEnv<'a> {
                 continue;
             }
             let observed = observed.get_or_insert_with(|| self.observation());
-            let failed = |error: CommitError| DialogArtifactsError::Storage(error.to_string());
+            let failed = |error: CommitError| DialogCorpusError::Storage(error.to_string());
             let mut settlement = layer
                 .take_settlement(observed)
                 .unwrap_or_else(|| super::transaction::ReadSettlement::new(self.pending_edition()));
@@ -716,7 +715,7 @@ impl<'a> QueryEnv<'a> {
 
     /// Record a selector's demanded range under `manifest`, when
     /// recording is on.
-    fn record_demand(&self, selector: &ArtifactSelector<Constrained>, manifest: &Manifest) {
+    fn record_demand(&self, selector: &Selector<Constrained>, manifest: &Manifest) {
         if let Some(demand) = &self.demand {
             demand.record(selector, manifest);
         }
@@ -730,7 +729,7 @@ impl<'a> QueryEnv<'a> {
     /// rule facts of its layers ([`RuleKey`]), so a read of any other
     /// attribute would let a write the key does not see change the set.
     /// Test builds check it.
-    fn read_rules(&self, selector: &ArtifactSelector<Constrained>, manifest: &Manifest) {
+    fn read_rules(&self, selector: &Selector<Constrained>, manifest: &Manifest) {
         #[cfg(test)]
         assert!(
             selector.attribute().is_some_and(is_rule_attribute),
@@ -756,7 +755,7 @@ impl QueryEnv<'_> {
 
     /// The lines' formats and the tombstones keyed under them, resolved
     /// from the lines' tree roots on first use (see [`Format`]).
-    async fn format(&self) -> Result<&Format, DialogArtifactsError> {
+    async fn format(&self) -> Result<&Format, DialogCorpusError> {
         self.format
             .get_or_try_init(|| async {
                 let layers = self.layers();
@@ -834,8 +833,8 @@ impl Clone for QueryEnv<'_> {
 pub(crate) async fn select_from_source<'a>(
     source: &Source,
     env: &'a Erased,
-    input: ArtifactSelector<Constrained>,
-) -> Result<ArtifactStream<'a>, DialogArtifactsError> {
+    input: Selector<Constrained>,
+) -> Result<FactStream<'a>, DialogCorpusError> {
     let select = crate::Select::from_view(source.as_view(), input);
     // Concurrent reads of one digest share fetch-and-hydrate through
     // the env's own `Load` (see `crate::load_or_hydrate`), with every
@@ -861,8 +860,8 @@ pub(crate) async fn select_from_source<'a>(
 impl<'a> Provider<Select<'a>> for QueryEnv<'a> {
     async fn execute(
         &self,
-        input: ArtifactSelector<Constrained>,
-    ) -> Result<ArtifactStream<'a>, DialogArtifactsError> {
+        input: Selector<Constrained>,
+    ) -> Result<FactStream<'a>, DialogCorpusError> {
         if input.attribute() == Some(&*QUARANTINED) {
             return Box::pin(self.select_quarantined(input)).await;
         }
@@ -875,10 +874,10 @@ impl<'a> Provider<Select<'a>> for QueryEnv<'a> {
         // the streams go in by precedence, newest standing first: the
         // session overlays, the staged writes, the lines, and the
         // per-query changes, which stand at no version.
-        let mut sessions: Vec<ArtifactStream<'a>> = Vec::new();
-        let mut staged: Vec<ArtifactStream<'a>> = Vec::new();
-        let mut lines: Vec<ArtifactStream<'a>> = Vec::with_capacity(self.sources.len());
-        let mut changes: Vec<ArtifactStream<'a>> = Vec::new();
+        let mut sessions: Vec<FactStream<'a>> = Vec::new();
+        let mut staged: Vec<FactStream<'a>> = Vec::new();
+        let mut lines: Vec<FactStream<'a>> = Vec::with_capacity(self.sources.len());
+        let mut changes: Vec<FactStream<'a>> = Vec::new();
 
         // The choosing writes this read meets, settled cell by cell:
         // the line's claims they succeed, or succeed and write back, are
@@ -886,7 +885,7 @@ impl<'a> Provider<Select<'a>> for QueryEnv<'a> {
         // are hidden from the layers' own rows, as the commit would
         // write nothing for them.
         let settled = self.settle_within(&input).await?;
-        let succeeded: Vec<&Artifact> = settled
+        let succeeded: Vec<&Fact> = settled
             .iter()
             .flat_map(|(_, cells)| {
                 cells
@@ -955,9 +954,9 @@ impl<'a> Provider<Select<'a>> for QueryEnv<'a> {
                     .fold(pending(), |newest, edition| newest.max(edition))
                     .successor()
             });
-            let rows: ArtifactStream<'a> = Box::pin(stream::iter(
+            let rows: FactStream<'a> = Box::pin(stream::iter(
                 rows.into_iter()
-                    .map(move |fact| Ok(ArtifactView::pending(fact, session))),
+                    .map(move |fact| Ok(FactView::pending(fact, session))),
             ));
             sessions.push(filter_hidden(
                 rows,
@@ -1001,9 +1000,9 @@ impl<'a> Provider<Select<'a>> for QueryEnv<'a> {
                 .map(|fact| sort_key(fact, &manifest))
                 .collect();
             let pending = pending();
-            let rows: ArtifactStream<'a> = Box::pin(stream::iter(
+            let rows: FactStream<'a> = Box::pin(stream::iter(
                 rows.into_iter()
-                    .map(move |fact| Ok(ArtifactView::pending(fact, pending))),
+                    .map(move |fact| Ok(FactView::pending(fact, pending))),
             ));
             if held.is_empty() {
                 staged.push(rows);
@@ -1018,7 +1017,7 @@ impl<'a> Provider<Select<'a>> for QueryEnv<'a> {
 
         // Most reads meet the lines alone, and take their streams as
         // they are.
-        let streams: Vec<ArtifactStream<'a>> =
+        let streams: Vec<FactStream<'a>> =
             if sessions.is_empty() && staged.is_empty() && changes.is_empty() {
                 lines
             } else {
@@ -1044,8 +1043,8 @@ impl<'a> Provider<Select<'a>> for QueryEnv<'a> {
 impl Provider<Estimate> for QueryEnv<'_> {
     async fn execute(
         &self,
-        input: ArtifactSelector<Constrained>,
-    ) -> Result<Option<u64>, DialogArtifactsError> {
+        input: Selector<Constrained>,
+    ) -> Result<Option<u64>, DialogCorpusError> {
         let mut total: Option<u64> = None;
         for source in &self.sources {
             let select = crate::Select::from_view(source.as_view(), input.clone());
@@ -1230,7 +1229,7 @@ enum Index {
 }
 
 impl Index {
-    fn selector(self, key: &Entity) -> ArtifactSelector<Constrained> {
+    fn selector(self, key: &Entity) -> Selector<Constrained> {
         match self {
             Index::Deriving => derives_selector(key),
         }
@@ -1239,30 +1238,30 @@ impl Index {
 
 impl<'a> QueryEnv<'a> {
     /// Read a `dialog.rule/*` selector against a single line's committed
-    /// tree only (NOT the overlay) and collect the matching artifacts.
+    /// tree only (NOT the overlay) and collect the matching facts.
     /// The durable layer's reads must be tree-only so the head-keyed
     /// discovery cache stays correct — overlay rules are handled
     /// separately, fresh, by the transient layer.
     async fn select_tree(
         &self,
         source: &Source,
-        selector: ArtifactSelector<Constrained>,
-    ) -> Result<Vec<Artifact>, DialogArtifactsError> {
+        selector: Selector<Constrained>,
+    ) -> Result<Vec<Fact>, DialogCorpusError> {
         Ok(self
             .select_tree_standing(source, selector)
             .await?
             .into_iter()
-            .map(|(artifact, _)| artifact)
+            .map(|(fact, _)| fact)
             .collect())
     }
 
-    /// [`select_tree`](Self::select_tree), each artifact with the
+    /// [`select_tree`](Self::select_tree), each fact with the
     /// standing of the commit that wrote it.
     async fn select_tree_standing(
         &self,
         source: &Source,
-        selector: ArtifactSelector<Constrained>,
-    ) -> Result<Vec<(Artifact, Standing)>, DialogArtifactsError> {
+        selector: Selector<Constrained>,
+    ) -> Result<Vec<(Fact, Standing)>, DialogCorpusError> {
         // Rule-discovery reads are demand too: a rule committed
         // later for a subscribed concept lands in this range and
         // must re-trigger the subscription. Recorded as *rule*
@@ -1270,29 +1269,26 @@ impl<'a> QueryEnv<'a> {
         // entity's slice.
         let manifest = &self.format().await?.manifest;
         self.read_rules(&selector, manifest);
-        // Rule bodies are hydrated from the full artifact, so this read
+        // Rule bodies are hydrated from the full fact, so this read
         // genuinely needs owned rows; it is head-cached, not per-query hot.
         let rows = select_from_source(source, self.env, selector)
             .await?
             .try_collect::<Vec<_>>()
             .await?;
-        let mut artifacts = Vec::with_capacity(rows.len());
+        let mut facts = Vec::with_capacity(rows.len());
         for row in rows {
-            let artifact = match row.to_owned() {
-                Ok(artifact) => artifact,
-                Err(DialogArtifactsError::CorruptEntry(reason)) => {
+            let fact = match row.to_owned() {
+                Ok(fact) => fact,
+                Err(DialogCorpusError::CorruptEntry(reason)) => {
                     tracing::warn!(%reason, "ignoring corrupt stored row");
                     continue;
                 }
                 Err(error) => return Err(error),
             };
-            let standing = Standing::new(
-                row.standing(),
-                Claim::from(artifact.clone()).cause().clone(),
-            );
-            artifacts.push((artifact, standing));
+            let standing = Standing::new(row.standing(), Claim::from(fact.clone()).cause().clone());
+            facts.push((fact, standing));
         }
-        Ok(artifacts)
+        Ok(facts)
     }
 
     /// The rules under `index` at `key` held in `overlay`: a line's
@@ -1413,7 +1409,7 @@ impl<'a> QueryEnv<'a> {
             let listening = Provider::<Preload>::execute(
                 self,
                 PreloadRequest {
-                    selector: ArtifactSelector::new().the(attribute),
+                    selector: Selector::new().the(attribute),
                     likelihood: Likelihood::Likely,
                 },
             )
@@ -1616,7 +1612,7 @@ fn relation_concept(field: &ConceptFieldDescriptor) -> Entity {
 }
 
 /// The `dialog.rule/quarantined` attribute, compared on every select.
-static QUARANTINED: LazyLock<ArtifactsRelation> = LazyLock::new(quarantined_attr);
+static QUARANTINED: LazyLock<CorpusRelation> = LazyLock::new(quarantined_attr);
 
 impl<'a> QueryEnv<'a> {
     /// The rule facts of the layers this query reads rules from.
@@ -1654,15 +1650,15 @@ impl<'a> QueryEnv<'a> {
     /// answered over every rule the layers hold.
     async fn select_quarantined(
         &self,
-        input: ArtifactSelector<Constrained>,
-    ) -> Result<ArtifactStream<'a>, DialogArtifactsError> {
+        input: Selector<Constrained>,
+    ) -> Result<FactStream<'a>, DialogCorpusError> {
         let quarantined = self
             .quarantined()
             .await
-            .map_err(|error| DialogArtifactsError::Storage(format!("quarantine: {error}")))?;
-        let rows: Vec<Artifact> = quarantined
+            .map_err(|error| DialogCorpusError::Storage(format!("quarantine: {error}")))?;
+        let rows: Vec<Fact> = quarantined
             .into_iter()
-            .map(|quarantine| Artifact {
+            .map(|quarantine| Fact {
                 the: QUARANTINED.clone(),
                 of: quarantine.rule,
                 is: Value::Entity(quarantine.concept),
@@ -1752,13 +1748,13 @@ impl<'a> QueryEnv<'a> {
     /// inert, as at resolution.
     async fn every_rule(&self) -> Result<Vec<DeductiveRule>, EvaluationError> {
         let attribute = source_attr();
-        let selector = ArtifactSelector::new().the(attribute.clone());
+        let selector = Selector::new().the(attribute.clone());
         let manifest = &self.format().await?.manifest;
         let mut bodies: Vec<(Entity, Vec<u8>)> = Vec::new();
-        let mut take = |artifacts: Vec<Artifact>| {
-            for artifact in artifacts {
-                if let Value::Bytes(bytes) = artifact.is {
-                    bodies.push((artifact.of, bytes));
+        let mut take = |facts: Vec<Fact>| {
+            for fact in facts {
+                if let Value::Bytes(bytes) = fact.is {
+                    bodies.push((fact.of, bytes));
                 }
             }
         };
@@ -1878,10 +1874,7 @@ impl<'a> QueryEnv<'a> {
     /// from the key the attribute spells; no concept is described or
     /// hashed and no body is hydrated, which is what a commit asks once
     /// per relation it writes.
-    pub(crate) async fn rules_derive(
-        &self,
-        the: &ArtifactsRelation,
-    ) -> Result<bool, EvaluationError> {
+    pub(crate) async fn rules_derive(&self, the: &CorpusRelation) -> Result<bool, EvaluationError> {
         let Some(on) = on_entity(the) else {
             return Ok(false);
         };
@@ -2014,7 +2007,7 @@ impl<'a> QueryEnv<'a> {
         // one: the concept's exact evaluation while nothing is stored
         // under them. A built-in head, a reducing rule, a second source
         // or a keyed collection rules it out.
-        let mut sole: Option<Option<(DeductiveRule, Vec<dialog_artifacts::Relation>)>> = None;
+        let mut sole: Option<Option<(DeductiveRule, Vec<dialog_corpus::Relation>)>> = None;
         for (_, field) in descriptor.with().iter() {
             let attribute = ConceptDescriptor::of_attribute(field);
             // Keyed by the relation's own attribute concept, read under
@@ -2041,7 +2034,7 @@ impl<'a> QueryEnv<'a> {
                     (Some(None), _) | (_, None) => None,
                     _ if !builtins.is_empty() => None,
                     (current, Some(attribute)) => {
-                        let mut found: Option<(DeductiveRule, Vec<dialog_artifacts::Relation>)> =
+                        let mut found: Option<(DeductiveRule, Vec<dialog_corpus::Relation>)> =
                             current.clone().flatten();
                         let mut ok = true;
                         for rule in &rules {
@@ -2248,7 +2241,7 @@ mod rule_tests {
     use super::*;
     use crate::helpers::{Counting, connect, test_repo};
     use crate::{Branch, Repository, Transaction};
-    use dialog_artifacts::Update as _;
+    use dialog_corpus::Update as _;
     use dialog_credentials::Credential;
     use dialog_peer::helpers::test_session_with_peer;
     use dialog_peer::{Peer, Session};
@@ -2305,8 +2298,8 @@ mod rule_tests {
             + Provider<nodes::Write<CorpusNode>>
             + ConditionalSync
             + dialog_capability::Provider<BlobLoad>
-            + dialog_capability::Provider<dialog_artifacts::Preload>
-            + dialog_capability::Provider<dialog_artifacts::Speculation>
+            + dialog_capability::Provider<dialog_corpus::Preload>
+            + dialog_capability::Provider<dialog_corpus::Speculation>
             + dialog_capability::Provider<Fork<RemoteSite, Resolve>>
             + Holds
             + ConditionalSync
@@ -2396,8 +2389,8 @@ mod rule_tests {
             + Provider<nodes::Write<CorpusNode>>
             + ConditionalSync
             + dialog_capability::Provider<BlobLoad>
-            + dialog_capability::Provider<dialog_artifacts::Preload>
-            + dialog_capability::Provider<dialog_artifacts::Speculation>
+            + dialog_capability::Provider<dialog_corpus::Preload>
+            + dialog_capability::Provider<dialog_corpus::Speculation>
             + dialog_capability::Provider<Fork<RemoteSite, Resolve>>
             + Holds
             + ConditionalSync
@@ -2482,8 +2475,8 @@ mod rule_tests {
             + Provider<nodes::Write<CorpusNode>>
             + ConditionalSync
             + dialog_capability::Provider<BlobLoad>
-            + dialog_capability::Provider<dialog_artifacts::Preload>
-            + dialog_capability::Provider<dialog_artifacts::Speculation>
+            + dialog_capability::Provider<dialog_corpus::Preload>
+            + dialog_capability::Provider<dialog_corpus::Speculation>
             + dialog_capability::Provider<Fork<RemoteSite, Resolve>>
             + Holds
             + ConditionalSync
@@ -3362,7 +3355,7 @@ mod rule_tests {
             vec![alice.clone()]
         );
 
-        let mut changes = dialog_artifacts::Changes::new();
+        let mut changes = dialog_corpus::Changes::new();
         rule_with_person_attr("org/contractor-name").assert(&mut changes);
         branch
             .commit(stream::iter(changes.into_instructions()))
@@ -3433,12 +3426,12 @@ mod rule_tests {
         let mut subscription = branch.subscribe(query());
         let first = subscription.poll(&operator).await?;
         assert!(first.is_some_and(|delta| delta.asserted.len() == 1));
-        let mut promote = dialog_artifacts::Changes::new();
+        let mut promote = dialog_corpus::Changes::new();
         promote.associate(
             "account/active".parse()?,
             account.clone(),
             Value::String("yes".into()),
-            dialog_artifacts::Pick::Last,
+            dialog_corpus::Pick::Last,
         );
         branch
             .transaction()
@@ -3614,7 +3607,7 @@ mod rule_tests {
         let other = Value::Bytes(rule_with_person_attr("org/person-alias").encode());
         let mut forged = Changes::new();
         for (of, the, change) in genuine.iter() {
-            let dialog_artifacts::Change::Assert(value, pick) = change else {
+            let dialog_corpus::Change::Assert(value, pick) = change else {
                 continue;
             };
             let value = if *the == source_attr() {
@@ -4374,7 +4367,7 @@ mod resolver_tests {
     use crate::helpers::test_repo;
     use crate::{Branch, Repository};
     use base58::ToBase58;
-    use dialog_artifacts::{Entity, Value};
+    use dialog_corpus::{Entity, Value};
     use dialog_peer::Peer;
     use dialog_peer::helpers::test_session_with_peer;
     use dialog_query::query::Output as _;
@@ -4944,10 +4937,10 @@ mod ordered_relation_tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use crate::helpers::test_repo;
-    use dialog_artifacts::position::{Bias, Position, insert};
-    use dialog_artifacts::{
-        Artifact, ArtifactSelector, ArtifactViewStream as _, Directory, Entity,
-        Relation as ArtifactsRelation, Sequence, Symbol, Value,
+    use dialog_corpus::position::{Bias, Position, insert};
+    use dialog_corpus::{
+        Directory, Entity, Fact, FactViewStream as _, Relation as CorpusRelation, Selector,
+        Sequence, Symbol, Value,
     };
     use dialog_peer::helpers::test_session_with_peer;
     use dialog_query::AttributeStatement;
@@ -4966,8 +4959,7 @@ mod ordered_relation_tests {
     /// A membership fact: `[list  test.list/<position>  member]`.
     fn membership(list: &Entity, position: &Position, member: &Entity) -> AttributeStatement {
         let domain = Symbol::from_str("test.list").expect("domain parses");
-        let attribute =
-            ArtifactsRelation::compose(&domain, position.clone()).expect("attribute fits");
+        let attribute = CorpusRelation::compose(&domain, position.clone()).expect("attribute fits");
         AttributeStatement {
             the: Relation::from(attribute),
             of: list.clone(),
@@ -5015,7 +5007,7 @@ mod ordered_relation_tests {
         // name shapes (symbols start lowercase, positions uppercase)
         // let one scan serve both.
         let domain = Symbol::from_str("test.list")?;
-        let title = ArtifactsRelation::compose(&domain, Symbol::from_str("title")?)?;
+        let title = CorpusRelation::compose(&domain, Symbol::from_str("title")?)?;
         branch
             .transaction()
             .assert(AttributeStatement {
@@ -5032,23 +5024,16 @@ mod ordered_relation_tests {
             .await?;
 
         // One contiguous range scan of the list's domain.
-        let members: Vec<Artifact> = branch
+        let members: Vec<Fact> = branch
             .claims()
-            .select(
-                ArtifactSelector::new()
-                    .of(list.clone())
-                    .with_domain(&domain),
-            )
+            .select(Selector::new().of(list.clone()).with_domain(&domain))
             .perform(&operator)
             .await?
             .owned()
             .try_collect()
             .await?;
 
-        let attributes: Vec<String> = members
-            .iter()
-            .map(|artifact| artifact.the.to_string())
-            .collect();
+        let attributes: Vec<String> = members.iter().map(|fact| fact.the.to_string()).collect();
         let mut sorted = attributes.clone();
         sorted.sort();
         assert_eq!(attributes, sorted, "the scan streams in position order");
@@ -5057,9 +5042,9 @@ mod ordered_relation_tests {
         // directory, position-named members into a sequence.
         let mut fields: Directory<Value> = Directory::new();
         let mut sequence: Sequence<Value> = Sequence::new();
-        for artifact in &members {
-            let named = fields.admit(&artifact.the, artifact.is.clone());
-            let ordered = sequence.admit(&artifact.the, artifact.is.clone());
+        for fact in &members {
+            let named = fields.admit(&fact.the, fact.is.clone());
+            let ordered = sequence.admit(&fact.the, fact.is.clone());
             assert!(named != ordered, "every entry lands in exactly one");
         }
 

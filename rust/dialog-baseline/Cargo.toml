@@ -15,7 +15,7 @@ publish = false
 [dependencies]
 anyhow = { workspace = true }
 base58 = { workspace = true }
-dialog-artifacts = { workspace = true }
+dialog-corpus = { workspace = true }
 dialog-storage = { workspace = true }
 futures-util = { workspace = true }
 rand = { workspace = true }

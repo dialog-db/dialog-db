@@ -27,8 +27,8 @@ pub use dialog_network::{Hydrate, HydrationLane, HydrationRequest, HydrationSche
 
 use super::routes::{HydrationRoute, Routes};
 use crate::ConnectedReplica;
-use dialog_artifacts::tree::{ArtifactNodeCache, CorpusNode};
 use dialog_common::Holds;
+use dialog_corpus::tree::{CorpusCache, CorpusNode};
 use dialog_effects::MethodExt as _;
 use dialog_effects::archive::Load;
 use dialog_effects::archive::prelude::CatalogScope;
@@ -153,7 +153,7 @@ where
     Env: Provider<Hydrate> + Holds + ConditionalSync + ?Sized,
     Store: Provider<nodes::Read<CorpusNode>> + ConditionalSync + ?Sized,
 {
-    let cache = ArtifactNodeCache::of(env, read.catalog.subject());
+    let cache = CorpusCache::of(env, read.catalog.subject());
     // A hit answers at once, before any of the hydrating machinery is set
     // up: nothing is allocated for it.
     if let Some(cache) = &cache
@@ -200,7 +200,7 @@ where
     Env: Provider<Hydrate> + Holds + ConditionalSync + ?Sized,
     Store: Provider<nodes::Read<CorpusNode>> + ConditionalSync + ?Sized,
 {
-    if ArtifactNodeCache::of(env, preload.catalog.subject()).is_none() {
+    if CorpusCache::of(env, preload.catalog.subject()).is_none() {
         return Resume::now(());
     }
     match read_node_or_hydrate(env, store, preload.read()).into_now() {
@@ -223,7 +223,7 @@ where
     Env: Holds + ?Sized,
     Store: Provider<nodes::Write<CorpusNode>> + ConditionalSync + ?Sized,
 {
-    let cache = ArtifactNodeCache::of(env, write.catalog.subject());
+    let cache = CorpusCache::of(env, write.catalog.subject());
     let nodes = write.nodes.clone();
     write.perform(store).map(move |written| {
         written?;
@@ -812,7 +812,7 @@ mod tests {
         let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
-        let target = dialog_artifacts::Entity::new()?;
+        let target = dialog_corpus::Entity::new()?;
         let reason = "no credential saved for the site";
         branch
             .tracking()

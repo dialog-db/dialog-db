@@ -27,7 +27,7 @@
 //! # async fn example<Env>(
 //! #     branch: &Branch,
 //! #     env: &Env,
-//! #     entity: dialog_artifacts::Entity,
+//! #     entity: dialog_corpus::Entity,
 //! #     range: ByteRange,
 //! #     chunks: futures_util::stream::Iter<std::vec::IntoIter<Result<Vec<u8>, BlobError>>>,
 //! # ) -> Result<(), CommitError>
@@ -44,9 +44,9 @@
 //! #         + Provider<BlobImport>
 //! #         + Provider<dialog_effects::archive::Load>
 //! #         + Provider<dialog_effects::blob::Load>
-//! #         + dialog_capability::Provider<dialog_search_tree::nodes::Read<dialog_artifacts::tree::CorpusNode>>
-//! #         + dialog_capability::Provider<dialog_search_tree::nodes::Preload<dialog_artifacts::tree::CorpusNode>>
-//! #         + dialog_capability::Provider<dialog_search_tree::nodes::Write<dialog_artifacts::tree::CorpusNode>>
+//! #         + dialog_capability::Provider<dialog_search_tree::nodes::Read<dialog_corpus::tree::CorpusNode>>
+//! #         + dialog_capability::Provider<dialog_search_tree::nodes::Preload<dialog_corpus::tree::CorpusNode>>
+//! #         + dialog_capability::Provider<dialog_search_tree::nodes::Write<dialog_corpus::tree::CorpusNode>>
 //! #         + Provider<Fork<RemoteSite, Resolve>>
 //! #         + Provider<Fork<RemoteSite, BlobRead>>
 //! #         + dialog_common::Holds
@@ -78,11 +78,11 @@ use crate::repository::branch::asset::recorded_size;
 use crate::repository::remote::Step;
 use crate::repository::source::{Live, View};
 use crate::{Branch, CommitError, Index, RemoteFallback, RemoteSite, Snapshot};
-use dialog_artifacts::tree::CorpusNode;
-use dialog_artifacts::{Asset, BlobIndexExt as _, BlobRecord, Entity, Instruction};
 use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync};
+use dialog_corpus::tree::CorpusNode;
+use dialog_corpus::{Asset, BlobIndexExt as _, BlobRecord, Entity, Instruction};
 use dialog_effects::MethodExt as _;
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::prelude::ArchiveExt as _;
@@ -507,7 +507,7 @@ where
             branch
                 .commit(stream::iter(vec![Instruction::Assert(
                     asset.fact()?,
-                    dialog_artifacts::Pick::Last,
+                    dialog_corpus::Pick::Last,
                 )]))
                 .machinery()
                 .perform(env),
@@ -603,8 +603,8 @@ mod tests {
     use super::Blob;
     use crate::RepositoryExt as _;
     use anyhow::Result;
-    use dialog_artifacts::{BlobIndexExt as _, BlobRecord, Entity};
     use dialog_capability::Subject;
+    use dialog_corpus::{BlobIndexExt as _, BlobRecord, Entity};
     use dialog_effects::blob::{BlobError, BlobReader, ByteRange};
     use dialog_peer::helpers::{open_peer, test_storage, unique_name};
 
@@ -878,7 +878,7 @@ mod tests {
             .await?;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
-        let entity: dialog_artifacts::Entity = "user:alice".parse()?;
+        let entity: dialog_corpus::Entity = "user:alice".parse()?;
         let result = Blob::from(entity)
             .read((&branch).into())
             .perform(&operator)

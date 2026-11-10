@@ -16,10 +16,10 @@ use std::sync::{Arc, Mutex};
 use futures_util::TryStreamExt;
 
 use crate::Binding;
-use crate::artifact::Value;
 use crate::attribute::The;
 use crate::concept::descriptor::ConceptDescriptor;
 use crate::concept::query::ConceptQuery;
+use crate::corpus::Value;
 use crate::error::EvaluationError;
 use crate::parameters::Parameters;
 use crate::planner::Conjunction;

@@ -4,7 +4,7 @@
 //! identity into a typed [`BranchMetadata`] — the [`Replica`], the
 //! [`Branch`](BranchConcept) concept, and a [`BranchRevision`] when
 //! the branch has a commit. `BranchMetadata` implements [`Statement`],
-//! so it folds straight into a [`Changes`](dialog_artifacts::Changes)
+//! so it folds straight into a [`Changes`](dialog_corpus::Changes)
 //! batch.
 //!
 //! The query layer composes these per-branch bundles (plus a
@@ -13,8 +13,8 @@
 //! [`QueryLayer::metadata`](super::session::QueryLayer::metadata).
 
 use base58::ToBase58;
-use dialog_artifacts::{Statement, Update};
 use dialog_capability::{Capability, Did};
+use dialog_corpus::{Statement, Update};
 use dialog_effects::authority::{Operator, OperatorExt as _};
 
 use crate::schema::Branch as BranchConcept;

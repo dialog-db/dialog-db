@@ -76,6 +76,75 @@ Reading each scan against whatever the head happened to be made both
 depend on the timing of unrelated commits, which no caller can reason
 about.
 
+### The corpus crate is `dialog-corpus`, and it asks its environment for everything it reads
+
+[#768](https://github.com/dialog-db/dialog-db/pull/768), decided in
+[design/tree-node-reads](./design/tree-node-reads.md); the spilled-value
+read is argued in
+[design-spilled-values.md](./design/tree-node-reads/design-spilled-values.md).
+
+The crate that held the data model and its indexes, `dialog-corpus`, is
+`dialog-corpus`: the corpus is the body of claims a branch holds, in the
+search tree. Its storage side is named after it, and the crate
+no longer depends on a store crate. What it reads beside its nodes, a
+value spilled out of its key, it asks its environment for through
+`blob::Load`, performed in one place and checked against the reference;
+nothing in the crate reads a store by type. The word "artifact" is
+retired: what the model called an artifact is a fact, a claim with its
+cause.
+
+What this changes for you:
+
+- The crate is `dialog-corpus`; paths that began `dialog_corpus::`
+  begin `dialog_corpus::`. `tree::Corpus` is `tree::Corpus`,
+  `CorpusExt` is `CorpusExt`, `CorpusCache` is `CorpusCache`,
+  `BufferedCorpus` is `BufferedCorpus`, `CorpusWriter` is
+  `CorpusWriter` and `DialogCorpusError` is `DialogCorpusError`.
+- The model side is renamed the same way. `Fact` is `Fact`,
+  `FactView` is `FactView`, `FactViewStream` is `FactViewStream`,
+  `Selector` is `Selector`, `fact_index_keys` and
+  `fact_index_keys_with` are `fact_index_keys` and
+  `fact_index_keys_with`, and every `from_fact`, `to_fact` and
+  `for_fact` is `from_fact`, `to_fact` and `for_fact`. The module that
+  held them, `artifacts`, is `model`. In `dialog-query` the re-export
+  module `artifact` is `corpus`, and its aliases `ArtifactsRelation` and
+  `ArtifactTypeError` are `CorpusRelation` and `CorpusTypeError`. `Fact`
+  prints as `Fact` in its `Debug` and `Display` forms.
+- The nightly fuzz soak is `soak:facts`, run by `--test fact_fuzz`, and
+  reads `DIALOG_FACT_FUZZ_SEEDS` and `DIALOG_FACT_FUZZ_OPS` where it read
+  `DIALOG_ARTIFACT_FUZZ_*`.
+- `dialog-corpus` does not depend on `dialog-storage`. `Blake3Hash` is
+  still `[u8; 32]` and is defined in the crate; the `HashType` re-export
+  is gone (it is `dialog_storage::HashType`). `IndexRoot`, a CBOR wrapper
+  nothing used, is removed. `From<DialogStorageError> for
+  DialogCorpusError` is gone: a storage error reaches the corpus as an
+  `ArchiveError`, a `BlobError` or the tree's error, each of which still
+  converts. `DialogSearchTreeError` implements `AuthorizationFailure` and
+  has `rejection()`, so a decision made beneath the tree is read without
+  naming the store's error type.
+- `ArchiveDelta::block` and `ArchiveDelta::flush_blocks` are gone, and
+  `DeltaOverlay` no longer answers `archive::Load`, `archive::Get` or
+  `Holds`: it answers the node layer's `Read`, `Preload` and `Write` for
+  `CorpusNode`, and `blob::Load` for a value the batch staged. A caller
+  that shipped a batch's nodes as blocks takes them with `flush_nodes()`
+  and writes them with `nodes::Write`, as a commit does.
+- `Provider<blob::Load>` is no longer asked of an environment by an
+  operation that never reaches a spilled value: `CorpusExt::select_data`,
+  `format_manifest`, `record` and `estimate`; `BlobIndexExt::get_blob`,
+  `has_blob` and `list_blobs`, and `blob_changes`; a buffered batch's
+  `record` and `seal`; `rekey_tree`; `history::context_in` and
+  `region_entry`; `spilled_refs`; `merge::screen_history`. It stays on
+  `apply`, `select_record`, `scan`, `write_instructions`, the buffered
+  applies, `observe_revisions`, `TreeHistory` and, through
+  `select_record`, `content_size` and `asset_size`. A caller that carried
+  the bound only to satisfy one of the former can drop it.
+
+Why: a crate named for artifacts no longer said what it held, and a crate
+that embodies the model should not depend on a store. #755 made the tree
+ask its environment for nodes; this makes the layer above it ask for
+everything else the same way, so what a store is and where it is stay the
+environment's business.
+
 ### A tree asks its environment for nodes, and the environment keeps them
 
 [design/tree-node-reads.md](./design/tree-node-reads.md), planned in
@@ -106,14 +175,14 @@ What this changes for you:
   with no alias trait in between, instead of `Provider<archive::Load> + Holds + ConditionalSync` (and `+
   Provider<archive::Get>` where a difference was computed). `Holds`, `Load`
   and `Get` are no longer asked of a tree's environment.
-- `dialog_artifacts::tree::CorpusNode` names the node of the corpus, the
+- `dialog_corpus::tree::CorpusNode` names the node of the corpus, the
   tree over claims (`PersistentNode<Key, State<Datum>>`), and an
   environment a corpus is read through is bounded as
   `Provider<nodes::Read<CorpusNode>> + Provider<nodes::Preload<CorpusNode>>`,
   one that is written through as `Provider<nodes::Write<CorpusNode>>`.
   There is no alias trait for either: a signature says which requests it
   performs. "Corpus" is the name the crate's storage side will carry when
-  `dialog-artifacts` is renamed; everything new here uses it.
+  `dialog-corpus` is renamed; everything new here uses it.
 - `TransientTree::persist(delta)`, `HitchhikerTree::persist(delta)`,
   `HitchhikerTree::persist_mut(delta)` and `Node::into_link(delta,
   manifest)` take no environment and no cache, and the delta they fill is
@@ -458,12 +527,12 @@ What this changes for you:
   write `ConditionalSend + ConditionalSync`.
 - These traits now name both bounds as supertraits, so what implements
   them and what a bound on them implies is unchanged:
-  `dialog_artifacts::{ValueType, History}`, `dialog_did_web::Fetch`,
+  `dialog_corpus::{ValueType, History}`, `dialog_did_web::Fetch`,
   `dialog_remote_ucan::Presented`, `dialog_peer_iroh::{Channel, Connect}`
   and the `dialog_peer` helpers' `Meter`.
 - A store a tree reads through by value asks for `ConditionalSend` as
   well, since it is moved into the read's future: the `S` of the
-  `dialog_artifacts::ArtifactTreeExt` and `BlobIndexExt` methods,
+  `dialog_corpus::CorpusExt` and `BlobIndexExt` methods,
   `TreeHistory`, `blob_changes` and `spilled_refs`, and of the query
   builder's `execute`, `execute_owned` and `estimate` in
   `dialog_repository`. An env passed by reference (`perform(&env)`)
@@ -516,7 +585,7 @@ BLAKE3 digest.
 What this changes for you:
 
 - `Bias::derive` returns a different bias for the same identity, so
-  `dialog_artifacts::position::insert` and the `dialog/position` formula
+  `dialog_corpus::position::insert` and the `dialog/position` formula
   derive different positions than before for the same member and
   neighbours. Derivation is still deterministic: every replica on this
   release derives the same position for the same insert.
@@ -692,7 +761,7 @@ What this changes for you:
 - A store that keeps nothing skips the range scan's sibling read-ahead
   and an integration's open-ahead pass, which would only read each node
   twice.
-- `dialog_artifacts::ArchiveReader` requires `ArtifactNodes`
+- `dialog_corpus::ArchiveReader` requires `ArtifactNodes`
   (`Nodes<Key, State<Datum>>`). `DeltaOverlay` keeps what its
   environment keeps.
 - `TreeHistory::from_root_with_cache` and `TreeHistory::empty_with_cache`
@@ -812,7 +881,7 @@ What this changes for you:
   version then value, so a merge that closes such a cycle leaves every
   query answerable. Before, the same pair also fell to value order,
   but so did every rewrite.
-- `dialog_artifacts::Standing` carries a `succession`, zero for every
+- `dialog_corpus::Standing` carries a `succession`, zero for every
   claim, and `Standing::new` builds a claim's standing. Code building a
   `Standing` by its fields names the new one. Nothing stored or synced
   changes: a rank is computed when a component is read.
@@ -1367,6 +1436,11 @@ has a tree to canonicalize even when the link itself wrote nothing.
 
 #### Compatibility and migration
 
+- Nothing stored or synced changes for the corpus rename: keys, node
+  encodings, spilled-value references, revisions and the wire format are
+  the same bytes, nothing is rewritten on upgrade, and an older release
+  reads everything this one writes. Only Rust names and the crate graph
+  move.
 - Bounding the caches changes nothing stored or synced: caches hold only
   what a replica can read again, nothing is rewritten on upgrade, and
   releases on either side read what the other writes. Nothing for an
@@ -1518,7 +1592,7 @@ What this changes for you:
   pull refuses a head whose region holds no entry for the head's own
   origin, holds it above the head, holds an entry outside the watermark
   bounds, or derives a count other than the one the head signed, as
-  `DialogArtifactsError::InvalidKey`, and keeps its own head.
+  `DialogCorpusError::InvalidKey`, and keeps its own head.
 - A commit no longer remembers the new head's whole context in the
   branch's memo unless it had the parent's there already. The first
   reader that needs the whole map reads the region then.
@@ -1703,14 +1777,14 @@ say. `PreparedPull::upstream` is the head the prepare fetched and verified,
 the one revision the commit adopts. `PreparedPull::novelty` lists the
 revisions the commit brings into the branch, ancestors first, each as a
 `NewRevision` with its record and its claims. `history::novelty` in
-`dialog-artifacts` is the walk underneath it.
+`dialog-corpus` is the walk underneath it.
 
 What this changes for you:
 
 - `PreparedPull::upstream`, `PreparedPull::novelty`, `NewRevision` and
-  `dialog_artifacts::history::novelty` are new.
+  `dialog_corpus::history::novelty` are new.
 - A revision whose record neither the upstream nor the branch holds fails
-  the walk with `DialogArtifactsError::IncompleteHistory`, where
+  the walk with `DialogCorpusError::IncompleteHistory`, where
   `history::log` skips it.
 - A no-op pull names nothing new, and neither does one whose commit keeps the
   branch's head and advances only its sync base.
@@ -1966,10 +2040,10 @@ The facts a query folds in beside its lines, the injected `db:session` metadata 
 What this changes for you:
 
 - `QueryLayer::overlay` returns an `Ephemeral` instead of an `Arc<Changes>`.
-- `Changes::select` and `impl Provider<Select> for Changes` are removed from `dialog-artifacts`. To read facts held in memory beside a tree, hold them in an `Ephemeral` (`Ephemeral::apply` takes the batch) and read it with `Ephemeral::select`.
+- `Changes::select` and `impl Provider<Select> for Changes` are removed from `dialog-corpus`. To read facts held in memory beside a tree, hold them in an `Ephemeral` (`Ephemeral::apply` takes the batch) and read it with `Ephemeral::select`.
 - A query or subscription whose `.with(..)` carries a rule no longer rebuilds the rule set and re-decodes each rule body on every evaluation. Results are unchanged.
 - Asset changes in a `.with(..)` batch are dropped from the query's overlay, as they were before: a query reads facts only.
-- `EntityKey::from_artifact`, `AttributeKey::from_artifact` and `ValueKey::from_artifact` build the key from its parts in one pass instead of parsing and re-encoding it once per field. The bytes are unchanged. `dialog_artifacts::artifact_index_keys`, which builds all three at once, is now public.
+- `EntityKey::from_fact`, `AttributeKey::from_fact` and `ValueKey::from_fact` build the key from its parts in one pass instead of parsing and re-encoding it once per field. The bytes are unchanged. `dialog_corpus::fact_index_keys`, which builds all three at once, is now public.
 
 Why: a query fell off the cache whenever its overlay held a rule. A performance report on Sapling, which hands rules to each query in its overlay, measured rule decoding and assembly at about 60% of instructions on that path. Reading the per-query batch as a separate kind of store is what let that path skip the cache, so the batch now goes through the store and the cache key every other overlay goes through.
 
@@ -2096,7 +2170,7 @@ What this changes for you:
 - `AuthorizationFailure::authorization_failure(&self) ->
   Option<&AuthorizeError>` on `ArchiveError`, `BlobError`, `MemoryError`,
   `BranchError`, `PeerError`, `ForkError`, `DialogStorageError`,
-  `DialogArtifactsError`, `ResolveError`, `PublishError`,
+  `DialogCorpusError`, `ResolveError`, `PublishError`,
   `RetractError`, `S3Error` and `AuthorizeError` itself.
 - The UCAN test service (`dialog-remote-ucan-s3`'s `helpers`) accepts
   `POST /revocations/<cid>` and refuses that certificate from then on.
@@ -2447,14 +2521,14 @@ What this changes for you:
   `Branch::migrate` (or `migrate_storage`) first; `Branch::needs_migration`
   says whether a branch is in that state, and `storage_encoding` which
   layout its head has.
-- A number read back raw (an `ArtifactSelector` select, a `Value` match)
+- A number read back raw (an `Selector` select, a `Value` match)
   comes back as the narrowest type that holds it: a natural when it is
   whole and not negative, an integer when whole and negative, a float
   otherwise. Code matching `Value::UnsignedInt` on counts and timestamps
   still sees them; code matching `Value::Float(5.0)` on a stored `5.0`
   now sees `UnsignedInt(5)`. A typed read (a concept field, a derived
   struct) views the number as the type it declares, unchanged.
-- An `ArtifactSelector` range bound reads each number through the lens
+- An `Selector` range bound reads each number through the lens
   its type names before comparing, as a field declared with that type
   reads it: an integer bound sees `34.5` as `34`, a natural bound does not
   see `-3`, a float bound sees every number as it is, and
@@ -2604,7 +2678,7 @@ What this changes for you:
   bare or tagged (`{"float:": NaN}` in dag-cbor), as does parsing the
   string `float:NaN` into a `Value`. No type `holds` a NaN, so a typed
   write refuses it, and a commit that would write one by a raw assertion
-  fails with `CommitError::Artifact(InvalidValue("NaN is not a value"))`
+  fails with `CommitError::Fact(InvalidValue("NaN is not a value"))`
   before anything lands.
 - `float/parse` of `NaN` is no row.
 - A float formula whose result would be NaN (`0.0 / 0.0`,
@@ -2721,7 +2795,7 @@ What this changes for you:
   The value index still keeps naturals, integers and floats apart, so
   until it moves to one band, two attributes that differ only by
   listing `5` or `5.0` share an identity but read different claims.
-- `dialog_artifacts::identity` and `dialog_query::identity` hold the
+- `dialog_corpus::identity` and `dialog_query::identity` hold the
   types dialog hashes under.
 
 Why: identity should be a function of what a definition means, cheap
@@ -2843,8 +2917,8 @@ written in.
 
 What this changes for you:
 
-- `dialog_artifacts::Attribute` is `dialog_artifacts::Relation`.
-  `DialogArtifactsError::InvalidAttribute` and `ReservedAttribute` are
+- `dialog_corpus::Attribute` is `dialog_corpus::Relation`.
+  `DialogCorpusError::InvalidAttribute` and `ReservedAttribute` are
   `InvalidRelation` and `ReservedRelation`, and `ATTRIBUTE_LENGTH` is
   `RELATION_LENGTH`.
 - In `dialog_query`, the validated relation name the `the!` macro
@@ -2853,8 +2927,8 @@ What this changes for you:
   (`The::Relation(..)`, `The::Collection { .. }`; it was `Relation`,
   with an `Attribute` variant). `dialog_query::ArtifactsAttribute` is
   `ArtifactsRelation`, and `Reach::Attribute` is `Reach::Relation`.
-- One type, `dialog_artifacts::Pick` (`Last`, `All`, `Top(..)`, `Max`,
-  `Min`), replaces both `dialog_artifacts::Policy` and
+- One type, `dialog_corpus::Pick` (`Last`, `All`, `Top(..)`, `Max`,
+  `Min`), replaces both `dialog_corpus::Policy` and
   `dialog_query::Select`. `AttributeDescriptor::select()` and
   `with_select(..)` are `pick()` and `with_pick(..)`;
   `without_select()` and `select_error()` are `without_pick()` and
@@ -2919,9 +2993,9 @@ What this changes for you:
   it. Under `last` the write is the newest fact of the cell, as a
   last-writer-wins write is.
 - Every write carries its pick. `Change::Assert(Value, Pick)` and
-  `Instruction::Assert(Artifact, Pick)` are the one write form, beside
+  `Instruction::Assert(Fact, Pick)` are the one write form, beside
   `Retract`; `Change::Replace`, `Instruction::Replace`, `Change::Succeed`
-  and `Instruction::Succeed` are gone. `dialog_artifacts::Pick` is the
+  and `Instruction::Succeed` are gone. `dialog_corpus::Pick` is the
   pick an attribute is read under (`Last`, `All`, `Top(..)`, `Max`,
   `Min`); `Update::associate` takes it as its fourth argument, and
   `associate_unique` and `succeed` are gone with the variants they

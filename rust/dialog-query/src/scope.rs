@@ -12,10 +12,10 @@
 //! `Scope` names that bundle once so premise evaluation signatures stay
 //! stable as effects are added.
 
-use dialog_artifacts::tree::CorpusNode;
-use dialog_artifacts::{Estimate, Preload, Select};
 use dialog_capability::Provider;
 use dialog_common::{ConditionalSync, Holds};
+use dialog_corpus::tree::CorpusNode;
+use dialog_corpus::{Estimate, Preload, Select};
 use dialog_effects::{archive, blob};
 use dialog_search_tree::nodes;
 

@@ -9,7 +9,7 @@
 //!
 //! - `dyn` bounds (`Box<dyn Future + Send>`): auto traits cannot be
 //!   substituted there, so the type gets a cfg'd pair of aliases —
-//!   one per target — like `ArtifactStream`.
+//!   one per target — like `FactStream`.
 //! - Native-only code (a `#[cfg(not(target_arch = "wasm32"))]` fn
 //!   feeding `tokio::spawn`, a deliberately `Send` variant of a
 //!   local/sendable pair).

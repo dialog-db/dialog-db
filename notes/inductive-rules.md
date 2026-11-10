@@ -762,7 +762,7 @@ Of the two reasons not to adopt it, "the circuit is static and our
 rules are data" is the weaker: Materialize instantiates differential
 dataflows dynamically per view (backfill from a snapshot, then
 stream), and because rules here are content-addressed facts, compiled
-dispatch artifacts — plans, discrimination maps, closure edges — are
+dispatch facts — plans, discrimination maps, closure edges — are
 content-addressed too: recompilation on rule arrival is O(rule churn)
 and the results are shareable across branches and replicas. The
 objection that holds is **state**: an arrangement is a function of

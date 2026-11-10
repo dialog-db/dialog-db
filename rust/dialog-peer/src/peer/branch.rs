@@ -16,10 +16,10 @@
 
 use super::{Mode, Peer};
 use core::fmt::Display;
-use dialog_artifacts::tree::CorpusNode;
 use dialog_capability::{Capability, Fork, Policy, Provider, Subject};
 use dialog_common::Blake3Hash;
 use dialog_common::{ConditionalSend, ConditionalSync};
+use dialog_corpus::tree::CorpusNode;
 use dialog_effects::Void;
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::prelude::{ArchiveScope, GetBlockExt as _};
@@ -63,8 +63,8 @@ pub trait BranchEnv:
     + Provider<nodes::Preload<CorpusNode>>
     + ConditionalSync
     + Provider<BlobLoad>
-    + Provider<dialog_artifacts::Preload>
-    + Provider<dialog_artifacts::Speculation>
+    + Provider<dialog_corpus::Preload>
+    + Provider<dialog_corpus::Speculation>
     + Provider<Fork<RemoteSite, Resolve>>
     + ConditionalSync
     + 'static
@@ -91,8 +91,8 @@ impl<T> BranchEnv for T where
         + Provider<nodes::Preload<CorpusNode>>
         + ConditionalSync
         + Provider<BlobLoad>
-        + Provider<dialog_artifacts::Preload>
-        + Provider<dialog_artifacts::Speculation>
+        + Provider<dialog_corpus::Preload>
+        + Provider<dialog_corpus::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
         + ConditionalSync
         + 'static
@@ -370,9 +370,9 @@ mod tests {
 
     use crate::helpers::{test_repo, test_session_with_peer};
     use crate::{Mode, Peer};
-    use dialog_artifacts::{Artifact, Entity, Instruction, Value};
     use dialog_capability::identity::TreeReference;
     use dialog_capability::{Did, Subject};
+    use dialog_corpus::{Entity, Fact, Instruction, Value};
     use dialog_effects::MethodExt as _;
     use dialog_effects::authority::{Identify, OperatorExt as _};
     use dialog_effects::branch::prelude::*;
@@ -1009,13 +1009,13 @@ mod tests {
             .transaction()
             .integrate(
                 vec![Instruction::Assert(
-                    Artifact {
+                    Fact {
                         the: "user/name".parse()?,
                         of: "user:elsewhere".parse()?,
                         is: Value::String("Elsewhere".into()),
                         cause: None,
                     },
-                    dialog_artifacts::Pick::All,
+                    dialog_corpus::Pick::All,
                 )]
                 .into_iter()
                 .collect(),

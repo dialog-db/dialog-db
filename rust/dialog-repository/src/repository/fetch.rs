@@ -19,7 +19,7 @@
 //!   consumer polls a driven stream — on any executor, wasm included,
 //!   with nothing detached. A queue nobody drives holds no resources.
 //!   The queue being ambient (an operator field, reached by the
-//!   [`Speculation`](dialog_artifacts::Speculation) command) is what
+//!   [`Speculation`](dialog_corpus::Speculation) command) is what
 //!   lets one evaluation's polling execute another's hints: queries,
 //!   subscriptions, and transaction queries all enqueue and all drive.
 
@@ -28,13 +28,13 @@ use std::sync::Arc;
 
 use std::task::{Context, Poll};
 
-use dialog_artifacts::selector::Constrained;
-use dialog_artifacts::{ArtifactSelector, FetchBudget, Likelihood, PreloadQueue};
+use dialog_corpus::selector::Constrained;
+use dialog_corpus::{FetchBudget, Likelihood, PreloadQueue, Selector};
 use futures_util::stream::FuturesUnordered;
 use futures_util::{Stream, StreamExt as _};
 
-use dialog_artifacts::tree::selector_range;
 use dialog_common::Blake3Hash as NodeHash;
+use dialog_corpus::tree::selector_range;
 use dialog_search_tree::{DialogSearchTreeError, Traversable as _};
 
 use crate::repository::archive::TreeEnv;
@@ -192,7 +192,7 @@ async fn warm_source(
     source: Source,
     routes: &Routes,
     env: &Erased,
-    selector: &ArtifactSelector<Constrained>,
+    selector: &Selector<Constrained>,
     likelihood: Likelihood,
 ) -> Result<(), DialogSearchTreeError> {
     let view = source.as_view();
@@ -238,15 +238,15 @@ mod tests {
     use super::*;
     use crate::RepositoryExt as _;
     use crate::helpers::{Counting, connect};
-    use dialog_artifacts::tree::ArtifactNodeCache;
-    use dialog_artifacts::tree::ArtifactTreeExt as _;
-    use dialog_artifacts::{
-        ArchiveDelta, Artifact, Datum, Entity, Instruction, Key, Preload, PreloadRequest,
-        Speculation, State, Value,
-    };
     use dialog_capability::Provider;
     use dialog_capability::{Capability, Subject};
     use dialog_common::{Held, Holdings, Holds};
+    use dialog_corpus::tree::CorpusCache;
+    use dialog_corpus::tree::CorpusExt as _;
+    use dialog_corpus::{
+        ArchiveDelta, Datum, Entity, Fact, Instruction, Key, Preload, PreloadRequest, Speculation,
+        State, Value,
+    };
     use dialog_effects::archive::Get;
     use dialog_effects::archive::prelude::ArchiveScope;
     use dialog_query::query::Output as _;
@@ -304,13 +304,13 @@ mod tests {
             blocks,
             &mut delta,
             stream::iter(vec![Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "profile/name".parse()?,
                     of: Entity::new()?,
                     is: Value::String(name.into()),
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             )]),
         )
         .await?;
@@ -335,7 +335,7 @@ mod tests {
                 .into_vec(),
             Holdings::default(),
         );
-        let cache = ArtifactNodeCache::new();
+        let cache = CorpusCache::new();
         cache.hold(&archive);
 
         let loaded: Result<Option<dialog_search_tree::PersistentNode<Key, State<Datum>>>, _> =
@@ -350,7 +350,7 @@ mod tests {
             ),
             "a node that does not hash to the one asked for must be refused, got {loaded:?}"
         );
-        let held = ArtifactNodeCache::of(&archive, catalog.subject())
+        let held = CorpusCache::of(&archive, catalog.subject())
             .expect("the archive holds the line's node cache");
         assert!(
             held.get_cached(&asked).is_none(),
@@ -359,8 +359,8 @@ mod tests {
         Ok(())
     }
 
-    fn selector(attribute: &str) -> ArtifactSelector<Constrained> {
-        ArtifactSelector::new().the(attribute.parse().expect("a valid attribute"))
+    fn selector(attribute: &str) -> Selector<Constrained> {
+        Selector::new().the(attribute.parse().expect("a valid attribute"))
     }
 
     /// A zero budget turns speculation off without touching demand:
@@ -391,7 +391,7 @@ mod tests {
         let branch = repo.branch("main").open().perform(&env).await?;
 
         let queue = Provider::<Speculation>::execute(&env, ()).await;
-        queue.set_budget(dialog_artifacts::FetchBudget::ZERO);
+        queue.set_budget(dialog_corpus::FetchBudget::ZERO);
 
         let listening = Provider::<Preload>::execute(
             &env,
@@ -438,7 +438,7 @@ mod tests {
 
         let mut transaction = branch.transaction();
         for index in 0..40 {
-            let entity: dialog_artifacts::Entity = format!("id:{index}").parse()?;
+            let entity: dialog_corpus::Entity = format!("id:{index}").parse()?;
             transaction = transaction
                 .assert(
                     the!("left/name")
@@ -511,7 +511,7 @@ mod tests {
 
         let mut transaction = branch.transaction();
         for index in 0..10 {
-            let entity: dialog_artifacts::Entity = format!("id:{index}").parse()?;
+            let entity: dialog_corpus::Entity = format!("id:{index}").parse()?;
             transaction = transaction
                 .assert(the!("a/name").of(entity.clone()).is(format!("a {index}")))
                 .assert(the!("b/name").of(entity.clone()).is(format!("b {index}")))

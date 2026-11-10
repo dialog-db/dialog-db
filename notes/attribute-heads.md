@@ -10,7 +10,7 @@
 >
 > Since this note was written, the policy has been named a **pick**,
 > spelled `pick:` (it was `select:`), and one Rust type,
-> `dialog_artifacts::Pick`, replaced the `Policy` and `Select` the
+> `dialog_corpus::Pick`, replaced the `Policy` and `Select` the
 > note mentions. Types are named by entities (`text:`, `integer:`,
 > `natural:`, ...). See [`glossary.md`](./glossary.md).
 
@@ -360,7 +360,7 @@ at once: the stored scan, each attribute-headed rule evaluated in
 scope, and each head split from a source rule (through the rows the
 body was remembered to yield, below). The candidates are grouped by
 entity and run through the attribute's election with the row's
-standing. A stored row's standing is its artifact's, the revision
+standing. A stored row's standing is its fact's, the revision
 version then the cause, exactly what the stored election compares. A
 derived row's is the maximum standing among the facts its `Match`
 cites, which is every fact a premise bound on the way to the head,

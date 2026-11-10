@@ -22,7 +22,7 @@ This is different from modeling structured data as multiple claims. Multiple cla
 
 **Rich text and collaborative types.** An automerge document is a CRDT with its own binary format and merge semantics. A text attribute backed by automerge should be a single value in one claim, not spread across multiple claims. A newtype wrapper like `TextDocument(automerge::Automerge)` implements `RecordFormat` using `Automerge::load`/`save`.
 
-**Capturing whole claim (a.k.a artifact) in a binding.** When claim selection evaluates, it produces a `Claim` (the resolved artifact). Downstream consumers need the full `Claim`, not just its individual fields. Today we work around this with a side `claims` map, separate from the general bindings. With `Value::Record`, we could treat claims as regular bindings produced by query evaluation.
+**Capturing whole claim (a.k.a fact) in a binding.** When claim selection evaluates, it produces a `Claim` (the resolved fact). Downstream consumers need the full `Claim`, not just its individual fields. Today we work around this with a side `claims` map, separate from the general bindings. With `Value::Record`, we could treat claims as regular bindings produced by query evaluation.
 
 ## Design: RecordFormat Trait
 
@@ -154,7 +154,7 @@ The query layer treats both identically. It carries the bytes, and the consumer 
 
 ## Future: Records From Storage
 
-Today the storage layer fully deserializes every datum into an `Artifact` before the query layer sees it. Ideally, record values would arrive as raw bytes wrapped in `Record::from(bytes)`, with deserialization deferred to `realize` on demand. The probabilistic search tree keys already encode enough information for filtering and grouping without deserializing the datum. Getting there requires changes to `ArtifactStore` and its consumers, but the `Record` type is designed with this path in mind.
+Today the storage layer fully deserializes every datum into a `Fact` before the query layer sees it. Ideally, record values would arrive as raw bytes wrapped in `Record::from(bytes)`, with deserialization deferred to `realize` on demand. The probabilistic search tree keys already encode enough information for filtering and grouping without deserializing the datum. Getting there requires changes to `Corpus` and its consumers, but the `Record` type is designed with this path in mind.
 
 ## Decision
 

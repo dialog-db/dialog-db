@@ -4,7 +4,7 @@ pub mod dynamic;
 pub mod typed;
 
 use crate::Term;
-use crate::artifact::{Cause, Value};
+use crate::corpus::{Cause, Value};
 
 pub use dynamic::*;
 pub use typed::*;

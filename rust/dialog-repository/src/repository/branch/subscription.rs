@@ -65,7 +65,7 @@
 //!
 //! [`AnalyzedRule::is_entity_local`]: dialog_query::rule::analyzer::AnalyzedRule::is_entity_local
 
-use dialog_artifacts::tree::CorpusNode;
+use dialog_corpus::tree::CorpusNode;
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::Read as BlobRead;
@@ -78,14 +78,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::repository::fetch::Driven;
-use dialog_artifacts::selector::Constrained;
-use dialog_artifacts::tree::{fetch_spilled, selector_range};
-use dialog_artifacts::{
-    Artifact, ArtifactSelector, AttributeKey, Entity, EntityKey, Key, Speculation, State, ValueKey,
-};
 use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::{ConditionalSync, Holds};
+use dialog_corpus::selector::Constrained;
+use dialog_corpus::tree::{fetch_spilled, selector_range};
+use dialog_corpus::{
+    AttributeKey, Entity, EntityKey, Fact, Key, Selector, Speculation, State, ValueKey,
+};
 use dialog_effects::archive::prelude::ArchiveScope;
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::Identify;
@@ -163,7 +163,7 @@ const HEAD_ATTRIBUTES: [&str; 3] = [
 /// an exact `the` match, a covering `the` prefix, or no attribute
 /// constraint over an entity slice that can hold the metadata
 /// entities (`metadata` — the anchored branch entities).
-fn selects_head(selector: &ArtifactSelector<Constrained>, metadata: &BTreeSet<Entity>) -> bool {
+fn selects_head(selector: &Selector<Constrained>, metadata: &BTreeSet<Entity>) -> bool {
     if let Some(attribute) = selector.attribute() {
         return HEAD_ATTRIBUTES.contains(&attribute.as_str());
     }
@@ -247,7 +247,7 @@ impl Demand {
     /// invalidate the reader.
     pub(crate) fn record(
         &self,
-        selector: &ArtifactSelector<Constrained>,
+        selector: &Selector<Constrained>,
         manifest: &dialog_search_tree::Manifest,
     ) {
         self.keyed_under(manifest);
@@ -274,7 +274,7 @@ impl Demand {
     /// `manifest` as in [`Demand::record`].
     pub(crate) fn record_rules(
         &self,
-        selector: &ArtifactSelector<Constrained>,
+        selector: &Selector<Constrained>,
         manifest: &dialog_search_tree::Manifest,
     ) {
         self.keyed_under(manifest);
@@ -467,9 +467,9 @@ fn touched_by(demand: &Demand, instants: Vec<crate::Instant>) -> Touched {
         for (arriving, facts) in [(true, instant.asserted), (false, instant.retracted)] {
             for fact in facts {
                 let keys = [
-                    EntityKey::from_artifact(&fact, &manifest).into_key(),
-                    AttributeKey::from_artifact(&fact, &manifest).into_key(),
-                    ValueKey::from_artifact(&fact, &manifest).into_key(),
+                    EntityKey::from_fact(&fact, &manifest).into_key(),
+                    AttributeKey::from_fact(&fact, &manifest).into_key(),
+                    ValueKey::from_fact(&fact, &manifest).into_key(),
                 ];
                 if keys.iter().any(|key| demand.covers_rules(key)) {
                     return Touched::Rules;
@@ -516,18 +516,18 @@ fn touched_by(demand: &Demand, instants: Vec<crate::Instant>) -> Touched {
 /// report it: every claim is read, so the moves are the change.
 async fn widened<'a>(
     env: &QueryEnv<'a>,
-    asserted: &[Artifact],
-    retracted: &[Artifact],
+    asserted: &[Fact],
+    retracted: &[Fact],
     elected: &Elected,
-) -> Result<(Vec<Artifact>, Vec<Artifact>), EvaluationError> {
-    let identity = |fact: &Artifact| {
+) -> Result<(Vec<Fact>, Vec<Fact>), EvaluationError> {
+    let identity = |fact: &Fact| {
         (
             fact.of.to_string(),
             fact.the.to_string(),
             fact.is.to_bytes(),
         )
     };
-    let mut cells: Vec<(Entity, dialog_artifacts::Relation)> = Vec::new();
+    let mut cells: Vec<(Entity, dialog_corpus::Relation)> = Vec::new();
     for fact in asserted.iter().chain(retracted) {
         if elected.includes(&fact.the)
             && !cells
@@ -546,15 +546,14 @@ async fn widened<'a>(
     let mut have_asserted = raw_asserted.clone();
     let mut have_retracted: BTreeSet<_> = retracted.iter().map(identity).collect();
     for (of, the) in cells {
-        let selector = ArtifactSelector::new().the(the).of(of);
-        let claims: Vec<Artifact> =
-            Provider::<dialog_artifacts::Select<'_>>::execute(env, selector)
-                .await
-                .map_err(|error| EvaluationError::Store(format!("cell read: {error}")))?
-                .map(|row| row.and_then(|view| view.to_owned()))
-                .try_collect()
-                .await
-                .map_err(|error| EvaluationError::Store(format!("cell read: {error}")))?;
+        let selector = Selector::new().the(the).of(of);
+        let claims: Vec<Fact> = Provider::<dialog_corpus::Select<'_>>::execute(env, selector)
+            .await
+            .map_err(|error| EvaluationError::Store(format!("cell read: {error}")))?
+            .map(|row| row.and_then(|view| view.to_owned()))
+            .try_collect()
+            .await
+            .map_err(|error| EvaluationError::Store(format!("cell read: {error}")))?;
         for claim in claims {
             let key = identity(&claim);
             if !raw_asserted.contains(&key) && have_retracted.insert(key.clone()) {
@@ -595,9 +594,9 @@ enum Touched {
         /// Subjects of the changed facts.
         subjects: BTreeSet<Entity>,
         /// Facts that became readable.
-        asserted: Vec<Artifact>,
+        asserted: Vec<Fact>,
         /// Facts that stopped being readable.
-        retracted: Vec<Artifact>,
+        retracted: Vec<Fact>,
     },
 }
 
@@ -729,8 +728,8 @@ where
             + Provider<nodes::Preload<CorpusNode>>
             + ConditionalSync
             + Provider<BlobLoad>
-            + Provider<dialog_artifacts::Preload>
-            + Provider<dialog_artifacts::Speculation>
+            + Provider<dialog_corpus::Preload>
+            + Provider<dialog_corpus::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + Holds
             + ConditionalSync
@@ -849,8 +848,8 @@ where
             + Provider<nodes::Preload<CorpusNode>>
             + ConditionalSync
             + Provider<BlobLoad>
-            + Provider<dialog_artifacts::Preload>
-            + Provider<dialog_artifacts::Speculation>
+            + Provider<dialog_corpus::Preload>
+            + Provider<dialog_corpus::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + dialog_common::Holds
             + ConditionalSync
@@ -917,7 +916,7 @@ where
                 let spilled = fetch_spilled(&raw_store, &archive, &entry.key)
                     .await
                     .map_err(|error| EvaluationError::Store(format!("spilled fetch: {error:?}")))?;
-                let fact = Artifact::from_key_datum_with_value(&entry.key, datum, spilled)
+                let fact = Fact::from_key_datum_with_value(&entry.key, datum, spilled)
                     .map_err(|error| EvaluationError::Store(format!("changed datum: {error:?}")))?;
                 // Dedup on the fact's identity (entity, attribute, value), all
                 // now reconstructed from the key.
@@ -979,8 +978,8 @@ where
         &'a mut self,
         env: &'a Env,
         subjects: &'a BTreeSet<Entity>,
-        asserted: &'a [Artifact],
-        retracted: &'a [Artifact],
+        asserted: &'a [Fact],
+        retracted: &'a [Fact],
     ) -> EvaluationFuture<'a, Option<Delta<Q::Conclusion>>>
     where
         Env: Provider<BlobRead>
@@ -995,8 +994,8 @@ where
             + Provider<nodes::Preload<CorpusNode>>
             + ConditionalSync
             + Provider<BlobLoad>
-            + Provider<dialog_artifacts::Preload>
-            + Provider<dialog_artifacts::Speculation>
+            + Provider<dialog_corpus::Preload>
+            + Provider<dialog_corpus::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + Holds
             + ConditionalSync
@@ -1209,8 +1208,8 @@ where
             + Provider<nodes::Preload<CorpusNode>>
             + ConditionalSync
             + Provider<BlobLoad>
-            + Provider<dialog_artifacts::Preload>
-            + Provider<dialog_artifacts::Speculation>
+            + Provider<dialog_corpus::Preload>
+            + Provider<dialog_corpus::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + Holds
             + ConditionalSync
@@ -1255,8 +1254,8 @@ where
     fn evaluate_with_continuation<'a, Env>(
         &'a self,
         env: &'a Env,
-        additions: Arc<Vec<Artifact>>,
-        deletions: Arc<Vec<Artifact>>,
+        additions: Arc<Vec<Fact>>,
+        deletions: Arc<Vec<Fact>>,
     ) -> EvaluationFuture<'a, Vec<Q::Conclusion>>
     where
         Env: Provider<BlobRead>
@@ -1271,8 +1270,8 @@ where
             + Provider<nodes::Preload<CorpusNode>>
             + ConditionalSync
             + Provider<BlobLoad>
-            + Provider<dialog_artifacts::Preload>
-            + Provider<dialog_artifacts::Speculation>
+            + Provider<dialog_corpus::Preload>
+            + Provider<dialog_corpus::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + Holds
             + ConditionalSync
@@ -1313,7 +1312,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use dialog_artifacts::tree::CorpusNode;
+    use dialog_corpus::tree::CorpusNode;
     use dialog_effects::archive::Load as ArchiveLoad;
     use dialog_effects::blob::Load as BlobLoad;
     use dialog_search_tree::nodes;
@@ -1324,12 +1323,12 @@ mod tests {
     use super::Delta;
     use crate::helpers::test_repo;
     use crate::{Ephemeral, RemoteSite};
-    use dialog_artifacts::{ArtifactSelector, Changes, Entity, Value};
-    use dialog_artifacts::{NameShape, Relation as ArtifactsRelation, Symbol};
     use dialog_capability::Command;
     use dialog_capability::{Fork, Provider};
     use dialog_common::Held;
     use dialog_common::{ConditionalSend, ConditionalSync, Holds};
+    use dialog_corpus::{Changes, Entity, Selector, Value};
+    use dialog_corpus::{NameShape, Relation as CorpusRelation, Symbol};
     use dialog_effects::archive::{Get, Put};
     use dialog_effects::authority::AuthorityError;
     use dialog_effects::authority::Identify;
@@ -1360,7 +1359,7 @@ mod tests {
     /// incremental maintenance for the whole subscription.
     #[dialog_common::test]
     fn it_keeps_entity_pinned_attribute_scans_head_independent() -> anyhow::Result<()> {
-        use dialog_artifacts::ArtifactSelector;
+        use dialog_corpus::Selector;
 
         let branch_entity = Entity::new()?;
         let ordinary = Entity::new()?;
@@ -1369,7 +1368,7 @@ mod tests {
         demand.anchor_metadata(branch_entity.clone());
 
         demand.record(
-            &ArtifactSelector::new().of(ordinary),
+            &Selector::new().of(ordinary),
             &dialog_search_tree::Manifest::default(),
         );
         assert!(
@@ -1378,7 +1377,7 @@ mod tests {
         );
 
         demand.record(
-            &ArtifactSelector::new().the("dialog.branch/name".parse()?),
+            &Selector::new().the("dialog.branch/name".parse()?),
             &dialog_search_tree::Manifest::default(),
         );
         assert!(
@@ -1387,7 +1386,7 @@ mod tests {
         );
 
         demand.record(
-            &ArtifactSelector::new().of(branch_entity),
+            &Selector::new().of(branch_entity),
             &dialog_search_tree::Manifest::default(),
         );
         assert!(
@@ -1418,8 +1417,8 @@ mod tests {
             + Provider<nodes::Preload<CorpusNode>>
             + ConditionalSync
             + Provider<BlobLoad>
-            + Provider<dialog_artifacts::Preload>
-            + Provider<dialog_artifacts::Speculation>
+            + Provider<dialog_corpus::Preload>
+            + Provider<dialog_corpus::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSend
             + Holds
@@ -1963,7 +1962,7 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let list = Entity::new()?;
-        let first = Relation::from(ArtifactsRelation::try_from("todo.list/N".to_string())?);
+        let first = Relation::from(CorpusRelation::try_from("todo.list/N".to_string())?);
         branch
             .transaction()
             .assert(first.of(list.clone()).is("Milk".to_string()))
@@ -2016,7 +2015,7 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let list = Entity::new()?;
-        let first = Relation::from(ArtifactsRelation::try_from("todo.list/N".to_string())?);
+        let first = Relation::from(CorpusRelation::try_from("todo.list/N".to_string())?);
         branch
             .transaction()
             .assert(first.of(list.clone()).is("Milk".to_string()))
@@ -2029,7 +2028,7 @@ mod tests {
         subscription.poll(&operator).await?.expect("initial");
 
         // A second ordered member, appended after the first.
-        let second = Relation::from(ArtifactsRelation::try_from("todo.list/N5".to_string())?);
+        let second = Relation::from(CorpusRelation::try_from("todo.list/N5".to_string())?);
         branch
             .transaction()
             .assert(second.of(list.clone()).is("Bread".to_string()))
@@ -2063,7 +2062,7 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let list = Entity::new()?;
-        let first = Relation::from(ArtifactsRelation::try_from("todo.list/N".to_string())?);
+        let first = Relation::from(CorpusRelation::try_from("todo.list/N".to_string())?);
         branch
             .transaction()
             .assert(first.of(list.clone()).is("Milk".to_string()))
@@ -2162,8 +2161,8 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let list = Entity::new()?;
-        let first = Relation::from(ArtifactsRelation::try_from("todo.list/N".to_string())?);
-        let second = Relation::from(ArtifactsRelation::try_from("todo.list/N5".to_string())?);
+        let first = Relation::from(CorpusRelation::try_from("todo.list/N".to_string())?);
+        let second = Relation::from(CorpusRelation::try_from("todo.list/N5".to_string())?);
         branch
             .transaction()
             // A named field in the same domain: the dictionary half,
@@ -2210,7 +2209,7 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let list = Entity::new()?;
-        let first = Relation::from(ArtifactsRelation::try_from("todo.list/N".to_string())?);
+        let first = Relation::from(CorpusRelation::try_from("todo.list/N".to_string())?);
         branch
             .transaction()
             .assert(first.of(list.clone()).is("Milk".to_string()))
@@ -2225,7 +2224,7 @@ mod tests {
         let baseline = subscription.recomputes();
 
         // Appending a member is inside the cover: it must arrive.
-        let second = Relation::from(ArtifactsRelation::try_from("todo.list/N5".to_string())?);
+        let second = Relation::from(CorpusRelation::try_from("todo.list/N5".to_string())?);
         branch
             .transaction()
             .assert(second.of(list.clone()).is("Bread".to_string()))
@@ -2276,8 +2275,8 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let list = Entity::new()?;
-        let first = Relation::from(ArtifactsRelation::try_from("todo.list/N".to_string())?);
-        let second = Relation::from(ArtifactsRelation::try_from("todo.list/N5".to_string())?);
+        let first = Relation::from(CorpusRelation::try_from("todo.list/N".to_string())?);
+        let second = Relation::from(CorpusRelation::try_from("todo.list/N5".to_string())?);
         branch
             .transaction()
             .assert(first.of(list.clone()).is("Milk".to_string()))
@@ -2321,8 +2320,8 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let list = Entity::new()?;
-        let first = Relation::from(ArtifactsRelation::try_from("todo.list/N".to_string())?);
-        let second = Relation::from(ArtifactsRelation::try_from("todo.list/N5".to_string())?);
+        let first = Relation::from(CorpusRelation::try_from("todo.list/N".to_string())?);
+        let second = Relation::from(CorpusRelation::try_from("todo.list/N5".to_string())?);
         branch
             .transaction()
             .assert(first.of(list.clone()).is("Milk".to_string()))
@@ -2362,7 +2361,7 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let list = Entity::new()?;
-        let member = Relation::from(ArtifactsRelation::try_from("todo.list/N".to_string())?);
+        let member = Relation::from(CorpusRelation::try_from("todo.list/N".to_string())?);
         branch
             .transaction()
             .assert(
@@ -2437,7 +2436,7 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let list = Entity::new()?;
-        let member = Relation::from(ArtifactsRelation::try_from("todo.list/N".to_string())?);
+        let member = Relation::from(CorpusRelation::try_from("todo.list/N".to_string())?);
         branch
             .transaction()
             .assert(
@@ -2802,7 +2801,7 @@ mod tests {
         //! Derived concepts + attributes shared by the incremental
         //! maintenance tests below.
 
-        use dialog_artifacts::Entity;
+        use dialog_corpus::Entity;
         use dialog_query::{Attribute, Concept};
 
         /// A badge number (`credential/badge`).
@@ -2971,7 +2970,7 @@ mod tests {
     }
 
     /// Stage the `dialog.rule/*` facts that persist a deductive rule
-    /// durably — a rule is a [`Statement`](dialog_artifacts::Statement),
+    /// durably — a rule is a [`Statement`](dialog_corpus::Statement),
     /// so installing it is asserting it.
     fn with_rule<'t>(
         transaction: crate::Transaction<&'t crate::Branch>,
@@ -3342,8 +3341,8 @@ mod tests {
         overlay.retract(the!("person/name").of(bob.clone()).is("Bob".to_string()))?;
 
         let names = |line: &Ephemeral| -> anyhow::Result<Vec<(String, Value)>> {
-            let selector = ArtifactSelector::new()
-                .the(ArtifactsRelation::try_from("person/name".to_string())?);
+            let selector =
+                Selector::new().the(CorpusRelation::try_from("person/name".to_string())?);
             let mut names: Vec<(String, Value)> = line
                 .scan(&selector)
                 .into_iter()
@@ -4668,7 +4667,7 @@ mod tests {
     /// asserts the new one, without a recompute.
     #[dialog_common::test]
     async fn it_maintains_a_session_replace() -> anyhow::Result<()> {
-        use dialog_artifacts::{Changes, Update as _};
+        use dialog_corpus::{Changes, Update as _};
 
         let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
@@ -4681,7 +4680,7 @@ mod tests {
                 "person/name".parse().expect("attribute"),
                 here.clone(),
                 Value::String(value.into()),
-                dialog_artifacts::Pick::Last,
+                dialog_corpus::Pick::Last,
             );
             changes
         };
@@ -4900,7 +4899,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_does_not_recompute_on_unrelated_overlay_writes() -> anyhow::Result<()> {
         use crate::schema;
-        use dialog_artifacts::{Changes, Update as _};
+        use dialog_corpus::{Changes, Update as _};
         use dialog_query::Query;
 
         let (operator, profile) = test_session_with_peer().await;
@@ -4939,7 +4938,7 @@ mod tests {
                 "sync/status".parse()?,
                 here.clone(),
                 Value::String(status.into()),
-                dialog_artifacts::Pick::Last,
+                dialog_corpus::Pick::Last,
             );
             branch.overlay().assert(changes)?;
             let site = Entity::new()?;
@@ -4986,7 +4985,7 @@ mod tests {
     /// clear. None of it recomputes.
     #[dialog_common::test]
     async fn it_agrees_with_a_fresh_evaluation_through_overlay_churn() -> anyhow::Result<()> {
-        use dialog_artifacts::{Changes, Update as _};
+        use dialog_corpus::{Changes, Update as _};
 
         let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
@@ -5019,7 +5018,7 @@ mod tests {
                 "person/name".parse().expect("attribute"),
                 of.clone(),
                 Value::String(is.into()),
-                dialog_artifacts::Pick::Last,
+                dialog_corpus::Pick::Last,
             );
             changes
         };
@@ -5189,7 +5188,7 @@ mod tests {
             ..default.clone()
         };
         let alice = Entity::new()?;
-        let fact = dialog_artifacts::Artifact {
+        let fact = dialog_corpus::Fact {
             the: "person/bio".parse()?,
             of: alice.clone(),
             is: Value::String("x".repeat(default.inline_n as usize + 1)),
@@ -5197,14 +5196,14 @@ mod tests {
         };
         let demand = super::Demand::new();
         demand.record(
-            &dialog_artifacts::ArtifactSelector::new()
+            &dialog_corpus::Selector::new()
                 .the(fact.the.clone())
                 .is(fact.is.clone()),
             &inlining,
         );
         assert_eq!(demand.manifest(), Some(inlining.clone()));
         assert!(
-            !demand.covers(&dialog_artifacts::ValueKey::from_artifact(&fact, &default).into_key()),
+            !demand.covers(&dialog_corpus::ValueKey::from_fact(&fact, &default).into_key()),
             "keyed under the default manifest the fact spills and falls outside the cover"
         );
 
@@ -5390,8 +5389,8 @@ mod tests {
     impl Fault for nodes::Read<CorpusNode> {}
     impl Fault for nodes::Preload<CorpusNode> {}
     impl Fault for nodes::Write<CorpusNode> {}
-    impl Fault for dialog_artifacts::Preload {}
-    impl Fault for dialog_artifacts::Speculation {}
+    impl Fault for dialog_corpus::Preload {}
+    impl Fault for dialog_corpus::Speculation {}
     impl Fault for Fork<RemoteSite, Resolve> {}
 
     /// An env that forwards to `inner` and fails every command whose

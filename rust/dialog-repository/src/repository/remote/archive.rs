@@ -1,9 +1,9 @@
 //! Remote archive operations -- upload blocks to remote storage.
 
 use crate::{ConnectedReplica, RemoteSite, UploadError};
-use dialog_artifacts::{Datum, Key, State};
 use dialog_capability::{Fork, Provider, Subject};
 use dialog_common::{Buffer, ConditionalSync};
+use dialog_corpus::{Datum, Key, State};
 use dialog_effects::archive::prelude::{ArchiveScope, CatalogScope};
 use dialog_effects::archive::{ArchiveError, Get, Put};
 use dialog_search_tree::{DialogSearchTreeError, PersistentNode};

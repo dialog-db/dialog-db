@@ -34,14 +34,14 @@
 //! [`Source`] is a view that owns its line, for the query environments,
 //! whose only lifetime is the capability environment's.
 
-use dialog_artifacts::history::{
-    CausalityCache, ContextCache, RevisionRecord, TreeHistory, Version, log,
-};
-use dialog_artifacts::tree::CorpusNode;
-use dialog_artifacts::tree::{ArtifactNodeCache, SpillCache};
-use dialog_artifacts::{Changes, DialogArtifactsError, Entity, SpineSlot, Statement as _};
 use dialog_capability::{Capability, Provider, Subject};
 use dialog_common::{Blake3Hash as NodeHash, ConditionalSync, Holds};
+use dialog_corpus::history::{
+    CausalityCache, ContextCache, RevisionRecord, TreeHistory, Version, log,
+};
+use dialog_corpus::tree::CorpusNode;
+use dialog_corpus::tree::{CorpusCache, SpillCache};
+use dialog_corpus::{Changes, DialogCorpusError, Entity, SpineSlot, Statement as _};
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::prelude::{ArchiveScope, CatalogScope};
 use dialog_effects::authority::{Operator, OperatorExt as _};
@@ -408,7 +408,7 @@ impl<'a> View<'a> {
         &self,
         env: &Env,
         limit: usize,
-    ) -> Result<Vec<(Version, RevisionRecord)>, DialogArtifactsError>
+    ) -> Result<Vec<(Version, RevisionRecord)>, DialogCorpusError>
     where
         Env: Provider<ArchiveLoad>
             + Provider<nodes::Write<CorpusNode>>
@@ -508,7 +508,7 @@ impl From<Snapshot> for Source {
 #[derive(Debug, Clone)]
 pub(crate) struct Caches {
     /// Tree nodes by hash, so blocks one read fetched stay warm for the next.
-    pub(crate) nodes: ArtifactNodeCache,
+    pub(crate) nodes: CorpusCache,
     /// Spilled value blocks by content reference.
     pub(crate) spills: SpillCache,
     /// Deductive-rule discovery (by head) and hydrated bodies (by entity).

@@ -12,11 +12,11 @@ wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 use std::cmp::Ordering;
 
 use anyhow::Result;
-use dialog_artifacts::history::HistorySelector;
-use dialog_artifacts::selector::Constrained;
-use dialog_artifacts::{
-    Artifact, ArtifactSelector, DialogArtifactsError, Entity, Instruction, NUMBER_BAND, Pick,
-    Relation, Value, encode_key_value_owned,
+use dialog_corpus::history::HistorySelector;
+use dialog_corpus::selector::Constrained;
+use dialog_corpus::{
+    DialogCorpusError, Entity, Fact, Instruction, NUMBER_BAND, Pick, Relation, Selector, Value,
+    encode_key_value_owned,
 };
 use dialog_peer::helpers::test_session_with_peer;
 use dialog_peer::{Peer, Session};
@@ -47,21 +47,21 @@ fn size() -> Relation {
 /// them.
 async fn select(
     branch: &Branch,
-    selector: ArtifactSelector<Constrained>,
+    selector: Selector<Constrained>,
     operator: &Operator,
-) -> Result<Vec<Artifact>> {
+) -> Result<Vec<Fact>> {
     Ok(branch
         .claims()
         .select(selector)
         .to_owned()
         .perform(operator)
         .await?
-        .try_collect::<Vec<Artifact>>()
+        .try_collect::<Vec<Fact>>()
         .await?)
 }
 
 /// The values of `rows`, in the order the scan yielded them.
-fn values(rows: &[Artifact]) -> Vec<Value> {
+fn values(rows: &[Fact]) -> Vec<Value> {
     rows.iter().map(|row| row.is.clone()).collect()
 }
 
@@ -73,7 +73,7 @@ fn by_number(a: &Value, b: &Value) -> Ordering {
 }
 
 /// The values of `rows`, sorted numerically.
-fn sorted(rows: &[Artifact]) -> Vec<Value> {
+fn sorted(rows: &[Fact]) -> Vec<Value> {
     let mut values = values(rows);
     values.sort_by(by_number);
     values
@@ -83,7 +83,7 @@ fn sorted(rows: &[Artifact]) -> Vec<Value> {
 /// numerically.
 async fn sizes(
     branch: &Branch,
-    selector: ArtifactSelector<Constrained>,
+    selector: Selector<Constrained>,
     operator: &Operator,
 ) -> Result<Vec<Value>> {
     Ok(sorted(
@@ -94,7 +94,7 @@ async fn sizes(
 /// Every `(entity, value)` under `the` on `branch`, sorted: the fact set a
 /// test compares before and after a rewrite or a pull.
 async fn facts(branch: &Branch, the: &str, operator: &Operator) -> Result<Vec<(Entity, Value)>> {
-    let rows = select(branch, ArtifactSelector::new().the(the.parse()?), operator).await?;
+    let rows = select(branch, Selector::new().the(the.parse()?), operator).await?;
     let mut facts: Vec<(Entity, Value)> = rows.into_iter().map(|row| (row.of, row.is)).collect();
     facts.sort_by(|a, b| {
         a.0.to_string()
@@ -125,8 +125,8 @@ async fn cell_records(
 }
 
 /// A fact with no cause, as an application writes it.
-fn fact(the: &str, of: &Entity, is: Value) -> Result<Artifact> {
-    Ok(Artifact {
+fn fact(the: &str, of: &Entity, is: Value) -> Result<Fact> {
+    Ok(Fact {
         the: the.parse()?,
         of: of.clone(),
         is,
@@ -151,7 +151,7 @@ async fn commit(
 /// Asserts `facts` under `pick` as one batch.
 async fn assert_all(
     branch: &Branch,
-    facts: impl IntoIterator<Item = Artifact>,
+    facts: impl IntoIterator<Item = Fact>,
     pick: Pick,
     operator: &Operator,
 ) -> Result<Revision, CommitError> {
@@ -159,7 +159,7 @@ async fn assert_all(
         branch,
         facts
             .into_iter()
-            .map(|artifact| Instruction::Assert(artifact, pick.clone()))
+            .map(|fact| Instruction::Assert(fact, pick.clone()))
             .collect(),
         operator,
     )
@@ -169,7 +169,7 @@ async fn assert_all(
 /// Retracts `facts` as one batch.
 async fn retract_all(
     branch: &Branch,
-    facts: impl IntoIterator<Item = Artifact>,
+    facts: impl IntoIterator<Item = Fact>,
     operator: &Operator,
 ) -> Result<Revision, CommitError> {
     commit(
@@ -280,9 +280,9 @@ fn mixed() -> Vec<Value> {
 /// answers the same way: a bound is a lens of its type, `across_numbers`
 /// compares as is.
 async fn assert_lens_bounds(branch: &Branch, operator: &Operator) -> Result<()> {
-    let at_least = |bound: Value| ArtifactSelector::new().is_at_least(bound);
-    let at_most = |bound: Value| ArtifactSelector::new().is_at_most(bound);
-    let more_than = |bound: Value| ArtifactSelector::new().is_greater_than(bound);
+    let at_least = |bound: Value| Selector::new().is_at_least(bound);
+    let at_most = |bound: Value| Selector::new().is_at_most(bound);
+    let more_than = |bound: Value| Selector::new().is_greater_than(bound);
     assert_eq!(
         sizes(branch, at_least(Value::UnsignedInt(2)), operator).await?,
         vec![
@@ -353,7 +353,7 @@ async fn assert_lens_bounds(branch: &Branch, operator: &Operator) -> Result<()> 
     assert_eq!(
         sizes(
             branch,
-            ArtifactSelector::new().is_between(Value::SignedInt(-3), Value::Float(2.5)),
+            Selector::new().is_between(Value::SignedInt(-3), Value::Float(2.5)),
             operator
         )
         .await?,
@@ -428,12 +428,7 @@ async fn it_holds_one_fact_for_a_number_however_it_is_spelled() -> Result<()> {
         (&zero, Value::UnsignedInt(0)),
         (&minus, Value::SignedInt(-1)),
     ] {
-        let rows = select(
-            &branch,
-            ArtifactSelector::new().of(entity.clone()),
-            &operator,
-        )
-        .await?;
+        let rows = select(&branch, Selector::new().of(entity.clone()), &operator).await?;
         assert_eq!(values(&rows), vec![expected], "{entity} holds one fact");
     }
     Ok(())
@@ -533,7 +528,7 @@ async fn it_does_not_supersede_a_cardinality_one_value_rewritten_in_another_type
         "no supersession is recorded"
     );
     assert_eq!(
-        values(&select(&branch, ArtifactSelector::new().of(item.clone()), &operator).await?),
+        values(&select(&branch, Selector::new().of(item.clone()), &operator).await?),
         vec![Value::UnsignedInt(3)]
     );
 
@@ -545,7 +540,7 @@ async fn it_does_not_supersede_a_cardinality_one_value_rewritten_in_another_type
     )
     .await?;
     assert_eq!(
-        values(&select(&branch, ArtifactSelector::new().of(item.clone()), &operator).await?),
+        values(&select(&branch, Selector::new().of(item.clone()), &operator).await?),
         vec![Value::UnsignedInt(4)],
         "4.0 supersedes 3 and reads as the natural 4"
     );
@@ -568,7 +563,7 @@ async fn it_reads_a_mixed_range_in_numeric_order_as_narrowest_types() -> Result<
 
     let by_attribute = select(
         &branch,
-        ArtifactSelector::new()
+        Selector::new()
             .the(size())
             .is_at_least(Value::Float(f64::NEG_INFINITY)),
         &operator,
@@ -578,7 +573,7 @@ async fn it_reads_a_mixed_range_in_numeric_order_as_narrowest_types() -> Result<
 
     let by_value = select(
         &branch,
-        ArtifactSelector::new().is_at_least(Value::Float(f64::NEG_INFINITY)),
+        Selector::new().is_at_least(Value::Float(f64::NEG_INFINITY)),
         &operator,
     )
     .await?;
@@ -586,7 +581,7 @@ async fn it_reads_a_mixed_range_in_numeric_order_as_narrowest_types() -> Result<
 
     // The attribute scan, unbounded on the value, holds the same facts.
     assert_eq!(
-        sizes(&branch, ArtifactSelector::new().the(size()), &operator).await?,
+        sizes(&branch, Selector::new().the(size()), &operator).await?,
         edge_readings()
     );
     Ok(())
@@ -625,7 +620,7 @@ async fn it_matches_a_constant_through_the_lens_of_its_type() -> Result<()> {
         &operator,
     )
     .await?;
-    let is = |constant: Value| ArtifactSelector::new().is(constant);
+    let is = |constant: Value| Selector::new().is(constant);
     let through_integer = vec![Value::UnsignedInt(4), Value::Float(4.3), Value::Float(4.9)];
     assert_eq!(
         sizes(&branch, is(Value::SignedInt(4)), &operator).await?,
@@ -660,9 +655,7 @@ async fn it_matches_a_constant_through_the_lens_of_its_type() -> Result<()> {
         values(
             &select(
                 &branch,
-                ArtifactSelector::new()
-                    .of(fraction.clone())
-                    .is(Value::SignedInt(4)),
+                Selector::new().of(fraction.clone()).is(Value::SignedInt(4)),
                 &operator
             )
             .await?
@@ -672,9 +665,7 @@ async fn it_matches_a_constant_through_the_lens_of_its_type() -> Result<()> {
     );
     let none = select(
         &branch,
-        ArtifactSelector::new()
-            .of(fraction.clone())
-            .is(Value::Float(4.0)),
+        Selector::new().of(fraction.clone()).is(Value::Float(4.0)),
         &operator,
     )
     .await?;
@@ -683,9 +674,7 @@ async fn it_matches_a_constant_through_the_lens_of_its_type() -> Result<()> {
         values(
             &select(
                 &branch,
-                ArtifactSelector::new()
-                    .of(whole.clone())
-                    .is(Value::Float(4.0)),
+                Selector::new().of(whole.clone()).is(Value::Float(4.0)),
                 &operator
             )
             .await?
@@ -1078,7 +1067,7 @@ fn typed_concept(the: &str, declared: &str) -> ConceptDescriptor {
 
 /// NaN is not a value: a commit that would write one, by a raw
 /// assertion that no field type checks, is refused with
-/// [`CommitError::Artifact`] (`InvalidValue`, "NaN is not a value") and
+/// [`CommitError::Fact`] (`InvalidValue`, "NaN is not a value") and
 /// lands nothing: the branch has no revision and holds no fact after it.
 /// The infinities are values and land.
 #[dialog_common::test]
@@ -1097,7 +1086,7 @@ async fn it_refuses_a_commit_that_would_write_nan() -> Result<()> {
         assert!(
             matches!(
                 &refusal,
-                Some(CommitError::Artifact(DialogArtifactsError::InvalidValue(reason)))
+                Some(CommitError::Fact(DialogCorpusError::InvalidValue(reason)))
                     if reason == "NaN is not a value"
             ),
             "{refusal:?}"
@@ -1175,7 +1164,7 @@ async fn it_refuses_a_typed_write_outside_the_field_type_before_commit() -> Resu
         .await?;
     branch.refresh(&operator).await?;
     assert_eq!(
-        values(&select(&branch, ArtifactSelector::new().of(item), &operator).await?),
+        values(&select(&branch, Selector::new().of(item), &operator).await?),
         vec![Value::UnsignedInt(7)],
         "7.0 is what natural:8 holds, read as the natural 7"
     );
@@ -1238,7 +1227,7 @@ async fn it_treats_a_typed_write_the_field_already_observes_as_a_no_op() -> Resu
         .await?;
     branch.refresh(&operator).await?;
     assert_eq!(observed_size(&branch, &item, &operator).await?, vec![4]);
-    let raw = ArtifactSelector::new().of(item.clone());
+    let raw = Selector::new().of(item.clone());
     assert_eq!(
         values(&select(&branch, raw.clone(), &operator).await?),
         vec![Value::Float(4.3)]
@@ -1355,7 +1344,7 @@ async fn assert_edge_reads(branch: &Branch, operator: &Operator) -> Result<()> {
         values(
             &select(
                 branch,
-                ArtifactSelector::new().is_at_least(Value::Float(f64::NEG_INFINITY)),
+                Selector::new().is_at_least(Value::Float(f64::NEG_INFINITY)),
                 operator
             )
             .await?
@@ -1366,7 +1355,7 @@ async fn assert_edge_reads(branch: &Branch, operator: &Operator) -> Result<()> {
     assert_eq!(
         sizes(
             branch,
-            ArtifactSelector::new().is_at_least(Value::UnsignedInt(1u128 << 64)),
+            Selector::new().is_at_least(Value::UnsignedInt(1u128 << 64)),
             operator
         )
         .await?,
@@ -1381,7 +1370,7 @@ async fn assert_edge_reads(branch: &Branch, operator: &Operator) -> Result<()> {
     assert_eq!(
         sizes(
             branch,
-            ArtifactSelector::new().is_at_least(Value::Float(1e30)),
+            Selector::new().is_at_least(Value::Float(1e30)),
             operator
         )
         .await?,
@@ -1396,7 +1385,7 @@ async fn assert_edge_reads(branch: &Branch, operator: &Operator) -> Result<()> {
     assert_eq!(
         sizes(
             branch,
-            ArtifactSelector::new().is_at_most(Value::Float(-1.0)),
+            Selector::new().is_at_most(Value::Float(-1.0)),
             operator
         )
         .await?,
@@ -1412,7 +1401,7 @@ async fn assert_edge_reads(branch: &Branch, operator: &Operator) -> Result<()> {
     assert_eq!(
         sizes(
             branch,
-            ArtifactSelector::new().is_at_most(Value::SignedInt(-1)),
+            Selector::new().is_at_most(Value::SignedInt(-1)),
             operator
         )
         .await?,
@@ -1427,7 +1416,7 @@ async fn assert_edge_reads(branch: &Branch, operator: &Operator) -> Result<()> {
     assert_eq!(
         sizes(
             branch,
-            ArtifactSelector::new().is_at_most(Value::UnsignedInt(0)),
+            Selector::new().is_at_most(Value::UnsignedInt(0)),
             operator
         )
         .await?,
@@ -1543,7 +1532,7 @@ async fn it_pulls_mixed_numbers_as_the_narrowest_types() -> Result<()> {
 
     assert_eq!(facts(&feature, "item/size", &operator).await?, upstream);
     assert_eq!(
-        values(&select(&feature, ArtifactSelector::new().of(item), &operator).await?),
+        values(&select(&feature, Selector::new().of(item), &operator).await?),
         vec![Value::UnsignedInt(3)],
         "3.0 and 3 pulled as one fact"
     );
@@ -1551,7 +1540,7 @@ async fn it_pulls_mixed_numbers_as_the_narrowest_types() -> Result<()> {
         assert_eq!(
             sizes(
                 branch,
-                ArtifactSelector::new().is_at_least(Value::Float(f64::NEG_INFINITY)),
+                Selector::new().is_at_least(Value::Float(f64::NEG_INFINITY)),
                 &operator
             )
             .await?,
@@ -1568,7 +1557,7 @@ async fn it_pulls_mixed_numbers_as_the_narrowest_types() -> Result<()> {
         assert_eq!(
             sizes(
                 branch,
-                ArtifactSelector::new().is_at_least(Value::UnsignedInt(2)),
+                Selector::new().is_at_least(Value::UnsignedInt(2)),
                 &operator
             )
             .await?,
@@ -1582,7 +1571,7 @@ async fn it_pulls_mixed_numbers_as_the_narrowest_types() -> Result<()> {
         assert_eq!(
             sizes(
                 branch,
-                ArtifactSelector::new()
+                Selector::new()
                     .is_at_most(Value::UnsignedInt(2))
                     .across_numbers(),
                 &operator
@@ -1593,7 +1582,7 @@ async fn it_pulls_mixed_numbers_as_the_narrowest_types() -> Result<()> {
         assert_eq!(
             sizes(
                 branch,
-                ArtifactSelector::new().is_at_least(Value::SignedInt(-3)),
+                Selector::new().is_at_least(Value::SignedInt(-3)),
                 &operator
             )
             .await?

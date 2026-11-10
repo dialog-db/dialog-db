@@ -23,10 +23,10 @@ use crate::repository::branch::session::shared_metadata;
 use crate::repository::source::{Live, View};
 use crate::rules::{SharedRuleCache, TriggerFootprint, is_rule_attribute, on_attr, reads_attr};
 use crate::{Branch, CommitError, PublishError, RemoteSite, Revision, Snapshot, Staged};
-use dialog_artifacts::tree::CorpusNode;
-use dialog_artifacts::{Changes, Statement};
 use dialog_capability::{Fork, Provider};
 use dialog_common::{ConditionalSync, Holds};
+use dialog_corpus::tree::CorpusNode;
+use dialog_corpus::{Changes, Statement};
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify};
@@ -340,8 +340,8 @@ impl TransactionCommit<&Snapshot> {
             + Provider<nodes::Preload<CorpusNode>>
             + ConditionalSync
             + Provider<BlobLoad>
-            + Provider<dialog_artifacts::Preload>
-            + Provider<dialog_artifacts::Speculation>
+            + Provider<dialog_corpus::Preload>
+            + Provider<dialog_corpus::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + Holds
             + ConditionalSync
@@ -486,8 +486,8 @@ impl Branch {
             + Provider<nodes::Preload<CorpusNode>>
             + ConditionalSync
             + Provider<BlobLoad>
-            + Provider<dialog_artifacts::Preload>
-            + Provider<dialog_artifacts::Speculation>
+            + Provider<dialog_corpus::Preload>
+            + Provider<dialog_corpus::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + Holds
             + ConditionalSync

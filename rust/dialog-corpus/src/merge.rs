@@ -1,0 +1,1041 @@
+//! Observed-remove screening for merge differentials.
+//!
+//! A pull merges by integrating the *upstream's* changes since the sync
+//! base onto the *local* tree. Raw tree integration alone cannot express
+//! deletion semantics — the active indexes carry no tombstones — so the
+//! incoming differential is screened before integration (see
+//! `notes/version-control.md`):
+//!
+//! - **R1** — an incoming live claim the receiver has *observed* (its
+//!   producing revision is in the local head's ancestry) is never
+//!   re-applied: if the local cache still holds it, there is nothing to
+//!   do; if it no longer does, some record in the local log covered it,
+//!   and applying it would resurrect a deletion. Unobserved claims are
+//!   news and pass through (a same-key contest between two unobserved
+//!   byte-variants of the same fact falls to the tree's deterministic
+//!   hash race — both assert the same value).
+//! - **R2** — incoming removes pass through untouched; the tree's
+//!   byte-guarded remove (only delete what matches exactly) is already
+//!   the correct observed-remove rule.
+//! - **R3** — incoming history records that *cover* claims (a
+//!   retraction's `cause`, a replace's `supersedes`) are applied to the
+//!   local live set: for each covered version still live locally, a
+//!   guarded remove is emitted. This is how a deletion reaches a replica
+//!   whose sync base never covered the fact (e.g. an empty-base pull),
+//!   with no tombstone anywhere.
+//!
+//! # Two passes, in this order
+//!
+//! Coverage must land before data: an incoming re-assert and the
+//! retraction it supersedes can arrive in one delta, and if the data
+//! change were integrated first it would contest a slot that R3 is
+//! about to clear — letting an arbitrary race decide what causality
+//! already decided. The merge therefore integrates the **history
+//! region first** ([`screen_history`]: record appends + R3 removes
+//! against the pre-merge snapshot), then the **data regions**
+//! ([`screen_data`]: R1). Region scoping rides the key tags: history
+//! keys sort under [`HISTORY_KEY_TAG`], data under the
+//! entity/attribute/value (and blob) tags.
+//!
+//! Every rule is O(1) per changed key, and the screen reads only the
+//! receiver's own snapshot and context — nothing about the sender's
+//! state beyond the differential itself.
+
+use crate::reads::*;
+use core::ops::RangeInclusive;
+use dialog_capability::Provider;
+use dialog_effects::archive::prelude::ArchiveScope;
+use std::collections::BTreeSet;
+use std::fmt::Display;
+use std::iter::repeat_n;
+use std::str::FromStr;
+use std::str::from_utf8;
+use std::sync::{Arc, Mutex};
+
+use dialog_common::ConditionalSync;
+use dialog_search_tree::{Change, DialogSearchTreeError, Differential, Entry};
+
+use crate::Value;
+use crate::history::{Context, REVISION_ATTRIBUTE, RevisionRecord, Version};
+use crate::key::varkey::{ValueRef, parse_key, parse_key_ref};
+use crate::model::decode_value;
+use crate::tree::Corpus;
+use crate::tree::fetch_spilled;
+use crate::{
+    AttributeKey, AttributeKeyPart, BLOB_KEY_TAG, CONTEXT_KEY_TAG, COVERAGE_KEY_TAG, Datum,
+    ENTITY_KEY_TAG, Entity, EntityKey, EntityKeyPart, FromKey as _, HISTORY_KEY_TAG, Key,
+    KeyViewConstruct, KeyViewMut as _, Relation, State, VALUE_KEY_TAG, ValueKey,
+};
+
+/// The full key span of one region tag.
+fn tag_span(tag: u8) -> RangeInclusive<Key> {
+    // Variable-length keys: every key under `tag` begins with that byte, so
+    // the region runs from the bare tag to the tag followed by a run of
+    // `0xFF`. `KEY_SPAN_FILLER` bytes of it exceeds any real key's length,
+    // and a longer key with the same prefix still sorts below it.
+    let lo = vec![tag];
+    let mut hi = vec![tag];
+    hi.extend(repeat_n(u8::MAX, KEY_SPAN_FILLER));
+    Key::from(lo)..=Key::from(hi)
+}
+
+/// Filler length for an open-ended key span bound. A key never reaches this
+/// many trailing `0xFF` bytes, so a bound built this way is above every key
+/// sharing its prefix.
+const KEY_SPAN_FILLER: usize = 64;
+
+/// The bottom of the key space: the empty key sorts below every other.
+fn bottom_key() -> Key {
+    Key::from(Vec::new())
+}
+
+/// The top of the key space.
+fn top_key() -> Key {
+    Key::from(vec![u8::MAX; KEY_SPAN_FILLER])
+}
+
+/// The history-side key ranges for the first merge pass: the history
+/// region itself plus the coverage region that mirrors its covering
+/// records (compact, value-free entries whose only purpose is to make
+/// "every deletion or replacement since the sync base" enumerable as a
+/// scoped diff, without streaming the value-bearing assert records).
+/// Coverage entries screen like any append-only records; the R3 slot
+/// scans fire from the history records, so the mirror never doubles the
+/// coverage work.
+pub fn history_scope() -> [RangeInclusive<Key>; 2] {
+    [tag_span(HISTORY_KEY_TAG), tag_span(COVERAGE_KEY_TAG)]
+}
+
+/// The entire key space as one range, for computing an unscoped tree
+/// difference through the scoped API.
+pub fn full_scope() -> [RangeInclusive<Key>; 1] {
+    [bottom_key()..=top_key()]
+}
+
+/// The coverage region's key range: the compact mirror of covering
+/// records, enumerated by graft repair.
+pub fn coverage_scope() -> [RangeInclusive<Key>; 1] {
+    [tag_span(COVERAGE_KEY_TAG)]
+}
+
+/// The context region's key range: one watermark per origin the tree's
+/// head has observed (see [`context_key`](crate::context_key)).
+///
+/// No merge pass integrates it. Every head minted by a merge writes the
+/// region entries it changes directly
+/// ([`region_writes`](crate::history::region_writes)), so the screens
+/// never see a context entry, and a graft's contested spans leave it out
+/// ([`without_context`]).
+pub fn context_scope() -> [RangeInclusive<Key>; 1] {
+    [tag_span(CONTEXT_KEY_TAG)]
+}
+
+/// `spans` with the context region cut out of each, for a merge pass that
+/// integrates entries: the region is written whole by the head the merge
+/// mints, never merged entry by entry.
+pub fn without_context(spans: Vec<RangeInclusive<Key>>) -> Vec<RangeInclusive<Key>> {
+    let [region] = context_scope();
+    let (low, high) = (region.start().clone(), region.end().clone());
+    let mut kept = Vec::with_capacity(spans.len());
+    for span in spans {
+        let (start, end) = span.into_inner();
+        if end < low || start > high {
+            kept.push(start..=end);
+            continue;
+        }
+        if start < low
+            && let Some(below) = predecessor_of(&low)
+        {
+            kept.push(start.clone()..=below);
+        }
+        if end > high
+            && let Some(above) = key_successor(&high)
+        {
+            kept.push(above..=end);
+        }
+    }
+    kept
+}
+
+/// Convert conservative divergence bounds (as reported by
+/// [`TreeDifference::divergent_bounds`](dialog_search_tree::TreeDifference::divergent_bounds))
+/// into inclusive spans: an absent lower bound starts at the bottom of
+/// the key space, and an exclusive lower bound becomes the successor
+/// key.
+pub fn spans_from_bounds(bounds: Vec<(Vec<u8>, Option<Vec<u8>>)>) -> Vec<RangeInclusive<Key>> {
+    bounds
+        .into_iter()
+        .filter_map(|(lower, upper)| {
+            // `lower` is the frontier node's separator: an INCLUSIVE lower
+            // bound (the smallest key the node can hold). `upper` is the next
+            // node's separator, which sorts strictly above this node's maximum
+            // key, so the span ends just below it. The last node has no
+            // successor and runs to the top of the key space.
+            let start = Key::from(lower);
+            let end = match upper {
+                Some(next) => predecessor_of(&Key::from(next))?,
+                None => top_key(),
+            };
+            (start <= end).then_some(start..=end)
+        })
+        .collect()
+}
+
+/// The data regions' key ranges (EAV/AEV/VAE and the blob index), for
+/// scoping the second merge pass.
+pub fn data_scope() -> [RangeInclusive<Key>; 2] {
+    let lo = vec![ENTITY_KEY_TAG];
+    let mut hi = vec![VALUE_KEY_TAG];
+    hi.extend(repeat_n(u8::MAX, KEY_SPAN_FILLER));
+    [Key::from(lo)..=Key::from(hi), tag_span(BLOB_KEY_TAG)]
+}
+
+/// The entity-ordered key span of the `(entity, attribute)` slot a
+/// history record speaks about — the range R3 scans for covered claims.
+///
+/// Coverage matches claims by *version*, not by the record's own value:
+/// a replace record supersedes claims of **other** values, and data keys
+/// embed the value hash, so the covered claims live at different keys
+/// than the record's. The whole slot must be scanned.
+pub fn coverage_range(key: &Key) -> Result<RangeInclusive<Key>, DialogSearchTreeError> {
+    let decode = |e: &dyn Display| DialogSearchTreeError::Node(format!("history record: {e}"));
+    // The record's entity and attribute live in its key, not its payload.
+    let parts = parse_key(key.as_ref())
+        .ok_or_else(|| DialogSearchTreeError::Node("history key did not parse".to_string()))?;
+    let of = Entity::from_str(
+        from_utf8(&parts.entity)
+            .map_err(|e| DialogSearchTreeError::Node(format!("entity is not UTF-8: {e}")))?,
+    )
+    .map_err(|e| decode(&e))?;
+    let the = Relation::from_str(
+        from_utf8(&parts.attribute)
+            .map_err(|e| DialogSearchTreeError::Node(format!("attribute is not UTF-8: {e}")))?,
+    )
+    .map_err(|e| decode(&e))?;
+    let start = <EntityKey<Key> as KeyViewConstruct>::min()
+        .set_entity(EntityKeyPart::from(&of))
+        .set_attribute(AttributeKeyPart::from(&the))
+        .into_key();
+    let end = <EntityKey<Key> as KeyViewConstruct>::max()
+        .set_entity(EntityKeyPart::from(&of))
+        .set_attribute(AttributeKeyPart::from(&the))
+        .into_key();
+    Ok(start..=end)
+}
+
+/// How many records [`screen_history`] screens ahead of the one it is
+/// emitting. Each covering record's slot scan is a read of the receiver's
+/// tree, which over a partial replica is a round trip; screened one at a
+/// time they would cost one round trip each, in a row.
+const SCREEN_LOOKAHEAD: usize = 16;
+
+/// Screen the **history-region** slice of an incoming merge
+/// differential: every record appends (history keys are unique and
+/// immutable — never contested), and each *covering* record (a
+/// retraction, or a replace with a non-empty supersedes set) emits
+/// guarded removes for the covered claims still live in the receiver's
+/// snapshot (R3). Run — and integrate — before the data pass.
+///
+/// Records are screened [`SCREEN_LOOKAHEAD`] ahead: each one's slot scan
+/// is independent of the others', so they run concurrently, while the
+/// screened changes are emitted in the records' own order (a record's
+/// append precedes the removes it causes, and records keep their stream
+/// order), which is what the integrate that follows relies on.
+pub fn screen_history<'a, Backend, C>(
+    changes: C,
+    local: Corpus,
+    storage: Backend,
+) -> impl Differential<Key, State<Datum>> + 'a
+where
+    Backend: Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
+        + Clone
+        + dialog_common::ConditionalSync
+        + 'a,
+    C: Differential<Key, State<Datum>> + 'a,
+{
+    use futures_util::{StreamExt as _, TryStreamExt as _, stream};
+
+    changes
+        .map(move |change| {
+            let local = local.clone();
+            let storage = storage.clone();
+            async move { screen_record(change?, &local, &storage).await }
+        })
+        .buffered(SCREEN_LOOKAHEAD)
+        .map_ok(|screened| stream::iter(screened.into_iter().map(Ok)))
+        .try_flatten()
+}
+
+/// One record's screening: the record itself, followed by the guarded
+/// removes (and surviving-claim re-adds) for every claim it covers that is
+/// still live in `local`. Self-contained, so [`screen_history`] can run
+/// several at once.
+async fn screen_record<Backend>(
+    change: Change<Key, State<Datum>>,
+    local: &Corpus,
+    storage: &Backend,
+) -> Result<Vec<Change<Key, State<Datum>>>, DialogSearchTreeError>
+where
+    Backend: Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
+        + Clone
+        + dialog_common::ConditionalSync,
+{
+    let entry = match change {
+        Change::Add(entry) => entry,
+        // A history key vanishing from the upstream would mean history
+        // was rewritten; the guarded remove makes it a no-op unless our
+        // copy matches theirs byte for byte.
+        remove @ Change::Remove(_) => return Ok(vec![remove]),
+    };
+
+    // A record covers claims iff its supersedes set is non-empty (a
+    // retraction's cause and a replace's superseded priors both land
+    // there — see `Record::into_entry`). A genesis retraction covers
+    // nothing and needs no scan. The slot a record covers is named by
+    // its KEY (entity and attribute live there now), so carry the key.
+    let covering = match &entry.value {
+        State::Added(datum)
+            if entry.key.as_ref().first() == Some(&HISTORY_KEY_TAG)
+                && !datum.supersedes.is_empty() =>
+        {
+            Some((entry.key.clone(), datum.supersedes.clone()))
+        }
+        _ => None,
+    };
+    let mut screened = vec![Change::Add(entry)];
+
+    // R3: the record covers claims — retire any still live locally in
+    // the record's (entity, attribute) slot. Covered claims are matched
+    // by version: a replace supersedes claims of *other* values, which
+    // live at other keys (keys embed the value hash), so the scan walks
+    // the whole slot rather than probing the record's own keys. The
+    // emitted removes are guarded (byte-exact), so a claim the record
+    // never observed (e.g. a later re-assert standing at the same key)
+    // is untouched.
+    if let Some((record_key, superseded)) = covering {
+        let candidates = local.stream_range(coverage_range(&record_key)?, storage);
+        futures_util::pin_mut!(candidates);
+        while let Some(candidate) = futures_util::StreamExt::next(&mut candidates).await {
+            let candidate = candidate?;
+            let State::Added(datum) = &candidate.value else {
+                continue;
+            };
+            if !datum.versions().any(|version| superseded.contains(version)) {
+                continue;
+            }
+            // The entry may collapse several same-value claims; the
+            // record retires exactly the ones it names. Full coverage
+            // removes the entry (guarded, so a claim the record never
+            // observed is untouched); partial coverage replaces it with
+            // the entry standing on its surviving claims, at all three
+            // orderings.
+            let surviving = datum.retire_covered(&superseded);
+            let entity_key = EntityKey(candidate.key);
+            let attribute_key = AttributeKey::from_key(&entity_key);
+            let value_key = ValueKey::from_key(&entity_key);
+            for key in [
+                entity_key.into_key(),
+                attribute_key.into_key(),
+                value_key.into_key(),
+            ] {
+                screened.push(Change::Remove(Entry::new(
+                    key.clone(),
+                    candidate.value.clone(),
+                )));
+                if let Some(surviving) = &surviving {
+                    screened.push(Change::Add(Entry::new(
+                        key,
+                        State::Added(surviving.clone()),
+                    )));
+                }
+            }
+        }
+    }
+    Ok(screened)
+}
+
+/// Whether two replicas have never observed one another: no origin
+/// `ours` has seen has been observed by `theirs`.
+///
+/// Shared ancestry shows up as a shared origin in BOTH contexts (a
+/// claim observed on either side carries its origin into that side's
+/// watermark), so enumerating our origins alone settles disjointness;
+/// the other side is only asked the per-origin point query
+/// [`Context::observes_origin`]. Pass the small side as `ours`.
+///
+/// Under it every screen is provably a no-op. A covering record
+/// supersedes only versions its side has observed, so nothing of ours
+/// can retire a claim of theirs (R3) and nothing of theirs can retire
+/// one of ours; and the context screens (R1) drop only copies the other
+/// side has seen superseded, which with no shared origin is nothing.
+/// A pull between such replicas can integrate both sides' changes
+/// unscreened: that is what makes a first contact between
+/// independently seeded replicas cost the integrate's reads and no
+/// screening scans of the other tree.
+pub fn unacquainted(ours: &Context, theirs: &Context) -> bool {
+    ours.iter()
+        .all(|(origin, _)| !theirs.observes_origin(origin))
+}
+
+/// Screen the **data-region** slice of an incoming merge differential
+/// by the receiver's causal context (R1); incoming guarded removes pass
+/// through (R2). Run — and integrate — after [`screen_history`]'s pass,
+/// so coverage has already retired what causality decided.
+pub fn screen_data<'a, C>(
+    changes: C,
+    context: impl Into<Arc<Context>>,
+) -> impl Differential<Key, State<Datum>> + 'a
+where
+    C: Differential<Key, State<Datum>> + 'a,
+{
+    let context: Arc<Context> = context.into();
+    async_stream::try_stream! {
+        futures_util::pin_mut!(changes);
+        while let Some(change) = futures_util::StreamExt::next(&mut changes).await {
+            match change? {
+                Change::Add(entry) => match &entry.value {
+                    // Legacy tombstones from pre-observed-remove trees
+                    // never propagate: deletion travels as history now.
+                    State::Removed => continue,
+                    State::Added(datum) => {
+                        // R1, per CLAIM: an entry stands for every claim
+                        // version it collapses (same-value claims share
+                        // one key), and each is screened independently.
+                        // An observed claim is never news — either it is
+                        // still live locally (the contest fuses it back
+                        // in) or some local record covered it
+                        // (re-applying it would resurrect a deletion) —
+                        // so observed versions are STRIPPED; the entry
+                        // passes on its unobserved claims alone, and is
+                        // dropped when none remain. Entries without
+                        // version tags (unversioned writes) cannot be
+                        // reasoned about and pass through.
+                        let observed: Vec<_> = datum
+                            .versions()
+                            .filter(|version| context.observes(version))
+                            .copied()
+                            .collect();
+                        if observed.is_empty() {
+                            yield Change::Add(entry);
+                            continue;
+                        }
+                        let Some(surviving) = datum.retire_covered(&observed) else {
+                            continue;
+                        };
+                        yield Change::Add(Entry::new(entry.key, State::Added(surviving)));
+                    }
+                },
+                // R2: guarded removes pass through; integrate applies
+                // them only when the local bytes match exactly.
+                remove @ Change::Remove(_) => yield remove,
+            }
+        }
+    }
+}
+
+/// Wrap a data-region differential, collecting the version of every
+/// revision record riding it into `observed`.
+///
+/// The revision records in an upstream delta are exactly the
+/// upstream-ancestry revisions the receiver may lack: a tree's records
+/// are a subset of its head's ancestry, and records at or below the
+/// sync base arrived with the pulls that established it. So the local
+/// context [`absorb`](Context::absorb)ing `observed` is the context of
+/// a head that adopts or merges this upstream — derived while the
+/// differential streams anyway, at zero extra reads, in place of the
+/// O(ancestry) `context_of` walk. The versions are collected as a SET
+/// (not folded into a context on the fly) because the count half of the
+/// watermark needs to know how many distinct new revisions arrived, and
+/// only the receiver's own watermark can screen which are new.
+///
+/// Versions are derived from record *contents* (`RevisionRecord::version`,
+/// the same derivation the read-side check binds records with), not
+/// trusted from the datum's version tag. A record that fails to decode
+/// fails the merge — the same strictness the durable history reader
+/// applies.
+///
+/// A record whose value spilled out of its key (a tree whose `inline_n`
+/// is below the record's size) is read back from `store`, the raw block
+/// backend the differential's tree is read through, from `archive`'s blobs.
+pub fn observe_revisions<'a, C, S>(
+    changes: C,
+    observed: Arc<Mutex<BTreeSet<Version>>>,
+    store: S,
+    archive: ArchiveScope,
+) -> impl Differential<Key, State<Datum>> + 'a
+where
+    C: Differential<Key, State<Datum>> + 'a,
+    S: Provider<blob::Load> + ConditionalSync + 'a,
+{
+    async_stream::try_stream! {
+        futures_util::pin_mut!(changes);
+        while let Some(change) = futures_util::StreamExt::next(&mut changes).await {
+            let change = change?;
+            // The attribute and the value both live in the key now, so the
+            // revision record is recognised and decoded from the key rather
+            // than from the payload.
+            if let Change::Add(entry) = &change
+                && let State::Added(_) = &entry.value
+                && let Some(parts) = parse_key_ref(entry.key.as_ref())
+                && parts.attribute.as_ref() == REVISION_ATTRIBUTE.as_bytes()
+            {
+                // The inline payload is the ORDER-PRESERVING encoding, not the
+                // raw record bytes: decode it back to a value first; a
+                // spilled payload is the raw value bytes in an archive
+                // block. Every arm that cannot produce the record's version
+                // FAILS the merge rather than skipping: the context derived
+                // here is published under the merged head's signature, and
+                // a silently omitted version understates the watermark — a
+                // later pull would then treat facts this head has seen as
+                // news and resurrect deletions.
+                let bytes = match &parts.value {
+                    ValueRef::Inline(inline) => {
+                        match decode_value(parts.value_type, inline) {
+                            Some((Value::Record(bytes), _)) => bytes,
+                            _ => Err(DialogSearchTreeError::Node(
+                                "revision record payload does not decode to a record value"
+                                    .to_string(),
+                            ))?,
+                        }
+                    }
+                    ValueRef::Spilled { .. } => {
+                        let spilled = fetch_spilled(&store, &archive, &entry.key)
+                            .await
+                            .map_err(|error| {
+                                DialogSearchTreeError::Node(format!(
+                                    "spilled revision record: {error}"
+                                ))
+                            })?;
+                        match spilled.map(|bytes| Value::try_from((parts.value_type, bytes))) {
+                            Some(Ok(Value::Record(bytes))) => bytes,
+                            _ => Err(DialogSearchTreeError::Node(
+                                "spilled revision record does not decode to a record value"
+                                    .to_string(),
+                            ))?,
+                        }
+                    }
+                };
+                let record = RevisionRecord::try_from_bytes(&bytes).map_err(|error| {
+                    DialogSearchTreeError::Node(format!("revision record: {error}"))
+                })?;
+                observed
+                    .lock()
+                    .expect("the revision observer mutex is never poisoned")
+                    .insert(record.version());
+            }
+            yield change;
+        }
+    }
+}
+
+/// Which source a key span of a three-way merge is taken from.
+///
+/// The partition below classifies the whole key space against the two
+/// sides' divergence spans (the key ranges where each side's tree
+/// differs from the shared base). Spans only one side changed are
+/// adopted from that side wholesale; spans both sides changed need the
+/// screened merge; spans neither side changed are identical in all
+/// three trees, so either side serves (the partition says `Theirs` so
+/// unchanged space fuses with adopted upstream spans).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpanSource {
+    /// Only our side diverged from the base here: take our subtree.
+    Ours,
+    /// Only the upstream diverged, or neither did: take its subtree.
+    Theirs,
+    /// Both sides diverged: the span needs the screened merge.
+    Contested,
+}
+
+/// The immediate successor of a key, or `None` at the top of the key
+/// space.
+fn key_successor(key: &Key) -> Option<Key> {
+    // The inverse of [`below`]. A key ending in the maximal filler tail is
+    // `below(k)` for the key that drops the tail and increments the byte
+    // before it; anything else gains a `0x00` (nothing sorts between).
+    let bytes = key.as_ref();
+    if bytes.len() >= KEY_SPAN_FILLER && bytes.iter().all(|byte| *byte == u8::MAX) {
+        // `top_key()` (or above): nothing sorts higher. Returning a
+        // successor here would hand `partition_spans` a cursor above the
+        // top, closing a degenerate final piece whose start sorts above
+        // its end — and a divergence span reaching the top is the common
+        // case, since the history-side regions sort highest.
+        return None;
+    }
+    let filler_at = bytes.len().checked_sub(KEY_SPAN_FILLER);
+    if let Some(at) = filler_at
+        && at > 0
+        && bytes[at..].iter().all(|byte| *byte == u8::MAX)
+    {
+        let mut next = bytes[..at].to_vec();
+        let last = next.len() - 1;
+        next[last] += 1;
+        return Some(Key::from(next));
+    }
+    let mut next = bytes.to_vec();
+    next.push(u8::MIN);
+    Some(Key::from(next))
+}
+
+/// Sort and coalesce a list of inclusive spans: overlapping or adjacent
+/// spans fuse into one.
+fn normalize_spans(spans: &[RangeInclusive<Key>]) -> Vec<RangeInclusive<Key>> {
+    let mut spans: Vec<_> = spans.to_vec();
+    spans.sort_by(|a, b| a.start().cmp(b.start()));
+    let mut normalized: Vec<RangeInclusive<Key>> = Vec::with_capacity(spans.len());
+    for span in spans {
+        match normalized.last_mut() {
+            Some(last)
+                if *span.start()
+                    <= key_successor(last.end()).unwrap_or_else(|| last.end().clone()) =>
+            {
+                if span.end() > last.end() {
+                    *last = last.start().clone()..=span.end().clone();
+                }
+            }
+            _ => normalized.push(span),
+        }
+    }
+    normalized
+}
+
+/// Partition the entire key space by the two sides' divergence spans,
+/// producing an ordered, gap-free, non-overlapping run of
+/// `(span, source)` pieces with adjacent same-source pieces coalesced.
+///
+/// The inputs are conservative divergence spans (a span that contains
+/// no real change is harmless: it only shifts work between the adopt
+/// and screen paths, never the outcome), typically derived from the
+/// divergent node bounds of two tree differentials.
+pub fn partition_spans(
+    ours: &[RangeInclusive<Key>],
+    theirs: &[RangeInclusive<Key>],
+) -> Vec<(RangeInclusive<Key>, SpanSource)> {
+    let ours = normalize_spans(ours);
+    let theirs = normalize_spans(theirs);
+
+    // Work in EXCLUSIVE upper bounds internally. On a variable-length key
+    // there is no general predecessor (`key_successor` appends `0x00`, and not
+    // every key is some other key's successor), so deriving an inclusive end
+    // from a boundary is lossy. Collecting `[start, end)` pieces and closing
+    // them at the end keeps the tiling exact: each piece's inclusive end is
+    // the previous byte-string below the next piece's start, which is exactly
+    // what `key_successor` inverts.
+    let mut cuts: Vec<(Key, SpanSource)> = Vec::new();
+    let mut cursor = bottom_key();
+    let mut ours_at = 0;
+    let mut theirs_at = 0;
+
+    loop {
+        while ours_at < ours.len() && ours[ours_at].end() < &cursor {
+            ours_at += 1;
+        }
+        while theirs_at < theirs.len() && theirs[theirs_at].end() < &cursor {
+            theirs_at += 1;
+        }
+
+        let in_ours = ours_at < ours.len() && ours[ours_at].start() <= &cursor;
+        let in_theirs = theirs_at < theirs.len() && theirs[theirs_at].start() <= &cursor;
+        let source = match (in_ours, in_theirs) {
+            (true, true) => SpanSource::Contested,
+            (true, false) => SpanSource::Ours,
+            _ => SpanSource::Theirs,
+        };
+
+        match cuts.last() {
+            Some((_, last)) if *last == source => {}
+            _ => cuts.push((cursor.clone(), source)),
+        }
+
+        // The classification holds until the next boundary: the key just past
+        // the end of a span the cursor is inside, or the start of the next
+        // span ahead. Taken from the spans themselves, never by stepping the
+        // key — the byte successor never overtakes a span start, so stepping
+        // would not terminate.
+        let next = [
+            in_ours
+                .then(|| key_successor(ours[ours_at].end()))
+                .flatten(),
+            (!in_ours && ours_at < ours.len()).then(|| ours[ours_at].start().clone()),
+            in_theirs
+                .then(|| key_successor(theirs[theirs_at].end()))
+                .flatten(),
+            (!in_theirs && theirs_at < theirs.len()).then(|| theirs[theirs_at].start().clone()),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|candidate| candidate > &cursor)
+        .min();
+
+        match next {
+            Some(next) => cursor = next,
+            None => break,
+        }
+    }
+
+    // Close each piece just below the next one's start, and the last at the
+    // top of the key space.
+    let mut pieces = Vec::with_capacity(cuts.len());
+    for (at, (start, source)) in cuts.iter().enumerate() {
+        let end = match cuts.get(at + 1) {
+            Some((next_start, _)) => below(next_start),
+            None => top_key(),
+        };
+        pieces.push((start.clone()..=end, *source));
+    }
+    pieces
+}
+
+/// The greatest key strictly below `key`, as the inverse of
+/// [`key_successor`]: that function appends `0x00`, so a key ending in `0x00`
+/// is the successor of the key without it. Any other key is not a successor,
+/// and the key below it is itself with a maximal filler tail appended to the
+/// decremented last byte.
+fn below(key: &Key) -> Key {
+    let bytes = key.as_ref();
+    match bytes.split_last() {
+        None => Key::from(Vec::new()),
+        Some((0x00, head)) => Key::from(head.to_vec()),
+        Some((last, head)) => {
+            let mut previous = head.to_vec();
+            previous.push(last - 1);
+            previous.extend(repeat_n(u8::MAX, KEY_SPAN_FILLER));
+            Key::from(previous)
+        }
+    }
+}
+
+/// The immediate predecessor of a key, or `None` for the empty key (the
+/// bottom of the key space). [`below`] restricted to keys that have a
+/// predecessor.
+fn predecessor_of(key: &Key) -> Option<Key> {
+    (!key.as_ref().is_empty()).then(|| below(key))
+}
+
+#[cfg(test)]
+mod span_tests {
+    use super::*;
+    use crate::context_key;
+    use crate::history::Origin;
+
+    fn key(at: u8) -> Key {
+        Key::from(vec![at])
+    }
+
+    fn top() -> Key {
+        top_key()
+    }
+
+    fn bottom() -> Key {
+        bottom_key()
+    }
+
+    /// Cutting the context region out of a span leaves exactly the keys
+    /// on either side of it: a span inside the region vanishes, one
+    /// across it splits in two, and one beside it is untouched.
+    #[test]
+    fn it_cuts_the_context_region_out_of_spans() {
+        let [region] = context_scope();
+        let inside = context_key(&Origin::from([7u8; 32]));
+        assert!(region.contains(&inside));
+
+        assert!(without_context(vec![inside.clone()..=inside.clone()]).is_empty());
+        assert_eq!(
+            without_context(vec![key(0)..=key(4)]),
+            vec![key(0)..=key(4)],
+            "a span below the region is untouched"
+        );
+
+        let split = without_context(vec![bottom()..=top()]);
+        assert_eq!(split.len(), 2);
+        assert!(split.iter().all(|span| !span.contains(&inside)));
+        assert!(split[0].contains(&key(5)), "coverage keys stay in");
+        assert!(split[1].contains(&key(7)), "keys above the region stay in");
+        assert!(split[0].end() < region.start() && split[1].start() > region.end());
+    }
+
+    #[test]
+    fn it_defaults_the_whole_space_to_theirs() {
+        let pieces = partition_spans(&[], &[]);
+        assert_eq!(pieces, vec![(bottom()..=top(), SpanSource::Theirs)]);
+    }
+
+    #[test]
+    fn it_carves_our_spans_out_of_their_space() {
+        let pieces = partition_spans(&[key(2)..=key(3)], &[]);
+        assert_eq!(
+            pieces,
+            vec![
+                (
+                    bottom()..=predecessor_of(&key(2)).expect("a tag key has a predecessor"),
+                    SpanSource::Theirs
+                ),
+                (key(2)..=key(3), SpanSource::Ours),
+                (key_successor(&key(3)).unwrap()..=top(), SpanSource::Theirs),
+            ]
+        );
+    }
+
+    #[test]
+    fn it_marks_overlap_contested_and_splits_the_rest() {
+        let pieces = partition_spans(&[key(2)..=key(5)], &[key(4)..=key(8)]);
+        assert_eq!(
+            pieces,
+            vec![
+                (
+                    bottom()..=predecessor_of(&key(2)).expect("a tag key has a predecessor"),
+                    SpanSource::Theirs
+                ),
+                (
+                    key(2)..=predecessor_of(&key(4)).expect("a tag key has a predecessor"),
+                    SpanSource::Ours
+                ),
+                (key(4)..=key(5), SpanSource::Contested),
+                (key_successor(&key(5)).unwrap()..=top(), SpanSource::Theirs),
+            ]
+        );
+    }
+
+    #[test]
+    fn it_coalesces_their_spans_with_unchanged_space() {
+        // A theirs-divergence span fuses with the surrounding unchanged
+        // space into one piece.
+        let pieces = partition_spans(&[key(6)..=key(6)], &[key(1)..=key(2)]);
+        assert_eq!(
+            pieces,
+            vec![
+                (
+                    bottom()..=predecessor_of(&key(6)).expect("a tag key has a predecessor"),
+                    SpanSource::Theirs
+                ),
+                (key(6)..=key(6), SpanSource::Ours),
+                (key_successor(&key(6)).unwrap()..=top(), SpanSource::Theirs),
+            ]
+        );
+    }
+
+    #[test]
+    fn it_normalizes_unsorted_and_overlapping_inputs() {
+        let pieces = partition_spans(&[key(5)..=key(6), key(2)..=key(4), key(4)..=key(5)], &[]);
+        assert_eq!(
+            pieces,
+            vec![
+                (
+                    bottom()..=predecessor_of(&key(2)).expect("a tag key has a predecessor"),
+                    SpanSource::Theirs
+                ),
+                (key(2)..=key(6), SpanSource::Ours),
+                (key_successor(&key(6)).unwrap()..=top(), SpanSource::Theirs),
+            ]
+        );
+    }
+
+    /// A divergence span that reaches the top of the key space is the
+    /// common case, not an edge: the coverage region is the highest
+    /// region, so any covering write since base puts the rightmost node
+    /// in the diff frontier and the span closes at `top_key()`. The
+    /// partition must not emit a degenerate trailing piece whose start
+    /// sorts above its end.
+    #[test]
+    fn it_partitions_spans_reaching_the_top_of_the_key_space() {
+        let pieces = partition_spans(&[key(5)..=top()], &[]);
+        for (span, _) in &pieces {
+            assert!(
+                span.start() <= span.end(),
+                "no degenerate piece: {:?} > {:?}",
+                span.start(),
+                span.end()
+            );
+        }
+        assert_eq!(*pieces.last().unwrap().0.end(), top());
+    }
+
+    #[test]
+    fn it_partitions_gap_free_and_in_order() {
+        let pieces = partition_spans(
+            &[key(1)..=key(3), key(10)..=key(20)],
+            &[key(2)..=key(12), key(30)..=key(40)],
+        );
+        // Gap-free coverage in ascending order, alternating sources.
+        let mut cursor = bottom();
+        for (span, _) in &pieces {
+            assert_eq!(*span.start(), cursor, "no gaps between pieces");
+            cursor = key_successor(span.end()).unwrap_or(top());
+        }
+        assert_eq!(*pieces.last().unwrap().0.end(), top());
+        // No two adjacent pieces share a source.
+        for window in pieces.windows(2) {
+            assert_ne!(window[0].1, window[1].1, "adjacent pieces coalesce");
+        }
+    }
+}
+
+#[cfg(test)]
+mod screen_tests {
+    use super::*;
+    use crate::ArchiveDelta;
+    use crate::history::{Edition, Origin, Version};
+    use crate::tree::CorpusExt as _;
+    use crate::{Entity, Fact, Instruction, Relation, Value};
+    use anyhow::Result;
+    use dialog_search_tree::helpers::Blocks;
+    use dialog_search_tree::helpers::ObservingBlocks;
+    use dialog_search_tree::helpers::test_catalog;
+    use futures_util::{StreamExt as _, stream};
+
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    /// Writes everything `delta` staged into `store`, and mirrors it into
+    /// `observing` so reads through it can be counted.
+    fn mirror(delta: &mut ArchiveDelta, store: &Blocks, observing: &ObservingBlocks) {
+        let blocks: Vec<_> = delta
+            .flush_nodes()
+            .into_iter()
+            .map(|node| node.buffer().clone())
+            .collect();
+        let blobs: Vec<_> = delta.flush_blobs().collect();
+        for block in blocks.into_iter().chain(blobs) {
+            store.store(block.clone());
+            observing.store(block);
+        }
+    }
+
+    /// Screening covering records must scan their slots concurrently, and
+    /// must emit exactly what screening them one at a time emits, in the
+    /// same order.
+    ///
+    /// Each covering record costs one scan of the receiver's tree, and on
+    /// a partial replica that scan is a round trip. A pull whose upstream
+    /// retracted many facts used to pay those round trips one after
+    /// another, ahead of the integrate the screened stream feeds. The
+    /// order pins what the integrate relies on: a record's append precedes
+    /// the removes it causes, and records keep their stream order.
+    #[dialog_common::test]
+    async fn it_screens_covering_records_concurrently_and_in_order() -> Result<()> {
+        // Built through the tree's own store, mirrored block for block into
+        // the observing backend the screen reads through.
+        let observing = ObservingBlocks::new();
+        let store = Blocks::new();
+        let the: Relation = "task/label".parse()?;
+        let writer = Version::new(Origin::from([1u8; 32]), Edition::new(0));
+        let retractor = Version::new(Origin::from([2u8; 32]), Edition::new(1));
+
+        // The receiver holds one fact per entity ...
+        let facts: Vec<Fact> = (0..24u32)
+            .map(|index| {
+                Ok(Fact {
+                    the: the.clone(),
+                    of: Entity::new()?,
+                    is: Value::String(format!("label {index}")),
+                    cause: None,
+                })
+            })
+            .collect::<Result<_>>()?;
+        let mut local = Corpus::empty_in(test_catalog());
+        let mut delta = ArchiveDelta::zero();
+        local
+            .apply_versioned(
+                &store,
+                &mut delta,
+                Some(writer),
+                stream::iter(
+                    facts
+                        .iter()
+                        .cloned()
+                        .map(|fact| Instruction::Assert(fact, crate::Pick::All)),
+                ),
+            )
+            .await?;
+        mirror(&mut delta, &store, &observing);
+
+        // ... and the upstream retracted every one of them, so its history
+        // delta is a run of covering records.
+        let mut upstream = local.clone();
+        let mut delta = ArchiveDelta::zero();
+        upstream
+            .apply_versioned(
+                &store,
+                &mut delta,
+                Some(retractor),
+                stream::iter(facts.iter().cloned().map(Instruction::Retract)),
+            )
+            .await?;
+        mirror(&mut delta, &store, &observing);
+
+        let storage = observing.clone();
+        let scope = history_scope();
+        let incoming = local
+            .differentiate_within(&upstream, &scope, &storage, &storage)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
+        let records: Vec<Key> = incoming
+            .iter()
+            .filter_map(|change| match change {
+                Change::Add(entry) if entry.key.as_ref().first() == Some(&HISTORY_KEY_TAG) => {
+                    Some(entry.key.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            records.len(),
+            facts.len(),
+            "one covering record per retraction"
+        );
+
+        // Screen against a COLD copy of the receiver's tree, so every slot
+        // scan has to read.
+        let cold = Corpus::at(test_catalog(), local.root().clone());
+        observing.reset();
+        let screened = screen_history(
+            stream::iter(incoming.into_iter().map(Ok)),
+            cold,
+            storage.clone(),
+        )
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+
+        let peak = observing.peak_reads_in_flight();
+        assert!(
+            peak > 1,
+            "the covering records' slot scans must overlap, but only {peak} \
+             read was ever in flight: one round trip per record"
+        );
+
+        // The records come out in their stream order, each ahead of the
+        // removes it causes, and every retraction retires its fact at all
+        // three orderings.
+        let mut order = Vec::new();
+        let mut removes = 0usize;
+        let mut pending_record = false;
+        for change in &screened {
+            match change {
+                Change::Add(entry) if entry.key.as_ref().first() == Some(&HISTORY_KEY_TAG) => {
+                    order.push(entry.key.clone());
+                    pending_record = true;
+                }
+                Change::Remove(_) => {
+                    assert!(pending_record, "a remove follows the record that causes it");
+                    removes += 1;
+                }
+                Change::Add(_) => {}
+            }
+        }
+        assert_eq!(order, records, "records keep their stream order");
+        assert_eq!(
+            removes,
+            facts.len() * 3,
+            "each fact is retired at EAV, AEV and VAE"
+        );
+        Ok(())
+    }
+}

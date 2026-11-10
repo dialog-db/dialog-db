@@ -22,9 +22,9 @@
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
 use anyhow::{Context as _, Result};
-use dialog_artifacts::{ArtifactSelector, Entity, Pick, Relation as ArtifactsRelation, Value};
 use dialog_capability::Provider;
 use dialog_common::ConditionalSend;
+use dialog_corpus::{Entity, Pick, Relation as ArtifactsRelation, Selector, Value};
 use dialog_effects::authority::Identify;
 use dialog_peer::helpers::test_session_with_peer;
 use dialog_peer::{Peer, Session};
@@ -275,7 +275,7 @@ fn claims<'a>(
     Box::pin(async move {
         let stream = branch
             .claims()
-            .select(ArtifactSelector::new().the(age()))
+            .select(Selector::new().the(age()))
             .perform(env)
             .await?;
         let mut rows: Rows = stream
@@ -773,8 +773,8 @@ async fn a_query_reads_the_revision_it_started_at() -> Result<()> {
     let query = QueryEnv::new(sources, overlay, &operator);
 
     let name: ArtifactsRelation = "person/name".parse()?;
-    let selector = ArtifactSelector::new().the(name).of(report.clone());
-    let first = Provider::<dialog_artifacts::Select<'_>>::execute(&query, selector.clone())
+    let selector = Selector::new().the(name).of(report.clone());
+    let first = Provider::<dialog_corpus::Select<'_>>::execute(&query, selector.clone())
         .await?
         .try_collect::<Vec<_>>()
         .await?;
@@ -790,7 +790,7 @@ async fn a_query_reads_the_revision_it_started_at() -> Result<()> {
         .perform(&operator)
         .await?;
 
-    let second = Provider::<dialog_artifacts::Select<'_>>::execute(&query, selector)
+    let second = Provider::<dialog_corpus::Select<'_>>::execute(&query, selector)
         .await?
         .try_collect::<Vec<_>>()
         .await?;
