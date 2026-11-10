@@ -20,6 +20,7 @@ What we tried, what it measured, and what we decided, newest last. The [idea](..
 - **R23:** with `!` as induction only and the commit decided by submitting a document as a query or a transaction, 8 of 10 readers preferred it to a top-level `!`, and one of five named `!` most confusing, the first time since R17 it was not all.
 - **R24:** `query`, `select`, `find` and `(? …)` read the same, 19 of 19 medians, and every reader chose its own; only readers of the others named `query`'s clash with the submission mode.
 - **R25:** cold, with no documentation, the four words read the same again: 31 of 35 points and 11 of 15 word points each, and no reader took `select` for a projection, `find` for one match or `?` for a variable. Readers expect an undeclared concept to be empty, not an error (16 of 20), and 19 of 20 could not tell what `id` does.
+- **R26:** five spellings of a type constraint, `(dialog/type ?x is: :text)`, `(: ?x as: :text)`, `(?x as: :text)`, `(:text ?x)` and `(text ?x)`, all scored 40 of 40 cold; neither prediction held. 22 of 25 found the variable label `?p:` hardest.
 - **Next:** settle what [implementation](implementation.md) found the design must decide first (rounds, `:top` ranking, authority, `fresh`), then build the front end in its order.
 - **Open:** whether commands are asserted or written; what a rule head that names no entity lands on; whether questions stay calls with variables or become rules into a domain-call head; text literals; optional parameters. The design's Open list has the rest.
 
@@ -688,6 +689,16 @@ xychart-beta
 **Results.** [implementation](implementation.md). Almost all of it compiles to today's descriptors unchanged: concepts, domain calls, relation heads as deductive rules, `assert` and `retract` heads as inductive `assert!` and `retract!`, several heads split into sibling rules, `!` heads as heads concluding a transient. New: concept names, a command domain convention that is also the transient marker, command definitions derived from the `reads` index, a `dialog/id` formula, `fresh` bound by the engine, a non-committing preview for query mode, and retract by entity. Four things the design has to settle first: induction fails a commit after 16 rounds, so the `remind!` example would fail; `:top` ranks the first case best, so `[:open :done]` resolves a conflict to open; induction runs as the committing operator; and `fresh` must be deterministic per firing.
 
 **Decision.** For the maintainer: the four settlements, the command domain spelling, and what a view is.
+
+## 2026-11-10 — R26: every spelling of a type constraint read correctly
+
+**Question.** The one [planned](results/r26-plan.md): shown no documentation, do readers take each spelling of a type constraint for a check that touches no stored facts?
+
+**Method.** As planned, with two departures recorded in the results: reader 5 of each variant started two minutes late, and three readers who answered nothing were replaced.
+
+**Results.** [r26](results/r26.md). All 25 readers scored all 8 points in every spelling. Neither prediction held: `(:text ?x)` was not read as field access, and `(text ?x)` was not read as stored data. What readers could not guess was the same everywhere: the variable label `?p:` (22 of 25), and whether a constraint is checked on a read, an assert or both (about 12 of 25).
+
+**Decision.** For the maintainer: reading cold does not separate the spellings. The question that could is which spelling an agent writes unprompted.
 
 ## How to reproduce
 
