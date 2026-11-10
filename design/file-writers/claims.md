@@ -30,4 +30,7 @@
 | integration runs in the background, detached from the commit | opinion | Irakli, 2026-11-10 | - |
 | a library cannot detach a process of its own the way git does: it cannot fork a running multi-threaded process safely, does not know which executable to run, and on the web and iOS cannot launch one at all; a detached integrator needs the host program to provide the command | fact | `fork` in a multi-threaded process (POSIX: only async-signal-safe calls in the child); git re-runs its own binary (`gc.autoDetach`); no process API in browsers or iOS apps | holds |
 | integration is safe to repeat after a process dies mid-way: blocks are content-addressed, and a loose block is deleted only once the file holds it durably | hypothesis | follows from the design; confirmed by a test that kills the integrator at each step and checks that a second one finishes with every block readable | open |
+| a single process writing alone should write into the file directly, with no loose blocks or integrator | opinion | Irakli, 2026-11-10 | - |
+| a process cannot know it is the only one, but a non-blocking try of the writer lock tells it whether anyone is writing at that moment, which is all a write needs | fact | `flock(LOCK_EX \| LOCK_NB)`, POSIX `fcntl` `F_SETLK`: they return at once instead of waiting | holds |
+| with one process, trying the turn always succeeds, so the single-process path is today's append | hypothesis | confirmed by a run with one writer that writes no loose block | open |
 

@@ -117,3 +117,17 @@ the host program gives dialog a command to run.
 **Decided.** Integration runs in the background, off the commit. Open:
 whether a task that dies with its process is enough, or integration has to
 outlive the writer.
+
+**Asked.** Irakli, unprompted: ideally, when only one process runs, it writes
+into the archive file directly, without the added ceremony.
+
+**Learned.** A process cannot know it is alone, but it does not need to: a
+non-blocking try of the writer lock says whether anyone is writing now. A
+fifth column follows: try the turn; with it, append directly as today and
+fold in any loose blocks waiting; without it, write loose blocks and
+schedule integration. With one process it is today's path; under
+contention nobody waits; and the writer that next gets the turn does most
+of the integrating, so a background integrator runs only when no writer
+comes.
+
+**Decided.** Not decided; the column is in the matrix.
