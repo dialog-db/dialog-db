@@ -1,7 +1,6 @@
-# Writers to one space's file, and where branch heads live
+# Writers on separate branches wait on one another in the file archive
 
-**Phase: Describing.** Working title; it still names a mechanism, not a
-problem.
+**Phase: Delimiting.**
 
 ## Description
 
@@ -34,7 +33,17 @@ No measurement so far has two branches of one replica writing at once.
 
 ## Problem
 
-Not stated yet.
+Many processes work on separate branches of one space at once. On main
+they never wait on one another to write: a block is a file of its own and a
+head is a cell of its own. The single-file archive makes every write to a
+space take the same file's one writer turn, so processes on separate
+branches serialize behind each other, and the archive cannot be used where
+such processes run.
+
+Not yet settled: whether processes on the *same* branch, which already
+coordinate on that branch's head, must also write without waiting on each
+other; and whether branch heads, or memory cells generally, belong in the
+file, a second question with its own problem not yet stated.
 
 ## Approach
 

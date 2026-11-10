@@ -4,8 +4,8 @@
 
 |  | Understanding | Activity |
 |---|---|---|
-| **Status** | Two processes advancing two branches of one space share no lock on main and take turns on one file lock with the file archive. Cells live outside the file, a file each. No contention between branches has been observed or measured. Two wishes arrived together: writers that never wait, and cells kept in the file. | Describing. |
-| **Agenda** | What the second process loses by waiting its turn, and how much. What keeping cells in the file would let someone do that they cannot now. Whether the two wishes are one problem or two. | Ask what was observed; then ask what cells in the file would buy. |
+| **Status** | Two processes advancing two branches of one space share no lock on main and take turns on one file lock with the file archive. Irakli requires that they not wait on one another. Cells live outside the file, a file each. | Delimiting: the problem is stated for writers on separate branches. |
+| **Agenda** | Whether processes on the same branch must also write without waiting on each other. What keeping cells in the file would let someone do that they cannot now. | Settle the unit of independence (branch or process), then the cells question, then use cases. |
 
 ## 2026-11-10, Describing: the topic opens
 
@@ -33,3 +33,18 @@ contend for writes.
 writes each block as its own content-addressed file with no shared lock,
 and each head is its own cell. The file archive is what introduces the
 shared turn. What the waiting costs a process is not stated yet.
+
+## 2026-11-10, Delimiting: the requirement
+
+**Asked.** What does the second process lose by waiting its turn? Irakli:
+many processes run and work on separate branches; serializing them and
+forcing them to coordinate would disqualify the single-file archive from
+such uses, so it has to be addressed.
+
+**Learned.** The cost of a wait is not what decides this: no wait between
+processes on separate branches is acceptable. The hypothesis that the wait
+matters is superseded by that requirement, not tested.
+
+**Decided.** The requirement, on Irakli's say-so: processes on separate
+branches of one space write without waiting on one another. The problem
+statement in the top story says so. Open: the same branch, and the cells.
