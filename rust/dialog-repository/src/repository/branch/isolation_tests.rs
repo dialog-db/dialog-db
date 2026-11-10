@@ -34,6 +34,7 @@ use dialog_query::{Attribute, AttributeStatement, Cardinality, Concept, Inductiv
 use dialog_storage::provider::storage::VolatileSpace;
 use futures_util::{StreamExt as _, TryStreamExt as _};
 use std::future::Future;
+use std::iter::repeat_n;
 use std::pin::Pin;
 use std::slice::from_ref;
 
@@ -112,7 +113,7 @@ fn command(index: u64) -> Entity {
 }
 
 fn bio(fill: char, index: u64) -> String {
-    let mut bio = std::iter::repeat_n(fill, BIO_LENGTH).collect::<String>();
+    let mut bio = repeat_n(fill, BIO_LENGTH).collect::<String>();
     bio.push_str(&index.to_string());
     bio
 }
