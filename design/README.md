@@ -60,7 +60,8 @@ Backtracking moves a topic to an earlier phase and says so in its journal.
   the environment; caching, decoding and storage form belong to providers.
   The [plan](tree-node-reads/plan.md) is for whoever builds it.
 - [A branch commit is refused when the head has moved](commit-handling.md):
-  **Describing.** A publish that loses the race for the head fails and the
-  caller runs the transaction again; the maintainer says that leaves a UI
-  application no good way to handle it. Arrived as a request for an
-  approach inspired by Software Transactional Memory.
+  **Diagnosing.** A publish that loses the race for the head fails and the
+  caller runs the transaction again; a web app shows an error, and agents
+  sharing a branch lose the race repeatedly and write from queries that
+  may be stale. Arrived as a request for an approach inspired by Software
+  Transactional Memory.

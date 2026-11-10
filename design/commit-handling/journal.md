@@ -4,8 +4,8 @@
 
 |  | Understanding | Activity |
 |---|---|---|
-| **Status** | *What do we know?* How a branch commit publishes on main: compare-and-set of the head cell against the head it was built on, refused with `VersionMismatch` when the head moved, recovery left to the caller. That a commit can ask to merge with the winner instead. That tonk's callers refresh and run again up to four times. The maintainer's statement: the refusal gives a UI application no good handling strategy. | *Where are we at?* Describing. The topic arrived as a remedy (an approach inspired by Software Transactional Memory); the maintainer has since given the symptom. What the symptom looks like to a person using a UI is not written down yet. |
-| **Agenda** | *What do we need to know?* **Open question, asked 2026-11-10, not answered:** when a UI's commit is refused today, what does the application do and what does the person using it see; and what is wrong with each of the two strategies that exist (run again on the fresh head, `merge()`). Then: what moves a head under a UI's commit (a pull, another tab or worker on the same storage, something else), and how often. What "Software Transactional Memory" stands for in the request: the word names several separable things (checking what was read rather than whether anything changed, running the body again without the caller, composing transactions, waiting until a read changes), and which is meant is not said. | *Where are we going?* Finish Describing with the symptom as a person meets it, then Diagnosing: from the remedy to the problem it answers, with more than one candidate cause written down. |
+| **Status** | *What do we know?* How a branch commit publishes on main: compare-and-set of the head cell against the head it was built on, refused with `VersionMismatch` when the head moved, recovery left to the caller; `merge()` publishes a merge with the winner instead. What callers do: tonk's reactor and worker run again up to four times, its command line does not run again and reports "commit failed". What the maintainer reports: a web app shows an error (if its author handled it), agents sharing a branch are refused repeatedly, and they write from queries that may be stale. The maintainer's ideal, which is a remedy: a commit never fails and is given an operation dialog runs again on the latest state. | *Where are we at?* Diagnosing, of the kind that goes from a feature to the problem it answers. Three candidate problems are written down in the last entry, none accepted. |
+| **Agenda** | *What do we need to know?* **Open question, asked 2026-11-10, not answered:** when the operation runs on the latest state and what it was decided from is no longer so (the thing it meant to change is gone, or was changed by someone else), what should the person or agent get back, and is that a failure in the sense of "a commit never fails"? Then: which of the three candidate problems the maintainer recognises, and whether they are one problem or several. Which refusal the agents met: the local commit's, or the push's (open hypothesis). Whether the web app's errors come from a path that does not run again or from four lost tries (open hypothesis). What "conflict" means: the glossary holds two meanings. For the agent case, what the "operation" could be when the deciding happened outside dialog. | *Where are we going?* Diagnosing until the candidate problems are accepted, merged or struck; then Delimiting. |
 
 ## 2026-11-10, Describing: the situation, and the remedy it arrived as
 
@@ -37,3 +37,63 @@ named keeps it.
 **Decided.** Not decided. The title moved from the remedy to the symptom.
 Nothing is diagnosed; the next sitting starts from the open question in
 the agenda.
+
+## 2026-11-10, Diagnosing: what a refusal looks like to a person and to an agent
+
+**Asked.** When a UI's commit is refused today, what does the application
+do, what does the person see or lose, and what is wrong with the two
+existing strategies? Answer as given: "Today if commit is refused in the
+web app user sees an error in the console or somewhere in the user
+interface if author bothered to handle an error. If two agents use tonk
+cli and work on the same branch they often run into conflicts and get
+confused by it and by the time they go and retry they often run into
+conflict again as head moved again, worse they don't necessarily consider
+that query they're working of maybe stale. Ideally commit never fails and
+instead it receives an operation that dialog can rerun on latest state and
+consider latest state."
+
+What is wrong with `merge()` was not answered directly.
+
+**Learned.** Read in tonk (`bfb2d72`): the command line pulls before a
+write, evaluates and publishes in one process with no `merge()` and no
+second try, and after the write pushes with up to five pull-and-push
+rounds. So an agent on the command line can meet two different refusals,
+the local publish's and the push's, and which one the report is about is
+not known.
+
+The report holds more than one thing. Written as candidate problems, the
+agent's reading, each a hypothesis in the ledger:
+
+1. **A refusal with no answer in the application's terms.** The head
+   moving is not something the application's author or its user did or
+   can act on, yet it arrives as the commit's error, in every caller.
+   Each caller writes its own loop or writes none.
+2. **The one who runs again is slower than the head.** When the reading,
+   deciding and writing pass through an agent, one round takes longer
+   than the gap between the other writer's commits, so running again
+   from the caller loses again.
+3. **A write decided from a read is applied without that read being
+   looked at again.** This is not the refusal. The head check refuses
+   when the head moved for reasons that touch nothing the writer read,
+   and it does not refuse when the read was made earlier (another
+   invocation) and the write lands on a fresh head. `merge()` and the
+   pull before a push carry such a write onto state it never saw. A
+   commit that is never refused would leave this as it is.
+
+Two things do not sit together yet. "A commit never fails" and "considers
+the latest state": an operation that looks at the latest state can find
+that what it was decided from is gone, and then something other than "it
+was applied as meant" has to come back. Which goes, or what "fails" means,
+is the open question.
+
+A second tension, not yet put: in the agent case the deciding happens in
+the agent, between two invocations. An operation dialog can run again has
+to hold the decision, and that one is not code dialog has.
+
+"Conflict" is used for the head having moved. In the literature the
+remedy comes from it means that two transactions' reads and writes
+overlap. Both are in the glossary, unresolved.
+
+**Decided.** Not decided. Phase moved from Describing to Diagnosing: the
+symptoms are written, and the remedy and the ideal are recorded as the
+maintainer's, not as the problem.

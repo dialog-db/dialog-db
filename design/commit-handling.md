@@ -1,6 +1,6 @@
 # A branch commit is refused when the head has moved
 
-Phase: **Describing.** See the [design index](README.md) for what the
+Phase: **Diagnosing.** See the [design index](README.md) for what the
 phases mean, and the [journal](commit-handling/journal.md) for where the
 topic stands.
 
@@ -34,10 +34,33 @@ expected, in which case it does not run again and answers with a revision
 conflict. A comment in the reactor says the only thing that races a commit
 there is sync, and that one retry settles it in practice.
 
+Tonk's command line pulls the upstream before a write, evaluates the
+document (its queries and its writes) in one process, and publishes
+without `merge()` and without running again; a refusal is reported as
+"commit failed" with the error's text. After the write it pushes, and a
+push the upstream refuses because it moved is answered by pulling, which
+merges both sides' facts, and pushing again, up to five times. A query an
+agent ran in an earlier invocation, and decided from, is not known to the
+invocation that writes.
+
 The maintainer says a commit on a branch can be refused if the branch head
 has moved, and that this gives a UI application no good strategy for
-handling it. The maintainer asks for an approach inspired by Software
-Transactional Memory.
+handling it. As the maintainer reports it:
+
+- In the web app, a refused commit shows as an error in the console, or
+  somewhere in the interface if the application's author handled the
+  error.
+- Two agents working on the same branch through the command line often
+  run into conflicts and are confused by them. By the time one has gone
+  back and tried again the head has often moved again, and it is refused
+  again.
+- The agents do not necessarily consider that the query they are working
+  from may be stale.
+
+The maintainer asks for an approach inspired by Software Transactional
+Memory, and describes the ideal as: a commit never fails; instead it
+receives an operation that dialog can run again on the latest state, and
+that considers the latest state.
 
 ## Problem
 
