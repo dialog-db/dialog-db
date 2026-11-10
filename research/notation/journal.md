@@ -531,7 +531,7 @@ The complaints changed. Premises are gone; what readers name now is that a top-l
 - A new thing is made by a command whose rule computes its entity: `(id …)` over the fields that identify it, or `(fresh ?n)` for a thing with no natural key. The schema's author owns how things are created, so agents creating through a command agree on identity.
 - `retract` stays the one built-in modifier, and names only the entity.
 - A ground fact may stand at the top level: `(todo todo:9c1e …)` holds this tick, `(todo! …)` commits. A variable in one is an error, since questions are always `query`. This reverses R17's and R18's task 10. At the top level, a form without `!` holds this tick and with `!` commits, whatever it is.
-- Three framings of `!` to test: a commit whose effect rules see next tick, where only a top-level commit moves the branch; induction, where an inductive rule fires only on inductive assertions and the evaluator reports what it would have done; and `!` read as *next*.
+- Two framings of `!` to test against R18's: a commit, where only a top-level commit moves the branch; and induction, where an inductive rule fires only on inductive assertions and the evaluator reports what it would have done. No document mentions the next tick, which readers found confusing; a third framing, `!` read as *next*, was dropped before any reader ran.
 
 **Decision.** Taken; R19 [planned](results/r19-plan.md) before any reader ran.
 
