@@ -165,19 +165,19 @@
             command = ''
               soak:adversarial
               soak:program
-              soak:artifacts
+              soak:facts
               soak:converge
               soak:subscription
               soak:sync
             '';
           };
 
-          "soak:artifacts" = {
-            description = "Artifacts-level fuzz soak (DIALOG_ARTIFACT_FUZZ_SEEDS/_OPS override)";
+          "soak:facts" = {
+            description = "Facts-level fuzz soak (DIALOG_FACT_FUZZ_SEEDS/_OPS override)";
             command = ''
-              export DIALOG_ARTIFACT_FUZZ_SEEDS="''${DIALOG_ARTIFACT_FUZZ_SEEDS:-200}"
-              export DIALOG_ARTIFACT_FUZZ_OPS="''${DIALOG_ARTIFACT_FUZZ_OPS:-600}"
-              cargo test -p dialog-baseline --release --test artifact_fuzz
+              export DIALOG_FACT_FUZZ_SEEDS="''${DIALOG_FACT_FUZZ_SEEDS:-200}"
+              export DIALOG_FACT_FUZZ_OPS="''${DIALOG_FACT_FUZZ_OPS:-600}"
+              cargo test -p dialog-baseline --release --test fact_fuzz
             '';
           };
 

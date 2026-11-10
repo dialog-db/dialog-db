@@ -1,13 +1,13 @@
-use crate::artifact::Cause;
 use crate::attribute::Attribute;
 use crate::attribute::AttributeDescriptor;
 use crate::attribute::statement::AttributeStatement;
+use crate::corpus::Cause;
 use crate::descriptor::Descriptor;
 use crate::negation::Negation;
 use crate::statement::Statement;
 use crate::types::Scalar;
 use crate::{Entity, Premise, Proposition, Term};
-use dialog_artifacts::Update;
+use dialog_corpus::Update;
 use std::iter;
 use std::marker::PhantomData;
 use std::ops::Not;
@@ -280,7 +280,7 @@ mod tests {
     use crate::Cardinality;
     use crate::Changes;
     use crate::Match;
-    use crate::artifact::Value;
+    use crate::corpus::Value;
     use crate::premise::Premise;
     use crate::proposition::Proposition;
     use crate::session::RuleRegistry;

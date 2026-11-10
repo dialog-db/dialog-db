@@ -73,7 +73,7 @@ pub struct Operator {
     /// when the operator is a session the profile handed its whole
     /// authority. Recorded once in each tree the operator writes, it
     /// proves the profile the operator's revision records name (see
-    /// `dialog_artifacts::history::DelegationRecord`).
+    /// `dialog_corpus::history::DelegationRecord`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delegation: Option<Vec<u8>>,
 }

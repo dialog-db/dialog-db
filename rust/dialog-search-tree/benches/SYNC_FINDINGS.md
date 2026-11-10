@@ -60,7 +60,7 @@ base = 10000 entries, op_buf_size = 1024.
 - This measures the search-tree differential, the quantity that drives
   repository sync round-trips, not the repository push/pull protocol end to end.
   A full repo+remote benchmark needs the hitchhiker tree wired through
-  `dialog-artifacts` and `dialog-repository` first.
+  `dialog-corpus` and `dialog-repository` first.
 - **The differential is novelty-blind.** `TreeDifference` reads only `index.links`
   and leaf `segment.entries`; it never reads `index.novelty`. So the round-trip
   and novel-block counts above are valid as *structural* (node-hash) churn, but

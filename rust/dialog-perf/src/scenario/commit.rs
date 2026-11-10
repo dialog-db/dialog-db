@@ -7,7 +7,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use anyhow::Result;
-use dialog_artifacts::{Pick, Value};
+use dialog_corpus::{Pick, Value};
 use dialog_query::InductiveRule;
 
 use super::{Outcome, Prepared, seed_stuff};

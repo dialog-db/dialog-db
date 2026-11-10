@@ -81,7 +81,7 @@ pub use secret::{
 };
 pub use upgrade::{Step, StepBound, StepFuture, Upgraded};
 
-use dialog_artifacts::tree::CorpusNode;
+use dialog_corpus::tree::CorpusNode;
 use dialog_search_tree::nodes;
 use dialog_ucan_core::subject::Subject as UcanSubject;
 use std::collections::HashMap;
@@ -504,7 +504,7 @@ impl<S: Clone, M: Mode> Peer<S, M> {
         &self.inner.chains
     }
 
-    pub(crate) fn speculation(&self) -> &Arc<dialog_artifacts::PreloadQueue> {
+    pub(crate) fn speculation(&self) -> &Arc<dialog_corpus::PreloadQueue> {
         self.inner.runtime.speculation()
     }
 

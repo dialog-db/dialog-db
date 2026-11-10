@@ -13,7 +13,7 @@ wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 use crate::Branch;
 use crate::helpers::test_repo;
 use anyhow::Result;
-use dialog_artifacts::Entity;
+use dialog_corpus::Entity;
 use dialog_peer::helpers::test_session_with_peer;
 use dialog_query::query::Output as _;
 use dialog_query::rule::DeductiveRuleDescriptor;

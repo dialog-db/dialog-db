@@ -93,8 +93,8 @@ use std::pin::pin;
 
 use futures_util::TryStreamExt;
 
-use crate::artifact::Type as ValueType;
-use crate::artifact::Value;
+use crate::corpus::Type as ValueType;
+use crate::corpus::Value;
 use crate::error::{EvaluationError, TypeError};
 use crate::formula::number::Numeric;
 use crate::selection::{Binding, Match, Selection};

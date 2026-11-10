@@ -56,12 +56,11 @@ pub async fn main() -> Result<()> {
     println!("{}", tokio::fs::try_exists(&csv_path).await?);
 
     let csv = tokio::fs::File::open(csv_path).await?;
-    let artifacts = CsvImporter::new(csv).filter_map(|artifact| async move {
-        artifact
-            .inspect_err(|error| println!("Skipping invalid datum: {error}"))
+    let facts = CsvImporter::new(csv).filter_map(|fact| async move {
+        fact.inspect_err(|error| println!("Skipping invalid datum: {error}"))
             .ok()
     });
-    let explored = dialog_diagnose::explore(artifacts).await?;
+    let explored = dialog_diagnose::explore(facts).await?;
 
     let starting_tab = match cli.tree {
         true => Some(DiagnoseTab::Tree),

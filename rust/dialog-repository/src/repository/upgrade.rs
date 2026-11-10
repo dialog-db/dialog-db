@@ -22,9 +22,9 @@
 //!   and `credential/key/self`, are left in place for one version and
 //!   removed by the next.
 
-use dialog_artifacts::Changes;
 use dialog_capability::{Capability, Did, Provider, Subject};
 use dialog_common::ConditionalSync;
+use dialog_corpus::Changes;
 use dialog_effects::MethodExt as _;
 use dialog_effects::authority::{Identify, Operator, OperatorExt as _};
 use dialog_effects::memory::prelude::{
@@ -43,7 +43,7 @@ use crate::{
     Repository, RepositoryMemoryExt as _, Resolved, Route, SiteAddress, Tracking, UpgradeError,
     contact, peer_did,
 };
-use dialog_artifacts::Entity;
+use dialog_corpus::Entity;
 use dialog_effects::peer::prelude::*;
 
 /// The layout version this release stores in.
@@ -439,10 +439,10 @@ mod tests {
         Cell, REGISTRY, RemoteAddress, RemoteEdition, RepositoryMemoryExt as _, Route, SiteAddress,
         Target, TreeReference, UpgradeError, site_address,
     };
-    use dialog_artifacts::{Instruction, NUMBER_BAND};
     use dialog_capability::Provider;
     use dialog_capability::Subject;
     use dialog_common::ConditionalSync;
+    use dialog_corpus::{Instruction, NUMBER_BAND};
     use dialog_credentials::Credential;
     use dialog_effects::MethodExt as _;
     use dialog_effects::memory::Version;

@@ -1,4 +1,4 @@
-use dialog_artifacts::tree::{ArtifactNodeCache, CorpusNode};
+use dialog_corpus::tree::{CorpusCache, CorpusNode};
 use dialog_effects::archive::ArchiveError;
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::blob::Load as BlobLoad;
@@ -185,7 +185,7 @@ where
         + ConditionalSync
         + 'static,
 {
-    use dialog_artifacts::{Artifact, Instruction, Value};
+    use dialog_corpus::{Fact, Instruction, Value};
     use dialog_credentials::Ed25519Signer;
     use dialog_ucan_core::subject::Subject;
     use dialog_varsig::Principal as _;
@@ -217,13 +217,13 @@ where
         let rows: Vec<_> = (0..150)
             .map(|i| {
                 Instruction::Assert(
-                    Artifact {
+                    Fact {
                         the: "device/link".parse().expect("valid attribute"),
                         of: format!("device:{round}-{i}").parse().expect("valid entity"),
                         is: Value::String(format!("device-{round}-{i}").repeat(24)),
                         cause: None,
                     },
-                    dialog_artifacts::Pick::All,
+                    dialog_corpus::Pick::All,
                 )
             })
             .collect();
@@ -346,7 +346,7 @@ fn load_block<P: CountedLoads>(env: &Counting<P>, load: ArchiveLoad) -> Loaded<'
 // `Get`, `Hydrate` or `Import` it is. A node the env holds is at hand,
 // uncounted: no block is read for it.
 fn read_node<P: CountedLoads>(env: &Counting<P>, read: nodes::Read<CorpusNode>) -> NodeRead<'_> {
-    let Some(cache) = ArtifactNodeCache::of(env, read.catalog.subject()) else {
+    let Some(cache) = CorpusCache::of(env, read.catalog.subject()) else {
         return read.through_loader(|load| crate::load_or_hydrate(env, load), None);
     };
     if let Some(node) = cache.get_cached(&read.name) {
@@ -362,7 +362,7 @@ fn preload_node<P: CountedLoads>(
     env: &Counting<P>,
     preload: nodes::Preload<CorpusNode>,
 ) -> Resume<'_, ()> {
-    if ArtifactNodeCache::of(env, preload.catalog.subject()).is_none() {
+    if CorpusCache::of(env, preload.catalog.subject()).is_none() {
         return Resume::now(());
     }
     match read_node(env, preload.read()).into_now() {
@@ -635,7 +635,7 @@ pub async fn reachable_blocks<Env>(
 where
     Env: Provider<Get> + ConditionalSync,
 {
-    use dialog_artifacts::{Datum, Key, State};
+    use dialog_corpus::{Datum, Key, State};
 
     let catalog = ArchiveScope::new(Subject::from(subject.clone())).index();
     let mut reachable = HashSet::new();
@@ -702,8 +702,8 @@ mod prune_tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use anyhow::Result;
-    use dialog_artifacts::{Artifact, DialogArtifactsError, Exporter, Instruction, Pick, Value};
     use dialog_capability::Subject;
+    use dialog_corpus::{DialogCorpusError, Exporter, Fact, Instruction, Pick, Value};
     use dialog_effects::archive::prelude::DEFAULT_CATALOG;
     use dialog_peer::helpers::{test_session_with_peer, unique_name};
     use futures_util::stream;
@@ -722,21 +722,21 @@ mod prune_tests {
     #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
     #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
     impl Exporter for Count {
-        async fn write(&mut self, artifact: &Artifact) -> Result<(), DialogArtifactsError> {
-            if artifact.the.to_string() == "prune/field" {
+        async fn write(&mut self, fact: &Fact) -> Result<(), DialogCorpusError> {
+            if fact.the.to_string() == "prune/field" {
                 *self.0.lock() += 1;
             }
             Ok(())
         }
 
-        async fn close(&mut self) -> Result<(), DialogArtifactsError> {
+        async fn close(&mut self) -> Result<(), DialogCorpusError> {
             Ok(())
         }
     }
 
     fn assert_fact(entity: usize) -> Instruction {
         Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "prune/field".parse().expect("a relation"),
                 of: format!("user:{entity}").parse().expect("an entity"),
                 is: Value::String("x".into()),

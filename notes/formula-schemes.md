@@ -66,7 +66,7 @@ lets composed unifications surface their results. Consequences:
 
 ## Prerequisite: cells carry lattice types
 
-`Cell::content_type` is today a single concrete `artifact::Type`; a scheme-bounded or
+`Cell::content_type` is today a single concrete `fact::Type`; a scheme-bounded or
 range-refined slot cannot be expressed. Cells graduate to the lattice `type_system::Type` (and, for
 scheme slots, to the unifier-facing variable form). This same change is the prerequisite for the
 planned range-refinement predicates, where a cell's type is "String with prefix `p`".

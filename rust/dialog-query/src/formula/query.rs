@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::artifact::Type as ValueType;
+use crate::corpus::Type as ValueType;
 use crate::error::EvaluationError;
 use crate::formula::bindings::Bindings;
 use crate::formula::cache::FormulaCache;

@@ -34,8 +34,8 @@
 //! names.
 
 use base58::ToBase58;
-use dialog_artifacts::Entity;
 use dialog_common::Blake3Hash;
+use dialog_corpus::Entity;
 use dialog_effects::branch::BranchRecord;
 use dialog_query::{Attribute, Concept};
 use dialog_varsig::Did;
@@ -86,7 +86,7 @@ impl EntityExt for Entity {
 /// DIDs and entities share the `did:method:identifier` URI shape, so
 /// a DID string always parses as a valid [`Entity`]. Dialog treats
 /// the two as distinct concerns — "a cryptographic identifier"
-/// vs. "the subject of artifacts" — but when a schema concept's
+/// vs. "the subject of facts" — but when a schema concept's
 /// identity *is* a DID (a profile, a repository subject), the DID is
 /// also the concept's `this` entity.
 pub trait DidExt {
@@ -173,7 +173,7 @@ pub mod branch {
     /// `dialog.branch/revision` — the content-derived entity of the
     /// current revision: the join key from "where is this branch now?"
     /// to everything recorded about that revision (see
-    /// [`RevisionRecord`](dialog_artifacts::history::RevisionRecord)).
+    /// [`RevisionRecord`](dialog_corpus::history::RevisionRecord)).
     #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
     #[domain("dialog.branch")]
     pub struct Revision(

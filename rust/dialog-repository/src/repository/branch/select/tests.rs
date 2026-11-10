@@ -1,11 +1,11 @@
 //! Branch-level pins of select and write semantics: facts are committed
 //! through a branch and read back through branch selects, the production
-//! path, rather than through a standalone artifact store.
+//! path, rather than through a standalone fact store.
 
 #[cfg(target_arch = "wasm32")]
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-use dialog_artifacts::tree::CorpusNode;
+use dialog_corpus::tree::CorpusNode;
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::{BlobError, Read as BlobRead};
@@ -17,13 +17,13 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use dialog_artifacts::selector::Constrained;
-use dialog_artifacts::{
-    Artifact, ArtifactSelector, Changes, DialogArtifactsError, Entity, Exporter, Instruction,
-    NameShape, Relation, Symbol, Update as _, Value, encode_value_owned,
-};
 use dialog_capability::{Fork, Provider};
 use dialog_common::{Blake3Hash, ConditionalSync};
+use dialog_corpus::selector::Constrained;
+use dialog_corpus::{
+    Changes, DialogCorpusError, Entity, Exporter, Fact, Instruction, NameShape, Relation, Selector,
+    Symbol, Update as _, Value, encode_value_owned,
+};
 use dialog_credentials::Credential;
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::memory::Resolve;
@@ -44,8 +44,8 @@ use crate::{Branch, HeldCaches, RemoteSite, Repository, Revision};
 type Operator = Peer<VolatileSpace, Session>;
 
 /// A fact with no cause, as an application writes it.
-fn fact(the: &str, of: Entity, is: Value) -> Result<Artifact> {
-    Ok(Artifact {
+fn fact(the: &str, of: Entity, is: Value) -> Result<Fact> {
+    Ok(Fact {
         the: the.parse()?,
         of,
         is,
@@ -68,14 +68,14 @@ async fn commit(
 /// Asserts every fact in `facts` on `branch` as one batch.
 async fn assert_all(
     branch: &Branch,
-    facts: impl IntoIterator<Item = Artifact>,
+    facts: impl IntoIterator<Item = Fact>,
     operator: &Operator,
 ) -> Result<Revision> {
     commit(
         branch,
         facts
             .into_iter()
-            .map(|artifact| Instruction::Assert(artifact, dialog_artifacts::Pick::All))
+            .map(|fact| Instruction::Assert(fact, dialog_corpus::Pick::All))
             .collect(),
         operator,
     )
@@ -85,9 +85,9 @@ async fn assert_all(
 /// Every row `selector` matches on `branch`, read through `env`.
 async fn select<Env>(
     branch: &Branch,
-    selector: ArtifactSelector<Constrained>,
+    selector: Selector<Constrained>,
     env: &Env,
-) -> Result<Vec<Artifact>>
+) -> Result<Vec<Fact>>
 where
     Env: Provider<BlobRead>
         + Provider<Get>
@@ -111,12 +111,12 @@ where
         .to_owned()
         .perform(env)
         .await?
-        .try_collect::<Vec<Artifact>>()
+        .try_collect::<Vec<Fact>>()
         .await?)
 }
 
 /// The string payloads of `rows`, sorted.
-fn strings(rows: &[Artifact]) -> Vec<String> {
+fn strings(rows: &[Fact]) -> Vec<String> {
     let mut values: Vec<String> = rows
         .iter()
         .map(|row| match &row.is {
@@ -147,9 +147,9 @@ fn writes<P>(counting: &Counting<P>) -> u64 {
 /// the rows with the archive block reads and the writes the select cost.
 async fn cold_select(
     repo: &Repository<Credential>,
-    selector: ArtifactSelector<Constrained>,
+    selector: Selector<Constrained>,
     operator: &Operator,
-) -> Result<(Vec<Artifact>, u64, u64)> {
+) -> Result<(Vec<Fact>, u64, u64)> {
     HeldCaches::of(operator).release(&repo.did());
     let branch = repo.branch("main").load().perform(operator).await?;
     let counting = Counting::new(operator.clone());
@@ -214,17 +214,17 @@ async fn without_spills(branch: &Branch, operator: &Operator) -> Result<Blocks> 
 
 /// An [`Exporter`] that keeps every exported row in memory.
 #[derive(Clone, Default)]
-struct Collect(Arc<Mutex<Vec<Artifact>>>);
+struct Collect(Arc<Mutex<Vec<Fact>>>);
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Exporter for Collect {
-    async fn write(&mut self, artifact: &Artifact) -> Result<(), DialogArtifactsError> {
-        self.0.lock().push(artifact.clone());
+    async fn write(&mut self, fact: &Fact) -> Result<(), DialogCorpusError> {
+        self.0.lock().push(fact.clone());
         Ok(())
     }
 
-    async fn close(&mut self) -> Result<(), DialogArtifactsError> {
+    async fn close(&mut self) -> Result<(), DialogCorpusError> {
         Ok(())
     }
 }
@@ -235,7 +235,7 @@ impl Exporter for Collect {
 /// inclusively or the entry is unreachable (the old probabilistic search tree papered
 /// over this with a point-lookup special case for start == end ranges).
 #[dialog_common::test]
-async fn it_selects_fully_constrained_artifacts() -> Result<()> {
+async fn it_selects_fully_constrained_facts() -> Result<()> {
     let (operator, profile) = test_session_with_peer().await;
     let repo = test_repo(&operator, &profile).await;
     let branch = repo.branch("main").open().perform(&operator).await?;
@@ -245,7 +245,7 @@ async fn it_selects_fully_constrained_artifacts() -> Result<()> {
 
     let results = select(
         &branch,
-        ArtifactSelector::new()
+        Selector::new()
             .of(sample.of.clone())
             .the(sample.the.clone())
             .is(sample.is.clone()),
@@ -286,7 +286,7 @@ async fn it_leaves_no_key_when_assert_and_retract_a_novel_fact_in_one_batch() ->
     commit(
         &branch,
         vec![
-            Instruction::Assert(transient.clone(), dialog_artifacts::Pick::All),
+            Instruction::Assert(transient.clone(), dialog_corpus::Pick::All),
             Instruction::Retract(transient.clone()),
         ],
         &operator,
@@ -294,15 +294,15 @@ async fn it_leaves_no_key_when_assert_and_retract_a_novel_fact_in_one_batch() ->
     .await?;
 
     for selector in [
-        ArtifactSelector::new().the(transient.the.clone()),
-        ArtifactSelector::new().of(transient.of.clone()),
-        ArtifactSelector::new().is(transient.is.clone()),
+        Selector::new().the(transient.the.clone()),
+        Selector::new().of(transient.of.clone()),
+        Selector::new().is(transient.is.clone()),
     ] {
         let hits = select(&branch, selector, &operator).await?;
         assert!(hits.is_empty(), "the transient fact left a key: {hits:?}");
     }
 
-    let names = select(&branch, ArtifactSelector::new().the(alice.the), &operator).await?;
+    let names = select(&branch, Selector::new().the(alice.the), &operator).await?;
     assert_eq!(names.len(), 1, "the prior fact survives the batch");
     assert_eq!(names[0].of, alice.of);
     Ok(())
@@ -330,7 +330,7 @@ async fn it_selects_by_attribute_prefix() -> Result<()> {
 
     let selected = select(
         &branch,
-        ArtifactSelector::new().the_starting_with("person/"),
+        Selector::new().the_starting_with("person/"),
         &operator,
     )
     .await?;
@@ -366,12 +366,7 @@ async fn it_selects_by_domain_and_name() -> Result<()> {
     .await?;
 
     let person: Symbol = "person".parse()?;
-    let selected = select(
-        &branch,
-        ArtifactSelector::new().with_domain(&person),
-        &operator,
-    )
-    .await?;
+    let selected = select(&branch, Selector::new().with_domain(&person), &operator).await?;
     assert_eq!(selected.len(), 2, "two entries under the person domain");
     assert!(
         selected.iter().all(|fact| fact.the.domain() == "person"),
@@ -383,7 +378,7 @@ async fn it_selects_by_domain_and_name() -> Result<()> {
     let name: Symbol = "name".parse()?;
     let named = select(
         &branch,
-        ArtifactSelector::new().of(alice).with_name(name.clone()),
+        Selector::new().of(alice).with_name(name.clone()),
         &operator,
     )
     .await?;
@@ -393,7 +388,7 @@ async fn it_selects_by_domain_and_name() -> Result<()> {
     // Domain plus name tightens to an exact attribute.
     let exact = select(
         &branch,
-        ArtifactSelector::new().with_domain(&person).with_name(name),
+        Selector::new().with_domain(&person).with_name(name),
         &operator,
     )
     .await?;
@@ -405,7 +400,7 @@ async fn it_selects_by_domain_and_name() -> Result<()> {
 /// A domain selection with a name shape yields exactly the matching half
 /// of a mixed domain: the scan ranges over the shape's contiguous
 /// sub-range (see `it_narrows_domain_ranges_by_name_shape` in
-/// `dialog_artifacts::tree`), with attributes of adjacent domains and of
+/// `dialog_corpus::tree`), with attributes of adjacent domains and of
 /// the other shape outside it.
 #[dialog_common::test]
 async fn it_selects_domain_halves_by_name_shape() -> Result<()> {
@@ -432,7 +427,7 @@ async fn it_selects_domain_halves_by_name_shape() -> Result<()> {
     let domain: Symbol = "todo.list".parse()?;
     let members = select(
         &branch,
-        ArtifactSelector::new()
+        Selector::new()
             .with_domain(&domain)
             .with_name_shape(NameShape::Position),
         &operator,
@@ -449,7 +444,7 @@ async fn it_selects_domain_halves_by_name_shape() -> Result<()> {
 
     let entries = select(
         &branch,
-        ArtifactSelector::new()
+        Selector::new()
             .with_domain(&domain)
             .with_name_shape(NameShape::Symbol),
         &operator,
@@ -504,7 +499,7 @@ async fn it_selects_by_entity_prefix() -> Result<()> {
 
     let selected = select(
         &branch,
-        ArtifactSelector::new().of_starting_with("urn:alpha:"),
+        Selector::new().of_starting_with("urn:alpha:"),
         &operator,
     )
     .await?;
@@ -515,7 +510,7 @@ async fn it_selects_by_entity_prefix() -> Result<()> {
     assert!(long_prefix.len() > 32, "the prefix outruns the raw head");
     let selected = select(
         &branch,
-        ArtifactSelector::new().of_starting_with(long_prefix),
+        Selector::new().of_starting_with(long_prefix),
         &operator,
     )
     .await?;
@@ -559,12 +554,7 @@ async fn it_selects_by_value_prefix() -> Result<()> {
     .await?;
 
     // "Al" spans two attributes (name and city) on the same entity.
-    let selected = select(
-        &branch,
-        ArtifactSelector::new().is_starting_with("Al"),
-        &operator,
-    )
-    .await?;
+    let selected = select(&branch, Selector::new().is_starting_with("Al"), &operator).await?;
     assert_eq!(
         strings(&selected),
         vec!["Albuquerque".to_string(), "Alice".into()],
@@ -572,22 +562,12 @@ async fn it_selects_by_value_prefix() -> Result<()> {
     );
 
     // A narrower prefix isolates one value.
-    let selected = select(
-        &branch,
-        ArtifactSelector::new().is_starting_with("Ali"),
-        &operator,
-    )
-    .await?;
+    let selected = select(&branch, Selector::new().is_starting_with("Ali"), &operator).await?;
     assert_eq!(selected.len(), 1);
     assert_eq!(selected[0].is, Value::String("Alice".into()));
 
     // A prefix that matches nothing returns nothing.
-    let selected = select(
-        &branch,
-        ArtifactSelector::new().is_starting_with("Zzz"),
-        &operator,
-    )
-    .await?;
+    let selected = select(&branch, Selector::new().is_starting_with("Zzz"), &operator).await?;
     assert!(selected.is_empty(), "no value begins with Zzz");
     Ok(())
 }
@@ -619,7 +599,7 @@ async fn it_treats_type_mismatched_values_as_non_matches_not_errors() -> Result<
     .collect::<Result<Vec<_>>>()?;
     assert_all(&branch, data, &operator).await?;
 
-    let numbers = |selected: &[dialog_artifacts::Artifact]| -> Vec<f64> {
+    let numbers = |selected: &[dialog_corpus::Fact]| -> Vec<f64> {
         let mut numbers: Vec<f64> = selected
             .iter()
             .map(|fact| match &fact.is {
@@ -637,7 +617,7 @@ async fn it_treats_type_mismatched_values_as_non_matches_not_errors() -> Result<
     // string and the boolean beside them are non-matches, not errors.
     let selected = select(
         &branch,
-        ArtifactSelector::new().is_at_least(Value::UnsignedInt(20)),
+        Selector::new().is_at_least(Value::UnsignedInt(20)),
         &operator,
     )
     .await?;
@@ -661,7 +641,7 @@ async fn it_treats_type_mismatched_values_as_non_matches_not_errors() -> Result<
     .await?;
     let selected = select(
         &branch,
-        ArtifactSelector::new()
+        Selector::new()
             .of(mixed)
             .is_at_least(Value::UnsignedInt(20)),
         &operator,
@@ -677,7 +657,7 @@ async fn it_treats_type_mismatched_values_as_non_matches_not_errors() -> Result<
     // own lens.
     let selected = select(
         &branch,
-        ArtifactSelector::new()
+        Selector::new()
             .is_at_least(Value::UnsignedInt(20))
             .is_at_most(Value::Float(40.0)),
         &operator,
@@ -688,7 +668,7 @@ async fn it_treats_type_mismatched_values_as_non_matches_not_errors() -> Result<
     // Inverted bounds are empty, not an error.
     let selected = select(
         &branch,
-        ArtifactSelector::new()
+        Selector::new()
             .is_at_least(Value::UnsignedInt(50))
             .is_at_most(Value::UnsignedInt(20)),
         &operator,
@@ -729,12 +709,7 @@ async fn it_post_filters_predicates_beyond_the_spill_prefix() -> Result<()> {
     // A probe longer than the in-key prefix: undecidable from the key,
     // decided by loading the block. Only the matching value comes back.
     let probe = format!("{stem}-apple");
-    let selected = select(
-        &branch,
-        ArtifactSelector::new().is_starting_with(&probe),
-        &operator,
-    )
-    .await?;
+    let selected = select(&branch, Selector::new().is_starting_with(&probe), &operator).await?;
     assert_eq!(selected.len(), 1, "the probe distinguishes the tails");
     assert_eq!(selected[0].is, Value::String(apple.clone()));
 
@@ -744,7 +719,7 @@ async fn it_post_filters_predicates_beyond_the_spill_prefix() -> Result<()> {
     let bound = format!("{stem}-m");
     let selected = select(
         &branch,
-        ArtifactSelector::new()
+        Selector::new()
             .the("doc/body".parse()?)
             .is_at_least(Value::String(bound)),
         &operator,
@@ -770,7 +745,7 @@ async fn it_post_filters_predicates_beyond_the_spill_prefix() -> Result<()> {
         &operator,
     )
     .await?;
-    let selected = select(&branch, ArtifactSelector::new().of(both), &operator).await?;
+    let selected = select(&branch, Selector::new().of(both), &operator).await?;
     assert_eq!(strings(&selected), {
         let mut expected = vec![apple, zebra];
         expected.sort();
@@ -799,7 +774,7 @@ async fn it_composes_value_prefix_with_value_bounds() -> Result<()> {
 
     let selected = select(
         &branch,
-        ArtifactSelector::new()
+        Selector::new()
             .the("user/name".parse()?)
             .is_starting_with("a")
             .is_at_most(Value::String("am".into())),
@@ -815,7 +790,7 @@ async fn it_composes_value_prefix_with_value_bounds() -> Result<()> {
     // The boundary value itself is included exactly when inclusive.
     let selected = select(
         &branch,
-        ArtifactSelector::new()
+        Selector::new()
             .the("user/name".parse()?)
             .is_starting_with("a")
             .is_less_than(Value::String("am".into())),
@@ -845,7 +820,7 @@ async fn it_includes_negative_zero_in_zero_bounded_ranges() -> Result<()> {
 
     let selected = select(
         &branch,
-        ArtifactSelector::new().is_at_least(Value::Float(0.0)),
+        Selector::new().is_at_least(Value::Float(0.0)),
         &operator,
     )
     .await?;
@@ -857,7 +832,7 @@ async fn it_includes_negative_zero_in_zero_bounded_ranges() -> Result<()> {
 
     let selected = select(
         &branch,
-        ArtifactSelector::new().is_at_most(Value::Float(-0.0)),
+        Selector::new().is_at_most(Value::Float(-0.0)),
         &operator,
     )
     .await?;
@@ -907,7 +882,7 @@ async fn it_applies_value_predicates_to_spilled_values_as_if_inline() -> Result<
     // scanned EAV range but must not satisfy a numeric bound.
     let selected = select(
         &branch,
-        ArtifactSelector::new()
+        Selector::new()
             .of(alice.clone())
             .is_at_least(Value::UnsignedInt(30)),
         &operator,
@@ -923,7 +898,7 @@ async fn it_applies_value_predicates_to_spilled_values_as_if_inline() -> Result<
     // from the key, with the block fetched only for reconstruction.
     let selected = select(
         &branch,
-        ArtifactSelector::new().of(alice).is_starting_with("Zzz"),
+        Selector::new().of(alice).is_starting_with("Zzz"),
         &operator,
     )
     .await?;
@@ -937,12 +912,7 @@ async fn it_applies_value_predicates_to_spilled_values_as_if_inline() -> Result<
     // The VAE route agrees: the same prefix scan with no entity pin finds
     // the same spilled fact, because spilled strings sort inside the
     // String band by their leading bytes.
-    let selected = select(
-        &branch,
-        ArtifactSelector::new().is_starting_with("Zzz"),
-        &operator,
-    )
-    .await?;
+    let selected = select(&branch, Selector::new().is_starting_with("Zzz"), &operator).await?;
     assert_eq!(
         selected.len(),
         1,
@@ -953,7 +923,7 @@ async fn it_applies_value_predicates_to_spilled_values_as_if_inline() -> Result<
     // prefix is not a string and must not match.
     let selected = select(
         &branch,
-        ArtifactSelector::new().of(bob).is_starting_with("Al"),
+        Selector::new().of(bob).is_starting_with("Al"),
         &operator,
     )
     .await?;
@@ -999,7 +969,7 @@ async fn it_round_trips_many_float_values() -> Result<()> {
 
     let selected = select(
         &branch,
-        ArtifactSelector::new().the("measure/value".parse()?),
+        Selector::new().the("measure/value".parse()?),
         &operator,
     )
     .await?;
@@ -1049,7 +1019,7 @@ async fn it_selects_by_value_range() -> Result<()> {
     )?);
     assert_all(&branch, data, &operator).await?;
 
-    let numbers = |facts: &[Artifact]| -> Vec<u128> {
+    let numbers = |facts: &[Fact]| -> Vec<u128> {
         let mut out: Vec<u128> = facts
             .iter()
             .map(|fact| match fact.is {
@@ -1064,7 +1034,7 @@ async fn it_selects_by_value_range() -> Result<()> {
     // Inclusive lower bound.
     let selected = select(
         &branch,
-        ArtifactSelector::new().is_at_least(Value::UnsignedInt(30)),
+        Selector::new().is_at_least(Value::UnsignedInt(30)),
         &operator,
     )
     .await?;
@@ -1073,7 +1043,7 @@ async fn it_selects_by_value_range() -> Result<()> {
     // Exclusive lower bound drops the boundary value.
     let selected = select(
         &branch,
-        ArtifactSelector::new().is_greater_than(Value::UnsignedInt(30)),
+        Selector::new().is_greater_than(Value::UnsignedInt(30)),
         &operator,
     )
     .await?;
@@ -1082,7 +1052,7 @@ async fn it_selects_by_value_range() -> Result<()> {
     // Inclusive upper bound.
     let selected = select(
         &branch,
-        ArtifactSelector::new().is_at_most(Value::UnsignedInt(20)),
+        Selector::new().is_at_most(Value::UnsignedInt(20)),
         &operator,
     )
     .await?;
@@ -1091,7 +1061,7 @@ async fn it_selects_by_value_range() -> Result<()> {
     // A closed interval.
     let selected = select(
         &branch,
-        ArtifactSelector::new().is_between(Value::UnsignedInt(20), Value::UnsignedInt(40)),
+        Selector::new().is_between(Value::UnsignedInt(20), Value::UnsignedInt(40)),
         &operator,
     )
     .await?;
@@ -1100,7 +1070,7 @@ async fn it_selects_by_value_range() -> Result<()> {
     // A range that spans nothing.
     let selected = select(
         &branch,
-        ArtifactSelector::new().is_at_least(Value::UnsignedInt(1000)),
+        Selector::new().is_at_least(Value::UnsignedInt(1000)),
         &operator,
     )
     .await?;
@@ -1120,20 +1090,20 @@ async fn it_pins_a_stream_at_the_version_where_iteration_begins() -> Result<()> 
     let data = generate_data(5)?;
     let entities = data
         .iter()
-        .map(|artifact| artifact.of.clone())
+        .map(|scanned| scanned.of.clone())
         .collect::<BTreeSet<Entity>>();
     assert_all(&branch, data, &operator).await?;
 
     let stream = branch
         .claims()
-        .select(ArtifactSelector::new().the("item/id".parse()?))
+        .select(Selector::new().the("item/id".parse()?))
         .to_owned()
         .perform(&operator)
         .await?;
     let mut stream = pin!(stream);
 
     let mut count = 0u128;
-    while let Some(artifact) = stream.try_next().await? {
+    while let Some(scanned) = stream.try_next().await? {
         // Each commit adds a fresh item/id row the pinned stream must not
         // see.
         assert_all(
@@ -1146,17 +1116,12 @@ async fn it_pins_a_stream_at_the_version_where_iteration_begins() -> Result<()> 
             &operator,
         )
         .await?;
-        assert!(entities.contains(&artifact.of));
+        assert!(entities.contains(&scanned.of));
         count += 1;
     }
     assert_eq!(count, 5, "the stream saw only the rows at its revision");
 
-    let after = select(
-        &branch,
-        ArtifactSelector::new().the("item/id".parse()?),
-        &operator,
-    )
-    .await?;
+    let after = select(&branch, Selector::new().the("item/id".parse()?), &operator).await?;
     assert_eq!(
         after.len(),
         10,
@@ -1186,7 +1151,7 @@ async fn it_can_query_efficiently_by_entity_and_value() -> Result<()> {
     branch
         .commit(stream::iter(
             data.into_iter()
-                .map(|artifact| Instruction::Assert(artifact, dialog_artifacts::Pick::All))
+                .map(|fact| Instruction::Assert(fact, dialog_corpus::Pick::All))
                 .collect::<Vec<_>>(),
         ))
         .canonicalize()
@@ -1195,7 +1160,7 @@ async fn it_can_query_efficiently_by_entity_and_value() -> Result<()> {
 
     let (rows, reads, writes) = cold_select(
         &repo,
-        ArtifactSelector::new().of(entity.clone()).is(name.clone()),
+        Selector::new().of(entity.clone()).is(name.clone()),
         &operator,
     )
     .await?;
@@ -1207,12 +1172,8 @@ async fn it_can_query_efficiently_by_entity_and_value() -> Result<()> {
 
     // The entity's facts could straddle a leaf boundary, so the scan it is
     // compared against spans two attributes' worth of leaves.
-    let (all, scan_reads, _) = cold_select(
-        &repo,
-        ArtifactSelector::new().the_starting_with("item/"),
-        &operator,
-    )
-    .await?;
+    let (all, scan_reads, _) =
+        cold_select(&repo, Selector::new().the_starting_with("item/"), &operator).await?;
     assert_eq!(all.len(), 1024);
     assert!(
         reads < scan_reads,
@@ -1240,7 +1201,7 @@ async fn it_can_query_efficiently_by_attribute_and_value() -> Result<()> {
     branch
         .commit(stream::iter(
             data.into_iter()
-                .map(|artifact| Instruction::Assert(artifact, dialog_artifacts::Pick::All))
+                .map(|fact| Instruction::Assert(fact, dialog_corpus::Pick::All))
                 .collect::<Vec<_>>(),
         ))
         .canonicalize()
@@ -1250,9 +1211,7 @@ async fn it_can_query_efficiently_by_attribute_and_value() -> Result<()> {
     let attribute: Relation = "item/name".parse()?;
     let (rows, reads, writes) = cold_select(
         &repo,
-        ArtifactSelector::new()
-            .the(attribute.clone())
-            .is(name.clone()),
+        Selector::new().the(attribute.clone()).is(name.clone()),
         &operator,
     )
     .await?;
@@ -1263,7 +1222,7 @@ async fn it_can_query_efficiently_by_attribute_and_value() -> Result<()> {
     assert_eq!(writes, 0, "a read writes nothing");
 
     let (all, scan_reads, _) =
-        cold_select(&repo, ArtifactSelector::new().the(attribute), &operator).await?;
+        cold_select(&repo, Selector::new().the(attribute), &operator).await?;
     assert_eq!(all.len(), 512);
     assert!(
         reads < scan_reads,
@@ -1286,7 +1245,7 @@ async fn it_uses_indexes_to_optimize_reads() -> Result<()> {
         .commit(stream::iter(
             generate_data(512)?
                 .into_iter()
-                .map(|artifact| Instruction::Assert(artifact, dialog_artifacts::Pick::All))
+                .map(|fact| Instruction::Assert(fact, dialog_corpus::Pick::All))
                 .collect::<Vec<_>>(),
         ))
         .canonicalize()
@@ -1295,19 +1254,15 @@ async fn it_uses_indexes_to_optimize_reads() -> Result<()> {
 
     let (rows, point_reads, point_writes) = cold_select(
         &repo,
-        ArtifactSelector::new().is(Value::String("name64".into())),
+        Selector::new().is(Value::String("name64".into())),
         &operator,
     )
     .await?;
     assert_eq!(rows.len(), 1);
     assert_eq!(point_writes, 0);
 
-    let (rows, scan_reads, scan_writes) = cold_select(
-        &repo,
-        ArtifactSelector::new().the("item/id".parse()?),
-        &operator,
-    )
-    .await?;
+    let (rows, scan_reads, scan_writes) =
+        cold_select(&repo, Selector::new().the("item/id".parse()?), &operator).await?;
     assert_eq!(rows.len(), 512);
     assert_eq!(scan_writes, 0);
     assert!(
@@ -1331,7 +1286,7 @@ async fn it_completes_a_query_when_no_data_matches() -> Result<()> {
 
     let results = select(
         &branch,
-        ArtifactSelector::new().is(Value::UnsignedInt(123)),
+        Selector::new().is(Value::UnsignedInt(123)),
         &operator,
     )
     .await?;
@@ -1355,12 +1310,12 @@ async fn it_distinguishes_same_value_across_different_entities() -> Result<()> {
 
     let entities = select(
         &branch,
-        ArtifactSelector::new().is(Value::UnsignedInt(123)),
+        Selector::new().is(Value::UnsignedInt(123)),
         &operator,
     )
     .await?
     .into_iter()
-    .map(|artifact| artifact.of)
+    .map(|fact| fact.of)
     .collect::<BTreeSet<Entity>>();
     assert_eq!(entities.len(), 3);
     Ok(())
@@ -1379,22 +1334,12 @@ async fn it_produces_the_same_version_with_different_insertion_order() -> Result
     let data = generate_data(32)?;
 
     let mut forward = Changes::new();
-    for artifact in data.iter().cloned() {
-        forward.associate(
-            artifact.the,
-            artifact.of,
-            artifact.is,
-            dialog_artifacts::Pick::All,
-        );
+    for fact in data.iter().cloned() {
+        forward.associate(fact.the, fact.of, fact.is, dialog_corpus::Pick::All);
     }
     let mut backward = Changes::new();
-    for artifact in data.into_iter().rev() {
-        backward.associate(
-            artifact.the,
-            artifact.of,
-            artifact.is,
-            dialog_artifacts::Pick::All,
-        );
+    for fact in data.into_iter().rev() {
+        backward.associate(fact.the, fact.of, fact.is, dialog_corpus::Pick::All);
     }
 
     let one = branch
@@ -1440,13 +1385,13 @@ async fn it_can_upsert_facts() -> Result<()> {
         &branch,
         vec![Instruction::Assert(
             fact("test/attribute", entity.clone(), Value::Boolean(true))?,
-            dialog_artifacts::Pick::Last,
+            dialog_corpus::Pick::Last,
         )],
         &operator,
     )
     .await?;
 
-    let results = select(&branch, ArtifactSelector::new().of(entity), &operator).await?;
+    let results = select(&branch, Selector::new().of(entity), &operator).await?;
     assert_eq!(results.len(), 1);
     assert_eq!(String::from(&results[0].the), "test/attribute");
     assert_eq!(results[0].is, Value::Boolean(true));
@@ -1508,7 +1453,7 @@ async fn it_avoids_unnecessary_storage_writes() -> Result<()> {
                 Entity::new()?,
                 Value::String("another value".into()),
             )?,
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         )]))
         .perform(&counting)
         .await?;
@@ -1543,12 +1488,7 @@ async fn it_round_trips_a_spilled_value() -> Result<()> {
 
     // A cold handle has no spill cache, so the read fetches the block.
     let cold = repo.branch("main").load().perform(&operator).await?;
-    let results = select(
-        &cold,
-        ArtifactSelector::new().the("doc/body".parse()?),
-        &operator,
-    )
-    .await?;
+    let results = select(&cold, Selector::new().the("doc/body".parse()?), &operator).await?;
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].is, value, "spilled value reconstructs exactly");
     Ok(())
@@ -1588,7 +1528,7 @@ async fn it_spills_exactly_above_the_threshold() -> Result<()> {
             "spill decision at the exact boundary is inclusive"
         );
         // Either way the value reconstructs.
-        let results = select(&branch, ArtifactSelector::new().of(entity), &operator).await?;
+        let results = select(&branch, Selector::new().of(entity), &operator).await?;
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].is, value);
     }
@@ -1624,7 +1564,7 @@ async fn it_spills_and_round_trips_every_value_type() -> Result<()> {
         )
         .await?;
         let cold = repo.branch("main").load().perform(&operator).await?;
-        let results = select(&cold, ArtifactSelector::new().of(entity), &operator).await?;
+        let results = select(&cold, Selector::new().of(entity), &operator).await?;
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].is, value, "{value:?} round-trips through spill");
     }
@@ -1649,7 +1589,7 @@ async fn it_replaces_a_spilled_prior() -> Result<()> {
                 &branch,
                 vec![Instruction::Assert(
                     fact("doc/body", entity.clone(), value)?,
-                    dialog_artifacts::Pick::Last,
+                    dialog_corpus::Pick::Last,
                 )],
                 &operator,
             )
@@ -1658,7 +1598,7 @@ async fn it_replaces_a_spilled_prior() -> Result<()> {
 
         let results = select(
             &branch,
-            ArtifactSelector::new().of(entity).the("doc/body".parse()?),
+            Selector::new().of(entity).the("doc/body".parse()?),
             &operator,
         )
         .await?;
@@ -1688,7 +1628,7 @@ async fn it_retracts_a_spilled_fact() -> Result<()> {
     assert_all(&branch, [spilled.clone()], &operator).await?;
     commit(&branch, vec![Instruction::Retract(spilled)], &operator).await?;
 
-    let results = select(&branch, ArtifactSelector::new().of(entity), &operator).await?;
+    let results = select(&branch, Selector::new().of(entity), &operator).await?;
     assert!(
         results.is_empty(),
         "a retracted spilled fact is not returned"
@@ -1720,12 +1660,7 @@ async fn it_dedups_a_shared_spilled_block() -> Result<()> {
         spilled_block(&branch, &value, &operator).await?,
         Some(value.to_bytes())
     );
-    let results = select(
-        &branch,
-        ArtifactSelector::new().the("doc/body".parse()?),
-        &operator,
-    )
-    .await?;
+    let results = select(&branch, Selector::new().the("doc/body".parse()?), &operator).await?;
     assert_eq!(results.len(), 2, "two facts share one spilled block");
     assert!(results.iter().all(|row| row.is == value));
     Ok(())
@@ -1750,28 +1685,20 @@ async fn it_errors_when_a_spilled_block_is_missing() -> Result<()> {
 
     // A cold handle: its spill cache does not already hold the value.
     let cold = repo.branch("main").load().perform(&operator).await?;
-    let rows: Vec<Result<Artifact, DialogArtifactsError>> = cold
+    let rows: Vec<Result<Fact, DialogCorpusError>> = cold
         .claims()
-        .select(ArtifactSelector::new().the("doc/body".parse()?))
+        .select(Selector::new().the("doc/body".parse()?))
         .to_owned()
         .execute(&without_spills(&cold, &operator).await?)
         .await?
         .collect()
         .await;
     assert!(
-        matches!(
-            rows.as_slice(),
-            [Err(DialogArtifactsError::InvalidValue(_))]
-        ),
+        matches!(rows.as_slice(), [Err(DialogCorpusError::InvalidValue(_))]),
         "a missing spilled block is a clean error, got {rows:?}"
     );
 
-    let rows = select(
-        &cold,
-        ArtifactSelector::new().the("doc/body".parse()?),
-        &operator,
-    )
-    .await?;
+    let rows = select(&cold, Selector::new().the("doc/body".parse()?), &operator).await?;
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].is, value);
     Ok(())
@@ -1796,12 +1723,7 @@ async fn it_selects_by_a_spilled_value() -> Result<()> {
         .await?;
     }
 
-    let results = select(
-        &branch,
-        ArtifactSelector::new().is(wanted.clone()),
-        &operator,
-    )
-    .await?;
+    let results = select(&branch, Selector::new().is(wanted.clone()), &operator).await?;
     assert_eq!(
         results.len(),
         1,
@@ -1831,7 +1753,7 @@ async fn it_commits_identically_when_the_spine_is_reused() -> Result<()> {
             "test/value".parse()?,
             format!("entity:00000000-0000-0000-0000-{:012}", n % 40).parse()?,
             Value::String(format!("value {n}")),
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         );
 
         // The oracle opens a fresh handle (and therefore reads the root
@@ -1859,7 +1781,7 @@ async fn it_commits_identically_when_the_spine_is_reused() -> Result<()> {
         );
     }
 
-    let selector = ArtifactSelector::new().the("test/value".parse()?);
+    let selector = Selector::new().the("test/value".parse()?);
     let reused = select(&live, selector.clone(), &operator).await?;
     let fresh = repo.branch("main").load().perform(&operator).await?;
     let reopened = select(&fresh, selector, &operator).await?;
@@ -1884,7 +1806,7 @@ async fn it_can_export_to_and_import_from_a_branch() -> Result<()> {
 
     let exported = Collect::default();
     source.export(exported.clone()).perform(&operator).await?;
-    let rows: Vec<Artifact> = exported
+    let rows: Vec<Fact> = exported
         .0
         .lock()
         .iter()
@@ -1897,13 +1819,13 @@ async fn it_can_export_to_and_import_from_a_branch() -> Result<()> {
     let target = target_repo.branch("main").open().perform(&operator).await?;
     target
         .import(stream::iter(
-            rows.into_iter().map(Ok::<_, DialogArtifactsError>),
+            rows.into_iter().map(Ok::<_, DialogCorpusError>),
         ))
         .perform(&operator)
         .await?;
 
-    let key = |row: &Artifact| (row.of.clone(), String::from(&row.the), row.is.to_utf8());
-    let selector = ArtifactSelector::new().the("item/id".parse()?);
+    let key = |row: &Fact| (row.of.clone(), String::from(&row.the), row.is.to_utf8());
+    let selector = Selector::new().the("item/id".parse()?);
     let mut expected: Vec<_> = select(&source, selector.clone(), &operator)
         .await?
         .iter()

@@ -3,7 +3,7 @@
 //! A revision describes itself with one atomic `dialog.db/revision` fact
 //! — a [`Value::Record`](crate::Value) of the dag-cbor
 //! [`RevisionRecord`] — rather than per-field facts (see
-//! `dialog_artifacts::history`). These formulas expose the record's
+//! `dialog_corpus::history`). These formulas expose the record's
 //! individual fields to queries: bind the record with an attribute scan,
 //! then apply [`Revision`] (scalar fields, one row) or [`RevisionParent`]
 //! (the DAG edge, one row per parent).
@@ -21,7 +21,7 @@
 //!   with the scan's `of` makes the join itself reject a valid record
 //!   replayed at another revision entity.
 
-use dialog_artifacts::history::{RevisionRecord, verify_issuer_signature};
+use dialog_corpus::history::{RevisionRecord, verify_issuer_signature};
 use std::collections::HashSet;
 
 use crate::formula::Input;
@@ -196,7 +196,7 @@ mod tests {
     use crate::types::Any;
     use crate::{FormulaQuery, Value};
     use base58::ToBase58 as _;
-    use dialog_artifacts::history::{Edition, Origin, REVISION_RECORD_FORMAT, Version};
+    use dialog_corpus::history::{Edition, Origin, REVISION_RECORD_FORMAT, Version};
     use ed25519_dalek::Signer as _;
 
     fn did_key_of(key: &ed25519_dalek::SigningKey) -> String {

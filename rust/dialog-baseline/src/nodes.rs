@@ -2,14 +2,14 @@
 //! the tree's shape rather than its facts.
 
 use anyhow::Result;
-use dialog_artifacts::{Datum, Key, State};
 use dialog_capability::Provider;
 use dialog_common::{Blake3Hash, ConditionalSync};
+use dialog_corpus::{Datum, Key, State};
 use dialog_effects::archive::Load;
 use dialog_effects::archive::prelude::CatalogScope;
 use dialog_search_tree::PersistentNode;
 
-/// A node of an artifact tree, as stored.
+/// A node of a fact tree, as stored.
 pub type TreeNode = PersistentNode<Key, State<Datum>>;
 
 /// One stored node, as [`walk`] visits it.

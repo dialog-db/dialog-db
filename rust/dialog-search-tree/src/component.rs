@@ -2,7 +2,7 @@
 //! stored columnar.
 //!
 //! A key is a fixed, ordered sequence of typed components (for the dialog
-//! artifact key: index type, entity, namespace, name, value type, value).
+//! fact key: index type, entity, namespace, name, value type, value).
 //! Recognizing those components lets a leaf store each one in the column that
 //! fits it, independent of the sort order the tree's ordering imposes:
 //!

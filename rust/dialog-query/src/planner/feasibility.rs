@@ -99,9 +99,9 @@ mod tests {
 
     use super::super::Planner;
     use super::*;
-    use crate::artifact::Entity;
     use crate::attribute::query::AttributeQuery;
     use crate::attribute::{Cardinality, Relation};
+    use crate::corpus::Entity;
     use crate::formula::Formula;
     use crate::formula::string::Length;
     use crate::proposition::Proposition;
