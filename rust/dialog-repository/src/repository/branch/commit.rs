@@ -182,8 +182,8 @@ impl<'a, Changes> Commit<'a, Changes> {
 /// Whether induction would see this instruction's fact; see
 /// [`induction_ignores`].
 fn induces(instruction: &Instruction) -> bool {
-    let (Instruction::Assert(artifact, _) | Instruction::Retract(artifact)) = instruction;
-    !induction_ignores(&artifact.the.to_string())
+    let (Instruction::Assert(fact, _) | Instruction::Retract(fact)) = instruction;
+    !induction_ignores(&fact.the.to_string())
 }
 
 impl Branch {
@@ -946,7 +946,7 @@ mod tests {
     use anyhow::Result;
     use dialog_peer::helpers::test_session_with_peer;
 
-    use dialog_corpus::{Artifact, ArtifactSelector, Instruction, Value};
+    use dialog_corpus::{Fact, Instruction, Selector, Value};
     use futures_util::{StreamExt, stream};
 
     /// Two commits in sequence (no refresh between) with different entities on
@@ -970,7 +970,7 @@ mod tests {
 
         branch
             .commit(stream::iter(vec![Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "person/name".parse()?,
                     of: alice.parse()?,
                     is: Value::String("Alice".to_string()),
@@ -983,7 +983,7 @@ mod tests {
 
         branch
             .commit(stream::iter(vec![Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "person/name".parse()?,
                     of: bob.parse()?,
                     is: Value::String("Bob".to_string()),
@@ -996,7 +996,7 @@ mod tests {
 
         let results: Vec<_> = branch
             .claims()
-            .select(ArtifactSelector::new().the("person/name".parse()?))
+            .select(Selector::new().the("person/name".parse()?))
             .to_owned()
             .perform(&operator)
             .await?
@@ -1014,7 +1014,7 @@ mod tests {
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
-        let artifact = Artifact {
+        let fact = Fact {
             the: "user/name".parse()?,
             of: "user:123".parse()?,
             is: Value::String("Alice".to_string()),
@@ -1022,7 +1022,7 @@ mod tests {
         };
 
         let instructions = stream::iter(vec![Instruction::Assert(
-            artifact.clone(),
+            fact.clone(),
             dialog_corpus::Pick::All,
         )]);
 
@@ -1033,8 +1033,8 @@ mod tests {
         );
         assert_ne!(revision.tree, empty_tree);
 
-        // Select should find the artifact
-        let selector = ArtifactSelector::new().the("user/name".parse()?);
+        // Select should find the fact
+        let selector = Selector::new().the("user/name".parse()?);
         let stream = branch
             .claims()
             .select(selector)
@@ -1046,8 +1046,8 @@ mod tests {
         let results: Vec<_> = stream.filter_map(|r| async { r.ok() }).collect().await;
 
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].the, artifact.the);
-        assert_eq!(results[0].is, artifact.is);
+        assert_eq!(results[0].the, fact.the);
+        assert_eq!(results[0].is, fact.is);
 
         Ok(())
     }
@@ -1079,7 +1079,7 @@ mod tests {
         // stale.
         writer_a
             .commit(stream::iter(vec![Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "user/name".parse()?,
                     of: "user:a".parse()?,
                     is: Value::String("Alice".to_string()),
@@ -1094,7 +1094,7 @@ mod tests {
         // drop A's commit.
         let raced = writer_b
             .commit(stream::iter(vec![Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "user/name".parse()?,
                     of: "user:b".parse()?,
                     is: Value::String("Bob".to_string()),
@@ -1118,7 +1118,7 @@ mod tests {
         writer_b.refresh(&operator).await?;
         writer_b
             .commit(stream::iter(vec![Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "user/name".parse()?,
                     of: "user:b".parse()?,
                     is: Value::String("Bob".to_string()),
@@ -1133,7 +1133,7 @@ mod tests {
         let fresh = repo.branch("main").open().perform(&operator).await?;
         let results: Vec<_> = fresh
             .claims()
-            .select(ArtifactSelector::new().the("user/name".parse()?))
+            .select(Selector::new().the("user/name".parse()?))
             .to_owned()
             .perform(&operator)
             .await?
@@ -1163,11 +1163,11 @@ mod history_tests {
     use dialog_corpus::history::{
         Causality, History as _, HistorySelector, causality, common_ancestor,
     };
-    use dialog_corpus::{Artifact, Instruction, Value};
+    use dialog_corpus::{Fact, Instruction, Value};
     use futures_util::{TryStreamExt as _, stream};
 
-    fn title(of: &str, value: &str) -> Artifact {
-        Artifact {
+    fn title(of: &str, value: &str) -> Fact {
+        Fact {
             the: "post/title".parse().unwrap(),
             of: of.parse().unwrap(),
             is: Value::String(value.to_string()),
@@ -1324,7 +1324,7 @@ mod history_tests {
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
-        let forged = Artifact {
+        let forged = Fact {
             the: "dialog.db/revision".parse()?,
             of: "forged:revision".parse()?,
             is: Value::String("lies".to_string()),
@@ -1342,7 +1342,7 @@ mod history_tests {
             assert!(
                 matches!(
                     result,
-                    Err(crate::CommitError::Artifact(
+                    Err(crate::CommitError::Fact(
                         DialogCorpusError::ReservedRelation(_)
                     ))
                 ),
@@ -1489,7 +1489,7 @@ mod history_tests {
         let reasserted = !head
             .claims()
             .select(
-                dialog_corpus::ArtifactSelector::new()
+                dialog_corpus::Selector::new()
                     .the("post/title".parse()?)
                     .of("post:1".parse()?),
             )

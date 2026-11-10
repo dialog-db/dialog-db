@@ -460,9 +460,7 @@ mod tests {
     use crate::{REGISTRY, RepositoryExt as _, RepositoryMemoryExt};
     use dialog_capability::Subject;
     use dialog_common::Holds as _;
-    use dialog_corpus::{
-        ArtifactSelector, Asset, DialogCorpusError, Entity, Statement as _, Value,
-    };
+    use dialog_corpus::{Asset, DialogCorpusError, Entity, Selector, Statement as _, Value};
     use dialog_effects::authority::Identify;
     use dialog_effects::authority::OperatorExt as _;
     use dialog_peer::helpers::{test_session_with_peer, unique_name};
@@ -641,7 +639,7 @@ mod tests {
             .perform(&operator)
             .await?;
         let select = registry.claims().select(
-            ArtifactSelector::new()
+            Selector::new()
                 .the("dialog.replica/active-branch".parse()?)
                 .of(replica.this.clone()),
         );
@@ -649,8 +647,8 @@ mod tests {
         let rows: Vec<_> = select.execute(store).await?.collect::<Vec<_>>().await;
 
         assert_eq!(rows.len(), 1, "one active branch recorded: {}", rows.len());
-        let artifact = rows.into_iter().next().expect("one row")?;
-        assert_eq!(artifact.to_owned()?.is, Value::Entity(feature));
+        let fact = rows.into_iter().next().expect("one row")?;
+        assert_eq!(fact.to_owned()?.is, Value::Entity(feature));
         Ok(())
     }
 
@@ -681,9 +679,7 @@ mod tests {
         assert!(
             matches!(
                 refused,
-                Err(CommitError::Artifact(DialogCorpusError::AssetsUnsupported(
-                    _
-                )))
+                Err(CommitError::Fact(DialogCorpusError::AssetsUnsupported(_)))
             ),
             "got {refused:?}"
         );

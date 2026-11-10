@@ -24,7 +24,7 @@ pub(crate) mod test {
     use dialog_capability::Resume;
     use dialog_corpus::selector::Constrained;
     use dialog_corpus::tree::CorpusNode;
-    use dialog_corpus::{ArtifactSelector, ArtifactStream, DialogCorpusError, Select};
+    use dialog_corpus::{DialogCorpusError, FactStream, Select, Selector};
     use dialog_effects::archive::{self, ArchiveError};
     use dialog_effects::blob;
     use dialog_peer::Peer as DialogOperator;
@@ -83,8 +83,8 @@ pub(crate) mod test {
     impl<'a> Provider<Select<'a>> for TestEnv<'a> {
         async fn execute(
             &self,
-            input: ArtifactSelector<Constrained>,
-        ) -> Result<ArtifactStream<'a>, DialogCorpusError> {
+            input: Selector<Constrained>,
+        ) -> Result<FactStream<'a>, DialogCorpusError> {
             let stream = self
                 .branch
                 .claims()
@@ -106,7 +106,7 @@ pub(crate) mod test {
     impl Provider<dialog_corpus::Estimate> for TestEnv<'_> {
         async fn execute(
             &self,
-            input: ArtifactSelector<Constrained>,
+            input: Selector<Constrained>,
         ) -> Result<Option<u64>, DialogCorpusError> {
             self.branch
                 .claims()

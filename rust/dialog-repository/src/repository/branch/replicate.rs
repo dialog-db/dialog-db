@@ -507,7 +507,7 @@ mod tests {
     use crate::helpers::connect;
     use crate::{Branch, ReplicateError, RepositoryExt as _, ResolveEnv, Revision, SiteAddress};
     use anyhow::{Result, bail};
-    use dialog_corpus::{Artifact, Instruction, Value};
+    use dialog_corpus::{Fact, Instruction, Value};
     use dialog_peer::helpers::{test_session_with_peer, unique_name};
     use dialog_remote_ucan::UcanAddress;
     use dialog_remote_ucan::helpers::UcanServiceAddress;
@@ -523,7 +523,7 @@ mod tests {
     async fn commit<Env: ResolveEnv>(branch: &Branch, name: &str, env: &Env) -> Result<Revision> {
         branch
             .commit(stream::iter(vec![Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "user/name".parse()?,
                     of: format!("user:{name}").parse()?,
                     is: Value::String(name.into()),

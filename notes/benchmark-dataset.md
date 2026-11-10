@@ -59,7 +59,7 @@ Stack Exchange dumps are CC BY-SA 4.0. Redistribution is fine with attribution, 
 
 ## Open
 
-Hosting. 88 MB of CSV is too large for the main repo. Options are a separate `dialog-db` org repo, release artifacts, or a fetch-plus-checksum script. A small `--limit` fixture can live in-repo for CI regardless.
+Hosting. 88 MB of CSV is too large for the main repo. Options are a separate `dialog-db` org repo, release assets, or a fetch-plus-checksum script. A small `--limit` fixture can live in-repo for CI regardless.
 
 ## Related
 

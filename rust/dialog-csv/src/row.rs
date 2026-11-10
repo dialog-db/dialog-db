@@ -1,5 +1,5 @@
 use base58::{FromBase58, ToBase58};
-use dialog_corpus::{Artifact, Cause, Entity, Relation, Value};
+use dialog_corpus::{Cause, Entity, Fact, Relation, Value};
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 
@@ -7,7 +7,7 @@ use dialog_corpus::DialogCorpusError;
 
 /// Intermediate CSV row representation.
 ///
-/// Converts between `Artifact` and flat text fields suitable for CSV.
+/// Converts between `Fact` and flat text fields suitable for CSV.
 /// The value is split into a type column (`as`) and the raw text
 /// payload (`is`), rather than using a tagged `type:value` encoding.
 #[derive(Serialize, Deserialize)]
@@ -71,20 +71,20 @@ fn parts_to_value(value_type: &str, is: &str) -> Result<Value, DialogCorpusError
     }
 }
 
-impl From<&Artifact> for CsvRow {
-    fn from(artifact: &Artifact) -> Self {
-        let (value_type, is) = value_to_parts(&artifact.is);
+impl From<&Fact> for CsvRow {
+    fn from(fact: &Fact) -> Self {
+        let (value_type, is) = value_to_parts(&fact.is);
         Self {
-            the: artifact.the.to_string(),
-            of: artifact.of.to_string(),
+            the: fact.the.to_string(),
+            of: fact.of.to_string(),
             value_type: value_type.to_string(),
             is,
-            cause: artifact.cause.as_ref().map(|c| c.to_base58()),
+            cause: fact.cause.as_ref().map(|c| c.to_base58()),
         }
     }
 }
 
-impl TryFrom<CsvRow> for Artifact {
+impl TryFrom<CsvRow> for Fact {
     type Error = DialogCorpusError;
 
     fn try_from(row: CsvRow) -> Result<Self, Self::Error> {
@@ -105,6 +105,6 @@ impl TryFrom<CsvRow> for Artifact {
             })
             .transpose()?;
 
-        Ok(Artifact { the, of, is, cause })
+        Ok(Fact { the, of, is, cause })
     }
 }

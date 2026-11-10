@@ -185,7 +185,7 @@ where
         + ConditionalSync
         + 'static,
 {
-    use dialog_corpus::{Artifact, Instruction, Value};
+    use dialog_corpus::{Fact, Instruction, Value};
     use dialog_credentials::Ed25519Signer;
     use dialog_ucan_core::subject::Subject;
     use dialog_varsig::Principal as _;
@@ -217,7 +217,7 @@ where
         let rows: Vec<_> = (0..150)
             .map(|i| {
                 Instruction::Assert(
-                    Artifact {
+                    Fact {
                         the: "device/link".parse().expect("valid attribute"),
                         of: format!("device:{round}-{i}").parse().expect("valid entity"),
                         is: Value::String(format!("device-{round}-{i}").repeat(24)),
@@ -703,7 +703,7 @@ mod prune_tests {
 
     use anyhow::Result;
     use dialog_capability::Subject;
-    use dialog_corpus::{Artifact, DialogCorpusError, Exporter, Instruction, Pick, Value};
+    use dialog_corpus::{DialogCorpusError, Exporter, Fact, Instruction, Pick, Value};
     use dialog_effects::archive::prelude::DEFAULT_CATALOG;
     use dialog_peer::helpers::{test_session_with_peer, unique_name};
     use futures_util::stream;
@@ -722,8 +722,8 @@ mod prune_tests {
     #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
     #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
     impl Exporter for Count {
-        async fn write(&mut self, artifact: &Artifact) -> Result<(), DialogCorpusError> {
-            if artifact.the.to_string() == "prune/field" {
+        async fn write(&mut self, fact: &Fact) -> Result<(), DialogCorpusError> {
+            if fact.the.to_string() == "prune/field" {
                 *self.0.lock() += 1;
             }
             Ok(())
@@ -736,7 +736,7 @@ mod prune_tests {
 
     fn assert_fact(entity: usize) -> Instruction {
         Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "prune/field".parse().expect("a relation"),
                 of: format!("user:{entity}").parse().expect("an entity"),
                 is: Value::String("x".into()),

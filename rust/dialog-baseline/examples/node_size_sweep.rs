@@ -34,7 +34,7 @@ use dialog_baseline::repo::{DialogRepo, MeteredRepo};
 use dialog_baseline::se::SeLog;
 use dialog_common::{Blake3Hash, Buffer};
 use dialog_corpus::selector::Constrained;
-use dialog_corpus::{ArtifactSelector, Entity, Relation, Value};
+use dialog_corpus::{Entity, Relation, Selector, Value};
 
 /// Counts the branch's archive traffic and keeps the size of every
 /// distinct block it ever wrote.
@@ -66,7 +66,7 @@ async fn profile(
     repo: &MeteredRepo<Sweep>,
     tally: &Tally,
     label: &str,
-    selectors: Vec<ArtifactSelector<Constrained>>,
+    selectors: Vec<Selector<Constrained>>,
 ) -> anyhow::Result<()> {
     let mut fetches = 0usize;
     let mut bytes = 0usize;
@@ -174,7 +174,7 @@ fn main() -> anyhow::Result<()> {
             let before = (tally.reads(), tally.read_bytes());
             let cold = repo.reopen().await?;
             // Force the root fetch that a first query would pay.
-            let selector = ArtifactSelector::new()
+            let selector = Selector::new()
                 .the(Relation::from_str("se.post/kind")?)
                 .of(Entity::from_str(&titled[0])?);
             repo.collect_from(&cold, selector).await?;
@@ -185,7 +185,7 @@ fn main() -> anyhow::Result<()> {
         let title_gets = titled
             .iter()
             .map(|post| {
-                Ok(ArtifactSelector::new()
+                Ok(Selector::new()
                     .the(Relation::from_str("se.post/title")?)
                     .of(Entity::from_str(post)?))
             })
@@ -194,7 +194,7 @@ fn main() -> anyhow::Result<()> {
 
         let entity_loads = titled
             .iter()
-            .map(|post| Ok(ArtifactSelector::new().of(Entity::from_str(post)?)))
+            .map(|post| Ok(Selector::new().of(Entity::from_str(post)?)))
             .collect::<anyhow::Result<Vec<_>>>()?;
         profile(&repo, &tally, "entity load (of scan)", entity_loads).await?;
 
@@ -203,7 +203,7 @@ fn main() -> anyhow::Result<()> {
             &tally,
             "kind lookup (VAE)",
             vec![
-                ArtifactSelector::new()
+                Selector::new()
                     .the(Relation::from_str("se.post/kind")?)
                     .is(Value::String("question".into())),
             ],

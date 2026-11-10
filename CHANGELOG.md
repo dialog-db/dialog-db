@@ -27,9 +27,9 @@ search tree. Its storage side is named after it, and the crate
 no longer depends on a store crate. What it reads beside its nodes, a
 value spilled out of its key, it asks its environment for through
 `blob::Load`, performed in one place and checked against the reference;
-nothing in the crate reads a store by type. The model side (`Artifact`,
-`ArtifactSelector`, `ArtifactView`, the importer and exporter) keeps its
-names.
+nothing in the crate reads a store by type. The word "artifact" is
+retired: what the model called an artifact is a fact, a claim with its
+cause.
 
 What this changes for you:
 
@@ -38,6 +38,19 @@ What this changes for you:
   `ArtifactTreeExt` is `CorpusExt`, `ArtifactNodeCache` is `CorpusCache`,
   `BufferedArtifactTree` is `BufferedCorpus`, `ArtifactWriter` is
   `CorpusWriter` and `DialogArtifactsError` is `DialogCorpusError`.
+- The model side is renamed the same way. `Artifact` is `Fact`,
+  `ArtifactView` is `FactView`, `ArtifactViewStream` is `FactViewStream`,
+  `ArtifactSelector` is `Selector`, `artifact_index_keys` and
+  `artifact_index_keys_with` are `fact_index_keys` and
+  `fact_index_keys_with`, and every `from_artifact`, `to_artifact` and
+  `for_artifact` is `from_fact`, `to_fact` and `for_fact`. The module that
+  held them, `artifacts`, is `model`. In `dialog-query` the re-export
+  module `artifact` is `corpus`, and its aliases `ArtifactsRelation` and
+  `ArtifactTypeError` are `CorpusRelation` and `CorpusTypeError`. `Fact`
+  prints as `Fact` in its `Debug` and `Display` forms.
+- The nightly fuzz soak is `soak:facts`, run by `--test fact_fuzz`, and
+  reads `DIALOG_FACT_FUZZ_SEEDS` and `DIALOG_FACT_FUZZ_OPS` where it read
+  `DIALOG_ARTIFACT_FUZZ_*`.
 - `dialog-corpus` does not depend on `dialog-storage`. `Blake3Hash` is
   still `[u8; 32]` and is defined in the crate; the `HashType` re-export
   is gone (it is `dialog_storage::HashType`). `IndexRoot`, a CBOR wrapper

@@ -1,9 +1,9 @@
 use dialog_capability::Command;
 
 use crate::selector::Constrained;
-use crate::{ArtifactSelector, DialogCorpusError};
+use crate::{DialogCorpusError, Selector};
 
-/// Command for estimating how many artifacts a selector's key range spans,
+/// Command for estimating how many facts a selector's key range spans,
 /// without scanning them.
 ///
 /// Answered from the range's two edge paths: children the range covers
@@ -20,7 +20,7 @@ use crate::{ArtifactSelector, DialogCorpusError};
 pub struct Estimate;
 
 impl Command for Estimate {
-    type Input = ArtifactSelector<Constrained>;
+    type Input = Selector<Constrained>;
     /// An advisory upper-bound entry count for the selector's range. `None`
     /// when the tree is empty or the estimate is unavailable, in which case a
     /// caller should treat the range as unknown (maximally broad).

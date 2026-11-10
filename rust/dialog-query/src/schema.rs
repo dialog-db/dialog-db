@@ -5,7 +5,7 @@
 //!
 //! As of v2, [`Field::content_type`] uses the unified
 //! [`type_system::Type`] enum rather than the legacy
-//! `Option<artifact::Type>`. The conversion between them is
+//! `Option<corpus::Type>`. The conversion between them is
 //! lossless: `None` becomes a fresh anonymous type variable,
 //! `Some(vt)` becomes `Type::Primitive(singleton(vt))`.
 
@@ -331,7 +331,7 @@ impl Group {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::artifact::Type as ValueType;
+    use crate::corpus::Type as ValueType;
     use crate::type_system::Type as Kind;
 
     #[dialog_common::test]

@@ -14,7 +14,7 @@
 
 use crate::{
     NUMBER_BAND, Value, ValueDataType,
-    artifacts::ordkey::{
+    model::ordkey::{
         decode_bool, decode_bytes, decode_f64, decode_i128, decode_u128, encode_bool, encode_bytes,
         encode_f64, encode_i128, encode_u128,
     },

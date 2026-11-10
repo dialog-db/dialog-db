@@ -8,9 +8,7 @@ use core::pin::Pin;
 use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
 use dialog_corpus::selector::Constrained;
-use dialog_corpus::{
-    ArtifactSelector, Estimate, Likelihood, Preload, PreloadRequest, encode_value_owned,
-};
+use dialog_corpus::{Estimate, Likelihood, Preload, PreloadRequest, Selector, encode_value_owned};
 use futures_util::{StreamExt, stream};
 use std::collections::HashSet;
 
@@ -290,13 +288,13 @@ impl Conjunction {
             // attribute it reads and which fields pin it, which every row
             // shares, and estimating every scan's range again for every
             // row walks the tree about as much as the scan itself would.
-            let fingerprint = |row: &Match| -> Vec<Option<ArtifactSelector<Constrained>>> {
+            let fingerprint = |row: &Match| -> Vec<Option<Selector<Constrained>>> {
                 scans.iter().map(|scan| scan.resolved_selector(row)).collect()
             };
             let mut decided: Option<bool> = None;
 
             let mut listening = true;
-            let mut hinted: HashSet<ArtifactSelector<Constrained>> = HashSet::new();
+            let mut hinted: HashSet<Selector<Constrained>> = HashSet::new();
             while let Some(first) = selection.next().await {
                 let first = first?;
                 let shape = fingerprint(&first);
@@ -433,7 +431,7 @@ impl MergeInput {
 
     /// What this input reads given a row's bindings, for a stored scan;
     /// a relation resolves nothing ahead of evaluation.
-    fn resolved_selector(&self, row: &Match) -> Option<ArtifactSelector<Constrained>> {
+    fn resolved_selector(&self, row: &Match) -> Option<Selector<Constrained>> {
         match self {
             MergeInput::Scan(scan) => scan.resolved_selector(row).ok(),
             MergeInput::Relation(_) => None,

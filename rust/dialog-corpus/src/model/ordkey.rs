@@ -37,7 +37,7 @@ const TERMINATOR: u8 = 0x00;
 /// terminator followed by that first byte reads back as an escaped zero and
 /// the key no longer parses (byte ORDER is unaffected — the encoding stays
 /// prefix-free — but a parse failure downstream degrades to the max-parts
-/// fallback, which is how the Replace data-loss bug happened). Real artifact
+/// fallback, which is how the Replace data-loss bug happened). Real fact
 /// keys satisfy this (UTF-8 fields and small tag bytes never start with
 /// `0xFF`); synthetic bounds must too, which is why `varkey`'s max filler
 /// byte is `0xFE`.

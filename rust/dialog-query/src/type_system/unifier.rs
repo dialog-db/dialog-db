@@ -9,7 +9,7 @@
 //! [`StaticType`]. Lifting between layers happens via [`lift`]
 //! and [`Context::infer`].
 
-use crate::artifact::Type as ValueType;
+use crate::corpus::Type as ValueType;
 use crate::type_system::Primitive;
 use crate::type_system::Type as StaticType;
 use serde::{Deserialize, Serialize};

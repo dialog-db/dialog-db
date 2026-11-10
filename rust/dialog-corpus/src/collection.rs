@@ -1,7 +1,7 @@
 //! Typed keyed views over a domain's claims: [`Directory`] and
 //! [`Sequence`].
 //!
-//! A domain scan ([`crate::ArtifactSelector::with_domain`]) yields
+//! A domain scan ([`crate::Selector::with_domain`]) yields
 //! every claim whose attribute lives under one domain, ordered by the
 //! raw bytes of the attribute's name half. That name half admits two
 //! syntactically disjoint shapes (see [`Name`]), and each shape has a
@@ -19,13 +19,13 @@
 //! right collection without a tag:
 //!
 //! ```no_run
-//! # use dialog_corpus::{Artifact, Directory, Sequence, Value};
-//! # fn collect(artifacts: Vec<Artifact>) {
+//! # use dialog_corpus::{Fact, Directory, Sequence, Value};
+//! # fn collect(facts: Vec<Fact>) {
 //! let mut fields: Directory<Value> = Directory::new();
 //! let mut members: Sequence<Value> = Sequence::new();
-//! for artifact in artifacts {
-//!     if !fields.admit(&artifact.the, artifact.is.clone()) {
-//!         members.admit(&artifact.the, artifact.is);
+//! for fact in facts {
+//!     if !fields.admit(&fact.the, fact.is.clone()) {
+//!         members.admit(&fact.the, fact.is);
 //!     }
 //! }
 //! # }

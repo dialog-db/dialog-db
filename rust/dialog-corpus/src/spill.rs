@@ -245,7 +245,7 @@ mod tests {
     use super::*;
     use crate::ArchiveDelta;
     use crate::tree::CorpusExt;
-    use crate::{Artifact, Instruction, Value};
+    use crate::{Fact, Instruction, Value};
     use dialog_search_tree::helpers::Blocks;
     use futures_util::{TryStreamExt, stream};
 
@@ -268,7 +268,7 @@ mod tests {
                 &store,
                 &mut delta,
                 stream::iter(vec![Instruction::Assert(
-                    Artifact {
+                    Fact {
                         the: "doc/body".parse().unwrap(),
                         of: "doc:1".parse().unwrap(),
                         is: value.clone(),
@@ -298,7 +298,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_ignores_tombstones_at_spilled_keys() -> Result<(), DialogCorpusError> {
         let inline_n = dialog_search_tree::Manifest::default().inline_n as usize;
-        let artifact = Artifact {
+        let fact = Fact {
             the: "doc/body".parse().unwrap(),
             of: "doc:1".parse().unwrap(),
             is: Value::String("z".repeat(inline_n + 1)),
@@ -313,10 +313,7 @@ mod tests {
         base.apply(
             &store,
             &mut delta,
-            stream::iter(vec![Instruction::Assert(
-                artifact.clone(),
-                crate::Pick::All,
-            )]),
+            stream::iter(vec![Instruction::Assert(fact.clone(), crate::Pick::All)]),
         )
         .await?;
         delta.flush_into(&store);
@@ -327,7 +324,7 @@ mod tests {
             .apply(
                 &store,
                 &mut delta,
-                stream::iter(vec![Instruction::Retract(artifact)]),
+                stream::iter(vec![Instruction::Retract(fact)]),
             )
             .await?;
         delta.flush_into(&store);
@@ -356,13 +353,13 @@ mod tests {
         use crate::history::{Edition, Origin, Version};
 
         let inline_n = dialog_search_tree::Manifest::default().inline_n as usize;
-        let artifact = Artifact {
+        let fact = Fact {
             the: "doc/body".parse().unwrap(),
             of: "doc:1".parse().unwrap(),
             is: Value::String("z".repeat(inline_n + 1)),
             cause: None,
         };
-        let reference = artifact.is.to_reference();
+        let reference = fact.is.to_reference();
 
         let store = Blocks::new();
         let mut delta = ArchiveDelta::zero();
@@ -378,10 +375,7 @@ mod tests {
                 &store,
                 &mut delta,
                 Some(Version::new(Origin::from([1u8; 32]), Edition::new(0))),
-                stream::iter(vec![Instruction::Assert(
-                    artifact.clone(),
-                    crate::Pick::All,
-                )]),
+                stream::iter(vec![Instruction::Assert(fact.clone(), crate::Pick::All)]),
             )
             .await?;
         delta.flush_into(&store);
@@ -390,7 +384,7 @@ mod tests {
                 &store,
                 &mut delta,
                 Some(Version::new(Origin::from([1u8; 32]), Edition::new(1))),
-                stream::iter(vec![Instruction::Retract(artifact)]),
+                stream::iter(vec![Instruction::Retract(fact)]),
             )
             .await?;
         delta.flush_into(&store);
@@ -418,7 +412,7 @@ mod tests {
         use crate::history::{Edition, Origin, Version};
 
         // An INLINE value: small, so no spill block exists anywhere.
-        let artifact = Artifact {
+        let fact = Fact {
             the: "user/name".parse().unwrap(),
             of: "user:1".parse().unwrap(),
             is: Value::String("Alice".to_string()),
@@ -435,10 +429,7 @@ mod tests {
                 &store,
                 &mut delta,
                 Some(Version::new(Origin::from([2u8; 32]), Edition::new(0))),
-                stream::iter(vec![Instruction::Assert(
-                    artifact.clone(),
-                    crate::Pick::All,
-                )]),
+                stream::iter(vec![Instruction::Assert(fact.clone(), crate::Pick::All)]),
             )
             .await?;
         delta.flush_into(&store);
@@ -448,7 +439,7 @@ mod tests {
                 &store,
                 &mut delta,
                 Some(Version::new(Origin::from([2u8; 32]), Edition::new(1))),
-                stream::iter(vec![Instruction::Retract(artifact)]),
+                stream::iter(vec![Instruction::Retract(fact)]),
             )
             .await?;
         delta.flush_into(&store);
@@ -473,7 +464,7 @@ mod tests {
                 &store,
                 &mut delta,
                 stream::iter(vec![Instruction::Assert(
-                    Artifact {
+                    Fact {
                         the: "user/name".parse().unwrap(),
                         of: "user:1".parse().unwrap(),
                         is: Value::String("Alice".to_string()),

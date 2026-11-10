@@ -6,23 +6,22 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use crate::selector::Constrained;
-use crate::{ArtifactSelector, ArtifactView, DialogCorpusError};
+use crate::{DialogCorpusError, FactView, Selector};
 
-/// A boxed stream of artifact query results, as borrowed-access
-/// [`ArtifactView`]s: read fields off each row, or call
-/// [`ArtifactView::to_owned`] where ownership is genuinely needed.
+/// A boxed stream of fact query results, as borrowed-access
+/// [`FactView`]s: read fields off each row, or call
+/// [`FactView::to_owned`] where ownership is genuinely needed.
 #[cfg(not(target_arch = "wasm32"))]
-pub type ArtifactStream<'a> =
-    Pin<Box<dyn Stream<Item = Result<ArtifactView, DialogCorpusError>> + Send + 'a>>;
+pub type FactStream<'a> =
+    Pin<Box<dyn Stream<Item = Result<FactView, DialogCorpusError>> + Send + 'a>>;
 
-/// A boxed stream of artifact query results, as borrowed-access
-/// [`ArtifactView`]s: read fields off each row, or call
-/// [`ArtifactView::to_owned`] where ownership is genuinely needed.
+/// A boxed stream of fact query results, as borrowed-access
+/// [`FactView`]s: read fields off each row, or call
+/// [`FactView::to_owned`] where ownership is genuinely needed.
 #[cfg(target_arch = "wasm32")]
-pub type ArtifactStream<'a> =
-    Pin<Box<dyn Stream<Item = Result<ArtifactView, DialogCorpusError>> + 'a>>;
+pub type FactStream<'a> = Pin<Box<dyn Stream<Item = Result<FactView, DialogCorpusError>> + 'a>>;
 
-/// Command for selecting artifacts from a source.
+/// Command for selecting facts from a source.
 ///
 /// The lifetime parameter `'a` ties the output stream to the provider,
 /// allowing the stream to borrow from the environment.
@@ -31,8 +30,8 @@ pub struct Select<'a> {
 }
 
 impl<'a> Command for Select<'a> {
-    type Input = ArtifactSelector<Constrained>;
-    type Output = Result<ArtifactStream<'a>, DialogCorpusError>;
+    type Input = Selector<Constrained>;
+    type Output = Result<FactStream<'a>, DialogCorpusError>;
 }
 
 /// How confident the requester is that a preloaded range will be read.
@@ -64,7 +63,7 @@ impl From<Likelihood> for dialog_common::Priority {
 #[derive(Debug, Clone)]
 pub struct PreloadRequest {
     /// The selector whose backing blocks are wanted.
-    pub selector: ArtifactSelector<Constrained>,
+    pub selector: Selector<Constrained>,
     /// How the request ranks against other speculative work.
     pub likelihood: Likelihood,
 }
@@ -151,8 +150,8 @@ struct QueueState {
 /// selector: a hint for a range already pending is not a second job.
 #[derive(Debug, Default)]
 struct Rank {
-    order: VecDeque<ArtifactSelector<Constrained>>,
-    pending: HashSet<ArtifactSelector<Constrained>>,
+    order: VecDeque<Selector<Constrained>>,
+    pending: HashSet<Selector<Constrained>>,
 }
 
 impl Rank {
@@ -161,13 +160,13 @@ impl Rank {
     }
 
     /// Enqueue unless the selector is already pending.
-    fn push(&mut self, selector: ArtifactSelector<Constrained>) {
+    fn push(&mut self, selector: Selector<Constrained>) {
         if self.pending.insert(selector.clone()) {
             self.order.push_back(selector);
         }
     }
 
-    fn pop(&mut self) -> Option<ArtifactSelector<Constrained>> {
+    fn pop(&mut self) -> Option<Selector<Constrained>> {
         let selector = self.order.pop_front()?;
         self.pending.remove(&selector);
         Some(selector)
@@ -257,7 +256,7 @@ impl PreloadQueue {
         &self,
         likely_spare: bool,
         maybe_spare: bool,
-    ) -> Option<(ArtifactSelector<Constrained>, Likelihood)> {
+    ) -> Option<(Selector<Constrained>, Likelihood)> {
         let mut state = self.state.lock();
         if likely_spare && let Some(selector) = state.likely.pop() {
             return Some((selector, Likelihood::Likely));
@@ -276,8 +275,8 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-    fn selector(attribute: &str) -> ArtifactSelector<Constrained> {
-        ArtifactSelector::new().the(attribute.parse().expect("a valid attribute"))
+    fn selector(attribute: &str) -> Selector<Constrained> {
+        Selector::new().the(attribute.parse().expect("a valid attribute"))
     }
 
     fn hint(attribute: &str, likelihood: Likelihood) -> PreloadRequest {

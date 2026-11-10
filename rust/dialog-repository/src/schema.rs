@@ -86,7 +86,7 @@ impl EntityExt for Entity {
 /// DIDs and entities share the `did:method:identifier` URI shape, so
 /// a DID string always parses as a valid [`Entity`]. Dialog treats
 /// the two as distinct concerns — "a cryptographic identifier"
-/// vs. "the subject of artifacts" — but when a schema concept's
+/// vs. "the subject of facts" — but when a schema concept's
 /// identity *is* a DID (a profile, a repository subject), the DID is
 /// also the concept's `this` entity.
 pub trait DidExt {

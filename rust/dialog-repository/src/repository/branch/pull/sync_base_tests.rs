@@ -23,7 +23,7 @@ use std::env;
 use anyhow::Result;
 use dialog_capability::Subject;
 use dialog_corpus::history::{Edition, Origin, Version, context_of};
-use dialog_corpus::{Artifact, ArtifactSelector, Instruction, Pick, Value};
+use dialog_corpus::{Fact, Instruction, Pick, Selector, Value};
 use dialog_effects::authority::{Identify, OperatorExt as _};
 use dialog_peer::helpers::{test_session_with_peer, unique_name};
 use futures_util::{StreamExt as _, stream};
@@ -31,8 +31,8 @@ use futures_util::{StreamExt as _, stream};
 use crate::repository::branch::upstream::Bases;
 use crate::{HeldCaches, RepositoryExt as _, Revision, TreeReference};
 
-fn title(of: &str) -> Artifact {
-    Artifact {
+fn title(of: &str) -> Fact {
+    Fact {
         the: "post/title".parse().expect("attribute parses"),
         of: of.parse().expect("entity parses"),
         is: Value::String("body".to_string()),
@@ -46,7 +46,7 @@ fn retract_one(of: &str) -> Instruction {
 
 fn assert_one(of: &str) -> Instruction {
     Instruction::Assert(
-        Artifact {
+        Fact {
             the: "post/title".parse().expect("attribute parses"),
             of: of.parse().expect("entity parses"),
             is: Value::String("body".to_string()),
@@ -148,7 +148,7 @@ macro_rules! titles {
     ($branch:expr, $env:expr) => {{
         let rows = $branch
             .claims()
-            .select(ArtifactSelector::new().the("post/title".parse()?))
+            .select(Selector::new().the("post/title".parse()?))
             .to_owned()
             .perform($env)
             .await?
@@ -170,7 +170,7 @@ macro_rules! claims {
         for the in ["post/title", "post/state"] {
             let rows = $branch
                 .claims()
-                .select(ArtifactSelector::new().the(the.parse()?))
+                .select(Selector::new().the(the.parse()?))
                 .to_owned()
                 .perform($env)
                 .await?
@@ -1236,8 +1236,8 @@ impl Claim {
         }
     }
 
-    fn artifact(&self) -> Artifact {
-        Artifact {
+    fn fact(&self) -> Fact {
+        Fact {
             the: self.the.parse().expect("attribute parses"),
             of: self.of.parse().expect("entity parses"),
             is: Value::String(self.is.clone()),
@@ -1252,10 +1252,10 @@ impl Claim {
         } else {
             Pick::All
         };
-        Instruction::Assert(self.artifact(), pick)
+        Instruction::Assert(self.fact(), pick)
     }
 
     fn retract(&self) -> Instruction {
-        Instruction::Retract(self.artifact())
+        Instruction::Retract(self.fact())
     }
 }

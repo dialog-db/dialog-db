@@ -12,7 +12,7 @@ use crate::{
 use anyhow::Result;
 use base58::ToBase58;
 use dialog_capability::Subject;
-use dialog_corpus::{Artifact, Entity, Relation, Value};
+use dialog_corpus::{Entity, Fact, Relation, Value};
 use dialog_credentials::{Ed25519Signer, SignerCredential};
 use dialog_effects::credential::CredentialError;
 use dialog_effects::storage::{Directory, Location};
@@ -196,7 +196,7 @@ pub async fn test_repo<M: Mode>(
 
 /// Generate deterministic test data consisting of facts that reference a
 /// specified number of [`Entity`]s.
-pub fn generate_data(entity_count: usize) -> Result<Vec<Artifact>> {
+pub fn generate_data(entity_count: usize) -> Result<Vec<Fact>> {
     let item_id_attribute = Relation::from_str("item/id")?;
     let item_name_attribute = Relation::from_str("item/name")?;
     let item_pointer_attribute = Relation::from_str("attribute/pointer")?;
@@ -214,21 +214,21 @@ pub fn generate_data(entity_count: usize) -> Result<Vec<Artifact>> {
     for i in 0..entity_count {
         let entity = make_entity();
 
-        data.push(Artifact {
+        data.push(Fact {
             the: item_pointer_attribute.clone(),
             of: entity.clone(),
             is: Value::Symbol(parent_attribute.clone()),
             cause: None,
         });
 
-        data.push(Artifact {
+        data.push(Fact {
             the: item_id_attribute.clone(),
             of: entity.clone(),
             is: Value::UnsignedInt(i as u128),
             cause: None,
         });
 
-        data.push(Artifact {
+        data.push(Fact {
             the: item_name_attribute.clone(),
             of: entity.clone(),
             is: Value::String(format!("name{i}")),
@@ -236,7 +236,7 @@ pub fn generate_data(entity_count: usize) -> Result<Vec<Artifact>> {
         });
 
         if let Some(parent_entity) = last_entity {
-            data.push(Artifact {
+            data.push(Fact {
                 the: parent_attribute.clone(),
                 of: entity.clone(),
                 is: Value::Entity(parent_entity.clone()),
@@ -244,7 +244,7 @@ pub fn generate_data(entity_count: usize) -> Result<Vec<Artifact>> {
             });
         }
 
-        data.push(Artifact {
+        data.push(Fact {
             the: back_reference_attribute.clone(),
             of: make_entity(),
             is: Value::Entity(entity.clone()),

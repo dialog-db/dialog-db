@@ -33,7 +33,7 @@ use dialog_common::Holds;
 use dialog_common::{Blake3Hash, ConditionalSync};
 use dialog_corpus::history::{Context, context_of};
 use dialog_corpus::{
-    ATTRIBUTE_KEY_TAG, ArchiveDelta, Artifact, BLOB_KEY_TAG, COVERAGE_KEY_TAG, ENTITY_KEY_TAG,
+    ATTRIBUTE_KEY_TAG, ArchiveDelta, BLOB_KEY_TAG, COVERAGE_KEY_TAG, ENTITY_KEY_TAG, Fact,
     HISTORY_KEY_TAG, Instruction, VALUE_KEY_TAG, Value,
 };
 use dialog_effects::archive::Load;
@@ -90,7 +90,7 @@ fn print_resident_peak() {
 
 fn assert_fact(entity: usize, value: &str) -> Instruction {
     Instruction::Assert(
-        Artifact {
+        Fact {
             the: "bench/field".parse().unwrap(),
             of: format!("user:{entity}").parse().unwrap(),
             is: Value::String(value.to_string()),

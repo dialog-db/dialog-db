@@ -3,9 +3,7 @@ use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::ConditionalSync;
 use dialog_corpus::tree::CorpusNode;
 use dialog_corpus::tree::fetch_spilled;
-use dialog_corpus::{
-    Artifact, DialogCorpusError, EntityKey, Exporter, Key, KeyViewConstruct, State,
-};
+use dialog_corpus::{DialogCorpusError, EntityKey, Exporter, Fact, Key, KeyViewConstruct, State};
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::prelude::ArchiveScope;
 use dialog_effects::archive::{Get, Put};
@@ -18,7 +16,7 @@ use futures_util::TryStreamExt;
 use crate::repository::archive::erased;
 use crate::{Branch, Index, RemoteSite};
 
-/// Command struct for exporting all artifacts from a branch.
+/// Command struct for exporting all facts from a branch.
 pub struct Export<'a, E> {
     branch: &'a Branch,
     exporter: E,
@@ -31,7 +29,7 @@ impl<'a, E> Export<'a, E> {
 }
 
 impl<E: Exporter> Export<'_, E> {
-    /// Execute the export, writing all artifacts to the exporter.
+    /// Execute the export, writing all facts to the exporter.
     pub async fn perform<Env>(self, env: &Env) -> Result<(), DialogCorpusError>
     where
         Env: Provider<BlobRead>
@@ -76,8 +74,8 @@ impl<E: Exporter> Export<'_, E> {
         while let Some(entry) = stream.try_next().await? {
             if let State::Added(datum) = &entry.value {
                 let spilled = fetch_spilled(&raw_store, &archive, &entry.key).await?;
-                let artifact = Artifact::from_key_datum_with_value(&entry.key, datum, spilled)?;
-                exporter.write(&artifact).await?;
+                let fact = Fact::from_key_datum_with_value(&entry.key, datum, spilled)?;
+                exporter.write(&fact).await?;
             }
         }
 

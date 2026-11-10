@@ -79,8 +79,8 @@ use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::ConditionalSync;
 use dialog_corpus::tree::CorpusNode;
 use dialog_corpus::{
-    Artifact, Asset, BlobIndexExt as _, BlobRecord, DialogCorpusError, Entity, Instruction,
-    Relation, Value,
+    Asset, BlobIndexExt as _, BlobRecord, DialogCorpusError, Entity, Fact, Instruction, Relation,
+    Value,
 };
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::{Get, Import, Put};
@@ -156,8 +156,8 @@ impl<'a> Delegations<'a> {
 }
 
 /// One fact on the delegation's entity.
-fn field(entity: &Entity, attribute: &str, value: Value) -> Result<Artifact, DialogCorpusError> {
-    Ok(Artifact {
+fn field(entity: &Entity, attribute: &str, value: Value) -> Result<Fact, DialogCorpusError> {
+    Ok(Fact {
         the: Relation::try_from(attribute.to_string())?,
         of: entity.clone(),
         is: value,
@@ -169,15 +169,15 @@ fn field(entity: &Entity, attribute: &str, value: Value) -> Result<Artifact, Dia
 ///
 /// Exactly the queried fields: policy, meta, and nonce stay inside the
 /// envelope, which the entity's blob carries byte-identical.
-fn field_artifacts(
+fn field_facts(
     entity: &Entity,
     certificate: &UcanCertificate,
-) -> Result<Vec<Artifact>, DialogCorpusError> {
+) -> Result<Vec<Fact>, DialogCorpusError> {
     let subject = match certificate.subject() {
         Some(did) => did.to_string(),
         None => ANY_SUBJECT.to_string(),
     };
-    let mut artifacts = vec![
+    let mut facts = vec![
         field(
             entity,
             DELEGATION_AUDIENCE,
@@ -196,26 +196,26 @@ fn field_artifacts(
         )?,
     ];
     if let Some(expiration) = certificate.0.expiration() {
-        artifacts.push(field(
+        facts.push(field(
             entity,
             DELEGATION_EXPIRATION,
             Value::UnsignedInt(expiration.to_unix() as u128),
         )?);
     }
     if let Some(not_before) = certificate.0.not_before() {
-        artifacts.push(field(
+        facts.push(field(
             entity,
             DELEGATION_NOT_BEFORE,
             Value::UnsignedInt(not_before.to_unix() as u128),
         )?);
     }
-    Ok(artifacts)
+    Ok(facts)
 }
 
 /// A certificate's encoded envelope, as [`CommitError`].
 fn encode(certificate: &UcanCertificate) -> Result<Vec<u8>, CommitError> {
     certificate.encode().map_err(|error| {
-        CommitError::Artifact(DialogCorpusError::InvalidValue(format!(
+        CommitError::Fact(DialogCorpusError::InvalidValue(format!(
             "failed to encode delegation envelope: {error}"
         )))
     })
@@ -297,8 +297,8 @@ impl RetainDelegation<'_> {
             }
 
             let entity = Entity::from_blob(&index_hash)?;
-            for artifact in field_artifacts(&entity, &certificate)? {
-                instructions.push(Instruction::Assert(artifact, dialog_corpus::Pick::All));
+            for fact in field_facts(&entity, &certificate)? {
+                instructions.push(Instruction::Assert(fact, dialog_corpus::Pick::All));
             }
             let envelope = Asset::stored(index_hash, bytes.len() as u64);
             instructions.push(Instruction::Assert(
@@ -404,8 +404,8 @@ impl RetractDelegation<'_> {
             let entity = Entity::from_blob(&index_hash)?;
             let legacy = Entity::from_legacy_blob(&index_hash)?;
             for holder in [&entity, &legacy] {
-                for artifact in field_artifacts(holder, &certificate)? {
-                    instructions.push(Instruction::Retract(artifact));
+                for fact in field_facts(holder, &certificate)? {
+                    instructions.push(Instruction::Retract(fact));
                 }
             }
             if let Some(size) = asset {
@@ -445,7 +445,7 @@ mod tests {
     use crate::{Blob, RepositoryExt as _};
     use anyhow::Result;
     use dialog_capability::Subject;
-    use dialog_corpus::ArtifactSelector;
+    use dialog_corpus::Selector;
     use dialog_credentials::Ed25519Signer;
     use dialog_effects::blob::BlobReader;
     use dialog_effects::storage::Location;
@@ -510,7 +510,7 @@ mod tests {
     /// has, so a replica downloading the head failed on it.
     #[dialog_common::test]
     async fn it_exports_a_branch_whose_retained_delegation_was_retracted() -> Result<()> {
-        use dialog_corpus::{Artifact, Instruction, Value};
+        use dialog_corpus::{Fact, Instruction, Value};
 
         let (branch, operator) = open_branch("delegation-retract-export").await?;
         let space = Ed25519Signer::generate().await?;
@@ -527,7 +527,7 @@ mod tests {
         for round in 0..64 {
             let facts = (0..32).map(|fact| {
                 Instruction::Assert(
-                    Artifact {
+                    Fact {
                         the: "test/fact".parse().expect("a valid attribute"),
                         of: format!("test:{round}-{fact}")
                             .parse()
@@ -578,7 +578,7 @@ mod tests {
         // The slim facts stand on the envelope's entity.
         let facts: Vec<_> = branch
             .claims()
-            .select(ArtifactSelector::new().of(entity.clone()))
+            .select(Selector::new().of(entity.clone()))
             .perform(&operator)
             .await?
             .collect::<Vec<_>>()
@@ -640,7 +640,7 @@ mod tests {
             .await?;
         let facts: Vec<_> = branch
             .claims()
-            .select(ArtifactSelector::new().of(entities[0].clone()))
+            .select(Selector::new().of(entities[0].clone()))
             .perform(&operator)
             .await?
             .collect::<Vec<_>>()
@@ -709,7 +709,7 @@ mod tests {
         // Facts gone, index reference gone...
         let facts: Vec<_> = branch
             .claims()
-            .select(ArtifactSelector::new().of(entity.clone()))
+            .select(Selector::new().of(entity.clone()))
             .perform(&operator)
             .await?
             .collect::<Vec<_>>()
@@ -753,10 +753,10 @@ mod tests {
         branch: &crate::Branch,
         operator: &Peer<VolatileSpace, Session>,
         entity: &Entity,
-    ) -> Result<Vec<Artifact>> {
+    ) -> Result<Vec<Fact>> {
         Ok(branch
             .claims()
-            .select(ArtifactSelector::new().of(entity.clone()))
+            .select(Selector::new().of(entity.clone()))
             .perform(operator)
             .await?
             .collect::<Vec<_>>()
@@ -789,8 +789,8 @@ mod tests {
             sink.write_all(&bytes).await?;
             let hash = *sink.finish().await?.as_bytes();
             let entity = Entity::from_legacy_blob(&hash)?;
-            for artifact in field_artifacts(&entity, &certificate)? {
-                instructions.push(Instruction::Assert(artifact, dialog_corpus::Pick::All));
+            for fact in field_facts(&entity, &certificate)? {
+                instructions.push(Instruction::Assert(fact, dialog_corpus::Pick::All));
             }
             entries.push(BlobRecord::new(bytes.len() as u64).legacy_entry(&hash));
             legacy.push(entity);
@@ -844,7 +844,7 @@ mod tests {
 
         let result = branch
             .commit(stream::iter(vec![Instruction::Assert(
-                Artifact {
+                Fact {
                     the: DELEGATION_AUDIENCE.parse()?,
                     of: "user:mallory".parse()?,
                     is: Value::String("did:key:zForged".to_string()),
@@ -858,9 +858,7 @@ mod tests {
         assert!(
             matches!(
                 result,
-                Err(CommitError::Artifact(DialogCorpusError::ReservedRelation(
-                    _
-                )))
+                Err(CommitError::Fact(DialogCorpusError::ReservedRelation(_)))
             ),
             "application commits must not write dialog.ucan facts"
         );

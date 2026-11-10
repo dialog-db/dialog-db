@@ -1,7 +1,7 @@
-use crate::artifact::Cause;
 use crate::attribute::Attribute;
 use crate::attribute::AttributeDescriptor;
 use crate::attribute::statement::AttributeStatement;
+use crate::corpus::Cause;
 use crate::descriptor::Descriptor;
 use crate::negation::Negation;
 use crate::statement::Statement;
@@ -280,7 +280,7 @@ mod tests {
     use crate::Cardinality;
     use crate::Changes;
     use crate::Match;
-    use crate::artifact::Value;
+    use crate::corpus::Value;
     use crate::premise::Premise;
     use crate::proposition::Proposition;
     use crate::session::RuleRegistry;

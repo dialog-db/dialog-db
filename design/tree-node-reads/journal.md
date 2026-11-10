@@ -791,3 +791,29 @@ overlay's `archive::Load`, `Get` and `Holds` were what an accessor over a
 batch's staged nodes would have needed; none exists, and the compile
 confirmed it. The `CatalogScope` every corpus operation carries is as it
 was.
+
+## 2026-11-10, Building: "artifact" is retired, and a fact is a claim with its cause
+
+**Asked.** The maintainer, after the corpus rename: there should be no
+`Artifact` types either; the whole artifact naming needs retiring. Asked
+whether `dialog_query::Claim` should absorb it, they drew a distinction:
+a claim is without a cause, a fact is with one.
+
+**Learned.** By that distinction the model's `Artifact { the, of, is,
+cause }` is a fact, and so are the two types already called `Claim`
+(`dialog_query::Claim`, whose cause is a zero hash when unknown, and
+`history::Claim`, whose cause is a set of versions). No type in the
+workspace is a claim in this sense. The selector is free to be `Selector`
+inside the crate: the other `Selector`s (`dialog_capability`,
+`dialog-ucan-core`) are never imported beside it.
+
+**Decided.** `Artifact` is `Fact`, `ArtifactView` `FactView`,
+`ArtifactSelector` `Selector`, the `artifacts` module `model`, and every
+identifier, file and living document that used the word follows; the
+glossary separates **Claim** and **Fact**. The two existing `Claim`s keep
+their names here: splitting `Fact` into a claim and its cause, and folding
+`dialog_query::Claim` into it, change what callers see, so they are their
+own change. Build-artifact senses stay as they are (crane's
+`cargoArtifacts`, GitHub's upload artifacts), as do dated records:
+CHANGELOG release sections, this journal's earlier entries and review
+notes.

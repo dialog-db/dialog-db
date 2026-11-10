@@ -596,17 +596,17 @@ mod tests {
     use dialog_search_tree::{Link, Manifest, NoveltyEntry, NoveltyOp, PersistentNodeBody, Scale};
 
     use super::*;
-    use crate::{Artifact, Entity, EntityKey, KeyType as _, Value as ArtifactValue};
+    use crate::{Entity, EntityKey, Fact, KeyType as _, Value as CorpusValue};
 
     /// An entity-ordered key for a `test/name` fact on a fresh entity.
-    fn artifact_key(name: &str) -> Vec<u8> {
-        let fact = Artifact {
+    fn fact_key(name: &str) -> Vec<u8> {
+        let fact = Fact {
             the: "test/name".parse().expect("attribute parses"),
             of: Entity::new().expect("entity mints"),
-            is: ArtifactValue::String(name.into()),
+            is: CorpusValue::String(name.into()),
             cause: None,
         };
-        EntityKey::from_artifact(&fact, &Manifest::default())
+        EntityKey::from_fact(&fact, &Manifest::default())
             .into_key()
             .bytes()
             .to_vec()
@@ -620,7 +620,7 @@ mod tests {
         // Two keys in sort order; the second span's separator is the
         // larger key itself (a key is a prefix of itself), so `low`
         // routes left and `high` routes right.
-        let mut keys = [artifact_key("a"), artifact_key("b")];
+        let mut keys = [fact_key("a"), fact_key("b")];
         keys.sort();
         let [low, high] = keys;
 
@@ -680,7 +680,7 @@ mod tests {
     /// components; separators stay lenient.
     #[dialog_common::test]
     fn it_decomposes_key_components() {
-        let key = artifact_key("value");
+        let key = fact_key("value");
         let components = key_components(&key);
         let kinds: Vec<&str> = components.iter().map(|part| part.kind).collect();
         assert_eq!(

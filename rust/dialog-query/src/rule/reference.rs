@@ -560,8 +560,8 @@ impl ser::SerializeStructVariant for Variant<Entries> {
 mod tests {
     use super::*;
     use crate::Value;
-    use crate::artifact::Entity;
     use crate::attribute::Relation;
+    use crate::corpus::Entity;
     use crate::rule::{DeductiveRule, DeductiveRuleDescriptor};
 
     /// A constant inside a premise's wire form references as the value it

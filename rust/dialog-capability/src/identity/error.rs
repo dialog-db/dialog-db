@@ -2,7 +2,7 @@ use thiserror::Error;
 
 /// What can go wrong turning bytes or strings into a name.
 ///
-/// Narrower than the artifact-layer error it used to be a part of:
+/// Narrower than the fact-layer error it used to be a part of:
 /// naming fails for three reasons, none of which involve storage or
 /// trees, so the identity vocabulary carries its own.
 #[derive(Debug, Error, PartialEq)]

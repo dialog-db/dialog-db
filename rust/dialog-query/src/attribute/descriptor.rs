@@ -1,7 +1,7 @@
 use crate::Parameters;
-use crate::artifact::{ArtifactsRelation, Entity, Value};
 use crate::attribute::Relation;
 use crate::attribute::query::AttributeQuery;
+use crate::corpus::{CorpusRelation, Entity, Value};
 use crate::error::{FieldTypeError, TypeError};
 use crate::schema::Cardinality;
 use crate::term::Term;
@@ -26,7 +26,7 @@ use std::str::FromStr;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Attribution {
     /// The fully-qualified attribute selector.
-    pub the: ArtifactsRelation,
+    pub the: CorpusRelation,
     /// The resolved value for this attribute.
     pub is: Value,
     /// The pick the attribute reads under, which its write elects under:
@@ -163,9 +163,9 @@ impl The {
     /// The concrete attribute to write a fact under, when there is
     /// one. A collection has none: its facts are keyed per entry, so
     /// the key has to come from the writer rather than the schema.
-    pub fn attribute(&self) -> Option<ArtifactsRelation> {
+    pub fn attribute(&self) -> Option<CorpusRelation> {
         match self {
-            The::Relation(the) => Some(ArtifactsRelation::from(the)),
+            The::Relation(the) => Some(CorpusRelation::from(the)),
             The::Collection { .. } => None,
         }
     }
@@ -174,16 +174,16 @@ impl The {
     /// `domain/key`, where the key must have the collection's name
     /// shape — a position for a sequence, a symbol for a dictionary.
     /// A plain attribute ignores the key and is its own entry.
-    pub fn entry(&self, key: &str) -> Result<ArtifactsRelation, FieldTypeError> {
+    pub fn entry(&self, key: &str) -> Result<CorpusRelation, FieldTypeError> {
         match self {
-            The::Relation(the) => Ok(ArtifactsRelation::from(the)),
+            The::Relation(the) => Ok(CorpusRelation::from(the)),
             The::Collection { domain, keyed } => {
                 let mismatch = || FieldTypeError::KeyShape {
                     domain: domain.as_str().to_owned(),
                     key: key.to_owned(),
                     keyed: *keyed,
                 };
-                let attribute = ArtifactsRelation::try_from(format!("{}/{key}", domain.as_str()))
+                let attribute = CorpusRelation::try_from(format!("{}/{key}", domain.as_str()))
                     .map_err(|_| mismatch())?;
                 let (_, name) = attribute.split().map_err(|_| mismatch())?;
                 if name.shape() != NameShape::from(*keyed) {
@@ -814,7 +814,7 @@ impl From<AttributeDescriptor> for Entity {
 /// which has no single attribute — use
 /// [`The::attribute`](Relation::attribute) where that is
 /// possible.
-impl From<&AttributeDescriptor> for ArtifactsRelation {
+impl From<&AttributeDescriptor> for CorpusRelation {
     fn from(descriptor: &AttributeDescriptor) -> Self {
         descriptor
             .the
@@ -823,9 +823,9 @@ impl From<&AttributeDescriptor> for ArtifactsRelation {
     }
 }
 
-impl From<AttributeDescriptor> for ArtifactsRelation {
+impl From<AttributeDescriptor> for CorpusRelation {
     fn from(descriptor: AttributeDescriptor) -> Self {
-        ArtifactsRelation::from(&descriptor)
+        CorpusRelation::from(&descriptor)
     }
 }
 

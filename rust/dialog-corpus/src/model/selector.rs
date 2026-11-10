@@ -1,6 +1,6 @@
 #![allow(private_bounds)]
 
-//! Domain module for the [`ArtifactSelector`]
+//! Domain module for the [`Selector`]
 
 use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
@@ -8,22 +8,22 @@ use std::str::FromStr as _;
 
 use crate::{Entity, Name, NameShape, Relation, Symbol, Value, ValueDataType};
 
-/// A marker type that represents a totally open-ended [`ArtifactSelector`]
+/// A marker type that represents a totally open-ended [`Selector`]
 #[derive(Clone)]
 pub struct Unconstrained;
-impl ArtifactSelectorState for Unconstrained {}
+impl SelectorState for Unconstrained {}
 
-/// A marker type that represents an [`ArtifactSelector`] that is constrained
+/// A marker type that represents an [`Selector`] that is constrained
 /// by at least the attribute, entity or value part of a triple.
 #[derive(Debug, Clone)]
 pub struct Constrained;
-impl ArtifactSelectorState for Constrained {}
+impl SelectorState for Constrained {}
 
-trait ArtifactSelectorState {}
+trait SelectorState {}
 
 /// A one-sided bound on a [`Value`]: the bounding value and whether the bound
 /// itself is included. Used for the value range constraints
-/// ([`ArtifactSelector::is_at_least`] and friends).
+/// ([`Selector::is_at_least`] and friends).
 #[derive(Debug, Clone)]
 pub struct ValueBound {
     /// The bounding value.
@@ -34,11 +34,11 @@ pub struct ValueBound {
     /// Whether the bound compares every number as it is, rather than
     /// reading each through the lens its type names: an integer bound sees
     /// 34.5 as 34, and a natural bound does not see -3 (see
-    /// [`ArtifactSelector::across_numbers`]).
+    /// [`Selector::across_numbers`]).
     pub across: bool,
     /// The bound as a number-band key encodes it. The scan sets it when it
     /// fits the selector to a tree that keys numbers in one band
-    /// ([`ArtifactSelector::for_manifest`]), so each row is compared with
+    /// ([`Selector::for_manifest`]), so each row is compared with
     /// these bytes rather than encoding the bound per row; leave it `None`.
     pub encoded: Option<Vec<u8>>,
 }
@@ -77,58 +77,58 @@ impl ValueBound {
     }
 }
 
-/// The basic query system for selecting [`Artifact`]s from an artifact index.
+/// The basic query system for selecting [`Fact`]s from a fact index.
 /// You can assign its fields directly, but for convenience and ergonomics it is
 /// also possible to construct it incrementally with the `the`, `of` and `is`
 /// methods.
 ///
-/// When a field is specified, all [`Artifact`]s that are selected will share
+/// When a field is specified, all [`Fact`]s that are selected will share
 /// the same field value.
 ///
-/// Note that when all fields of the [`ArtifactSelector`] are `None`, it implies
-/// that all [`Artifact`]s in the index should be selected (this can
+/// Note that when all fields of the [`Selector`] are `None`, it implies
+/// that all [`Fact`]s in the index should be selected (this can
 /// be very slow and is often not what you want). To avoid this, always be sure
-/// to specify at least one field of the [`ArtifactSelector`] before submitting
+/// to specify at least one field of the [`Selector`] before submitting
 /// a query!
 #[derive(Debug, Clone)]
-pub struct ArtifactSelector<State>
+pub struct Selector<State>
 where
-    State: ArtifactSelectorState,
+    State: SelectorState,
 {
     entity: Option<Entity>,
     attribute: Option<Relation>,
     value: Option<Value>,
 
-    /// Prefix bound on the entity URI: selected [`Artifact`]s'
+    /// Prefix bound on the entity URI: selected [`Fact`]s'
     /// entities must have URIs beginning with this string. The
     /// entity key stores the full URI raw, so this bound is an
     /// exact key range.
     entity_prefix: Option<String>,
-    /// Prefix bound on the attribute name: selected [`Artifact`]s'
+    /// Prefix bound on the attribute name: selected [`Fact`]s'
     /// attributes must have names beginning with this string. The
     /// attribute key stores the full (64-byte-capped) name raw, so
     /// this bound is an exact key range.
     attribute_prefix: Option<String>,
     /// Filter on the name half of the attribute: selected
-    /// [`Artifact`]s' attributes must have this exact name after the
+    /// [`Fact`]s' attributes must have this exact name after the
     /// `/` delimiter, in any domain. A name alone does not describe a
     /// contiguous key range, so it is a per-entry filter; combined
-    /// with [`ArtifactSelector::with_domain`] the builder tightens it
+    /// with [`Selector::with_domain`] the builder tightens it
     /// to an exact attribute.
     attribute_name: Option<Name>,
     /// Constraint on the shape of the attribute's name half:
-    /// selected [`Artifact`]s' attributes must be named by a symbol
+    /// selected [`Fact`]s' attributes must be named by a symbol
     /// (dictionary entries) or by a position (ordered members).
     /// The shapes' first-byte classes are contiguous and disjoint
     /// (`A`–`Z` below `a`–`z`), so combined with a whole-domain
-    /// [`ArtifactSelector::with_domain`] prefix this narrows the
+    /// [`Selector::with_domain`] prefix this narrows the
     /// scan to the matching half of the domain's key range; on any
     /// other selector shape it is a per-entry filter. The
     /// classification is coarse (first byte only, matching the
     /// range bytes); strict [`Name`] vocabulary enforcement is the
     /// consumer's re-check.
     name_shape: Option<NameShape>,
-    /// Prefix bound on the value: selected [`Artifact`]s' values must
+    /// Prefix bound on the value: selected [`Fact`]s' values must
     /// be strings beginning with this string. The M3 value-in-key
     /// format stores the value order-preservingly in the VAE index, so
     /// this is an exact key range over the value dimension. Spilled
@@ -138,18 +138,18 @@ where
     /// containing a NUL byte cannot match past the NUL (the inline
     /// payload escapes `0x00`).
     value_prefix: Option<String>,
-    /// Lower bound on the value: selected [`Artifact`]s' values must be
+    /// Lower bound on the value: selected [`Fact`]s' values must be
     /// `>=` (or `>`, when not inclusive) this. The value sorts
     /// order-preservingly in the VAE index, so this is a key range bound;
     /// exclusivity is enforced by the per-entry re-check.
     value_lower: Option<ValueBound>,
-    /// Upper bound on the value: selected [`Artifact`]s' values must be
+    /// Upper bound on the value: selected [`Fact`]s' values must be
     /// `<=` (or `<`, when not inclusive) this.
     value_upper: Option<ValueBound>,
     state_type: PhantomData<State>,
 }
 
-impl Default for ArtifactSelector<Unconstrained> {
+impl Default for Selector<Unconstrained> {
     fn default() -> Self {
         Self::new()
     }
@@ -173,9 +173,9 @@ struct SelectorIdentity<'a> {
     value_upper: Option<(Vec<u8>, bool)>,
 }
 
-impl<State> ArtifactSelector<State>
+impl<State> Selector<State>
 where
-    State: ArtifactSelectorState,
+    State: SelectorState,
 {
     fn identity(&self) -> SelectorIdentity<'_> {
         let bound = |bound: &Option<ValueBound>| {
@@ -198,31 +198,31 @@ where
     }
 }
 
-/// Two selectors are equal when they select the same artifacts: every
+/// Two selectors are equal when they select the same facts: every
 /// constraint agrees, values compared by their key encoding. This is what
 /// lets a queue of speculative preloads hold one entry per range.
-impl<State> PartialEq for ArtifactSelector<State>
+impl<State> PartialEq for Selector<State>
 where
-    State: ArtifactSelectorState,
+    State: SelectorState,
 {
     fn eq(&self, other: &Self) -> bool {
         self.identity() == other.identity()
     }
 }
 
-impl<State> Eq for ArtifactSelector<State> where State: ArtifactSelectorState {}
+impl<State> Eq for Selector<State> where State: SelectorState {}
 
-impl<State> Hash for ArtifactSelector<State>
+impl<State> Hash for Selector<State>
 where
-    State: ArtifactSelectorState,
+    State: SelectorState,
 {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.identity().hash(state);
     }
 }
 
-impl ArtifactSelector<Unconstrained> {
-    /// Construct a new, unconstrained [`ArtifactSelector`]. It will need to be
+impl Selector<Unconstrained> {
+    /// Construct a new, unconstrained [`Selector`]. It will need to be
     /// constrained (by configuring at least an entity, attribute or value)
     /// before it can be used.
     pub fn new() -> Self {
@@ -242,14 +242,14 @@ impl ArtifactSelector<Unconstrained> {
     }
 }
 
-impl<State> ArtifactSelector<State>
+impl<State> Selector<State>
 where
-    State: ArtifactSelectorState,
+    State: SelectorState,
 {
     /// The cells this selector reads from: its entity and attribute
     /// bounds alone, with every bound on the value dropped. `None` when
     /// it bounds only the value, and so reads from every cell.
-    pub fn cells(&self) -> Option<ArtifactSelector<Constrained>> {
+    pub fn cells(&self) -> Option<Selector<Constrained>> {
         if self.entity.is_none()
             && self.attribute.is_none()
             && self.entity_prefix.is_none()
@@ -259,7 +259,7 @@ where
         {
             return None;
         }
-        Some(ArtifactSelector {
+        Some(Selector {
             entity: self.entity.clone(),
             attribute: self.attribute.clone(),
             value: None,
@@ -274,17 +274,17 @@ where
         })
     }
 
-    /// The [`Entity`] (or subject) that selected [`Artifact`]s should refer to
+    /// The [`Entity`] (or subject) that selected [`Fact`]s should refer to
     pub fn entity(&self) -> Option<&Entity> {
         self.entity.as_ref()
     }
 
-    /// The [`Relation`] (or predicate) used in any selected [`Artifact`]s
+    /// The [`Relation`] (or predicate) used in any selected [`Fact`]s
     pub fn attribute(&self) -> Option<&Relation> {
         self.attribute.as_ref()
     }
 
-    /// The [`Value`] (or object) that selected [`Artifact`]s should refer to.
+    /// The [`Value`] (or object) that selected [`Fact`]s should refer to.
     pub fn value(&self) -> Option<&Value> {
         self.value.as_ref()
     }
@@ -324,9 +324,9 @@ where
         self.value_upper.as_ref()
     }
 
-    /// Set the [`Relation`] field (the predicate) of the [`ArtifactSelector`]
-    pub fn the(self, attribute: Relation) -> ArtifactSelector<Constrained> {
-        ArtifactSelector::<Constrained> {
+    /// Set the [`Relation`] field (the predicate) of the [`Selector`]
+    pub fn the(self, attribute: Relation) -> Selector<Constrained> {
+        Selector::<Constrained> {
             attribute: Some(attribute),
             entity: self.entity,
             value: self.value,
@@ -341,9 +341,9 @@ where
         }
     }
 
-    /// Set the [`Entity`] field (the subject) of the [`ArtifactSelector`]
-    pub fn of(self, entity: Entity) -> ArtifactSelector<Constrained> {
-        ArtifactSelector::<Constrained> {
+    /// Set the [`Entity`] field (the subject) of the [`Selector`]
+    pub fn of(self, entity: Entity) -> Selector<Constrained> {
+        Selector::<Constrained> {
             attribute: self.attribute,
             entity: Some(entity),
             value: self.value,
@@ -358,9 +358,9 @@ where
         }
     }
 
-    /// Set the [`Value`] field (the object) of the [`ArtifactSelector`]
-    pub fn is(self, value: Value) -> ArtifactSelector<Constrained> {
-        ArtifactSelector::<Constrained> {
+    /// Set the [`Value`] field (the object) of the [`Selector`]
+    pub fn is(self, value: Value) -> Selector<Constrained> {
+        Selector::<Constrained> {
             attribute: self.attribute,
             entity: self.entity,
             value: Some(value),
@@ -375,13 +375,13 @@ where
         }
     }
 
-    /// Constrain selected [`Artifact`]s to attributes under `domain`
+    /// Constrain selected [`Fact`]s to attributes under `domain`
     /// — every attribute of the form `domain/<name>`. Attributes sort
     /// by their raw bytes, so a domain is a contiguous key range (one
     /// prefix scan) and the entries arrive ordered by name: symbol
     /// names lexicographically, fractional positions in list order
     /// (see [`crate::position`]).
-    pub fn with_domain(self, domain: &Symbol) -> ArtifactSelector<Constrained> {
+    pub fn with_domain(self, domain: &Symbol) -> Selector<Constrained> {
         let selector = self.the_starting_with(format!("{domain}/"));
         // A name recorded before the domain arrived can now be
         // tightened to an exact attribute.
@@ -391,13 +391,13 @@ where
         }
     }
 
-    /// Filter selected [`Artifact`]s to attributes whose name half —
+    /// Filter selected [`Fact`]s to attributes whose name half —
     /// the part after the `/` delimiter — is exactly `name`, in any
     /// domain. A name alone does not describe a contiguous key range,
     /// so it does not constrain the selector; combine it with another
-    /// constraint (an entity, or [`ArtifactSelector::with_domain`],
+    /// constraint (an entity, or [`Selector::with_domain`],
     /// which tightens the pair to an exact attribute).
-    pub fn with_name(mut self, name: impl Into<Name>) -> ArtifactSelector<State> {
+    pub fn with_name(mut self, name: impl Into<Name>) -> Selector<State> {
         let name = name.into();
         if self.attribute.is_none()
             && let Some(domain) = self
@@ -418,24 +418,24 @@ where
         self
     }
 
-    /// Constrain selected [`Artifact`]s to attributes whose name half
+    /// Constrain selected [`Fact`]s to attributes whose name half
     /// has the given shape: symbol-named dictionary entries or
     /// position-named ordered members. With a whole-domain prefix
-    /// (see [`ArtifactSelector::with_domain`]) the scan narrows to
+    /// (see [`Selector::with_domain`]) the scan narrows to
     /// the matching contiguous half of the domain's range; otherwise
     /// this is a per-entry filter, and like a bare name it does not
     /// by itself constrain the selector.
-    pub fn with_name_shape(mut self, shape: NameShape) -> ArtifactSelector<State> {
+    pub fn with_name_shape(mut self, shape: NameShape) -> Selector<State> {
         self.name_shape = Some(shape);
         self
     }
 
-    /// Constrain selected [`Artifact`]s to attributes whose name begins
+    /// Constrain selected [`Fact`]s to attributes whose name begins
     /// with `prefix`. A prefix is a constraint, so the resulting
     /// selector is [`Constrained`]; an exact attribute set via
-    /// [`ArtifactSelector::the`] takes precedence during scans.
-    pub fn the_starting_with(self, prefix: impl Into<String>) -> ArtifactSelector<Constrained> {
-        ArtifactSelector::<Constrained> {
+    /// [`Selector::the`] takes precedence during scans.
+    pub fn the_starting_with(self, prefix: impl Into<String>) -> Selector<Constrained> {
+        Selector::<Constrained> {
             attribute: self.attribute,
             entity: self.entity,
             value: self.value,
@@ -450,12 +450,12 @@ where
         }
     }
 
-    /// Constrain selected [`Artifact`]s to entities whose URI begins
+    /// Constrain selected [`Fact`]s to entities whose URI begins
     /// with `prefix`. A prefix is a constraint, so the resulting
     /// selector is [`Constrained`]; an exact entity set via
-    /// [`ArtifactSelector::of`] takes precedence during scans.
-    pub fn of_starting_with(self, prefix: impl Into<String>) -> ArtifactSelector<Constrained> {
-        ArtifactSelector::<Constrained> {
+    /// [`Selector::of`] takes precedence during scans.
+    pub fn of_starting_with(self, prefix: impl Into<String>) -> Selector<Constrained> {
+        Selector::<Constrained> {
             attribute: self.attribute,
             entity: self.entity,
             value: self.value,
@@ -470,9 +470,9 @@ where
         }
     }
 
-    /// Constrain selected [`Artifact`]s to string values beginning with
+    /// Constrain selected [`Fact`]s to string values beginning with
     /// `prefix`. A prefix is a constraint, so the resulting selector is
-    /// [`Constrained`]; an exact value set via [`ArtifactSelector::is`] takes
+    /// [`Constrained`]; an exact value set via [`Selector::is`] takes
     /// precedence during scans.
     ///
     /// The M3 value-in-key format stores the value order-preservingly in the
@@ -480,8 +480,8 @@ where
     /// begin with `prefix`. A spilled value participates through the leading
     /// bytes its key carries: a probe within that in-key prefix decides from
     /// the key alone, and a longer probe loads the value and post-filters.
-    pub fn is_starting_with(self, prefix: impl Into<String>) -> ArtifactSelector<Constrained> {
-        ArtifactSelector::<Constrained> {
+    pub fn is_starting_with(self, prefix: impl Into<String>) -> Selector<Constrained> {
+        Selector::<Constrained> {
             attribute: self.attribute,
             entity: self.entity,
             value: self.value,
@@ -496,10 +496,10 @@ where
         }
     }
 
-    /// Constrain selected [`Artifact`]s to values greater than or equal to
+    /// Constrain selected [`Fact`]s to values greater than or equal to
     /// `value` (`>= value`). The value sorts order-preservingly in the VAE
     /// index, so this bounds the scan's value sub-range from below.
-    pub fn is_at_least(self, value: Value) -> ArtifactSelector<Constrained> {
+    pub fn is_at_least(self, value: Value) -> Selector<Constrained> {
         self.with_value_lower(ValueBound {
             value,
             inclusive: true,
@@ -508,9 +508,9 @@ where
         })
     }
 
-    /// Constrain selected [`Artifact`]s to values strictly greater than
+    /// Constrain selected [`Fact`]s to values strictly greater than
     /// `value` (`> value`).
-    pub fn is_greater_than(self, value: Value) -> ArtifactSelector<Constrained> {
+    pub fn is_greater_than(self, value: Value) -> Selector<Constrained> {
         self.with_value_lower(ValueBound {
             value,
             inclusive: false,
@@ -519,9 +519,9 @@ where
         })
     }
 
-    /// Constrain selected [`Artifact`]s to values less than or equal to
+    /// Constrain selected [`Fact`]s to values less than or equal to
     /// `value` (`<= value`). Bounds the scan's value sub-range from above.
-    pub fn is_at_most(self, value: Value) -> ArtifactSelector<Constrained> {
+    pub fn is_at_most(self, value: Value) -> Selector<Constrained> {
         self.with_value_upper(ValueBound {
             value,
             inclusive: true,
@@ -530,9 +530,9 @@ where
         })
     }
 
-    /// Constrain selected [`Artifact`]s to values strictly less than `value`
+    /// Constrain selected [`Fact`]s to values strictly less than `value`
     /// (`< value`).
-    pub fn is_less_than(self, value: Value) -> ArtifactSelector<Constrained> {
+    pub fn is_less_than(self, value: Value) -> Selector<Constrained> {
         self.with_value_upper(ValueBound {
             value,
             inclusive: false,
@@ -541,14 +541,14 @@ where
         })
     }
 
-    /// Constrain selected [`Artifact`]s to values in the inclusive range
+    /// Constrain selected [`Fact`]s to values in the inclusive range
     /// `[lower, upper]`.
-    pub fn is_between(self, lower: Value, upper: Value) -> ArtifactSelector<Constrained> {
+    pub fn is_between(self, lower: Value, upper: Value) -> Selector<Constrained> {
         self.is_at_least(lower).is_at_most(upper)
     }
 
-    fn with_value_lower(self, bound: ValueBound) -> ArtifactSelector<Constrained> {
-        ArtifactSelector::<Constrained> {
+    fn with_value_lower(self, bound: ValueBound) -> Selector<Constrained> {
+        Selector::<Constrained> {
             attribute: self.attribute,
             entity: self.entity,
             value: self.value,
@@ -563,8 +563,8 @@ where
         }
     }
 
-    fn with_value_upper(self, bound: ValueBound) -> ArtifactSelector<Constrained> {
-        ArtifactSelector::<Constrained> {
+    fn with_value_upper(self, bound: ValueBound) -> Selector<Constrained> {
+        Selector::<Constrained> {
             attribute: self.attribute,
             entity: self.entity,
             value: self.value,
@@ -580,7 +580,7 @@ where
     }
 }
 
-impl ArtifactSelector<Constrained> {
+impl Selector<Constrained> {
     /// Let the value bounds compare every number as it is. Without this a
     /// bound reads each number through the lens its type names before
     /// comparing, as a field declared with that type reads it: an integer
@@ -652,7 +652,7 @@ impl ArtifactSelector<Constrained> {
 
 #[cfg(test)]
 mod tests {
-    use super::ArtifactSelector;
+    use super::Selector;
     use crate::{Entity, Relation, Value};
 
     /// A selector's cells keep its entity and attribute bounds and
@@ -662,7 +662,7 @@ mod tests {
     fn it_keeps_the_cell_bounds_alone() {
         let the: Relation = "person/name".parse().expect("an attribute");
         let of: Entity = "id:alice".parse().expect("an entity");
-        let cells = ArtifactSelector::new()
+        let cells = Selector::new()
             .the(the.clone())
             .of(of.clone())
             .is(Value::String("Alice".into()))
@@ -671,7 +671,7 @@ mod tests {
         assert_eq!(cells.attribute(), Some(&the));
         assert_eq!(cells.entity(), Some(&of));
         assert_eq!(cells.value(), None);
-        let cells = ArtifactSelector::new()
+        let cells = Selector::new()
             .the_starting_with("person/")
             .is_at_least(Value::UnsignedInt(1))
             .cells()
@@ -679,7 +679,7 @@ mod tests {
         assert_eq!(cells.attribute_prefix(), Some("person/"));
         assert_eq!(cells.value(), None);
         assert!(
-            ArtifactSelector::new()
+            Selector::new()
                 .is(Value::String("Alice".into()))
                 .cells()
                 .is_none()

@@ -5,9 +5,7 @@ use serde_bytes::{ByteBuf, Bytes};
 use std::fmt::{Debug, Formatter, Result as FmtResult};
 use std::sync::Arc;
 
-use crate::{
-    Artifact, DialogCorpusError, Entity, Relation, Statement, Update, Value, make_reference,
-};
+use crate::{DialogCorpusError, Entity, Fact, Relation, Statement, Update, Value, make_reference};
 
 /// The attribute recording that a branch holds an asset: the fact
 /// `asset:<hash> dialog.asset/size <size>`.
@@ -90,8 +88,8 @@ impl Asset {
     }
 
     /// The fact recording that a branch holds this asset.
-    pub fn fact(&self) -> Result<Artifact, DialogCorpusError> {
-        Ok(Artifact {
+    pub fn fact(&self) -> Result<Fact, DialogCorpusError> {
+        Ok(Fact {
             the: ASSET_SIZE.parse::<Relation>()?,
             of: self.entity()?,
             is: Value::UnsignedInt(self.size as u128),

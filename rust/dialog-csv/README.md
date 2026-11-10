@@ -1,13 +1,13 @@
 # dialog-csv
 
-CSV import/export for Dialog artifacts.
+CSV import/export for Dialog facts.
 
 Implements the `Exporter` and `Importer` traits from `dialog-corpus`,
-enabling artifacts to be serialized to and deserialized from CSV files.
+enabling facts to be serialized to and deserialized from CSV files.
 
 ## CSV format
 
-Each row represents a single artifact with five columns:
+Each row represents a single fact with five columns:
 
 | Column  | Description | Example |
 |---------|-------------|---------|
@@ -26,7 +26,7 @@ Supported value types: `text`, `natural`, `integer`, `boolean`,
 ### Export a branch to a CSV file
 
 ```rs
-let file = tokio::fs::File::create("artifacts.csv").await?;
+let file = tokio::fs::File::create("facts.csv").await?;
 branch
     .export(CsvExporter::from(file))
     .perform(&operator)
@@ -36,7 +36,7 @@ branch
 ### Import a CSV file into a branch
 
 ```rs
-let file = tokio::fs::File::open("artifacts.csv").await?;
+let file = tokio::fs::File::open("facts.csv").await?;
 branch
     .import(CsvImporter::from(file))
     .perform(&operator)
@@ -48,13 +48,13 @@ branch
 ```rs
 // Export
 let mut exporter = CsvExporter::from(writer);
-exporter.write(&artifact).await?;
+exporter.write(&fact).await?;
 exporter.close().await?;
 
 // Import
 let importer = CsvImporter::from(reader);
 while let Some(result) = importer.next().await {
-    let artifact = result?;
-    println!("{artifact}");
+    let fact = result?;
+    println!("{fact}");
 }
 ```

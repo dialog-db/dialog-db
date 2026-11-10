@@ -10,8 +10,8 @@
 //! per-origin watermark map.
 //!
 //! The tree-facing half of version control (the `RevisionRecord` a revision
-//! writes into the artifact tree, and the history key encodings) stays in
-//! `dialog-corpus`, which is where the `Artifact`/`Key`/`Datum` types it
+//! writes into the fact tree, and the history key encodings) stays in
+//! `dialog-corpus`, which is where the `Fact`/`Key`/`Datum` types it
 //! is made of live.
 
 mod context;

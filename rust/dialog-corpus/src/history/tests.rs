@@ -11,7 +11,7 @@ use ed25519_dalek::SigningKey;
 use futures_util::TryStreamExt as _;
 
 use crate::tree::{Corpus, CorpusExt as _, SpillCache};
-use crate::{Artifact, DialogCorpusError, Entity, Instruction, Relation, Value, encode_bytes};
+use crate::{DialogCorpusError, Entity, Fact, Instruction, Relation, Value, encode_bytes};
 
 use super::{
     Authority, Causality, CausalityCache, Cause, Claim, Edition, History, HistorySelector,
@@ -526,14 +526,14 @@ async fn it_records_multiple_values_per_attribute() -> Result<()> {
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-async fn it_records_history_in_the_artifact_tree() -> Result<()> {
+async fn it_records_history_in_the_fact_tree() -> Result<()> {
     use futures_util::stream;
 
     let store = Blocks::new();
 
     let entity = Entity::new()?;
     let the: Relation = "post/title".parse()?;
-    let title = |value: &str| Artifact {
+    let title = |value: &str| Fact {
         the: the.clone(),
         of: entity.clone(),
         is: Value::String(value.into()),
@@ -633,7 +633,7 @@ async fn it_succeeds_the_claim_the_succession_elects() -> Result<()> {
     let store = Blocks::new();
     let entity = Entity::new()?;
     let the: Relation = "org/salary".parse()?;
-    let salary = |value: u32| Artifact {
+    let salary = |value: u32| Fact {
         the: the.clone(),
         of: entity.clone(),
         is: Value::UnsignedInt(value.into()),
@@ -664,17 +664,15 @@ async fn it_succeeds_the_claim_the_succession_elects() -> Result<()> {
         Ok(changed)
     };
     let held = async |tree: &Corpus, store: &Blocks| -> Result<Vec<u128>> {
-        let selector = crate::ArtifactSelector::new()
-            .of(entity.clone())
-            .the(the.clone());
-        let rows: Vec<Artifact> = tree
+        let selector = crate::Selector::new().of(entity.clone()).the(the.clone());
+        let rows: Vec<Fact> = tree
             .clone()
             .scan_owned(store.clone(), SpillCache::with_budget(0), selector)
             .try_collect()
             .await?;
         let mut values: Vec<u128> = rows
             .into_iter()
-            .filter_map(|artifact| match artifact.is {
+            .filter_map(|fact| match fact.is {
                 Value::UnsignedInt(value) => Some(value),
                 _ => None,
             })
@@ -769,7 +767,7 @@ async fn it_selects_the_records_of_one_revision() -> Result<()> {
 
     let entity = Entity::new()?;
     let the: Relation = "post/title".parse()?;
-    let title = |value: &str| Artifact {
+    let title = |value: &str| Fact {
         the: the.clone(),
         of: entity.clone(),
         is: Value::String(value.into()),
@@ -810,7 +808,7 @@ async fn it_selects_the_records_of_one_revision() -> Result<()> {
         vec![
             Instruction::Assert(title("Hi"), crate::Pick::Last),
             Instruction::Assert(
-                Artifact {
+                Fact {
                     the: other.clone(),
                     of: entity.clone(),
                     is: Value::String("hi".into()),
@@ -900,7 +898,7 @@ async fn it_selects_records_whose_values_spilled() -> Result<()> {
         &mut delta,
         Some(version),
         stream::iter(vec![Instruction::Assert(
-            Artifact {
+            Fact {
                 the: the.clone(),
                 of: entity.clone(),
                 is: Value::String(body.clone()),
@@ -1011,7 +1009,7 @@ async fn it_fetches_spilled_history_values_concurrently() -> Result<()> {
     let mut claims = Vec::new();
     for body in &bodies {
         claims.push(Instruction::Assert(
-            Artifact {
+            Fact {
                 the: the.clone(),
                 of: Entity::new()?,
                 is: Value::String(body.clone()),
@@ -1229,7 +1227,7 @@ async fn it_collapses_a_same_batch_assert_and_retract() -> Result<()> {
 
     let entity = Entity::new()?;
     let the: Relation = "post/title".parse()?;
-    let title = Artifact {
+    let title = Fact {
         the: the.clone(),
         of: entity.clone(),
         is: Value::String("Hej".into()),
@@ -1292,7 +1290,7 @@ async fn it_keeps_a_fact_retracted_and_re_asserted_in_one_batch() -> Result<()> 
 
     let entity = Entity::new()?;
     let the: Relation = "post/title".parse()?;
-    let title = Artifact {
+    let title = Fact {
         the: the.clone(),
         of: entity.clone(),
         is: Value::String("Hej".into()),
@@ -1371,7 +1369,7 @@ async fn it_reads_spilled_claim_values_back_through_history() -> Result<()> {
     let big = Value::String("z".repeat(inline_n + 1));
     let entity = Entity::new()?;
     let the: Relation = "doc/body".parse()?;
-    let doc = |value: Value| Artifact {
+    let doc = |value: Value| Fact {
         the: the.clone(),
         of: entity.clone(),
         is: value,
@@ -1427,7 +1425,7 @@ async fn it_ignores_a_retraction_of_a_nonexistent_fact() -> Result<()> {
 
     let entity = Entity::new()?;
     let the: Relation = "post/title".parse()?;
-    let title = Artifact {
+    let title = Fact {
         the: the.clone(),
         of: entity.clone(),
         is: Value::String("Hej".into()),
@@ -1487,7 +1485,7 @@ async fn it_folds_same_batch_records_at_one_history_key() -> Result<()> {
 
     let entity = Entity::new()?;
     let the: Relation = "post/title".parse()?;
-    let title = Artifact {
+    let title = Fact {
         the: the.clone(),
         of: entity.clone(),
         is: Value::String("Hej".into()),
@@ -1583,7 +1581,7 @@ async fn it_covers_every_observed_claim_of_a_retracted_value() -> Result<()> {
 
     let entity = Entity::new()?;
     let the: Relation = "task/label".parse()?;
-    let urgent = Artifact {
+    let urgent = Fact {
         the: the.clone(),
         of: entity.clone(),
         is: Value::String("urgent".into()),
@@ -1656,7 +1654,7 @@ async fn it_unions_contended_claim_versions_in_either_direction() -> Result<()> 
 
     let entity = Entity::new()?;
     let the: Relation = "task/label".parse()?;
-    let urgent = Artifact {
+    let urgent = Fact {
         the: the.clone(),
         of: entity.clone(),
         is: Value::String("urgent".into()),
@@ -1760,7 +1758,7 @@ async fn it_supersedes_only_different_values_when_replacing_many() -> Result<()>
 
     let entity = Entity::new()?;
     let the: Relation = "post/title".parse()?;
-    let title = |value: &str| Artifact {
+    let title = |value: &str| Fact {
         the: the.clone(),
         of: entity.clone(),
         is: Value::String(value.into()),
@@ -1877,7 +1875,7 @@ async fn it_disambiguates_truncated_history_keys_in_queries() -> Result<()> {
     let version = Version::new(Origin::from([7u8; 32]), Edition::new(0));
     let claim = |of: &Entity, the: &Relation, value: &str| {
         Instruction::Assert(
-            Artifact {
+            Fact {
                 the: the.clone(),
                 of: of.clone(),
                 is: Value::String(value.into()),
@@ -2470,7 +2468,7 @@ async fn it_mirrors_covering_records_into_the_coverage_region() -> Result<()> {
 
     let entity = Entity::new()?;
     let the: Relation = "post/title".parse()?;
-    let title = |value: &str| Artifact {
+    let title = |value: &str| Fact {
         the: the.clone(),
         of: entity.clone(),
         is: Value::String(value.into()),

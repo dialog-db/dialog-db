@@ -1,7 +1,7 @@
 pub use crate::Entity;
 
-mod artifact;
-pub use artifact::*;
+mod fact;
+pub use fact::*;
 
 mod data;
 pub use data::*;
@@ -10,15 +10,14 @@ mod instruction;
 pub use instruction::*;
 
 pub mod selector;
-pub use selector::{ArtifactSelector, ValueBound};
+pub use selector::{Selector, ValueBound};
 
 mod estimate;
 pub use estimate::Estimate;
 
 mod query;
 pub use query::{
-    ArtifactStream, FetchBudget, Likelihood, Preload, PreloadQueue, PreloadRequest, Select,
-    Speculation,
+    FactStream, FetchBudget, Likelihood, Preload, PreloadQueue, PreloadRequest, Select, Speculation,
 };
 
 mod asset;
@@ -57,6 +56,6 @@ pub type Blake3Hash = [u8; 32];
 
 use crate::tree::Corpus;
 
-/// The search tree each artifact index is: keys are raw key bytes and values
+/// The search tree each fact index is: keys are raw key bytes and values
 /// are [`State`](crate::State) payloads (see [`crate::tree`]).
 pub type Index = Corpus;

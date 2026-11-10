@@ -26,8 +26,8 @@ use std::fmt;
 use std::fmt::Display;
 use std::ops::Not;
 
-use crate::artifact::Type as ValueType;
-use crate::artifact::Value;
+use crate::corpus::Type as ValueType;
+use crate::corpus::Value;
 use crate::error::EvaluationError;
 use crate::selection::Selection;
 use crate::type_system::Primitive;
@@ -249,13 +249,13 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
-    use crate::artifact::{ArtifactsRelation, Entity};
+    use crate::corpus::{CorpusRelation, Entity};
     use crate::rule::TypeEnv;
     use crate::selection::Match;
     use futures_util::TryStreamExt;
 
     fn symbol(name: &str) -> Value {
-        Value::Symbol(ArtifactsRelation::try_from(name.to_string()).expect("valid attribute"))
+        Value::Symbol(CorpusRelation::try_from(name.to_string()).expect("valid attribute"))
     }
 
     async fn matches(predicate: StartsWith, value: Value) -> Result<usize, EvaluationError> {
@@ -405,11 +405,11 @@ mod tests {
     fn it_mirrors_the_attribute_length_limit() {
         let longest = format!("ns/{}", "a".repeat(SYMBOL_LEXICAL_LIMIT - 3));
         assert!(
-            ArtifactsRelation::try_from(longest.clone()).is_ok(),
+            CorpusRelation::try_from(longest.clone()).is_ok(),
             "a symbol of exactly the limit is valid"
         );
         assert!(
-            ArtifactsRelation::try_from(format!("{longest}a")).is_err(),
+            CorpusRelation::try_from(format!("{longest}a")).is_err(),
             "one byte past the limit is rejected"
         );
     }

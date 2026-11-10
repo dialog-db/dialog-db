@@ -19,7 +19,7 @@ wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 use crate::helpers::test_repo;
 use crate::{Branch, Transient};
 use anyhow::Result;
-use dialog_corpus::{ArtifactSelector, Entity, Pick, Relation as ArtifactsRelation, Value};
+use dialog_corpus::{Entity, Pick, Relation as CorpusRelation, Selector, Value};
 use dialog_peer::helpers::test_session_with_peer;
 use dialog_query::attribute::Relation;
 use dialog_query::query::Output as _;
@@ -59,7 +59,7 @@ fn value(json: &Json) -> Value {
 /// A fact as a statement this release writes as stored, under `all`.
 fn statement(the: &str, of: &Entity, is: Value) -> AttributeStatement {
     AttributeStatement {
-        the: Relation::from(the.parse::<ArtifactsRelation>().expect("an attribute")),
+        the: Relation::from(the.parse::<CorpusRelation>().expect("an attribute")),
         of: of.clone(),
         is,
         cause: None,
@@ -151,7 +151,7 @@ async fn stored(
     the: &str,
     of: &Entity,
 ) -> Result<Vec<Value>> {
-    let selector = ArtifactSelector::new().the(the.parse()?).of(of.clone());
+    let selector = Selector::new().the(the.parse()?).of(of.clone());
     let stream = branch.claims().select(selector).perform(operator).await?;
     let mut values: Vec<Value> = stream
         .collect::<Vec<_>>()
@@ -160,7 +160,7 @@ async fn stored(
         .map(|item| item.and_then(|view| view.to_owned()))
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
-        .map(|artifact| artifact.is)
+        .map(|fact| fact.is)
         .collect();
     values.sort_by_key(|value| format!("{value:?}"));
     Ok(values)

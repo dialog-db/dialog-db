@@ -41,7 +41,7 @@
 //!     avoids up front but pays incrementally.
 
 use anyhow::{Context as _, Result};
-use dialog_corpus::{Artifact, ArtifactSelector, Instruction, Value};
+use dialog_corpus::{Fact, Instruction, Selector, Value};
 use dialog_credentials::{Credential, SignerCredential};
 use dialog_effects::credential::prelude::*;
 use dialog_effects::storage::Location;
@@ -172,7 +172,7 @@ pub(crate) fn entity_facts(index: usize) -> Result<Vec<Instruction>> {
         .into_iter()
         .map(|(the, is)| {
             Ok(Instruction::Assert(
-                Artifact {
+                Fact {
                     the: the.parse()?,
                     of: of.clone(),
                     is,
@@ -187,7 +187,7 @@ pub(crate) fn entity_facts(index: usize) -> Result<Vec<Instruction>> {
 /// The space's metadata and membership facts (what a join probes).
 pub(crate) fn meta_facts(members: usize) -> Result<Vec<Instruction>> {
     let mut facts = vec![Instruction::Assert(
-        Artifact {
+        Fact {
             the: "db/name".parse()?,
             of: "id:space".parse()?,
             is: Value::String("soak space".into()),
@@ -198,7 +198,7 @@ pub(crate) fn meta_facts(members: usize) -> Result<Vec<Instruction>> {
     for member in 0..members {
         let of: dialog_corpus::Entity = format!("member:{member}").parse()?;
         facts.push(Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "member/name".parse()?,
                 of: of.clone(),
                 is: Value::String(format!("Member {member}")),
@@ -207,7 +207,7 @@ pub(crate) fn meta_facts(members: usize) -> Result<Vec<Instruction>> {
             dialog_corpus::Pick::All,
         ));
         facts.push(Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "member/role".parse()?,
                 of,
                 is: Value::String(if member == 0 { "owner" } else { "editor" }.into()),
@@ -269,7 +269,7 @@ fn claim_facts() -> Result<Vec<Instruction>> {
     let of: dialog_corpus::Entity = "member:joiner".parse()?;
     Ok(vec![
         Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "member/name".parse()?,
                 of: of.clone(),
                 is: Value::String("The Joiner".into()),
@@ -278,7 +278,7 @@ fn claim_facts() -> Result<Vec<Instruction>> {
             dialog_corpus::Pick::All,
         ),
         Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "member/role".parse()?,
                 of: of.clone(),
                 is: Value::String("editor".into()),
@@ -287,7 +287,7 @@ fn claim_facts() -> Result<Vec<Instruction>> {
             dialog_corpus::Pick::All,
         ),
         Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "member/joined".parse()?,
                 of,
                 is: Value::String("2026-09-01".into()),
@@ -364,7 +364,7 @@ pub(crate) async fn mount_client(
 async fn select_count(
     branch: &Branch,
     operator: &Peer<VolatileSpace, dialog_peer::Session>,
-    selector: ArtifactSelector<dialog_corpus::selector::Constrained>,
+    selector: Selector<dialog_corpus::selector::Constrained>,
 ) -> Result<usize> {
     let rows = branch
         .claims()
@@ -400,7 +400,7 @@ pub(crate) async fn phases(
         let named = select_count(
             &client,
             &client_operator,
-            ArtifactSelector::new().the("db/name".parse()?),
+            Selector::new().the("db/name".parse()?),
         )
         .await?;
         anyhow::ensure!(named == 1, "probe should find the space name");
@@ -412,19 +412,19 @@ pub(crate) async fn phases(
         let names = select_count(
             &client,
             &client_operator,
-            ArtifactSelector::new().the("member/name".parse()?),
+            Selector::new().the("member/name".parse()?),
         )
         .await?;
         let roles = select_count(
             &client,
             &client_operator,
-            ArtifactSelector::new().the("member/role".parse()?),
+            Selector::new().the("member/role".parse()?),
         )
         .await?;
         let joined = select_count(
             &client,
             &client_operator,
-            ArtifactSelector::new().the("member/joined".parse()?),
+            Selector::new().the("member/joined".parse()?),
         )
         .await?;
         anyhow::ensure!(
@@ -457,7 +457,7 @@ pub(crate) async fn phases(
         let titles = select_count(
             &client,
             &client_operator,
-            ArtifactSelector::new().the("bug/title".parse()?),
+            Selector::new().the("bug/title".parse()?),
         )
         .await?;
         anyhow::ensure!(titles == expected, "render should see every title");
@@ -469,7 +469,7 @@ pub(crate) async fn phases(
         let details = select_count(
             &client,
             &client_operator,
-            ArtifactSelector::new()
+            Selector::new()
                 .the("bug/detail".parse()?)
                 .of(format!("bug:{}", expected / 2).parse()?),
         )
@@ -483,7 +483,7 @@ pub(crate) async fn phases(
         let titles = select_count(
             &client,
             &client_operator,
-            ArtifactSelector::new().the("bug/title".parse()?),
+            Selector::new().the("bug/title".parse()?),
         )
         .await?;
         anyhow::ensure!(titles == expected, "requery should see every title");

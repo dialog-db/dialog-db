@@ -38,7 +38,7 @@ pub enum TreeNode {
 ///
 /// This worker loads individual tree nodes on-demand as the UI navigates
 /// the probabilistic search tree structure.
-pub struct ArtifactsHierarchy {
+pub struct FactsHierarchy {
     /// The session the tree's blocks load through
     storage: Arc<DiagnoseSession>,
     /// The catalog the tree's nodes live in
@@ -47,7 +47,7 @@ pub struct ArtifactsHierarchy {
     tx: Sender<WorkerMessage>,
 }
 
-impl ArtifactsHierarchy {
+impl FactsHierarchy {
     /// Creates a new hierarchy worker.
     ///
     /// # Arguments

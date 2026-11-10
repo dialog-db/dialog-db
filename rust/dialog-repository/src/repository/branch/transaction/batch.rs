@@ -36,7 +36,7 @@ use dialog_common::{ConditionalSync, Holds};
 use dialog_corpus::history::{CausalityCache, Context, ContextCache, RevisionRecord, Version};
 use dialog_corpus::tree::CorpusNode;
 use dialog_corpus::tree::WriteScope;
-use dialog_corpus::{Artifact, ArtifactSelector, Change, Changes, Entity, Statement, Update as _};
+use dialog_corpus::{Change, Changes, Entity, Fact, Selector, Statement, Update as _};
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify, OperatorExt as _};
@@ -110,25 +110,25 @@ pub struct TransactionBatch {
     /// retract that only it holds: retracted from it once the publish
     /// lands, so what a transaction read is what its publish leaves.
     overlay: Ephemeral,
-    overlay_retractions: Vec<Artifact>,
+    overlay_retractions: Vec<Fact>,
 }
 
 /// The facts `changes` retracts that `overlay` holds. A transaction's
 /// read hides such a fact, and the commit's retraction of it lands
 /// nothing in the tree, which never held it: the publish retracts it
 /// from the overlay, so the session's row does not come back.
-fn overlay_retractions(changes: &Staged, overlay: &Ephemeral) -> Vec<Artifact> {
+fn overlay_retractions(changes: &Staged, overlay: &Ephemeral) -> Vec<Fact> {
     let mut retracted = Vec::new();
     for (the, of, change) in changes.log() {
         let Change::Retract(value) = change else {
             continue;
         };
-        let selector = ArtifactSelector::new()
+        let selector = Selector::new()
             .the(the.clone())
             .of(of.clone())
             .is(value.clone());
         if !overlay.scan(&selector).is_empty() {
-            retracted.push(Artifact {
+            retracted.push(Fact {
                 the: the.clone(),
                 of: of.clone(),
                 is: value.clone(),
@@ -141,7 +141,7 @@ fn overlay_retractions(changes: &Staged, overlay: &Ephemeral) -> Vec<Artifact> {
 
 /// Retract `facts` from the session overlay, once the publish that
 /// retracted them landed.
-fn retract_from_overlay(overlay: &Ephemeral, facts: Vec<Artifact>) -> Result<(), CommitError> {
+fn retract_from_overlay(overlay: &Ephemeral, facts: Vec<Fact>) -> Result<(), CommitError> {
     if facts.is_empty() {
         return Ok(());
     }
@@ -219,7 +219,7 @@ impl TransactionBatch {
         self.transaction().dispatch(claim)
     }
 
-    /// The staged artifact index, serving the chain tip.
+    /// The staged fact index, serving the chain tip.
     pub fn claims(&self) -> SnapshotClaims<'_> {
         self.snapshot.claims()
     }

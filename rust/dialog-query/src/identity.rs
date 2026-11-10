@@ -23,7 +23,7 @@
 use base58::ToBase58;
 use merkle_reference::{Reference, Type};
 
-use crate::artifact::Entity;
+use crate::corpus::Entity;
 
 /// The type of attributes.
 pub const ATTRIBUTE: Type = Type::from_reference(Reference::from_hex(

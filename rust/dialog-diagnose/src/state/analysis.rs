@@ -15,7 +15,7 @@ use crate::DiagnoseSession;
 /// These statistics are computed asynchronously to provide insights
 /// into the tree's structure without blocking the UI.
 #[derive(Default, Debug, Clone)]
-pub struct ArtifactsTreeStats {
+pub struct FactsTreeStats {
     /// Maximum depth of the tree
     pub depth: usize,
     /// Total number of entries across all leaf nodes
@@ -32,7 +32,7 @@ pub struct ArtifactsTreeStats {
 ///
 /// This worker performs a breadth-first traversal of the probabilistic search tree
 /// to compute various statistics about its structure and contents.
-pub struct ArtifactsTreeAnalysis {
+pub struct FactsTreeAnalysis {
     /// The probabilistic search tree index to analyze
     tree: Index,
     /// The session the tree's blocks load through
@@ -41,7 +41,7 @@ pub struct ArtifactsTreeAnalysis {
     tx: Sender<WorkerMessage>,
 }
 
-impl ArtifactsTreeAnalysis {
+impl FactsTreeAnalysis {
     /// Creates a new tree analysis worker.
     ///
     /// # Arguments
@@ -72,7 +72,7 @@ impl ArtifactsTreeAnalysis {
         tokio::spawn(async move {
             let accessor = Accessor::new(storage.as_ref(), &catalog);
 
-            let mut stats = ArtifactsTreeStats::default();
+            let mut stats = FactsTreeStats::default();
             let mut levels = VecDeque::from([vec![root]]);
             let mut segment_sizes: Vec<usize> = vec![];
 

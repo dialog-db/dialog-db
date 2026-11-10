@@ -325,8 +325,8 @@ mod tests {
     use crate::{Blob, Branch, CommitError};
     use anyhow::Result;
     use dialog_corpus::{
-        ASSET_SIZE, Artifact, ArtifactSelector, Asset, Changes, DialogCorpusError, Entity,
-        Relation, Update as _, Value,
+        ASSET_SIZE, Asset, Changes, DialogCorpusError, Entity, Fact, Relation, Selector,
+        Update as _, Value,
     };
     use dialog_effects::blob::{BlobError, BlobReader};
     use dialog_peer::helpers::test_session_with_peer;
@@ -371,10 +371,10 @@ mod tests {
         branch: &Branch,
         operator: &Peer<VolatileSpace, Session>,
         entity: &Entity,
-    ) -> Result<Vec<Artifact>> {
+    ) -> Result<Vec<Fact>> {
         Ok(branch
             .claims()
-            .select(ArtifactSelector::new().of(entity.clone()))
+            .select(Selector::new().of(entity.clone()))
             .to_owned()
             .perform(operator)
             .await?
@@ -616,9 +616,7 @@ mod tests {
         assert!(
             matches!(
                 refused,
-                Err(CommitError::Artifact(DialogCorpusError::AssetsUnsupported(
-                    _
-                )))
+                Err(CommitError::Fact(DialogCorpusError::AssetsUnsupported(_)))
             ),
             "got {refused:?}"
         );
@@ -945,9 +943,7 @@ mod tests {
             .await;
         assert!(matches!(
             refused,
-            Err(CommitError::Artifact(DialogCorpusError::ReservedRelation(
-                _
-            )))
+            Err(CommitError::Fact(DialogCorpusError::ReservedRelation(_)))
         ));
         Ok(())
     }

@@ -292,8 +292,8 @@ where
         // candidate must not veto the good one. Only when no candidate
         // verifies does the first failure surface.
         let mut failure = None;
-        for artifact in candidates {
-            if let Value::Record(bytes) = &artifact.is {
+        for fact in candidates {
+            if let Value::Record(bytes) = &fact.is {
                 let verified = RevisionRecord::try_from_bytes(bytes)
                     .and_then(|record| record.verify(version).map(|()| record));
                 match verified {

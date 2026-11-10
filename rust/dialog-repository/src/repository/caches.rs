@@ -629,7 +629,7 @@ mod tests {
     use dialog_capability::{Command, Fork, Provider};
     use dialog_common::Blake3Hash as NodeHash;
     use dialog_common::{ConditionalSync, Held, Holds};
-    use dialog_corpus::{Artifact, Instruction, Pick, Value};
+    use dialog_corpus::{Fact, Instruction, Pick, Value};
     use dialog_credentials::Credential;
     use dialog_effects::archive::{ArchiveError, Get, Import, Put};
     use dialog_effects::authority::{Attest, Identify};
@@ -733,7 +733,7 @@ mod tests {
     ) -> Result<(Branch, NodeHash)> {
         let main = repository.branch("main").open().perform(operator).await?;
         main.commit(stream::iter(vec![Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "user/name".parse()?,
                 of: "user:1".parse()?,
                 is: Value::String("Alice".into()),
@@ -852,7 +852,7 @@ mod tests {
         };
         let failed = main
             .commit(stream::iter(vec![Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "user/name".parse()?,
                     of: "user:2".parse()?,
                     is: Value::String("Bob".into()),
@@ -864,7 +864,7 @@ mod tests {
             .await;
 
         assert!(
-            matches!(failed, Err(CommitError::Artifact(_))),
+            matches!(failed, Err(CommitError::Fact(_))),
             "the commit fails at the flush: {failed:?}"
         );
         assert_eq!(
@@ -893,7 +893,7 @@ mod tests {
     {
         branch
             .commit(stream::iter(vec![Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "user/name".parse()?,
                     of: format!("user:{fact}").parse()?,
                     is: Value::String("Alice".into()),

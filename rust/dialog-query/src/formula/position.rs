@@ -26,10 +26,10 @@
 use dialog_corpus::position as fractional;
 use dialog_corpus::position::Bias;
 
-use dialog_corpus::Relation as ArtifactsRelation;
+use dialog_corpus::Relation as CorpusRelation;
 
 use crate::Formula;
-use crate::artifact::Entity;
+use crate::corpus::Entity;
 use crate::formula::Input;
 
 /// Resolve an optional bound: empty means open, anything else must
@@ -98,7 +98,7 @@ impl Position {
 #[derive(Debug, Clone, Formula)]
 pub struct PositionParts {
     /// The attribute, as bound by a scan's `the` slot.
-    pub of: ArtifactsRelation,
+    pub of: CorpusRelation,
     /// The attribute's namespace (the ordered relation's name).
     #[output]
     pub namespace: String,
@@ -183,7 +183,7 @@ mod tests {
     #[dialog_common::test]
     fn it_decomposes_position_attributes() {
         let position = derive(&member("m"), "", "").expect("derives");
-        let attribute: ArtifactsRelation = format!("todo.item/{position}")
+        let attribute: CorpusRelation = format!("todo.item/{position}")
             .try_into()
             .expect("attribute parses");
         let rows = PositionParts::compute(PositionPartsInput {
@@ -193,12 +193,12 @@ mod tests {
         assert_eq!(rows[0].namespace, "todo.item");
         assert_eq!(rows[0].position, position);
 
-        let plain: ArtifactsRelation = "person/display_name".parse().expect("attribute parses");
+        let plain: CorpusRelation = "person/display_name".parse().expect("attribute parses");
         assert!(
             PositionParts::compute(PositionPartsInput { of: plain }).is_empty(),
             "predicates with non-position characters project nothing"
         );
-        let wordlike: ArtifactsRelation = "person/name".parse().expect("attribute parses");
+        let wordlike: CorpusRelation = "person/name".parse().expect("attribute parses");
         assert!(
             PositionParts::compute(PositionPartsInput { of: wordlike }).is_empty(),
             "word predicates start lowercase and are never positions"

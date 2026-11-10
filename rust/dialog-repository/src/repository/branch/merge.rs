@@ -255,13 +255,13 @@ mod tests {
     use crate::{Branch, CommitError, PublishError, PullError};
     use anyhow::Result;
     use dialog_corpus::history::History as _;
-    use dialog_corpus::{Artifact, ArtifactSelector, Instruction, Value};
+    use dialog_corpus::{Fact, Instruction, Selector, Value};
     use dialog_peer::helpers::test_session_with_peer;
     use futures_util::{StreamExt, stream};
 
     fn name(of: &str, is: &str) -> Result<Instruction> {
         Ok(Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "user/name".parse()?,
                 of: of.parse()?,
                 is: Value::String(is.to_string()),
@@ -277,14 +277,14 @@ mod tests {
     {
         let mut values: Vec<Value> = branch
             .claims()
-            .select(ArtifactSelector::new().the("user/name".parse()?))
+            .select(Selector::new().the("user/name".parse()?))
             .to_owned()
             .perform(env)
             .await?
             .collect::<Vec<_>>()
             .await
             .into_iter()
-            .map(|artifact| artifact.map(|artifact| artifact.is))
+            .map(|fact| fact.map(|fact| fact.is))
             .collect::<Result<_, _>>()?;
         values.sort_by_key(|value| format!("{value:?}"));
         Ok(values)

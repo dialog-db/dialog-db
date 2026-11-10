@@ -1810,7 +1810,7 @@ mod tests {
         let rows: Vec<_> = operator
             .delegations()
             .claims()
-            .select(dialog_corpus::ArtifactSelector::new().the("dialog.ucan/audience".parse()?))
+            .select(dialog_corpus::Selector::new().the("dialog.ucan/audience".parse()?))
             .perform(operator)
             .await?
             .try_collect()

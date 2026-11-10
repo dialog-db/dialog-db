@@ -3,7 +3,7 @@
 //!
 //! A [`Uri`] is a normalized name; an [`Entity`] is a name paired with
 //! the padded byte form key encodings carry. Both sit here rather than
-//! with the artifact machinery because the wire vocabulary needs to
+//! with the fact machinery because the wire vocabulary needs to
 //! name things without pulling in a search tree or a storage backend --
 //! the same reason [`history`](crate::history) holds `Origin`,
 //! `Version` and `Edition`.

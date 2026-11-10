@@ -4,7 +4,7 @@
 
 use crate::ArchiveDelta;
 use crate::tree::{Corpus, CorpusExt as _, SpillCache};
-use crate::{Artifact, Changes, Entity, Instruction, Pick, Relation, Update as _, Value};
+use crate::{Changes, Entity, Fact, Instruction, Pick, Relation, Update as _, Value};
 use anyhow::Result;
 use dialog_search_tree::helpers::Blocks;
 use dialog_search_tree::helpers::test_catalog;
@@ -36,17 +36,15 @@ async fn apply(
 }
 
 async fn held(tree: &Corpus, store: &Blocks, of: &Entity, the: &Relation) -> Result<Vec<u128>> {
-    let selector = crate::ArtifactSelector::new()
-        .of(of.clone())
-        .the(the.clone());
-    let rows: Vec<Artifact> = tree
+    let selector = crate::Selector::new().of(of.clone()).the(the.clone());
+    let rows: Vec<Fact> = tree
         .clone()
         .scan_owned(store.clone(), SpillCache::with_budget(0), selector)
         .try_collect()
         .await?;
     let mut values: Vec<u128> = rows
         .into_iter()
-        .filter_map(|artifact| match artifact.is {
+        .filter_map(|fact| match fact.is {
             Value::UnsignedInt(value) => Some(value),
             _ => None,
         })
@@ -68,7 +66,7 @@ async fn a_batch_lands_a_cells_writes_in_the_order_they_were_recorded() -> Resul
     let store = Blocks::new();
     let entity = Entity::new()?;
     let the: Relation = "org/salary".parse()?;
-    let salary = |value: u32| Artifact {
+    let salary = |value: u32| Fact {
         the: the.clone(),
         of: entity.clone(),
         is: Value::UnsignedInt(value.into()),
@@ -150,7 +148,7 @@ async fn a_claim_succeeded_within_its_own_batch_leaves_no_standing_record() -> R
     let store = Blocks::new();
     let entity = Entity::new()?;
     let the: Relation = "org/salary".parse()?;
-    let salary = |value: u32| Artifact {
+    let salary = |value: u32| Fact {
         the: the.clone(),
         of: entity.clone(),
         is: Value::UnsignedInt(value.into()),

@@ -20,9 +20,9 @@ use std::mem;
 use dialog_search_tree::Manifest;
 use futures_util::TryStreamExt as _;
 
-use crate::artifacts::decode_value;
 use crate::key::varkey::{ValuePayload, build_key, parse_key};
 use crate::merge::full_scope;
+use crate::model::decode_value;
 use crate::tree::{Corpus, CorpusExt as _};
 use crate::{
     ArchiveDelta, BLOB_KEY_TAG, CONTEXT_KEY_TAG, DialogCorpusError, Key, ValueDataType,
@@ -117,8 +117,8 @@ mod tests {
     use super::rekey_tree;
     use crate::tree::{Corpus, CorpusExt as _, SpillCache};
     use crate::{
-        ArchiveDelta, Artifact, ArtifactSelector, BlobIndexExt as _, BlobRecord, Entity,
-        Instruction, NUMBER_BAND, Pick, Relation, Value,
+        ArchiveDelta, BlobIndexExt as _, BlobRecord, Entity, Fact, Instruction, NUMBER_BAND, Pick,
+        Relation, Selector, Value,
     };
 
     fn size() -> Relation {
@@ -132,7 +132,7 @@ mod tests {
         for value in values {
             let of = Entity::new()?;
             instructions.push(Instruction::Assert(
-                Artifact {
+                Fact {
                     the: size(),
                     of: of.clone(),
                     is: value.clone(),
@@ -141,7 +141,7 @@ mod tests {
                 Pick::All,
             ));
             instructions.push(Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "item/label".parse()?,
                     of,
                     is: Value::String(format!("{value:?}")),
@@ -164,12 +164,12 @@ mod tests {
     }
 
     async fn sizes(tree: &Corpus, store: &Blocks) -> anyhow::Result<Vec<Value>> {
-        let rows: Vec<Artifact> = tree
+        let rows: Vec<Fact> = tree
             .clone()
             .scan_owned(
                 store.clone(),
                 SpillCache::with_budget(0),
-                ArtifactSelector::new().the(size()),
+                Selector::new().the(size()),
             )
             .try_collect()
             .await?;

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::{iter, mem};
 
 use crate::Claim;
-use crate::artifact::Value;
+use crate::corpus::Value;
 use crate::error::EvaluationError;
 use crate::term::{Term, VariableName};
 use crate::type_system::Type as Kind;
@@ -158,14 +158,14 @@ struct Frame {
 }
 
 /// What a row brings to a cardinality-one election: the standing of
-/// the fact it cites, as [`ArtifactView::elect`] compares it and as a
+/// the fact it cites, as [`FactView::elect`] compares it and as a
 /// succession orders stored claims. A row derived by a rule stands as
 /// the fact that bound its value does.
 ///
-/// [`ArtifactView::elect`]: dialog_corpus::ArtifactView::elect
+/// [`FactView::elect`]: dialog_corpus::FactView::elect
 pub use dialog_corpus::Standing;
 
-/// Binding order is premise-evaluation order, an artifact of the plan;
+/// Binding order is premise-evaluation order, a fact of the plan;
 /// two rows are the same result when they bind the same names to the
 /// same values, in any order, however their frames are split.
 impl PartialEq for Match {
@@ -670,7 +670,7 @@ impl Match {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::artifact::Value;
+    use crate::corpus::Value;
 
     /// A typed variable only accepts values inhabiting its kind:
     /// the contract check behind every merge and propagation.
@@ -823,7 +823,7 @@ mod model_tests {
     use std::collections::HashMap;
 
     use super::*;
-    use crate::artifact::Value;
+    use crate::corpus::Value;
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);

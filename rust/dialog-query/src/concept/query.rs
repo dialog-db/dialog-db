@@ -16,9 +16,9 @@ pub use rules::{ConceptRules, Exact, Installed};
 
 use std::fmt;
 
-use crate::artifact::{ArtifactsRelation, Type, Value};
 use crate::attribute::The;
 use crate::concept::descriptor::{ConceptDescriptor, ConceptFieldDescriptor};
+use crate::corpus::{CorpusRelation, Type, Value};
 use crate::planner::{Disjunction, Plan};
 use crate::rule::deductive::DeductiveRule;
 use crate::schema::CONCEPT_OVERHEAD;
@@ -1120,7 +1120,7 @@ impl ConceptQuery {
 /// per attribute is kept on the query's memo, since the facts do not
 /// change within a query and a concept is evaluated many times in one.
 async fn stored_absent<'a, Env>(
-    attributes: &[ArtifactsRelation],
+    attributes: &[CorpusRelation],
     env: &'a Env,
 ) -> Result<bool, EvaluationError>
 where
@@ -1131,7 +1131,7 @@ where
         let absent = match env.memo().and_then(|memo| memo.stored_absent(&key)) {
             Some(absent) => absent,
             None => {
-                let selector = dialog_corpus::ArtifactSelector::new().the(attribute.clone());
+                let selector = dialog_corpus::Selector::new().the(attribute.clone());
                 let mut rows = Provider::<dialog_corpus::Select<'_>>::execute(env, selector)
                     .await
                     .map_err(|error| EvaluationError::Store(error.to_string()))?;

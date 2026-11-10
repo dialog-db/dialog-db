@@ -482,7 +482,7 @@ gained numeric scenarios. Against the per-type bands, in instructions:
 | Range over mixed number types | −57% |
 | Wide range | +105% |
 
-- The wide range is an artifact of the scenario: its attributes interleave in
+- The wide range is a fact of the scenario: its attributes interleave in
   the value index, and the scan reads the other attributes' numbers too. The
   per-type bands hide this because each band holds fewer of them. Scanning by
   attribute and filtering by value (estimate-based index routing) is the fix,

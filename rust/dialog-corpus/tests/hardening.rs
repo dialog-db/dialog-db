@@ -10,16 +10,16 @@ use std::str::FromStr as _;
 use anyhow::Result;
 use dialog_corpus::tree::{Corpus, CorpusExt as _, spill_cache};
 use dialog_corpus::{
-    ArchiveDelta, Artifact, ArtifactSelector, ArtifactView, Cause, Entity, Instruction, Relation,
-    SortKey, Uri, Value, sort_key,
+    ArchiveDelta, Cause, Entity, Fact, FactView, Instruction, Relation, Selector, SortKey, Uri,
+    Value, sort_key,
 };
 use dialog_search_tree::{Manifest, helpers::Blocks};
 use futures_util::TryStreamExt as _;
 
 /// The sort key under the format the stores here are created with: a new
 /// store's tree takes [`Manifest::default`].
-fn default_sort_key(artifact: &Artifact) -> SortKey {
-    sort_key(artifact, &Manifest::default())
+fn default_sort_key(fact: &Fact) -> SortKey {
+    sort_key(fact, &Manifest::default())
 }
 
 fn entity(n: u32) -> Entity {
@@ -43,7 +43,7 @@ fn probe_values() -> Vec<Value> {
 }
 
 /// A scanned row's sort key — derived straight from its stored key bytes —
-/// must equal the sort key computed from the materialized artifact's
+/// must equal the sort key computed from the materialized fact's
 /// fields. The query layer's k-way merge orders and dedups by the stored
 /// derivation while the `Changes` overlay uses the field derivation; if
 /// the two ever diverge for any value encoding, merged query results
@@ -57,7 +57,7 @@ async fn it_derives_sort_keys_identical_to_the_field_path() -> Result<()> {
     let mut instructions = Vec::new();
     for (at, value) in probe_values().into_iter().enumerate() {
         instructions.push(Instruction::Assert(
-            Artifact {
+            Fact {
                 the: Relation::from_str("hardening/value")?,
                 of: entity(at as u32),
                 is: value,
@@ -83,7 +83,7 @@ async fn it_derives_sort_keys_identical_to_the_field_path() -> Result<()> {
         .scan(
             blocks.clone(),
             spill_cache(),
-            ArtifactSelector::new().the(Relation::from_str("hardening/value")?),
+            Selector::new().the(Relation::from_str("hardening/value")?),
         )
         .try_collect()
         .await?;
@@ -110,7 +110,7 @@ async fn it_derives_sort_keys_identical_to_the_field_path() -> Result<()> {
 async fn it_separates_sort_keys_by_value_identity() -> Result<()> {
     let the = Relation::from_str("hardening/value")?;
     let of = entity(1);
-    let artifact = |is: Value| Artifact {
+    let fact = |is: Value| Fact {
         the: the.clone(),
         of: of.clone(),
         is,
@@ -125,8 +125,8 @@ async fn it_separates_sort_keys_by_value_identity() -> Result<()> {
     ];
     for (a, left) in lookalikes.iter().enumerate() {
         for (b, right) in lookalikes.iter().enumerate() {
-            let equal = default_sort_key(&artifact(left.clone()))
-                == default_sort_key(&artifact(right.clone()));
+            let equal =
+                default_sort_key(&fact(left.clone())) == default_sort_key(&fact(right.clone()));
             assert_eq!(
                 equal,
                 a == b,
@@ -135,10 +135,10 @@ async fn it_separates_sort_keys_by_value_identity() -> Result<()> {
         }
     }
 
-    // Identical artifacts agree.
+    // Identical facts agree.
     assert_eq!(
-        default_sort_key(&artifact(Value::String("same".into()))),
-        default_sort_key(&artifact(Value::String("same".into()))),
+        default_sort_key(&fact(Value::String("same".into()))),
+        default_sort_key(&fact(Value::String("same".into()))),
     );
     Ok(())
 }
@@ -183,7 +183,7 @@ async fn it_memoizes_uri_parses_transparently() -> Result<()> {
 }
 
 /// Among rows no revision tagged, the cardinality-one election
-/// (`ArtifactView::elect`) prefers the higher cause, symmetrically:
+/// (`FactView::elect`) prefers the higher cause, symmetrically:
 /// whichever argument order two replicas fold the same rows in, the same
 /// row survives. (Versioned rows are decided by their versions first; the
 /// unit tests beside `elect` pin that tier.) This policy used to be
@@ -194,22 +194,22 @@ async fn it_elects_the_higher_cause_in_either_order() -> Result<()> {
     let attr = Relation::from_str("person/name").expect("valid attribute");
     let of = entity(1);
 
-    let older = Artifact {
+    let older = Fact {
         the: attr.clone(),
         of: of.clone(),
         is: Value::String("Alice".into()),
         cause: Some(Cause([1u8; 32])),
     };
-    let newer = Artifact {
+    let newer = Fact {
         the: attr,
         of,
         is: Value::String("Alicia".into()),
         cause: Some(Cause([2u8; 32])),
     };
 
-    let winner = ArtifactView::from(older.clone()).elect(newer.clone().into())?;
+    let winner = FactView::from(older.clone()).elect(newer.clone().into())?;
     assert_eq!(winner.cause().cloned(), newer.cause, "higher cause wins");
-    let winner = ArtifactView::from(newer.clone()).elect(older.into())?;
+    let winner = FactView::from(newer.clone()).elect(older.into())?;
     assert_eq!(
         winner.cause().cloned(),
         newer.cause,
@@ -225,34 +225,34 @@ async fn it_breaks_election_ties_deterministically() -> Result<()> {
     let attr = Relation::from_str("person/name").expect("valid attribute");
     let of = entity(2);
 
-    let a = Artifact {
+    let a = Fact {
         the: attr.clone(),
         of: of.clone(),
         is: Value::String("Alice".into()),
         cause: Some(Cause([1u8; 32])),
     };
-    let b = Artifact {
+    let b = Fact {
         the: attr.clone(),
         of: of.clone(),
         is: Value::String("Alicia".into()),
         cause: Some(Cause([1u8; 32])),
     };
 
-    let ab = ArtifactView::from(a.clone()).elect(b.clone().into())?;
-    let ba = ArtifactView::from(b.clone()).elect(a.clone().into())?;
+    let ab = FactView::from(a.clone()).elect(b.clone().into())?;
+    let ba = FactView::from(b.clone()).elect(a.clone().into())?;
     assert_eq!(
         Cause::from(&ab.to_owned()?),
         Cause::from(&ba.to_owned()?),
         "the fact-hash tiebreak elects the same row in either order"
     );
 
-    let uncaused = Artifact {
+    let uncaused = Fact {
         the: attr,
         of,
         is: Value::String("Anon".into()),
         cause: None,
     };
-    let winner = ArtifactView::from(uncaused.clone()).elect(a.clone().into())?;
+    let winner = FactView::from(uncaused.clone()).elect(a.clone().into())?;
     assert_eq!(
         winner.cause().cloned(),
         a.cause,

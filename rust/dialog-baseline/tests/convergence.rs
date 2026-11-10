@@ -27,7 +27,7 @@ use dialog_baseline::repo::{DialogRepo, VolatileRepo};
 use dialog_baseline::se::{SeLog, se_instructions};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_corpus::tree::Corpus;
-use dialog_corpus::{ArtifactSelector, Instruction, Relation};
+use dialog_corpus::{Instruction, Relation, Selector};
 use dialog_repository::TransactionBatch;
 
 fn txn_count() -> usize {
@@ -97,7 +97,7 @@ async fn facts(repo: &VolatileRepo, log: &SeLog) -> Result<Vec<String>> {
 
     let mut rows = Vec::new();
     for attribute in attributes {
-        let selector = ArtifactSelector::new().the(Relation::from_str(&attribute)?);
+        let selector = Selector::new().the(Relation::from_str(&attribute)?);
         for fact in repo.collect(selector).await? {
             rows.push(format!("{} {} {:?}", fact.the, fact.of, fact.is));
         }

@@ -30,7 +30,7 @@
 use std::str::FromStr;
 
 use anyhow::{Context, Result};
-use dialog_corpus::{Artifact, Entity, Instruction, Relation, Value};
+use dialog_corpus::{Entity, Fact, Instruction, Relation, Value};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
@@ -351,16 +351,16 @@ impl SqliteFacts {
 pub fn se_instructions(commit: &[SeFact]) -> Result<Vec<Instruction>> {
     let mut instructions = Vec::with_capacity(commit.len());
     for fact in commit {
-        let artifact = Artifact {
+        let stated = Fact {
             the: Relation::from_str(&fact.the)?,
             of: Entity::from_str(&fact.of)?,
             is: fact.value.to_dialog()?,
             cause: None,
         };
         instructions.push(if is_multi_valued(&fact.the) {
-            Instruction::Assert(artifact, dialog_corpus::Pick::All)
+            Instruction::Assert(stated, dialog_corpus::Pick::All)
         } else {
-            Instruction::Assert(artifact, dialog_corpus::Pick::Last)
+            Instruction::Assert(stated, dialog_corpus::Pick::Last)
         });
     }
     Ok(instructions)

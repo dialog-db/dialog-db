@@ -5,9 +5,7 @@ use dialog_common::{ConditionalSend, ConditionalSync, Holds};
 use dialog_corpus::selector::Constrained;
 use dialog_corpus::tree::CorpusExt as _;
 use dialog_corpus::tree::CorpusNode;
-use dialog_corpus::{
-    Artifact, ArtifactSelector, ArtifactStream, ArtifactView, Datum, DialogCorpusError, Key, State,
-};
+use dialog_corpus::{Datum, DialogCorpusError, Fact, FactStream, FactView, Key, Selector, State};
 use dialog_effects::archive::Get;
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::blob::Load as BlobLoad;
@@ -22,24 +20,21 @@ use crate::repository::archive::erased;
 use crate::repository::source::SourceRef;
 use crate::{Branch, Index};
 
-/// Command struct for selecting artifacts from a branch or a snapshot.
+/// Command struct for selecting facts from a branch or a snapshot.
 pub struct Select<'a> {
     source: SourceRef<'a>,
-    selector: ArtifactSelector<Constrained>,
+    selector: Selector<Constrained>,
 }
 
 impl<'a> Select<'a> {
-    /// Create a select command for the given branch and artifact selector.
-    pub fn new(branch: &'a Branch, selector: ArtifactSelector<Constrained>) -> Self {
+    /// Create a select command for the given branch and fact selector.
+    pub fn new(branch: &'a Branch, selector: Selector<Constrained>) -> Self {
         Self::from_source(SourceRef::from(branch), selector)
     }
 
     /// Create a select command for the given line (branch or snapshot)
-    /// and artifact selector.
-    pub(crate) fn from_source(
-        source: SourceRef<'a>,
-        selector: ArtifactSelector<Constrained>,
-    ) -> Self {
+    /// and fact selector.
+    pub(crate) fn from_source(source: SourceRef<'a>, selector: Selector<Constrained>) -> Self {
         Self { source, selector }
     }
 
@@ -78,7 +73,7 @@ where
 
 impl<'a> Select<'a> {
     /// Materialize every row: the select's streams yield owned
-    /// [`Artifact`]s instead of borrowed-access [`ArtifactView`]s.
+    /// [`Fact`]s instead of borrowed-access [`FactView`]s.
     ///
     /// `select(..).to_owned().perform(..)` is the drop-in spelling for
     /// consumers of the pre-view API; prefer reading fields off the views
@@ -96,16 +91,16 @@ impl Select<'_> {
     /// Execute the select, using fallback to remote if the line is a
     /// branch with a remote upstream.
     ///
-    /// Rows stream as borrowed-access [`ArtifactView`]s; chain
+    /// Rows stream as borrowed-access [`FactView`]s; chain
     /// [`to_owned`](Self::to_owned) before this call for owned
-    /// [`Artifact`]s. The per-item error type remains
+    /// [`Fact`]s. The per-item error type remains
     /// [`DialogCorpusError`] because stream items surface
-    /// artifact-decoding errors that the caller may want to inspect
+    /// fact-decoding errors that the caller may want to inspect
     /// directly.
     pub async fn perform<Env>(
         self,
         env: &Env,
-    ) -> Result<impl Stream<Item = Result<ArtifactView, DialogCorpusError>>, DialogSearchTreeError>
+    ) -> Result<impl Stream<Item = Result<FactView, DialogCorpusError>>, DialogSearchTreeError>
     where
         Env: Provider<Get>
             + Provider<ArchiveLoad>
@@ -179,7 +174,7 @@ impl Select<'_> {
         self,
         store: S,
     ) -> Result<
-        impl Stream<Item = Result<ArtifactView, DialogCorpusError>> + 's + use<'s, S>,
+        impl Stream<Item = Result<FactView, DialogCorpusError>> + 's + use<'s, S>,
         DialogSearchTreeError,
     >
     where
@@ -211,7 +206,7 @@ impl Select<'_> {
     pub(crate) async fn execute_boxed<'s, S>(
         self,
         store: S,
-    ) -> Result<ArtifactStream<'s>, DialogSearchTreeError>
+    ) -> Result<FactStream<'s>, DialogSearchTreeError>
     where
         S: Provider<ArchiveLoad>
             + Provider<nodes::Write<CorpusNode>>
@@ -252,7 +247,7 @@ impl Select<'_> {
         self.estimate(erased(env)).await
     }
 
-    /// An advisory upper-bound estimate of how many artifacts this selector's
+    /// An advisory upper-bound estimate of how many facts this selector's
     /// range spans, read from the range's edge paths (see
     /// [`CorpusExt::estimate`](dialog_corpus::tree::CorpusExt::estimate)).
     ///
@@ -290,7 +285,7 @@ impl Select<'_> {
     async fn execute_owned<'s, S>(
         self,
         store: S,
-    ) -> Result<impl Stream<Item = Result<Artifact, DialogCorpusError>> + 's, DialogSearchTreeError>
+    ) -> Result<impl Stream<Item = Result<Fact, DialogCorpusError>> + 's, DialogSearchTreeError>
     where
         S: Provider<ArchiveLoad>
             + Provider<nodes::Write<CorpusNode>>
@@ -311,10 +306,10 @@ impl Select<'_> {
 }
 
 /// A [`Select`] whose streams materialize every row into an owned
-/// [`Artifact`] — the explicit opt-in produced by [`Select::to_owned`].
+/// [`Fact`] — the explicit opt-in produced by [`Select::to_owned`].
 ///
 /// The query pipeline itself traffics in borrowed-access views
-/// (`ArtifactStream` yields [`ArtifactView`]s; the k-way merge and the
+/// (`FactStream` yields [`FactView`]s; the k-way merge and the
 /// `Changes` overlay operate on them, and the engine materializes only the
 /// rows its filters admit). This form is for CONSUMERS that want every row
 /// owned — a collect-everything read, an export — where materializing from
@@ -332,7 +327,7 @@ impl SelectOwned<'_> {
     pub async fn perform<Env>(
         self,
         env: &Env,
-    ) -> Result<impl Stream<Item = Result<Artifact, DialogCorpusError>>, DialogSearchTreeError>
+    ) -> Result<impl Stream<Item = Result<Fact, DialogCorpusError>>, DialogSearchTreeError>
     where
         Env: Provider<Get>
             + Provider<ArchiveLoad>
@@ -353,7 +348,7 @@ impl SelectOwned<'_> {
     pub async fn execute<'s, S>(
         self,
         store: S,
-    ) -> Result<impl Stream<Item = Result<Artifact, DialogCorpusError>> + 's, DialogSearchTreeError>
+    ) -> Result<impl Stream<Item = Result<Fact, DialogCorpusError>> + 's, DialogSearchTreeError>
     where
         S: Provider<ArchiveLoad>
             + Provider<nodes::Write<CorpusNode>>

@@ -1,4 +1,4 @@
-//! Internal data representation for storing artifacts in indexes.
+//! Internal data representation for storing facts in indexes.
 //!
 //! This module defines the [`Datum`] type: the per-entry payload stored
 //! alongside a key in the probabilistic search tree indexes.
@@ -11,22 +11,22 @@
 //! keyed by that same 32-byte reference (written on commit by
 //! [`CorpusExt::apply`](crate::tree::CorpusExt::apply) and fetched
 //! on read). The payload holds only the [`Cause`], which the key cannot
-//! reconstruct. A [`Artifact`] is reconstructed from the key plus this payload
+//! reconstruct. A [`Fact`] is reconstructed from the key plus this payload
 //! (plus the fetched spilled block, if any) by
-//! [`Artifact::from_key_datum`]/[`Artifact::from_key_datum_with_value`].
+//! [`Fact::from_key_datum`]/[`Fact::from_key_datum_with_value`].
 
 use rkyv::Archive;
 use serde::{Deserialize, Serialize};
 
 use crate::ValueType;
 
-use crate::{Artifact, Cause, history::Version};
+use crate::{Cause, Fact, history::Version};
 
 #[cfg(doc)]
 use crate::{Entity, Relation, Value, tree::Corpus, tree::Stamp};
 
 /// A [`Datum`] is the per-entry payload stored against a key in the
-/// artifact indexes ([`Corpus`]): the parts of a fact the key does not
+/// fact indexes ([`Corpus`]): the parts of a fact the key does not
 /// already carry.
 #[derive(
     Clone, Debug, PartialEq, Serialize, Deserialize, Archive, rkyv::Serialize, rkyv::Deserialize,
@@ -74,12 +74,12 @@ pub struct Datum {
 }
 
 impl Datum {
-    /// The payload for `artifact`: only the cause. A spilled value's bytes are
+    /// The payload for `fact`: only the cause. A spilled value's bytes are
     /// written separately as a content-addressed block in the archive (keyed by
     /// the key's 32-byte reference), so the payload never carries value bytes.
-    pub fn for_artifact(artifact: &Artifact) -> Self {
+    pub fn for_fact(fact: &Fact) -> Self {
         Self {
-            cause: artifact.cause.clone(),
+            cause: fact.cause.clone(),
             blob: None,
             version: None,
             collapsed: Vec::new(),

@@ -372,7 +372,7 @@ mod tests {
     use crate::{Mode, Peer};
     use dialog_capability::identity::TreeReference;
     use dialog_capability::{Did, Subject};
-    use dialog_corpus::{Artifact, Entity, Instruction, Value};
+    use dialog_corpus::{Entity, Fact, Instruction, Value};
     use dialog_effects::MethodExt as _;
     use dialog_effects::authority::{Identify, OperatorExt as _};
     use dialog_effects::branch::prelude::*;
@@ -1009,7 +1009,7 @@ mod tests {
             .transaction()
             .integrate(
                 vec![Instruction::Assert(
-                    Artifact {
+                    Fact {
                         the: "user/name".parse()?,
                         of: "user:elsewhere".parse()?,
                         is: Value::String("Elsewhere".into()),

@@ -18,7 +18,7 @@ use base58::{FromBase58, ToBase58};
 use dialog_number::Number;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
-/// All value type representations that may be stored by [`Artifacts`]
+/// All value type representations a [`Fact`](crate::Fact) may carry
 ///
 /// # Serialization
 ///

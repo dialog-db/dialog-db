@@ -29,7 +29,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use dialog_corpus::selector::Constrained;
-use dialog_corpus::{ArtifactSelector, FetchBudget, Likelihood, PreloadQueue};
+use dialog_corpus::{FetchBudget, Likelihood, PreloadQueue, Selector};
 use futures_util::stream::FuturesUnordered;
 use futures_util::{Stream, StreamExt as _};
 
@@ -193,7 +193,7 @@ async fn warm_source(
     source: Source,
     routes: &Routes,
     env: &Erased,
-    selector: &ArtifactSelector<Constrained>,
+    selector: &Selector<Constrained>,
     likelihood: Likelihood,
 ) -> Result<(), DialogSearchTreeError> {
     let Some(root) = source.as_ref().root() else {
@@ -244,8 +244,8 @@ mod tests {
     use dialog_corpus::tree::CorpusCache;
     use dialog_corpus::tree::CorpusExt as _;
     use dialog_corpus::{
-        ArchiveDelta, Artifact, Datum, Entity, Instruction, Key, Preload, PreloadRequest,
-        Speculation, State, Value,
+        ArchiveDelta, Datum, Entity, Fact, Instruction, Key, Preload, PreloadRequest, Speculation,
+        State, Value,
     };
     use dialog_effects::archive::Get;
     use dialog_query::query::Output as _;
@@ -303,7 +303,7 @@ mod tests {
             blocks,
             &mut delta,
             stream::iter(vec![Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "profile/name".parse()?,
                     of: Entity::new()?,
                     is: Value::String(name.into()),
@@ -358,8 +358,8 @@ mod tests {
         Ok(())
     }
 
-    fn selector(attribute: &str) -> ArtifactSelector<Constrained> {
-        ArtifactSelector::new().the(attribute.parse().expect("a valid attribute"))
+    fn selector(attribute: &str) -> Selector<Constrained> {
+        Selector::new().the(attribute.parse().expect("a valid attribute"))
     }
 
     /// A zero budget turns speculation off without touching demand:

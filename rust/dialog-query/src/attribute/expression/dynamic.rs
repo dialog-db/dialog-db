@@ -1,7 +1,7 @@
-use crate::artifact::{Cause, Entity, Value};
 use crate::attribute::Relation;
 use crate::attribute::query::AttributeQuery;
 use crate::attribute::statement::AttributeStatement;
+use crate::corpus::{Cause, Entity, Value};
 use crate::negation::Negation;
 use crate::query::Output;
 use crate::schema::Cardinality;

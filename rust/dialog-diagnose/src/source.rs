@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use dialog_capability::Subject;
 use dialog_common::{Blake3Hash, ConditionalSend};
-use dialog_corpus::{Artifact, Index, Instruction};
+use dialog_corpus::{Fact, Index, Instruction};
 use dialog_effects::storage::Location;
 use dialog_peer::helpers::{open_peer, test_storage, unique_name};
 use dialog_peer::{Peer, Session};
@@ -19,7 +19,7 @@ use futures_util::{Stream, StreamExt as _};
 /// The session diagnose reads its repository through: what every view
 /// reads the explored tree's nodes and spilled values through, by
 /// performing loads on it. It holds the repository's node cache, so every
-/// view (the hierarchy, the analysis, the artifact listing) reads a node
+/// view (the hierarchy, the analysis, the fact listing) reads a node
 /// from the archive once. Shared behind an [`Arc`], so every background
 /// worker can hold it.
 pub type DiagnoseSession = Peer<VolatileSpace, Session>;
@@ -32,12 +32,12 @@ pub struct Explored {
     pub session: Arc<DiagnoseSession>,
 }
 
-/// Commits `artifacts` to the main branch of a fresh in-memory repository,
+/// Commits `facts` to the main branch of a fresh in-memory repository,
 /// canonicalized so the tree is the one the fact set determines, and returns
 /// the tree the branch committed.
-pub async fn explore<Artifacts>(artifacts: Artifacts) -> anyhow::Result<Explored>
+pub async fn explore<Facts>(facts: Facts) -> anyhow::Result<Explored>
 where
-    Artifacts: Stream<Item = Artifact> + ConditionalSend,
+    Facts: Stream<Item = Fact> + ConditionalSend,
 {
     let storage = test_storage().await;
     let peer = open_peer(storage, Location::profile(unique_name("diagnose"))).await?;
@@ -52,8 +52,8 @@ where
         .perform(&session)
         .await?;
     let branch = repository.branch("main").open().perform(&session).await?;
-    let changes = artifacts
-        .map(|artifact| Instruction::Assert(artifact, dialog_corpus::Pick::All))
+    let changes = facts
+        .map(|fact| Instruction::Assert(fact, dialog_corpus::Pick::All))
         .collect::<Vec<_>>()
         .await
         .into_iter()

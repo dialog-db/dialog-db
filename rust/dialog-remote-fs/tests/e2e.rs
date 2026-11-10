@@ -16,7 +16,7 @@
 
 use anyhow::Result;
 use dialog_capability::Subject;
-use dialog_corpus::{Artifact, ArtifactSelector, Instruction, Value};
+use dialog_corpus::{Fact, Instruction, Selector, Value};
 use dialog_credentials::{Credential, Ed25519Signer, SignerCredential};
 use dialog_effects::MethodExt as _;
 use dialog_effects::Rejection;
@@ -101,8 +101,8 @@ async fn setup_repo_with_fs_remote(
     Ok((repo, location, branch))
 }
 
-fn artifact(of: &str, name: &str) -> Result<Artifact> {
-    Ok(Artifact {
+fn fact(of: &str, name: &str) -> Result<Fact> {
+    Ok(Fact {
         the: "user/name".parse()?,
         of: of.parse()?,
         is: Value::String(name.into()),
@@ -120,7 +120,7 @@ async fn it_pushes_and_pulls_via_fs_remote() -> Result<()> {
         .transaction()
         .integrate(
             vec![Instruction::Assert(
-                artifact("user:1", "Alice")?,
+                fact("user:1", "Alice")?,
                 dialog_corpus::Pick::All,
             )]
             .into_iter()
@@ -140,7 +140,7 @@ async fn it_pushes_and_pulls_via_fs_remote() -> Result<()> {
 
     let results: Vec<_> = branch
         .claims()
-        .select(ArtifactSelector::new().the("user/name".parse()?))
+        .select(Selector::new().the("user/name".parse()?))
         .to_owned()
         .perform(&operator)
         .await?
@@ -164,7 +164,7 @@ async fn it_shares_an_fs_remote_between_two_repos() -> Result<()> {
         .transaction()
         .integrate(
             vec![Instruction::Assert(
-                artifact("user:alice", "Alice")?,
+                fact("user:alice", "Alice")?,
                 dialog_corpus::Pick::All,
             )]
             .into_iter()
@@ -214,7 +214,7 @@ async fn it_shares_an_fs_remote_between_two_repos() -> Result<()> {
 
     let results: Vec<_> = bob_branch
         .claims()
-        .select(ArtifactSelector::new().the("user/name".parse()?))
+        .select(Selector::new().the("user/name".parse()?))
         .to_owned()
         .perform(&operator)
         .await?
@@ -222,7 +222,7 @@ async fn it_shares_an_fs_remote_between_two_repos() -> Result<()> {
         .await
         .into_iter()
         .collect::<Result<Vec<_>, _>>()?;
-    assert_eq!(results.len(), 1, "Bob should have Alice's artifact");
+    assert_eq!(results.len(), 1, "Bob should have Alice's fact");
     assert_eq!(results[0].is, Value::String("Alice".into()));
     Ok(())
 }
@@ -268,7 +268,7 @@ async fn it_rejects_a_stale_push_on_cas_conflict() -> Result<()> {
         .transaction()
         .integrate(
             vec![Instruction::Assert(
-                artifact("user:alice", "Alice")?,
+                fact("user:alice", "Alice")?,
                 dialog_corpus::Pick::All,
             )]
             .into_iter()
@@ -286,7 +286,7 @@ async fn it_rejects_a_stale_push_on_cas_conflict() -> Result<()> {
         .transaction()
         .integrate(
             vec![Instruction::Assert(
-                artifact("user:bob", "Bob")?,
+                fact("user:bob", "Bob")?,
                 dialog_corpus::Pick::All,
             )]
             .into_iter()

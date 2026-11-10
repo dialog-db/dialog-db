@@ -111,13 +111,13 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-    use dialog_corpus::{Artifact, Entity, EntityKey, KeyType as _, Value};
+    use dialog_corpus::{Entity, EntityKey, Fact, KeyType as _, Value};
     use dialog_search_tree::Manifest;
 
     use super::*;
 
-    fn fact() -> Artifact {
-        Artifact {
+    fn fact() -> Fact {
+        Fact {
             the: "test/name".parse().expect("attribute parses"),
             of: Entity::new().expect("entity mints"),
             is: Value::String("Alice".into()),
@@ -125,8 +125,8 @@ mod tests {
         }
     }
 
-    fn entity_key(fact: &Artifact) -> Vec<u8> {
-        EntityKey::from_artifact(fact, &Manifest::default())
+    fn entity_key(fact: &Fact) -> Vec<u8> {
+        EntityKey::from_fact(fact, &Manifest::default())
             .into_key()
             .bytes()
             .to_vec()

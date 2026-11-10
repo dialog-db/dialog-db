@@ -1,7 +1,7 @@
 pub use ratatui::prelude::*;
 use ratatui::widgets::{Axis, Block, Chart, Dataset, GraphType};
 
-use crate::ArtifactsTreeStats;
+use crate::FactsTreeStats;
 
 /// Widget for displaying a distribution chart of probabilistic search tree segment sizes.
 ///
@@ -15,7 +15,7 @@ use crate::ArtifactsTreeStats;
 /// - Line graph showing the distribution curve
 pub struct DistributionChart<'a> {
     /// Tree statistics containing distribution data to visualize
-    pub stats: &'a ArtifactsTreeStats,
+    pub stats: &'a FactsTreeStats,
 }
 
 impl Widget for DistributionChart<'_> {

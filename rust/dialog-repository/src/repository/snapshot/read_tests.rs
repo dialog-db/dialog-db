@@ -7,7 +7,7 @@ wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 use anyhow::Result;
 use dialog_corpus::history::History as _;
 use dialog_corpus::tree::CorpusNode;
-use dialog_corpus::{Artifact, ArtifactSelector, Changes, Entity, Value};
+use dialog_corpus::{Changes, Entity, Fact, Selector, Value};
 use dialog_effects::blob::BlobError;
 use dialog_effects::blob::Read as BlobRead;
 use dialog_peer::helpers::test_session_with_peer;
@@ -56,7 +56,7 @@ fn person(id: &str, name: &str) -> Person {
 }
 
 /// Every `test/name` value on a line, sorted, read through the raw
-/// artifact index (the lowest read path there is).
+/// fact index (the lowest read path there is).
 async fn names<'a, Env>(source: impl Into<SourceRef<'a>>, env: &Env) -> Result<Vec<String>>
 where
     Env: Provider<BlobRead>
@@ -77,17 +77,15 @@ where
         + ConditionalSync
         + 'static,
 {
-    let rows: Vec<Artifact> = Select::from_source(
-        source.into(),
-        ArtifactSelector::new().the("test/name".parse()?),
-    )
-    .to_owned()
-    .perform(env)
-    .await?
-    .collect::<Vec<_>>()
-    .await
-    .into_iter()
-    .collect::<Result<_, _>>()?;
+    let rows: Vec<Fact> =
+        Select::from_source(source.into(), Selector::new().the("test/name".parse()?))
+            .to_owned()
+            .perform(env)
+            .await?
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<_, _>>()?;
     let mut names: Vec<String> = rows
         .into_iter()
         .filter_map(|row| match row.is {
@@ -301,7 +299,7 @@ async fn it_fails_when_the_root_is_absent() -> Result<()> {
     let snapshot = repo.snapshot(revision);
     let result = snapshot
         .claims()
-        .select(ArtifactSelector::new().the("test/name".parse()?))
+        .select(Selector::new().the("test/name".parse()?))
         .perform(&operator)
         .await;
     assert!(

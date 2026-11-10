@@ -1,7 +1,7 @@
-//! Pattern matching for artifacts against selectors.
+//! Pattern matching for facts against selectors.
 //!
-//! This module provides functionality for matching artifacts and index entries
-//! against artifact selectors during query operations.
+//! This module provides functionality for matching facts and index entries
+//! against fact selectors during query operations.
 //!
 //! A spilled value's key carries the order-preserving encoding of its leading
 //! raw bytes plus the whole-value hash, so most predicates decide from the
@@ -14,14 +14,13 @@
 
 use std::cmp::Ordering;
 
+use crate::{NUMBER_BAND, encode_key_value_owned};
 use crate::{
-    ArtifactSelector, NameShape, Value, ValueDataType,
-    artifacts::selector::{Constrained, ValueBound},
-    decode_bytes_cow, decode_value,
+    NameShape, Selector, Value, ValueDataType, decode_bytes_cow, decode_value,
     key::value_payload,
     key::varkey::{KeyRef, ValuePayload, ValueRef},
+    model::selector::{Constrained, ValueBound},
 };
-use crate::{NUMBER_BAND, encode_key_value_owned};
 use dialog_search_tree::Manifest;
 
 /// The verdict of matching one scanned key against a selector.
@@ -81,7 +80,7 @@ fn truncated_order(stored: &[u8], probe: &[u8]) -> TruncatedOrder {
 /// manifest would make an equality match on a boundary-sized value silently
 /// fail.
 pub fn match_selector_and_key_ref(
-    selector: &ArtifactSelector<Constrained>,
+    selector: &Selector<Constrained>,
     key: &KeyRef<'_>,
     manifest: &Manifest,
 ) -> SelectorMatch {
@@ -346,10 +345,7 @@ pub fn match_selector_and_key_ref(
 /// Semantically re-checks the VALUE predicates (prefix and range bounds) of a
 /// selector against a fully-loaded value: the scan's post-filter for entries
 /// whose key-side verdict was [`SelectorMatch::NeedsValue`].
-pub(crate) fn value_predicates_admit(
-    selector: &ArtifactSelector<Constrained>,
-    value: &Value,
-) -> bool {
+pub(crate) fn value_predicates_admit(selector: &Selector<Constrained>, value: &Value) -> bool {
     if let Some(prefix) = selector.value_prefix() {
         match value {
             Value::String(content) => {

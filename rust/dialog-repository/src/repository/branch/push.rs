@@ -3,7 +3,7 @@ use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::{Buffer, ConditionalSync, Holds};
 use dialog_corpus::history::Version;
 use dialog_corpus::tree::CorpusNode;
-use dialog_corpus::{Datum, Key as ArtifactKey, ShipmentRef, State, shipment_ref, shipment_refs};
+use dialog_corpus::{Datum, Key as CorpusKey, ShipmentRef, State, shipment_ref, shipment_refs};
 use dialog_effects::MethodExt as _;
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::prelude::ArchiveExt as _;
@@ -783,7 +783,7 @@ where
 
 /// The direct children of a tree node, by hash. A segment has none.
 fn node_children(
-    node: &PersistentNode<ArtifactKey, State<Datum>>,
+    node: &PersistentNode<CorpusKey, State<Datum>>,
 ) -> Result<Vec<NodeHash>, PushError> {
     match node.body() {
         NodeBody::Index(index) => {
@@ -1232,7 +1232,7 @@ async fn node_from_anywhere<Env>(
     branch: &Branch,
     sources: &[ConnectedReplica],
     env: &Env,
-) -> Result<Option<PersistentNode<ArtifactKey, State<Datum>>>, PushError>
+) -> Result<Option<PersistentNode<CorpusKey, State<Datum>>>, PushError>
 where
     Env: Provider<Get>
         + Provider<Put>
@@ -1444,18 +1444,18 @@ where
                 // buffered in an index) may name blob bytes and spilled
                 // value blocks the target also lacks; ship those before
                 // the node lands, mirroring the top-level shipment loop.
-                let mut entries: Vec<(ArtifactKey, State<Datum>)> = Vec::new();
+                let mut entries: Vec<(CorpusKey, State<Datum>)> = Vec::new();
                 match node.body() {
                     NodeBody::Segment(segment) => {
-                        segment.for_each_entry::<ArtifactKey, _>(|key, value| {
-                            entries.push((ArtifactKey::from(key.to_vec()), into_owned(value)?));
+                        segment.for_each_entry::<CorpusKey, _>(|key, value| {
+                            entries.push((CorpusKey::from(key.to_vec()), into_owned(value)?));
                             Ok(())
                         })?;
                     }
                     NodeBody::Index(index) => {
-                        for entry in index.all_novelty::<ArtifactKey>()? {
+                        for entry in index.all_novelty::<CorpusKey>()? {
                             if let NoveltyOp::Assert(value) = entry.op {
-                                entries.push((ArtifactKey::from(entry.key), value));
+                                entries.push((CorpusKey::from(entry.key), value));
                             }
                         }
                     }
@@ -1525,7 +1525,7 @@ mod tests {
     use anyhow::Result;
     use dialog_peer::helpers::test_session_with_peer;
 
-    use dialog_corpus::{Artifact, Instruction, Value};
+    use dialog_corpus::{Fact, Instruction, Value};
     use futures_util::{StreamExt as _, stream};
 
     #[dialog_common::test]
@@ -1538,7 +1538,7 @@ mod tests {
         let feature = repo.branch("feature").open().perform(&operator).await?;
         feature.set_upstream(&main).perform(&operator).await?;
 
-        let artifact = Artifact {
+        let fact = Fact {
             the: "user/name".parse()?,
             of: "user:123".parse()?,
             is: Value::String("Alice".to_string()),
@@ -1546,7 +1546,7 @@ mod tests {
         };
         let _hash = feature
             .commit(stream::iter(vec![Instruction::Assert(
-                artifact,
+                fact,
                 dialog_corpus::Pick::All,
             )]))
             .perform(&operator)
@@ -1586,7 +1586,7 @@ mod tests {
         feature
             .commit(stream::iter(vec![
                 Instruction::Assert(
-                    Artifact {
+                    Fact {
                         the: "doc/body".parse()?,
                         of: "doc:a".parse()?,
                         is: value.clone(),
@@ -1595,7 +1595,7 @@ mod tests {
                     dialog_corpus::Pick::All,
                 ),
                 Instruction::Assert(
-                    Artifact {
+                    Fact {
                         the: "doc/body".parse()?,
                         of: "doc:b".parse()?,
                         is: value.clone(),
@@ -1615,7 +1615,7 @@ mod tests {
         let main_reloaded = repo.branch("main").load().perform(&operator).await?;
         let results: Vec<_> = main_reloaded
             .claims()
-            .select(dialog_corpus::ArtifactSelector::new().the("doc/body".parse()?))
+            .select(dialog_corpus::Selector::new().the("doc/body".parse()?))
             .to_owned()
             .perform(&operator)
             .await?
@@ -1658,7 +1658,7 @@ mod tests {
 
         feature
             .commit(stream::iter(vec![Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "user/name".parse()?,
                     of: "user:123".parse()?,
                     is: Value::String("Alice".to_string()),
@@ -1718,7 +1718,7 @@ mod tests {
         feature_a.set_upstream(&main).perform(&operator).await?;
         feature_a
             .commit(stream::iter(vec![Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "user/name".parse()?,
                     of: "user:1".parse()?,
                     is: Value::String("Alice".to_string()),
@@ -1785,7 +1785,7 @@ mod tests {
 
         feature
             .commit(stream::iter(vec![Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "user/name".parse()?,
                     of: "user:123".parse()?,
                     is: Value::String("Alice".to_string()),
@@ -1845,7 +1845,7 @@ mod tests {
         let occupied = repo.branch("occupied").open().perform(&operator).await?;
         occupied
             .commit(stream::iter(vec![Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "user/name".parse()?,
                     of: "user:theirs".parse()?,
                     is: Value::String("Existing".to_string()),
@@ -1859,7 +1859,7 @@ mod tests {
         let feature = repo.branch("feature").open().perform(&operator).await?;
         feature
             .commit(stream::iter(vec![Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "user/name".parse()?,
                     of: "user:ours".parse()?,
                     is: Value::String("New".to_string()),
@@ -1887,7 +1887,7 @@ mod tests {
         let main = repo.branch("main").open().perform(&operator).await?;
         let _hash = main
             .commit(stream::iter(vec![Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "user/name".parse()?,
                     of: "user:main".parse()?,
                     is: Value::String("Main data".to_string()),
@@ -1903,7 +1903,7 @@ mod tests {
 
         let _hash = feature
             .commit(stream::iter(vec![Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "user/email".parse()?,
                     of: "user:feature".parse()?,
                     is: Value::String("feature@example.com".to_string()),
@@ -1980,7 +1980,7 @@ mod tests {
         }
         feature
             .commit(stream::iter(vec![Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "user/name".parse()?,
                     of: "user:1".parse()?,
                     is: Value::String("Alice".into()),
@@ -2028,7 +2028,7 @@ mod tests {
         for value in ["Alice", "Bob"] {
             feature
                 .commit(stream::iter(vec![Instruction::Assert(
-                    Artifact {
+                    Fact {
                         the: "user/name".parse()?,
                         of: format!("user:{value}").parse()?,
                         is: Value::String(value.into()),
@@ -2053,7 +2053,7 @@ mod tests {
 
     fn post(of: &str) -> Instruction {
         Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "post/title".parse().expect("attribute parses"),
                 of: of.parse().expect("entity parses"),
                 is: Value::String(of.to_string()),

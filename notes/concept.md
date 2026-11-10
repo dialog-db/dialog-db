@@ -147,7 +147,7 @@ fn employee_from_contractor(employee: Query<Employee>) -> impl When {
     )
 }
 
-let session = Session::open(artifacts)
+let session = Session::open(facts)
     .install(employee_from_contractor)?;
 ```
 

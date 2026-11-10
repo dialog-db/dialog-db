@@ -1,4 +1,4 @@
-//! Artifacts cursor for streaming facts data.
+//! Facts cursor for streaming facts data.
 
 use std::{
     pin::Pin,
@@ -12,11 +12,11 @@ use tokio::sync::Mutex;
 use super::store::WorkerMessage;
 use crate::DiagnoseSession;
 
-/// Internal state for the artifacts cursor.
+/// Internal state for the facts cursor.
 ///
 /// Tracks the current position in the stream and completion status.
 #[derive(Default)]
-pub struct ArtifactsCursorState {
+pub struct FactsCursorState {
     /// Index of the next item to fetch
     next_index: usize,
     /// Last key processed (for resuming streams)
@@ -25,13 +25,13 @@ pub struct ArtifactsCursorState {
     finished: bool,
 }
 
-/// Background worker for streaming facts data from the artifacts database.
+/// Background worker for streaming facts data from the facts database.
 ///
 /// This cursor provides incremental access to facts data, loading it
 /// on-demand as the UI requests specific ranges of data.
-pub struct ArtifactsCursor {
+pub struct FactsCursor {
     /// Shared state for tracking cursor position
-    state: Arc<Mutex<ArtifactsCursorState>>,
+    state: Arc<Mutex<FactsCursorState>>,
     /// The probabilistic search tree index containing the facts
     tree: Index,
     /// The session the tree's blocks load through
@@ -40,8 +40,8 @@ pub struct ArtifactsCursor {
     tx: Sender<WorkerMessage>,
 }
 
-impl ArtifactsCursor {
-    /// Creates a new artifacts cursor.
+impl FactsCursor {
+    /// Creates a new facts cursor.
     ///
     /// # Arguments
     ///

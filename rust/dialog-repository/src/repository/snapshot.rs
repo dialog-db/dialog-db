@@ -61,7 +61,7 @@ use dialog_common::{Blake3Hash as NodeHash, Buffer, ConditionalSync, Holds};
 use dialog_corpus::history::{CausalityCache, ContextCache, RevisionRecord, TreeHistory, Version};
 use dialog_corpus::selector::Constrained;
 use dialog_corpus::{
-    ArtifactSelector, BlobIndexExt as _, Datum, DialogCorpusError, Entity, Key, ShipmentRef, State,
+    BlobIndexExt as _, Datum, DialogCorpusError, Entity, Key, Selector, ShipmentRef, State,
     Statement, shipment_ref,
 };
 use dialog_effects::archive::prelude::{
@@ -397,9 +397,9 @@ impl Snapshot {
         &self.caches
     }
 
-    /// The snapshot's artifact index.
+    /// The snapshot's fact index.
     ///
-    /// Use `.select(selector).perform(&env)` to query artifacts.
+    /// Use `.select(selector).perform(&env)` to query facts.
     pub fn claims(&self) -> SnapshotClaims<'_> {
         SnapshotClaims { snapshot: self }
     }
@@ -516,14 +516,14 @@ impl Clone for Snapshot {
     }
 }
 
-/// The snapshot's artifact index. Created by [`Snapshot::claims`].
+/// The snapshot's fact index. Created by [`Snapshot::claims`].
 pub struct SnapshotClaims<'a> {
     snapshot: &'a Snapshot,
 }
 
 impl<'a> SnapshotClaims<'a> {
-    /// Select artifacts matching the selector.
-    pub fn select(self, selector: ArtifactSelector<Constrained>) -> Select<'a> {
+    /// Select facts matching the selector.
+    pub fn select(self, selector: Selector<Constrained>) -> Select<'a> {
         Select::from_source(SourceRef::from(self.snapshot), selector)
     }
 }
@@ -792,7 +792,7 @@ impl SnapshotExport {
                 // buffers, whose keys and values reference content
                 // exactly like stored entries (a buffered retract
                 // references nothing of its own). The closure only
-                // collects: classification returns artifact errors,
+                // collects: classification returns fact errors,
                 // which do not belong in a tree-walk callback. The
                 // buffer is sized from the node's own count first: grown
                 // entry by entry, its copies cost whatever the allocator's
@@ -1115,7 +1115,7 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use anyhow::Result;
-    use dialog_corpus::{Artifact, ArtifactSelector, Instruction, Value};
+    use dialog_corpus::{Fact, Instruction, Selector, Value};
     use dialog_credentials::Credential;
     use dialog_effects::archive::prelude::GetBlockExt as _;
     use dialog_effects::blob::BlobSource;
@@ -1214,13 +1214,13 @@ mod tests {
 
         let mut facts: Vec<Instruction> = generate_data(20)?
             .into_iter()
-            .map(|artifact| Instruction::Assert(artifact, dialog_corpus::Pick::All))
+            .map(|fact| Instruction::Assert(fact, dialog_corpus::Pick::All))
             .collect();
         let large = Value::String(
             "spilled".repeat(dialog_search_tree::Manifest::default().inline_n as usize + 1),
         );
         facts.push(Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "document/body".parse()?,
                 of: "document:large".parse()?,
                 is: large,
@@ -1398,7 +1398,7 @@ mod tests {
 
         let rows = branch
             .claims()
-            .select(ArtifactSelector::new().the("document/body".parse()?))
+            .select(Selector::new().the("document/body".parse()?))
             .to_owned()
             .perform(&destination)
             .await?

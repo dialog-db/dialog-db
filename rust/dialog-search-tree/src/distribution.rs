@@ -443,7 +443,7 @@ pub mod cap {
     /// `manifest.max_segment`: its key bytes plus
     /// [`Manifest::key_overhead`]. The cap needs a deterministic per-entry
     /// weight at cut time, when the value and the encoded node size (front
-    /// coding, per-node dictionaries) are not in hand; for artifact trees
+    /// coding, per-node dictionaries) are not in hand; for fact trees
     /// the key carries the value, so key length dominates real cost.
     pub fn entry_weight(key: &[u8], manifest: &Manifest) -> usize {
         key.len() + manifest.key_overhead()

@@ -330,7 +330,7 @@ mod tests {
     use crate::DELEGATION_AUDIENCE;
     use anyhow::Result;
     use dialog_capability::access::Retain;
-    use dialog_corpus::{ArtifactSelector, Value};
+    use dialog_corpus::{Selector, Value};
     use dialog_credentials::Ed25519Signer;
     use dialog_effects::storage::Location;
     use dialog_peer::Peer;
@@ -456,7 +456,7 @@ mod tests {
         let facts: Vec<_> = branch
             .claims()
             .select(
-                ArtifactSelector::new()
+                Selector::new()
                     .the(DELEGATION_AUDIENCE.parse()?)
                     .is(Value::String(profile.did().to_string())),
             )

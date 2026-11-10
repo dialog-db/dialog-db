@@ -8351,7 +8351,7 @@ mod tests {
             "an edit opened with the tree's manifest must not reformat it"
         );
         // Spelled out per field: `inline_n` is the value-spill threshold the
-        // artifact key builders read off the tree, and it is the tree's 64,
+        // fact key builders read off the tree, and it is the tree's 64,
         // not the default 4096.
         assert_eq!(after.inline_n, 64);
         assert_eq!(after.max_separator, 16);
@@ -8390,7 +8390,7 @@ mod tests {
 
     /// Regression: inserting a NEW MINIMUM variable-length key into a
     /// single-entry tree must not drop the existing entry. Mirrors the
-    /// artifact two-commit bug where a second entity whose key sorts before
+    /// fact two-commit bug where a second entity whose key sorts before
     /// the first wiped the first. Fixed-width `[u8;4]` tests never exercise a
     /// new-minimum split because equal-length keys share no long prefix.
     #[dialog_common::test]

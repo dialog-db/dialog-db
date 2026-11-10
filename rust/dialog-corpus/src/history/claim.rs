@@ -28,7 +28,7 @@ mod value_codec {
 
 /// A claim as recorded in the history index.
 ///
-/// Structurally this is an [`Artifact`](crate::Artifact) whose `cause` is a
+/// Structurally this is a [`Fact`](crate::Fact) whose `cause` is a
 /// set of [`Version`](super::Version)s rather than a single content hash:
 /// the cause identifies the prior claims on the same `(entity, attribute)`
 /// that this claim supersedes, analogous to how a git commit records which

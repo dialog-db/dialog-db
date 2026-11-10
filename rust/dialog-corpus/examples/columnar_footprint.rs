@@ -1,4 +1,4 @@
-//! Production storage-footprint report for the artifact index under the
+//! Production storage-footprint report for the fact index under the
 //! columnar leaf codec: real EAV/AEV/VAE facts written through the buffered
 //! index write path a commit uses (all three orderings), then the live tree
 //! traversed to sum its on-disk bytes.
@@ -45,7 +45,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None,
         futures_util::stream::iter(
             data.into_iter()
-                .map(|artifact| Instruction::Assert(artifact, dialog_corpus::Pick::All)),
+                .map(|fact| Instruction::Assert(fact, dialog_corpus::Pick::All)),
         ),
         false,
     )
@@ -122,7 +122,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let live_bytes = index_bytes + segment_bytes;
 
-    println!("artifact columnar footprint (production key schema)");
+    println!("fact columnar footprint (production key schema)");
     println!(
         "workload: {ENTITIES} entities, {fact_count} facts, {entries} tree entries (3 orderings)\n"
     );

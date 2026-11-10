@@ -4,7 +4,7 @@ use crate::KeyType;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Artifact, AttributeKeyPart, EntityKeyPart, ValueDataType, key::fact_key, key::varkey,
+    AttributeKeyPart, EntityKeyPart, Fact, ValueDataType, key::fact_key, key::varkey,
     key::varkey::KeyParts, key::varkey::ValuePayload,
 };
 use dialog_search_tree::Manifest;
@@ -15,7 +15,7 @@ use super::{Key, KeyView, KeyViewConstruct, KeyViewMut};
 pub const VALUE_KEY_TAG: u8 = 2;
 
 /// A [`KeyType`] that is used when constructing an index of the [`Value`]s
-/// of [`Artifact`]s.
+/// of [`Fact`]s.
 #[repr(transparent)]
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ValueKey<K>(pub K);
@@ -140,7 +140,7 @@ impl ValueKey<Key> {
     /// tree must be looked up under that same manifest, or a boundary-sized
     /// value inlines on one path and spills on the other and the lookup
     /// misses.
-    pub fn from_artifact(fact: &Artifact, manifest: &Manifest) -> Self {
+    pub fn from_fact(fact: &Fact, manifest: &Manifest) -> Self {
         Self(fact_key(VALUE_KEY_TAG, fact, manifest))
     }
 }

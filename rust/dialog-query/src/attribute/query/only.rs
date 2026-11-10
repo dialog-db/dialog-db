@@ -2,8 +2,8 @@ use super::all::AttributeQueryAll;
 use super::pipelined;
 use crate::Claim;
 use crate::Value;
-use crate::artifact::{ArtifactSelector, ArtifactsRelation, Constrained};
 use crate::attribute::Relation;
+use crate::corpus::{Constrained, CorpusRelation, Selector};
 use crate::environment::Environment;
 use crate::query::Application;
 use crate::query::Output;
@@ -14,23 +14,23 @@ use crate::types::{Any, Record};
 use crate::{Entity, EvaluationError, Parameters, Schema, Term, try_stream};
 use dialog_capability::Provider;
 use dialog_corpus::history::Edition;
-use dialog_corpus::{Artifact, ArtifactView, Cause, DialogCorpusError, Select};
+use dialog_corpus::{Cause, DialogCorpusError, Fact, FactView, Select};
 use std::fmt::Display;
 use std::fmt::{Formatter, Result as FmtResult};
 use std::pin::Pin;
 
-/// An election winner: the artifact and the standing it was stored with.
-type Winner = (Artifact, Option<(Edition, [u8; 32])>);
+/// An election winner: the fact and the standing it was stored with.
+type Winner = (Fact, Option<(Edition, [u8; 32])>);
 
 /// Materializes an election winner, treating a corrupt stored row
 /// ([`DialogCorpusError::CorruptEntry`]) as an ignorable non-result
 /// (`Ok(None)`, with a warning) rather than a query failure: a corrupt or
 /// foreign-written tree entry must not poison every query that ranges over
 /// it. All other errors propagate.
-fn materialize_winner(winner: ArtifactView) -> Result<Option<Winner>, DialogCorpusError> {
+fn materialize_winner(winner: FactView) -> Result<Option<Winner>, DialogCorpusError> {
     let standing = winner.standing();
     match winner.to_owned() {
-        Ok(artifact) => Ok(Some((artifact, standing))),
+        Ok(fact) => Ok(Some((fact, standing))),
         Err(DialogCorpusError::CorruptEntry(reason)) => {
             tracing::warn!(%reason, "ignoring corrupt stored row in election");
             Ok(None)
@@ -45,12 +45,10 @@ fn materialize_winner(winner: ArtifactView) -> Result<Option<Winner>, DialogCorp
 fn challenged(
     source: &Term<Record>,
     candidate: &Match,
-) -> Result<ArtifactSelector<Constrained>, EvaluationError> {
+) -> Result<Selector<Constrained>, EvaluationError> {
     let claim = candidate.prove(source)?;
-    let attribute = ArtifactsRelation::try_from(Value::from(claim.the().clone()))?;
-    Ok(ArtifactSelector::new()
-        .the(attribute)
-        .of(claim.of().clone()))
+    let attribute = CorpusRelation::try_from(Value::from(claim.the().clone()))?;
+    Ok(Selector::new().the(attribute).of(claim.of().clone()))
 }
 
 /// Winner verification.
@@ -86,11 +84,11 @@ where
             Provider::<Select<'_>>::execute(env, challenged(selector.source(), &candidate)?)
                 .await?;
 
-        let mut winner: Option<ArtifactView> = None;
+        let mut winner: Option<FactView> = None;
         for await each in challengers {
             let challenger = each?;
             // The election policy lives with the value layer
-            // (`ArtifactView::elect`); this loop only folds rows
+            // (`FactView::elect`); this loop only folds rows
             // through it.
             winner = Some(match winner {
                 None => challenger,
@@ -118,7 +116,7 @@ where
 ///
 /// Wraps an [`AttributeQueryAll`] and yields one value per
 /// `(attribute, entity)` pair. Which row survives is not this layer's
-/// decision: competing rows fold through [`ArtifactView::elect`], the
+/// decision: competing rows fold through [`FactView::elect`], the
 /// value layer's cardinality-one election, and the engine encodes no
 /// policy of its own.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize)]
@@ -175,8 +173,8 @@ impl AttributeQueryOnly {
         self.query.source()
     }
 
-    /// Map `Term<Relation>` to `Term<ArtifactsRelation>`.
-    pub fn attribute(&self) -> Term<ArtifactsRelation> {
+    /// Map `Term<Relation>` to `Term<CorpusRelation>`.
+    pub fn attribute(&self) -> Term<CorpusRelation> {
         self.query.attribute()
     }
 
@@ -291,21 +289,21 @@ impl AttributeQueryOnly {
                         resolved.cause().clone(),
                     );
 
-                    let mut candidate: Option<ArtifactView> = None;
+                    let mut candidate: Option<FactView> = None;
 
                     let stream = Provider::<Select<'_>>::execute(env, (&scan).try_into()?).await?;
-                    for await artifact in stream {
-                        let artifact = artifact?;
+                    for await fact in stream {
+                        let fact = fact?;
 
                         candidate = Some(match candidate.take() {
                             Some(current) => {
                                 // Group membership compares the raw key
                                 // bytes; nothing materializes while the
                                 // window slides within a group.
-                                if current.the_bytes()? == artifact.the_bytes()?
-                                    && current.of_bytes()? == artifact.of_bytes()?
+                                if current.the_bytes()? == fact.the_bytes()?
+                                    && current.of_bytes()? == fact.of_bytes()?
                                 {
-                                    current.elect(artifact)?
+                                    current.elect(fact)?
                                 } else {
                                     // Group closed: only its winner pays
                                     // for materialization, and only if it
@@ -330,10 +328,10 @@ impl AttributeQueryOnly {
                                         }
                                         _ => {}
                                     }
-                                    artifact
+                                    fact
                                 }
                             }
-                            None => artifact,
+                            None => fact,
                         });
                     }
 
@@ -408,11 +406,11 @@ impl Application for AttributeQueryOnly {
     }
 }
 
-impl TryFrom<&AttributeQueryOnly> for ArtifactSelector<Constrained> {
+impl TryFrom<&AttributeQueryOnly> for Selector<Constrained> {
     type Error = EvaluationError;
 
     fn try_from(from: &AttributeQueryOnly) -> Result<Self, Self::Error> {
-        ArtifactSelector::try_from(&from.query)
+        Selector::try_from(&from.query)
     }
 }
 
@@ -735,7 +733,7 @@ mod tests {
     }
 
     /// When both attribute and value are known ({the, is}) but entity is
-    /// unknown, the VAE scan only sees artifacts matching that exact value.
+    /// unknown, the VAE scan only sees facts matching that exact value.
     /// If another value is the actual winner for an entity, the scan won't
     /// see it. The challenge/verification path must detect this and filter
     /// out non-winners.

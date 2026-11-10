@@ -74,7 +74,7 @@
 
 use anyhow::{Context as _, Result};
 use dialog_capability::Provider;
-use dialog_corpus::{Artifact, ArtifactSelector, Instruction, Pick, Value};
+use dialog_corpus::{Fact, Instruction, Pick, Selector, Value};
 use dialog_query::{Query, Term};
 use dialog_remote_fs::simulation;
 use dialog_repository::Branch;
@@ -109,7 +109,7 @@ fn landing() -> Query<Card> {
 fn toggle(entities: usize, k: usize, j: usize, round: usize) -> Result<Instruction> {
     let index = j * entities / k;
     Ok(Instruction::Assert(
-        Artifact {
+        Fact {
             the: "bug/status".parse()?,
             of: format!("bug:{index}").parse()?,
             is: Value::String(format!("touched-{round}")),
@@ -163,7 +163,7 @@ pub(crate) async fn phases(
     while queue.pending() > 0 && reads < 64 {
         let rows = client
             .claims()
-            .select(ArtifactSelector::new().the("db/name".parse()?))
+            .select(Selector::new().the("db/name".parse()?))
             .to_owned()
             .perform(&client_operator)
             .await?

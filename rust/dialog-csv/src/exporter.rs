@@ -1,11 +1,11 @@
 use async_trait::async_trait;
 use dialog_corpus::Exporter;
-use dialog_corpus::{Artifact, DialogCorpusError};
+use dialog_corpus::{DialogCorpusError, Fact};
 use tokio::io::AsyncWrite;
 
 use crate::row::CsvRow;
 
-/// Exports artifacts as CSV rows.
+/// Exports facts as CSV rows.
 ///
 /// Columns: `the`, `of`, `as` (value type), `is`, `cause`.
 pub struct CsvExporter<W: AsyncWrite + Unpin> {
@@ -31,8 +31,8 @@ impl<W: AsyncWrite + Unpin> From<W> for CsvExporter<W> {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 // bare-send-ok: csv_async bounds its writers on real Send on every target
 impl<W: AsyncWrite + Unpin + Send> Exporter for CsvExporter<W> {
-    async fn write(&mut self, artifact: &Artifact) -> Result<(), DialogCorpusError> {
-        let row = CsvRow::from(artifact);
+    async fn write(&mut self, fact: &Fact) -> Result<(), DialogCorpusError> {
+        let row = CsvRow::from(fact);
         self.writer
             .serialize(row)
             .await

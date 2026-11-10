@@ -87,8 +87,8 @@ pub enum DialogCorpusError {
     #[error("Could not export data: {0}")]
     Export(String),
 
-    /// Attempted to query with an unconstrained [`ArtifactSelector`]
-    #[error("An artifact selector must specify at least one field")]
+    /// Attempted to query with an unconstrained [`Selector`]
+    #[error("A fact selector must specify at least one field")]
     EmptySelector,
 
     /// A revision signature or structural integrity check failed

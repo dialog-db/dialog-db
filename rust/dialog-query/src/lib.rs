@@ -19,10 +19,10 @@
 // Allow macro-generated code to reference this crate as `dialog_query::`
 extern crate self as dialog_query;
 
-/// Re-exports from the dialog-corpus crate.
-pub mod artifact;
 /// Attribute definitions and schema metadata.
 pub mod attribute;
+/// Re-exports from the dialog-corpus crate.
+pub mod corpus;
 /// Proposition types for querying the knowledge base.
 pub mod proposition;
 
@@ -110,7 +110,6 @@ pub mod type_system;
 /// Type system utilities bridging Rust types to dialog-corpus types.
 pub mod types;
 
-pub use artifact::*;
 pub use attribute::query::{AttributeQuery, DynamicAttributeQuery};
 pub use attribute::*;
 pub use claim::Claim;
@@ -118,6 +117,7 @@ pub use concept::descriptor::{ConceptConclusion, ConceptDescriptor, ConceptField
 pub use concept::query::{ConceptQuery, ConceptRules, Installed};
 pub use concept::{Concept, ConceptField, Conclusion, ConformingField};
 pub use constraint::Constraint;
+pub use corpus::*;
 pub use descriptor::Descriptor;
 pub use environment::*;
 pub use error::*;
@@ -134,7 +134,7 @@ pub use reduce::{Aggregator, Reduce, ReduceEntry, ReduceSpec};
 pub use resolver::*;
 pub use rule::*;
 pub use schema::*;
-// The pick a field reads under, from the artifacts crate.
+// The pick a field reads under, from the facts crate.
 pub use dialog_corpus::Pick;
 pub use scope::*;
 pub use selection::*;

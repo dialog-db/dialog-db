@@ -22,7 +22,7 @@
 //! (see [`key::varkey`](crate::key::varkey)) and passes through unchanged,
 //! while [`State<Datum>`] is the tree's value type directly, serialized into
 //! node buffers by the tree itself. Because the fact's value is encoded into
-//! the key, a scan reconstructs each [`Artifact`] from its key rather than
+//! the key, a scan reconstructs each [`Fact`] from its key rather than
 //! from the payload.
 //!
 //! `Corpus` is a type alias for a `dialog_search_tree::PersistentTree`, so the
@@ -48,13 +48,13 @@ use std::sync::{Arc, Mutex};
 use crate::history::{Cause as HistoryCause, Claim, Record, RecordEntries, Version};
 use crate::key::value_payload as build_value_payload;
 use crate::{
-    ATTRIBUTE_KEY_TAG, ArchiveDelta, Artifact, ArtifactSelector, ArtifactView, AttributeKey,
-    AttributeKeyPart, Cause, CorpusWriter, Datum, DeltaOverlay, DialogCorpusError, ENTITY_KEY_TAG,
-    EntityKey, EntityKeyPart, Instruction, Key, KeyView, KeyViewConstruct, KeyViewMut, Pick,
-    SelectorMatch, Standing, State, VALUE_KEY_TAG, Value, ValueDataType, ValueKey,
-    decode_value_parts, encode_bytes, encode_value_owned,
+    ATTRIBUTE_KEY_TAG, ArchiveDelta, AttributeKey, AttributeKeyPart, Cause, CorpusWriter, Datum,
+    DeltaOverlay, DialogCorpusError, ENTITY_KEY_TAG, EntityKey, EntityKeyPart, Fact, FactView,
+    Instruction, Key, KeyView, KeyViewConstruct, KeyViewMut, Pick, Selector, SelectorMatch,
+    Standing, State, VALUE_KEY_TAG, Value, ValueDataType, ValueKey, decode_value_parts,
+    encode_bytes, encode_value_owned,
     key::varkey::{self, KeyLayout, KeyRef, ValuePayload, ValueRef, parse_key_layout},
-    key::{EncodedValue, artifact_index_keys, artifact_index_keys_with, reproject_index_keys},
+    key::{EncodedValue, fact_index_keys, fact_index_keys_with, reproject_index_keys},
     make_reference, match_selector_and_key_ref,
     selector::Constrained,
     value_predicates_admit,
@@ -418,7 +418,7 @@ fn value_lower_edge(value: &Value, manifest: &Manifest) -> Vec<u8> {
 fn apply_prefix_bounds<K: KeyViewMut>(
     start: K,
     end: K,
-    selector: &ArtifactSelector<Constrained>,
+    selector: &Selector<Constrained>,
     manifest: &Manifest,
 ) -> (K, K) {
     let mut start = start;
@@ -576,16 +576,14 @@ fn numeric_width(value_type: ValueDataType) -> usize {
 ///
 /// An extension trait rather than inherent methods because
 /// `Corpus` aliases a foreign `dialog_search_tree::PersistentTree` — the
-/// orphan rule forbids `impl Corpus { .. }`. Uses
-/// `#[async_trait]` (matching [`ArtifactStore`](crate::ArtifactStore))
+/// orphan rule forbids `impl Corpus { .. }`. Uses `#[async_trait]`
 /// so the async `apply` desugars to a boxed future rather than a
 /// bound-less native `async fn`.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 pub trait CorpusExt {
     /// Drain a stream of [`Instruction`]s into the tree, applying the
-    /// same key writes that a branch commit or `Artifacts::commit`
-    /// would.
+    /// same key writes that a branch commit would.
     ///
     /// Each instruction touches all three EAV/AEV/VAE indexes; an
     /// assertion under a choosing pick additionally scans the
@@ -660,7 +658,7 @@ pub trait CorpusExt {
         store: S,
         of: &crate::Entity,
         the: &crate::Relation,
-    ) -> Result<Vec<Artifact>, DialogCorpusError>
+    ) -> Result<Vec<Fact>, DialogCorpusError>
     where
         S: Provider<nodes::Read<CorpusNode>>
             + Provider<nodes::Preload<CorpusNode>>
@@ -708,9 +706,9 @@ pub trait CorpusExt {
             + Clone;
 
     /// Scan the tree for facts matching the given constrained selector,
-    /// yielding each as a borrowed-access [`ArtifactView`] rather than a
-    /// materialized [`Artifact`] — the caller decides per row whether to
-    /// read a field off the view or [`to_owned`](ArtifactView::to_owned)
+    /// yielding each as a borrowed-access [`FactView`] rather than a
+    /// materialized [`Fact`] — the caller decides per row whether to
+    /// read a field off the view or [`to_owned`](FactView::to_owned)
     /// the whole fact.
     ///
     /// Picks the EAV/AEV/VAE index based on which field of the
@@ -727,8 +725,8 @@ pub trait CorpusExt {
         self,
         store: S,
         cache: SpillCache,
-        selector: ArtifactSelector<Constrained>,
-    ) -> impl Stream<Item = Result<ArtifactView, DialogCorpusError>> + 's + ConditionalSend
+        selector: Selector<Constrained>,
+    ) -> impl Stream<Item = Result<FactView, DialogCorpusError>> + 's + ConditionalSend
     where
         Self: Sized,
         S: Provider<nodes::Read<CorpusNode>>
@@ -740,14 +738,14 @@ pub trait CorpusExt {
             + 's;
 
     /// Like [`scan`](Self::scan), but yields every row as an owned
-    /// [`Artifact`] materialized from the scan's OWN key parse.
+    /// [`Fact`] materialized from the scan's OWN key parse.
     ///
     /// This is the fast path for consumers that materialize every row (a
     /// `select(..).to_owned()`, an export): the scan already parsed each
     /// key once for selector matching and spill resolution, and
     /// reconstruction reuses that parse. Routing the same rows through
-    /// [`ArtifactView`]s and per-row
-    /// [`to_owned`](crate::ArtifactView::to_owned) parses every key a
+    /// [`FactView`]s and per-row
+    /// [`to_owned`](crate::FactView::to_owned) parses every key a
     /// second time — measured at double-digit percent on large
     /// scan-and-materialize workloads. Consumers that read only some
     /// fields, or only some rows, should keep using
@@ -756,8 +754,8 @@ pub trait CorpusExt {
         self,
         store: S,
         cache: SpillCache,
-        selector: ArtifactSelector<Constrained>,
-    ) -> impl Stream<Item = Result<Artifact, DialogCorpusError>> + 's + ConditionalSend
+        selector: Selector<Constrained>,
+    ) -> impl Stream<Item = Result<Fact, DialogCorpusError>> + 's + ConditionalSend
     where
         Self: Sized,
         S: Provider<nodes::Read<CorpusNode>>
@@ -768,7 +766,7 @@ pub trait CorpusExt {
             + Clone
             + 's;
 
-    /// An advisory upper-bound estimate of how many artifacts the `selector`'s
+    /// An advisory upper-bound estimate of how many facts the `selector`'s
     /// key range spans, read from the range's edge paths (see
     /// `PersistentTree::range_estimate`).
     ///
@@ -778,7 +776,7 @@ pub trait CorpusExt {
     async fn estimate<S>(
         self,
         store: S,
-        selector: ArtifactSelector<Constrained>,
+        selector: Selector<Constrained>,
     ) -> Result<Option<u64>, DialogCorpusError>
     where
         Self: Sized,
@@ -899,7 +897,7 @@ impl CorpusExt for Corpus {
         store: S,
         of: &crate::Entity,
         the: &crate::Relation,
-    ) -> Result<Vec<Artifact>, DialogCorpusError>
+    ) -> Result<Vec<Fact>, DialogCorpusError>
     where
         S: Provider<nodes::Read<CorpusNode>>
             + Provider<nodes::Preload<CorpusNode>>
@@ -932,9 +930,7 @@ impl CorpusExt for Corpus {
             if let State::Added(datum) = &entry.value {
                 let spilled =
                     fetch_spilled(&storage, &self.catalog().archive(), &entry.key).await?;
-                records.push(Artifact::from_key_datum_with_value(
-                    &entry.key, datum, spilled,
-                )?);
+                records.push(Fact::from_key_datum_with_value(&entry.key, datum, spilled)?);
             }
         }
         Ok(records)
@@ -994,7 +990,7 @@ impl CorpusExt for Corpus {
     async fn estimate<S>(
         self,
         store: S,
-        selector: ArtifactSelector<Constrained>,
+        selector: Selector<Constrained>,
     ) -> Result<Option<u64>, DialogCorpusError>
     where
         S: Provider<nodes::Read<CorpusNode>>
@@ -1024,8 +1020,8 @@ impl CorpusExt for Corpus {
         self,
         store: S,
         cache: SpillCache,
-        selector: ArtifactSelector<Constrained>,
-    ) -> impl Stream<Item = Result<ArtifactView, DialogCorpusError>> + 's + ConditionalSend
+        selector: Selector<Constrained>,
+    ) -> impl Stream<Item = Result<FactView, DialogCorpusError>> + 's + ConditionalSend
     where
         S: Provider<nodes::Read<CorpusNode>>
             + Provider<nodes::Preload<CorpusNode>>
@@ -1059,7 +1055,7 @@ impl CorpusExt for Corpus {
             // value spilled is handed on with its block reference, so the
             // fetch it needs runs alongside its neighbours' (stage two)
             // instead of holding the scan for one round trip per row.
-            let staged = stream.map(|item| -> Result<Staged<_, ArtifactView>, DialogCorpusError> {
+            let staged = stream.map(|item| -> Result<Staged<_, FactView>, DialogCorpusError> {
                 let raw = item?;
                 // A key that does not parse is corruption; dropping it
                 // silently would make the corrupt entry vanish from results
@@ -1090,7 +1086,7 @@ impl CorpusExt for Corpus {
                 let State::Added(datum) = raw.value else {
                     unreachable!("Added state checked above")
                 };
-                Ok(Staged::Ready(ArtifactView::new(raw.key, layout, datum, None)))
+                Ok(Staged::Ready(FactView::new(raw.key, layout, datum, None)))
             });
             // Stage two: the spilled rows' block fetches, SPILL_LOOKAHEAD in
             // flight, in row order.
@@ -1121,7 +1117,7 @@ impl CorpusExt for Corpus {
                         let State::Added(datum) = raw.value else {
                             unreachable!("Added state checked above")
                         };
-                        Ok::<_, DialogCorpusError>(Some(ArtifactView::new(
+                        Ok::<_, DialogCorpusError>(Some(FactView::new(
                             raw.key,
                             layout,
                             datum,
@@ -1143,8 +1139,8 @@ impl CorpusExt for Corpus {
         self,
         store: S,
         cache: SpillCache,
-        selector: ArtifactSelector<Constrained>,
-    ) -> impl Stream<Item = Result<Artifact, DialogCorpusError>> + 's + ConditionalSend
+        selector: Selector<Constrained>,
+    ) -> impl Stream<Item = Result<Fact, DialogCorpusError>> + 's + ConditionalSend
     where
         S: Provider<nodes::Read<CorpusNode>>
             + Provider<nodes::Preload<CorpusNode>>
@@ -1170,7 +1166,7 @@ impl CorpusExt for Corpus {
             // The two stages of `scan`, reconstructing whole facts: every
             // row is parsed once, and a spilled row is materialized from
             // that parse once its block has landed.
-            let staged = stream.map(|item| -> Result<Staged<_, Artifact>, DialogCorpusError> {
+            let staged = stream.map(|item| -> Result<Staged<_, Fact>, DialogCorpusError> {
                 let raw = item?;
                 let layout = parse_key_layout(raw.key.as_ref()).ok_or_else(|| {
                     DialogCorpusError::InvalidKey(
@@ -1190,7 +1186,7 @@ impl CorpusExt for Corpus {
                     return Ok(Staged::Spilled { raw, layout, verdict, hash });
                 }
                 Ok(match reconstruct(&selector, &parts, datum, None, verdict)? {
-                    Some(artifact) => Staged::Ready(artifact),
+                    Some(fact) => Staged::Ready(fact),
                     None => Staged::Skip,
                 })
             });
@@ -1216,8 +1212,8 @@ impl CorpusExt for Corpus {
                 .buffered(SPILL_LOOKAHEAD);
             tokio::pin!(fetched);
             for await item in fetched {
-                if let Some(artifact) = item? {
-                    yield artifact;
+                if let Some(fact) = item? {
+                    yield fact;
                 }
             }
         }
@@ -1262,24 +1258,24 @@ fn staged_ready<Raw, Ready>(staged: Staged<Raw, Ready>) -> Option<Ready> {
 /// whole query. Structural key corruption (the parse before this) stays
 /// loud.
 fn reconstruct(
-    selector: &ArtifactSelector<Constrained>,
+    selector: &Selector<Constrained>,
     parts: &KeyRef<'_>,
     datum: &Datum,
     spilled: Option<Vec<u8>>,
     verdict: SelectorMatch,
-) -> Result<Option<Artifact>, DialogCorpusError> {
-    let artifact = match Artifact::from_key_ref_datum_value(parts, datum, spilled) {
-        Ok(artifact) => artifact,
+) -> Result<Option<Fact>, DialogCorpusError> {
+    let fact = match Fact::from_key_ref_datum_value(parts, datum, spilled) {
+        Ok(fact) => fact,
         Err(DialogCorpusError::CorruptEntry(reason)) => {
             tracing::warn!(%reason, "ignoring corrupt stored row in scan");
             return Ok(None);
         }
         Err(error) => return Err(error),
     };
-    if verdict == SelectorMatch::NeedsValue && !value_predicates_admit(selector, &artifact.is) {
+    if verdict == SelectorMatch::NeedsValue && !value_predicates_admit(selector, &fact.is) {
         return Ok(None);
     }
-    Ok(Some(artifact))
+    Ok(Some(fact))
 }
 
 /// The inclusive key range a selector's scan reads.
@@ -1306,7 +1302,7 @@ fn reconstruct(
 /// written under, so passing a different manifest brackets the wrong keys and
 /// an equality scan on a boundary-sized value silently returns nothing.
 pub fn selector_range(
-    selector: &ArtifactSelector<Constrained>,
+    selector: &Selector<Constrained>,
     manifest: &Manifest,
 ) -> RangeInclusive<Key> {
     // One bound = one `KeyParts` mutation + one `build_key`. The previous
@@ -1371,7 +1367,7 @@ pub fn selector_range(
         start.into_key()..=end.into_key()
     } else {
         // `Constrained` guarantees at least one field is set.
-        unreachable!("ArtifactSelector will always have at least one field specified")
+        unreachable!("Selector will always have at least one field specified")
     }
 }
 
@@ -1452,7 +1448,7 @@ fn fold_record(earlier: &[Version], later: Record) -> Record {
 /// Applies an instruction stream to any [`CorpusWriter`], returning the
 /// written target and whether the batch changed the indexes.
 ///
-/// This is the whole of the artifact write semantics: reserved-namespace
+/// This is the whole of the fact write semantics: reserved-namespace
 /// enforcement, cardinality-one supersession, value spilling, coverage records,
 /// and the history entries each instruction contributes. It is generic over the
 /// write target so the canonical edit path and the buffered (hitchhiker) path
@@ -1536,26 +1532,24 @@ where
         // positional — rules are content-addressed, so a forged rule
         // fact fails the hydration check upstream and is inert.
         if scope == WriteScope::Application {
-            let (Instruction::Assert(artifact, _) | Instruction::Retract(artifact)) = &instruction;
-            let the = artifact.the.as_str();
+            let (Instruction::Assert(fact, _) | Instruction::Retract(fact)) = &instruction;
+            let the = fact.the.as_str();
             if the.starts_with("dialog.")
                 && !the.starts_with("dialog.rule/")
                 && !the.starts_with("dialog.concept/")
             {
-                return Err(DialogCorpusError::ReservedRelation(
-                    artifact.the.to_string(),
-                ));
+                return Err(DialogCorpusError::ReservedRelation(fact.the.to_string()));
             }
         }
         match instruction {
-            Instruction::Assert(artifact, Pick::All) => {
+            Instruction::Assert(fact, Pick::All) => {
                 changed = true;
                 // ONE value encode per instruction: the payload feeds all
                 // three index keys, and a spilling value's block bytes and
                 // reference come from the same pass.
-                let encoded = EncodedValue::new(&artifact.is, manifest);
+                let encoded = EncodedValue::new(&fact.is, manifest);
                 let (entity_key, attribute_key, value_key) =
-                    artifact_index_keys_with(&artifact, encoded.value_type, encoded.payload);
+                    fact_index_keys_with(&fact, encoded.value_type, encoded.payload);
 
                 // Persist a spilling value's bytes as a content-addressed
                 // block before recording the fact; the key holds only the
@@ -1566,15 +1560,15 @@ where
                 // assertion is purely additive, so it supersedes nothing.
                 if let Some(version) = &version {
                     let record = Record::Assert(Claim {
-                        the: artifact.the.clone(),
-                        of: artifact.of.clone(),
-                        is: artifact.is.clone(),
+                        the: fact.the.clone(),
+                        of: fact.of.clone(),
+                        is: fact.is.clone(),
                         cause: HistoryCause::genesis(),
                     });
                     buffer_record(&mut history_records, record, version);
                 }
 
-                let mut datum = Datum::for_artifact(&artifact);
+                let mut datum = Datum::for_fact(&fact);
                 datum.version = version;
                 // The fact orderings address a claim by (entity, attribute,
                 // value), so asserting a value that already stands re-asserts
@@ -1611,8 +1605,8 @@ where
                     )
                     .await?;
             }
-            Instruction::Assert(artifact, policy) => {
-                let entity_key = EntityKey::from_artifact(&artifact, manifest);
+            Instruction::Assert(fact, policy) => {
+                let entity_key = EntityKey::from_fact(&fact, manifest);
 
                 // Scan the cell's claims against the in-flight write target,
                 // so writes from earlier instructions in this batch are
@@ -1643,19 +1637,19 @@ where
                                 &candidate.key,
                             )
                             .await?;
-                            let current = Artifact::from_key_datum_with_value(
+                            let current = Fact::from_key_datum_with_value(
                                 &candidate.key,
                                 current_element,
                                 spilled,
                             )?;
-                            if current.of != artifact.of || current.the != artifact.the {
+                            if current.of != fact.of || current.the != fact.the {
                                 continue;
                             }
                             // The cell holds the written value when a
                             // reader of the value's type observes it: an
                             // integer 4 asserted over a stored 4.3 is what
                             // the cell already reads as.
-                            if current.is.reads_as(&artifact.is) {
+                            if current.is.reads_as(&fact.is) {
                                 held = Some(priors.len());
                             }
                             let versions: Vec<Version> =
@@ -1718,8 +1712,8 @@ where
                             .copied()
                             .collect();
                         let record = Record::Retract(Claim {
-                            the: artifact.the.clone(),
-                            of: artifact.of.clone(),
+                            the: fact.the.clone(),
+                            of: fact.of.clone(),
                             is: elected_value,
                             cause: HistoryCause::new(withdrawn),
                         });
@@ -1740,9 +1734,9 @@ where
                         .filter(|superseded| superseded != version)
                         .collect();
                     let record = Record::Assert(Claim {
-                        the: artifact.the.clone(),
-                        of: artifact.of.clone(),
-                        is: artifact.is.clone(),
+                        the: fact.the.clone(),
+                        of: fact.of.clone(),
+                        is: fact.is.clone(),
                         cause: HistoryCause::new(superseded),
                     });
                     buffer_record(&mut history_records, record, version);
@@ -1751,11 +1745,11 @@ where
                 // The assertion itself, as `Assert` writes one, folding in
                 // the versions of the written value's own claim when the
                 // cell held it.
-                let encoded = EncodedValue::new(&artifact.is, manifest);
+                let encoded = EncodedValue::new(&fact.is, manifest);
                 let (entity_key, attribute_key, value_key) =
-                    artifact_index_keys_with(&artifact, encoded.value_type, encoded.payload);
+                    fact_index_keys_with(&fact, encoded.value_type, encoded.payload);
                 stage_spilled_value(staged, encoded.spill);
-                let mut datum = Datum::for_artifact(&artifact);
+                let mut datum = Datum::for_fact(&fact);
                 datum.version = version;
                 if version.is_some() {
                     datum.absorb_versions(held_versions.iter());
@@ -1772,9 +1766,8 @@ where
                     )
                     .await?;
             }
-            Instruction::Retract(artifact) => {
-                let (entity_key, attribute_key, value_key) =
-                    artifact_index_keys(&artifact, manifest);
+            Instruction::Retract(fact) => {
+                let (entity_key, attribute_key, value_key) = fact_index_keys(&fact, manifest);
 
                 // The standing datum decides everything below: whether
                 // the retract changes anything at all, and which versions
@@ -1806,9 +1799,9 @@ where
                         .copied()
                         .collect();
                     let record = Record::Retract(Claim {
-                        the: artifact.the.clone(),
-                        of: artifact.of.clone(),
-                        is: artifact.is.clone(),
+                        the: fact.the.clone(),
+                        of: fact.of.clone(),
+                        is: fact.is.clone(),
                         cause: HistoryCause::new(withdrawn),
                     });
                     buffer_record(&mut history_records, record, version);
@@ -1873,7 +1866,7 @@ mod spill_cache_tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::{Corpus, CorpusExt, SpillCache, fetch_spilled, fetch_spilled_cached, spill_cache};
-    use crate::{Artifact, EntityKey, Instruction, KeyView, Value};
+    use crate::{EntityKey, Fact, Instruction, KeyView, Value};
 
     use crate::ArchiveDelta;
 
@@ -1888,14 +1881,14 @@ mod spill_cache_tests {
     /// complete and in order.
     #[dialog_common::test]
     async fn it_fetches_spilled_values_concurrently_in_scans() -> anyhow::Result<()> {
-        use crate::ArtifactSelector;
+        use crate::Selector;
 
         use futures_util::TryStreamExt as _;
 
         let inline_n = dialog_search_tree::Manifest::default().inline_n as usize;
         let store = CountingBlocks::new();
-        let facts: Vec<Artifact> = (0..24)
-            .map(|index| Artifact {
+        let facts: Vec<Fact> = (0..24)
+            .map(|index| Fact {
                 the: "doc/body".parse().unwrap(),
                 of: format!("doc:{index}").parse().unwrap(),
                 is: Value::String(format!("{index}:").repeat(inline_n + 1)),
@@ -1911,12 +1904,12 @@ mod spill_cache_tests {
                 facts
                     .iter()
                     .cloned()
-                    .map(|artifact| Instruction::Assert(artifact, crate::Pick::All)),
+                    .map(|fact| Instruction::Assert(fact, crate::Pick::All)),
             ),
         )
         .await?;
         store.flush(&mut delta);
-        let selector = ArtifactSelector::new().the("doc/body".parse()?);
+        let selector = Selector::new().the("doc/body".parse()?);
 
         for owned in [false, true] {
             // A fresh spill cache and node cache: every spilled block reads.
@@ -1924,7 +1917,7 @@ mod spill_cache_tests {
             store.reset();
             let values: Vec<Value> = if owned {
                 cold.scan_owned(store.clone(), spill_cache(), selector.clone())
-                    .map_ok(|artifact| artifact.is)
+                    .map_ok(|fact| fact.is)
                     .try_collect()
                     .await?
             } else {
@@ -1988,7 +1981,7 @@ mod spill_cache_tests {
         let store = CountingBlocks::new();
         let mut delta = ArchiveDelta::zero();
         let mut tree = Corpus::empty_in(test_catalog());
-        let artifact = Artifact {
+        let fact = Fact {
             the: "doc/body".parse().unwrap(),
             of: "doc:1".parse().unwrap(),
             is: value.clone(),
@@ -1997,16 +1990,12 @@ mod spill_cache_tests {
         tree.apply(
             &store,
             &mut delta,
-            stream::iter(vec![Instruction::Assert(
-                artifact.clone(),
-                crate::Pick::All,
-            )]),
+            stream::iter(vec![Instruction::Assert(fact.clone(), crate::Pick::All)]),
         )
         .await
         .unwrap();
         store.flush(&mut delta);
-        let key = EntityKey::from_artifact(&artifact, &dialog_search_tree::Manifest::default())
-            .into_key();
+        let key = EntityKey::from_fact(&fact, &dialog_search_tree::Manifest::default()).into_key();
         assert!(EntityKey(&key).value_is_spilled(), "value must spill");
         (store, key, value)
     }
@@ -2053,7 +2042,7 @@ mod spill_cache_tests {
         let store = CountingBlocks::new();
         let mut delta = ArchiveDelta::zero();
         let mut tree = Corpus::empty_in(test_catalog());
-        let artifact = Artifact {
+        let fact = Fact {
             the: "user/name".parse().unwrap(),
             of: "user:1".parse().unwrap(),
             is: Value::String("Alice".to_string()),
@@ -2062,14 +2051,10 @@ mod spill_cache_tests {
         tree.apply(
             &store,
             &mut delta,
-            stream::iter(vec![Instruction::Assert(
-                artifact.clone(),
-                crate::Pick::All,
-            )]),
+            stream::iter(vec![Instruction::Assert(fact.clone(), crate::Pick::All)]),
         )
         .await?;
-        let key = EntityKey::from_artifact(&artifact, &dialog_search_tree::Manifest::default())
-            .into_key();
+        let key = EntityKey::from_fact(&fact, &dialog_search_tree::Manifest::default()).into_key();
         let cache = spill_cache();
         assert_eq!(
             fetch_spilled_cached(&store, &test_catalog().archive(), &cache, &key).await?,
@@ -2089,7 +2074,7 @@ mod range_tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::selector_range;
-    use crate::{ArtifactSelector, NameShape};
+    use crate::{NameShape, Selector};
 
     /// A name shape under a whole-domain prefix narrows the scanned
     /// key range itself: each shape's first-byte class is contiguous,
@@ -2099,7 +2084,7 @@ mod range_tests {
     #[dialog_common::test]
     fn it_narrows_domain_ranges_by_name_shape() {
         let manifest = dialog_search_tree::Manifest::default();
-        let domain = || ArtifactSelector::new().the_starting_with("todo.list/");
+        let domain = || Selector::new().the_starting_with("todo.list/");
 
         let all = selector_range(&domain(), &manifest);
         let positions = selector_range(&domain().with_name_shape(NameShape::Position), &manifest);
@@ -2121,7 +2106,7 @@ mod range_tests {
         // A partial prefix does not end at the name boundary, so the
         // shape cannot extend it: the range stays the prefix range and
         // the shape remains a per-entry filter.
-        let partial = ArtifactSelector::new().the_starting_with("todo.li");
+        let partial = Selector::new().the_starting_with("todo.li");
         let partial_shaped = selector_range(
             &partial.clone().with_name_shape(NameShape::Position),
             &manifest,
@@ -2154,8 +2139,8 @@ mod selector_range_tests {
     use super::{apply_prefix_bounds, selector_range};
     use crate::selector::Constrained;
     use crate::{
-        ArtifactSelector, AttributeKey, Entity, EntityKey, Key, KeyViewConstruct, KeyViewMut as _,
-        Relation, Value, ValueKey,
+        AttributeKey, Entity, EntityKey, Key, KeyViewConstruct, KeyViewMut as _, Relation,
+        Selector, Value, ValueKey,
     };
     use dialog_search_tree::Manifest;
 
@@ -2169,7 +2154,7 @@ mod selector_range_tests {
     /// to that claim across the selector shapes and value sizes that pick
     /// different encodings.
     fn legacy_selector_range(
-        selector: &ArtifactSelector<Constrained>,
+        selector: &Selector<Constrained>,
         manifest: &Manifest,
     ) -> RangeInclusive<Key> {
         if selector.entity().is_some()
@@ -2206,7 +2191,7 @@ mod selector_range_tests {
             );
             start.into_key()..=end.into_key()
         } else {
-            unreachable!("ArtifactSelector will always have at least one field specified")
+            unreachable!("Selector will always have at least one field specified")
         }
     }
 
@@ -2243,32 +2228,25 @@ mod selector_range_tests {
         ]
     }
 
-    fn selector_matrix(manifest: &Manifest) -> Vec<ArtifactSelector<Constrained>> {
-        let mut matrix: Vec<ArtifactSelector<Constrained>> = vec![
-            ArtifactSelector::new().of(entity()),
-            ArtifactSelector::new().the(attribute()),
-            ArtifactSelector::new().of(entity()).the(attribute()),
-            ArtifactSelector::new().the_starting_with("person/"),
-            ArtifactSelector::new().of_starting_with("did:key:"),
-            ArtifactSelector::new().is_starting_with("Al"),
-            ArtifactSelector::new()
-                .the(attribute())
-                .is_starting_with("Al"),
-            ArtifactSelector::new().is_at_least(Value::UnsignedInt(10)),
-            ArtifactSelector::new().is_at_most(Value::Float(0.0)),
-            ArtifactSelector::new()
+    fn selector_matrix(manifest: &Manifest) -> Vec<Selector<Constrained>> {
+        let mut matrix: Vec<Selector<Constrained>> = vec![
+            Selector::new().of(entity()),
+            Selector::new().the(attribute()),
+            Selector::new().of(entity()).the(attribute()),
+            Selector::new().the_starting_with("person/"),
+            Selector::new().of_starting_with("did:key:"),
+            Selector::new().is_starting_with("Al"),
+            Selector::new().the(attribute()).is_starting_with("Al"),
+            Selector::new().is_at_least(Value::UnsignedInt(10)),
+            Selector::new().is_at_most(Value::Float(0.0)),
+            Selector::new()
                 .is_at_least(Value::UnsignedInt(5))
                 .is_at_most(Value::UnsignedInt(50)),
         ];
         for value in probe_values(manifest) {
-            matrix.push(ArtifactSelector::new().is(value.clone()));
-            matrix.push(ArtifactSelector::new().the(attribute()).is(value.clone()));
-            matrix.push(
-                ArtifactSelector::new()
-                    .of(entity())
-                    .the(attribute())
-                    .is(value),
-            );
+            matrix.push(Selector::new().is(value.clone()));
+            matrix.push(Selector::new().the(attribute()).is(value.clone()));
+            matrix.push(Selector::new().of(entity()).the(attribute()).is(value));
         }
         matrix
     }
@@ -2313,9 +2291,8 @@ mod corrupt_row_tests {
     use super::{Corpus, CorpusExt, spill_cache};
     use crate::key::varkey::{KeyParts, ValuePayload, build_key};
     use crate::{
-        ATTRIBUTE_KEY_TAG, Artifact, ArtifactSelector, ArtifactViewStream as _, Datum,
-        ENTITY_KEY_TAG, Instruction, Key, State, VALUE_KEY_TAG, Value, ValueDataType,
-        encode_value_owned,
+        ATTRIBUTE_KEY_TAG, Datum, ENTITY_KEY_TAG, Fact, FactViewStream as _, Instruction, Key,
+        Selector, State, VALUE_KEY_TAG, Value, ValueDataType, encode_value_owned,
     };
 
     use crate::ArchiveDelta;
@@ -2325,7 +2302,7 @@ mod corrupt_row_tests {
 
     /// Manufactures a tree whose persisted nodes carry both valid facts and
     /// crafted entries with invalid entities, written through the TREE layer —
-    /// below the artifacts layer's validating constructors — exactly as a
+    /// below the facts layer's validating constructors — exactly as a
     /// buggy or hostile writer would produce them. The entities cover both
     /// failure classes: a string that is no URI at all, and one that parses
     /// but is not its own canonical rendering.
@@ -2338,7 +2315,7 @@ mod corrupt_row_tests {
             .into_iter()
             .map(|of| {
                 Instruction::Assert(
-                    Artifact {
+                    Fact {
                         the: "user/name".parse().expect("attribute"),
                         of: of.parse().expect("entity"),
                         is: Value::String(of.to_string()),
@@ -2391,8 +2368,8 @@ mod corrupt_row_tests {
     #[dialog_common::test]
     async fn it_skips_corrupt_rows_in_owned_scans() -> anyhow::Result<()> {
         let (tree, store) = poisoned_tree().await?;
-        let selector = ArtifactSelector::new().the("user/name".parse()?);
-        let rows: Vec<Artifact> = tree
+        let selector = Selector::new().the("user/name".parse()?);
+        let rows: Vec<Fact> = tree
             .scan_owned(store, spill_cache(), selector)
             .try_collect()
             .await?;
@@ -2408,7 +2385,7 @@ mod corrupt_row_tests {
     #[dialog_common::test]
     async fn it_skips_corrupt_rows_when_materializing_views() -> anyhow::Result<()> {
         let (tree, store) = poisoned_tree().await?;
-        let selector = ArtifactSelector::new().the("user/name".parse()?);
+        let selector = Selector::new().the("user/name".parse()?);
 
         let views: Vec<_> = tree
             .clone()
@@ -2417,7 +2394,7 @@ mod corrupt_row_tests {
             .await?;
         assert_eq!(views.len(), 5, "corrupt rows still scan as views");
 
-        let rows: Vec<Artifact> = tree
+        let rows: Vec<Fact> = tree
             .scan(store, spill_cache(), selector)
             .owned()
             .try_collect()

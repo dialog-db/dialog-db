@@ -356,7 +356,7 @@ mod tests {
 
     use super::*;
     use crate::tree::{Corpus, CorpusExt as _};
-    use crate::{ArchiveDelta, Artifact, Entity, Instruction, Value};
+    use crate::{ArchiveDelta, Entity, Fact, Instruction, Value};
 
     use dialog_search_tree::helpers::Blocks;
     use futures_util::stream;
@@ -369,7 +369,7 @@ mod tests {
             blocks,
             &mut delta,
             stream::iter(vec![Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "profile/name".parse()?,
                     of: Entity::new()?,
                     is: Value::String(name.into()),

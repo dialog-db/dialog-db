@@ -114,7 +114,7 @@ mod tests {
     use anyhow::Result;
     use dialog_peer::helpers::test_session_with_peer;
 
-    use dialog_corpus::{Artifact, Instruction, Value};
+    use dialog_corpus::{Fact, Instruction, Value};
     use futures_util::stream;
 
     #[dialog_common::test]
@@ -125,7 +125,7 @@ mod tests {
         let main = repo.branch("main").open().perform(&operator).await?;
         let _hash = main
             .commit(stream::iter(vec![Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "user/name".parse()?,
                     of: "user:main".parse()?,
                     is: Value::String("Main data".to_string()),
@@ -162,7 +162,7 @@ mod tests {
         let main = repo.branch("main").open().perform(&operator).await?;
         let _hash = main
             .commit(stream::iter(vec![Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "user/name".parse()?,
                     of: "user:main".parse()?,
                     is: Value::String("Main data".to_string()),

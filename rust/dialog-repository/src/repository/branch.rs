@@ -727,14 +727,14 @@ impl Branch {
         SourceRef::from(self).log(env, limit).await
     }
 
-    /// Export all artifacts from this branch to the given exporter.
+    /// Export all facts from this branch to the given exporter.
     pub fn export<E: Exporter>(&self, exporter: E) -> Export<'_, E> {
         Export::new(self, exporter)
     }
 
-    /// Import artifacts into this branch from the given importer.
+    /// Import facts into this branch from the given importer.
     ///
-    /// Each artifact read from the importer is committed as an assertion.
+    /// Each fact read from the importer is committed as an assertion.
     pub fn import<I: Importer>(&self, importer: I) -> Import<'_, I> {
         Import::new(self, importer)
     }

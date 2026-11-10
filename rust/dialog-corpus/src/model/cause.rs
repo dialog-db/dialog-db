@@ -1,7 +1,7 @@
-//! Causal references for artifact versioning.
+//! Causal references for fact versioning.
 //!
 //! This module defines the [`Cause`] type which represents causal relationships
-//! between artifacts, enabling proper versioning and update semantics in the
+//! between facts, enabling proper versioning and update semantics in the
 //! triple store.
 
 use std::fmt::{Display, Formatter, Result as FmtResult};
@@ -14,10 +14,10 @@ use crate::{make_reference, reference_type};
 
 use crate::{TypeError, ValueDataType};
 
-use super::{Artifact, Blake3Hash, Value};
+use super::{Blake3Hash, Fact, Value};
 
-/// A [`Cause`] is a reference to an [`Artifact`] that preceded a more recent
-/// version of the same [`Artifact`] (where same implies same [`Entity`] and
+/// A [`Cause`] is a reference to a [`Fact`] that preceded a more recent
+/// version of the same [`Fact`] (where same implies same [`Entity`] and
 /// same [`Relation`]).
 #[repr(transparent)]
 #[derive(
@@ -35,14 +35,14 @@ use super::{Artifact, Blake3Hash, Value};
 )]
 pub struct Cause(pub Blake3Hash);
 
-impl From<&Artifact> for Cause {
-    fn from(artifact: &Artifact) -> Self {
+impl From<&Fact> for Cause {
+    fn from(fact: &Fact) -> Self {
         Cause(make_reference(
             [
-                artifact.the.as_str().as_bytes().to_vec(),
-                artifact.of.as_str().as_bytes().to_vec(),
-                artifact.is.to_bytes(),
-                (artifact.cause.as_ref())
+                fact.the.as_str().as_bytes().to_vec(),
+                fact.of.as_str().as_bytes().to_vec(),
+                fact.is.to_bytes(),
+                (fact.cause.as_ref())
                     .map(|cause| (*cause).to_vec())
                     .unwrap_or_default(),
             ]

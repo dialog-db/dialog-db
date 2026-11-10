@@ -11,7 +11,7 @@
 //! path, so a supersession bug that drops or orphans a spilled value
 //! surfaces as a hard error, not just a digest mismatch.
 //!
-//! Knobs: `DIALOG_ARTIFACT_FUZZ_SEEDS`, `DIALOG_ARTIFACT_FUZZ_OPS`.
+//! Knobs: `DIALOG_FACT_FUZZ_SEEDS`, `DIALOG_FACT_FUZZ_OPS`.
 
 #![cfg(not(target_arch = "wasm32"))]
 
@@ -23,7 +23,7 @@ use dialog_baseline::repo::{DialogRepo, VolatileRepo};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_corpus::selector::Constrained;
 use dialog_corpus::tree::Corpus;
-use dialog_corpus::{Artifact, ArtifactSelector, Entity, Instruction, Relation, Value, sort_key};
+use dialog_corpus::{Entity, Fact, Instruction, Relation, Selector, Value, sort_key};
 use dialog_repository::TransactionBatch;
 use dialog_search_tree::Manifest;
 use futures_util::TryStreamExt as _;
@@ -66,7 +66,7 @@ fn value(rng: &mut u64) -> Value {
 /// sometimes deliberately absent ones.
 fn generate(seed: u64, op_count: usize) -> Vec<Instruction> {
     let mut rng = 0xC2B2AE3D27D4EB4Fu64 ^ seed;
-    let mut live: Vec<Artifact> = Vec::new();
+    let mut live: Vec<Fact> = Vec::new();
     let mut ops = Vec::with_capacity(op_count);
     for _ in 0..op_count {
         let of = entity(xorshift(&mut rng) % 30);
@@ -74,19 +74,19 @@ fn generate(seed: u64, op_count: usize) -> Vec<Instruction> {
         let instruction = match xorshift(&mut rng) % 10 {
             // Assert: cardinality-many additive facts.
             0..=3 => {
-                let artifact = Artifact {
+                let fact = Fact {
                     the,
                     of,
                     is: value(&mut rng),
                     cause: None,
                 };
-                live.push(artifact.clone());
-                Instruction::Assert(artifact, dialog_corpus::Pick::All)
+                live.push(fact.clone());
+                Instruction::Assert(fact, dialog_corpus::Pick::All)
             }
             // Replace: cardinality-one supersession (cause chains from the
             // superseded fact — the ordering-sensitive path).
             4..=6 => {
-                let artifact = Artifact {
+                let fact = Fact {
                     the: the.clone(),
                     of: of.clone(),
                     is: value(&mut rng),
@@ -101,22 +101,22 @@ fn generate(seed: u64, op_count: usize) -> Vec<Instruction> {
                     .count();
                 if held <= 1 {
                     live.retain(|held| !(held.the == the && held.of == of));
-                    live.push(artifact.clone());
-                    Instruction::Assert(artifact, dialog_corpus::Pick::Last)
+                    live.push(fact.clone());
+                    Instruction::Assert(fact, dialog_corpus::Pick::Last)
                 } else {
-                    live.push(artifact.clone());
-                    Instruction::Assert(artifact, dialog_corpus::Pick::All)
+                    live.push(fact.clone());
+                    Instruction::Assert(fact, dialog_corpus::Pick::All)
                 }
             }
             // Retract a real fact when one exists...
             7 | 8 if !live.is_empty() => {
                 let at = (xorshift(&mut rng) as usize) % live.len();
-                let artifact = live.swap_remove(at);
-                Instruction::Retract(artifact)
+                let fact = live.swap_remove(at);
+                Instruction::Retract(fact)
             }
             // ...and sometimes an absent one: a retract with nothing to hit
             // must vanish identically under every grouping.
-            _ => Instruction::Retract(Artifact {
+            _ => Instruction::Retract(Fact {
                 the,
                 of,
                 is: Value::String("never-asserted".into()),
@@ -129,14 +129,14 @@ fn generate(seed: u64, op_count: usize) -> Vec<Instruction> {
 }
 
 /// Every fuzzed fact.
-fn everything() -> ArtifactSelector<Constrained> {
-    ArtifactSelector::new().of_starting_with("entity:fuzz-")
+fn everything() -> Selector<Constrained> {
+    Selector::new().of_starting_with("entity:fuzz-")
 }
 
 /// The facts' fingerprint: every row, in one fixed order. Any fixed order
 /// works; one fixed format keeps it a function of the facts alone,
 /// whatever format an arm's tree uses.
-fn fingerprint(mut rows: Vec<Artifact>) -> Vec<String> {
+fn fingerprint(mut rows: Vec<Fact>) -> Vec<String> {
     let order = Manifest::default();
     rows.sort_by_cached_key(|row| sort_key(row, &order));
     rows.iter()
@@ -196,11 +196,11 @@ fn knob(name: &str, fallback: usize) -> usize {
 // found by the seed count, and 48 seeds find one that 5% of seeds hit
 // nine times in ten. The nightly soak runs 200 seeds.
 fn seeds() -> u64 {
-    knob("DIALOG_ARTIFACT_FUZZ_SEEDS", 48) as u64
+    knob("DIALOG_FACT_FUZZ_SEEDS", 48) as u64
 }
 
 fn op_count() -> usize {
-    knob("DIALOG_ARTIFACT_FUZZ_OPS", 600)
+    knob("DIALOG_FACT_FUZZ_OPS", 600)
 }
 
 /// Every grouping of the same instruction program, published or staged as

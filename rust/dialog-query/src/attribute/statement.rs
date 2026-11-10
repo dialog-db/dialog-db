@@ -1,6 +1,6 @@
-use crate::artifact::{Entity, Value};
 use crate::attribute::Relation;
 use crate::attribute::expression::dynamic::DynamicAttributeExpression;
+use crate::corpus::{Entity, Value};
 use crate::schema::Cardinality;
 use crate::statement::Statement;
 use dialog_corpus::{Pick, Update};

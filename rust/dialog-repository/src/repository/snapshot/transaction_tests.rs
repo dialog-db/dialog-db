@@ -10,7 +10,7 @@ use dialog_capability::{Fork, Provider};
 use dialog_common::{ConditionalSync, Holds};
 use dialog_corpus::history::{History as _, Version};
 use dialog_corpus::tree::CorpusNode;
-use dialog_corpus::{Artifact, ArtifactSelector, Changes, Entity, Instruction, Value};
+use dialog_corpus::{Changes, Entity, Fact, Instruction, Selector, Value};
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::Identify;
@@ -91,11 +91,11 @@ where
         + ConditionalSync
         + 'static,
 {
-    let mut selector = ArtifactSelector::new().the(the.parse()?);
+    let mut selector = Selector::new().the(the.parse()?);
     if let Some(of) = of {
         selector = selector.of(of.clone());
     }
-    let rows: Vec<Artifact> = Select::from_source(source.into(), selector)
+    let rows: Vec<Fact> = Select::from_source(source.into(), selector)
         .to_owned()
         .perform(env)
         .await?
@@ -155,9 +155,9 @@ fn name(of: &str, is: &str) -> impl dialog_corpus::Statement {
         .is(is.to_string())
 }
 
-/// A `user/name` artifact, for raw commits.
-fn fact(of: &str, is: &str) -> Artifact {
-    Artifact {
+/// A `user/name` fact, for raw commits.
+fn fact(of: &str, is: &str) -> Fact {
+    Fact {
         the: "user/name".parse().expect("attribute parses"),
         of: of.parse().expect("entity parses"),
         is: Value::String(is.to_string()),
@@ -564,7 +564,7 @@ async fn it_signs_the_minted_revision() -> Result<()> {
 async fn it_rejects_writes_to_the_reserved_namespace() -> Result<()> {
     let (operator, _, _, _, snapshot) = staged().await?;
     let base = snapshot.revision();
-    let forged = Artifact {
+    let forged = Fact {
         the: "dialog.db/revision".parse()?,
         of: "forged:revision".parse()?,
         is: Value::String("lies".to_string()),
@@ -583,7 +583,7 @@ async fn it_rejects_writes_to_the_reserved_namespace() -> Result<()> {
     assert!(
         matches!(
             result,
-            Err(CommitError::Artifact(
+            Err(CommitError::Fact(
                 dialog_corpus::DialogCorpusError::ReservedRelation(_)
             ))
         ),

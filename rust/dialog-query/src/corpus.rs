@@ -1,8 +1,8 @@
 pub use dialog_corpus::selector::Constrained;
 pub use dialog_corpus::{
-    Artifact, ArtifactSelector, Cause, DialogCorpusError, Entity, Instruction, NameShape,
-    Relation as ArtifactsRelation, Select, TypeError as ArtifactTypeError, Value,
-    ValueDataType as Type, decode_value, encode_value_owned,
+    Cause, DialogCorpusError, Entity, Fact, Instruction, NameShape, Relation as CorpusRelation,
+    Select, Selector, TypeError as CorpusTypeError, Value, ValueDataType as Type, decode_value,
+    encode_value_owned,
 };
 pub use futures_util::stream::Stream;
 

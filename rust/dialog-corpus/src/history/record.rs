@@ -3,8 +3,8 @@ use std::str::from_utf8;
 
 use serde::{Deserialize, Serialize};
 
-use crate::artifacts::decode_value;
 use crate::key::varkey::{self, ValuePayload};
+use crate::model::decode_value;
 use crate::{Datum, DialogCorpusError, Entity, Key, Relation, State, coverage_key, history_key};
 use dialog_search_tree::Manifest;
 
@@ -122,7 +122,7 @@ impl Record {
     /// value all come from it; the payload carries only the lineage the key
     /// does not encode (the superseded versions and the record's polarity).
     /// This mirrors how a fact reconstructs through
-    /// [`Artifact::from_key_datum_with_value`](crate::Artifact::from_key_datum_with_value):
+    /// [`Fact::from_key_datum_with_value`](crate::Fact::from_key_datum_with_value):
     /// pass `spilled = None` for inline keys and `Some(bytes)` (the block
     /// fetched by the key's 32-byte reference) for spilled ones.
     pub fn try_from_key_datum_with_value(

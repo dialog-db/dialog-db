@@ -2,9 +2,13 @@
 
 ## Core Concepts
 
-### Claim (fact)
+### Claim
 
-Atomic, immutable unit of knowledge, equivalent to a semantic triple in [RDF] and a [datom] in Datomic. "Fact" and "claim" name the same thing; the Rust code calls one an `Artifact`.
+Atomic, immutable unit of knowledge, equivalent to a semantic triple in [RDF] and a [datom] in Datomic: that _the_ attribute _of_ an entity _is_ a value, without a cause.
+
+### Fact
+
+A claim with its cause: the claim as the corpus holds it, with the reference to the claim it succeeds. The Rust code calls it `Fact` (`dialog_corpus::Fact`); its cause is `None` when it names no claim it succeeds. By this distinction `dialog_query::Claim` and `dialog_corpus::history::Claim`, both of which carry a cause, are facts under another name.
 
 A claim has the form `{the, of, is, cause}`, read the way it is said: _the_ **color** _of_ **sky** _is_ **blue**.
 
@@ -189,7 +193,7 @@ DialogDB's approach to time where facts exist in causal timelines rather than a 
 
 ### Corpus
 
-The body of claims a branch holds, in the search tree: every fact the transactor has incorporated, keyed for the entity-, attribute- and value-ordered scans. It is the storage side of the `dialog-corpus` crate: `dialog_corpus::tree::Corpus` is the tree, `CorpusNode` a node of it and `CorpusCache` the cache those nodes are kept in; the model side (`Artifact`, `ArtifactSelector`) keeps its names until the claim rename. A corpus is one revision's worth: a query pins the one its branch stood at when it began.
+The body of claims a branch holds, in the search tree: every fact the transactor has incorporated, keyed for the entity-, attribute- and value-ordered scans. It is the storage side of the `dialog-corpus` crate: `dialog_corpus::tree::Corpus` is the tree, `CorpusNode` a node of it and `CorpusCache` the cache those nodes are kept in; the model side is `Fact` and `Selector`. A corpus is one revision's worth: a query pins the one its branch stood at when it began.
 
 ### EAV Index (Entity-Attribute-Value)
 
@@ -279,10 +283,6 @@ DBSP-based approach to efficiently update query results when facts change. Inste
 Current query evaluation strategy that selectively loads data. This approach starts from query goals and works backwards to find supporting facts, loading only the portions of the database needed to answer the query, rather than scanning entire indexes.
 
 ## Implementation Details
-
-### Artifact
-
-The Rust implementation's term for a fact - a semantic triple that may be stored in or retrieved from the database. This terminology distinction helps differentiate between the abstract concept of facts and their concrete representation in code.
 
 ### Scalar
 

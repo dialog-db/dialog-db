@@ -24,7 +24,7 @@ use anyhow::Result;
 
 use dialog_capability::Subject;
 use dialog_corpus::history::{EDITION_CEILING, Edition, Origin, Watermark};
-use dialog_corpus::{Artifact, DialogCorpusError, Instruction, Value, context_entry};
+use dialog_corpus::{DialogCorpusError, Fact, Instruction, Value, context_entry};
 use dialog_effects::authority::Attest;
 use dialog_effects::storage::Location;
 use dialog_peer::helpers::{open_peer, test_session_with_peer, test_storage, unique_name};
@@ -37,8 +37,8 @@ use dialog_corpus::history::ContextCache;
 use dialog_corpus::history::context_of;
 use dialog_search_tree::Cache;
 
-fn artifact(of: &str) -> Artifact {
-    Artifact {
+fn fact(of: &str) -> Fact {
+    Fact {
         the: "post/title".parse().expect("attribute parses"),
         of: of.parse().expect("entity parses"),
         is: Value::String("body".to_string()),
@@ -47,7 +47,7 @@ fn artifact(of: &str) -> Artifact {
 }
 
 fn assert_one(of: &str) -> Instruction {
-    Instruction::Assert(artifact(of), dialog_corpus::Pick::All)
+    Instruction::Assert(fact(of), dialog_corpus::Pick::All)
 }
 
 pub mod note {
@@ -98,7 +98,7 @@ macro_rules! passing_writers {
             }
             writer
                 .commit(stream::iter(vec![Instruction::Assert(
-                    Artifact {
+                    Fact {
                         the: "writer/mark".parse().expect("attribute parses"),
                         of: format!("mark:{tag}-{i}").parse().expect("entity parses"),
                         is: Value::String("passing".to_string()),
@@ -459,7 +459,7 @@ async fn it_does_not_resurrect_a_deleted_fact_whose_deleter_is_only_in_the_regio
     peer.pull().perform(&operator).await?;
 
     feature
-        .commit(stream::iter(vec![Instruction::Retract(artifact("post:1"))]))
+        .commit(stream::iter(vec![Instruction::Retract(fact("post:1"))]))
         .perform(&operator)
         .await?;
     let deleter = feature.revision().expect("feature has a head").origin();
@@ -660,7 +660,7 @@ async fn it_refuses_to_pull_a_head_whose_region_no_head_minted() -> Result<()> {
         assert!(
             matches!(
                 pulled,
-                Err(PullError::Artifact(DialogCorpusError::InvalidKey(_)))
+                Err(PullError::Fact(DialogCorpusError::InvalidKey(_)))
             ),
             "{why} must be refused; got {pulled:?}"
         );

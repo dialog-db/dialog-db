@@ -314,7 +314,7 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     /// A tree deep enough to have real index nodes, keyed so the leading
-    /// byte partitions it into regions the way the artifact tree's tag
+    /// byte partitions it into regions the way the fact tree's tag
     /// byte does.
     async fn tagged_tree(
         storage: &mut Blocks,

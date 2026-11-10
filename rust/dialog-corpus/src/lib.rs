@@ -9,12 +9,12 @@
 #![cfg_attr(not(test), warn(clippy::large_futures))]
 #![cfg_attr(not(test), deny(clippy::panic))]
 
-//! This package embodies the data model of dialog: [`Artifact`]s (facts of
+//! This package embodies the data model of dialog: [`Fact`]s (facts of
 //! the form "the attribute of an entity is a value") and the indexes that
 //! store them, which are search trees keyed so that entity-, attribute- and
 //! value-ordered scans are all range reads (see [`tree`]).
 //!
-//! Applications store artifacts through a branch of a repository, which adds
+//! Applications store facts through a branch of a repository, which adds
 //! version control on top of the index writes here. Working with an index
 //! directly:
 //!
@@ -23,7 +23,7 @@
 //! use std::str::FromStr;
 //! use dialog_corpus::tree::{Corpus, CorpusExt, spill_cache};
 //! use dialog_corpus::{
-//!     ArchiveDelta, Artifact, ArtifactSelector, Entity, Instruction, Relation, Value,
+//!     ArchiveDelta, Fact, Selector, Entity, Instruction, Relation, Value,
 //! };
 //! use dialog_search_tree::helpers::{Blocks, test_catalog};
 //! use futures_util::{StreamExt, stream};
@@ -35,23 +35,23 @@
 //! let mut corpus = Corpus::empty_in(test_catalog());
 //! let mut delta = ArchiveDelta::zero();
 //!
-//! // Assert an artifact: the new nodes (and any spilled value) are staged
+//! // Assert a fact: the new nodes (and any spilled value) are staged
 //! // in the delta, then written out.
-//! let artifact = Artifact {
+//! let fact = Fact {
 //!     the: Relation::from_str("profile/name")?,
 //!     of: Entity::new()?,
 //!     is: Value::String("Foo Bar".into()),
 //!     cause: None,
 //! };
 //! corpus
-//!     .apply(&blocks, &mut delta, stream::iter(vec![Instruction::Assert(artifact, dialog_corpus::Pick::All)]))
+//!     .apply(&blocks, &mut delta, stream::iter(vec![Instruction::Assert(fact, dialog_corpus::Pick::All)]))
 //!     .await?;
 //! // A commit writes the staged nodes and spilled values where they belong;
 //! // this stand-in keeps them in the blocks.
 //! delta.flush_into(&blocks);
 //!
 //! // Query the corpus
-//! let selector = ArtifactSelector::new().the(Relation::from_str("profile/name")?);
+//! let selector = Selector::new().the(Relation::from_str("profile/name")?);
 //! let results = corpus
 //!     .scan(blocks.clone(), spill_cache(), selector)
 //!     .filter_map(|view| async move { view.ok() })
@@ -74,8 +74,8 @@ mod reads {
     pub use dialog_search_tree::nodes;
 }
 
-mod artifacts;
-pub use artifacts::*;
+mod model;
+pub use model::*;
 
 pub mod history;
 
@@ -87,11 +87,11 @@ pub use reference::*;
 mod error;
 pub use error::*;
 
-/// Format-agnostic export trait for artifacts.
+/// Format-agnostic export trait for facts.
 pub mod exporter;
 pub use exporter::Exporter;
 
-/// Format-agnostic import trait for artifacts.
+/// Format-agnostic import trait for facts.
 pub mod importer;
 pub use importer::Importer;
 

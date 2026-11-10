@@ -68,7 +68,7 @@ change has no such room. `--markdown` writes every row, moved or not,
 and the `Delta report` job posts both gates' tables as one comment on
 the pull request, edited on each push, so the before and after need not
 be carried by hand. To reproduce locally, download the base commit's
-`perf-current` artifact into `target/perf-base` and run `perf:check`.
+`perf-current` upload into `target/perf-base` and run `perf:check`.
 
 An instruction count also depends on the CPU: valgrind passes the
 host's feature flags through, and code that picks a SIMD path at
@@ -124,7 +124,7 @@ git add perf/baseline
 ```
 
 or take them from the `Perf gate` job's uploaded `perf-current`
-artifact, which is the same sweep on the same toolchain. Commit the
+fact, which is the same sweep on the same toolchain. Commit the
 reports with the pull request that changes the cost, with the numbers
 in its body. `compare` also lists improvements past the allowance;
 re-baseline after one so the gate holds the new level.

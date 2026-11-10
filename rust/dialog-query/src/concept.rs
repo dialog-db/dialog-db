@@ -6,8 +6,8 @@ pub mod query;
 pub use descriptor::{ConceptDescriptor, ConceptFieldDescriptor};
 pub use query::ConceptQuery;
 
-use crate::artifact::Type as ValueType;
 use crate::attribute::{Attribute, AttributeDescriptor, AttributeStatement};
+use crate::corpus::Type as ValueType;
 use crate::descriptor::Descriptor;
 use crate::error::EvaluationError;
 pub use crate::predicate::Predicate;
@@ -393,7 +393,7 @@ mod tests {
     use super::*;
     use crate::AttributeStatement;
     use crate::Query;
-    use crate::artifact::{ArtifactSelector, ArtifactsRelation, Value};
+    use crate::corpus::{CorpusRelation, Selector, Value};
     use crate::query::Output;
 
     use crate::Concept;
@@ -806,16 +806,12 @@ mod tests {
             .await?;
 
         // Verify Alice exists
-        let name_attr: ArtifactsRelation = "person/name".parse()?;
-        let age_attr: ArtifactsRelation = "person/age".parse()?;
+        let name_attr: CorpusRelation = "person/name".parse()?;
+        let age_attr: CorpusRelation = "person/age".parse()?;
 
         let name_facts: Vec<_> = branch
             .claims()
-            .select(
-                ArtifactSelector::new()
-                    .the(name_attr.clone())
-                    .of(alice.clone()),
-            )
+            .select(Selector::new().the(name_attr.clone()).of(alice.clone()))
             .to_owned()
             .perform(&operator)
             .await?
@@ -830,11 +826,7 @@ mod tests {
 
         let age_facts: Vec<_> = branch
             .claims()
-            .select(
-                ArtifactSelector::new()
-                    .the(age_attr.clone())
-                    .of(alice.clone()),
-            )
+            .select(Selector::new().the(age_attr.clone()).of(alice.clone()))
             .to_owned()
             .perform(&operator)
             .await?
@@ -855,11 +847,7 @@ mod tests {
         // Verify Alice has been retracted
         let name_facts_after: Vec<_> = branch
             .claims()
-            .select(
-                ArtifactSelector::new()
-                    .the(name_attr.clone())
-                    .of(alice.clone()),
-            )
+            .select(Selector::new().the(name_attr.clone()).of(alice.clone()))
             .to_owned()
             .perform(&operator)
             .await?
@@ -873,11 +861,7 @@ mod tests {
 
         let age_facts_after: Vec<_> = branch
             .claims()
-            .select(
-                ArtifactSelector::new()
-                    .the(age_attr.clone())
-                    .of(alice.clone()),
-            )
+            .select(Selector::new().the(age_attr.clone()).of(alice.clone()))
             .to_owned()
             .perform(&operator)
             .await?
@@ -919,7 +903,7 @@ mod tests {
         let facts: Vec<_> = branch
             .claims()
             .select(
-                ArtifactSelector::new()
+                Selector::new()
                     .the(name_attr.clone().into())
                     .of(alice.clone()),
             )
@@ -943,7 +927,7 @@ mod tests {
         let facts_after: Vec<_> = branch
             .claims()
             .select(
-                ArtifactSelector::new()
+                Selector::new()
                     .the(name_attr.clone().into())
                     .of(alice.clone()),
             )

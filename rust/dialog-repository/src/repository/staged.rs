@@ -4,7 +4,7 @@
 //! A transaction is read "as if committed" before it commits, often
 //! once per statement it applies, so its writes are held the way
 //! [`Ephemeral`](crate::Ephemeral) holds session facts: under the
-//! tree's three index keys ([`Facts`]), so a selector is a range read
+//! corpus's three index keys, so a selector is a range read
 //! that comes out in tree order. What differs is what a write means:
 //!
 //! - **The last write to a fact wins.** An assert holds the fact; a
@@ -32,8 +32,8 @@ use std::sync::{Arc, OnceLock};
 use dialog_common::Blake3Hash;
 use dialog_corpus::selector::Constrained;
 use dialog_corpus::{
-    Artifact, ArtifactSelector, AssetChange, Change, Changes, Entity, Instruction, Pick, Relation,
-    SortKey, Statement, Update, Value, sort_key,
+    AssetChange, Change, Changes, Entity, Fact, Instruction, Pick, Relation, Selector, SortKey,
+    Statement, Update, Value, sort_key,
 };
 use dialog_search_tree::Manifest;
 
@@ -56,7 +56,7 @@ struct State {
     facts: Facts,
     /// What the transaction retracted, by sort key under the store's
     /// format: hidden in the lines beneath, and retracted at commit.
-    retracted: BTreeMap<SortKey, Artifact>,
+    retracted: BTreeMap<SortKey, Fact>,
     /// The sort keys of `retracted`, shared with readers.
     tombstones: Arc<HashSet<SortKey>>,
     /// The asset changes, held as a batch with no facts.
@@ -107,13 +107,13 @@ impl fmt::Debug for SettlementMemo {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct CellSettlement {
     /// The claims the cell's writes succeed.
-    pub(crate) succeeded: Vec<Artifact>,
+    pub(crate) succeeded: Vec<Fact>,
     /// The written facts the cell already held as claims.
-    pub(crate) held: Vec<Artifact>,
+    pub(crate) held: Vec<Fact>,
     /// The line's claims of values the cell's writes succeeded and then
     /// wrote back: the staged row replaces the line's, so only the
     /// line's is hidden.
-    pub(crate) replaced: Vec<Artifact>,
+    pub(crate) replaced: Vec<Fact>,
 }
 
 /// What a read settlement observed: the lines it settled against and
@@ -171,7 +171,7 @@ impl State {
         if is_rule_attribute(the) {
             self.rules = OnceLock::new();
         }
-        let fact = |value: &Value| Artifact {
+        let fact = |value: &Value| Fact {
             the: the.clone(),
             of: of.clone(),
             is: value.clone(),
@@ -315,7 +315,7 @@ impl Staged {
     }
 
     /// The held facts a selector matches, in the store's own key order.
-    pub(crate) fn scan(&self, selector: &ArtifactSelector<Constrained>) -> Vec<Artifact> {
+    pub(crate) fn scan(&self, selector: &Selector<Constrained>) -> Vec<Fact> {
         self.0.facts.scan(selector)
     }
 
@@ -323,7 +323,7 @@ impl Staged {
     /// of a tree written under `manifest` would produce them: what a
     /// query merges with that tree's rows. The window is shared with the
     /// other stores one read meets.
-    pub(crate) fn select_within(&self, window: &Window<'_>, manifest: &Manifest) -> Vec<Artifact> {
+    pub(crate) fn select_within(&self, window: &Window<'_>, manifest: &Manifest) -> Vec<Fact> {
         self.0.facts.select_within(window, manifest)
     }
 
@@ -351,7 +351,7 @@ impl Staged {
     /// cells are found by the entity and attribute bounds alone.
     pub(crate) fn electing_cells_within(
         &self,
-        selector: &ArtifactSelector<Constrained>,
+        selector: &Selector<Constrained>,
     ) -> Vec<(Relation, Entity)> {
         self.0.electing.within(selector)
     }
@@ -393,7 +393,7 @@ impl Staged {
     /// Whether this store holds any rule, for any concept.
     pub(crate) fn holds_rules(&self) -> bool {
         !self
-            .scan(&ArtifactSelector::new().the(conclusion_attr()))
+            .scan(&Selector::new().the(conclusion_attr()))
             .is_empty()
     }
 }
@@ -459,8 +459,8 @@ mod tests {
     use dialog_corpus::history::Edition;
     use dialog_corpus::{Asset, Change, Pick, Value};
 
-    fn fact(of: &str, the: &str, is: &str) -> Artifact {
-        Artifact {
+    fn fact(of: &str, the: &str, is: &str) -> Fact {
+        Fact {
             the: the.parse().expect("attribute"),
             of: of.parse().expect("entity"),
             is: Value::String(is.into()),
@@ -478,7 +478,7 @@ mod tests {
     }
 
     fn held(staged: &Staged, of: &str, the: &str) -> Vec<Value> {
-        let selector = ArtifactSelector::new()
+        let selector = Selector::new()
             .of(of.parse().expect("entity"))
             .the(the.parse().expect("attribute"));
         staged.scan(&selector).into_iter().map(|f| f.is).collect()
@@ -522,7 +522,7 @@ mod tests {
             &Change::Assert(Value::String("C".into()), Pick::All),
         );
 
-        let mut cells = staged.electing_cells_within(&ArtifactSelector::new().the(the.clone()));
+        let mut cells = staged.electing_cells_within(&Selector::new().the(the.clone()));
         cells.sort();
         assert_eq!(
             cells,
@@ -530,7 +530,7 @@ mod tests {
             "both cells, the retracted write's included"
         );
         assert_eq!(
-            staged.electing_cells_within(&ArtifactSelector::new().the(the.clone()).of(b.clone())),
+            staged.electing_cells_within(&Selector::new().the(the.clone()).of(b.clone())),
             vec![(the.clone(), b.clone())]
         );
         assert_eq!(

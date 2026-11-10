@@ -47,10 +47,10 @@ use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
 use futures_util::TryStreamExt as _;
 
-use crate::artifact::Artifact;
 use crate::attribute::{Cardinality, Relation};
 use crate::concept::descriptor::ConceptDescriptor;
 use crate::concept::query::ConceptQuery;
+use crate::corpus::Fact;
 use crate::error::EvaluationError;
 use crate::negation::Negation;
 use crate::planner::Planner;
@@ -216,7 +216,7 @@ impl Side {
 /// A changed fact and the side it is readable on: an asserted fact
 /// exists after the change, a retracted one before it.
 struct Change<'f> {
-    fact: &'f Artifact,
+    fact: &'f Fact,
     exists: Side,
 }
 
@@ -293,8 +293,8 @@ where
 /// derivation layers.
 pub async fn affected_entities<'a, Env, Before>(
     concept: &ConceptDescriptor,
-    asserted: &[Artifact],
-    retracted: &[Artifact],
+    asserted: &[Fact],
+    retracted: &[Fact],
     after: &'a Env,
     before: Before,
 ) -> Result<Option<BTreeSet<Entity>>, EvaluationError>
@@ -472,7 +472,7 @@ fn attribute_premise(premise: &Premise) -> Option<Slots<'_>> {
 /// reads any — each as how the fact binds into it.
 fn reading_attribute<'r>(
     rule: &'r DeductiveRule,
-    fact: &'r Artifact,
+    fact: &'r Fact,
 ) -> impl Iterator<Item = Bind> + 'r {
     let attribute = Value::from(Relation::from(fact.the.clone()));
     rule.analysis().premises().filter_map(move |premise| {
@@ -720,8 +720,8 @@ mod tests {
         Premise::Unless(Negation(Proposition::Concept(application(concept, terms))))
     }
 
-    fn fact(the: &str, of: &Entity, is: &str) -> anyhow::Result<Artifact> {
-        Ok(Artifact {
+    fn fact(the: &str, of: &Entity, is: &str) -> anyhow::Result<Fact> {
+        Ok(Fact {
             the: the.parse()?,
             of: of.clone(),
             is: Value::String(is.to_string()),
@@ -1023,7 +1023,7 @@ mod tests {
         let before_env = TestEnv::new(&before, &operator, registry.clone());
         let after_env = TestEnv::new(&after, &operator, registry);
 
-        let level = Artifact {
+        let level = Fact {
             the: "staff/level".parse()?,
             of: alice.clone(),
             is: Value::from(5u32),
@@ -1100,7 +1100,7 @@ mod tests {
         let before_env = TestEnv::new(&before, &operator, registry.clone());
         let after_env = TestEnv::new(&after, &operator, registry);
 
-        let level = Artifact {
+        let level = Fact {
             the: "staff/level".parse()?,
             of: alice.clone(),
             is: Value::from(5u32),
@@ -1162,7 +1162,7 @@ mod tests {
         registry.register(rule)?;
         let env = TestEnv::new(&branch, &operator, registry);
 
-        let recoloured = Artifact {
+        let recoloured = Fact {
             the: "doc/color".parse()?,
             of: tag.clone(),
             is: Value::String("blue".to_string()),
@@ -1174,7 +1174,7 @@ mod tests {
             "a colour change reaches no label"
         );
 
-        let retagged = Artifact {
+        let retagged = Fact {
             the: "doc/tag".parse()?,
             of: tag.clone(),
             is: Value::String("y".to_string()),

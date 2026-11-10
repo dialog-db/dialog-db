@@ -41,8 +41,8 @@ use dialog_capability::{Fork, Provider};
 use dialog_common::{ConditionalSync, Holds};
 use dialog_corpus::selector::Constrained;
 use dialog_corpus::{
-    Artifact, ArtifactSelector, Change, Changes, DialogCorpusError, Entity, Instruction, Relation,
-    Select, Statement, Value,
+    Change, Changes, DialogCorpusError, Entity, Fact, Instruction, Relation, Select, Selector,
+    Statement, Value,
 };
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::Identify;
@@ -149,7 +149,7 @@ where
         // decide when a candidate needs the full-body fallback (a
         // removal can newly enable a rule only through `unless`, which
         // a seed cannot express).
-        let mut assert_rows: Vec<Artifact> = Vec::new();
+        let mut assert_rows: Vec<Fact> = Vec::new();
         let mut retract_attrs: BTreeSet<Relation> = BTreeSet::new();
         let mut replace_attrs: BTreeSet<Relation> = BTreeSet::new();
         for instruction in &stimulus {
@@ -443,14 +443,12 @@ impl<'a> Dispatch<'a> {
             Some(footprint) => footprint,
             None => {
                 let mut footprint = TriggerFootprint::default();
-                for claim in committed(source, ArtifactSelector::new().the(on_attr()), env).await? {
+                for claim in committed(source, Selector::new().the(on_attr()), env).await? {
                     if let Value::Entity(key) = claim.is {
                         footprint.on.insert(key);
                     }
                 }
-                for claim in
-                    committed(source, ArtifactSelector::new().the(reads_attr()), env).await?
-                {
+                for claim in committed(source, Selector::new().the(reads_attr()), env).await? {
                     if let Value::Entity(key) = claim.is {
                         footprint.reads.insert(key);
                     }
@@ -502,9 +500,7 @@ impl<'a> Dispatch<'a> {
             let committed_entities = match cache.triggers(on, head) {
                 Some(entities) => entities,
                 None => {
-                    let selector = ArtifactSelector::new()
-                        .the(on_attr())
-                        .is(Value::Entity(on.clone()));
+                    let selector = Selector::new().the(on_attr()).is(Value::Entity(on.clone()));
                     let entities: Vec<Entity> = committed(self.source, selector, env)
                         .await?
                         .into_iter()
@@ -567,7 +563,7 @@ impl<'a> Dispatch<'a> {
                     let committed_readers = match cache.reads(&on, head) {
                         Some(entities) => entities,
                         None => {
-                            let selector = ArtifactSelector::new()
+                            let selector = Selector::new()
                                 .the(reads_attr())
                                 .is(Value::Entity(on.clone()));
                             let entities: Vec<Entity> = committed(self.source, selector, env)
@@ -749,9 +745,7 @@ impl<'a> Dispatch<'a> {
         if let Some(verdict) = cache.transient(concept, head) {
             return Ok(verdict);
         }
-        let selector = ArtifactSelector::new()
-            .the(transient_attr())
-            .of(concept.clone());
+        let selector = Selector::new().the(transient_attr()).of(concept.clone());
         let verdict = !committed(self.source, selector, env).await?.is_empty();
         cache.record_transient(concept.clone(), head.clone(), verdict);
         Ok(verdict)
@@ -785,9 +779,7 @@ impl<'a> Dispatch<'a> {
         if self.head.is_none() {
             return Ok(None);
         }
-        let selector = ArtifactSelector::new()
-            .the(source_attr())
-            .of(entity.clone());
+        let selector = Selector::new().the(source_attr()).of(entity.clone());
         Ok(committed(self.source, selector, env)
             .await?
             .into_iter()
@@ -889,7 +881,7 @@ where
         let spilled = fetch_spilled(&raw_store, &archive, &entry.key)
             .await
             .map_err(|error| CommitError::Induction(format!("watermark spilled: {error:?}")))?;
-        let fact = Artifact::from_key_datum_with_value(&entry.key, datum, spilled)
+        let fact = Fact::from_key_datum_with_value(&entry.key, datum, spilled)
             .map_err(|error| CommitError::Induction(format!("watermark datum: {error:?}")))?;
         if induction_ignores(&fact.the.to_string()) {
             continue;
@@ -927,13 +919,13 @@ pub(crate) fn induction_ignores(the: &str) -> bool {
         && !the.starts_with("dialog.concept/")
 }
 
-/// Collect the artifacts a selector matches on the line's committed
+/// Collect the facts a selector matches on the line's committed
 /// tree (no overlay — the cacheable slice).
 async fn committed<Env>(
     source: SourceRef<'_>,
-    selector: ArtifactSelector<Constrained>,
+    selector: Selector<Constrained>,
     env: &Env,
-) -> Result<Vec<Artifact>, CommitError>
+) -> Result<Vec<Fact>, CommitError>
 where
     Env: Provider<BlobRead>
         + Provider<Get>
@@ -964,11 +956,11 @@ where
         .map_err(|error| CommitError::Induction(format!("committed probe: {error}")))
 }
 
-/// Collect the artifacts a selector matches in the layered view.
+/// Collect the facts a selector matches in the layered view.
 async fn select<'a>(
     view: &QueryEnv<'a>,
-    selector: ArtifactSelector<Constrained>,
-) -> Result<Vec<Artifact>, CommitError> {
+    selector: Selector<Constrained>,
+) -> Result<Vec<Fact>, CommitError> {
     let stream = Provider::<Select<'_>>::execute(view, selector)
         .await
         .map_err(|error| CommitError::Induction(format!("dispatch probe: {error}")))?;
@@ -1033,7 +1025,7 @@ fn premise_reach(rule: &InductiveRule) -> (BTreeSet<Reach>, BTreeSet<Reach>) {
 async fn fire_seeded<'a>(
     rule: &InductiveRule,
     transient_head: bool,
-    rows: &[Artifact],
+    rows: &[Fact],
     view: &QueryEnv<'a>,
     novelty: &mut Changes,
     transients: &mut Changes,
@@ -1232,13 +1224,13 @@ async fn emit_matches<'a>(
 /// frozen round view, so siblings within a round judge novelty against
 /// identical state.
 async fn is_novel<'a>(view: &QueryEnv<'a>, instruction: &Instruction) -> Result<bool, CommitError> {
-    let artifact = match instruction {
+    let fact = match instruction {
         Instruction::Assert(a, _) | Instruction::Retract(a) => a,
     };
-    let selector = ArtifactSelector::new()
-        .the(artifact.the.clone())
-        .of(artifact.of.clone())
-        .is(artifact.is.clone());
+    let selector = Selector::new()
+        .the(fact.the.clone())
+        .of(fact.of.clone())
+        .is(fact.is.clone());
     let present = !select(view, selector).await?.is_empty();
     Ok(match instruction {
         Instruction::Assert(_, _) => !present,
@@ -1260,7 +1252,7 @@ mod tests {
     use dialog_capability::{Fork, Provider};
     use dialog_common::ConditionalSync;
     use dialog_corpus::tree::CorpusNode;
-    use dialog_corpus::{ArtifactSelector, Changes, Entity, Instruction, Value};
+    use dialog_corpus::{Changes, Entity, Instruction, Selector, Value};
     use dialog_effects::archive::{Get, Put};
     use dialog_effects::blob::Read as BlobRead;
     use dialog_effects::memory::Resolve;
@@ -1292,15 +1284,15 @@ mod tests {
             + ConditionalSync
             + 'static,
     {
-        let selector = ArtifactSelector::new().the(the.parse()?).of(of.clone());
+        let selector = Selector::new().the(the.parse()?).of(of.clone());
         let stream = branch.claims().select(selector).perform(env).await?;
-        let artifacts: Vec<_> = stream.collect().await;
-        Ok(artifacts
+        let facts: Vec<_> = stream.collect().await;
+        Ok(facts
             .into_iter()
             .map(|item| item.and_then(|view| view.to_owned()))
             .collect::<Result<Vec<_>, _>>()?
             .into_iter()
-            .map(|artifact| artifact.is)
+            .map(|fact| fact.is)
             .collect())
     }
 
@@ -1620,7 +1612,7 @@ mod tests {
     /// would, so the increment after a merge commits.
     #[dialog_common::test]
     async fn it_increments_an_integer_counter_after_a_pulled_count() -> Result<()> {
-        use dialog_corpus::{Artifact, Instruction};
+        use dialog_corpus::{Fact, Instruction};
         use futures_util::stream;
 
         let (operator, profile) = test_session_with_peer().await;
@@ -1640,7 +1632,7 @@ mod tests {
         // The other replica's count lands without local induction.
         branch
             .commit(stream::iter(vec![Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "counter/count".parse()?,
                     of: counter.clone(),
                     is: Value::SignedInt(1),
@@ -2870,7 +2862,7 @@ mod tests {
     /// is, and the next inducing instant catches up over both.
     #[dialog_common::test]
     async fn it_carries_the_watermark_over_a_machinery_commit() -> Result<()> {
-        use dialog_corpus::{Artifact, Instruction};
+        use dialog_corpus::{Fact, Instruction};
         use futures_util::stream;
 
         let (operator, profile) = test_session_with_peer().await;
@@ -2893,7 +2885,7 @@ mod tests {
 
         let record = |audience: &str| -> Result<Instruction> {
             Ok(Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "dialog.ucan/audience".parse()?,
                     of: "ucan:1".parse()?,
                     is: Value::String(audience.into()),
@@ -2921,7 +2913,7 @@ mod tests {
         let doc: Entity = "doc:1".parse()?;
         branch
             .commit(stream::iter(vec![Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "doc/title".parse()?,
                     of: doc.clone(),
                     is: Value::String("hello".into()),
@@ -2981,7 +2973,7 @@ mod tests {
     /// is a no-op — the watermark is at the head.
     #[dialog_common::test]
     async fn it_catches_up_over_a_raw_commit() -> Result<()> {
-        use dialog_corpus::{Artifact, Instruction};
+        use dialog_corpus::{Fact, Instruction};
         use futures_util::stream;
 
         let (operator, profile) = test_session_with_peer().await;
@@ -3001,7 +2993,7 @@ mod tests {
         let doc: Entity = "doc:1".parse()?;
         branch
             .commit(stream::iter(vec![Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "doc/title".parse()?,
                     of: doc.clone(),
                     is: Value::String("hello".into()),
@@ -3041,7 +3033,7 @@ mod tests {
     /// conjunction completes at the instant it first exists.
     #[dialog_common::test]
     async fn it_completes_a_conjunction_across_instants() -> Result<()> {
-        use dialog_corpus::{Artifact, Instruction};
+        use dialog_corpus::{Fact, Instruction};
         use futures_util::stream;
 
         let (operator, profile) = test_session_with_peer().await;
@@ -3087,7 +3079,7 @@ mod tests {
         let subject: Entity = "pair:1".parse()?;
         branch
             .commit(stream::iter(vec![Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "fact.p/v".parse()?,
                     of: subject.clone(),
                     is: Value::String("p".into()),
@@ -3126,7 +3118,7 @@ mod tests {
     /// facts arriving after adoption do.
     #[dialog_common::test]
     async fn it_adopts_a_branch_without_retroactive_firing() -> Result<()> {
-        use dialog_corpus::{Artifact, Instruction};
+        use dialog_corpus::{Fact, Instruction};
         use futures_util::stream;
 
         let (operator, profile) = test_session_with_peer().await;
@@ -3146,7 +3138,7 @@ mod tests {
         branch.refresh(&operator).await?;
         branch
             .commit(stream::iter(vec![Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "doc/title".parse()?,
                     of: old.clone(),
                     is: Value::String("old".into()),
@@ -3174,7 +3166,7 @@ mod tests {
         let fresh: Entity = "doc:new".parse()?;
         branch
             .commit(stream::iter(vec![Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "doc/title".parse()?,
                     of: fresh.clone(),
                     is: Value::String("new".into()),
@@ -3353,17 +3345,17 @@ mod tests {
             + ConditionalSync
             + 'static,
     {
-        let selector = ArtifactSelector::new()
+        let selector = Selector::new()
             .the_starting_with("todo.list/".to_string())
             .of(list.clone());
         let stream = branch.claims().select(selector).perform(env).await?;
-        let artifacts: Vec<_> = stream.collect().await;
-        let mut entries: Vec<(String, Value)> = artifacts
+        let facts: Vec<_> = stream.collect().await;
+        let mut entries: Vec<(String, Value)> = facts
             .into_iter()
             .map(|item| item.and_then(|view| view.to_owned()))
             .collect::<Result<Vec<_>, _>>()?
             .into_iter()
-            .map(|artifact| (artifact.the.name().to_owned(), artifact.is))
+            .map(|fact| (fact.the.name().to_owned(), fact.is))
             .collect();
         entries.sort_by(|a, b| a.0.cmp(&b.0));
         Ok(entries)

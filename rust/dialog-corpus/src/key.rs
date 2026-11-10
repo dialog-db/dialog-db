@@ -1,4 +1,4 @@
-//! Key structures for indexing artifacts in probabilistic search trees.
+//! Key structures for indexing facts in probabilistic search trees.
 //!
 //! This module provides the key layout and manipulation utilities for creating
 //! efficient indexes over semantic triples. Keys are structured to enable fast
@@ -16,7 +16,7 @@ use std::fmt::Debug;
 /// A key used to reference values in a search tree index.
 ///
 /// Hosted here since the search tree itself keys on raw byte arrays; this
-/// trait is the artifact-level abstraction over the typed key views.
+/// trait is the fact-level abstraction over the typed key views.
 pub trait KeyType:
     Debug + TryFrom<Vec<u8>> + ConditionalSync + Clone + PartialEq + Ord + Serialize + DeserializeOwned
 {
@@ -24,7 +24,7 @@ pub trait KeyType:
     fn bytes(&self) -> &[u8];
 }
 
-/// A value that may be stored against a key in an artifact index.
+/// A value that may be stored against a key in a fact index.
 pub trait ValueType:
     Debug + ConditionalSend + ConditionalSync + Clone + Serialize + DeserializeOwned
 {
@@ -60,7 +60,7 @@ pub(crate) mod varkey;
 pub const HISTORY_KEY_TAG: u8 = 3;
 
 use crate::{
-    ArtifactSelector, Value, ValueDataType, encode_key_value_owned, key::varkey::ValuePayload,
+    Selector, Value, ValueDataType, encode_key_value_owned, key::varkey::ValuePayload,
     selector::Constrained,
 };
 
@@ -168,7 +168,7 @@ fn encoded_len_lower_bound(value: &Value) -> usize {
     }
 }
 
-/// Builds all three index keys — `(EAV, AEV, VAE)` — for an artifact from a
+/// Builds all three index keys — `(EAV, AEV, VAE)` — for a fact from a
 /// single field-encoding pass: the entity/attribute bytes and the value
 /// payload are computed once and serialized per ordering.
 ///
@@ -179,23 +179,23 @@ fn encoded_len_lower_bound(value: &Value) -> usize {
 /// serializations of the same parts.
 ///
 /// Public for in-memory stores that key facts the way the tree does.
-pub fn artifact_index_keys(artifact: &crate::Artifact, manifest: &Manifest) -> (Key, Key, Key) {
-    let encoded = EncodedValue::new(&artifact.is, manifest);
-    artifact_index_keys_with(artifact, encoded.value_type, encoded.payload)
+pub fn fact_index_keys(fact: &crate::Fact, manifest: &Manifest) -> (Key, Key, Key) {
+    let encoded = EncodedValue::new(&fact.is, manifest);
+    fact_index_keys_with(fact, encoded.value_type, encoded.payload)
 }
 
-/// [`artifact_index_keys`] with the value payload already in hand, so a caller
+/// [`fact_index_keys`] with the value payload already in hand, so a caller
 /// that also needs the spill block (the instruction loop, via
 /// [`EncodedValue`]) encodes the value exactly once.
-pub(crate) fn artifact_index_keys_with(
-    artifact: &crate::Artifact,
+pub(crate) fn fact_index_keys_with(
+    fact: &crate::Fact,
     value_type: ValueDataType,
     payload: ValuePayload,
 ) -> (Key, Key, Key) {
     let mut parts = varkey::KeyParts {
         tag: ENTITY_KEY_TAG,
-        entity: artifact.of.as_str().as_bytes().to_vec(),
-        attribute: artifact.the.as_str().as_bytes().to_vec(),
+        entity: fact.of.as_str().as_bytes().to_vec(),
+        attribute: fact.the.as_str().as_bytes().to_vec(),
         value_type,
         value: payload,
         // The fact orderings carry no version; only history/coverage keys do.
@@ -209,16 +209,16 @@ pub(crate) fn artifact_index_keys_with(
     (eav, aev, vae)
 }
 
-/// One index key of `artifact`, in the ordering `tag` names, built from its
-/// parts in one serialization (see [`artifact_index_keys`]): what the chained
+/// One index key of `fact`, in the ordering `tag` names, built from its
+/// parts in one serialization (see [`fact_index_keys`]): what the chained
 /// `set_*` rebuilds produce, without parsing and re-encoding the key once per
 /// field.
-pub(crate) fn fact_key(tag: u8, artifact: &crate::Artifact, manifest: &Manifest) -> Key {
-    let encoded = EncodedValue::new(&artifact.is, manifest);
+pub(crate) fn fact_key(tag: u8, fact: &crate::Fact, manifest: &Manifest) -> Key {
+    let encoded = EncodedValue::new(&fact.is, manifest);
     Key::from(varkey::build_key(&varkey::KeyParts {
         tag,
-        entity: artifact.of.as_str().as_bytes().to_vec(),
-        attribute: artifact.the.as_str().as_bytes().to_vec(),
+        entity: fact.of.as_str().as_bytes().to_vec(),
+        attribute: fact.the.as_str().as_bytes().to_vec(),
         value_type: encoded.value_type,
         value: encoded.payload,
         version: None,
@@ -265,8 +265,8 @@ pub(crate) fn value_tail_bytes(value: &Value, manifest: &Manifest) -> Vec<u8> {
     tail
 }
 
-/// An opaque, generic [`KeyType`] backing the subtrees of an [`Artifacts`]
-/// index.
+/// An opaque, generic [`KeyType`] backing the subtrees of a
+/// [`Corpus`](crate::tree::Corpus).
 ///
 /// A key is a variable-length, lossless, order-preserving byte string built by
 /// [`varkey::build_key`]: a tag byte followed by the ordering's components,
@@ -497,7 +497,7 @@ pub trait KeyViewMut: KeyView {
     /// would fail and silently drop back to the bound's fallback parts.
     fn set_value(self, value_type: ValueDataType, value: ValuePayload) -> Self;
 
-    /// Sets the constrained parts of the given [`ArtifactSelector`] to the associated
+    /// Sets the constrained parts of the given [`Selector`] to the associated
     /// components of this [`KeyView`].
     ///
     /// `manifest` is the target tree's format. It must be the manifest the
@@ -505,7 +505,7 @@ pub trait KeyViewMut: KeyView {
     /// with the wrong payload shape (a different `inline_n` changes whether the
     /// bound spills, and a different `spill_prefix` changes how much of it the
     /// key carries) and the range brackets the wrong keys.
-    fn apply_selector(self, selector: &ArtifactSelector<Constrained>, manifest: &Manifest) -> Self {
+    fn apply_selector(self, selector: &Selector<Constrained>, manifest: &Manifest) -> Self {
         let mut key = self;
 
         if let Some(entity) = selector.entity() {
@@ -561,14 +561,14 @@ pub trait KeyView: Sized + Clone {
     fn value_spill_hash(&self) -> Option<&[u8]>;
 }
 
-/// Trait for constructing key views from artifact selectors.
+/// Trait for constructing key views from fact selectors.
 ///
 /// This trait enables the creation of key views that match the constraints
-/// specified in an artifact selector, used during query range construction.
+/// specified in a fact selector, used during query range construction.
 pub trait FromSelector: KeyViewConstruct {
-    /// Creates a key view from an artifact selector's constraints, under the
+    /// Creates a key view from a fact selector's constraints, under the
     /// target tree's format `manifest`.
-    fn from_selector(selector: &ArtifactSelector<Constrained>, manifest: &Manifest) -> Self {
+    fn from_selector(selector: &Selector<Constrained>, manifest: &Manifest) -> Self {
         Self::default().apply_selector(selector, manifest)
     }
 }
@@ -640,13 +640,13 @@ mod tests {
     use std::str::FromStr;
 
     use super::{AttributeKey, EntityKey, FromKey, KeyView, Manifest, ValueKey, value_payload};
-    use crate::{Artifact, Entity, Relation, Value, decode_value, key::varkey::ValuePayload};
+    use crate::{Entity, Fact, Relation, Value, decode_value, key::varkey::ValuePayload};
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-    fn fact(value: Value) -> Artifact {
-        Artifact {
+    fn fact(value: Value) -> Fact {
+        Fact {
             the: Relation::from_str("person/name").unwrap(),
             of: Entity::from_str("did:key:z6MkExample").unwrap(),
             is: value,
@@ -660,11 +660,9 @@ mod tests {
     /// boundary, under the default format and a narrow one.
     #[dialog_common::test]
     async fn it_builds_fact_keys_as_the_chained_setters_do() -> anyhow::Result<()> {
-        use super::{
-            AttributeKeyPart, EntityKeyPart, KeyType, KeyViewConstruct, artifact_index_keys,
-        };
+        use super::{AttributeKeyPart, EntityKeyPart, KeyType, KeyViewConstruct, fact_index_keys};
 
-        fn chained<K: KeyViewConstruct + KeyType>(fact: &Artifact, manifest: &Manifest) -> Vec<u8> {
+        fn chained<K: KeyViewConstruct + KeyType>(fact: &Fact, manifest: &Manifest) -> Vec<u8> {
             K::default()
                 .set_entity(EntityKeyPart::from(&fact.of))
                 .set_attribute(AttributeKeyPart::from(&fact.the))
@@ -698,16 +696,16 @@ mod tests {
         for manifest in [Manifest::default(), narrow] {
             for value in &values {
                 let fact = fact(value.clone());
-                let entity = EntityKey::from_artifact(&fact, &manifest);
-                let attribute = AttributeKey::from_artifact(&fact, &manifest);
-                let value_key = ValueKey::from_artifact(&fact, &manifest);
+                let entity = EntityKey::from_fact(&fact, &manifest);
+                let attribute = AttributeKey::from_fact(&fact, &manifest);
+                let value_key = ValueKey::from_fact(&fact, &manifest);
                 assert_eq!(entity.bytes(), chained::<EntityKey<_>>(&fact, &manifest));
                 assert_eq!(
                     attribute.bytes(),
                     chained::<AttributeKey<_>>(&fact, &manifest)
                 );
                 assert_eq!(value_key.bytes(), chained::<ValueKey<_>>(&fact, &manifest));
-                let (eav, aev, vae) = artifact_index_keys(&fact, &manifest);
+                let (eav, aev, vae) = fact_index_keys(&fact, &manifest);
                 assert_eq!(eav.as_ref(), entity.bytes());
                 assert_eq!(aev.as_ref(), attribute.bytes());
                 assert_eq!(vae.as_ref(), value_key.bytes());
@@ -747,9 +745,9 @@ mod tests {
         for value in values {
             let fact = fact(value.clone());
             let keys = [
-                EntityKey::from_artifact(&fact, &Manifest::default()).into_key(),
-                AttributeKey::from_artifact(&fact, &Manifest::default()).into_key(),
-                ValueKey::from_artifact(&fact, &Manifest::default()).into_key(),
+                EntityKey::from_fact(&fact, &Manifest::default()).into_key(),
+                AttributeKey::from_fact(&fact, &Manifest::default()).into_key(),
+                ValueKey::from_fact(&fact, &Manifest::default()).into_key(),
             ];
             for key in keys {
                 assert!(
@@ -790,19 +788,18 @@ mod tests {
     async fn it_sorts_spilled_values_into_their_type_band() -> anyhow::Result<()> {
         let big = "z".repeat(Manifest::default().inline_n as usize + 1);
         let spilled_key =
-            EntityKey::from_artifact(&fact(Value::String(big.clone())), &Manifest::default())
+            EntityKey::from_fact(&fact(Value::String(big.clone())), &Manifest::default())
                 .into_key();
 
         // In-band neighbors: ordered by leading value bytes, not banished
         // above the type band.
         let below =
-            EntityKey::from_artifact(&fact(Value::String("y-below".into())), &Manifest::default())
+            EntityKey::from_fact(&fact(Value::String("y-below".into())), &Manifest::default())
                 .into_key();
-        let shorter =
-            EntityKey::from_artifact(&fact(Value::String("zz".into())), &Manifest::default())
-                .into_key();
+        let shorter = EntityKey::from_fact(&fact(Value::String("zz".into())), &Manifest::default())
+            .into_key();
         let next_band =
-            EntityKey::from_artifact(&fact(Value::UnsignedInt(1)), &Manifest::default()).into_key();
+            EntityKey::from_fact(&fact(Value::UnsignedInt(1)), &Manifest::default()).into_key();
         assert!(
             below < spilled_key,
             "sorts by leading bytes within the band"
@@ -820,8 +817,7 @@ mod tests {
         // differ only in the trailing hash — distinct keys, both spilled.
         let sibling = format!("{}A", "z".repeat(Manifest::default().inline_n as usize + 1));
         let sibling_key =
-            EntityKey::from_artifact(&fact(Value::String(sibling)), &Manifest::default())
-                .into_key();
+            EntityKey::from_fact(&fact(Value::String(sibling)), &Manifest::default()).into_key();
         assert_ne!(
             spilled_key, sibling_key,
             "same-prefix large values stay distinct via the trailing hash"
@@ -848,7 +844,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_round_trips_a_small_value_inline() -> anyhow::Result<()> {
         let value = Value::String("Alice".into());
-        let key = EntityKey::from_artifact(&fact(value.clone()), &Manifest::default());
+        let key = EntityKey::from_fact(&fact(value.clone()), &Manifest::default());
 
         assert!(!key.value_is_spilled(), "a small value stays inline");
         assert_eq!(key.value_type(), value.data_type());
@@ -867,9 +863,9 @@ mod tests {
         let value = Value::UnsignedInt(1234);
         let fact = fact(value.clone());
 
-        let eav = EntityKey::from_artifact(&fact, &Manifest::default());
-        let aev = AttributeKey::from_artifact(&fact, &Manifest::default());
-        let vae = ValueKey::from_artifact(&fact, &Manifest::default());
+        let eav = EntityKey::from_fact(&fact, &Manifest::default());
+        let aev = AttributeKey::from_fact(&fact, &Manifest::default());
+        let vae = ValueKey::from_fact(&fact, &Manifest::default());
 
         assert_eq!(eav.value_payload(), aev.value_payload());
         assert_eq!(eav.value_payload(), vae.value_payload());
@@ -933,7 +929,7 @@ mod tests {
     async fn it_builds_a_spilled_key_with_prefix_and_trailing_hash() -> anyhow::Result<()> {
         let manifest = Manifest::default();
         let value = Value::String("x".repeat(manifest.inline_n as usize + 1));
-        let key = EntityKey::from_artifact(&fact(value.clone()), &manifest);
+        let key = EntityKey::from_fact(&fact(value.clone()), &manifest);
 
         assert!(key.value_is_spilled(), "an oversized value spills the key");
         assert_eq!(

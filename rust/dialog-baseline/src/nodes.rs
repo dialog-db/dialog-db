@@ -9,7 +9,7 @@ use dialog_effects::archive::Load;
 use dialog_effects::archive::prelude::CatalogScope;
 use dialog_search_tree::PersistentNode;
 
-/// A node of an artifact tree, as stored.
+/// A node of a fact tree, as stored.
 pub type TreeNode = PersistentNode<Key, State<Datum>>;
 
 /// One stored node, as [`walk`] visits it.

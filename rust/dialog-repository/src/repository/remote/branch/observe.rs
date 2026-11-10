@@ -99,7 +99,7 @@ mod tests {
         TreeReference, Upstream,
     };
     use anyhow::Result;
-    use dialog_corpus::{Artifact, DialogCorpusError, Entity, Instruction, Value};
+    use dialog_corpus::{DialogCorpusError, Entity, Fact, Instruction, Value};
     use dialog_effects::memory::Version;
     use dialog_peer::helpers::test_session_with_peer;
     use dialog_remote_s3::Address;
@@ -141,7 +141,7 @@ mod tests {
     {
         branch
             .commit(stream::iter(vec![Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "user/name".parse()?,
                     of: format!("user:{name}").parse()?,
                     is: Value::String(name.into()),
@@ -297,7 +297,7 @@ mod tests {
         assert!(
             matches!(
                 observed,
-                Err(ObserveRemoteBranchError::Artifact(
+                Err(ObserveRemoteBranchError::Fact(
                     DialogCorpusError::InvalidSignature(_)
                 ))
             ),

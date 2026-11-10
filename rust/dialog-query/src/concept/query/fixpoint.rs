@@ -50,9 +50,9 @@
 //! afterwards.
 
 use super::ConceptQuery;
-use crate::artifact::Artifact;
 use crate::attribute::{Relation, The};
 use crate::concept::descriptor::ConceptDescriptor;
+use crate::corpus::Fact;
 use crate::error::EvaluationError;
 use crate::negation::Negation;
 use crate::parameters::Parameters;
@@ -1091,7 +1091,7 @@ enum BaseSource {
 /// an addition can actually match them.
 async fn classify_base<'a, Env>(
     premise: &Premise,
-    additions: &[Artifact],
+    additions: &[Fact],
     env: &'a Env,
 ) -> Result<BaseSource, EvaluationError>
 where
@@ -1100,12 +1100,7 @@ where
     fn slots(query: &crate::AttributeQuery) -> (Term<Relation>, Term<Entity>, Term<Any>) {
         (query.the().clone(), query.of().clone(), query.is().clone())
     }
-    fn any_match(
-        the: &Term<Relation>,
-        of: &Term<Entity>,
-        is: &Term<Any>,
-        facts: &[Artifact],
-    ) -> bool {
+    fn any_match(the: &Term<Relation>, of: &Term<Entity>, is: &Term<Any>, facts: &[Fact]) -> bool {
         facts.iter().any(|fact| {
             constant_admits(
                 the.as_constant(),
@@ -1238,7 +1233,7 @@ pub async fn extend<'a, Env>(
     analysis: &ProgramAnalysis,
     env: &'a Env,
     table: &mut InMemoryAnswerTable,
-    additions: &[Artifact],
+    additions: &[Fact],
 ) -> Result<Option<Vec<Answer>>, EvaluationError>
 where
     Env: crate::Scope<'a>,
@@ -1399,7 +1394,7 @@ pub async fn retract<'a, Env>(
     analysis: &ProgramAnalysis,
     env: &'a Env,
     table: &mut InMemoryAnswerTable,
-    deletions: &[Artifact],
+    deletions: &[Fact],
 ) -> Result<Option<()>, EvaluationError>
 where
     Env: crate::Scope<'a>,
@@ -1731,8 +1726,8 @@ where
 #[derive(Clone, Default)]
 pub struct Continuation {
     table: Arc<Mutex<Option<InMemoryAnswerTable>>>,
-    additions: Arc<Vec<Artifact>>,
-    deletions: Arc<Vec<Artifact>>,
+    additions: Arc<Vec<Fact>>,
+    deletions: Arc<Vec<Fact>>,
 }
 
 impl fmt::Debug for Continuation {
@@ -1759,11 +1754,7 @@ impl Continuation {
     /// Attach the poll's changed facts: deletions retract via DRed,
     /// additions extend semi-naively, in that order. Either phase
     /// declining (non-additive shapes) falls back to a rebuild.
-    pub fn with_changes(
-        mut self,
-        additions: Arc<Vec<Artifact>>,
-        deletions: Arc<Vec<Artifact>>,
-    ) -> Self {
+    pub fn with_changes(mut self, additions: Arc<Vec<Fact>>, deletions: Arc<Vec<Fact>>) -> Self {
         self.additions = additions;
         self.deletions = deletions;
         self

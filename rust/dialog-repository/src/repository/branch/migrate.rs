@@ -333,9 +333,7 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use anyhow::Result;
-    use dialog_corpus::{
-        ArtifactSelector, Entity, NUMBER_BAND, Pick, Relation as ArtifactsRelation, Value,
-    };
+    use dialog_corpus::{Entity, NUMBER_BAND, Pick, Relation as CorpusRelation, Selector, Value};
     use dialog_peer::helpers::test_session_with_peer;
     use dialog_query::attribute::Relation;
     use dialog_query::{AttributeStatement, Cardinality};
@@ -347,7 +345,7 @@ mod tests {
 
     type Operator = dialog_peer::Peer<VolatileSpace, dialog_peer::Session>;
 
-    fn size() -> ArtifactsRelation {
+    fn size() -> CorpusRelation {
         "item/size".parse().expect("a relation")
     }
 
@@ -384,7 +382,7 @@ mod tests {
     async fn sizes(branch: &Branch, operator: &Operator) -> Result<Vec<(Entity, Value)>> {
         let rows = branch
             .claims()
-            .select(ArtifactSelector::new().the(size()))
+            .select(Selector::new().the(size()))
             .perform(operator)
             .await?
             .try_collect::<Vec<_>>()

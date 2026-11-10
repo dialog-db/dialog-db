@@ -267,13 +267,13 @@ mod tests {
 
     use crate::helpers::test_repo;
     use anyhow::Result;
-    use dialog_corpus::{Artifact, Instruction, Value};
+    use dialog_corpus::{Fact, Instruction, Value};
     use dialog_peer::helpers::test_session_with_peer;
     use futures_util::stream;
 
     fn name(of: &str, is: &str) -> Result<Instruction> {
         Ok(Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "user/name".parse()?,
                 of: of.parse()?,
                 is: Value::String(is.to_string()),

@@ -28,8 +28,7 @@
 //!
 //! Canonicality is therefore a property to reach for deliberately, via
 //! [`BufferedCorpus::canonicalize`] (surfaced on the commit path as
-//! `commit(..).canonicalize()` and on stores as
-//! [`Artifacts::canonicalize`](crate::Artifacts::canonicalize)), rather than a
+//! `commit(..).canonicalize()`), rather than a
 //! precondition for publishing. The policy across the stack: ordinary commits
 //! seal buffered; sync and publish do NOT canonicalize (buffered novelty sits
 //! near the root, so replicas differ in a few top blocks rather than many
@@ -838,8 +837,8 @@ mod tests {
     use crate::tree::Stamp;
     use crate::tree::{Corpus, CorpusExt as _};
     use crate::{
-        Artifact, Asset, AttributeKey, BlobChange, BlobIndexExt as _, Datum, DialogCorpusError,
-        EntityKey, Instruction, State, Value, blob_changes,
+        Asset, AttributeKey, BlobChange, BlobIndexExt as _, Datum, DialogCorpusError, EntityKey,
+        Fact, Instruction, State, Value, blob_changes,
     };
     use futures_util::TryStreamExt as _;
 
@@ -849,7 +848,7 @@ mod tests {
 
     fn assert_of(entity: &str, value: &str) -> Instruction {
         Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "test/field".parse().unwrap(),
                 of: entity.parse().unwrap(),
                 is: Value::String(value.to_string()),
@@ -861,7 +860,7 @@ mod tests {
 
     fn replace_of(entity: &str, value: &str) -> Instruction {
         Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "test/field".parse().unwrap(),
                 of: entity.parse().unwrap(),
                 is: Value::String(value.to_string()),
@@ -872,7 +871,7 @@ mod tests {
     }
 
     fn retract_of(entity: &str, value: &str) -> Instruction {
-        Instruction::Retract(Artifact {
+        Instruction::Retract(Fact {
             the: "test/field".parse().unwrap(),
             of: entity.parse().unwrap(),
             is: Value::String(value.to_string()),
@@ -1055,18 +1054,16 @@ mod tests {
             .await?;
 
             // The record write the commit path performs on the same tree.
-            let artifact = Artifact {
+            let fact = Fact {
                 the: "test/record".parse().unwrap(),
                 of: format!("rev:{i}").parse().unwrap(),
                 is: Value::String(format!("{i}")),
                 cause: None,
             };
-            let entity_key = crate::EntityKey::from_artifact(
-                &artifact,
-                &dialog_search_tree::Manifest::default(),
-            );
+            let entity_key =
+                crate::EntityKey::from_fact(&fact, &dialog_search_tree::Manifest::default());
             let attribute_key = crate::AttributeKey::from_key(&entity_key);
-            let added = crate::State::Added(crate::Datum::for_artifact(&artifact));
+            let added = crate::State::Added(crate::Datum::for_fact(&fact));
             tree.record(
                 &store,
                 &mut delta,
@@ -1240,16 +1237,15 @@ mod tests {
             vec![assert_of("user:1", "resident"), assert_of("user:2", "b")]
         }
         fn entries() -> Vec<(crate::Key, State<Datum>)> {
-            let artifact = Artifact {
+            let fact = Fact {
                 the: "test/record".parse().unwrap(),
                 of: "rev:1".parse().unwrap(),
                 is: Value::String("record".to_string()),
                 cause: None,
             };
-            let entity_key =
-                EntityKey::from_artifact(&artifact, &dialog_search_tree::Manifest::default());
+            let entity_key = EntityKey::from_fact(&fact, &dialog_search_tree::Manifest::default());
             let attribute_key = AttributeKey::from_key(&entity_key);
-            let added = State::Added(Datum::for_artifact(&artifact));
+            let added = State::Added(Datum::for_fact(&fact));
             vec![
                 (entity_key.into_key(), added.clone()),
                 (attribute_key.into_key(), added),

@@ -1,4 +1,4 @@
-//! Variable-length, lossless, order-preserving artifact key construction and
+//! Variable-length, lossless, order-preserving fact key construction and
 //! parsing.
 //!
 //! Replaces the fixed 162-byte padded key. A key is a tag byte followed by its
@@ -105,7 +105,7 @@ impl ValuePayload {
     }
 }
 
-/// The decoded components of an artifact key, borrowed where possible.
+/// The decoded components of a fact key, borrowed where possible.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyParts {
     /// The index ordering tag.
@@ -418,7 +418,7 @@ pub fn build_key(parts: &KeyParts) -> Vec<u8> {
 /// The length of a value slot payload starting at `at`, given its `type_byte`.
 /// The payload is self-delimited by the order-preserving value encoding:
 /// numerics are fixed-width and strings/bytes are `0x00`-terminated, mirroring
-/// the [`ordvalue`](crate::artifacts::ordvalue) decoders without allocating.
+/// the [`ordvalue`](crate::model::ordvalue) decoders without allocating.
 /// (A spilled value's slot holds its encoded prefix, delimited identically.)
 fn value_payload_len(type_byte: u8, bytes: &[u8], at: usize) -> Option<usize> {
     // An unknown discriminant is corruption: reject the key rather than
@@ -627,7 +627,7 @@ impl ValueRef<'_> {
     }
 }
 
-/// The components of an artifact key, borrowed from the key bytes where
+/// The components of a fact key, borrowed from the key bytes where
 /// possible. The borrowed, allocation-light analogue of [`KeyParts`] for the
 /// read/scan path: entity and attribute are [`Cow`]s that borrow the key bytes
 /// when escape-free (the norm for UTF-8 entities/attributes) and own only when

@@ -56,9 +56,9 @@ use dialog_common::ConditionalSync;
 use dialog_search_tree::{Change, DialogSearchTreeError, Differential, Entry};
 
 use crate::Value;
-use crate::artifacts::decode_value;
 use crate::history::{Context, REVISION_ATTRIBUTE, RevisionRecord, Version};
 use crate::key::varkey::{ValueRef, parse_key, parse_key_ref};
+use crate::model::decode_value;
 use crate::tree::Corpus;
 use crate::tree::fetch_spilled;
 use crate::{
@@ -880,7 +880,7 @@ mod screen_tests {
     use crate::ArchiveDelta;
     use crate::history::{Edition, Origin, Version};
     use crate::tree::CorpusExt as _;
-    use crate::{Artifact, Entity, Instruction, Relation, Value};
+    use crate::{Entity, Fact, Instruction, Relation, Value};
     use anyhow::Result;
     use dialog_search_tree::helpers::Blocks;
     use dialog_search_tree::helpers::ObservingBlocks;
@@ -926,9 +926,9 @@ mod screen_tests {
         let retractor = Version::new(Origin::from([2u8; 32]), Edition::new(1));
 
         // The receiver holds one fact per entity ...
-        let facts: Vec<Artifact> = (0..24u32)
+        let facts: Vec<Fact> = (0..24u32)
             .map(|index| {
-                Ok(Artifact {
+                Ok(Fact {
                     the: the.clone(),
                     of: Entity::new()?,
                     is: Value::String(format!("label {index}")),
@@ -947,7 +947,7 @@ mod screen_tests {
                     facts
                         .iter()
                         .cloned()
-                        .map(|artifact| Instruction::Assert(artifact, crate::Pick::All)),
+                        .map(|fact| Instruction::Assert(fact, crate::Pick::All)),
                 ),
             )
             .await?;

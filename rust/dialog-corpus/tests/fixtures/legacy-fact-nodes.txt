@@ -1,4 +1,4 @@
-# Artifact tree nodes in the legacy layout: 40 facts on fixture:entity-000..039,
+# Fact tree nodes in the legacy layout: 40 facts on fixture:entity-000..039,
 # fixture/name on even n and fixture/bio on odd n, value "value n" except n = 7, a 5000-byte
 # string of x that spills: its block is the raw bytes stored under their blake3 hash,
 # which the reading test stores itself ("spill present" records that the writer stored it).

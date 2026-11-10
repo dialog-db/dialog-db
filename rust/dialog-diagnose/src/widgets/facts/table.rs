@@ -1,4 +1,4 @@
-use dialog_corpus::{Artifact, Datum, Key, State};
+use dialog_corpus::{Datum, Fact, Key, State};
 use ratatui::{
     prelude::*,
     widgets::{Cell, HighlightSpacing, Row, Table},
@@ -64,12 +64,10 @@ impl Widget for FactTable<'_> {
                         // reconstructing the entity and attribute from the key.
                         // An inline value reconstructs as usual.
                         let (entity, attribute, value) =
-                            match Artifact::from_key_datum_placeholder(key, datum) {
-                                Ok(artifact) => (
-                                    artifact.of.to_string(),
-                                    artifact.the.to_string(),
-                                    artifact.is.to_utf8(),
-                                ),
+                            match Fact::from_key_datum_placeholder(key, datum) {
+                                Ok(fact) => {
+                                    (fact.of.to_string(), fact.the.to_string(), fact.is.to_utf8())
+                                }
                                 Err(error) => (String::new(), String::new(), format!("{error}")),
                             };
 

@@ -1,4 +1,4 @@
-//! An artifact tree written in the legacy (untagged) node layout stays
+//! A fact tree written in the legacy (untagged) node layout stays
 //! readable: every fact scans back, including one whose value spilled.
 
 #![cfg(not(target_arch = "wasm32"))]
@@ -7,11 +7,11 @@ use std::str::FromStr as _;
 
 use dialog_common::Blake3Hash;
 use dialog_corpus::tree::{Corpus, CorpusExt as _, spill_cache};
-use dialog_corpus::{Artifact, ArtifactSelector, Entity, Relation, Value};
+use dialog_corpus::{Entity, Fact, Relation, Selector, Value};
 use dialog_search_tree::helpers::Blocks;
 use futures_util::TryStreamExt as _;
 
-const FIXTURE: &str = include_str!("fixtures/legacy-artifact-nodes.txt");
+const FIXTURE: &str = include_str!("fixtures/legacy-fact-nodes.txt");
 
 fn unhex(text: &str) -> Vec<u8> {
     (0..text.len())
@@ -20,8 +20,8 @@ fn unhex(text: &str) -> Vec<u8> {
         .collect()
 }
 
-fn expected(n: u32) -> Artifact {
-    Artifact {
+fn expected(n: u32) -> Fact {
+    Fact {
         the: Relation::from_str(if n.is_multiple_of(2) {
             "fixture/name"
         } else {
@@ -39,7 +39,7 @@ fn expected(n: u32) -> Artifact {
 }
 
 #[tokio::test]
-async fn it_reads_an_artifact_tree_written_in_the_legacy_layout() -> anyhow::Result<()> {
+async fn it_reads_an_fact_tree_written_in_the_legacy_layout() -> anyhow::Result<()> {
     let store = Blocks::new();
     let mut root = None;
     for line in FIXTURE.lines() {
@@ -58,18 +58,18 @@ async fn it_reads_an_artifact_tree_written_in_the_legacy_layout() -> anyhow::Res
         root.expect("a root line"),
     );
     for attribute in ["fixture/name", "fixture/bio"] {
-        let mut rows: Vec<Artifact> = tree
+        let mut rows: Vec<Fact> = tree
             .clone()
             .scan(
                 store.clone(),
                 spill_cache(),
-                ArtifactSelector::new().the(Relation::from_str(attribute)?),
+                Selector::new().the(Relation::from_str(attribute)?),
             )
             .and_then(|row| async move { row.to_owned() })
             .try_collect()
             .await?;
         rows.sort_by(|left, right| left.of.as_str().cmp(right.of.as_str()));
-        let want: Vec<Artifact> = (0..40u32)
+        let want: Vec<Fact> = (0..40u32)
             .filter(|n| (n % 2 == 0) == (attribute == "fixture/name"))
             .map(expected)
             .collect();

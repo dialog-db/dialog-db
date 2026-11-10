@@ -30,8 +30,8 @@ use dialog_common::{ConditionalSync, Held, Holdings, Holds};
 use dialog_corpus::selector::Constrained;
 use dialog_corpus::tree::CorpusNode;
 use dialog_corpus::{
-    Artifact, ArtifactSelector, ArtifactStream, DialogCorpusError, Instruction,
-    Relation as ArtifactsRelation, Select, Value,
+    DialogCorpusError, Fact, FactStream, Instruction, Relation as CorpusRelation, Select, Selector,
+    Value,
 };
 use dialog_effects::archive::ArchiveError;
 use dialog_effects::archive::Load as ArchiveLoad;
@@ -268,8 +268,8 @@ where
 /// The outcome of running a single query through [`BenchEnv::run_query`].
 #[derive(Debug, Clone)]
 pub struct QueryRun {
-    /// The artifacts the query produced.
-    pub results: Vec<Artifact>,
+    /// The facts the query produced.
+    pub results: Vec<Fact>,
     /// Total number of block reads (including repeats) the query triggered.
     pub reads: usize,
     /// Number of distinct block keys the query read.
@@ -277,12 +277,12 @@ pub struct QueryRun {
 }
 
 impl QueryRun {
-    /// The number of artifacts the query produced.
+    /// The number of facts the query produced.
     pub fn len(&self) -> usize {
         self.results.len()
     }
 
-    /// Whether the query produced no artifacts.
+    /// Whether the query produced no facts.
     pub fn is_empty(&self) -> bool {
         self.results.is_empty()
     }
@@ -512,8 +512,8 @@ where
 {
     async fn execute(
         &self,
-        input: ArtifactSelector<Constrained>,
-    ) -> Result<ArtifactStream<'a>, DialogCorpusError> {
+        input: Selector<Constrained>,
+    ) -> Result<FactStream<'a>, DialogCorpusError> {
         let select = self.branch.claims().select(input);
         let store = self.operator;
         let counting = CountingStore::new(store, self.journal.clone());
@@ -547,7 +547,7 @@ where
 {
     async fn execute(
         &self,
-        input: ArtifactSelector<Constrained>,
+        input: Selector<Constrained>,
     ) -> Result<Option<u64>, DialogCorpusError> {
         // Route the estimate's root read through the same counting store as
         // the scans, so a bench sees the block it costs.
@@ -678,7 +678,7 @@ fn parse_value(value_type: &str, raw: &str) -> Option<Value> {
         "integer" => raw.parse().ok().map(Value::SignedInt),
         "float" => raw.parse().ok().map(Value::Float),
         "boolean" => bool::from_str(raw).ok().map(Value::Boolean),
-        "attribute" => ArtifactsRelation::from_str(raw).ok().map(Value::Symbol),
+        "attribute" => CorpusRelation::from_str(raw).ok().map(Value::Symbol),
         _ => None,
     }
 }
@@ -772,7 +772,7 @@ where
     /// the branch via a single transaction.
     ///
     /// Seeding is intentionally not part of any measured path. The facts
-    /// come from [`generate_data`], which produces several artifacts per
+    /// come from [`generate_data`], which produces several facts per
     /// entity across a handful of attributes.
     pub async fn seed(&self, entity_count: usize) -> Result<usize> {
         let data = generate_data(entity_count)?;
@@ -786,7 +786,7 @@ where
 
         let instructions: Vec<Instruction> = data
             .into_iter()
-            .map(|artifact| Instruction::Assert(artifact, dialog_corpus::Pick::All))
+            .map(|fact| Instruction::Assert(fact, dialog_corpus::Pick::All))
             .collect();
         branch
             .transaction()
@@ -819,19 +819,16 @@ where
     /// scan so warm-up reads (e.g. the eager root probe inside
     /// `execute`) are excluded from the recorded counts.
     pub async fn run_query(&self, attribute: &str) -> Result<QueryRun> {
-        let the: ArtifactsRelation = attribute.parse()?;
+        let the: CorpusRelation = attribute.parse()?;
         let branch = self.cold().await?;
 
-        let select = branch
-            .claims()
-            .select(ArtifactSelector::new().the(the))
-            .to_owned();
+        let select = branch.claims().select(Selector::new().the(the)).to_owned();
         let store = &self.operator;
         let journal = ReadJournal::default();
         let counting = CountingStore::new(store, journal.clone());
 
         let stream = select.execute(counting).await?;
-        let results: Vec<Artifact> = stream.try_collect().await?;
+        let results: Vec<Fact> = stream.try_collect().await?;
 
         let reads = journal.reads();
         let unique_reads = journal.unique_reads();
@@ -945,7 +942,7 @@ where
             memo: Memo::default(),
         };
         env.journal().clear();
-        let selector = ArtifactSelector::new()
+        let selector = Selector::new()
             .of(of.clone())
             .the("stuff/name".parse().expect("valid attribute"));
         let stream = Provider::<Select<'_>>::execute(&env, selector).await?;
@@ -969,7 +966,7 @@ where
             memo: Memo::default(),
         };
         env.journal().clear();
-        let selector = ArtifactSelector::new().the("stuff/name".parse().expect("valid attribute"));
+        let selector = Selector::new().the("stuff/name".parse().expect("valid attribute"));
         let stream = Provider::<Select<'_>>::execute(&env, selector).await?;
         let rows: Vec<_> = stream.try_collect().await?;
         Ok(JoinRun {
@@ -1228,7 +1225,7 @@ where
                 current = Some(row[txn_at].clone());
             }
 
-            let Ok(the) = ArtifactsRelation::from_str(&row[the_at]) else {
+            let Ok(the) = CorpusRelation::from_str(&row[the_at]) else {
                 continue;
             };
             let Ok(of) = Entity::from_str(&row[of_at]) else {
@@ -1242,7 +1239,7 @@ where
                 entities.push(of.clone());
             }
             pending.push(Instruction::Assert(
-                Artifact {
+                Fact {
                     the,
                     of,
                     is,
@@ -2179,11 +2176,8 @@ mod test {
         let root = *revision.tree.hash();
         // Any constrained selector works here; the catalog it names is the
         // branch's archive index, which is where the tree nodes live.
-        let the: ArtifactsRelation = "se.post/title".parse()?;
-        let select = branch
-            .claims()
-            .select(ArtifactSelector::new().the(the))
-            .to_owned();
+        let the: CorpusRelation = "se.post/title".parse()?;
+        let select = branch.claims().select(Selector::new().the(the)).to_owned();
         let store = env.operator();
         let stats = distribution::capture(&select.catalog(), &root, store).await?;
         distribution::report(&format!("se-replay-{limit}"), &stats);
@@ -2261,7 +2255,7 @@ mod test {
     /// A realistic bug-tracker concept query, over a fact base large enough to
     /// span multiple leaves, must both round-trip and filter correctly. The
     /// [`Bug`] concept joins six attributes including a `Float` `ordering`
-    /// field, so this is the concept-layer analogue of the artifact-layer float
+    /// field, so this is the concept-layer analogue of the fact-layer float
     /// key-width regression: before that fix, committing enough float-valued
     /// bugs to fill a leaf failed outright, and no bug query could run.
     #[dialog_common::test]

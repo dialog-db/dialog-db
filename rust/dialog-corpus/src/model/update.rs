@@ -1,8 +1,8 @@
 use crate::Blake3Hash;
-use crate::artifacts::ordvalue::encode_value_owned;
 use crate::history::Edition;
 use crate::key::value_tail_bytes;
-use crate::{Artifact, Asset, Cause, Entity, Instruction, Relation, Value};
+use crate::model::ordvalue::encode_value_owned;
+use crate::{Asset, Cause, Entity, Fact, Instruction, Relation, Value};
 use dialog_search_tree::Manifest;
 use futures_util::Stream;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
@@ -649,7 +649,7 @@ impl Changes {
                 for operation in operations {
                     let instruction = match operation {
                         Change::Assert(value, policy) => Instruction::Assert(
-                            Artifact {
+                            Fact {
                                 the: attribute.clone(),
                                 of: entity.clone(),
                                 is: value,
@@ -657,7 +657,7 @@ impl Changes {
                             },
                             policy,
                         ),
-                        Change::Retract(value) => Instruction::Retract(Artifact {
+                        Change::Retract(value) => Instruction::Retract(Fact {
                             the: attribute.clone(),
                             of: entity.clone(),
                             is: value,
@@ -669,8 +669,8 @@ impl Changes {
             }
         }
         let cell = |instruction: &Instruction| {
-            let (Instruction::Assert(artifact, _) | Instruction::Retract(artifact)) = instruction;
-            (artifact.of.clone(), artifact.the.clone())
+            let (Instruction::Assert(fact, _) | Instruction::Retract(fact)) = instruction;
+            (fact.of.clone(), fact.the.clone())
         };
         instructions.sort_by_cached_key(cell);
         instructions
@@ -764,7 +764,7 @@ impl Stream for ChangeStream {
     }
 }
 
-/// The full sort key for an [`Artifact`] — `(the, of, value_tail)`.
+/// The full sort key for a [`Fact`] — `(the, of, value_tail)`.
 ///
 /// - `the` / `of` — raw attribute / entity key bytes.
 /// - `value_tail` — the key's value tail bytes (see below).
@@ -825,10 +825,10 @@ impl Stream for ChangeStream {
 /// not.
 pub type SortKey = (Vec<u8>, Vec<u8>, Vec<u8>);
 
-/// Compute the [`SortKey`] for an artifact.
+/// Compute the [`SortKey`] for a fact.
 ///
 /// Uses the same entity/attribute bytes and value tail the tree's own index
-/// keys are built from (`EntityKey::from(&Artifact)` and friends), so a
+/// keys are built from (`EntityKey::from(&Fact)` and friends), so a
 /// `SortKey` sort reproduces the tree's byte order exactly, not just an
 /// approximation of it. In particular the value component is the value tail the
 /// key carries, so same-`(the, of, type)` facts order by value exactly as the
@@ -839,11 +839,11 @@ pub type SortKey = (Vec<u8>, Vec<u8>, Vec<u8>);
 /// it decides whether the value spills and how much of it the tail carries, so
 /// a different manifest would sort a boundary-sized value into a different
 /// position than the tree puts it.
-pub fn sort_key(artifact: &Artifact, manifest: &Manifest) -> SortKey {
+pub fn sort_key(fact: &Fact, manifest: &Manifest) -> SortKey {
     (
-        artifact.the.as_str().as_bytes().to_vec(),
-        artifact.of.as_str().as_bytes().to_vec(),
-        value_tail_bytes(&artifact.is, manifest),
+        fact.the.as_str().as_bytes().to_vec(),
+        fact.of.as_str().as_bytes().to_vec(),
+        value_tail_bytes(&fact.is, manifest),
     )
 }
 
@@ -989,7 +989,7 @@ mod tests {
         use super::{Changes, Instruction, Pick, Value};
         let fact = |of: &str, the: &str, is: &str| -> Instruction {
             Instruction::Assert(
-                super::Artifact {
+                super::Fact {
                     the: the.parse().expect("attribute"),
                     of: of.parse().expect("entity"),
                     is: Value::String(is.into()),
@@ -1014,12 +1014,11 @@ mod tests {
                 .into_instructions()
                 .into_iter()
                 .map(|instruction| {
-                    let (Instruction::Assert(artifact, _) | Instruction::Retract(artifact)) =
-                        instruction;
-                    let Value::String(is) = artifact.is else {
+                    let (Instruction::Assert(fact, _) | Instruction::Retract(fact)) = instruction;
+                    let Value::String(is) = fact.is else {
                         panic!("a text value")
                     };
-                    (artifact.of.to_string(), artifact.the.to_string(), is)
+                    (fact.of.to_string(), fact.the.to_string(), is)
                 })
                 .collect()
         };
@@ -1352,14 +1351,14 @@ mod tests {
     #[dialog_common::test]
     fn it_orders_sort_keys_exactly_as_the_tree_orders_keys() {
         let inline_n = dialog_search_tree::Manifest::default().inline_n as usize;
-        let facts: Vec<Artifact> = vec![
+        let facts: Vec<Fact> = vec![
             Value::String("z".repeat(inline_n + 1)), // spilled: tail 0x83…
             Value::UnsignedInt(1),                   // inline: tail 0x04…
             Value::String("abc".into()),             // inline: tail 0x03…
             Value::Float(1.5),                       // inline: tail 0x06…
         ]
         .into_iter()
-        .map(|is| Artifact {
+        .map(|is| Fact {
             the: name_attr(),
             of: alice(),
             is,
@@ -1373,7 +1372,7 @@ mod tests {
         let mut by_sort_key = facts.clone();
         by_sort_key.sort_by_key(|fact| sort_key(fact, &manifest));
         let mut by_tree_key = facts;
-        by_tree_key.sort_by_key(|fact| crate::EntityKey::from_artifact(fact, &manifest).into_key());
+        by_tree_key.sort_by_key(|fact| crate::EntityKey::from_fact(fact, &manifest).into_key());
 
         let sorted: Vec<&Value> = by_sort_key.iter().map(|fact| &fact.is).collect();
         let expected: Vec<&Value> = by_tree_key.iter().map(|fact| &fact.is).collect();

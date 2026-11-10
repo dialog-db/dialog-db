@@ -121,12 +121,12 @@ let results: Vec<Employee> = main
     .await?;
 ```
 
-Raw artifact selection (with automatic remote fallback):
+Raw fact selection (with automatic remote fallback):
 
 ```rs
-let artifacts = main
+let facts = main
     .claims()
-    .select(ArtifactSelector::new().the("user/name".parse()?))
+    .select(Selector::new().the("user/name".parse()?))
     .perform(&operator)
     .await?
     .collect::<Vec<_>>()

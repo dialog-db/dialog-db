@@ -49,10 +49,10 @@
 use dialog_search_tree::Manifest;
 use std::iter::repeat_n;
 
-use crate::artifacts::encode_bytes;
 use crate::history::{EDITION_LENGTH, ORIGIN_LENGTH, VERSION_LENGTH, Version};
 use crate::key::value_payload;
 use crate::key::varkey::{KeyParts, ValuePayload, build_key};
+use crate::model::encode_bytes;
 use crate::{Entity, Key, Relation, ValueDataType};
 
 /// The leading tag byte of history region keys

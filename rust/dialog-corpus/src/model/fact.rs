@@ -1,7 +1,7 @@
-//! Artifact data structure representing semantic triples.
+//! Fact data structure representing semantic triples.
 //!
-//! This module defines the core [`Artifact`] type which represents a semantic triple
-//! (subject-predicate-object) in the Dialog database. Artifacts are the fundamental
+//! This module defines the core [`Fact`] type which represents a semantic triple
+//! (subject-predicate-object) in the Dialog database. Facts are the fundamental
 //! units of data storage and retrieval.
 
 use std::{
@@ -25,35 +25,35 @@ use crate::{
 
 use super::{Cause, Entity, Relation, Value};
 
-/// A [`Artifact`] embodies a datum - a semantic triple - that may be stored in or
-/// retrieved from a [`ArtifactStore`].
+/// A [`Fact`] embodies a datum - a semantic triple - that may be stored in or
+/// retrieved from a [`Corpus`].
 #[derive(Clone, PartialEq, PartialOrd, Serialize, Deserialize)]
-pub struct Artifact {
-    /// The [`Relation`] of the [`Artifact`]; the predicate of the triple
+pub struct Fact {
+    /// The [`Relation`] of the [`Fact`]; the predicate of the triple
     pub the: Relation,
-    /// The [`Entity`] of the [`Artifact`]; the subject of the triple
+    /// The [`Entity`] of the [`Fact`]; the subject of the triple
     #[serde(
         serialize_with = "dialog_capability::identity::to_utf8",
         deserialize_with = "dialog_capability::identity::from_utf8"
     )]
     pub of: Entity,
-    /// The [`Value`] of the [`Artifact`]; the object of the triple
-    // TODO: This is in support of Artifacts<->CSV but we probably want
-    // different (de)serialization for Artifacts<->JSON (assuming we ever
+    /// The [`Value`] of the [`Fact`]; the object of the triple
+    // TODO: This is in support of Facts<->CSV but we probably want
+    // different (de)serialization for Facts<->JSON (assuming we ever
     // want that.
     #[serde(
-        serialize_with = "crate::artifacts::value::to_utf8",
-        deserialize_with = "crate::artifacts::value::from_utf8"
+        serialize_with = "crate::model::value::to_utf8",
+        deserialize_with = "crate::model::value::from_utf8"
     )]
     pub is: Value,
-    /// The [`Cause`] of the [`Artifact`], which is a reference to an ancester
+    /// The [`Cause`] of the [`Fact`], which is a reference to an ancester
     /// version with a different [`Value`].
     pub cause: Option<Cause>,
 }
 
-impl Debug for Artifact {
+impl Debug for Fact {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        f.debug_struct("Artifact")
+        f.debug_struct("Fact")
             .field("the", &self.the.to_string())
             .field("of", &self.of.to_string())
             .field("is", &self.is)
@@ -62,27 +62,27 @@ impl Debug for Artifact {
     }
 }
 
-impl Display for Artifact {
+impl Display for Fact {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         let attribute = self.the.to_string();
         let entity = self.of.to_string();
         let value = self.is.to_utf8();
 
-        write!(f, "Artifact: the '{attribute}' of '{entity}' is '{value}'")
+        write!(f, "Fact: the '{attribute}' of '{entity}' is '{value}'")
     }
 }
 
-impl Artifact {
+impl Fact {
     /// Reconstructs a fact from an index `key` and its stored [`Datum`] payload,
     /// for a key whose value is stored INLINE.
     ///
     /// The entity, attribute, value type, and value all come from the key
     /// (stored losslessly and order-preservingly by [`EntityKey::from`] and
     /// friends). This is a convenience over
-    /// [`Artifact::from_key_datum_with_value`] with no spilled bytes; if the key
+    /// [`Fact::from_key_datum_with_value`] with no spilled bytes; if the key
     /// is spilled (`key.value_is_spilled()`) it errors, because the raw value
     /// bytes live in a separate archive block the caller must fetch. Use
-    /// [`Artifact::from_key_datum_with_value`] for the general case.
+    /// [`Fact::from_key_datum_with_value`] for the general case.
     pub fn from_key_datum(key: &Key, datum: &Datum) -> Result<Self, DialogCorpusError> {
         Self::from_key_datum_with_value(key, datum, None)
     }
@@ -118,7 +118,7 @@ impl Artifact {
         reconstruct(&parts, datum, spilled)
     }
 
-    /// Reconstructs an [`Artifact`] from an already-parsed [`KeyRef`], a datum,
+    /// Reconstructs a [`Fact`] from an already-parsed [`KeyRef`], a datum,
     /// and (for a spilled value) the fetched block bytes. The scan path parses
     /// each key once into a [`KeyRef`] for matching and spill resolution, then
     /// hands that same parse here so reconstruction adds no further key walk.
@@ -165,7 +165,7 @@ impl Artifact {
         if !spilled {
             return Self::from_key_datum(key, datum);
         }
-        Ok(Artifact {
+        Ok(Fact {
             the,
             of,
             is: Value::String("<spilled value>".to_string()),
@@ -174,9 +174,9 @@ impl Artifact {
     }
 }
 
-/// A fact row that has NOT been materialized into an owned [`Artifact`].
+/// A fact row that has NOT been materialized into an owned [`Fact`].
 ///
-/// Scans yield these instead of owned [`Artifact`]s because full
+/// Scans yield these instead of owned [`Fact`]s because full
 /// materialization is the dominant per-row cost of a scan — an entity URI
 /// parse, an attribute alloc, a value decode with its allocs, and a cause
 /// clone, per row — and many consumers never need most of it (a count, a
@@ -194,17 +194,17 @@ impl Artifact {
 /// - [`cause`](Self::cause) reads the payload's cause without any key walk.
 /// - [`sort_key`](Self::sort_key) derives the query layer's merge order
 ///   straight from the stored key bytes, with no value decode or re-encode.
-/// - [`to_owned`](Self::to_owned) materializes the full [`Artifact`] for
+/// - [`to_owned`](Self::to_owned) materializes the full [`Fact`] for
 ///   consumers that genuinely need ownership.
 ///
-/// A view can also back onto an owned [`Artifact`] (via `From<Artifact>`):
+/// A view can also back onto an owned [`Fact`] (via `From<Fact>`):
 /// that is how sources with no stored key — the in-memory `Changes` overlay a
 /// query unions with branch scans — travel the same streams. The borrowed
 /// accessors all work on both backings; only [`key`](Self::key),
 /// [`datum`](Self::datum), [`spilled`](Self::spilled), and
 /// [`parts`](Self::parts) are scanned-only.
 #[derive(Clone, Debug)]
-pub struct ArtifactView {
+pub struct FactView {
     backing: Backing,
 }
 
@@ -224,28 +224,28 @@ enum Backing {
         spilled: Option<Vec<u8>>,
     },
     /// A row synthesized without a stored key (e.g. an uncommitted overlay
-    /// fact), carried as the owned [`Artifact`] it was made from. Boxed so
+    /// fact), carried as the owned [`Fact`] it was made from. Boxed so
     /// the common scanned row doesn't pay the owned form's footprint. A
     /// pending write carries the standing the commit will give it (see
-    /// [`ArtifactView::pending`]); any other owned row has none.
+    /// [`FactView::pending`]); any other owned row has none.
     Owned {
-        artifact: Box<Artifact>,
+        fact: Box<Fact>,
         standing: Option<(Edition, [u8; 32])>,
     },
 }
 
-impl From<Artifact> for ArtifactView {
-    fn from(artifact: Artifact) -> Self {
+impl From<Fact> for FactView {
+    fn from(fact: Fact) -> Self {
         Self {
             backing: Backing::Owned {
-                artifact: Box::new(artifact),
+                fact: Box::new(fact),
                 standing: None,
             },
         }
     }
 }
 
-impl ArtifactView {
+impl FactView {
     /// Assembles a view from a scanned entry's key handle, the layout the
     /// scan read from it, its payload, and (for a spilled value) the
     /// fetched block bytes.
@@ -273,17 +273,17 @@ impl ArtifactView {
     /// version's hash, not known yet, read as zero; what the commit
     /// orders among them by cause and value, a read over the
     /// transaction orders the same way.
-    pub fn pending(artifact: Artifact, edition: Edition) -> Self {
+    pub fn pending(fact: Fact, edition: Edition) -> Self {
         Self {
             backing: Backing::Owned {
-                artifact: Box::new(artifact),
+                fact: Box::new(fact),
                 standing: Some((edition, [0; 32])),
             },
         }
     }
 
     /// The raw bytes of the index key this row was scanned at, or `None`
-    /// for a row backed by an owned [`Artifact`] (no stored key exists).
+    /// for a row backed by an owned [`Fact`] (no stored key exists).
     pub fn key(&self) -> Option<&[u8]> {
         match &self.backing {
             Backing::Scanned { key, .. } => Some(key.as_ref()),
@@ -292,7 +292,7 @@ impl ArtifactView {
     }
 
     /// The stored payload of this row (the parts of the fact the key does not
-    /// carry), or `None` for a row backed by an owned [`Artifact`].
+    /// carry), or `None` for a row backed by an owned [`Fact`].
     pub fn datum(&self) -> Option<&Datum> {
         match &self.backing {
             Backing::Scanned { datum, .. } => Some(datum),
@@ -303,8 +303,7 @@ impl ArtifactView {
     /// Every claim version this row stands for (the revision that wrote
     /// it plus any collapsed claims of the same fact, see
     /// [`Datum::versions`]). Empty for a row no revision tagged: data
-    /// committed straight through [`Artifacts`](crate::Artifacts), or an
-    /// owned row.
+    /// applied to a corpus with no version, or an owned row.
     pub fn versions(&self) -> impl Iterator<Item = &Version> {
         self.datum().into_iter().flat_map(Datum::versions)
     }
@@ -326,7 +325,7 @@ impl ArtifactView {
     pub fn cause(&self) -> Option<&Cause> {
         match &self.backing {
             Backing::Scanned { datum, .. } => datum.cause.as_ref(),
-            Backing::Owned { artifact, .. } => artifact.cause.as_ref(),
+            Backing::Owned { fact, .. } => fact.cause.as_ref(),
         }
     }
 
@@ -343,7 +342,7 @@ impl ArtifactView {
     /// value payload, borrowing from the key bytes (owning only an escaped
     /// entity/attribute). The scan read the key's layout once, so this
     /// slices the key without walking it again. Errors for a row
-    /// backed by an owned [`Artifact`], which has no stored key — the
+    /// backed by an owned [`Fact`], which has no stored key — the
     /// field accessors below work on both backings.
     pub fn parts(&self) -> Result<KeyRef<'_>, DialogCorpusError> {
         match &self.backing {
@@ -359,7 +358,7 @@ impl ArtifactView {
     pub fn the_bytes(&self) -> Result<Cow<'_, [u8]>, DialogCorpusError> {
         match &self.backing {
             Backing::Scanned { .. } => Ok(self.parts()?.attribute),
-            Backing::Owned { artifact, .. } => Ok(Cow::Borrowed(artifact.the.as_str().as_bytes())),
+            Backing::Owned { fact, .. } => Ok(Cow::Borrowed(fact.the.as_str().as_bytes())),
         }
     }
 
@@ -368,7 +367,7 @@ impl ArtifactView {
     pub fn of_bytes(&self) -> Result<Cow<'_, [u8]>, DialogCorpusError> {
         match &self.backing {
             Backing::Scanned { .. } => Ok(self.parts()?.entity),
-            Backing::Owned { artifact, .. } => Ok(Cow::Borrowed(artifact.of.as_str().as_bytes())),
+            Backing::Owned { fact, .. } => Ok(Cow::Borrowed(fact.of.as_str().as_bytes())),
         }
     }
 
@@ -377,7 +376,7 @@ impl ArtifactView {
     pub fn value(&self) -> Result<Value, DialogCorpusError> {
         match &self.backing {
             Backing::Scanned { spilled, .. } => decode_value_parts(&self.parts()?, spilled.clone()),
-            Backing::Owned { artifact, .. } => Ok(artifact.is.clone()),
+            Backing::Owned { fact, .. } => Ok(fact.is.clone()),
         }
     }
 
@@ -413,19 +412,19 @@ impl ArtifactView {
                     tail,
                 ))
             }
-            Backing::Owned { artifact, .. } => Ok(crate::sort_key(artifact, manifest)),
+            Backing::Owned { fact, .. } => Ok(crate::sort_key(fact, manifest)),
         }
     }
 
-    /// Materializes the full owned [`Artifact`]: entity, attribute, value,
+    /// Materializes the full owned [`Fact`]: entity, attribute, value,
     /// and cause. This is the whole per-row cost scans stopped paying by
     /// default — reach for it only when ownership is genuinely needed.
-    pub fn to_owned(&self) -> Result<Artifact, DialogCorpusError> {
+    pub fn to_owned(&self) -> Result<Fact, DialogCorpusError> {
         match &self.backing {
             Backing::Scanned { datum, spilled, .. } => {
                 reconstruct(&self.parts()?, datum, spilled.clone())
             }
-            Backing::Owned { artifact, .. } => Ok(artifact.as_ref().clone()),
+            Backing::Owned { fact, .. } => Ok(fact.as_ref().clone()),
         }
     }
 
@@ -468,7 +467,7 @@ impl ArtifactView {
     /// agree on the observed value without coordination. Versions and
     /// causes read straight off the rows; only a genuine tie pays for the
     /// materialization the value needs.
-    pub fn elect(self, challenger: ArtifactView) -> Result<ArtifactView, DialogCorpusError> {
+    pub fn elect(self, challenger: FactView) -> Result<FactView, DialogCorpusError> {
         match (self.standing(), challenger.standing()) {
             (Some(a), Some(b)) if a > b => return Ok(self),
             (Some(a), Some(b)) if a < b => return Ok(challenger),
@@ -510,18 +509,16 @@ impl ArtifactView {
 }
 
 /// Chainable materialization for streams of scanned rows: `.owned()` turns a
-/// stream of [`ArtifactView`]s into a stream of owned [`Artifact`]s by calling
-/// [`ArtifactView::to_owned`] on every row.
+/// stream of [`FactView`]s into a stream of owned [`Fact`]s by calling
+/// [`FactView::to_owned`] on every row.
 ///
 /// This is the explicit opt-in to the full per-row materialization cost —
 /// scans stopped paying it by default. Prefer reading fields off the views
 /// where possible; reach for `.owned()` when rows genuinely leave the scan's
 /// scope (collected into results handed to a caller, serialized outward, fed
-/// to an API that requires [`Artifact`]).
-pub trait ArtifactViewStream:
-    Stream<Item = Result<ArtifactView, DialogCorpusError>> + Sized
-{
-    /// Materializes every row into an owned [`Artifact`].
+/// to an API that requires [`Fact`]).
+pub trait FactViewStream: Stream<Item = Result<FactView, DialogCorpusError>> + Sized {
+    /// Materializes every row into an owned [`Fact`].
     ///
     /// A row whose stored bytes fail read-side validation
     /// ([`CorruptEntry`](DialogCorpusError::CorruptEntry) — e.g. an entity
@@ -529,7 +526,7 @@ pub trait ArtifactViewStream:
     /// yielded as an error: a corrupt or foreign-written entry in a tree must
     /// not fail every query that ranges over it. All other errors pass
     /// through.
-    fn owned(self) -> impl Stream<Item = Result<Artifact, DialogCorpusError>> + ConditionalSend
+    fn owned(self) -> impl Stream<Item = Result<Fact, DialogCorpusError>> + ConditionalSend
     where
         Self: ConditionalSend,
     {
@@ -545,10 +542,7 @@ pub trait ArtifactViewStream:
     }
 }
 
-impl<S> ArtifactViewStream for S where
-    S: Stream<Item = Result<ArtifactView, DialogCorpusError>> + Sized
-{
-}
+impl<S> FactViewStream for S where S: Stream<Item = Result<FactView, DialogCorpusError>> + Sized {}
 
 /// Extracts the entity and attribute from a key view, decoding the raw UTF-8
 /// key columns.
@@ -578,19 +572,19 @@ fn as_corrupt_entry(error: DialogCorpusError) -> DialogCorpusError {
     }
 }
 
-/// Reconstructs an [`Artifact`] from a single borrowed parse of the key's
+/// Reconstructs a [`Fact`] from a single borrowed parse of the key's
 /// components and its payload. The entity, attribute, and value type come from
 /// the parsed key; the value is decoded inline from the key's payload or taken
 /// from `spilled` (the archive block bytes) when it spilled.
 ///
 /// Takes the already-parsed [`KeyRef`] so the whole reconstruction is a single
 /// key walk that borrows the key bytes; see
-/// [`Artifact::from_key_datum_with_value`] for why.
+/// [`Fact::from_key_datum_with_value`] for why.
 fn reconstruct(
     parts: &KeyRef<'_>,
     datum: &Datum,
     spilled: Option<Vec<u8>>,
-) -> Result<Artifact, DialogCorpusError> {
+) -> Result<Fact, DialogCorpusError> {
     // These bytes came out of the tree — validation failures are classified
     // `CorruptEntry` (an ignorable row); see `entity_attribute`.
     let of = Entity::from_stored(from_utf8(&parts.entity).map_err(|error| {
@@ -603,7 +597,7 @@ fn reconstruct(
 
     let is = decode_value_parts(parts, spilled)?;
 
-    Ok(Artifact {
+    Ok(Fact {
         the,
         of,
         is,
@@ -615,7 +609,7 @@ fn reconstruct(
 /// order-preserving payload for an inline value, or the fetched archive block
 /// bytes (`spilled`) for a spilled one. The value-only slice of
 /// [`reconstruct`], for callers (a value predicate re-check, a
-/// [`ArtifactView::value`] access) that need the value without paying for the
+/// [`FactView::value`] access) that need the value without paying for the
 /// entity and attribute materialization.
 pub(crate) fn decode_value_parts(
     parts: &KeyRef<'_>,
@@ -661,12 +655,7 @@ mod tests {
     use crate::key::varkey::{ValuePayload, build_key};
     use crate::{ValueDataType, encode_value_owned};
 
-    fn row(
-        entity: &[u8],
-        value: &str,
-        version: Option<Version>,
-        cause: Option<Cause>,
-    ) -> ArtifactView {
+    fn row(entity: &[u8], value: &str, version: Option<Version>, cause: Option<Cause>) -> FactView {
         let parts = varkey::KeyParts {
             tag: ENTITY_KEY_TAG,
             entity: entity.to_vec(),
@@ -677,7 +666,7 @@ mod tests {
         };
         let key = build_key(&parts);
         let layout = varkey::parse_key_layout(&key).expect("a built key parses");
-        ArtifactView::new(
+        FactView::new(
             KeyHandle::Owned(key),
             layout,
             Datum {
@@ -692,7 +681,7 @@ mod tests {
         )
     }
 
-    fn view(entity: &[u8]) -> ArtifactView {
+    fn view(entity: &[u8]) -> FactView {
         row(entity, "v", None, None)
     }
 
@@ -700,7 +689,7 @@ mod tests {
         Version::new(Origin([origin; 32]), Edition::new(edition))
     }
 
-    fn elected(winner: Result<ArtifactView, DialogCorpusError>) -> Value {
+    fn elected(winner: Result<FactView, DialogCorpusError>) -> Value {
         winner.expect("elects").to_owned().expect("materializes").is
     }
 

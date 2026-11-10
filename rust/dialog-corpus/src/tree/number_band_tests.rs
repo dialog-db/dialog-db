@@ -11,16 +11,16 @@ use dialog_search_tree::{Manifest, PersistentTree, helpers::Blocks};
 use futures_util::{TryStreamExt as _, stream};
 
 use super::{Corpus, CorpusExt as _, SpillCache};
-use crate::key::artifact_index_keys;
+use crate::key::fact_index_keys;
 use crate::key::varkey::parse_key_ref;
 use crate::selector::Constrained;
 use crate::{
-    ArchiveDelta, Artifact, ArtifactSelector, Entity, Instruction, NUMBER_BAND, Pick, Relation,
-    Value, ValueDataType,
+    ArchiveDelta, Entity, Fact, Instruction, NUMBER_BAND, Pick, Relation, Selector, Value,
+    ValueDataType,
 };
 
 /// A tree written under `value_encoding`, holding `facts`.
-async fn tree(value_encoding: u32, facts: Vec<Artifact>) -> anyhow::Result<(Corpus, Blocks)> {
+async fn tree(value_encoding: u32, facts: Vec<Fact>) -> anyhow::Result<(Corpus, Blocks)> {
     let store = Blocks::new();
     let manifest = Manifest {
         value_encoding,
@@ -42,11 +42,11 @@ fn size() -> Relation {
 }
 
 /// One item per value, each with its size.
-fn sizes(values: &[Value]) -> anyhow::Result<Vec<Artifact>> {
+fn sizes(values: &[Value]) -> anyhow::Result<Vec<Fact>> {
     values
         .iter()
         .map(|value| {
-            Ok(Artifact {
+            Ok(Fact {
                 the: size(),
                 of: Entity::new()?,
                 is: value.clone(),
@@ -59,9 +59,9 @@ fn sizes(values: &[Value]) -> anyhow::Result<Vec<Artifact>> {
 async fn values(
     tree: &Corpus,
     store: &Blocks,
-    selector: ArtifactSelector<Constrained>,
+    selector: Selector<Constrained>,
 ) -> anyhow::Result<Vec<Value>> {
-    let rows: Vec<Artifact> = tree
+    let rows: Vec<Fact> = tree
         .clone()
         .scan_owned(store.clone(), SpillCache::with_budget(0), selector)
         .try_collect()
@@ -95,7 +95,7 @@ fn mixed() -> Vec<Value> {
 #[dialog_common::test]
 async fn it_keys_every_number_in_one_band() -> anyhow::Result<()> {
     let (tree, store) = tree(NUMBER_BAND, sizes(&mixed())?).await?;
-    let all = values(&tree, &store, ArtifactSelector::new().the(size())).await?;
+    let all = values(&tree, &store, Selector::new().the(size())).await?;
     assert_eq!(
         all,
         vec![
@@ -111,7 +111,7 @@ async fn it_keys_every_number_in_one_band() -> anyhow::Result<()> {
         ..Manifest::default()
     };
     for fact in sizes(&mixed())? {
-        for key in <[_; 3]>::from(artifact_index_keys(&fact, &manifest)) {
+        for key in <[_; 3]>::from(fact_index_keys(&fact, &manifest)) {
             let parts = parse_key_ref(key.as_ref()).expect("parses");
             assert_eq!(parts.value_type, ValueDataType::Number);
         }
@@ -124,7 +124,7 @@ async fn it_keys_every_number_in_one_band() -> anyhow::Result<()> {
 #[dialog_common::test]
 async fn it_scans_a_range_across_number_types_in_the_band() -> anyhow::Result<()> {
     let (tree, store) = tree(NUMBER_BAND, sizes(&mixed())?).await?;
-    let selector = ArtifactSelector::new()
+    let selector = Selector::new()
         .the(size())
         .is_at_least(Value::Float(2.5))
         .across_numbers();
@@ -148,8 +148,8 @@ async fn it_scans_a_range_across_number_types_in_the_band() -> anyhow::Result<()
 #[dialog_common::test]
 async fn it_reads_numbers_through_the_lens_of_the_bound() -> anyhow::Result<()> {
     let (tree, store) = tree(NUMBER_BAND, sizes(&mixed())?).await?;
-    let at_least = |bound: Value| ArtifactSelector::new().the(size()).is_at_least(bound);
-    let at_most = |bound: Value| ArtifactSelector::new().the(size()).is_at_most(bound);
+    let at_least = |bound: Value| Selector::new().the(size()).is_at_least(bound);
+    let at_most = |bound: Value| Selector::new().the(size()).is_at_most(bound);
     assert_eq!(
         values(&tree, &store, at_least(Value::UnsignedInt(2))).await?,
         vec![
@@ -202,7 +202,7 @@ async fn it_reads_numbers_through_the_lens_of_the_bound() -> anyhow::Result<()> 
 #[dialog_common::test]
 async fn it_drops_bounds_across_number_types_in_per_type_bands() -> anyhow::Result<()> {
     let (tree, store) = tree(0, sizes(&mixed())?).await?;
-    let selector = ArtifactSelector::new()
+    let selector = Selector::new()
         .the(size())
         .is_at_least(Value::Float(2.5))
         .across_numbers();
@@ -213,9 +213,7 @@ async fn it_drops_bounds_across_number_types_in_per_type_bands() -> anyhow::Resu
     });
 
     // A bound of one type still bounds its own band.
-    let selector = ArtifactSelector::new()
-        .the(size())
-        .is_at_least(Value::Float(2.5));
+    let selector = Selector::new().the(size()).is_at_least(Value::Float(2.5));
     assert_eq!(
         values(&tree, &store, selector).await?,
         vec![Value::Float(2.5), Value::Float(5.0)]
@@ -230,7 +228,7 @@ async fn it_holds_a_number_once_whatever_type_wrote_it() -> anyhow::Result<()> {
     let item = Entity::new()?;
     let facts = [Value::UnsignedInt(5), Value::Float(5.0)]
         .into_iter()
-        .map(|is| Artifact {
+        .map(|is| Fact {
             the: size(),
             of: item.clone(),
             is,
@@ -239,12 +237,12 @@ async fn it_holds_a_number_once_whatever_type_wrote_it() -> anyhow::Result<()> {
         .collect::<Vec<_>>();
     let (band, store) = tree(NUMBER_BAND, facts.clone()).await?;
     assert_eq!(
-        values(&band, &store, ArtifactSelector::new().of(item.clone())).await?,
+        values(&band, &store, Selector::new().of(item.clone())).await?,
         vec![Value::UnsignedInt(5)]
     );
     let (per_type, store) = tree(0, facts).await?;
     assert_eq!(
-        values(&per_type, &store, ArtifactSelector::new().of(item))
+        values(&per_type, &store, Selector::new().of(item))
             .await?
             .len(),
         2

@@ -1,12 +1,12 @@
 //! Streaming merge + tombstone helpers for query-time source composition.
 //!
-//! Everything here works on `Stream<Item = Result<ArtifactView, _>>` —
-//! [`ArtifactStream`]s — and is agnostic to where the streams came
+//! Everything here works on `Stream<Item = Result<FactView, _>>` —
+//! [`FactStream`]s — and is agnostic to where the streams came
 //! from (a branch's tree scan, an [`Ephemeral`](crate::Ephemeral)
 //! overlay, anything else that implements `Provider<Select>`). Rows travel as borrowed-access
-//! [`ArtifactView`]s; nothing in this layer materializes an owned
-//! `Artifact`, and merge order comes from each row's
-//! [`sort_key`](ArtifactView::sort_key) — derived straight from a scanned
+//! [`FactView`]s; nothing in this layer materializes an owned
+//! `Fact`, and merge order comes from each row's
+//! [`sort_key`](FactView::sort_key) — derived straight from a scanned
 //! row's stored key bytes, with no per-row value decode or re-encode.
 //!
 //! Every helper takes the format [`Manifest`] of the trees the streams are
@@ -17,7 +17,7 @@
 //! - [`merge_grouped`] is the k-way merge that backs query-time
 //!   union of multiple sources. It preserves the "as-if merged into a
 //!   single physical tree" order via [`sort_key`](dialog_corpus::sort_key)
-//!   and dedupes identical `(the, of, is, cause)` artifacts within
+//!   and dedupes identical `(the, of, is, cause)` facts within
 //!   each `(the, of)` run.
 //! - [`Hidden`] + [`filter_hidden`] apply the tombstones an overlay
 //!   holds, with a transaction's staged retracts, to a source stream as
@@ -29,11 +29,11 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use dialog_corpus::selector::Constrained;
-use dialog_corpus::{ArtifactSelector, ArtifactStream, ArtifactView, Cause, SortKey, sort_key};
+use dialog_corpus::{Cause, FactStream, FactView, Selector, SortKey, sort_key};
 use dialog_search_tree::Manifest;
 use futures_util::{StreamExt, stream};
 
-/// Merge sorted artifact streams into one stream whose order matches
+/// Merge sorted fact streams into one stream whose order matches
 /// what a single physical probabilistic search tree containing every input would
 /// produce, deduplicating identical claims that appear in more than one
 /// source.
@@ -89,10 +89,10 @@ use futures_util::{StreamExt, stream};
 /// runs still merge whole; only the order of values within a run may differ
 /// from a single tree's.
 pub(crate) fn merge_grouped<'a>(
-    streams: Vec<ArtifactStream<'a>>,
+    streams: Vec<FactStream<'a>>,
     manifest: Manifest,
     keys: MergeKeys,
-) -> ArtifactStream<'a> {
+) -> FactStream<'a> {
     if streams.is_empty() {
         return Box::pin(stream::empty());
     }
@@ -114,7 +114,7 @@ pub(crate) fn merge_grouped<'a>(
         // (the pre-view code re-encoded each head's value once per
         // competing stream per yielded item; the peekable-based merge
         // after it still cloned the winning key on every beat).
-        let mut heads: Vec<Option<(SortKey, ArtifactView)>> = Vec::with_capacity(streams.len());
+        let mut heads: Vec<Option<(SortKey, FactView)>> = Vec::with_capacity(streams.len());
         for stream in &mut streams {
             heads.push(match stream.next().await {
                 None => None,
@@ -189,7 +189,7 @@ pub(crate) enum MergeKeys {
 impl MergeKeys {
     fn of(
         self,
-        view: &ArtifactView,
+        view: &FactView,
         manifest: &Manifest,
     ) -> Result<SortKey, dialog_corpus::DialogCorpusError> {
         match self {
@@ -223,14 +223,14 @@ impl Hidden {
 
     /// What of this can hide a row `selector` matches: every hidden
     /// fact, since a tombstone is keyed by the whole fact.
-    pub(crate) fn within(&self, _selector: &ArtifactSelector<Constrained>) -> Self {
+    pub(crate) fn within(&self, _selector: &Selector<Constrained>) -> Self {
         self.clone()
     }
 
     /// Whether `view` is hidden: its sort key names a hidden fact.
     fn hides(
         &self,
-        view: &ArtifactView,
+        view: &FactView,
         manifest: &Manifest,
     ) -> Result<bool, dialog_corpus::DialogCorpusError> {
         if self.facts.is_empty() {
@@ -241,15 +241,15 @@ impl Hidden {
     }
 }
 
-/// Wrap an artifact stream in a filter that drops any item `hidden`
+/// Wrap a fact stream in a filter that drops any item `hidden`
 /// hides, its sort key taken under `manifest` (which the hidden facts
 /// must be keyed under too).
 /// No-op when nothing is hidden.
 pub(crate) fn filter_hidden<'a>(
-    inner: ArtifactStream<'a>,
+    inner: FactStream<'a>,
     hidden: Hidden,
     manifest: Manifest,
-) -> ArtifactStream<'a> {
+) -> FactStream<'a> {
     if hidden.is_empty() {
         return inner;
     }
@@ -260,13 +260,13 @@ pub(crate) fn filter_hidden<'a>(
                 match inner.next().await {
                     None => return None,
                     Some(Err(e)) => {
-                        return Some((Err::<ArtifactView, _>(e), (inner, hidden, manifest)));
+                        return Some((Err::<FactView, _>(e), (inner, hidden, manifest)));
                     }
                     Some(Ok(view)) => {
                         // A scanned row's sort key comes straight from its
                         // stored key bytes, written under the tree's
                         // manifest; the tombstones were keyed under that
-                        // same manifest (see `ArtifactView::sort_key`).
+                        // same manifest (see `FactView::sort_key`).
                         match hidden.hides(&view, &manifest) {
                             Err(e) => return Some((Err(e), (inner, hidden, manifest))),
                             Ok(true) => continue,
@@ -291,12 +291,12 @@ mod tests {
     use dialog_corpus::ArchiveDelta;
     use dialog_corpus::tree::Corpus;
     use dialog_corpus::{
-        Artifact, Changes, DialogCorpusError, Entity, Instruction, Update as _, Value,
+        Changes, DialogCorpusError, Entity, Fact, Instruction, Update as _, Value,
     };
     use dialog_search_tree::helpers::Blocks;
 
-    fn artifact(of: &str, the: &str, is: &str) -> Artifact {
-        Artifact {
+    fn fact(of: &str, the: &str, is: &str) -> Fact {
+        Fact {
             the: the.parse().expect("attribute"),
             of: of.parse().expect("entity"),
             is: Value::String(is.into()),
@@ -304,15 +304,15 @@ mod tests {
         }
     }
 
-    fn stream_of(items: Vec<Artifact>) -> ArtifactStream<'static> {
+    fn stream_of(items: Vec<Fact>) -> FactStream<'static> {
         Box::pin(stream::iter(
             items
                 .into_iter()
-                .map(|artifact| Ok::<_, DialogCorpusError>(artifact.into())),
+                .map(|fact| Ok::<_, DialogCorpusError>(fact.into())),
         ))
     }
 
-    async fn collect(s: ArtifactStream<'_>) -> anyhow::Result<Vec<Artifact>> {
+    async fn collect(s: FactStream<'_>) -> anyhow::Result<Vec<Fact>> {
         Ok(s.collect::<Vec<_>>()
             .await
             .into_iter()
@@ -333,7 +333,7 @@ mod tests {
         // A single input is returned as-is — even if it has duplicates,
         // since branch / overlay scans are duplicate-free by
         // construction.
-        let a = artifact("id:a", "test/name", "Alice");
+        let a = fact("id:a", "test/name", "Alice");
         let merged = merge_grouped(
             vec![stream_of(vec![a.clone(), a.clone()])],
             Manifest::default(),
@@ -345,10 +345,10 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn it_dedupes_identical_artifacts_across_streams() -> anyhow::Result<()> {
-        // Same artifact from two streams collapses to one in the
+    async fn it_dedupes_identical_facts_across_streams() -> anyhow::Result<()> {
+        // Same fact from two streams collapses to one in the
         // merged output.
-        let a = artifact("id:a", "test/name", "Alice");
+        let a = fact("id:a", "test/name", "Alice");
         let merged = merge_grouped(
             vec![stream_of(vec![a.clone()]), stream_of(vec![a.clone()])],
             Manifest::default(),
@@ -378,16 +378,16 @@ mod tests {
 
         let tombstones = Ephemeral::holding(changes).tombstones(&Manifest::default());
         assert_eq!(tombstones.len(), 1, "only the retract contributes");
-        // The lone tombstone matches the retracted artifact.
-        let retracted = artifact("id:bob", "test/name", "Bob");
+        // The lone tombstone matches the retracted fact.
+        let retracted = fact("id:bob", "test/name", "Bob");
         assert!(tombstones.contains(&sort_key(&retracted, &Manifest::default())));
         Ok(())
     }
 
     #[dialog_common::test]
-    async fn it_filters_matching_artifacts_via_tombstones() -> anyhow::Result<()> {
-        let keep = artifact("id:a", "test/name", "Keep");
-        let drop = artifact("id:b", "test/name", "Drop");
+    async fn it_filters_matching_facts_via_tombstones() -> anyhow::Result<()> {
+        let keep = fact("id:a", "test/name", "Keep");
+        let drop = fact("id:b", "test/name", "Drop");
         let mut tombstones = HashSet::new();
         tombstones.insert(sort_key(&drop, &Manifest::default()));
 
@@ -402,10 +402,7 @@ mod tests {
     }
 
     /// A tree holding `facts`, written under `manifest`, and its store.
-    async fn tree_under(
-        manifest: Manifest,
-        facts: Vec<Artifact>,
-    ) -> anyhow::Result<(Corpus, Blocks)> {
+    async fn tree_under(manifest: Manifest, facts: Vec<Fact>) -> anyhow::Result<(Corpus, Blocks)> {
         use dialog_corpus::tree::CorpusExt as _;
 
         let store = Blocks::new();
@@ -417,7 +414,7 @@ mod tests {
             stream::iter(
                 facts
                     .into_iter()
-                    .map(|artifact| Instruction::Assert(artifact, dialog_corpus::Pick::All)),
+                    .map(|fact| Instruction::Assert(fact, dialog_corpus::Pick::All)),
             ),
         )
         .await?;
@@ -432,12 +429,12 @@ mod tests {
     /// line.
     #[dialog_common::test]
     async fn it_merges_and_filters_lines_written_under_different_manifests() -> anyhow::Result<()> {
-        use dialog_corpus::ArtifactSelector;
+        use dialog_corpus::Selector;
         use dialog_corpus::tree::{CorpusExt as _, spill_cache};
 
         let long = "x".repeat(100);
-        let shared = artifact("id:a", "test/bio", &long);
-        let other = artifact("id:b", "test/bio", "short");
+        let shared = fact("id:a", "test/bio", &long);
+        let other = fact("id:b", "test/bio", "short");
         let small = Manifest {
             inline_n: 32,
             ..Manifest::default()
@@ -445,8 +442,8 @@ mod tests {
         let (spilling, spilling_store) = tree_under(small.clone(), vec![shared.clone()]).await?;
         let (inlining, inlining_store) =
             tree_under(Manifest::default(), vec![shared.clone(), other.clone()]).await?;
-        let selector = || ArtifactSelector::new().the("test/bio".parse().expect("attribute"));
-        let scans = || -> Vec<ArtifactStream<'static>> {
+        let selector = || Selector::new().the("test/bio".parse().expect("attribute"));
+        let scans = || -> Vec<FactStream<'static>> {
             vec![
                 Box::pin(
                     spilling
@@ -495,8 +492,8 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_passes_stream_through_when_tombstones_are_empty() -> anyhow::Result<()> {
-        let a = artifact("id:a", "test/name", "Alice");
-        let b = artifact("id:b", "test/name", "Bob");
+        let a = fact("id:a", "test/name", "Alice");
+        let b = fact("id:b", "test/name", "Bob");
         let filtered = filter_hidden(
             stream_of(vec![a.clone(), b.clone()]),
             Hidden::default().facts(Arc::new(HashSet::new())),

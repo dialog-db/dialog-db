@@ -59,7 +59,7 @@ use dialog_effects::archive::prelude::ArchiveScope;
 use dialog_effects::{archive, blob};
 use serde::{Deserialize, Serialize};
 
-use crate::artifact::Type as ValueType;
+use crate::corpus::Type as ValueType;
 use crate::error::EvaluationError;
 use crate::formula::cell::Cells;
 use crate::query::Application;

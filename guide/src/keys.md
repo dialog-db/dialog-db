@@ -516,6 +516,6 @@ The limit and the length of the prefix are not constants of Dialog. They are set
 
 <div class="aside">
 
-**Implementations.** Keys are built by `build_key` in [`dialog-corpus/src/key/varkey.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-corpus/src/key/varkey.rs). The string encoding is in [`artifacts/ordkey.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-corpus/src/artifacts/ordkey.rs) and [`artifacts/ordvalue.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-corpus/src/artifacts/ordvalue.rs), and the number encoding is the [`dialog-number`](https://github.com/dialog-db/dialog-db/tree/main/rust/dialog-number) crate. Spilling is decided by `EncodedValue::new` in [`key.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-corpus/src/key.rs).
+**Implementations.** Keys are built by `build_key` in [`dialog-corpus/src/key/varkey.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-corpus/src/key/varkey.rs). The string encoding is in [`model/ordkey.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-corpus/src/model/ordkey.rs) and [`model/ordvalue.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-corpus/src/model/ordvalue.rs), and the number encoding is the [`dialog-number`](https://github.com/dialog-db/dialog-db/tree/main/rust/dialog-number) crate. Spilling is decided by `EncodedValue::new` in [`key.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-corpus/src/key.rs).
 
 </div>

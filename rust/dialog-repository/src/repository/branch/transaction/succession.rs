@@ -41,8 +41,7 @@ use crate::{CommitError, Ephemeral, Staged};
 use dialog_capability::Provider;
 use dialog_corpus::history::Edition;
 use dialog_corpus::{
-    Artifact, ArtifactSelector, Cause, Change, Changes, Entity, Pick,
-    Relation as ArtifactsRelation, Select, Value,
+    Cause, Change, Changes, Entity, Fact, Pick, Relation as CorpusRelation, Select, Selector, Value,
 };
 use dialog_query::Application as _;
 use dialog_query::attribute::{AttributeDescriptor, Relation, The};
@@ -90,7 +89,7 @@ pub(crate) async fn settle(
     // through the writes before each succession), or the session
     // overlay holds the cell.
     if !staged.holds_rules() {
-        let mut relations: Vec<&ArtifactsRelation> = Vec::new();
+        let mut relations: Vec<&CorpusRelation> = Vec::new();
         let mut unseen = false;
         for (the, of, change) in staged.log() {
             if !change.elects() {
@@ -151,7 +150,7 @@ pub(crate) struct ReadSettlement {
     upto: usize,
     /// Each cell some write under a choosing pick wrote, with its
     /// claims and what its writes settled to.
-    cells: HashMap<(ArtifactsRelation, Entity), Cell>,
+    cells: HashMap<(CorpusRelation, Entity), Cell>,
     /// The settled writes, as the view later writes read the derived
     /// candidates through.
     prefix: Staged,
@@ -241,7 +240,7 @@ impl ReadSettlement {
     /// wrote, which reads as written.
     pub(crate) fn settlement_of(
         &self,
-        key: &(ArtifactsRelation, Entity),
+        key: &(CorpusRelation, Entity),
         layer: &Staged,
     ) -> Option<CellSettlement> {
         let cell = self.cells.get(key)?;
@@ -253,11 +252,11 @@ impl ReadSettlement {
             .map(|candidate| &candidate.value)
             .collect();
         let held: Vec<Value> = layer
-            .scan(&ArtifactSelector::new().the(the.clone()).of(of.clone()))
+            .scan(&Selector::new().the(the.clone()).of(of.clone()))
             .into_iter()
             .map(|fact| fact.is)
             .collect();
-        let fact = |value: &Value| Artifact {
+        let fact = |value: &Value| Fact {
             the: the.clone(),
             of: of.clone(),
             is: value.clone(),
@@ -324,8 +323,8 @@ struct Candidate {
 }
 
 /// Whether some line's session overlay holds a fact of the cell.
-fn overlay_holds(sources: &[Source], the: &ArtifactsRelation, of: &Entity) -> bool {
-    let selector = ArtifactSelector::new().the(the.clone()).of(of.clone());
+fn overlay_holds(sources: &[Source], the: &CorpusRelation, of: &Entity) -> bool {
+    let selector = Selector::new().the(the.clone()).of(of.clone());
     sources
         .iter()
         .any(|source| !source.as_ref().overlay().scan(&selector).is_empty())
@@ -335,11 +334,11 @@ fn overlay_holds(sources: &[Source], the: &ArtifactsRelation, of: &Entity) -> bo
 /// write can succeed, and the session overlay's rows, which it cannot.
 async fn claims_of(
     view: &QueryEnv<'_>,
-    the: &ArtifactsRelation,
+    the: &CorpusRelation,
     of: &Entity,
 ) -> Result<Vec<Candidate>, CommitError> {
     let failed = |error: &dyn Display| CommitError::Succession(error.to_string());
-    let selector = ArtifactSelector::new().the(the.clone()).of(of.clone());
+    let selector = Selector::new().the(the.clone()).of(of.clone());
     let rows = Provider::<Select<'_>>::execute(view, selector)
         .await
         .map_err(|error| failed(&error))?
@@ -348,13 +347,13 @@ async fn claims_of(
         .map_err(|error| failed(&error))?;
     let mut claims = Vec::with_capacity(rows.len());
     for row in rows {
-        let artifact = row.to_owned().map_err(|error| failed(&error))?;
+        let fact = row.to_owned().map_err(|error| failed(&error))?;
         claims.push(Candidate {
             standing: Some(Standing::new(
                 row.standing(),
-                Claim::from(artifact.clone()).cause().clone(),
+                Claim::from(fact.clone()).cause().clone(),
             )),
-            value: artifact.is,
+            value: fact.is,
             claim: row.key().is_some(),
         });
     }
@@ -366,7 +365,7 @@ async fn claims_of(
 #[cfg(test)]
 pub(crate) async fn stored_claims(
     view: &QueryEnv<'_>,
-    the: &ArtifactsRelation,
+    the: &CorpusRelation,
     of: &Entity,
 ) -> Result<Vec<(Value, Standing)>, CommitError> {
     Ok(claims_of(view, the, of)
@@ -379,7 +378,7 @@ pub(crate) async fn stored_claims(
 
 /// The attribute concept over `the`, under which the rules deriving the
 /// relation are found.
-fn relation_predicate(the: &ArtifactsRelation) -> ConceptDescriptor {
+fn relation_predicate(the: &CorpusRelation) -> ConceptDescriptor {
     let attribute = AttributeDescriptor::over(
         The::Relation(Relation::from(the.clone())),
         "",
@@ -396,20 +395,16 @@ fn relation_predicate(the: &ArtifactsRelation) -> ConceptDescriptor {
 #[derive(Clone, Default)]
 struct Derives {
     /// Whether the line's rules derive the relation, by attribute.
-    line: HashMap<ArtifactsRelation, bool>,
+    line: HashMap<CorpusRelation, bool>,
     /// The `on:` entities of the rules the prefix installed.
     staged: HashSet<Entity>,
     /// The trigger entities each relation probes, by attribute.
-    probes: HashMap<ArtifactsRelation, Vec<Entity>>,
+    probes: HashMap<CorpusRelation, Vec<Entity>>,
 }
 
 impl Derives {
     /// Whether some rule derives `the` at this point of the settlement.
-    async fn at(
-        &mut self,
-        line: &QueryEnv<'_>,
-        the: &ArtifactsRelation,
-    ) -> Result<bool, CommitError> {
+    async fn at(&mut self, line: &QueryEnv<'_>, the: &CorpusRelation) -> Result<bool, CommitError> {
         let known = match self.line.get(the) {
             Some(known) => *known,
             None => {
@@ -433,7 +428,7 @@ impl Derives {
 
     /// Note a write the prefix gained: a `derives` fact names a
     /// relation a rule the prefix installs derives.
-    fn gained(&mut self, the: &ArtifactsRelation, change: &Change) {
+    fn gained(&mut self, the: &CorpusRelation, change: &Change) {
         if *the == derives_attr()
             && let Change::Assert(Value::Entity(on), _) = change
         {
@@ -445,7 +440,7 @@ impl Derives {
 /// Whether some rule `view` knows derives the relation `the` names:
 /// read from the rule index alone, without assembling the relation's
 /// bundle.
-async fn rules_derive(view: &QueryEnv<'_>, the: &ArtifactsRelation) -> Result<bool, CommitError> {
+async fn rules_derive(view: &QueryEnv<'_>, the: &CorpusRelation) -> Result<bool, CommitError> {
     view.rules_derive(the)
         .await
         .map_err(|error| CommitError::Succession(error.to_string()))
@@ -457,7 +452,7 @@ async fn rules_derive(view: &QueryEnv<'_>, the: &ArtifactsRelation) -> Result<bo
 /// offers beyond the claims.
 async fn derived_candidates(
     view: &QueryEnv<'_>,
-    the: &ArtifactsRelation,
+    the: &CorpusRelation,
     of: &Entity,
 ) -> Result<Vec<Candidate>, CommitError> {
     let failed = |error: &dyn Display| CommitError::Succession(error.to_string());
@@ -640,9 +635,7 @@ mod tests {
     use crate::helpers::test_repo;
     use anyhow::Result;
     use dialog_corpus::history::Edition;
-    use dialog_corpus::{
-        ArtifactSelector, Change, Entity, Pick, Relation as ArtifactsRelation, Value,
-    };
+    use dialog_corpus::{Change, Entity, Pick, Relation as CorpusRelation, Selector, Value};
     use dialog_credentials::Credential;
     use dialog_peer::helpers::test_session_with_peer;
     use dialog_query::attribute::Relation;
@@ -693,7 +686,7 @@ mod tests {
         AttributeStatement {
             the: Relation::from(
                 "org/salary"
-                    .parse::<ArtifactsRelation>()
+                    .parse::<CorpusRelation>()
                     .expect("an attribute"),
             ),
             of: of.clone(),
@@ -710,9 +703,7 @@ mod tests {
         operator: &dialog_peer::Peer<VolatileSpace, dialog_peer::Session>,
         of: &Entity,
     ) -> Result<Vec<u128>> {
-        let selector = ArtifactSelector::new()
-            .the("org/salary".parse()?)
-            .of(of.clone());
+        let selector = Selector::new().the("org/salary".parse()?).of(of.clone());
         let stream = branch.claims().select(selector).perform(operator).await?;
         let mut values: Vec<u128> = stream
             .collect::<Vec<_>>()
@@ -721,7 +712,7 @@ mod tests {
             .map(|item| item.and_then(|view| view.to_owned()))
             .collect::<Result<Vec<_>, _>>()?
             .into_iter()
-            .filter_map(|artifact| match artifact.is {
+            .filter_map(|fact| match fact.is {
                 Value::UnsignedInt(value) => Some(value),
                 _ => None,
             })
@@ -1593,7 +1584,7 @@ mod tests {
     /// A value asserted under `all`, succeeded by a `last` write of the
     /// cell and asserted again, all in one transaction, stands beside
     /// the `last` value when the transaction commits, as it does when
-    /// the writes commit one by one: the three writes the artifact fuzz
+    /// the writes commit one by one: the three writes the fact fuzz
     /// reduced to, and the four it first failed on.
     #[dialog_common::test]
     async fn it_keeps_a_value_asserted_again_after_a_last_write_succeeded_it() -> Result<()> {

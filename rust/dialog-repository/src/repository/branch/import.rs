@@ -14,7 +14,7 @@ use futures_util::StreamExt;
 
 use crate::{Branch, CommitError, RemoteSite, Revision};
 
-/// Command struct for importing artifacts into a branch.
+/// Command struct for importing facts into a branch.
 pub struct Import<'a, I> {
     branch: &'a Branch,
     importer: I,
@@ -27,7 +27,7 @@ impl<'a, I> Import<'a, I> {
 }
 
 impl<I: Importer + Unpin + ConditionalSend> Import<'_, I> {
-    /// Execute the import, reading artifacts and committing them as assertions.
+    /// Execute the import, reading facts and committing them as assertions.
     pub async fn perform<Env>(self, env: &Env) -> Result<Revision, CommitError>
     where
         Env: Provider<BlobImport>
@@ -53,7 +53,7 @@ impl<I: Importer + Unpin + ConditionalSend> Import<'_, I> {
     {
         let instructions = self.importer.filter_map(|result| async {
             match result {
-                Ok(artifact) => Some(Instruction::Assert(artifact, dialog_corpus::Pick::All)),
+                Ok(fact) => Some(Instruction::Assert(fact, dialog_corpus::Pick::All)),
                 Err(error) => {
                     eprintln!("Skipping incompatible datum: {error}");
                     None

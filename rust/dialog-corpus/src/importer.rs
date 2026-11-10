@@ -1,15 +1,15 @@
-//! Format-agnostic import trait for artifacts.
+//! Format-agnostic import trait for facts.
 //!
 //! Implementations live in separate crates (e.g., `dialog-csv`).
 
 use futures_util::Stream;
 
-use crate::{Artifact, DialogCorpusError};
+use crate::{DialogCorpusError, Fact};
 
-/// Reads artifacts from some input format.
+/// Reads facts from some input format.
 ///
-/// An importer is simply a stream of artifacts. Implementations handle
+/// An importer is simply a stream of facts. Implementations handle
 /// the format-specific deserialization internally.
-pub trait Importer: Stream<Item = Result<Artifact, DialogCorpusError>> {}
+pub trait Importer: Stream<Item = Result<Fact, DialogCorpusError>> {}
 
-impl<T> Importer for T where T: Stream<Item = Result<Artifact, DialogCorpusError>> {}
+impl<T> Importer for T where T: Stream<Item = Result<Fact, DialogCorpusError>> {}

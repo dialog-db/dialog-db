@@ -555,7 +555,7 @@ struct Model {
 ///
 /// This represents a concept instance that has been validated against its schema,
 /// with all attributes properly typed and confirmed to exist. Can be converted
-/// to artifacts for storage.
+/// to facts for storage.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ConceptStatement {
     /// The entity this instance represents
@@ -875,7 +875,7 @@ mod tests {
     extern crate self as dialog_query;
 
     use super::*;
-    use crate::artifact::Type;
+    use crate::corpus::Type;
     use crate::the;
     use crate::{Attribute, Concept};
 

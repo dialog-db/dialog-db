@@ -3,8 +3,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::Revision;
 use crate::{
-    Artifact, Datum, DialogCorpusError, Entity, Key, Relation, State, Value,
-    key::{EncodedValue, artifact_index_keys_with},
+    Datum, DialogCorpusError, Entity, Fact, Key, Relation, State, Value,
+    key::{EncodedValue, fact_index_keys_with},
 };
 use dialog_search_tree::Manifest;
 
@@ -146,10 +146,10 @@ impl RevisionRecord {
         Ok(())
     }
 
-    /// The fact carrying this record: an [`Artifact`] on the revision
+    /// The fact carrying this record: a [`Fact`] on the revision
     /// entity under [`REVISION_ATTRIBUTE`], valued with the encoded record
-    pub fn to_artifact(&self, version: &Version) -> Result<Artifact, DialogCorpusError> {
-        Ok(Artifact {
+    pub fn to_fact(&self, version: &Version) -> Result<Fact, DialogCorpusError> {
+        Ok(Fact {
             the: Relation::try_from(REVISION_ATTRIBUTE.to_string())?,
             of: version.entity(),
             is: Value::Record(self.to_bytes()?),
@@ -176,14 +176,14 @@ impl RevisionRecord {
     /// store beside the tree.
     pub fn entries(&self, manifest: &Manifest) -> Result<RecordEntries, DialogCorpusError> {
         let version = self.version();
-        let artifact = self.to_artifact(&version)?;
+        let fact = self.to_fact(&version)?;
 
         // Only the EAV and AEV orderings are written (see above), so the VAE
         // key this builds is dropped.
-        let encoded = EncodedValue::new(&artifact.is, manifest);
+        let encoded = EncodedValue::new(&fact.is, manifest);
         let (entity_key, attribute_key, _) =
-            artifact_index_keys_with(&artifact, encoded.value_type, encoded.payload);
-        let mut datum = Datum::for_artifact(&artifact);
+            fact_index_keys_with(&fact, encoded.value_type, encoded.payload);
+        let mut datum = Datum::for_fact(&fact);
         datum.version = Some(version);
         let added = State::Added(datum);
 

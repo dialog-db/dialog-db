@@ -16,8 +16,8 @@ use super::rekey::rekey_tree;
 use super::{Corpus, CorpusExt as _, SpillCache};
 use crate::selector::Constrained;
 use crate::{
-    ArchiveDelta, Artifact, ArtifactSelector, Entity, Instruction, NUMBER_BAND, Pick, Relation,
-    Value, encode_key_value_owned,
+    ArchiveDelta, Entity, Fact, Instruction, NUMBER_BAND, Pick, Relation, Selector, Value,
+    encode_key_value_owned,
 };
 
 const TWO_POW_53: u128 = 1 << 53;
@@ -64,7 +64,7 @@ fn sizes(values: &[Value]) -> anyhow::Result<Vec<Instruction>> {
         .iter()
         .map(|value| {
             Ok(Instruction::Assert(
-                Artifact {
+                Fact {
                     the: size(),
                     of: Entity::new()?,
                     is: value.clone(),
@@ -81,9 +81,9 @@ fn sizes(values: &[Value]) -> anyhow::Result<Vec<Instruction>> {
 async fn scan(
     tree: &Corpus,
     store: &Blocks,
-    selector: ArtifactSelector<Constrained>,
+    selector: Selector<Constrained>,
 ) -> anyhow::Result<Vec<Value>> {
-    let rows: Vec<Artifact> = tree
+    let rows: Vec<Fact> = tree
         .clone()
         .scan_owned(store.clone(), SpillCache::with_budget(0), selector)
         .try_collect()
@@ -102,8 +102,8 @@ fn in_band_order(mut values: Vec<Value>) -> Vec<Value> {
     values
 }
 
-fn the_size() -> ArtifactSelector<Constrained> {
-    ArtifactSelector::new().the(size())
+fn the_size() -> Selector<Constrained> {
+    Selector::new().the(size())
 }
 
 /// Every edge number, written as its narrowest type, in numeric order.
@@ -364,7 +364,7 @@ async fn it_finds_an_exact_number_through_the_lens_of_its_type() -> anyhow::Resu
 #[dialog_common::test]
 async fn it_reads_numbers_through_a_natural_bound() -> anyhow::Result<()> {
     let (tree, store) = tree(NUMBER_BAND, sizes(&lens_values())?).await?;
-    let cases: Vec<(ArtifactSelector<Constrained>, Vec<Value>, &str)> = vec![
+    let cases: Vec<(Selector<Constrained>, Vec<Value>, &str)> = vec![
         (the_size().is_at_least(natural(2)), slice(10, 15), ">= 2"),
         (the_size().is_greater_than(natural(2)), slice(12, 15), "> 2"),
         (the_size().is_at_most(natural(2)), slice(7, 11), "<= 2"),
@@ -408,7 +408,7 @@ async fn it_reads_numbers_through_a_natural_bound() -> anyhow::Result<()> {
 #[dialog_common::test]
 async fn it_reads_numbers_through_an_integer_bound() -> anyhow::Result<()> {
     let (tree, store) = tree(NUMBER_BAND, sizes(&lens_values())?).await?;
-    let cases: Vec<(ArtifactSelector<Constrained>, Vec<Value>, &str)> = vec![
+    let cases: Vec<(Selector<Constrained>, Vec<Value>, &str)> = vec![
         (the_size().is_at_least(integer(-3)), slice(4, 14), ">= -3"),
         (
             the_size().is_greater_than(integer(-3)),
@@ -458,7 +458,7 @@ async fn it_reads_numbers_through_an_integer_bound() -> anyhow::Result<()> {
 async fn it_reads_numbers_as_they_are_through_a_float_bound() -> anyhow::Result<()> {
     let (tree, store) = tree(NUMBER_BAND, sizes(&lens_values())?).await?;
     let all = lens_values();
-    let cases: Vec<(ArtifactSelector<Constrained>, Vec<Value>, &str)> = vec![
+    let cases: Vec<(Selector<Constrained>, Vec<Value>, &str)> = vec![
         (the_size().is_at_least(float(2.5)), slice(11, 17), ">= 2.5"),
         (
             the_size().is_greater_than(float(2.5)),
@@ -531,7 +531,7 @@ async fn it_reads_numbers_as_they_are_through_a_float_bound() -> anyhow::Result<
 #[dialog_common::test]
 async fn it_compares_numbers_as_they_are_across_number_types() -> anyhow::Result<()> {
     let (tree, store) = tree(NUMBER_BAND, sizes(&lens_values())?).await?;
-    let cases: Vec<(ArtifactSelector<Constrained>, Vec<Value>, &str)> = vec![
+    let cases: Vec<(Selector<Constrained>, Vec<Value>, &str)> = vec![
         (
             the_size().is_at_most(natural(2)).across_numbers(),
             slice(0, 10),
@@ -686,7 +686,7 @@ fn every_type_items() -> anyhow::Result<Vec<Instruction>> {
     for value in values {
         let of = Entity::new()?;
         instructions.push(Instruction::Assert(
-            Artifact {
+            Fact {
                 the: size(),
                 of: of.clone(),
                 is: value.clone(),
@@ -695,7 +695,7 @@ fn every_type_items() -> anyhow::Result<Vec<Instruction>> {
             Pick::All,
         ));
         instructions.push(Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "item/label".parse()?,
                 of,
                 is: Value::String(format!("{value:?}")),
@@ -808,7 +808,7 @@ async fn it_reads_a_rekeyed_band_as_a_native_one() -> anyhow::Result<()> {
         lens_values(),
         "S3: numeric order across types"
     );
-    let selectors: Vec<(ArtifactSelector<Constrained>, &str)> = vec![
+    let selectors: Vec<(Selector<Constrained>, &str)> = vec![
         (the_size().is(float(3.0)), "is 3.0"),
         (the_size().is(integer(3)), "is integer 3"),
         (the_size().is(natural(2)), "is natural 2"),
