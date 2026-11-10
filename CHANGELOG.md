@@ -16,8 +16,9 @@ says how to cut a release.
 
 ### The corpus crate is `dialog-corpus`, and it asks its environment for everything it reads
 
-Decided in [design/tree-node-reads](./design/tree-node-reads.md); the
-spilled-value read is argued in
+[#768](https://github.com/dialog-db/dialog-db/pull/768), decided in
+[design/tree-node-reads](./design/tree-node-reads.md); the spilled-value
+read is argued in
 [design-spilled-values.md](./design/tree-node-reads/design-spilled-values.md).
 
 The crate that held the data model and its indexes, `dialog-artifacts`, is
