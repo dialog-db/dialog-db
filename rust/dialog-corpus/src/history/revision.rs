@@ -1,8 +1,8 @@
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
+use crate::Blake3Hash;
 use crate::{DialogCorpusError, Entity, make_reference};
-use dialog_storage::Blake3Hash;
 
 use super::{Authority, Cause, Edition, Issuer, Origin, Signature, Version};
 

@@ -250,8 +250,6 @@ where
     Backend: Provider<nodes::Read<CorpusNode>>
         + Provider<nodes::Preload<CorpusNode>>
         + ConditionalSync
-        + Provider<blob::Load>
-        + ConditionalSync
         + Clone
         + dialog_common::ConditionalSync
         + 'a,
@@ -282,8 +280,6 @@ async fn screen_record<Backend>(
 where
     Backend: Provider<nodes::Read<CorpusNode>>
         + Provider<nodes::Preload<CorpusNode>>
-        + ConditionalSync
-        + Provider<blob::Load>
         + ConditionalSync
         + Clone
         + dialog_common::ConditionalSync,
@@ -897,7 +893,11 @@ mod screen_tests {
     /// Writes everything `delta` staged into `store`, and mirrors it into
     /// `observing` so reads through it can be counted.
     fn mirror(delta: &mut ArchiveDelta, store: &Blocks, observing: &ObservingBlocks) {
-        let blocks: Vec<_> = delta.flush_blocks().collect();
+        let blocks: Vec<_> = delta
+            .flush_nodes()
+            .into_iter()
+            .map(|node| node.buffer().clone())
+            .collect();
         let blobs: Vec<_> = delta.flush_blobs().collect();
         for block in blocks.into_iter().chain(blobs) {
             store.store(block.clone());

@@ -14,10 +14,10 @@ use crate::reads::*;
 use std::collections::HashSet;
 use std::str::from_utf8;
 
+use crate::Blake3Hash;
 use async_stream::try_stream;
 use dialog_common::ConditionalSend;
 use dialog_search_tree::{Change, TreeDifference};
-use dialog_storage::Blake3Hash;
 use futures_util::Stream;
 
 use crate::key::varkey::{ValueRef, parse_key_ref};
@@ -173,10 +173,7 @@ pub fn shipment_refs<'a, Env>(
     difference: &'a TreeDifference<'a, Key, State<Datum>, Env>,
 ) -> impl Stream<Item = Result<ShipmentRef, DialogCorpusError>> + 'a + ConditionalSend
 where
-    Env: Provider<nodes::Read<CorpusNode>>
-        + Provider<nodes::Preload<CorpusNode>>
-        + ConditionalSync
-        + ConditionalSync,
+    Env: Provider<nodes::Read<CorpusNode>> + Provider<nodes::Preload<CorpusNode>> + ConditionalSync,
 {
     try_stream! {
         let changes = difference.changes();
@@ -221,8 +218,6 @@ pub fn spilled_refs<'s, S>(
 where
     S: Provider<nodes::Read<CorpusNode>>
         + Provider<nodes::Preload<CorpusNode>>
-        + ConditionalSync
-        + Provider<blob::Load>
         + ConditionalSend
         + ConditionalSync
         + Clone

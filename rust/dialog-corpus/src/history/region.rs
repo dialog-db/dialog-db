@@ -36,8 +36,6 @@ where
     S: Provider<nodes::Read<CorpusNode>>
         + Provider<nodes::Preload<CorpusNode>>
         + ConditionalSync
-        + Provider<blob::Load>
-        + ConditionalSync
         + Clone
         + ConditionalSync,
 {
@@ -67,8 +65,6 @@ pub async fn region_entry<S>(
 where
     S: Provider<nodes::Read<CorpusNode>>
         + Provider<nodes::Preload<CorpusNode>>
-        + ConditionalSync
-        + Provider<blob::Load>
         + ConditionalSync
         + Clone
         + ConditionalSync,

@@ -715,3 +715,79 @@ Provider<Preload<PersistentNode<Key, Value>>> + ConditionalSync` itself.
 The one thing the alias bought, a `&dyn Nodes<K, V>` to collapse
 monomorphic copies, nothing used; a bound of three traits cannot be a
 trait object, and no call site had asked for one.
+
+## 2026-11-10, Building: the crate is the corpus, and it reads its world through providers
+
+**Asked.** The maintainer: do the refactor of `dialog-artifacts` becoming
+`dialog-corpus`, and take out all the storage stuff so only provider-based
+implementations remain.
+
+**Learned.** The crate's library code named a store in four ways, and
+only one of them was a store. `dialog_storage::Blake3Hash` is the raw
+`[u8; 32]`, not `dialog_common::Blake3Hash` (a newtype with its own rkyv
+and serde derives), so the model's hash is not already the common one;
+moving the model onto the newtype would change nothing stored but is a
+far wider change than a rename, so the alias moved into the crate
+instead. `CborEncoder` served one type, `IndexRoot`, that nothing in the
+workspace used. `DialogStorageError` was named only to read an
+authorization or a rejection out of the tree's error; the tree's error
+can say that itself (`AuthorizationFailure`, `rejection()`). And the
+test-only `Volatile` in the crate's doc example is what
+`dialog_search_tree::helpers::Blocks` already wraps.
+
+Of the `Provider<blob::Load>` bounds in the crate, twenty-two sat on
+paths that never reach `load_spill`: `select_data`, `format_manifest`,
+`record` and `estimate` on the tree; the blob index's reads and
+`blob_changes`; a buffered batch's `record` and `seal`; `rekey_tree`;
+the context and coverage region reads; `spilled_refs`; the history
+screen. They read keys and payloads, and a spilled value's reference
+is in its key. The thirty-one that stay reach a spilled value through `apply`
+(succession reads the prior claim), `select_record`, the scans,
+`observe_revisions` and `TreeHistory`; `content_size` and `asset_size`
+reach it only by type, through `select_record` on a fact whose value is
+a number and never spills.
+
+On a corpus request in front of `blob::Load`, the question the second
+2026-11-09 entry left for this rename: a request defined in
+`dialog-corpus` cannot be answered by the stores in `dialog-storage`,
+because the dependency runs the other way through the tree crate, and a
+blanket impl over every `Provider<blob::Load>` is refused by the orphan
+rule. The tree crate could write `reads_nodes_through_blocks!` for the
+stores because it sits above them; the corpus crate cannot. So such a
+request would be answered only by the wrapper environments (the peer,
+the access and query environments, the overlay, every test
+environment), each by hand, and would move about a hundred and ten
+bounds in the repository, query and peer crates. What it would add
+beyond its name is the hash check, already in `load_spill`, and later an
+answer from a spill cache the environment holds, which is the move that
+would earn it (`design-spilled-values.md`).
+
+**Decided.** The crate is `dialog-corpus`; `ArtifactTree` is `Corpus`,
+`ArtifactTreeExt` `CorpusExt`, `ArtifactNodeCache` `CorpusCache`,
+`BufferedArtifactTree` `BufferedCorpus`, `ArtifactWriter` `CorpusWriter`,
+`DialogArtifactsError` `DialogCorpusError`. The crate depends on no store
+crate. `blob::Load` stays the spilled-value read, performed through
+`load_spill` alone, and bounded only where a path reaches a spilled
+value; a corpus request in front of it is one decision with the cache
+move, deferred to the subject decision, and the matrix says why. The
+overlay answers the corpus's requests (`Read`, `Preload`, `Write` of
+`CorpusNode`, `blob::Load`) and nothing of the block layer:
+`ArchiveDelta::block`, `flush_blocks`, and the overlay's `archive::Load`,
+`Get` and `Holds` are gone, and nothing needed them. The one caller that
+shipped a batch's nodes as blocks (the read-amplification bench) writes
+them with `nodes::Write`, as a commit does.
+
+The model-side rename (`Artifact` to `Claim`) is not in this change. Two
+things argue against doing it blind: `history::Claim` already names the
+claim as the history records it, with a version-set cause, so the rename
+collides with a type in the same crate; and `Artifact`'s shape (`the`,
+`of`, `is`, an optional causal reference) is the notation's *assertion*,
+the thing proposed, as much as its claim, the thing incorporated,
+which `Instruction::Assert(artifact)` shows. The maintainer decides
+which name each gets.
+
+Where this touches the `Accessor` follow-up: nowhere in code. The
+overlay's `archive::Load`, `Get` and `Holds` were what an accessor over a
+batch's staged nodes would have needed; none exists, and the compile
+confirmed it. The `CatalogScope` every corpus operation carries is as it
+was.

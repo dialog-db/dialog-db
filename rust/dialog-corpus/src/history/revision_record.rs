@@ -233,7 +233,7 @@ pub struct RecordEntries {
     pub entries: Vec<(Key, State<Datum>)>,
     /// A spilled value's block: the reference its keys carry and the raw
     /// value bytes stored under it. `None` when every value stays inline.
-    pub spill: Option<(dialog_storage::Blake3Hash, Vec<u8>)>,
+    pub spill: Option<(crate::Blake3Hash, Vec<u8>)>,
 }
 
 impl From<Vec<(Key, State<Datum>)>> for RecordEntries {

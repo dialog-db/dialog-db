@@ -82,8 +82,6 @@ where
     S: Provider<nodes::Read<CorpusNode>>
         + Provider<nodes::Preload<CorpusNode>>
         + ConditionalSync
-        + Provider<blob::Load>
-        + ConditionalSync
         + Clone,
 {
     let value_encoding = manifest.value_encoding;

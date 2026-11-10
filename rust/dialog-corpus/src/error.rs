@@ -5,7 +5,6 @@ use dialog_effects::archive::ArchiveError;
 use dialog_effects::blob::BlobError;
 use dialog_effects::memory::MemoryError;
 use dialog_search_tree::DialogSearchTreeError;
-use dialog_storage::DialogStorageError;
 use thiserror::Error;
 
 use crate::ValueDataType;
@@ -111,16 +110,6 @@ impl AuthorizationFailure for DialogCorpusError {
     }
 }
 
-impl From<DialogStorageError> for DialogCorpusError {
-    fn from(error: DialogStorageError) -> Self {
-        match error {
-            DialogStorageError::Authorization(error) => Self::Authorization(error),
-            DialogStorageError::Rejected(error) => Self::Rejected(error),
-            error => Self::Storage(error.to_string()),
-        }
-    }
-}
-
 impl From<ArchiveError> for DialogCorpusError {
     fn from(error: ArchiveError) -> Self {
         match error {
@@ -153,15 +142,13 @@ impl From<MemoryError> for DialogCorpusError {
 
 impl From<DialogSearchTreeError> for DialogCorpusError {
     fn from(error: DialogSearchTreeError) -> Self {
-        match error {
-            DialogSearchTreeError::Storage(DialogStorageError::Authorization(error)) => {
-                Self::Authorization(error)
-            }
-            DialogSearchTreeError::Storage(DialogStorageError::Rejected(error)) => {
-                Self::Rejected(error)
-            }
-            error => Self::Tree(error.to_string()),
+        if let Some(reason) = error.authorization_failure() {
+            return Self::Authorization(reason.clone());
         }
+        if let Some(rejection) = error.rejection() {
+            return Self::Rejected(rejection.clone());
+        }
+        Self::Tree(error.to_string())
     }
 }
 
@@ -196,9 +183,11 @@ mod tests {
 
     use dialog_capability::access::AuthorizeError;
     use dialog_effects::archive::ArchiveError;
-    use dialog_storage::DialogStorageError;
+    use dialog_search_tree::helpers::test_catalog;
+    use dialog_search_tree::nodes;
 
     use super::*;
+    use crate::tree::CorpusNode;
 
     fn revoked() -> AuthorizeError {
         AuthorizeError::Revoked {
@@ -228,13 +217,26 @@ mod tests {
             "the reason survives the hop, got {error:?}"
         );
 
-        let through_storage = DialogCorpusError::from(DialogStorageError::Authorization(revoked()));
+        // A refusal the block layer makes while a node is read arrives as
+        // the tree's error, and has to come out the same way.
+        let read = nodes::Read::<CorpusNode>::new(
+            test_catalog(),
+            dialog_common::Blake3Hash::from([0u8; 32]),
+        );
+        let through_tree = read
+            .through_loader(
+                |_| async { Err(ArchiveError::Authorization(revoked())) },
+                None,
+            )
+            .await
+            .expect_err("the load refused");
+        let through_tree = DialogCorpusError::from(through_tree);
         assert!(
             matches!(
-                through_storage,
+                through_tree,
                 DialogCorpusError::Authorization(AuthorizeError::Revoked { .. })
             ),
-            "and survives arriving via storage, got {through_storage:?}"
+            "and survives arriving through a node read, got {through_tree:?}"
         );
     }
 }

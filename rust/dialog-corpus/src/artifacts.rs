@@ -3,9 +3,6 @@ pub use crate::Entity;
 mod artifact;
 pub use artifact::*;
 
-mod revision;
-pub use revision::*;
-
 mod data;
 pub use data::*;
 
@@ -54,7 +51,9 @@ pub use cause::*;
 mod r#match;
 pub use r#match::*;
 
-pub use dialog_storage::{Blake3Hash, HashType};
+/// A BLAKE3 digest as the model carries it: the bytes of a value's
+/// reference, a blob's hash, a spilled value's address.
+pub type Blake3Hash = [u8; 32];
 
 use crate::tree::Corpus;
 

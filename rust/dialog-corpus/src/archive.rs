@@ -1,17 +1,19 @@
 //! What a batch of edits reads and writes, by lane.
 //!
-//! A corpus touches two kinds of content-addressed bytes: the tree's
-//! own nodes (blocks) and the values too large to live in a key (blobs,
-//! spilled values). They share an address space, a BLAKE3 hash, but not a
-//! meaning, so they never share a path either. A tree's nodes are blocks of
-//! its catalog, read through [`archive::Load`]; spilled values are blobs of
-//! the catalog's archive, read through [`blob::Load`] ([`load_spill`]). A
-//! batch stages what it writes in an [`ArchiveDelta`] that keeps the two
-//! lanes apart, and its commit writes each lane where that lane belongs.
-use dialog_capability::{Capability, Provider, Resume};
-use dialog_common::{Blake3Hash, Buffer, ConditionalSync, Held, Holds};
+//! A corpus touches two kinds of content-addressed bytes: the tree's own
+//! nodes and the values too large to live in a key (spilled values). They
+//! share an address space, a BLAKE3 hash, but not a meaning, so they never
+//! share a path either. A tree's nodes are asked for as nodes
+//! ([`Read`]), and the environment keeps them as blocks of the corpus's
+//! catalog; spilled values are blobs of the catalog's archive, read through
+//! [`blob::Load`] ([`load_spill`]). A batch stages what it writes in an
+//! [`ArchiveDelta`] that keeps the two lanes apart, and its commit writes
+//! each lane where that lane belongs ([`Write`] for the nodes, a blob
+//! import for the values).
+use dialog_capability::{Provider, Resume};
+use dialog_common::{Blake3Hash, Buffer, ConditionalSync};
+use dialog_effects::archive::ArchiveError;
 use dialog_effects::archive::prelude::ArchiveScope;
-use dialog_effects::archive::{self, ArchiveError, Get};
 use dialog_effects::blob;
 use dialog_search_tree::nodes::{Preload, Read, Write};
 use dialog_search_tree::{Delta, DialogSearchTreeError};
@@ -98,11 +100,6 @@ impl ArchiveDelta {
         self.nodes.get(hash)
     }
 
-    /// The staged node under `hash` as its block, if any.
-    pub fn block(&self, hash: &Blake3Hash) -> Option<Buffer> {
-        self.nodes.get(hash).map(|node| node.buffer().clone())
-    }
-
     /// The staged spilled value under `hash`, if any.
     pub fn blob(&self, hash: &Blake3Hash) -> Option<Buffer> {
         self.blobs.get(hash)
@@ -111,16 +108,6 @@ impl ArchiveDelta {
     /// Takes every staged node, emptying the nodes lane.
     pub fn flush_nodes(&mut self) -> Vec<CorpusNode> {
         self.nodes.flush().map(|(_, node)| node).collect()
-    }
-
-    /// Takes every staged node as its block, emptying the nodes lane: for a
-    /// caller that ships blocks.
-    pub fn flush_blocks(&mut self) -> impl Iterator<Item = Buffer> + use<> {
-        self.nodes
-            .flush()
-            .map(|(_, node)| node.buffer().clone())
-            .collect::<Vec<_>>()
-            .into_iter()
     }
 
     /// Takes every staged spilled value, emptying the blobs lane.
@@ -169,33 +156,6 @@ impl<'a, Env: ?Sized> DeltaOverlay<'a, Env> {
     }
 }
 
-impl<Env: Holds + ?Sized> Holds for DeltaOverlay<'_, Env> {
-    fn held(&self, key: &str) -> Option<Held> {
-        self.env.held(key)
-    }
-
-    fn hold(&self, key: String, handle: Held) {
-        self.env.hold(key, handle)
-    }
-
-    fn held_or(&self, key: &str, make: &dyn Fn() -> Held) -> Held {
-        self.env.held_or(key, make)
-    }
-}
-
-#[dialog_capability::provider]
-impl<Env> Provider<archive::Load> for DeltaOverlay<'_, Env>
-where
-    Env: Provider<archive::Load> + ConditionalSync + ?Sized,
-{
-    async fn execute(&self, load: archive::Load) -> Result<Option<Buffer>, ArchiveError> {
-        if let Some(block) = self.delta.block(&load.digest) {
-            return Ok(Some(block));
-        }
-        load.perform(self.env).await
-    }
-}
-
 /// A staged node answers its read at once, as the node the seal produced;
 /// any other read is the environment's.
 impl<Env> Provider<Read<CorpusNode>> for DeltaOverlay<'_, Env>
@@ -238,22 +198,8 @@ where
     }
 }
 
-/// A staged block is one the replica minted, so a local-only read finds it
-/// as it finds what the local archive holds.
-#[dialog_capability::provider]
-impl<Env> Provider<Get> for DeltaOverlay<'_, Env>
-where
-    Env: Provider<Get> + ConditionalSync + ?Sized,
-{
-    async fn execute(&self, get: Capability<Get>) -> Result<Option<Vec<u8>>, ArchiveError> {
-        use dialog_effects::archive::prelude::GetExt as _;
-        if let Some(block) = self.delta.block(get.digest()) {
-            return Ok(Some(block.as_ref().to_vec()));
-        }
-        get.perform(self.env).await
-    }
-}
-
+/// A spilled value the batch staged is read back before the commit writes
+/// it; any other load is the environment's.
 #[dialog_capability::provider]
 impl<Env> Provider<blob::Load> for DeltaOverlay<'_, Env>
 where
@@ -276,8 +222,11 @@ impl ArchiveDelta {
     /// lanes: an in-memory stand-in for a commit. A spilled value is kept
     /// as a block of the catalog, where a spilled-value read finds it.
     pub fn flush_into(&mut self, blocks: &Blocks) {
-        for block in self.flush_blocks().chain(self.flush_blobs()) {
-            blocks.store(block);
+        for node in self.flush_nodes() {
+            blocks.store(node.buffer().clone());
+        }
+        for blob in self.flush_blobs() {
+            blocks.store(blob);
         }
     }
 }

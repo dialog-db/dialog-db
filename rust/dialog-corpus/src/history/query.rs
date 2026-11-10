@@ -3,8 +3,8 @@ use dialog_effects::archive::prelude::CatalogScope;
 use std::ops::Bound;
 use std::str::FromStr;
 
+use crate::Blake3Hash;
 use dialog_common::Blake3Hash as NodeHash;
-use dialog_storage::Blake3Hash;
 use futures_util::{Stream, StreamExt, TryStreamExt};
 
 use crate::Value;
@@ -56,7 +56,6 @@ pub struct TreeHistory<S>
 where
     S: Provider<nodes::Read<CorpusNode>>
         + Provider<nodes::Preload<CorpusNode>>
-        + ConditionalSync
         + Provider<blob::Load>
         + ConditionalSync
         + Clone,
@@ -80,7 +79,6 @@ impl<S> TreeHistory<S>
 where
     S: Provider<nodes::Read<CorpusNode>>
         + Provider<nodes::Preload<CorpusNode>>
-        + ConditionalSync
         + Provider<blob::Load>
         + ConditionalSync
         + Clone,
@@ -220,7 +218,6 @@ impl<S> History for TreeHistory<S>
 where
     S: Provider<nodes::Read<CorpusNode>>
         + Provider<nodes::Preload<CorpusNode>>
-        + ConditionalSync
         + Provider<blob::Load>
         + ConditionalSend
         + ConditionalSync

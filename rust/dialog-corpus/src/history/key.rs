@@ -1,7 +1,7 @@
 use core::fmt;
 
+use crate::Blake3Hash;
 use crate::{ENTITY_LENGTH, Entity, HASH_SIZE, RELATION_LENGTH, Relation};
-use dialog_storage::Blake3Hash;
 
 use super::{Claim, EDITION_LENGTH, ORIGIN_LENGTH, Origin, VERSION_LENGTH, Version};
 

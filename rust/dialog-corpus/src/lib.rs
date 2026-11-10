@@ -25,16 +25,14 @@
 //! use dialog_corpus::{
 //!     ArchiveDelta, Artifact, ArtifactSelector, Entity, Instruction, Relation, Value,
 //! };
-//! use dialog_capability::{Subject, did};
-//! use dialog_effects::archive::prelude::ArchiveScope;
-//! use dialog_storage::provider::Volatile;
+//! use dialog_search_tree::helpers::{Blocks, test_catalog};
 //! use futures_util::{StreamExt, stream};
 //!
-//! // Any environment that loads blocks and blobs will do; this one keeps
-//! // them in memory. The index lives in a catalog of a subject's archive.
-//! let blocks = Volatile::new();
-//! let catalog = ArchiveScope::new(Subject::from(did!("key:z6MkIndex"))).index();
-//! let mut index = Corpus::empty_in(catalog.clone());
+//! // Any environment that answers the corpus's node reads and spilled-value
+//! // loads will do; this one keeps everything in memory. The corpus lives
+//! // in a catalog of a subject's archive.
+//! let blocks = Blocks::new();
+//! let mut corpus = Corpus::empty_in(test_catalog());
 //! let mut delta = ArchiveDelta::zero();
 //!
 //! // Assert an artifact: the new nodes (and any spilled value) are staged
@@ -45,18 +43,16 @@
 //!     is: Value::String("Foo Bar".into()),
 //!     cause: None,
 //! };
-//! index
+//! corpus
 //!     .apply(&blocks, &mut delta, stream::iter(vec![Instruction::Assert(artifact, dialog_corpus::Pick::All)]))
 //!     .await?;
-//! // A value spilled before values moved to the blob store is read from
-//! // the catalog too, so this stand-in for a commit writes both lanes there.
-//! let mut staged: Vec<_> = delta.flush_blocks().collect();
-//! staged.extend(delta.flush_blobs());
-//! catalog.import(staged).perform(&blocks).await?;
+//! // A commit writes the staged nodes and spilled values where they belong;
+//! // this stand-in keeps them in the blocks.
+//! delta.flush_into(&blocks);
 //!
-//! // Query the index
+//! // Query the corpus
 //! let selector = ArtifactSelector::new().the(Relation::from_str("profile/name")?);
-//! let results = index
+//! let results = corpus
 //!     .scan(blocks.clone(), spill_cache(), selector)
 //!     .filter_map(|view| async move { view.ok() })
 //!     .collect::<Vec<_>>()

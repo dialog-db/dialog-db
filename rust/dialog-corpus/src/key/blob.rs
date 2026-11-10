@@ -7,7 +7,7 @@
 //! bytes are zero. Unlike the EAV/AEV/VAE views it carries no entity /
 //! attribute / value fields — a blob is named by its hash alone.
 
-use dialog_storage::Blake3Hash;
+use crate::Blake3Hash;
 
 use crate::{Key, TAG_LENGTH};
 

@@ -1,9 +1,9 @@
+use crate::Blake3Hash;
 use crate::artifacts::ordvalue::encode_value_owned;
 use crate::history::Edition;
 use crate::key::value_tail_bytes;
 use crate::{Artifact, Asset, Cause, Entity, Instruction, Relation, Value};
 use dialog_search_tree::Manifest;
-use dialog_storage::Blake3Hash;
 use futures_util::Stream;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use std::cmp::Ordering;

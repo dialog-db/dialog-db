@@ -28,6 +28,7 @@
 //! orphan rule rules out inherent methods — the operations are exposed as
 //! an extension trait instead.
 
+use crate::Blake3Hash;
 use crate::reads::*;
 use async_stream::try_stream;
 use async_trait::async_trait;
@@ -37,7 +38,6 @@ use dialog_effects::archive::prelude::ArchiveScope;
 use dialog_search_tree::{
     Buffer, Manifest, NodeCache, PersistentNode, PersistentTree, Value as TreeValue,
 };
-use dialog_storage::Blake3Hash;
 use futures_util::{Stream, StreamExt};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::iter::repeat_n;
@@ -605,7 +605,6 @@ pub trait CorpusExt {
     where
         S: Provider<nodes::Read<CorpusNode>>
             + Provider<nodes::Preload<CorpusNode>>
-            + ConditionalSync
             + Provider<blob::Load>
             + ConditionalSync
             + Clone,
@@ -632,7 +631,6 @@ pub trait CorpusExt {
     where
         S: Provider<nodes::Read<CorpusNode>>
             + Provider<nodes::Preload<CorpusNode>>
-            + ConditionalSync
             + Provider<blob::Load>
             + ConditionalSync
             + Clone,
@@ -650,8 +648,6 @@ pub trait CorpusExt {
     where
         S: Provider<nodes::Read<CorpusNode>>
             + Provider<nodes::Preload<CorpusNode>>
-            + ConditionalSync
-            + Provider<blob::Load>
             + ConditionalSend
             + ConditionalSync
             + Clone;
@@ -667,7 +663,6 @@ pub trait CorpusExt {
     where
         S: Provider<nodes::Read<CorpusNode>>
             + Provider<nodes::Preload<CorpusNode>>
-            + ConditionalSync
             + Provider<blob::Load>
             + ConditionalSend
             + ConditionalSync
@@ -691,8 +686,6 @@ pub trait CorpusExt {
     where
         S: Provider<nodes::Read<CorpusNode>>
             + Provider<nodes::Preload<CorpusNode>>
-            + ConditionalSync
-            + Provider<blob::Load>
             + ConditionalSend
             + ConditionalSync
             + Clone;
@@ -710,8 +703,6 @@ pub trait CorpusExt {
     where
         S: Provider<nodes::Read<CorpusNode>>
             + Provider<nodes::Preload<CorpusNode>>
-            + ConditionalSync
-            + Provider<blob::Load>
             + ConditionalSync
             + Clone;
 
@@ -741,7 +732,6 @@ pub trait CorpusExt {
         Self: Sized,
         S: Provider<nodes::Read<CorpusNode>>
             + Provider<nodes::Preload<CorpusNode>>
-            + ConditionalSync
             + Provider<blob::Load>
             + ConditionalSend
             + ConditionalSync
@@ -771,7 +761,6 @@ pub trait CorpusExt {
         Self: Sized,
         S: Provider<nodes::Read<CorpusNode>>
             + Provider<nodes::Preload<CorpusNode>>
-            + ConditionalSync
             + Provider<blob::Load>
             + ConditionalSend
             + ConditionalSync
@@ -794,8 +783,6 @@ pub trait CorpusExt {
         Self: Sized,
         S: Provider<nodes::Read<CorpusNode>>
             + Provider<nodes::Preload<CorpusNode>>
-            + ConditionalSync
-            + Provider<blob::Load>
             + ConditionalSend
             + ConditionalSync
             + Clone;
@@ -813,7 +800,6 @@ impl CorpusExt for Corpus {
     where
         S: Provider<nodes::Read<CorpusNode>>
             + Provider<nodes::Preload<CorpusNode>>
-            + ConditionalSync
             + Provider<blob::Load>
             + ConditionalSync
             + Clone,
@@ -834,7 +820,6 @@ impl CorpusExt for Corpus {
     where
         S: Provider<nodes::Read<CorpusNode>>
             + Provider<nodes::Preload<CorpusNode>>
-            + ConditionalSync
             + Provider<blob::Load>
             + ConditionalSync
             + Clone,
@@ -880,8 +865,6 @@ impl CorpusExt for Corpus {
     where
         S: Provider<nodes::Read<CorpusNode>>
             + Provider<nodes::Preload<CorpusNode>>
-            + ConditionalSync
-            + Provider<blob::Load>
             + ConditionalSend
             + ConditionalSync
             + Clone,
@@ -919,7 +902,6 @@ impl CorpusExt for Corpus {
     where
         S: Provider<nodes::Read<CorpusNode>>
             + Provider<nodes::Preload<CorpusNode>>
-            + ConditionalSync
             + Provider<blob::Load>
             + ConditionalSend
             + ConditionalSync
@@ -965,8 +947,6 @@ impl CorpusExt for Corpus {
     where
         S: Provider<nodes::Read<CorpusNode>>
             + Provider<nodes::Preload<CorpusNode>>
-            + ConditionalSync
-            + Provider<blob::Load>
             + ConditionalSend
             + ConditionalSync
             + Clone,
@@ -987,8 +967,6 @@ impl CorpusExt for Corpus {
     where
         S: Provider<nodes::Read<CorpusNode>>
             + Provider<nodes::Preload<CorpusNode>>
-            + ConditionalSync
-            + Provider<blob::Load>
             + ConditionalSync
             + Clone,
     {
@@ -1020,8 +998,6 @@ impl CorpusExt for Corpus {
     where
         S: Provider<nodes::Read<CorpusNode>>
             + Provider<nodes::Preload<CorpusNode>>
-            + ConditionalSync
-            + Provider<blob::Load>
             + ConditionalSend
             + ConditionalSync
             + Clone,
@@ -1052,7 +1028,6 @@ impl CorpusExt for Corpus {
     where
         S: Provider<nodes::Read<CorpusNode>>
             + Provider<nodes::Preload<CorpusNode>>
-            + ConditionalSync
             + Provider<blob::Load>
             + ConditionalSend
             + ConditionalSync
@@ -1172,7 +1147,6 @@ impl CorpusExt for Corpus {
     where
         S: Provider<nodes::Read<CorpusNode>>
             + Provider<nodes::Preload<CorpusNode>>
-            + ConditionalSync
             + Provider<blob::Load>
             + ConditionalSend
             + ConditionalSync
@@ -1520,7 +1494,6 @@ where
     W: CorpusWriter + ConditionalSend,
     S: Provider<nodes::Read<CorpusNode>>
         + Provider<nodes::Preload<CorpusNode>>
-        + ConditionalSync
         + Provider<blob::Load>
         + ConditionalSync
         + Clone,
@@ -1903,8 +1876,8 @@ mod spill_cache_tests {
 
     use crate::ArchiveDelta;
 
+    use crate::Blake3Hash;
     use crate::helpers::CountingBlocks;
-    use dialog_storage::Blake3Hash;
     use futures_util::stream;
 
     /// A scan over spilled values fetches their blocks concurrently: each

@@ -107,7 +107,7 @@ pub(crate) struct EncodedValue {
     /// A spilling value's archive block: its 32-byte reference (the hash the
     /// key's spill tail carries) and the raw value bytes to store under it.
     /// `None` for a value that stays inline.
-    pub spill: Option<(dialog_storage::Blake3Hash, Vec<u8>)>,
+    pub spill: Option<(crate::Blake3Hash, Vec<u8>)>,
 }
 
 impl EncodedValue {

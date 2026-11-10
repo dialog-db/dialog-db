@@ -17,12 +17,12 @@
 //! [`BlobRecord`]'s conversions so callers deal in `{version, size}`, not raw
 //! `Datum` fields, and a leading version byte lets the record grow.
 
+use crate::Blake3Hash;
 use crate::reads::*;
 use async_stream::try_stream;
 use async_trait::async_trait;
 use dialog_common::ConditionalSend;
 use dialog_search_tree::TreeDifference;
-use dialog_storage::Blake3Hash;
 use futures_util::Stream;
 
 use crate::{
@@ -160,8 +160,6 @@ pub fn blob_changes<'s, S>(
 where
     S: Provider<nodes::Read<CorpusNode>>
         + Provider<nodes::Preload<CorpusNode>>
-        + ConditionalSync
-        + Provider<blob::Load>
         + ConditionalSend
         + ConditionalSync
         + Clone
@@ -200,8 +198,6 @@ pub trait BlobIndexExt {
     where
         S: Provider<nodes::Read<CorpusNode>>
             + Provider<nodes::Preload<CorpusNode>>
-            + ConditionalSync
-            + Provider<blob::Load>
             + ConditionalSend
             + ConditionalSync
             + Clone;
@@ -221,7 +217,6 @@ pub trait BlobIndexExt {
     where
         S: Provider<nodes::Read<CorpusNode>>
             + Provider<nodes::Preload<CorpusNode>>
-            + ConditionalSync
             + Provider<blob::Load>
             + ConditionalSend
             + ConditionalSync
@@ -239,7 +234,6 @@ pub trait BlobIndexExt {
     where
         S: Provider<nodes::Read<CorpusNode>>
             + Provider<nodes::Preload<CorpusNode>>
-            + ConditionalSync
             + Provider<blob::Load>
             + ConditionalSend
             + ConditionalSync
@@ -250,8 +244,6 @@ pub trait BlobIndexExt {
     where
         S: Provider<nodes::Read<CorpusNode>>
             + Provider<nodes::Preload<CorpusNode>>
-            + ConditionalSync
-            + Provider<blob::Load>
             + ConditionalSend
             + ConditionalSync
             + Clone,
@@ -271,8 +263,6 @@ pub trait BlobIndexExt {
         Self: Sized,
         S: Provider<nodes::Read<CorpusNode>>
             + Provider<nodes::Preload<CorpusNode>>
-            + ConditionalSync
-            + Provider<blob::Load>
             + ConditionalSend
             + ConditionalSync
             + Clone
@@ -290,8 +280,6 @@ impl BlobIndexExt for Corpus {
     where
         S: Provider<nodes::Read<CorpusNode>>
             + Provider<nodes::Preload<CorpusNode>>
-            + ConditionalSync
-            + Provider<blob::Load>
             + ConditionalSend
             + ConditionalSync
             + Clone,
@@ -312,7 +300,6 @@ impl BlobIndexExt for Corpus {
     where
         S: Provider<nodes::Read<CorpusNode>>
             + Provider<nodes::Preload<CorpusNode>>
-            + ConditionalSync
             + Provider<blob::Load>
             + ConditionalSend
             + ConditionalSync
@@ -332,7 +319,6 @@ impl BlobIndexExt for Corpus {
     where
         S: Provider<nodes::Read<CorpusNode>>
             + Provider<nodes::Preload<CorpusNode>>
-            + ConditionalSync
             + Provider<blob::Load>
             + ConditionalSend
             + ConditionalSync
@@ -363,8 +349,6 @@ impl BlobIndexExt for Corpus {
         Self: Sized,
         S: Provider<nodes::Read<CorpusNode>>
             + Provider<nodes::Preload<CorpusNode>>
-            + ConditionalSync
-            + Provider<blob::Load>
             + ConditionalSend
             + ConditionalSync
             + Clone

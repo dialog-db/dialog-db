@@ -30,9 +30,9 @@
 //! cached here?"): that answer changes without a commit, is *not*
 //! idempotent, and must not be served through this module.
 
+use crate::Blake3Hash;
 use crate::tree::CorpusNode;
 use dialog_search_tree::{Buffer, Distribution, Geometric, Hashed, Manifest, Rank};
-use dialog_storage::Blake3Hash;
 use rkyv::deserialize;
 use rkyv::rancor::Error as RkyvError;
 

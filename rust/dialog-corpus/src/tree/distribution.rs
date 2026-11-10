@@ -17,8 +17,8 @@ use dialog_common::Blake3Hash as NodeHash;
 use dialog_effects::archive::prelude::CatalogScope;
 use std::env;
 
+use crate::Blake3Hash;
 use dialog_search_tree::{Manifest, PersistentNode, PersistentNodeBody};
-use dialog_storage::Blake3Hash;
 use rkyv::rancor::Error as RkyvError;
 use rkyv::{deserialize, to_bytes};
 
@@ -88,10 +88,7 @@ pub async fn capture<Env>(
     env: &Env,
 ) -> Result<Vec<NodeStat>, DialogCorpusError>
 where
-    Env: Provider<nodes::Read<CorpusNode>>
-        + Provider<nodes::Preload<CorpusNode>>
-        + ConditionalSync
-        + ConditionalSync,
+    Env: Provider<nodes::Read<CorpusNode>> + Provider<nodes::Preload<CorpusNode>> + ConditionalSync,
 {
     let mut stats: Vec<(usize, NodeStat)> = Vec::new();
     if root == dialog_common::NULL_BLAKE3_HASH.as_bytes() {

@@ -1,5 +1,5 @@
+use crate::Blake3Hash;
 use base58::ToBase58;
-use dialog_storage::Blake3Hash;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_bytes::{ByteBuf, Bytes};
 use std::fmt::{Debug, Formatter, Result as FmtResult};

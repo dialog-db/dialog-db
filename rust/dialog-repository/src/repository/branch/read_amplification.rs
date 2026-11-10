@@ -467,17 +467,22 @@ async fn measure_write_paths(depth: usize, batches: usize) -> Result<()> {
     // per-batch costs are least amortized and buffering has the most to prove.
     let batch = |i: usize| -> Vec<I> { vec![assert_fact(depth + i, "write-path")] };
 
-    // Every batch's new nodes are imported into the archive, exactly as the
+    // Every batch's new nodes are written to the archive, exactly as the
     // commit path does before it references the root in a revision. Without
-    // this the next batch cannot read back what the last one wrote.
+    // this the next batch cannot read back what the last one wrote. A
+    // spilled value is kept as a block of the catalog, where a spilled-value
+    // load finds it.
     macro_rules! persist {
-        ($delta:expr) => {
+        ($delta:expr) => {{
+            nodes::Write::<CorpusNode>::new(main.archive().index(), $delta.flush_nodes())
+                .perform(&env)
+                .await?;
             main.archive()
                 .index()
-                .import($delta.flush_blocks().chain($delta.flush_blobs()))
+                .import($delta.flush_blobs())
                 .perform(&env)
                 .await?
-        };
+        }};
     }
 
     // Canonical: reshape per batch, exactly what the commit path does today.

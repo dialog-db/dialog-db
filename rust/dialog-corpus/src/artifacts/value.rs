@@ -12,10 +12,10 @@ use std::{
     str::FromStr,
 };
 
+use crate::Blake3Hash;
 use crate::{Cause, DialogCorpusError, Entity, Relation, TypeError, make_reference};
 use base58::{FromBase58, ToBase58};
 use dialog_number::Number;
-use dialog_storage::Blake3Hash;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
 /// All value type representations that may be stored by [`Artifacts`]
