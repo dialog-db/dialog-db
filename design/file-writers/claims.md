@@ -68,4 +68,6 @@
 | cells do not accrete: an update writes over the slot and keeps no history; the inline size is calibrated, and only a value that outgrows it spills | opinion | Irakli, 2026-11-10 | - |
 | each update of a spilled cell leaves its previous block in the extent, unreferenced | fact | follows from spilled values being blocks appended to a writer's extent | holds |
 | dialog already spills a value too large for a tree node into a block of its own, referenced from the node | fact | `rust/dialog-artifacts/src/spill.rs` on this branch (`dialog-corpus` on main since #768); CHANGELOG, "spilled values share one budget" (#742) | holds |
+| a cell gets a capacity when it is created; a value that outgrows it is a separate operation, like deleting the cell and creating it again, so cells never spill | opinion | Irakli, 2026-11-10; replaces spilling for cells | - |
+| a resized cell's old slot has to forward to the new one until the index names it, or a reader holding the old offset reads a value no longer current | hypothesis | follows from readers caching a cell's offset and the index changing only at integration; confirmed by a test that resizes a cell between a reader's index lookup and its read | open |
 

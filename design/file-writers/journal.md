@@ -287,3 +287,16 @@ needed, resort to spills.
 **Decided.** Cells do not accrete: an update writes over the slot. Values
 are inline in a slot of a calibrated size; only a value that outgrows it
 spills, leaving its previous block behind in the extent on each update.
+
+**Asked.** (The read set waits again.) Irakli: maybe a cell gets a
+capacity on creation, and resizing it is a separate operation, like
+deleting the cell and creating it again.
+
+**Learned.** That removes spilling from cells altogether. Its one cost: a
+reader caches a cell's offset from the index, which learns of a resized
+cell's new slot only at the next integration, so the old slot has to
+forward to the new one until then.
+
+**Decided.** A cell has a capacity fixed at creation; outgrowing it is a
+resize, done as a delete and a create, leaving the old slot forwarding.
+Cells never spill. This replaces the inline-or-spilled entry above.
