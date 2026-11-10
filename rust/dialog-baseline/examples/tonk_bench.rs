@@ -529,7 +529,9 @@ mod native {
             });
         }
 
-        // The views, read by a member that just joined: cold, then warm.
+        // The views, read by a member that just joined: cold, then warm. The
+        // line on stderr marks where they start, for a profiler.
+        eprintln!("queries start");
         let reader = &members[1];
         let mut sizes = BTreeMap::new();
         for view in VIEWS {
