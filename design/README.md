@@ -55,4 +55,7 @@ Backtracking moves a topic to an earlier phase and says so in its journal.
 
 ## Topics
 
-None yet.
+- [The search tree's concerns are not expressed as capabilities](tree-node-reads.md):
+  **Building.** The tree talks in nodes through capabilities it performs on
+  the environment; caching, decoding and storage form belong to providers.
+  The [plan](tree-node-reads/plan.md) is for whoever builds it.

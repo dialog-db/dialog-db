@@ -920,7 +920,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 }
 
                 let mut delta = ArchiveDelta::zero();
-                let mut merged = stitched.persist(delta.blocks(), &tree_store)?;
+                let mut merged = stitched.persist(delta.nodes())?;
                 let merged_tree = TreeReference::from(*merged.root().as_bytes());
 
                 // Head selection mirrors the other merge paths, so
@@ -1085,7 +1085,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 let mut delta = ArchiveDelta::zero();
                 merged = Box::pin(merged.edit().integrate(screened, &tree_store))
                     .await?
-                    .persist(delta.blocks(), &tree_store)?;
+                    .persist(delta.nodes())?;
                 let merged_tree = TreeReference::from(*merged.root().as_bytes());
 
                 // The replay can degenerate, and the head selection must
@@ -1256,7 +1256,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
         let mut delta = ArchiveDelta::zero();
         merged = Box::pin(merged.edit().integrate(screened, &tree_store))
             .await?
-            .persist(delta.blocks(), &tree_store)?;
+            .persist(delta.nodes())?;
 
         let merged_tree = TreeReference::from(*merged.root().as_bytes());
 

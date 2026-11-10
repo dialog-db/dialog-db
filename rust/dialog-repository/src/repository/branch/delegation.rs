@@ -49,6 +49,9 @@
 //! #         + Provider<BlobRead>
 //! #         + Provider<dialog_effects::archive::Load>
 //! #         + Provider<dialog_effects::blob::Load>
+//! #         + dialog_capability::Provider<dialog_search_tree::nodes::Read<dialog_artifacts::tree::CorpusNode>>
+//! #         + dialog_capability::Provider<dialog_search_tree::nodes::Preload<dialog_artifacts::tree::CorpusNode>>
+//! #         + dialog_capability::Provider<dialog_search_tree::nodes::Write<dialog_artifacts::tree::CorpusNode>>
 //! #         + Provider<Fork<RemoteSite, Resolve>>
 //! #         + dialog_common::Holds
 //! #         + dialog_common::ConditionalSync
@@ -70,6 +73,7 @@ use crate::repository::archive::erased;
 use crate::repository::branch::asset::recorded_size;
 use crate::repository::source::SourceRef;
 use crate::{Branch, CommitError, Index, RemoteSite};
+use dialog_artifacts::tree::CorpusNode;
 use dialog_artifacts::{
     Artifact, Asset, BlobIndexExt as _, BlobRecord, DialogArtifactsError, Entity, Instruction,
     Relation, Value,
@@ -86,6 +90,7 @@ use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::Read as BlobRead;
 use dialog_effects::blob::Write as BlobWrite;
 use dialog_effects::memory::{Publish, Resolve};
+use dialog_search_tree::nodes;
 use dialog_ucan::{UcanCertificate, UcanDelegation};
 use futures_util::stream;
 use std::collections::HashSet;
@@ -235,12 +240,19 @@ impl RetainDelegation<'_> {
             + Provider<Get>
             + Provider<Put>
             + Provider<Import>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
             + Provider<Resolve>
             + Provider<Publish>
             + Provider<Identify>
             + Provider<Attest>
             + Provider<BlobWrite>
             + Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
             + Provider<Fork<RemoteSite, Resolve>>
             + dialog_common::Holds
@@ -337,12 +349,19 @@ impl RetractDelegation<'_> {
             + Provider<Get>
             + Provider<Put>
             + Provider<Import>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
             + Provider<Resolve>
             + Provider<Publish>
             + Provider<Identify>
             + Provider<Attest>
             + Provider<BlobWrite>
             + Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
             + Provider<Fork<RemoteSite, Resolve>>
             + dialog_common::Holds

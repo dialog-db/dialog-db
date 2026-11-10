@@ -8,9 +8,6 @@ mod router;
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 mod web;
 
-use std::sync::Arc;
-
-use async_trait::async_trait;
 use dialog_capability::access::{AuthorizeError, Export, Forget, Protocol, Prove, Retain};
 use dialog_capability::{Capability, Did, Policy, Provider, Subject};
 use dialog_common::{ConditionalSend, ConditionalSync};
@@ -18,6 +15,7 @@ use dialog_credentials::Credential;
 use dialog_effects::credential::prelude::*;
 use dialog_effects::storage::LocationExt as _;
 use dialog_effects::{archive, blob, credential, memory, storage};
+use std::sync::Arc;
 
 use loader::Loader;
 use router::Router;
@@ -84,8 +82,7 @@ impl<S: Clone> Clone for Storage<S> {
 
 /// A storage knows no place to look for a block but the spaces it mounts,
 /// so it answers a load as the read (see [`load`](crate::provider::load)).
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl<S> Provider<archive::Load> for Storage<S>
 where
     S: Clone + ConditionalSend + ConditionalSync,
@@ -100,8 +97,7 @@ where
 }
 
 /// A spilled value loads as its blob, or the block it was stored as.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl<S> Provider<blob::Load> for Storage<S>
 where
     S: Clone + ConditionalSend + ConditionalSync,
@@ -145,8 +141,7 @@ fn refused(location: &storage::Location) -> storage::StorageError {
 
 /// A space is handed over as its verifier: a signing key it still holds
 /// from before the credential store is never given out.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl<S> Provider<storage::Load> for Storage<S>
 where
     S: Clone + ConditionalSend + ConditionalSync,
@@ -172,8 +167,7 @@ where
 }
 
 /// A space created from a signing key is created from its verifier.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl<S> Provider<storage::Create> for Storage<S>
 where
     S: Clone + ConditionalSend + ConditionalSync,
@@ -219,8 +213,7 @@ where
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl<S, P> Provider<Prove<P>> for Storage<S>
 where
     S: Clone + ConditionalSend + ConditionalSync,
@@ -236,8 +229,7 @@ where
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl<S, P> Provider<Export<P>> for Storage<S>
 where
     S: Clone + ConditionalSend + ConditionalSync,
@@ -254,8 +246,7 @@ where
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl<S, P> Provider<Forget<P>> for Storage<S>
 where
     S: Clone + ConditionalSend + ConditionalSync,
@@ -270,8 +261,7 @@ where
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl<S, P> Provider<Retain<P>> for Storage<S>
 where
     S: Clone + ConditionalSend + ConditionalSync,

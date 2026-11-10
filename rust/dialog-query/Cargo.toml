@@ -31,6 +31,7 @@ dialog-artifacts = { workspace = true }
 dialog-capability = { workspace = true }
 dialog-common = { workspace = true }
 dialog-effects = { workspace = true }
+dialog-search-tree = { workspace = true }
 
 # Async utilities
 futures-util = { workspace = true }

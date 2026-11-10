@@ -21,8 +21,7 @@ use crate::verifier::MultiVerifier;
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DidKeyProvider;
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<Resolve> for DidKeyProvider {
     async fn execute(&self, input: Resolve) -> Result<MultiVerifier, ResolveError> {
         if input.did.method() != "key" {
@@ -36,8 +35,7 @@ impl Provider<Resolve> for DidKeyProvider {
 }
 
 /// A `did:key` has no document, so it names no services.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<Discover> for DidKeyProvider {
     async fn execute(&self, input: Discover) -> Result<Vec<Service>, ResolveError> {
         if input.did.method() != "key" {
@@ -73,8 +71,7 @@ impl<F: Fetch> DidWebProvider<F> {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl<F: Fetch> Provider<Resolve> for DidWebProvider<F> {
     async fn execute(&self, input: Resolve) -> Result<MultiVerifier, ResolveError> {
         if input.did.method() != "web" {
@@ -101,8 +98,7 @@ impl<F: Fetch> Provider<Resolve> for DidWebProvider<F> {
 }
 
 /// The services a `did:web` document names, fetched as resolving it does.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl<F: Fetch> Provider<Discover> for DidWebProvider<F> {
     async fn execute(&self, input: Discover) -> Result<Vec<Service>, ResolveError> {
         if input.did.method() != "web" {
@@ -158,8 +154,7 @@ impl<F: Fetch> DidPlcProvider<F> {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl<F: Fetch> Provider<Resolve> for DidPlcProvider<F> {
     async fn execute(&self, input: Resolve) -> Result<MultiVerifier, ResolveError> {
         if input.did.method() != "plc" {
@@ -186,8 +181,7 @@ impl<F: Fetch> Provider<Resolve> for DidPlcProvider<F> {
 }
 
 /// The services a `did:plc` document names, fetched as resolving it does.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl<F: Fetch> Provider<Discover> for DidPlcProvider<F> {
     async fn execute(&self, input: Discover) -> Result<Vec<Service>, ResolveError> {
         if input.did.method() != "plc" {
@@ -231,8 +225,7 @@ impl<K, W, P> MethodResolver<K, W, P> {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl<K, W, P> Provider<Resolve> for MethodResolver<K, W, P>
 where
     K: Provider<Resolve> + dialog_common::ConditionalSync,
@@ -249,8 +242,7 @@ where
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl<K, W, P> Provider<Discover> for MethodResolver<K, W, P>
 where
     K: Provider<Discover> + dialog_common::ConditionalSync,

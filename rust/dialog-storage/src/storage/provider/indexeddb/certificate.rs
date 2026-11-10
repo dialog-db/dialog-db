@@ -181,7 +181,7 @@ impl<P: Protocol> CertificateStore<P> for IndexedDb {
     }
 }
 
-#[async_trait(?Send)]
+#[dialog_capability::provider]
 impl<P> Provider<Export<P>> for IndexedDb
 where
     P: Protocol,
@@ -194,7 +194,7 @@ where
     }
 }
 
-#[async_trait(?Send)]
+#[dialog_capability::provider]
 impl<P> Provider<Forget<P>> for IndexedDb
 where
     P: Protocol,
@@ -206,7 +206,7 @@ where
     }
 }
 
-#[async_trait(?Send)]
+#[dialog_capability::provider]
 impl<P> Provider<Prove<P>> for IndexedDb
 where
     P: Protocol,
@@ -221,7 +221,7 @@ where
     }
 }
 
-#[async_trait(?Send)]
+#[dialog_capability::provider]
 impl<P: Protocol> Provider<Retain<P>> for IndexedDb {
     async fn execute(&self, input: Capability<Retain<P>>) -> Result<(), AuthorizeError> {
         let delegation = &Retain::<P>::of(&input).delegation;

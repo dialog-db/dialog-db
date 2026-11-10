@@ -40,8 +40,7 @@ fn handed<M: Mode>(credential: Credential) -> Credential {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl<S, M: Mode> Provider<space_fx::Load> for Peer<S, M>
 where
     S: PeerSpace,
@@ -366,8 +365,7 @@ impl<S: Clone, M: Mode> Peer<S, M> {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl<S, M: Mode> Provider<space_fx::Create> for Peer<S, M>
 where
     S: PeerSpace,

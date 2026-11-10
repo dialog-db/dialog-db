@@ -124,8 +124,7 @@ impl BlobSink for CollectBlob {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<blob::Read> for Volatile {
     async fn execute(&self, input: Capability<blob::Read>) -> Result<BlobReader, BlobError> {
         let blob::Read {
@@ -158,8 +157,7 @@ impl Provider<blob::Read> for Volatile {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<blob::Write> for Volatile {
     async fn execute(&self, _input: Capability<blob::Write>) -> Result<BlobWriter, BlobError> {
         Ok(Box::new(CollectBlob {
@@ -170,8 +168,7 @@ impl Provider<blob::Write> for Volatile {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<blob::Import> for Volatile {
     async fn execute(&self, input: Capability<blob::Import>) -> Result<BlobWriter, BlobError> {
         Ok(Box::new(CollectBlob {
@@ -182,8 +179,7 @@ impl Provider<blob::Import> for Volatile {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<archive::Put> for Volatile {
     async fn execute(&self, input: Capability<archive::Put>) -> Result<(), ArchiveError> {
         let block = &input.constraint.block;
@@ -195,8 +191,7 @@ impl Provider<archive::Put> for Volatile {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<archive::Get> for Volatile {
     async fn execute(
         &self,
@@ -206,8 +201,7 @@ impl Provider<archive::Get> for Volatile {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<archive::Import> for Volatile {
     async fn execute(&self, input: Capability<archive::Import>) -> Result<(), ArchiveError> {
         let mut blocks = self.blocks.lock().expect("not poisoned");
@@ -221,8 +215,7 @@ impl Provider<archive::Import> for Volatile {
 /// A store has no identity of its own, so it answers with the subject
 /// it was asked about and names itself in the rest. Enough to satisfy
 /// [`Store`](crate::serve::Store) without inventing a peer.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<peer::Hello> for Volatile {
     async fn execute(
         &self,
@@ -237,8 +230,7 @@ impl Provider<peer::Hello> for Volatile {
 }
 
 /// Whatever [`Volatile::offering`] was given, and nothing by default.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<peer::Spaces> for Volatile {
     async fn execute(
         &self,
@@ -253,8 +245,7 @@ impl Provider<peer::Spaces> for Volatile {
 /// needs one should say so by using a real repository.
 macro_rules! declines {
     ($effect:ty, $output:ty) => {
-        #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-        #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+        #[dialog_capability::provider]
         impl Provider<$effect> for Volatile {
             async fn execute(&self, _: Capability<$effect>) -> $output {
                 Err(memory::MemoryError::Storage(

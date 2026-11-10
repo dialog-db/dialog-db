@@ -1647,6 +1647,7 @@ dependencies = [
  "dialog-remote-ucan",
  "dialog-remote-ucan-s3",
  "dialog-repository",
+ "dialog-search-tree",
  "dialog-storage",
  "dialog-ucan",
  "dialog-ucan-core",

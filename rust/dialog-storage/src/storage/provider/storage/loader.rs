@@ -3,16 +3,14 @@
 //! Handles `storage::Load` and `storage::Create` effects, managing
 //! location-to-DID mappings and space provider lifecycle.
 
-use std::fmt::Display;
-use std::sync::Arc;
-
-use async_trait::async_trait;
 use dialog_capability::{Capability, Did, Policy, Provider, did};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_credentials::Credential;
 use dialog_effects::prelude::*;
 use dialog_effects::{credential, storage};
 use dialog_varsig::Principal;
+use std::fmt::Display;
+use std::sync::Arc;
 use storage::{Location, StorageError};
 
 use crate::provider::SpaceProvider;
@@ -80,8 +78,7 @@ fn credential_load_error(error: credential::CredentialError) -> StorageError {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl<S> Provider<storage::Load> for Loader<S>
 where
     S: SpaceProvider + Resource<Location> + ConditionalSend,
@@ -130,8 +127,7 @@ where
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl<S> Provider<storage::Create> for Loader<S>
 where
     S: SpaceProvider + Resource<Location> + ConditionalSend,

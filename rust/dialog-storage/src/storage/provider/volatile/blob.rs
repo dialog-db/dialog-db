@@ -278,8 +278,7 @@ impl BlobSink for MemoryRangeSink {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<Read> for Volatile {
     async fn execute(&self, effect: Capability<Read>) -> Result<BlobReader, BlobError> {
         let subject: Did = effect.subject().into();
@@ -322,8 +321,7 @@ impl Provider<Read> for Volatile {
 
 /// The bytes that the session keeps: each blob and outboard, and the groups
 /// and the pairs of each partial blob.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<Usage> for Volatile {
     async fn execute(&self, effect: Capability<Usage>) -> Result<u64, BlobError> {
         let subject: Did = effect.subject().into();
@@ -410,8 +408,7 @@ fn verified(
 }
 
 /// Which bytes of a blob the session holds.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<Held> for Volatile {
     async fn execute(&self, effect: Capability<Held>) -> Result<Option<Holding>, BlobError> {
         let subject: Did = effect.subject().into();
@@ -434,8 +431,7 @@ impl Provider<Held> for Volatile {
 /// The proof of a range of a blob, from the pairs of its outboard, or of the
 /// hashes that verified the groups of a partial blob that holds each group
 /// whose path the proof reads.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<Proof> for Volatile {
     async fn execute(
         &self,
@@ -487,8 +483,7 @@ impl Provider<Proof> for Volatile {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<ImportRange> for Volatile {
     async fn execute(&self, effect: Capability<ImportRange>) -> Result<BlobWriter, BlobError> {
         let (size, range) = (effect.size(), effect.range());
@@ -508,8 +503,7 @@ impl Provider<ImportRange> for Volatile {
 }
 
 /// The length of the buffer held under the digest; nothing is copied.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<Size> for Volatile {
     async fn execute(&self, effect: Capability<Size>) -> Result<Option<u64>, BlobError> {
         let subject: Did = effect.subject().into();
@@ -523,16 +517,14 @@ impl Provider<Size> for Volatile {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<Write> for Volatile {
     async fn execute(&self, effect: Capability<Write>) -> Result<BlobWriter, BlobError> {
         Ok(Box::new(self.open_blob_sink(effect.subject().into(), None)))
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<Import> for Volatile {
     async fn execute(&self, effect: Capability<Import>) -> Result<BlobWriter, BlobError> {
         let expected = effect.digest().clone();

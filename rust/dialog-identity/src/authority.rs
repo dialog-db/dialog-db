@@ -103,8 +103,7 @@ impl Principal for Authority {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<authority::Identify> for Authority {
     async fn execute(
         &self,
@@ -114,8 +113,7 @@ impl Provider<authority::Identify> for Authority {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<authority::Attest> for Authority {
     async fn execute(&self, input: authority::Attest) -> Result<Vec<u8>, AuthorityError> {
         // Sign with the operator key: the session identity `Identify`

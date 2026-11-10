@@ -76,8 +76,7 @@ impl FileSystemHandle {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<Resolve> for FileSystem {
     async fn execute(
         &self,
@@ -101,8 +100,7 @@ impl Provider<Resolve> for FileSystem {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<Publish> for FileSystem {
     async fn execute(&self, effect: Capability<Publish>) -> Result<Version, MemoryError> {
         let space = effect.space();
@@ -166,8 +164,7 @@ impl Provider<Publish> for FileSystem {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<Retract> for FileSystem {
     async fn execute(&self, effect: Capability<Retract>) -> Result<(), MemoryError> {
         let space = effect.space();
@@ -206,8 +203,7 @@ impl Provider<Retract> for FileSystem {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<List> for FileSystem {
     async fn execute(&self, effect: Capability<List>) -> Result<Vec<String>, MemoryError> {
         let mut paths: Vec<String> = self

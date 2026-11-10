@@ -144,8 +144,7 @@ pub struct Space<A, M, C, D, B> {
     pub blob: B,
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl<Archive, Memory, Credential, Certificate, Blob, P> Provider<Prove<P>>
     for Space<Archive, Memory, Credential, Certificate, Blob>
 where
@@ -164,8 +163,7 @@ where
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl<Archive, Memory, Credential, Certificate, Blob, P> Provider<Export<P>>
     for Space<Archive, Memory, Credential, Certificate, Blob>
 where
@@ -185,8 +183,7 @@ where
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl<Archive, Memory, Credential, Certificate, Blob, P> Provider<Forget<P>>
     for Space<Archive, Memory, Credential, Certificate, Blob>
 where
@@ -204,8 +201,7 @@ where
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl<Archive, Memory, Credential, Certificate, Blob, P> Provider<AccessRetain<P>>
     for Space<Archive, Memory, Credential, Certificate, Blob>
 where

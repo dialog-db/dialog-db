@@ -19,6 +19,8 @@
 //! ancestry includes, is measured by `context_cost_by_origins` the same
 //! way (`DIALOG_RA_MAX_ORIGINS` caps its sweep).
 
+use dialog_artifacts::tree::CorpusNode;
+use dialog_search_tree::nodes;
 use std::env;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -28,15 +30,15 @@ use futures_util::stream;
 
 use dialog_artifacts::history::{Context, context_of};
 use dialog_artifacts::{
-    ATTRIBUTE_KEY_TAG, ArchiveDelta, Artifact, BLOB_KEY_TAG, COVERAGE_KEY_TAG, Datum,
-    ENTITY_KEY_TAG, HISTORY_KEY_TAG, Instruction, Key, State, VALUE_KEY_TAG, Value,
+    ATTRIBUTE_KEY_TAG, ArchiveDelta, Artifact, BLOB_KEY_TAG, COVERAGE_KEY_TAG, ENTITY_KEY_TAG,
+    HISTORY_KEY_TAG, Instruction, VALUE_KEY_TAG, Value,
 };
 use dialog_capability::Provider;
 use dialog_common::Holds;
 use dialog_common::{Blake3Hash, ConditionalSync};
 use dialog_effects::archive::Load;
 use dialog_effects::archive::prelude::CatalogScope;
-use dialog_search_tree::{FrameAttribution, Manifest, PersistentNode};
+use dialog_search_tree::{FrameAttribution, Manifest};
 
 use crate::RepositoryExt as _;
 use crate::helpers::{Counting, prune_unreachable as prune};
@@ -528,7 +530,7 @@ async fn measure_write_paths(depth: usize, batches: usize) -> Result<()> {
         .await?;
         deferred = next;
     }
-    let _ = deferred.canonicalize(&staged, delta.blocks()).await?;
+    let _ = deferred.canonicalize(&staged, delta.nodes()).await?;
     let deferred_ms = started.elapsed().as_millis();
     persist!(delta);
 
@@ -1105,9 +1107,6 @@ async fn current_costs() -> Result<()> {
     Ok(())
 }
 
-/// The node type the artifact tree persists, read back for attribution.
-type ArtifactNode = PersistentNode<Key, State<Datum>>;
-
 /// Records the length and hash of every archive block the operator moves,
 /// beneath every cache, so a block a commit wrote or a query read can be
 /// fetched again by hash and attributed.
@@ -1159,7 +1158,12 @@ async fn attribute_block<Env>(
     hash: &Blake3Hash,
 ) -> Result<Option<FrameAttribution>>
 where
-    Env: Provider<Load> + Holds + ConditionalSync,
+    Env: Provider<Load>
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
+        + Holds
+        + ConditionalSync,
 {
     let Some(buffer) = Load::new(catalog.clone(), hash.clone())
         .perform(store)
@@ -1167,7 +1171,7 @@ where
     else {
         anyhow::bail!("block {hash} is not in the archive");
     };
-    let Ok(node) = ArtifactNode::try_from(buffer) else {
+    let Ok(node) = CorpusNode::try_from(buffer) else {
         return Ok(None);
     };
     let manifest = node.manifest()?;
@@ -1347,7 +1351,7 @@ async fn attribute_first_query(origins: usize) -> Result<()> {
                     .perform(&store)
                     .await?
                     .expect("just read");
-                let manifest = ArtifactNode::try_from(node)?.manifest()?;
+                let manifest = CorpusNode::try_from(node)?.manifest()?;
                 let label = if at == 0 {
                     format!("root ({len} bytes)")
                 } else {
@@ -1421,7 +1425,7 @@ async fn attribute_crowd(origins: usize) -> Result<()> {
             .perform(&store)
             .await?
             .expect("the root is stored");
-        ArtifactNode::try_from(node)?.manifest()?
+        CorpusNode::try_from(node)?.manifest()?
     };
 
     let start = attribute_block(&store, &catalog, &root_of(&main))

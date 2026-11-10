@@ -1,3 +1,4 @@
+use dialog_artifacts::tree::CorpusNode;
 use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
 use dialog_effects::Rejection;
@@ -6,6 +7,7 @@ use dialog_effects::archive::{Get as ArchiveGet, Put as ArchivePut};
 use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::Read as BlobRead;
 use dialog_effects::memory::{Publish, Resolve};
+use dialog_search_tree::nodes;
 
 use super::context::{full_context, head_observes};
 use crate::repository::archive::erased;
@@ -66,6 +68,11 @@ impl Reset<'_> {
             + Provider<ArchivePut>
             + Provider<Resolve>
             + Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
             + dialog_common::Holds
             + ConditionalSync
@@ -130,6 +137,11 @@ where
         + Provider<ArchivePut>
         + Provider<Resolve>
         + Provider<ArchiveLoad>
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
         + Provider<BlobLoad>
         + dialog_common::Holds
         + ConditionalSync

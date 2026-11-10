@@ -710,8 +710,7 @@ async fn rebuild_outboard(
     Ok(())
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<Read> for FileSystem {
     async fn execute(&self, effect: Capability<Read>) -> Result<BlobReader, BlobError> {
         let digest = effect.digest();
@@ -762,8 +761,7 @@ impl Provider<Read> for FileSystem {
 /// names, with its outboard. A staged write, a lock, and a temporary file
 /// keep nothing yet. The store reads the record of each partial blob, and no
 /// blob.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<Usage> for FileSystem {
     async fn execute(&self, _effect: Capability<Usage>) -> Result<u64, BlobError> {
         let blob_dir = self.blob()?;
@@ -805,8 +803,7 @@ impl Provider<Usage> for FileSystem {
 
 /// Which bytes of a blob the store holds: from the length of a whole blob,
 /// or from the record of a partial one.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<Held> for FileSystem {
     async fn execute(&self, effect: Capability<Held>) -> Result<Option<Holding>, BlobError> {
         self.holding(effect.digest()).await
@@ -820,8 +817,7 @@ impl Provider<Held> for FileSystem {
 /// group whose path the proof reads. A pair of the outboard of a whole blob
 /// that does not verify removes the outboard, which the next read builds
 /// again.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<Proof> for FileSystem {
     async fn execute(
         &self,
@@ -904,8 +900,7 @@ impl Provider<Proof> for FileSystem {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<ImportRange> for FileSystem {
     async fn execute(&self, effect: Capability<ImportRange>) -> Result<BlobWriter, BlobError> {
         let sink = self
@@ -917,8 +912,7 @@ impl Provider<ImportRange> for FileSystem {
 
 /// The blob file's length, from its metadata (natively) or its `File`
 /// (on the web); its bytes are not read.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<Size> for FileSystem {
     async fn execute(&self, effect: Capability<Size>) -> Result<Option<u64>, BlobError> {
         let handle = self.blob()?.resolve(&blob_key(effect.digest()))?;
@@ -926,16 +920,14 @@ impl Provider<Size> for FileSystem {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<Write> for FileSystem {
     async fn execute(&self, _effect: Capability<Write>) -> Result<BlobWriter, BlobError> {
         Ok(Box::new(self.open_blob_sink(None).await?))
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<Import> for FileSystem {
     async fn execute(&self, effect: Capability<Import>) -> Result<BlobWriter, BlobError> {
         let expected = effect.digest().clone();
