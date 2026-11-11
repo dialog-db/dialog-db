@@ -516,3 +516,84 @@ CI (run 13, against main): nothing slower; warm commands off the disk
 off the commit; a contact write that reads before it writes
 (`remove_name`) is replayed as computed, by the registry's own retry as
 before and by the commit's now.
+
+## 2026-11-11, Verifying: a test for every case the design handles
+
+Every concurrent case the design says it handles now has a test in
+`rust/dialog-archive-file/src/archive/concurrency.rs` (the archive and its
+cells), `src/archive/cells.rs` and `tests/repository.rs` (branches), and
+each test was checked against the code broken on purpose: with the
+guarantee it pins removed, it fails. Other processes are the test binary
+run again in a role; children start together on a line from the parent;
+a child that never says what it should fails the test after twenty
+seconds instead of hanging it.
+
+**Cases pinned.** A lone writer writes nothing into extents. Processes,
+and threads of one process, append at once and every block reads back,
+filed once, after reopening. A process that has never held the turn
+writes while another holds it throughout. Another process reads blocks
+still in an extent. A dead writer's extent is read, taken over without
+losing its blocks, and folded in by the next writer. An extent retired
+under a stale snapshot is not taken. A crash between folding and
+retiring is finished by the next integration. An extent is reused only
+after a sync point, and a reader that read it before reads the blocks
+written over it. A frame not whole ends a walk, and is read once its
+bytes arrive. A new catalog, and a full extent with none to take, wait
+for the turn. Only the last process to close cuts the file. A file
+reached by two names in one process is one handle. One of many creating
+a cell wins; counting a cell up from three processes and three threads
+loses no update; a swap and a retraction racing land one; a cell's lock
+holds up that cell alone; a cell read while written is a value written,
+never older than one read before. Two processes commit to two branches
+while a third holds the turn throughout; three commit to one branch at
+once and every commit lands.
+
+**What the suite found, and what changed.**
+
+1. *A process that had never held the turn waited for it on its first
+   write*, and *opening the file took the turn*: the main tonk case, a
+   command-line process committing while an app integrates, waited
+   twice. A process holding the turn now leaves one extent listed that
+   no process owns, and a process with none takes it, or a dead writer's,
+   by its owner's byte; opening takes the turn only after a reboot or for
+   a new file. An adopter checks the newest slot still lists what it
+   took, and a claim takes the owner's byte before any slot lists it.
+2. *Threads lost blocks.* An integration folding this process's extents
+   took them off its idle list without marking them busy; another thread
+   took one (the process's own lock does not stop its own threads) and
+   wrote into it as it was retired. Every extent whose byte a process
+   holds is now idle or busy, and a failed integration keeps them held.
+3. *A reader could report no whole slot*: it read the file's length and
+   then the slots, and two appends in between put both past the length.
+   The slots are read first, and a read that catches both torn is tried
+   again.
+4. *A cell read could go backwards*: the first half read, written over,
+   then the second read torn mid-write, returned the first's older value
+   after a newer one had been read. A reader reads the first half again
+   after the second and reads again if it changed, by read calls, not
+   from the mapping, which the compiler may take as unchanging.
+5. *Readers missed blocks*: a walk that stopped at a frame not yet whole
+   recorded the whole count as read, and a reader could not tell an
+   extent claimed again from the one it had read. A walk records how far
+   it got; an extent carries the sequence of the slot that claimed it,
+   and a reader that sees it change reads the extent again. The format is
+   12.
+6. *One file by two names was two handles in a process*: both would hold
+   the turn, and closing either let go of every lock the process held on
+   the file. Open files are known by device and inode.
+7. *A transaction that lost its branch's race was refused*: the retry of
+   stage four covered the repository's internal commits only, and the
+   changelog claimed more. `transaction()...commit().publish()` now
+   stages its writes again over the head that won; a batch its caller
+   staged explicitly is still refused, as its caller read what it staged
+   on.
+
+A first counting test failed for a reason that is not a bug: a cell's
+edition is its value's hash, and every memory store takes a publish of
+the value a cell holds as done, so two increments to the same value were
+one. The test writes values that differ.
+
+**Open.** Integration off the commit; a write computed from a read before
+the commit is applied again as computed (the claim above); more than one
+process opening while the turn is held finds one extent to take, and the
+next waits for the turn once.

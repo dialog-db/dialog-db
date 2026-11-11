@@ -130,10 +130,14 @@ with the winner instead.
 
 What this changes for you:
 
-- `Branch::commit(...).perform(...)` and `.commit().publish()` succeed
-  where they returned `CommitError::Publish(PublishError::VersionMismatch)`
-  after a concurrent commit, landing on top of it; the error is returned
-  only once the retries run out.
+- `branch.transaction()...commit().publish().perform(...)` succeeds where
+  it returned `CommitError::Publish(PublishError::VersionMismatch)` after
+  a concurrent commit, landing on top of it; the error is returned only
+  once the retries run out. The repository's own commits (delegations,
+  migrations) do the same.
+- A `TransactionBatch` its caller staged (`.commit().perform(...)`, then
+  `.publish()`) is still refused on a lost race: its caller read what it
+  staged on, and runs it again.
 - A write computed outside the rules from an earlier read (read a value,
   assert one derived from it) is applied again as it was computed; express
   it as a rule, or read and commit again on the caller's side, to have it
@@ -163,7 +167,12 @@ What this changes for you:
 - A `Space` whose memory is a `FileArchive` keeps no `memory` directory:
   its cells are in `archive.dialog`.
 - A cell's edition is the BLAKE3 hash of its value, as under `fs`, so a
-  `Publish` names the same version either way.
+  `Publish` names the same version either way, and publishing the value a
+  cell already holds succeeds whatever edition the writer expected, as on
+  every memory store.
+- A `Resolve` reads a value the cell held at one moment: never torn, and
+  never older than one a read before it returned, while other processes
+  write it.
 - `List` walks the cells' own index, not the blocks'.
 
 Why: a space that is one file is one thing to copy, back up and keep
@@ -181,8 +190,11 @@ extent of its own, space it claimed in an earlier turn, and they read back
 at once, in its process and in others. The next writer to get the turn,
 usually the same one after its commit, turns those blocks into frames and
 tokens, and the extent is freed once a sync point makes that durable. A
-writer waits for the turn only to claim an extent when its process had
-none ready; one that holds the turn keeps one ready.
+process that holds the turn keeps an extent ready for itself and leaves
+one no process owns; a process with none takes that one, or one whose
+writer died, so a process that has never held the turn writes without
+waiting for it too. A writer waits for the turn only to claim an extent
+when there is none to take, or for a catalog the file has not numbered.
 
 What this changes for you:
 
@@ -193,9 +205,16 @@ What this changes for you:
   whole file, on every platform.
 - `Options::extent` sets how many bytes of blocks an extent holds (1 MiB
   by default). Each process that writes keeps one extent claimed while it
-  has the file open; the last process to close the file retires its
-  extents and cuts free extents that end the file off it.
-- The file's format is version 11: a file written by an earlier build of
+  has the file open, and one more is kept for a process that has none;
+  the last process to close the file retires them and cuts free extents
+  that end the file off it.
+- Opening the file no longer waits for another process's turn: the slot
+  it opens from was written in this boot, so there is nothing to repair.
+  After a reboot, or for a new file, opening still takes the turn.
+- A file reached by two names in one process (a hard link, a symbolic
+  link) is one handle, as a path reached two ways already was: two would
+  both hold the writer's turn.
+- The file's format is version 12: a file written by an earlier build of
   `dialog-archive-file` does not open.
 
 Why: many processes work on separate branches of one space at once, and on
@@ -1549,8 +1568,8 @@ has a tree to canonicalize even when the link itself wrote nothing.
 
 #### Compatibility and migration
 
-- A `FileArchive` file is format 11; one written by an earlier build of
-  this branch's `dialog-archive-file` (format 10) does not open, and is
+- A `FileArchive` file is format 12; one written by an earlier build of
+  this branch's `dialog-archive-file` (format 10 or 11) does not open, and is
   moved again from the replica it came from with `dialog-migrate`. Nothing
   else stored or synced changes: blocks, their hashes and what a replica
   syncs are the same.
