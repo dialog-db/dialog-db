@@ -14,6 +14,57 @@ says how to cut a release.
 
 ## Unreleased
 
+### A pull brings along what the replica read before its head moves
+
+[design/held-across-pull.md](./design/held-across-pull.md).
+
+A pull that adopts an upstream head by root (a fast-forward, a rival
+merge settled, a reset brought forward) read none of the head's tree, so
+everything the upstream had changed was held by reference once the head
+landed, wherever it was. A read the replica had answered from its own
+blocks a moment before then waited on the peer that holds the block, and
+failed without one: a page rendered from a device's own store did not
+render offline after a sync it had no part in.
+
+A pull now follows the head it adopts before handing it back.
+`PersistentTree::follow(held, env)` walks the tree held and the tree
+adopted in step and reads a node of the adopted one, fetching what the
+replica lacks, only where the keys the node is routed meet those of a leaf
+the replica holds of the tree it stands on. `Pull::prepare` and
+`Pull::perform` both do it, so the cells still move only in
+`PreparedPull::commit`.
+
+What this changes for you:
+
+- Every key a replica reads from its own blocks before a pull, it reads
+  from its own blocks after it. A replica that holds every leaf of its
+  head ends holding every leaf of the head it adopts.
+- Where a replica wrote from its own blocks before a pull, it writes from
+  them after it. A write reads the leaves it writes to, and a head adopted
+  by root left them on the remote after every pull. A replica's first
+  write to a key it only read still fetches the leaves of the orders it
+  never read that key through.
+- A pull that adopts a head another replica moved fetches blocks where it
+  fetched none: the nodes that changed along the paths the replica holds a
+  leaf of. A region it never read stays by reference however much of it
+  changed, and a replica with no head, or one that holds none of its
+  head's leaves, still adopts at no fetch.
+- The head stays where it was while those blocks are fetched, and reads
+  and commits go on against it. A commit that lands meanwhile makes the
+  pull's publish fail as before, with the head where the commit put it,
+  and the caller pulls again.
+- A pull fails with `PullError::Tree` when a node it follows to cannot be
+  fetched, and the head is left where it was. Before, the pull succeeded
+  and the next read of that node failed.
+- `PersistentTree::follow` is new in `dialog-search-tree`.
+
+Why: a partial replica's promise is that what it read it can read again
+without the network. Adopting by root kept the cost of a pull independent
+of what the upstream changed, and broke that promise each time the
+upstream changed something the replica had read. Bounding the reads by
+what the replica holds keeps both: the cost follows what changed in what
+this replica uses.
+
 ### The corpus crate is `dialog-corpus`, and it asks its environment for everything it reads
 
 [#768](https://github.com/dialog-db/dialog-db/pull/768), decided in
@@ -82,50 +133,6 @@ that embodies the model should not depend on a store. #755 made the tree
 ask its environment for nodes; this makes the layer above it ask for
 everything else the same way, so what a store is and where it is stay the
 environment's business.
-### A pull brings along what the replica read before its head moves
-
-A pull that adopts an upstream head by root (a fast-forward, a rival
-merge settled, a reset brought forward) read none of the head's tree, so
-everything the upstream had changed was held by reference once the head
-landed, wherever it was. A read the replica had answered from its own
-blocks a moment before then waited on the peer that holds the block, and
-failed without one: a page rendered from a device's own store did not
-render offline after a sync it had no part in.
-
-A pull now follows the head it adopts before handing it back.
-`PersistentTree::follow(held, env)` walks the tree held and the tree
-adopted in step and reads a node of the adopted one, fetching what the
-replica lacks, only where the keys the node is routed meet those of a leaf
-the replica holds of the tree it stands on. `Pull::prepare` and
-`Pull::perform` both do it, so the cells still move only in
-`PreparedPull::commit`.
-
-What this changes for you:
-
-- Every key a replica reads from its own blocks before a pull, it reads
-  from its own blocks after it. A replica that holds every leaf of its
-  head ends holding every leaf of the head it adopts.
-- A pull that adopts a head another replica moved fetches blocks where it
-  fetched none: the nodes that changed along the paths the replica holds a
-  leaf of. A region it never read stays by reference however much of it
-  changed, and a replica with no head, or one that holds none of its
-  head's leaves, still adopts at no fetch.
-- The head stays where it was while those blocks are fetched, and reads
-  and commits go on against it. A commit that lands meanwhile makes the
-  pull's publish fail as before, and the pull prepares again on the head
-  the commit left.
-- A pull fails with `PullError::Tree` when a node it follows to cannot be
-  fetched, and the head is left where it was. Before, the pull succeeded
-  and the next read of that node failed.
-- `PersistentTree::follow` is new in `dialog-search-tree`.
-
-Why: a partial replica's promise is that what it read it can read again
-without the network. Adopting by root kept the cost of a pull independent
-of what the upstream changed, and broke that promise each time the
-upstream changed something the replica had read. Bounding the reads by
-what the replica holds keeps both: the cost follows what changed in what
-this replica uses.
-
 ### A tree asks its environment for nodes, and the environment keeps them
 
 [design/tree-node-reads.md](./design/tree-node-reads.md), planned in

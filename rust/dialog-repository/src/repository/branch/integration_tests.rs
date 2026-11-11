@@ -21,9 +21,10 @@ use dialog_effects::MethodExt as _;
 use dialog_effects::archive::prelude::{ArchiveExt as _, ArchiveScope};
 use dialog_effects::blob::prelude::{ArchiveBlobExt as _, ReadBlobExt as _};
 use std::collections::HashSet;
+use std::ops::Range;
 
 use crate::contact;
-use crate::helpers::connect;
+use crate::helpers::{Counting, connect};
 use crate::schema::DidExt as _;
 use crate::{
     Blob, Branch, Index, Item, Repository, RepositoryExt as _, Revision, SiteAddress,
@@ -2277,6 +2278,151 @@ async fn it_pushes_novelty_after_adopting_the_upstream_head_by_reference(
     Ok(())
 }
 
+/// One fact naming `entity`, appended.
+fn named(entity: &str, name: &str) -> Instruction {
+    Instruction::Assert(
+        Fact {
+            the: "user/name".parse().expect("valid attribute"),
+            of: entity.parse().expect("valid entity"),
+            is: Value::String(name.into()),
+            cause: None,
+        },
+        dialog_corpus::Pick::All,
+    )
+}
+
+/// Seventy-five residents of `batch`, enough of them over a few batches
+/// that the tree has leaves a replica can hold some of and not others.
+fn residents(batch: usize) -> Vec<Instruction> {
+    (0..75)
+        .map(|i| {
+            named(
+                &format!("user:{batch}-{i}"),
+                &format!("resident-{batch}-{i}"),
+            )
+        })
+        .collect()
+}
+
+/// A device that authored a subject and published it, and a second device
+/// that adopted its head and holds none of its tree: the two ends of the
+/// tests of what a replica holds once it adopts a head another moved.
+struct Followed {
+    /// The authoring device's branch, and what it performs through.
+    alice: Branch,
+    operator: Peer<VolatileSpace, dialog_peer::Session>,
+    /// The following device's branch, and the counting env it performs
+    /// through.
+    bob: Branch,
+    env: Counting<Peer<VolatileSpace, dialog_peer::Session>>,
+}
+
+/// [`Followed`] over `s3`: four batches of residents published, and
+/// adopted by a follower that has read none of them.
+async fn followed(s3: &S3Address, name: &str) -> Result<Followed> {
+    let (operator, profile) = test_session_with_peer().await;
+    let (alice_repo, alice) =
+        setup_repo_with_s3_remote(&operator, &profile, s3, &format!("{name}-a")).await?;
+    for batch in 0..4 {
+        alice
+            .commit(stream::iter(residents(batch)))
+            .perform(&operator)
+            .await?;
+    }
+    alice.push().perform(&operator).await?;
+
+    let env = Counting::new(operator.clone());
+    let bob_repo = profile
+        .space(unique_name(&format!("{name}-b")))
+        .open()
+        .perform(&env)
+        .await?;
+    let origin = connect("origin", s3_site_address(s3), alice_repo.did(), &env).await?;
+    let bob = bob_repo.branch("main").open().perform(&env).await?;
+    let remote = origin.branch("main").open().perform(&env).await?;
+    bob.set_upstream(remote).perform(&env).await?;
+    bob.pull().perform(&env).await?.expect("head adopted");
+    Ok(Followed {
+        alice,
+        operator,
+        bob,
+        env,
+    })
+}
+
+impl Followed {
+    /// The names the follower reads of `entity`, and how many blocks it
+    /// fetched from the remote to read them.
+    async fn names_of(&self, entity: &str) -> Result<(Vec<Value>, u64)> {
+        self.env.reset();
+        let facts: Vec<_> = self
+            .bob
+            .claims()
+            .select(
+                Selector::new()
+                    .the("user/name".parse()?)
+                    .of(entity.parse()?),
+            )
+            .to_owned()
+            .perform(&self.env)
+            .await?
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((
+            facts.into_iter().map(|fact| fact.is).collect(),
+            self.env.count("Hydrate"),
+        ))
+    }
+
+    /// The follower names `entity`, and how many blocks it fetched from
+    /// the remote to write that.
+    async fn name(&self, entity: &str, name: &str) -> Result<u64> {
+        self.env.reset();
+        self.bob
+            .commit(stream::iter(vec![named(entity, name)]))
+            .perform(&self.env)
+            .await?;
+        Ok(self.env.count("Hydrate"))
+    }
+
+    /// The author renames `entity`, settles `batches` more residents where
+    /// the follower never read, and publishes.
+    async fn move_upstream(&self, entity: &str, name: &str, batches: Range<usize>) -> Result<()> {
+        self.alice
+            .commit(stream::iter(vec![named(entity, name)]))
+            .perform(&self.operator)
+            .await?;
+        for batch in batches {
+            self.alice
+                .commit(stream::iter(residents(batch)))
+                .perform(&self.operator)
+                .await?;
+        }
+        self.alice.push().perform(&self.operator).await?;
+        Ok(())
+    }
+
+    /// The follower pulls, and the head it lands on is the author's by
+    /// root: the pull that reads none of the tree it adopts.
+    async fn adopt(&self) -> Result<()> {
+        let adopted = self
+            .bob
+            .pull()
+            .perform(&self.env)
+            .await?
+            .expect("head adopted");
+        assert_eq!(
+            Some(adopted.tree),
+            self.alice.revision().map(|revision| revision.tree),
+            "the fixture must adopt the author's head by root, or it no \
+             longer covers the head a merge would have read"
+        );
+        Ok(())
+    }
+}
+
 /// A replica reads from its own blocks, once it adopted a head another
 /// device moved, the fact it read from them before.
 ///
@@ -2292,129 +2438,153 @@ async fn it_pushes_novelty_after_adopting_the_upstream_head_by_reference(
 async fn it_reads_what_it_held_after_adopting_a_head_another_device_moved(
     s3: S3Address,
 ) -> Result<()> {
-    use crate::helpers::Counting;
+    let devices = followed(&s3, "follow-read").await?;
 
-    let (operator, profile) = test_session_with_peer().await;
-    let named = |entity: String, name: String| {
-        Instruction::Assert(
-            Artifact {
-                the: "user/name".parse().expect("valid attribute"),
-                of: entity.parse().expect("valid entity"),
-                is: Value::String(name),
-                cause: None,
-            },
-            dialog_artifacts::Pick::All,
-        )
-    };
-    let residents = |batch: usize| {
-        (0..75)
-            .map(|i| named(format!("user:{batch}-{i}"), format!("resident-{batch}-{i}")))
-            .collect::<Vec<_>>()
-    };
-
-    // Device A gives the subject enough history that the tree has real
-    // depth, and publishes it.
-    let (alice_repo, alice_branch) =
-        setup_repo_with_s3_remote(&operator, &profile, &s3, "follow-a").await?;
-    for batch in 0..4 {
-        alice_branch
-            .commit(stream::iter(residents(batch)))
-            .perform(&operator)
-            .await?;
-    }
-    alice_branch.push().perform(&operator).await?;
-
-    // Device B, same subject, fresh archive: the pull adopts A's head.
-    let env = Counting::new(operator.clone());
-    let bob_repo = profile
-        .space(unique_name("follow-b"))
-        .open()
-        .perform(&env)
-        .await?;
-    let origin = connect("origin", s3_site_address(&s3), alice_repo.did(), &env).await?;
-    let bob_branch = bob_repo.branch("main").open().perform(&env).await?;
-    let remote_branch = origin.branch("main").open().perform(&env).await?;
-    bob_branch.set_upstream(remote_branch).perform(&env).await?;
-    bob_branch
-        .pull()
-        .perform(&env)
-        .await?
-        .expect("head adopted");
-
-    // The names B reads of one resident, and how many blocks it fetched
-    // from the remote to read them.
-    let names_of = |entity: &'static str| {
-        let (env, bob_branch) = (&env, &bob_branch);
-        async move {
-            env.reset();
-            let facts: Vec<_> = bob_branch
-                .claims()
-                .select(
-                    ArtifactSelector::new()
-                        .the("user/name".parse()?)
-                        .of(entity.parse()?),
-                )
-                .to_owned()
-                .perform(env)
-                .await?
-                .collect::<Vec<_>>()
-                .await
-                .into_iter()
-                .collect::<Result<Vec<_>, _>>()?;
-            let names: Vec<Value> = facts.into_iter().map(|fact| fact.is).collect();
-            anyhow::Ok((names, env.count("Hydrate")))
-        }
-    };
-    let (names, fetched) = names_of("user:0-0").await?;
+    let (names, fetched) = devices.names_of("user:0-0").await?;
     assert_eq!(names, vec![Value::String("resident-0-0".into())]);
-    assert!(fetched > 0, "B holds none of the tree until it reads");
-    let (_, fetched) = names_of("user:0-0").await?;
-    assert_eq!(fetched, 0, "B holds what it read");
-
-    // A renames the resident B read, settles many more where B never
-    // read, and publishes. B adopts the head.
-    alice_branch
-        .commit(stream::iter(vec![named(
-            "user:0-0".into(),
-            "renamed".into(),
-        )]))
-        .perform(&operator)
-        .await?;
-    for batch in 4..12 {
-        alice_branch
-            .commit(stream::iter(residents(batch)))
-            .perform(&operator)
-            .await?;
-    }
-    alice_branch.push().perform(&operator).await?;
-    let adopted = bob_branch
-        .pull()
-        .perform(&env)
-        .await?
-        .expect("head adopted");
-    assert_eq!(
-        Some(adopted.tree),
-        alice_branch.revision().map(|revision| revision.tree),
-        "the fixture must adopt A's head by root, or it no longer covers \
-         the head a merge would have read"
+    assert!(
+        fetched > 0,
+        "the follower holds none of the tree until it reads"
     );
+    let (_, fetched) = devices.names_of("user:0-0").await?;
+    assert_eq!(fetched, 0, "the follower holds what it read");
 
-    let (names, fetched) = names_of("user:0-0").await?;
+    devices.move_upstream("user:0-0", "renamed", 4..12).await?;
+    devices.adopt().await?;
+
+    let (names, fetched) = devices.names_of("user:0-0").await?;
     assert!(
         names.contains(&Value::String("renamed".into())),
-        "B reads the adopted head: {names:?}"
+        "the follower reads the adopted head: {names:?}"
     );
     assert_eq!(
         fetched, 0,
-        "what B read from its own blocks before the pull, it reads from \
-         them after"
+        "what the follower read from its own blocks before the pull, it \
+         reads from them after"
     );
 
-    let (names, fetched) = names_of("user:9-9").await?;
+    let (names, fetched) = devices.names_of("user:9-9").await?;
     assert_eq!(names, vec![Value::String("resident-9-9".into())]);
     assert!(
         fetched > 0,
-        "what B never read was left by reference, and is fetched on demand"
+        "what the follower never read was left by reference, and is \
+         fetched on demand"
+    );
+
+    Ok(())
+}
+
+/// A replica writes where it wrote before, once it adopted a head another
+/// device moved, without fetching a block.
+///
+/// A write reads the leaves it writes to: the fact's in each index, and
+/// its history's. A replica holds those once it has written there. A head
+/// adopted by root left them on the remote wherever the other device had
+/// changed them, so every pull made the next write to the same fact wait
+/// on the remote again: an editor that had just answered a keystroke at
+/// once took a round trip to answer the next. Following the head keeps
+/// the leaves a replica wrote to as it keeps the ones it read.
+///
+/// A replica's first write to a fact it only read still fetches the
+/// leaves of the indexes it never read that fact through. That is not
+/// pinned here: it is a write to a region the replica does not hold.
+#[dialog_common::test]
+async fn it_writes_where_it_wrote_after_adopting_a_head_another_device_moved(
+    s3: S3Address,
+) -> Result<()> {
+    let devices = followed(&s3, "follow-write").await?;
+
+    // The follower writes, which fetches the leaves it writes to, and
+    // publishes. The author builds on that, so its next head is one the
+    // follower adopts by root.
+    devices.name("user:0-0", "first").await?;
+    assert_eq!(
+        devices.name("user:0-0", "second").await?,
+        0,
+        "the follower holds the leaves it wrote to"
+    );
+    devices.bob.push().perform(&devices.env).await?;
+    devices.alice.pull().perform(&devices.operator).await?;
+    devices.move_upstream("user:0-0", "renamed", 4..12).await?;
+    devices.adopt().await?;
+
+    assert_eq!(
+        devices.name("user:0-0", "third").await?,
+        0,
+        "where the follower wrote from its own blocks before the pull, it \
+         writes from them after"
+    );
+    let (names, _) = devices.names_of("user:0-0").await?;
+    for name in ["first", "second", "renamed", "third"] {
+        assert!(
+            names.contains(&Value::String(name.into())),
+            "the follower's writes and the author's are all there: {names:?}"
+        );
+    }
+
+    Ok(())
+}
+
+/// A commit that lands while a pull is fetching what it follows to is
+/// kept: the pull loses its publish and leaves the head where the commit
+/// put it, and the pull made again merges the two.
+///
+/// Following a head is the network half of a pull, and it runs before any
+/// cell is written, so a replica reads and writes on the head it holds
+/// for as long as the fetch takes. This pins that a write made in that
+/// time is neither lost nor overwritten, and that what the first pull
+/// fetched is not fetched again.
+#[dialog_common::test]
+async fn it_keeps_a_commit_made_while_a_pull_followed_a_moved_head(s3: S3Address) -> Result<()> {
+    let devices = followed(&s3, "follow-commit").await?;
+    devices.names_of("user:0-0").await?;
+    devices.move_upstream("user:0-0", "renamed", 4..12).await?;
+
+    // The pull fetches and merges, and writes no cell.
+    let before = devices.bob.revision();
+    let prepared = devices.bob.pull().prepare(&devices.env).await?;
+    assert_eq!(
+        devices.bob.revision(),
+        before,
+        "a prepared pull leaves the head where it was"
+    );
+
+    // The follower writes meanwhile, on the head it still holds.
+    devices.name("user:local", "written meanwhile").await?;
+    let written = devices.bob.revision();
+
+    let landed = prepared.commit(&devices.env).await;
+    assert!(
+        matches!(
+            landed,
+            Err(crate::PullError::Publish(
+                crate::PublishError::VersionMismatch { .. }
+            ))
+        ),
+        "the pull prepared on the head the commit replaced loses its \
+         publish: {landed:?}"
+    );
+    assert_eq!(
+        devices.bob.revision(),
+        written,
+        "the lost publish leaves the head where the commit put it"
+    );
+
+    devices.bob.pull().perform(&devices.env).await?;
+    let (names, fetched) = devices.names_of("user:0-0").await?;
+    assert!(
+        names.contains(&Value::String("renamed".into())),
+        "the pull made again brings the author's write: {names:?}"
+    );
+    assert_eq!(
+        fetched, 0,
+        "what the follower read before, it reads from its own blocks"
+    );
+    let (names, _) = devices.names_of("user:local").await?;
+    assert_eq!(
+        names,
+        vec![Value::String("written meanwhile".into())],
+        "the commit made meanwhile is kept"
     );
 
     Ok(())

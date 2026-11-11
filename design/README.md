@@ -59,3 +59,7 @@ Backtracking moves a topic to an earlier phase and says so in its journal.
   **Building.** The tree talks in nodes through capabilities it performs on
   the environment; caching, decoding and storage form belong to providers.
   The [plan](tree-node-reads/plan.md) is for whoever builds it.
+- [A replica cannot read or write what it held once a pull moves its head](held-across-pull.md):
+  **Directing.** A head adopted by root leaves every changed leaf by
+  reference, so reads and writes of keys the replica held wait on the
+  remote. Five approaches compared; one is built on the topic's branch.
