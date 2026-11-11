@@ -2404,12 +2404,15 @@ impl Followed {
         Ok(())
     }
 
-    /// The follower pulls, and the head it lands on is the author's by
-    /// root: the pull that reads none of the tree it adopts.
+    /// The follower pulls, bringing along what it holds, and the head it
+    /// lands on is the author's by root: the pull that reads none of the
+    /// tree it adopts but what the download asks for.
     async fn adopt(&self) -> Result<()> {
         let adopted = self
             .bob
             .pull()
+            .download()
+            .overlapping()
             .perform(&self.env)
             .await?
             .expect("head adopted");
@@ -2431,7 +2434,7 @@ impl Followed {
 /// wherever it was. The next read of a fact this replica had just read
 /// then waited on the remote, and failed without one: a page rendered
 /// from the device's own store a moment before did not render offline.
-/// The pull now follows the head it adopts (`PersistentTree::follow`): it
+/// A pull asked for an overlapping download (`Download::overlapping`)
 /// reads what changed along the paths this replica holds a leaf of before
 /// the head moves, and leaves what the replica never read by reference.
 #[dialog_common::test]
@@ -2482,8 +2485,8 @@ async fn it_reads_what_it_held_after_adopting_a_head_another_device_moved(
 /// adopted by root left them on the remote wherever the other device had
 /// changed them, so every pull made the next write to the same fact wait
 /// on the remote again: an editor that had just answered a keystroke at
-/// once took a round trip to answer the next. Following the head keeps
-/// the leaves a replica wrote to as it keeps the ones it read.
+/// once took a round trip to answer the next. An overlapping download
+/// keeps the leaves a replica wrote to as it keeps the ones it read.
 ///
 /// A replica's first write to a fact it only read still fetches the
 /// leaves of the indexes it never read that fact through. That is not
@@ -2525,15 +2528,14 @@ async fn it_writes_where_it_wrote_after_adopting_a_head_another_device_moved(
     Ok(())
 }
 
-/// A commit that lands while a pull is fetching what it follows to is
-/// kept: the pull loses its publish and leaves the head where the commit
-/// put it, and the pull made again merges the two.
+/// A commit that lands after a pull was prepared is kept: the pull loses
+/// its publish and leaves the head where the commit put it, and the pull
+/// made again merges the two.
 ///
-/// Following a head is the network half of a pull, and it runs before any
-/// cell is written, so a replica reads and writes on the head it holds
-/// for as long as the fetch takes. This pins that a write made in that
-/// time is neither lost nor overwritten, and that what the first pull
-/// fetched is not fetched again.
+/// The network half of a pull runs before any cell is written, so a
+/// replica reads and writes on the head it holds for as long as the fetch
+/// takes. This pins that a write made in that time is neither lost nor
+/// overwritten.
 #[dialog_common::test]
 async fn it_keeps_a_commit_made_while_a_pull_followed_a_moved_head(s3: S3Address) -> Result<()> {
     let devices = followed(&s3, "follow-commit").await?;
@@ -2586,6 +2588,102 @@ async fn it_keeps_a_commit_made_while_a_pull_followed_a_moved_head(s3: S3Address
         vec![Value::String("written meanwhile".into())],
         "the commit made meanwhile is kept"
     );
+
+    Ok(())
+}
+
+/// A pull asked to retry lands although a commit moved the head while it
+/// was downloading: it is made again on the head the commit left, and
+/// both the commit and the upstream's change are there. Without a retry
+/// the same pull fails, the head where the commit put it.
+///
+/// The commit is made the moment the pull's download first fetches a
+/// block, which is after the pull read the head it merges onto and before
+/// it publishes.
+///
+/// Native only: the test drives the pull's future by hand to place the
+/// commit, which needs an executor that polls a future that woke itself.
+/// The retry is the same code on both targets, and what it is made of, a
+/// pull losing its publish to a commit and the next pull merging both, is
+/// covered on wasm by
+/// `it_keeps_a_commit_made_while_a_pull_followed_a_moved_head`.
+#[cfg(not(feature = "web-integration-tests"))]
+#[dialog_common::test]
+async fn it_retries_a_pull_that_a_commit_overtook(s3: S3Address) -> Result<()> {
+    use std::future::{Future as _, poll_fn};
+    use std::task::Poll;
+
+    let devices = followed(&s3, "follow-retry").await?;
+    devices.names_of("user:0-0").await?;
+
+    // The follower pulls with `limit`, and commits `entity` once the
+    // pull's download has fetched its first block.
+    let pull_and_commit = |limit: crate::Limit, entity: &'static str| {
+        let devices = &devices;
+        async move {
+            devices.env.reset();
+            let mut pulling = Box::pin(
+                devices
+                    .bob
+                    .pull()
+                    .retry(limit)
+                    .download()
+                    .overlapping()
+                    .perform(&devices.env),
+            );
+            let mut committed = false;
+            loop {
+                if let Poll::Ready(pulled) =
+                    poll_fn(|context| Poll::Ready(pulling.as_mut().poll(context))).await
+                {
+                    assert!(committed, "the commit was made while the pull ran");
+                    return anyhow::Ok(pulled);
+                }
+                if !committed && devices.env.count("Hydrate") > 0 {
+                    devices
+                        .bob
+                        .commit(stream::iter(vec![named(entity, "written meanwhile")]))
+                        .perform(&devices.env)
+                        .await?;
+                    committed = true;
+                }
+                tokio::task::yield_now().await;
+            }
+        }
+    };
+
+    devices.move_upstream("user:0-0", "renamed", 4..8).await?;
+    let pulled = pull_and_commit(crate::Limit::default(), "user:first").await?;
+    assert!(
+        matches!(
+            pulled,
+            Err(crate::PullError::Publish(
+                crate::PublishError::VersionMismatch { .. }
+            ))
+        ),
+        "a pull that is not retried loses its publish to the commit: {pulled:?}"
+    );
+
+    devices
+        .move_upstream("user:0-0", "renamed again", 8..12)
+        .await?;
+    pull_and_commit(crate::Limit::Unlimited, "user:second")
+        .await?
+        .map_err(|error| anyhow::anyhow!("a retried pull lands: {error}"))?;
+
+    let (names, _) = devices.names_of("user:0-0").await?;
+    assert!(
+        names.contains(&Value::String("renamed again".into())),
+        "the retried pull brought the author's write: {names:?}"
+    );
+    for entity in ["user:first", "user:second"] {
+        let (names, _) = devices.names_of(entity).await?;
+        assert_eq!(
+            names,
+            vec![Value::String("written meanwhile".into())],
+            "the commit made meanwhile is kept"
+        );
+    }
 
     Ok(())
 }

@@ -5,7 +5,7 @@ root, and who asks for it. For: a partial replica loses the ability to
 read and write, from its own blocks, each key whose leaf another replica
 changed, every time it adopts that replica's head by root.
 
-Not decided. Column D is built on the topic's branch.
+Decided 2026-11-11: column E, by the maintainer (journal). Column D was built first and is replaced by E on the topic's branch; its cells stay as measured.
 
 | criterion \ approach | A. Status quo: adopt by root, fetch on demand | B. Subscriptions first: the embedder evaluates its live queries against the prepared head, then commits | C. Download the difference: fetch every node by which the two heads differ before the head moves | D. Follow what is held, in every pull: walk both trees in step, fetch an adopted node only where its keys meet a held leaf | E. Follow what is held, asked for: the same walk as a `Download` scope the embedder runs between `prepare` and `commit` |
 |---|---|---|---|---|---|
@@ -16,7 +16,7 @@ Not decided. Column D is built on the topic's branch.
 | what a pull costs a replica that holds everything | nothing fetched, everything changed fetched at its next read | as A beyond the live queries | every changed node | every changed node: the same as C | the same as D when asked |
 | reads and writes while the pull fetches | never waits on a pull; waits afterwards, one read at a time | on the held head for as long as the queries take | on the held head for as long as the fetch takes | on the held head for as long as the fetch takes; a commit meanwhile makes the pull lose its publish and be made again | the same as D |
 | a pull that cannot fetch | 🔴 succeeds; the next read of the missing node fails | ? the embedder decides | fails, head stays | fails with `PullError::Tree`, head stays | the download fails, the embedder does not commit |
-| can be forgotten by a caller | nothing to forget | 🔴 each embedder builds it | 🟡 if it is an option of pull | 🟢 cannot: every pull does it | 🔴 has been forgotten once already for a branch that needed it (the account branch in tonk) |
+| can be forgotten by a caller | nothing to forget | 🔴 each embedder builds it | 🟡 if it is an option of pull | 🟢 cannot: every pull does it | 🟡 has been forgotten once already for a branch that needed it (the account branch in tonk) |
 | an embedder that wants a pull to fetch nothing | 🟢 has it | has it by not doing it | ? needs an opt-out | ? needs an opt-out: none is built | 🟢 has it by not asking |
 | where the rule lives | nowhere | in each embedder, tied to its subscription machinery | in dialog | in dialog: `PersistentTree::follow`, called by `prepare_upstream` | in dialog, and in each embedder's pull |
 | fetches under the branch's write lock | none | none | ? | ? `land` prepares a second upstream again under the lock, and that prepare now follows | none in dialog; the embedder's own ordering |

@@ -4,8 +4,8 @@
 
 |  | Understanding | Activity |
 |---|---|---|
-| **Status** | A head adopted by root leaves every changed leaf by reference; reads and writes of keys the replica held then fetch. Measured in dialog for reads and for repeat writes. A walk bounded by what the replica holds removes both, and leaves a first write to a key only read fetching as before. | Directing. The matrix is written; column D is built and tested on the branch; nothing is decided. |
-| **Agenda** | Whether the reported slow load, the slow edits and the pulsing dot in tonk are this problem (two open hypotheses). What D costs on the Perf and Replication gates. Whether a pull can fetch under the write lock. Whether a retried pull fetches again. | The maintainer chooses a column, or asks for another. Then: run the gates on a pull request; move tonk to main so the two tonk hypotheses can be tested in the browser. |
+| **Status** | A head adopted by root leaves every changed leaf by reference; reads and writes of keys the replica held then fetch. Measured in dialog for reads and for repeat writes. An overlapping download removes both, and leaves a first write to a key only read fetching as before. | Building. Column E is decided and built: `Download::overlapping`, `Pull::retry`, with tests over a remote. |
+| **Agenda** | Whether the reported slow load, the slow edits and the pulsing dot in tonk are this problem (two open hypotheses). What an overlapping download costs on the Perf and Replication scenarios, which do not ask for it yet. Whether a spilled value a changed leaf references should come along. | The pull request's gates. Tonk moves to this dialog, asks for the overlapping download and the retry in its space pulls, and the two tonk hypotheses are tested in the browser. |
 
 ## 2026-11-10, Diagnosing: from a slow load to what a pull leaves behind
 
@@ -63,3 +63,29 @@ accept D's cost, and that tonk's symptoms are this problem.
 **Backtracked.** From Building to Directing: the code came first. The
 matrix was written after, with the status quo and the alternatives the
 code had skipped.
+
+## 2026-11-11, Directing to Building: the caller asks
+
+**Asked.** Should every pull follow what is held (D), or should a caller
+ask for it (E)? Is there a good reason a pull fails when a commit
+overtakes it?
+
+**Learned.** The maintainer: how much a pull downloads should be an
+explicit decision of the caller; switching what a plain pull does is not
+wanted. A pull overtaken by a commit should be able to rebase until it
+lands, by a modifier on the pull.
+
+Nothing in dialog needs a pull to fail when overtaken: `land` already
+prepares again under the write lock for a second upstream of one pull.
+What a failed pull gives a caller is the choice of when to try again,
+which a limit expresses.
+
+With the fetch in a download, not in `prepare_upstream`, the open risk of
+a fetch under the write lock is gone: `land`'s second prepare follows
+nothing.
+
+**Decided.** Column E, by the maintainer. `Download::overlapping` beside
+`within` and `operational`; `Pull::retry(Limit)`, default no retry. The
+row "can be forgotten by a caller" is the cost accepted: tonk has to ask
+in each place it pulls a space, and it forgot once for the account
+branch. Rests on the two open tonk hypotheses.

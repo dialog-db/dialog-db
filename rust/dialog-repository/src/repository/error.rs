@@ -1161,6 +1161,11 @@ pub enum DownloadError {
     /// The materializing walk failed.
     #[error("Download walk failed: {0}")]
     Snapshot(#[from] SnapshotError),
+
+    /// A node the replica holds a leaf under could not be read: the walk
+    /// of an [overlapping](crate::Download::overlapping) download.
+    #[error("Download could not follow the tree: {0}")]
+    Tree(DialogSearchTreeError),
 }
 
 /// Errors from snapshot export and import.

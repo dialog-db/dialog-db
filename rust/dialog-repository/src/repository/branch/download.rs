@@ -13,6 +13,12 @@
 //! every block and blob the revision references that the local store
 //! does not hold, caching each as it lands. [`Pull::download`] chains
 //! the two acts — adopt the upstream head, then materialize it.
+//!
+//! Between the two stands [`Download::overlapping`]: bring local only
+//! what this replica already holds of its head, as the revision it is
+//! about to adopt has it. A replica that asks for it of every pull reads
+//! and writes from its own blocks whatever it read and wrote from them
+//! before, and still pays for nothing it never looked at.
 
 use core::ops::RangeInclusive;
 use dialog_corpus::tree::CorpusNode;
@@ -30,11 +36,16 @@ use dialog_effects::memory::{Publish, Resolve};
 use dialog_effects::peer::Connect;
 use futures_util::StreamExt as _;
 
+use super::pull::lost_publish;
 use crate::HeldCaches;
+use crate::repository::archive::routes;
 use crate::repository::snapshot::Snapshot;
 use crate::{
-    Branch, DownloadError, Pull, PullError, RemoteFallback, RemoteSite, Revision, Upstream,
+    Branch, DownloadError, Pull, PullError, RemoteFallback, RemoteSite, Revision, TreeReference,
+    Upstream,
 };
+use dialog_common::Blake3Hash as NodeHash;
+use dialog_corpus::Index;
 
 /// [`data_scope`] as the byte ranges the traversal takes: the operational
 /// indexes and the blob index, with history and coverage left out.
@@ -47,13 +58,25 @@ fn operational_scope() -> Vec<RangeInclusive<Vec<u8>>> {
         .to_vec()
 }
 
+/// How much of a revision a download brings local.
+#[derive(Clone, Debug, Default)]
+enum Extent {
+    /// Every block and blob the revision references.
+    #[default]
+    Everything,
+    /// The key regions given, the rest left by reference.
+    Within(Vec<RangeInclusive<Vec<u8>>>),
+    /// What this replica holds of its head, as the revision has it.
+    Overlapping,
+}
+
 /// Command struct for materializing a branch's content locally. Created
 /// by [`Branch::download`].
 pub struct Download<'a> {
     branch: &'a Branch,
     from: Option<Upstream>,
     revision: Option<Revision>,
-    scope: Option<Vec<RangeInclusive<Vec<u8>>>>,
+    extent: Extent,
 }
 
 impl Branch {
@@ -68,7 +91,7 @@ impl Branch {
             branch: self,
             from: None,
             revision: None,
-            scope: None,
+            extent: Extent::default(),
         }
     }
 }
@@ -85,7 +108,36 @@ impl Download<'_> {
     /// Materialize only the key regions in `scope`, leaving the rest of
     /// the tree by reference. See [`SnapshotExport::within`].
     pub fn within(mut self, scope: impl Into<Vec<RangeInclusive<Vec<u8>>>>) -> Self {
-        self.scope = Some(scope.into());
+        self.extent = Extent::Within(scope.into());
+        self
+    }
+
+    /// Materialize only what this replica holds of its head, as the
+    /// revision has it: the nodes a read or a write the replica answers
+    /// from its own blocks now would reach there.
+    ///
+    /// For a revision about to become the head ([`of`](Self::of) a
+    /// prepared pull, or [`Pull::download`]). A replica holds the leaves
+    /// its reads reached and its writes minted, and the rest of its head
+    /// by reference. A head adopted by root reads none of its tree, so
+    /// every leaf the upstream changed is by reference once it lands,
+    /// held before or not: a read or a write the replica answered at
+    /// once waits on the remote the next time, and fails without one.
+    /// This fetches those leaves first, and only those. The head's tree
+    /// and the revision's are walked in step
+    /// ([`PersistentTree::follow`](dialog_search_tree::PersistentTree::follow)),
+    /// and a node of the revision is fetched only where its keys meet a
+    /// leaf the replica holds. A region the replica never read stays by
+    /// reference however much of it changed, so the cost follows what
+    /// changed in what this replica uses.
+    ///
+    /// It brings tree nodes, not what they point at: a spilled value or
+    /// a blob a changed leaf newly references is fetched when it is
+    /// read. Without [`of`](Self::of) the revision is the head itself,
+    /// which holds what it holds, and nothing is fetched. A branch with
+    /// no head holds nothing to bring along.
+    pub fn overlapping(mut self) -> Self {
+        self.extent = Extent::Overlapping;
         self
     }
 
@@ -148,6 +200,35 @@ impl Download<'_> {
             }
         };
 
+        let scope = match self.extent {
+            Extent::Everything => None,
+            Extent::Within(scope) => Some(scope),
+            Extent::Overlapping => {
+                let Some(held) = branch.revision() else {
+                    return Ok(());
+                };
+                if held.tree == revision.tree {
+                    return Ok(());
+                }
+                // The upstream may be one the branch does not track:
+                // lend its route, so what the walk misses is fetched from
+                // the peer that holds it.
+                let _loan = routes::lend(
+                    branch.routes(),
+                    branch.of(),
+                    &RemoteFallback::Remote(remote),
+                );
+                let catalog = branch.archive().index();
+                let at =
+                    |tree: &TreeReference| Index::at(catalog.clone(), NodeHash::from(*tree.hash()));
+                at(&revision.tree)
+                    .follow(&at(&held.tree), env)
+                    .await
+                    .map_err(DownloadError::Tree)?;
+                return Ok(());
+            }
+        };
+
         // One walk with download reach: a read-miss falls through to the
         // remote and is cached locally on the way through, and a missing
         // blob is imported (digest-verified) before its reader is served.
@@ -157,7 +238,7 @@ impl Download<'_> {
         let export = Snapshot::cold(branch.subject(), revision, &HeldCaches::of(env))
             .export()
             .download(remote);
-        let export = match self.scope {
+        let export = match scope {
             Some(scope) => export.within(scope),
             None => export,
         };
@@ -172,7 +253,7 @@ impl Download<'_> {
 
 /// Command struct for a pull followed by a download of the adopted head.
 /// Created by [`Pull::download`].
-pub struct PullDownload<'a>(Pull<'a>, Option<Vec<RangeInclusive<Vec<u8>>>>);
+pub struct PullDownload<'a>(Pull<'a>, Extent);
 
 impl<'a> Pull<'a> {
     /// After the pull, fetch every block and blob the adopted head
@@ -183,7 +264,7 @@ impl<'a> Pull<'a> {
     /// flow is the motivating case: pull the account's access branch,
     /// download it, and proofs read entirely locally.
     pub fn download(self) -> PullDownload<'a> {
-        PullDownload(self, None)
+        PullDownload(self, Extent::default())
     }
 }
 
@@ -191,7 +272,19 @@ impl<'a> PullDownload<'a> {
     /// Materialize only the key regions in `scope`. See
     /// [`Download::within`].
     pub fn within(mut self, scope: impl Into<Vec<RangeInclusive<Vec<u8>>>>) -> Self {
-        self.1 = Some(scope.into());
+        self.1 = Extent::Within(scope.into());
+        self
+    }
+
+    /// Materialize only what this replica holds of its head, as the
+    /// head the pull would adopt has it. See [`Download::overlapping`].
+    ///
+    /// This is the download a replica that works offline wants of every
+    /// pull: what it read and wrote from its own blocks before the pull
+    /// it reads and writes from them after, and it pays for nothing it
+    /// never looked at.
+    pub fn overlapping(mut self) -> Self {
+        self.1 = Extent::Overlapping;
         self
     }
 
@@ -239,20 +332,29 @@ impl<'a> PullDownload<'a> {
     {
         let branch = self.0.branch();
         let from = self.0.source().cloned();
-        // Boxed: the prepare future carries the whole pull machinery and
-        // trips the large-futures lint inline.
-        let prepared = Box::pin(self.0.prepare(env)).await?;
-        if let Some(revision) = prepared.revision().cloned() {
-            Download {
-                branch,
-                from,
-                revision: Some(revision),
-                scope: self.1,
+        let mut retries = self.0.retries();
+        loop {
+            // Boxed: the prepare future carries the whole pull machinery
+            // and trips the large-futures lint inline.
+            let prepared = Box::pin(self.0.clone().prepare(env)).await?;
+            if let Some(revision) = prepared.revision().cloned() {
+                Download {
+                    branch,
+                    from: from.clone(),
+                    revision: Some(revision),
+                    extent: self.1.clone(),
+                }
+                .perform(env)
+                .await?;
             }
-            .perform(env)
-            .await?;
+            // A commit that landed while the download ran moved the
+            // head: the merge is made again on the head it left, and
+            // the download of it finds held what this one fetched.
+            match prepared.commit(env).await {
+                Err(error) if lost_publish(&error) && retries.take() => continue,
+                result => return result,
+            }
         }
-        prepared.commit(env).await
     }
 }
 

@@ -38,11 +38,54 @@ use crate::{
 /// then exceeds simply walking the few entries.
 pub(crate) const SMALL_DIVERGENCE: u64 = 8;
 
+/// How many times a pull that lost its publish is made again. See
+/// [`Pull::retry`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Limit {
+    /// At most this many more times. `Times(0)`, the default, is not at
+    /// all: the pull fails with the head where the commit put it.
+    Times(usize),
+    /// Until it lands.
+    Unlimited,
+}
+
+impl Default for Limit {
+    fn default() -> Self {
+        Self::Times(0)
+    }
+}
+
+impl Limit {
+    /// Whether one more attempt is allowed, taking it if so.
+    pub(crate) fn take(&mut self) -> bool {
+        match self {
+            Self::Unlimited => true,
+            Self::Times(0) => false,
+            Self::Times(left) => {
+                *left -= 1;
+                true
+            }
+        }
+    }
+}
+
+/// Whether `error` is a pull losing its publish: the head moved, by a
+/// commit or another pull of this writer, between the head the merge was
+/// prepared on and the publish.
+pub(crate) fn lost_publish(error: &PullError) -> bool {
+    matches!(
+        error,
+        PullError::Publish(PublishError::VersionMismatch { .. })
+    )
+}
+
 /// Command struct for pulling from upstream (auto-dispatches local/remote).
+#[derive(Clone)]
 pub struct Pull<'a> {
     branch: &'a Branch,
     from: Option<Upstream>,
     confirm_upstream: bool,
+    retry: Limit,
 }
 
 impl<'a> Pull<'a> {
@@ -51,7 +94,13 @@ impl<'a> Pull<'a> {
             branch,
             from: None,
             confirm_upstream: true,
+            retry: Limit::default(),
         }
+    }
+
+    /// How many more times this pull is made after losing its publish.
+    pub(crate) fn retries(&self) -> Limit {
+        self.retry
     }
 
     /// The branch this pull targets.
@@ -93,6 +142,26 @@ impl<'a> Pull<'a> {
         self.confirm_upstream = false;
         self
     }
+
+    /// Make the pull again, up to `limit` times, when it loses its
+    /// publish.
+    ///
+    /// A pull merges onto the head it read, and publishes only if the
+    /// head is still that one. A commit that lands in between, on a
+    /// replica that goes on writing while it syncs, makes the publish
+    /// fail with [`PublishError::VersionMismatch`], the head where the
+    /// commit put it. Without a retry that is the pull's answer, and the
+    /// caller pulls again. With one, the pull does: it merges onto the
+    /// head the commit left and publishes that, as many times as `limit`
+    /// allows. Every attempt starts from the upstream's head as it then
+    /// is, and finds held whatever an earlier attempt fetched.
+    ///
+    /// Only a lost publish is retried. Any other failure is the pull's
+    /// answer at once.
+    pub fn retry(mut self, limit: Limit) -> Self {
+        self.retry = limit;
+        self
+    }
 }
 
 impl Branch {
@@ -125,6 +194,21 @@ impl<'a> Pull<'a> {
     /// # }
     /// ```
     pub async fn perform<Env>(self, env: &Env) -> Result<Option<Revision>, PullError>
+    where
+        Env: ResolveEnv,
+    {
+        let mut retries = self.retry;
+        loop {
+            match Box::pin(self.attempt(env)).await {
+                Err(error) if lost_publish(&error) && retries.take() => continue,
+                result => return result,
+            }
+        }
+    }
+
+    /// One attempt of [`perform`](Self::perform): prepare and land every
+    /// upstream once.
+    async fn attempt<Env>(&self, env: &Env) -> Result<Option<Revision>, PullError>
     where
         Env: ResolveEnv,
     {
@@ -299,75 +383,7 @@ async fn land<'a, Env: ResolveEnv>(
 ///
 /// Unless `confirm_upstream`, a remote upstream is not asked for its head:
 /// the one last known for it is merged (see [`Pull::assuming_upstream`]).
-///
-/// A head the merge would adopt is followed to before it is handed back
-/// (see [`follow`]), so the reads this replica answers from its own blocks
-/// it still answers from them once the head lands.
 pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
-    branch: &'a Branch,
-    upstream: Upstream,
-    confirm_upstream: bool,
-    env: &Env,
-) -> Result<PreparedPull<'a>, PullError> {
-    let prepared = Box::pin(merge_upstream(
-        branch,
-        upstream.clone(),
-        confirm_upstream,
-        env,
-    ))
-    .await?;
-    if let PreparedPull::Merged(merged) = &prepared {
-        follow(branch, &upstream, &merged.new_revision, env).await?;
-    }
-    Ok(prepared)
-}
-
-/// Read what this replica holds of its head, as `adopted` has it, before
-/// the head moves there.
-///
-/// A head adopted by root (a fast-forward, a rival settled, a reset
-/// brought forward) reads none of its tree, so everything the upstream
-/// changed is held by reference once the head lands, wherever it is. A
-/// read this replica answered from its own blocks then waits on the peer
-/// that holds the block, and fails without one. Read first, those reads
-/// stay on the head held until the adopted one answers them as it did,
-/// and a read that fails leaves the head where it was.
-///
-/// Only the nodes a read would reach on its way to a key this replica
-/// holds a leaf for are read (see
-/// [`PersistentTree::follow`](dialog_search_tree::PersistentTree::follow)):
-/// a region it never read stays by reference, so the cost of a pull stays
-/// independent of upstream churn there. A merge mints the nodes it
-/// changes and reads the rest of what it merged, so for one this finds
-/// most of what it asks for held. A replica with no head holds nothing to
-/// follow, and adopts by reference.
-async fn follow<Env: ResolveEnv>(
-    branch: &Branch,
-    upstream: &Upstream,
-    adopted: &Revision,
-    env: &Env,
-) -> Result<(), PullError> {
-    let Some(held) = branch.revision() else {
-        return Ok(());
-    };
-    if held.tree == adopted.tree {
-        return Ok(());
-    }
-    // The upstream may be one the branch does not track: lend its route,
-    // as the merge did, so what the walk misses is fetched from the peer
-    // that holds it.
-    let _loan = routes::lend(branch.routes(), branch.of(), &upstream.fallback());
-    let catalog = branch.archive().index();
-    let at = |tree: &TreeReference| Index::at(catalog.clone(), NodeHash::from(*tree.hash()));
-    at(&adopted.tree)
-        .follow(&at(&held.tree), erased(env))
-        .await?;
-    Ok(())
-}
-
-/// The merge of [`prepare_upstream`]: everything but following to the
-/// head it would adopt.
-async fn merge_upstream<'a, Env: ResolveEnv>(
     branch: &'a Branch,
     upstream: Upstream,
     confirm_upstream: bool,
