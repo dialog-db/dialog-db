@@ -4,8 +4,8 @@
 
 |  | Understanding | Activity |
 |---|---|---|
-| **Status** | Tonk's forms get their meaning in a Rust parser and analyzer, with `rule!` and `concept!` special-cased. Dialog stores rules under the hash of their descriptor and stores no concepts or names. The new notation on #728 is unimplemented. | **Diagnosing.** The feature is stated nine ways. The problem is not stated. |
-| **Agenda** | Which of the four candidate problems below is in the way, and for whom. What "primitive form" means, since it is used for two things. Whether a space, and not only dialog, may add a form. | Delimit: one paragraph with no remedy in it. Then Direction, with the parked approaches as columns. |
+| **Status** | The kernel is small and the core forms are about 90 lines over it; a model runs them on the to-do document. Eight findings say what the kernel still has to settle ([kernel.md](kernel.md)). | **Designing.** Direction decided by the maintainer. The core forms are defined; the kernel is not built. |
+| **Agenda** | What a write with `_` means. Whether a pick wraps a term. What a plain `assert` head on a command means: this round or the next. How a rule says why a form is refused. How `:id` takes open labels. | Decide the findings that change the kernel, then build it: reader, `match` and `fill`, the walker, `compile` to today's descriptors. |
 
 ## Candidate problems
 
@@ -40,3 +40,28 @@ Not examined yet. They are columns, not recommendations.
 - The 2026-05-16 design had no problem assembling a form from rows, because its macros expanded to triples. The problem appeared on #728 when a definition became one value under its hash. H4 says a set-collecting `reduce` closes it.
 
 **Decided.** Not decided. What would decide the phase: Irakli's answer to the open question, written into the Problem section.
+
+## 2026-11-11, Designing: the kernel, and the core forms run in a model
+
+**Asked.**
+
+- Irakli declined to state a problem and asked for a design and a plan, not an implementation. Direction: macros as rules, a minimal kernel, hash-addressed definitions, nothing built on conduct or wasm, and as fast as the system is today.
+- He asked that claims be confirmed in the code and not left as hypotheses, and that notes not be trusted. The planner, the rule evaluator and fixpoint, commit-time induction, the value and type model, resolvers and the write instructions were read.
+- He set the spellings: a formula is applied by keyword, `(:text ?x)`, or by a bare operator with `:` as the second operand's label, `(+ ?a : ?b is: ?c)`; equality is `(:value ?a is: ?b)`; `when` and `unless` are siblings in a rule; "application", not "call"; `query` is a rule marked for the report; a head that persists is `assert!`.
+- He asked for the core forms defined in the slim kernel, to see whether it works before the kernel is built.
+
+**Learned.**
+
+- From the code: `reduce` is refused in deductive rules; a recursive group is evaluated bottom-up in full and non-recursive rules get the caller's bindings; a rule installed in a commit fires in that commit; `Record` is opaque bytes; formulas have fixed cells; a resolver may read content-addressed storage only; the store has two write instructions, `Assert(fact, pick)` and `Retract(fact)`; a rule's kind is its descriptor's head field, `deduce`, `assert!` or `retract!`; `unless` negates one proposition.
+- So: `assert!` and `retract!` cannot both be macros; expansion cannot be a resolver, since names are read through the mutable head, and a query at a pinned revision is a `Snapshot`; a read has to be one entity and several fields.
+- Withdrawn by the agent: conduct as the host, a meta-circular evaluator with threaded bindings, building forms with `reduce`, dag-cbor for forms, shared subforms, "a macro applies from the next document", and the walker as a resolver.
+- The core forms work in the model with one rule applying every macro. `concept` is one line: a macro that defines a macro.
+- With `!` marking what stays, issuing a command is a plain `assert`, and the model no longer tells a command by its domain.
+
+**Decided.**
+
+- The direction, by the maintainer, on an opinion. No problem statement.
+- The kernel and its spellings as in [kernel.md](kernel.md), except the pick wrapper, which is proposed.
+- `!` marks what stays, which departs from #728's design as of R25.
+- Forms are fully inlined, with a canonical encoding (bijoux for integers). The #733 tokenization is for storage. A source map keeps, for each reference, its name, the revision and the entity.
+- Not decided: findings 3 to 8 of [kernel.md](kernel.md).
