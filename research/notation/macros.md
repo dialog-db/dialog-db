@@ -9,6 +9,8 @@
 - `concept`, `view`, `query` are macros in the prelude. The kernel knows none of them.
 - Installing is those asserts landing: in a query run they are in the report, in a transaction they are stored.
 
+A definition is never spread over facts on its entity. If a concept were its attributes asserted on the concept's entity, anyone could change the concept by asserting one more. So a definition (a concept, a rule, a view) is one value, its canonical form, stored under an entity that is the hash of that form. A claim of another source on that entity is not the definition, since its hash does not match: the entity certifies itself. What is said about a definition (its names, the views of a concept, indexes such as which attributes a rule reads) is ordinary facts on its entity, additive and from any writer, and never changes what the definition is.
+
 ```mermaid
 flowchart LR
   doc["document forms"] -- "each issued as (expand form)" --> expand["expand rows"]
@@ -37,19 +39,17 @@ In a quoted pattern, a `?name` matches any atom, the source's own variables incl
 ### `concept`
 
 ```clj
-(rule (assert (dialog.concept ?concept name: ?name ?label: ?attribute))
-      (assert (dialog.attribute ?attribute the: ?the as: ?type pick: ?pick))
+(rule (assert (dialog.concept ?concept source: ?definition))
+      (assert (dialog.name ?concept is: ?name))
   (when (expand ?form)
         (match ?form '(concept (?name ?this ?label: ?var …) _ …))
-        (match ?form '(concept _ (?domain ?this ?field: (?pick ?var as: ?type) …) _ …))
-        (dialog/relation ?the domain: ?domain name: ?field)
-        (id ?attribute the: ?the as: ?type pick: ?pick)
-        (id ?concept of: ?form)))
+        (dialog/canonical ?form without: ?name is: ?definition)
+        (id ?concept of: ?definition)))
 ```
 
-The first `match` gives a row per head parameter, the second a row per field of the body, and `?var` joins them: the head's `title: ?title` meets the body's `title: (last ?title as: :text)`. Each attribute's entity is its content, so two documents that declare the same attribute derive the same entity, and nothing conflicts: capture becomes merge, as the journal puts it. `(id ?concept of: ?form)` hashes the canonical form without its name; the name is a fact beside it, so one name may point at several concepts.
+The concept is stored whole, as its canonical form without its name, under the hash of that form, as a rule's body is stored under `dialog.rule/source` today. The name is a fact beside it, so one name may point at several concepts, and two documents that write the same concept derive the same entity: capture becomes merge, as the journal puts it.
 
-Another rule, disjoint by its pattern, reads the constraints of a body (`(: ?var as: ?type)`), and another a collection field (`?key: (?pick ?var …)`). Each variant is a rule; together they are the macro.
+The rest of the macro checks the form rather than taking it apart. A rule per shape a body may hold, disjoint by its pattern, says what is well formed: a field joined to a head parameter, `(?domain ?this ?field: (?pick ?var as: ?type) …)` with `?var` among the head's variables; a constraint, `(: ?var as: ?type)`; a collection field, `?key: (?pick ?var …)`. A form with a part no rule accepts is an error, and nothing is stored.
 
 ### `query`
 
@@ -58,9 +58,9 @@ Another rule, disjoint by its pattern, reads the constraints of a body (`(: ?var
         (?domain ?this ?field: ?value …))
   (when (expand ?form)
         (match ?form '(query (?name ?this ?label: ?value …)))
-        (dialog.concept ?concept name: ?name ?label: ?attribute)
-        (dialog.attribute ?attribute the: ?the)
-        (dialog/relation ?the domain: ?domain name: ?field)))
+        (dialog.name ?concept is: ?name)
+        (dialog.concept ?concept source: ?definition)
+        (match ?definition '(concept (_ _ ?label: ?var …) (?domain _ ?field: (_ ?var _ …) …) _ …))))
 ```
 
 The journal's first open item was that a query cannot be a macro, because the form a user writes does not know the schema. A macro that is a rule reads the schema the `concept` macro stored. Here a concept call becomes a domain call with the concept's attributes, which is what dialog's wire carries today. The head spelling, a call built from rows, is the hardest part to write and is open below.
@@ -75,11 +75,11 @@ The journal's first open item was that a query cannot be a macro, because the fo
   (when (expand ?form)
         (match ?form '(view ?template model: ?model))
         (match ?model '(?mode (?name _ …) _ …))
-        (dialog.concept ?concept name: ?name)
+        (dialog.name ?concept is: ?name)
         (id ?view of: ?form)))
 ```
 
-A view is stored as a key on its concept's entity, as tonk stores it: `row`, `detail`, `edit`, each a key. The model is syntax, so the pattern in it is a value and is never checked as a ground command.
+A view is a definition of its own, its form under its hash. What ties it to a concept is a fact on the concept's entity, a key per mode as tonk stores it: `row`, `detail`, `edit`. That fact says something about the concept without changing it, so anyone may add a view to anyone's concept. The model is syntax, so the pattern in it is a value and is never checked as a ground command.
 
 The macro also installs a rule, and that rule is what makes displaying a command. `(row (todo todo:9c1e))` is the command `row` around a to-do, and the view is what handles it: it derives `ui.display`, which the runtime renders by running the stored model with `?todo` bound and filling the template. A view is a command handler that renders. Its events are commands too, `issue='toggle'` issuing `(toggle (todo ?todo))`, so a view both answers commands and issues them.
 
@@ -107,7 +107,7 @@ The macro also installs a rule, and that rule is what makes displaying a command
 
 | form | what expands | what lands |
 |---|---|---|
-| `concept` | the `concept` macro | `dialog.concept` with `name: todo`, `title:`, `status:`; two `dialog.attribute` entities |
+| `concept` | the `concept` macro | the concept's form under its hash, and `dialog.name` `todo` on it |
 | `rule` | built in | `dialog.rule/*`, as dialog stores rules today |
 | `view` | the `view` macro | `row:` on `todo`'s concept entity, the view's template and model, the rule for `row` |
 | `(add …)` | no macro: a command | a row of `add`, which the rule reads |
@@ -121,8 +121,8 @@ H1 asked whether the prelude needs no kernel special cases. Writing it out:
 
 - **One special case.** `rule` is built in, because it installs the first macro. Everything else is prelude.
 - **Syntax needs a kernel.** `match` and quoted patterns are kernel pieces, and `…` iteration is what lets a macro handle a body of any length without recursion.
-- **Assembling a form from rows is the hard part.** A macro gets one row per match; a `query` macro that turns a concept call into one domain call has to put the rows back into one form. The journal kept every composite a set (`when:` is a set, `with:` is a keyed set) and stored constellations of facts rather than assembled forms, which avoids the problem for anything the engine can read as facts. A query compiled to a descriptor still has to be assembled once; that assembly is the one aggregate a macro needs, and it runs at expansion, not in a rule over data.
-- **Two identities.** `(id ?concept of: ?form)` names a definition. Dialog's concept identity is the hash of its attribute set, a structure. Both are useful: two definitions with the same attributes are the same structure under different names. The kernel computes the structural one when it builds a descriptor.
+- **Definitions are values, not facts.** Storing a concept as attributes on its entity would let anyone change it. A definition is its canonical form under its own hash, and macros check forms rather than take them apart. That also removes most of the assembly problem: a definition is stored as written, so nothing has to be put back together from rows. A query compiled to a descriptor still has to be assembled once, from the rows its macro matched; that is the one aggregate a macro needs, and it runs at expansion, not in a rule over data.
+- **Two identities.** The hash of the form names a definition. Dialog's concept identity is the hash of its attribute set, a structure. Both are useful: two definitions with the same attributes are the same structure. The kernel computes the structural one when it builds a descriptor.
 - **Phases.** A macro installed by a transaction applies from the next document, as Racket separates phases, so every expansion can be reproduced from the hashes a document pinned.
 
 So H1 holds with one exception, `rule`, and with a kernel step that assembles forms from rows.
