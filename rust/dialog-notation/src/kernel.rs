@@ -145,7 +145,8 @@ fn term(form: &Form) -> Result<Term, Error> {
         application if application.is_formula() => Term::Formula(Box::new(formula(application)?)),
         Form::Map(_) => {
             return Err(Error::Unsupported(format!(
-                "{form} where a term stands: Dialog-DB has no premise that builds a record yet"
+                "{form} where a term stands: a struct is a value and, with a variable in it, a \
+                 pattern, and Dialog-DB has no record values yet"
             )));
         }
         other => return Err(Error::Refused(format!("{other} is not a term"))),

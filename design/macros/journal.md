@@ -4,8 +4,8 @@
 
 |  | Understanding | Activity |
 |---|---|---|
-| **Status** | The kernel and the core forms run on a real branch through `rust/dialog-notation` ([poc.md](poc.md)). A form is data: a value dialog has, a list or a map, named by a merkle reference and laid out under a version; `( )` is a tuple, and the syntax reads `of:` as its primary ([design-forms.md](design-forms.md)). Syntax is still held by the crate. The two-cell `entity/derive` is a stand-in. | **Designing.** Direction decided by the maintainer. The kernel and the data under a form are built as a proof of concept. How a rule builds and takes apart a record is not. |
-| **Agenda** | Whether a form is atoms and lists only, with map, tuple and set as heads. How a formula's second operand is written once the empty label goes. Whether sugar for a map sorts its entries. How a rule builds a record (H5). Whether dialog can be asked for an expansion a form at a time (H3). | Settle the center before building more. Then the record premise, `entity/derive` over a record, and syntax kept on the branch. |
+| **Status** | The kernel and the core forms run on a real branch through `rust/dialog-notation` ([poc.md](poc.md)); the prelude is rules only, 68 lines. The tree of what dialog runs exists in dialog already. A struct is a value and, with a variable in it, a destructuring pattern, which waits on record values (#748). Rules of several heads are their own topic (#776). The crate still keeps parsed notation as data and copies dialog's forms in `kernel.rs`. | **Designing.** Direction decided by the maintainer. A proof of concept runs. The tree between the notation and dialog's forms is not built. |
+| **Agenda** | Which reading of a struct at the end of an application stays. The label for a concept's body. How a query reports: a macro to a rule and an assertion that its deductions be reported. Whether dialog can be asked for an expansion a form at a time (H3). What a read with no pick reads. | Not waiting on records: a syntax tree apart from the parsed notation, resolved then expanded as tonk's analyzer does; dialog's own forms in place of `kernel.rs`; a helper rule for a negated conjunction. Waiting on records (#748): a struct as a term, `entity/derive` over a record, syntax kept on the branch. Waiting on #776: a rule of several heads. |
 
 ## Candidate problems
 
@@ -274,3 +274,9 @@ Not examined yet. They are columns, not recommendations.
 - A struct as a pattern does not: `(expand {note: ?n})` is read as `(expand note: ?n)`, by the reading of a trailing record as labelled parts built earlier the same day. That reading and "a struct is a value like 5" contradict each other.
 
 **Decided.** By the maintainer: `unless` may stand inside `when`; a pattern is any form; the `syntax` of two parts goes and the prelude is rules. Built, with tests. Not decided: the label for a concept's body, and which of the two readings of a trailing struct stays.
+
+## 2026-11-11, Designing: a struct with a variable is a pattern
+
+**Asked.** How dialog evaluates a struct that holds a variable: a third case of `Term`, or a premise made when lowering. Irakli: it is a destructuring pattern, and a gap in dialog to close. It hinges on record values, which dialog did not have, and closes with them.
+
+**Decided.** By the maintainer: a struct with a variable in it is a destructuring pattern, to be had in dialog with records as values. It is #748's work, not this topic's. What the notation needs of it is listed in [design-forms.md](design-forms.md). This topic refuses a struct as a term until records land.

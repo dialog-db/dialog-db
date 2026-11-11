@@ -317,6 +317,22 @@ Open in this:
 - **`Relation::split` refuses an empty domain**, and whatever calls it on a symbol that is a value has to stop doing so.
 - **A read with no pick.** The proof of concept reads `all`; dialog's descriptor and the hope above say `last`.
 
+## A struct with a variable in it
+
+Decided 2026-11-11, by the maintainer: it is a destructuring pattern, and that dialog has none is a gap to close. It hinges on records as values, which dialog has not had, and closes with them. So it is the record values topic's (#748), which already has destructuring a bound record in scope, and not this one's.
+
+What the notation needs of it, for whoever builds records:
+
+| need | for |
+|---|---|
+| a struct with nothing to bind is a value, like 5 | `{text: "hi"}` as a field's value, a constant in a rule |
+| a struct with a variable in it, where a bound record stands, takes the record apart | `(expand {note: ?n})`, reading a command's row |
+| the same struct, where its variables are bound and a value is wanted, is the record | `(:id {text: ?x})`: `entity/derive` over a record |
+| the pairs a pattern did not name, bound as a record | `...?rest` |
+| the keys a label writes: an attribute of a domain, and a name of none | `{xyz.todo/text: ?x}`, `{text: ?x}` |
+
+Until then the notation refuses a struct where a term stands, and `entity/derive` stays the two-cell stand-in. H5 below asked whether this is one premise that runs both ways; that it is a pattern in a term is now the maintainer's, and how dialog evaluates one is #748's to decide.
+
 ## Hypotheses, after the decision
 
 | hypothesis | confirmed by | refuted by |

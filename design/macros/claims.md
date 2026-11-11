@@ -57,6 +57,7 @@
 | a rule's identity ignores the order of its premises and the names of its variables | fact | `rust/dialog-query/src/rule/canonical.rs` | holds |
 | tonk parses an application by name and resolves it inline in a later pass | fact | `rust/tonk-analyzer/src/analyzer.rs` in tonk: resolve, then expand | holds |
 | dialog lacks negation over several propositions | hypothesis | `unless` is a list of `Negation`; datalog negates atoms and writes a negated conjunction as a helper rule | refuted as a gap: the compiler can write the helper rule |
+| a struct with a variable in it is a destructuring pattern, to be had in dialog with records as values | opinion | Irakli, 2026-11-11 | decides; the work is #748's |
 | a rule can build a record from what it has bound | hypothesis | H5 of [design-forms.md](design-forms.md): confirmed by a record premise planned as a concept query is, running both ways | open; #748 speaks only of reading one |
 | a premise may take parameters that differ by application | fact | `ConceptQuery::schema`, `rust/dialog-query/src/concept/query.rs` | holds |
 | the two-cell `entity/derive` names the entities a record will | hypothesis | refuted by its own definition: a chain of pairs under a seed is not a record's canonical form | refuted; it is a stand-in |
