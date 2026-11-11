@@ -35,6 +35,21 @@ fn fact(entity: &str, name: &str) -> anyhow::Result<Fact> {
     })
 }
 
+/// Commits `changes` to `branch`, built again over the head that won when
+/// another writer moves it first.
+macro_rules! commit {
+    ($branch:expr, $operator:expr, $changes:expr) => {{
+        let changes: Changes = $changes;
+        $branch
+            .transact(|transaction| {
+                let changes = changes.clone();
+                async move { Ok::<_, dialog_repository::CommitError>(transaction.integrate(changes)) }
+            })
+            .perform($operator)
+            .await
+    }};
+}
+
 /// Opens the `main` branch of repository `name` in the peer at `peer`, with
 /// an operator allowed to act on it.
 macro_rules! open {
@@ -86,13 +101,7 @@ async fn commit_facts(at: &Directory, peer: &str, name: &str) -> anyhow::Result<
                 ))
             })
             .collect::<anyhow::Result<_>>()?;
-        branch
-            .transaction()
-            .integrate(changes)
-            .commit()
-            .publish()
-            .perform(&operator)
-            .await?;
+        commit!(branch, &operator, changes)?;
     }
     let rows: Vec<Fact> = branch
         .claims()
@@ -475,13 +484,7 @@ async fn it_takes_unchanged_rows_from_the_node_a_commit_supersedes() -> anyhow::
                 changes.associate(renamed.the, renamed.of, renamed.is, Pick::Last);
             }
         }
-        branch
-            .transaction()
-            .integrate(changes)
-            .commit()
-            .publish()
-            .perform(&operator)
-            .await?;
+        commit!(branch, &operator, changes)?;
     }
 
     // A second claim of a fact already held lands on the same key, with a
@@ -498,13 +501,7 @@ async fn it_takes_unchanged_rows_from_the_node_a_commit_supersedes() -> anyhow::
                 ))
             })
             .collect::<anyhow::Result<_>>()?;
-        branch
-            .transaction()
-            .integrate(changes)
-            .commit()
-            .publish()
-            .perform(&operator)
-            .await?;
+        commit!(branch, &operator, changes)?;
     }
 
     let archive = FileArchive::open(directory.path().join(&name).join(FILE_NAME))?;
@@ -663,13 +660,7 @@ async fn it_keeps_branch_heads_in_the_file() -> anyhow::Result<()> {
                     Ok(Instruction::Assert(fact(&entity, "someone")?, Pick::All))
                 })
                 .collect::<anyhow::Result<_>>()?;
-            branch
-                .transaction()
-                .integrate(changes)
-                .commit()
-                .publish()
-                .perform(&operator)
-                .await?;
+            commit!(branch, &operator, changes)?;
         }
     }
     let (operator, branch) = open!(FileSpace, at, peer, name);
@@ -785,23 +776,11 @@ async fn committing_process() -> anyhow::Result<()> {
     let (peer, name) = (peer.to_string(), name.to_string());
     let signals = Path::new(signals);
     let (operator, branch) = open!(FileSpace, at, peer, name, branch);
-    branch
-        .transaction()
-        .integrate(tagged(&format!("{tag} warm"), 0)?)
-        .commit()
-        .publish()
-        .perform(&operator)
-        .await?;
+    commit!(branch, &operator, tagged(&format!("{tag} warm"), 0)?)?;
     std::fs::write(signals.join(format!("{tag}.ready")), b"")?;
     anyhow::ensure!(signalled(&signals.join("go")), "never told to go");
     for commit in 0..commits.parse()? {
-        branch
-            .transaction()
-            .integrate(tagged(tag, commit)?)
-            .commit()
-            .publish()
-            .perform(&operator)
-            .await?;
+        commit!(branch, &operator, tagged(tag, commit)?)?;
     }
     std::fs::write(signals.join(format!("{tag}.done")), b"")?;
     Ok(())
@@ -881,13 +860,11 @@ async fn it_commits_to_two_branches_from_two_processes_without_waiting() -> anyh
     std::fs::create_dir(&signals)?;
     for branch in ["alpha", "beta"] {
         let (operator, branch_handle) = open!(FileSpace, at, peer, name, branch);
-        branch_handle
-            .transaction()
-            .integrate(tagged(&format!("{branch} first"), 0)?)
-            .commit()
-            .publish()
-            .perform(&operator)
-            .await?;
+        commit!(
+            branch_handle,
+            &operator,
+            tagged(&format!("{branch} first"), 0)?
+        )?;
     }
     let file = directory.path().join(&name).join(FILE_NAME);
     let mut alpha = committer(&at_text, &peer, &name, "alpha", "alpha", 10, &signals)?;
@@ -937,13 +914,7 @@ async fn it_commits_concurrently_to_one_branch_from_many_processes() -> anyhow::
     std::fs::create_dir(&signals)?;
     {
         let (operator, branch) = open!(FileSpace, at, peer, name);
-        branch
-            .transaction()
-            .integrate(tagged("first", 0)?)
-            .commit()
-            .publish()
-            .perform(&operator)
-            .await?;
+        commit!(branch, &operator, tagged("first", 0)?)?;
     }
     let tags = ["one", "two", "three"];
     let mut writers = tags

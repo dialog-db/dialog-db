@@ -1203,60 +1203,142 @@ mod tests {
         Ok(())
     }
 
-    /// A transaction that loses its branch's race is staged again over the
-    /// head that won and published on top of it, as a commit is: both
-    /// writers' facts survive. (A batch its caller staged explicitly is
-    /// refused instead; `transaction::batch` pins that.)
+    /// A one-shot `.commit().publish()` that loses its branch's race fails
+    /// as it always did, with nothing of it written; `Branch::transact` is
+    /// what runs again.
     #[dialog_common::test]
-    async fn it_publishes_a_transaction_racing_another_over_the_winner() -> Result<()> {
+    async fn it_refuses_a_one_shot_transaction_that_lost_its_race() -> Result<()> {
         let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let writer_a = repo.branch("main").open().perform(&operator).await?;
         let writer_b = repo.branch("main").open().perform(&operator).await?;
-        let name = |entity: &str, name: &str| -> Result<dialog_corpus::Changes> {
-            Ok(vec![Instruction::Assert(
-                Fact {
-                    the: "user/name".parse()?,
-                    of: entity.parse()?,
-                    is: Value::String(name.to_string()),
-                    cause: None,
-                },
-                dialog_corpus::Pick::All,
-            )]
-            .into_iter()
-            .collect())
-        };
-
-        let first = writer_a
+        writer_a
             .transaction()
-            .integrate(name("user:a", "Alice")?)
+            .integrate(named("user:a", "Alice")?)
             .commit()
             .publish()
             .perform(&operator)
             .await?;
         // B's handle still holds the head A built on.
-        let second = writer_b
+        let refused = writer_b
             .transaction()
-            .integrate(name("user:b", "Bob")?)
+            .integrate(named("user:b", "Bob")?)
             .commit()
             .publish()
             .perform(&operator)
-            .await?;
-        assert_ne!(second.version(), first.version());
+            .await;
+        assert!(
+            matches!(
+                refused,
+                Err(crate::CommitError::Publish(
+                    crate::PublishError::VersionMismatch { .. }
+                ))
+            ),
+            "got {refused:?}"
+        );
+        assert_eq!(names(&repo, &operator).await?, vec!["Alice".to_string()]);
+        Ok(())
+    }
 
-        let fresh = repo.branch("main").open().perform(&operator).await?;
-        let results: Vec<_> = fresh
+    /// A transaction built by `transact` that loses its branch's race is
+    /// built again over the head that won: what it read, it reads again,
+    /// so a write computed from a read is computed over the winner.
+    #[dialog_common::test]
+    async fn it_builds_a_transaction_again_over_the_head_that_won() -> Result<()> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let writer_a = repo.branch("main").open().perform(&operator).await?;
+        let writer_b = repo.branch("main").open().perform(&operator).await?;
+        let tries = AtomicUsize::new(0);
+        writer_b
+            .transact(|transaction| {
+                let (tries, writer_a, operator) = (&tries, &writer_a, &operator);
+                async move {
+                    let seen = read_names(&transaction, operator).await?;
+                    if tries.fetch_add(1, Ordering::SeqCst) == 0 {
+                        // Another writer moves the head after this try read.
+                        writer_a
+                            .transact(|transaction| async move {
+                                anyhow::Ok(transaction.integrate(named("user:a", "Alice")?))
+                            })
+                            .perform(operator)
+                            .await?;
+                    }
+                    anyhow::Ok(transaction.integrate(named("user:b", &format!("Bob saw {seen}"))?))
+                }
+            })
+            .perform(&operator)
+            .await?;
+        assert_eq!(tries.load(Ordering::SeqCst), 2, "built twice");
+        assert_eq!(
+            names(&repo, &operator).await?,
+            vec!["Alice".to_string(), "Bob saw 1".to_string()],
+            "the second build read what the winner wrote"
+        );
+        Ok(())
+    }
+
+    use dialog_query::attribute::Relation;
+    use dialog_storage::provider::storage::VolatileSpace;
+
+    type Operator = dialog_peer::Peer<VolatileSpace, dialog_peer::Session>;
+
+    fn named(entity: &str, name: &str) -> Result<dialog_corpus::Changes> {
+        Ok(vec![Instruction::Assert(
+            Fact {
+                the: "user/name".parse()?,
+                of: entity.parse()?,
+                is: Value::String(name.to_string()),
+                cause: None,
+            },
+            dialog_corpus::Pick::All,
+        )]
+        .into_iter()
+        .collect())
+    }
+
+    /// How many names a transaction reads.
+    async fn read_names(
+        transaction: &crate::Transaction<&crate::Branch>,
+        env: &Operator,
+    ) -> Result<usize> {
+        use dialog_query::query::Output as _;
+        use dialog_query::{Term, the};
+        Ok(transaction
+            .query()
+            .select(dialog_query::AttributeQuery::from(
+                Term::<Relation>::from(the!("user/name"))
+                    .of(Term::<dialog_corpus::Entity>::var("e"))
+                    .is(Term::<String>::var("v")),
+            ))
+            .perform(env)
+            .try_vec()
+            .await?
+            .len())
+    }
+
+    /// The names the branch holds, sorted.
+    async fn names(repo: &crate::Repository, env: &Operator) -> Result<Vec<String>> {
+        let fresh = repo.branch("main").open().perform(env).await?;
+        let mut names: Vec<String> = fresh
             .claims()
             .select(Selector::new().the("user/name".parse()?))
             .to_owned()
-            .perform(&operator)
+            .perform(env)
             .await?
             .collect::<Vec<_>>()
             .await
             .into_iter()
-            .collect::<Result<Vec<_>, _>>()?;
-        assert_eq!(results.len(), 2, "both racing transactions survive");
-        Ok(())
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .filter_map(|fact| match fact.is {
+                Value::String(name) => Some(name),
+                _ => None,
+            })
+            .collect();
+        names.sort();
+        Ok(names)
     }
 }
 

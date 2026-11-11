@@ -1,5 +1,8 @@
 //! A transaction read between its writes: what a library install does
 //! when it stages a schema and then resolves names against it.
+// Measures the one-shot `.commit().publish().perform(..)` the gates were
+// recorded with; moving it to `Branch::transact` is the maintainer's call.
+#![allow(deprecated)]
 
 use std::future::Future;
 use std::pin::Pin;

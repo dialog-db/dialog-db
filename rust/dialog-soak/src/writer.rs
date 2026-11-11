@@ -35,6 +35,9 @@
 //!
 //! The facts are new entities beyond the seeded range, in the seed's
 //! shape; the bulk batch is the seed's own entity facts, 2 000 of them.
+// Measures the one-shot `.commit().publish().perform(..)` the gates were
+// recorded with; moving it to `Branch::transact` is the maintainer's call.
+#![allow(deprecated)]
 
 use anyhow::{Context as _, Result};
 use dialog_corpus::{Fact, Instruction, Pick, Value};

@@ -24,7 +24,7 @@ use super::succession;
 use super::{Transaction, TransactionCommit, carry_footprint, touches_rule_facts, touches_rules};
 use crate::Ephemeral;
 use crate::repository::branch::asset::store_assets;
-use crate::repository::branch::commit::{Amended, Mint, Minted, Outcome, RETRIES};
+use crate::repository::branch::commit::{Amended, Mint, Minted, Outcome};
 use crate::repository::source::{Caches, SourceRef};
 use crate::{
     Branch, Cell, Checkpoint, CommitError, PublishError, QueryLayer, RemoteSite, Revision,
@@ -413,15 +413,12 @@ impl TransactionPublish<&Branch> {
     /// newly-published [`Revision`] (or the unchanged head when the
     /// settled batch is a no-op).
     ///
-    /// When another writer moved the head first, the transaction's writes
-    /// are staged again over the head that won (its rules run again
-    /// there) and published, up to the same number of times a commit
-    /// tries; [`VersionMismatch`](PublishError::VersionMismatch) is
-    /// returned only once those run out. A write the caller computed from
-    /// a read of the transaction is applied again as it was computed:
-    /// express it as a rule, or read and write again, to have it computed
-    /// over the head that won. A [`TransactionBatch`] staged explicitly is
-    /// not staged again: its caller saw what it staged on.
+    /// Fails with [`VersionMismatch`](PublishError::VersionMismatch) when
+    /// another writer moved the head first; the transaction is consumed,
+    /// for its caller to build again over the new head.
+    #[deprecated(
+        note = "a commit that loses its branch's race fails; use `Branch::transact`, which builds the transaction again over the head that won"
+    )]
     pub async fn perform<Env>(self, env: &Env) -> Result<Revision, CommitError>
     where
         Env: Provider<BlobSize>
@@ -450,19 +447,40 @@ impl TransactionPublish<&Branch> {
             + ConditionalSync
             + 'static,
     {
-        let mut attempts = 0;
-        loop {
-            let batch = Box::pin(self.commit.clone().perform(env)).await?;
-            match batch.publish().perform(env).await {
-                Err(CommitError::Publish(PublishError::VersionMismatch { .. }))
-                    if attempts < RETRIES =>
-                {
-                    attempts += 1;
-                    self.commit.line.revision.resolve().perform(env).await?;
-                }
-                done => return done,
-            }
-        }
+        self.once(env).await
+    }
+
+    /// [`perform`](Self::perform), for the commands that build on it.
+    pub(crate) async fn once<Env>(self, env: &Env) -> Result<Revision, CommitError>
+    where
+        Env: Provider<BlobSize>
+            + Provider<BlobImport>
+            + Provider<Get>
+            + Provider<BlobRead>
+            + Provider<Put>
+            + Provider<Import>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<Resolve>
+            + Provider<Publish>
+            + Provider<Identify>
+            + Provider<Attest>
+            + Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + Provider<BlobLoad>
+            + Provider<dialog_corpus::Preload>
+            + Provider<dialog_corpus::Speculation>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + Holds
+            + ConditionalSync
+            + 'static,
+    {
+        let batch = Box::pin(self.commit.perform(env)).await?;
+        batch.publish().perform(env).await
     }
 }
 

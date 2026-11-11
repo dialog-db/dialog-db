@@ -690,6 +690,7 @@ impl<'a> Generator<'a> {
                     sent += 1;
                 }
             }
+            // bare-send-ok: `Line::Sync` is a dataset line, not a bound
             lines.push(Line::Sync);
         }
         self.turn = None;

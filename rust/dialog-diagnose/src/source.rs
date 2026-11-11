@@ -3,6 +3,9 @@
 //! Diagnose loads its facts into a branch of a fresh in-memory repository,
 //! the way an application stores them, and explores the tree that branch
 //! commits: facts, history region and all.
+// Measures the one-shot `.commit().publish().perform(..)` the gates were
+// recorded with; moving it to `Branch::transact` is the maintainer's call.
+#![allow(deprecated)]
 
 use std::sync::Arc;
 

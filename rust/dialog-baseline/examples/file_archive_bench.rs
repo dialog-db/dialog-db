@@ -26,6 +26,9 @@
 //! transactions of the log as one, to see what a commit's size costs; the
 //! peak heap the commits reach, above the heap before the first, is
 //! reported with the commit time.
+// Measures the one-shot `.commit().publish().perform(..)` the gates were
+// recorded with; moving it to `Branch::transact` is the maintainer's call.
+#![allow(deprecated)]
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::BTreeSet;

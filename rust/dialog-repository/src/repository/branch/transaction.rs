@@ -11,9 +11,11 @@ mod quarantine;
 pub(crate) use induce::induction_ignores;
 mod query;
 mod succession;
+mod transact;
 pub use batch::*;
 pub use query::{TransactionQuery, TransactionSelectQuery};
 pub(crate) use succession::ReadSettlement;
+pub use transact::Transact;
 
 use crate::Commit;
 use crate::repository::branch::QueryLayer;
@@ -205,7 +207,6 @@ impl Snapshot {
 /// [`canonicalize`](Self::canonicalize)); the difference is the
 /// induction step in front and that transients never reach the
 /// durable batch.
-#[derive(Clone)]
 pub struct TransactionCommit<Line> {
     pub(super) line: Line,
     pub(super) changes: Staged,
@@ -402,6 +403,12 @@ impl Branch {
             + ConditionalSync
             + 'static,
     {
-        Box::pin(self.transaction().commit().publish().perform(env)).await
+        // Its rules run over the head: one that lost the race runs them
+        // again over the head that won.
+        Box::pin(
+            self.transact(|transaction| async move { Ok::<_, CommitError>(transaction) })
+                .perform(env),
+        )
+        .await
     }
 }

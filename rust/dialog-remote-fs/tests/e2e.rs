@@ -13,6 +13,9 @@
 //! milestone that lets a repository be created *directly on* a File System
 //! Access directory is separate work.) Because the vault is a [`Location`], the
 //! tests run on native and the web alike.
+// Exercises the one-shot `.commit().publish().perform(..)`, which keeps
+// failing on a lost race as it did; nothing here races.
+#![allow(deprecated)]
 
 use anyhow::Result;
 use dialog_capability::Subject;

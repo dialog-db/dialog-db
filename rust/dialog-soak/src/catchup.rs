@@ -71,6 +71,9 @@
 //! nothing is pending: those reads drive the hints, in the setup. What a
 //! measured poll enqueues runs in the next measured phase, as it would
 //! on a replica.
+// Measures the one-shot `.commit().publish().perform(..)` the gates were
+// recorded with; moving it to `Branch::transact` is the maintainer's call.
+#![allow(deprecated)]
 
 use anyhow::{Context as _, Result};
 use dialog_capability::Provider;

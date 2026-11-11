@@ -23,6 +23,10 @@
 //! follow-up crates / PRs.
 
 #![warn(missing_docs)]
+// The tests exercise the one-shot `.commit().publish().perform(..)` a
+// commit used to be, which must keep failing on a lost race as it did;
+// code outside them commits through `Branch::transact`.
+#![cfg_attr(test, allow(deprecated))]
 #![warn(clippy::absolute_paths)]
 #![warn(clippy::default_trait_access)]
 #![warn(clippy::fallible_impl_from)]

@@ -71,6 +71,9 @@
 //! cargo run --release -p dialog-baseline --example single_file_census -- \
 //!   archive path/to/replica/archive
 //! ```
+// Measures the one-shot `.commit().publish().perform(..)` the gates were
+// recorded with; moving it to `Branch::transact` is the maintainer's call.
+#![allow(deprecated)]
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Write as _;

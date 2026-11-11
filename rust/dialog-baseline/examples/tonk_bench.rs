@@ -24,6 +24,9 @@
 //! It uses only what main and this branch share, so the same file builds
 //! in a worktree of `origin/main` for the baseline (`--cfg dialog_main`
 //! leaves out the stores main does not have).
+// Measures the one-shot `.commit().publish().perform(..)` the gates were
+// recorded with; moving it to `Branch::transact` is the maintainer's call.
+#![allow(deprecated)]
 
 #[cfg(not(target_arch = "wasm32"))]
 #[path = "tonk/dataset.rs"]
@@ -642,6 +645,7 @@ mod native {
                         caught_up[*author as usize] = true;
                     }
                 }
+                // bare-send-ok: `Line::Sync` is a dataset line, not a bound
                 Line::Sync => {
                     round += 1;
                     for (n, member) in members.iter().enumerate() {

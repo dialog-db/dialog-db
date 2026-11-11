@@ -39,6 +39,9 @@
 //! 13. **download** — a second fresh client materializes the entire space
 //!     (`pull().download()`): the eager-replication cost the lazy join
 //!     avoids up front but pays incrementally.
+// Measures the one-shot `.commit().publish().perform(..)` the gates were
+// recorded with; moving it to `Branch::transact` is the maintainer's call.
+#![allow(deprecated)]
 
 use anyhow::{Context as _, Result};
 use dialog_corpus::{Fact, Instruction, Selector, Value};

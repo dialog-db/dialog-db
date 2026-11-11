@@ -3,6 +3,9 @@
 //! the file reads what the replica committed.
 
 #![cfg(not(target_arch = "wasm32"))]
+// Exercises the one-shot `.commit().publish().perform(..)`, which keeps
+// failing on a lost race as it did; nothing here races.
+#![allow(deprecated)]
 
 use std::str::FromStr;
 
