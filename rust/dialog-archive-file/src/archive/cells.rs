@@ -131,15 +131,47 @@ impl Layout {
     }
 
     /// The newest whole half: its sequence and what it holds. `None` when
-    /// neither half is whole.
+    /// neither half is whole. For bytes no writer changes as they are read:
+    /// a copy, or the file under the cell's lock.
     pub fn read(&self, bytes: &[u8]) -> Option<(u64, Held)> {
         (0..2)
             .filter_map(|half| self.read_half(bytes, half))
             .max_by_key(|(sequence, _)| *sequence)
     }
 
+    /// The value the cell held at one moment, read from `file` while
+    /// writers may write it: as [`read`](Self::read), without its lock.
+    ///
+    /// Read alone, the halves can disagree with any one moment: the first
+    /// read whole, then written over, the second read torn mid-write, and
+    /// the first's older value taken as the newest, after a read that saw
+    /// a newer one. So the first is read again after the second. Unchanged,
+    /// no write to it began or ended between the two reads, and at the
+    /// moment the second was read the newest whole of the two was the
+    /// newest value written: the second torn is the write after the
+    /// first's. Changed, the halves are read again. A half a crashed writer
+    /// left torn reads the same each time, and is passed over.
+    ///
+    /// Each half is read with a read call, not from the mapping: the
+    /// mapping is borrowed as bytes that never change, and two reads of it
+    /// could be taken as one.
+    pub fn read_settled(&self, file: &File) -> io::Result<Option<(u64, Held)>> {
+        settled(|half| self.read_half_from(file, half))
+    }
+
+    fn read_half_from(&self, file: &File, half: u64) -> io::Result<Option<(u64, Held)>> {
+        let mut bytes = vec![0u8; (HALF + self.capacity as u64) as usize];
+        crate::file::read_at(file, self.at(half), &mut bytes)?;
+        Ok(self.decode_half(&bytes))
+    }
+
     fn read_half(&self, bytes: &[u8], half: u64) -> Option<(u64, Held)> {
-        let at = self.at(half) as usize;
+        self.decode_half(bytes.get(self.at(half) as usize..)?)
+    }
+
+    /// A half from its bytes, if it is whole.
+    fn decode_half(&self, bytes: &[u8]) -> Option<(u64, Held)> {
+        let at = 0;
         let head = bytes.get(at..at + HALF as usize)?;
         let sequence = u64::from_le_bytes(head[0..8].try_into().ok()?);
         let len = u32::from_le_bytes(head[8..12].try_into().ok()?);
@@ -179,6 +211,25 @@ impl Layout {
             self.at(older),
             &encode_half(sequence + 1, held, self.capacity)?,
         )
+    }
+}
+
+/// The newest whole half at one moment, from `read`, which reads a half
+/// as it is now (see [`Layout::read_settled`]).
+fn settled(
+    mut read: impl FnMut(u64) -> io::Result<Option<(u64, Held)>>,
+) -> io::Result<Option<(u64, Held)>> {
+    let sequence = |half: &Option<(u64, Held)>| half.as_ref().map(|(sequence, _)| *sequence);
+    loop {
+        let first = read(0)?;
+        let second = read(1)?;
+        let again = read(0)?;
+        if sequence(&first) == sequence(&again) {
+            return Ok([again, second]
+                .into_iter()
+                .flatten()
+                .max_by_key(|(sequence, _)| *sequence));
+        }
     }
 }
 
@@ -299,7 +350,7 @@ impl FileArchive {
 
     /// The cell named `name`, looking again after reading the slots when it
     /// is not found and another process grew the file.
-    fn cell(&self, name: &[u8]) -> io::Result<Option<(Arc<Snapshot>, Layout)>> {
+    pub(super) fn cell(&self, name: &[u8]) -> io::Result<Option<(Arc<Snapshot>, Layout)>> {
         let (snapshot, found) = self.look(|snapshot| self.find_cell(snapshot, name))?;
         if let Some(layout) = found {
             return Ok(Some((snapshot, layout)));
@@ -328,8 +379,9 @@ impl FileArchive {
         let Some((snapshot, layout)) = self.cell(&name(space, cell))? else {
             return Ok(None);
         };
+        drop(snapshot);
         let (_, held) = layout
-            .read(snapshot.bytes())
+            .read_settled(&self.inner.file)?
             .ok_or_else(|| invalid("a cell with neither half whole"))?;
         self.value(held)
     }
@@ -501,7 +553,10 @@ impl FileArchive {
             if &name[..split] != space.as_bytes() {
                 continue;
             }
-            if matches!(layout.read(bytes), Some((_, Held::Empty)) | None) {
+            if matches!(
+                layout.read_settled(&self.inner.file)?,
+                Some((_, Held::Empty)) | None
+            ) {
                 continue;
             }
             cells.push(String::from_utf8_lossy(&name[split + 1..]).into_owned());
@@ -724,6 +779,40 @@ mod tests {
         let spilled = Held::Spilled(Blake3Hash::hash(b"big"));
         layout.write(&file, &mapped, 3, &spilled)?;
         assert_eq!(layout.read(&read(&file)?), Some((4, spilled)));
+        Ok(())
+    }
+
+    /// A reader that read the first half, then the second torn as it was
+    /// written, does not take the first's value if the first was written
+    /// over in between: that value is older than one a reader could have
+    /// read before. It reads both again, and takes the newest settled.
+    #[test]
+    fn it_reads_a_cell_as_it_was_at_one_moment() -> anyhow::Result<()> {
+        let value = |text: &str| Held::Value(text.as_bytes().to_vec());
+        // Half 0 holds 10, half 1 holds 11 (read by an earlier reader).
+        // Then half 0 is written with 12, and half 1 is being written with
+        // 13 when this reader reads it.
+        let mut reads = vec![
+            Some((10, value("ten"))),
+            None,
+            Some((12, value("twelve"))),
+            // Read again: the write of 13 has finished.
+            Some((12, value("twelve"))),
+            Some((13, value("thirteen"))),
+            Some((12, value("twelve"))),
+        ]
+        .into_iter();
+        let read = settled(|_| Ok(reads.next().expect("no more reads than scripted")))?;
+        let sequence = read.map(|(sequence, _)| sequence);
+        assert!(
+            sequence >= Some(11),
+            "not older than what an earlier reader read: {sequence:?}"
+        );
+
+        // A half a crashed writer left torn stays torn: the other is taken.
+        let mut reads = vec![None, Some((7, value("seven"))), None].into_iter();
+        let read = settled(|_| Ok(reads.next().expect("no more reads than scripted")))?;
+        assert_eq!(read, Some((7, value("seven"))));
         Ok(())
     }
 }

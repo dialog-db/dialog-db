@@ -23,6 +23,8 @@ use crate::rows::{Reader, Rows, get_rows, invalid, put_rows, put_varint, rename}
 use crate::tokens::{ALIGN, Draft, TokenRead};
 
 mod cells;
+#[cfg(test)]
+mod concurrency;
 mod extent;
 mod index;
 #[cfg(test)]
@@ -39,8 +41,42 @@ use slot::{DATA, SLOT, Slot, boot};
 use tree::{Child, Nodes, PAGE, Pages, check, is_stale};
 
 /// The files this process has open, so a second open of one shares it.
-static OPEN: LazyLock<Mutex<HashMap<PathBuf, Weak<Inner>>>> =
+static OPEN: LazyLock<Mutex<HashMap<FileId, Weak<Inner>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Which file a path names, whatever name it is reached by. On Unix, its
+/// device and inode: a file reached by two names (a hard link, a symbolic
+/// link) is one file, and must be one handle in a process, as the locks
+/// (see the `locks` module) belong to the process: two handles would both
+/// hold the writer's turn, and closing either would let go of every lock
+/// the process holds on the file. Elsewhere, its canonical path.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct FileId(#[cfg(unix)] (u64, u64), #[cfg(not(unix))] PathBuf);
+
+impl FileId {
+    /// The file at `path`, if there is one.
+    fn at(path: &Path) -> io::Result<Option<Self>> {
+        match std::fs::metadata(path) {
+            Ok(metadata) => Ok(Some(Self::of(path, &metadata)?)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn of(path: &Path, metadata: &std::fs::Metadata) -> io::Result<Self> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let _ = path;
+            Ok(Self((metadata.dev(), metadata.ino())))
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = metadata;
+            Ok(Self(std::fs::canonicalize(path)?))
+        }
+    }
+}
 
 /// The longest chain of frames, each written against the one before, a
 /// read decodes, by default: every this many versions of a node, a frame is
@@ -311,6 +347,10 @@ struct Inner {
     /// folding in or cutting anything.
     #[cfg(test)]
     dies: std::sync::atomic::AtomicBool,
+    /// Set by a test to stop an integration after its blocks are appended
+    /// and before its extents are retired, as a crash between the two would.
+    #[cfg(test)]
+    stop_before_retire: std::sync::atomic::AtomicBool,
 }
 
 /// What a [`FileArchive`] holds, and what holding it costs.
@@ -510,7 +550,8 @@ struct Extents {
 /// found is, by its catalog's number and hash, with the extent it is in.
 #[derive(Default)]
 struct Loose {
-    read: HashMap<u64, u64>,
+    /// By extent: the epoch it was read in, and how far.
+    read: HashMap<u64, (u64, u64)>,
     blocks: HashMap<(u16, Blake3Hash), (u64, u32)>,
     /// The slot the extents were last read as of.
     sequence: u64,
@@ -520,19 +561,63 @@ struct Loose {
 /// file's lock, a tail past it is an append that did not finish: it is
 /// dropped.
 fn newest(file: &File, locked: bool) -> io::Result<Slot> {
-    let len = file.metadata()?.len();
-    let slot = Slot::read(file)?
-        .into_iter()
-        .find(|slot| slot.end <= len)
-        .ok_or_else(|| invalid("no whole slot"))?;
+    // The slots first, then the length: a writer grows the file before it
+    // writes the slot that names the growth, so every slot read then ends
+    // within the length read after. Read the other way round, two appends
+    // between the two reads would leave both slots past it.
+    //
+    // Without the lock, a writer may be writing a slot as it is read, and
+    // write the other before the other is read: both read torn. Each such
+    // miss is a writer moving on, so it is read again, a bounded number of
+    // times, before the file is taken to have no whole slot.
+    let mut tries = if locked { 1 } else { 64 };
+    let (slot, len) = loop {
+        let slots = Slot::read(file)?;
+        let len = file.metadata()?.len();
+        tries -= 1;
+        match slots.into_iter().find(|slot| slot.end <= len) {
+            Some(slot) => break (slot, len),
+            None if tries > 0 => std::thread::yield_now(),
+            None => return Err(invalid("no whole slot")),
+        }
+    };
     if locked && len > slot.end {
         file.set_len(slot.end)?;
     }
     Ok(slot)
 }
 
+/// The newest slot, when it was written in this boot: taken as it is, with
+/// nothing to check, so without the writer's turn, as a reader following
+/// the file's growth takes one; a tail past it is dropped by the next
+/// writer in the turn. `None` when the file needs [`recover`]'s turn: it
+/// is new, or its newest slot is from another boot.
+fn written_this_boot(file: &File) -> io::Result<Option<Slot>> {
+    let len = file.metadata()?.len();
+    let mut magic = [0u8; 8];
+    if len < DATA || {
+        read_at(file, 0, &mut magic)?;
+        &magic != MAGIC
+    } {
+        return Ok(None);
+    }
+    let Some(durable) = Slot::read_durable(file)? else {
+        return Ok(None);
+    };
+    let this_boot = boot();
+    // As in `newest`: the slots, then the length.
+    let slots = Slot::read(file)?;
+    let len = file.metadata()?.len();
+    Ok(slots
+        .into_iter()
+        .find(|slot| slot.end <= len && slot.sequence >= durable.sequence)
+        .filter(|slot| this_boot != 0 && slot.boot == this_boot))
+}
+
 /// Opens the file's state, creating it when it is empty. Holds the file's
-/// lock, so it never reads, or drops, an append under way.
+/// lock, so it never reads, or drops, an append under way. When another
+/// process holds it, a slot written in this boot is taken without it: a
+/// process opening the file does not wait on a writer's turn.
 ///
 /// A rolling slot written in this boot is taken as it is: a process that
 /// died left what it wrote with the operating system, in order. One
@@ -544,7 +629,13 @@ fn newest(file: &File, locked: bool) -> io::Result<Slot> {
 /// taken; if none does, the file goes back to the durable slot, which
 /// nothing since was allowed to write over.
 fn recover(file: &File) -> io::Result<Slot> {
-    let _exclusive = Exclusive::take(file)?;
+    let _exclusive = match Exclusive::try_take(file)? {
+        Some(exclusive) => exclusive,
+        None => match written_this_boot(file)? {
+            Some(slot) => return Ok(slot),
+            None => Exclusive::take(file)?,
+        },
+    };
     let len = file.metadata()?.len();
     if len == 0 {
         write_at(file, 0, MAGIC)?;
@@ -863,12 +954,42 @@ impl FileArchive {
     /// options it was first opened with.
     pub fn open_with(path: impl AsRef<Path>, options: Options) -> Result<Self, ArchiveError> {
         let path = path.as_ref().to_path_buf();
-        let key = std::path::absolute(&path).map_err(|error| storage_error(&path, error))?;
         let mut open = OPEN.lock();
         open.retain(|_, inner| inner.strong_count() > 0);
-        if let Some(inner) = open.get(&key).and_then(Weak::upgrade) {
+        // Looked up before the file is opened: a descriptor opened and
+        // closed again for a file this process has open would let go of its
+        // locks.
+        if let Some(id) = FileId::at(&path).map_err(|error| storage_error(&path, error))?
+            && let Some(inner) = open.get(&id).and_then(Weak::upgrade)
+        {
             return Ok(Self { inner });
         }
+        let opened = Self::open_unshared(&path, options)?;
+        let metadata = opened
+            .inner
+            .file
+            .metadata()
+            .map_err(|error| storage_error(&path, error))?;
+        let id = FileId::of(&path, &metadata).map_err(|error| storage_error(&path, error))?;
+        if let Some(inner) = open.get(&id).and_then(Weak::upgrade) {
+            // Another name for an open file came to name it between the
+            // look and the open. The new descriptor is never closed, so
+            // the open one keeps its locks.
+            std::mem::forget(opened);
+            return Ok(Self { inner });
+        }
+        open.insert(id, Arc::downgrade(&opened.inner));
+        Ok(opened)
+    }
+
+    /// Opens the file with a handle of its own, not shared with another
+    /// open of it in this process. Outside tests, only [`open_with`](Self::open_with)
+    /// calls it, holding the table of open files. A test uses it for a
+    /// second handle with its own index and extents, as another process
+    /// has, driven from one thread; its locks are not another process's,
+    /// so a test of what locks keep apart runs another process instead.
+    fn open_unshared(path: &Path, options: Options) -> Result<Self, ArchiveError> {
+        let path = path.to_path_buf();
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -903,8 +1024,9 @@ impl FileArchive {
             before_publish: Mutex::new(None),
             #[cfg(test)]
             dies: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            stop_before_retire: std::sync::atomic::AtomicBool::new(false),
         });
-        open.insert(key, Arc::downgrade(&inner));
         Ok(Self { inner })
     }
 
@@ -1342,7 +1464,13 @@ impl FileArchive {
                     (owned.record, at),
                 );
             }
-            loose.read.insert(owned.record, owned.used);
+            // Read up to here, if read up to where these start: what a
+            // dead writer left before them is read by the next walk.
+            let start = owned.used - bytes.len() as u64;
+            let read = loose.read.entry(owned.record).or_insert((owned.epoch, 0));
+            if *read == (owned.epoch, start) {
+                read.1 = owned.used;
+            }
         }
         self.give_back(owned);
         written.map(|()| true)
@@ -1361,8 +1489,59 @@ impl FileArchive {
         };
         match taken {
             Some(owned) => Ok(owned),
-            None => self.claim(),
+            None => match self.adopt()? {
+                Some(owned) => Ok(owned),
+                None => self.claim(),
+            },
         }
+    }
+
+    /// An extent the file lists that no process owns, taken for this
+    /// process without the writer's turn: one a turn holder left ready
+    /// (see [`keep_lobby`](Self::keep_lobby)), or one whose owner died.
+    /// `None` when there is none.
+    fn adopt(&self) -> io::Result<Option<Owned>> {
+        let file = &self.inner.file;
+        let snapshot = self.current();
+        let record = {
+            let mut extents = self.inner.extents.lock();
+            let mut found = None;
+            for &record in &snapshot.slot.extents {
+                // A process's own locks never exclude its threads: the
+                // ones this process holds are told apart here.
+                if extents.busy.contains(&record)
+                    || extents.idle.iter().any(|owned| owned.record == record)
+                {
+                    continue;
+                }
+                if locks::lock(file, locks::owner(record), true, false)? {
+                    extents.busy.insert(record);
+                    found = Some(record);
+                    break;
+                }
+            }
+            found
+        };
+        let Some(record) = record else {
+            return Ok(None);
+        };
+        // An integration may have retired it since this process's snapshot
+        // listed it. It let go of the extent's byte only after writing the
+        // slot that says so, so the newest slot tells.
+        let listed = newest(file, false)
+            .map(|slot| slot.extents.contains(&record))
+            .and_then(|listed| {
+                if listed {
+                    Owned::of(snapshot.bytes(), record).map(Some)
+                } else {
+                    Ok(None)
+                }
+            });
+        if !matches!(listed, Ok(Some(_))) {
+            let _ = locks::unlock(file, locks::owner(record));
+            self.inner.extents.lock().busy.remove(&record);
+        }
+        listed
     }
 
     /// Returns an extent a writer took, for the next to take.
@@ -1377,24 +1556,52 @@ impl FileArchive {
     /// process had no extent ready.
     fn claim(&self) -> io::Result<Owned> {
         let turn = self.turn()?;
-        let claimed = self.claim_in_turn(&turn)?;
-        self.inner.extents.lock().busy.insert(claimed.record);
-        Ok(claimed)
+        self.claim_in_turn(&turn)
     }
 
     /// Keeps an extent ready for this process's writers, claimed while it
     /// holds the turn anyway, so a writer that later finds the turn taken
     /// writes at once instead of waiting to claim one.
     fn keep_spare(&self, turn: &Turn<'_>) -> io::Result<()> {
+        let has = {
+            let extents = self.inner.extents.lock();
+            !extents.idle.is_empty() || !extents.busy.is_empty()
+        };
+        if !has {
+            let spare = self.claim_in_turn(turn)?;
+            let mut extents = self.inner.extents.lock();
+            extents.busy.remove(&spare.record);
+            extents.idle.push(spare);
+        }
+        self.keep_lobby(turn)
+    }
+
+    /// Keeps one empty extent listed that no process owns, claimed in a
+    /// turn this process holds anyway, so a process that has never held
+    /// the turn takes it for its first write (see [`adopt`](Self::adopt))
+    /// instead of waiting for the turn to claim one.
+    fn keep_lobby(&self, turn: &Turn<'_>) -> io::Result<()> {
+        let snapshot = self.newest_in_turn(turn)?;
+        let file = &self.inner.file;
         {
             let extents = self.inner.extents.lock();
-            if !extents.idle.is_empty() || !extents.busy.is_empty() {
-                return Ok(());
+            for &record in &snapshot.slot.extents {
+                if extents.busy.contains(&record)
+                    || extents.idle.iter().any(|owned| owned.record == record)
+                    || extent::used(snapshot.bytes(), record) != Some(0)
+                {
+                    continue;
+                }
+                if locks::lock(file, locks::owner(record), true, false)? {
+                    locks::unlock(file, locks::owner(record))?;
+                    return Ok(());
+                }
             }
         }
-        let spare = self.claim_in_turn(turn)?;
-        self.inner.extents.lock().idle.push(spare);
-        Ok(())
+        let lobby = self.claim_in_turn(turn)?;
+        let unlocked = locks::unlock(file, locks::owner(lobby.record));
+        self.inner.extents.lock().busy.remove(&lobby.record);
+        unlocked
     }
 
     /// Claims an extent in the writer's turn: one freed by an integration a
@@ -1408,18 +1615,29 @@ impl FileArchive {
             Some(record) => (record, true),
             None => {
                 let record = slot.end;
-                let bytes = extent::record(record, self.inner.options.extent)?;
+                let bytes = extent::record(record, self.inner.options.extent, slot.sequence)?;
                 write_at(file, record, &bytes)?;
                 slot.end += bytes.len() as u64;
                 (record, false)
             }
         };
-        slot.extents.push(record);
-        slot.boot = boot();
-        self.know(slot.end);
-        snapshot_after_claim(self, file, slot, reused, record).inspect_err(|_| {
+        // Owned before any slot lists it, so no process adopts it, and
+        // marked busy before this process's snapshot lists it, so no
+        // thread of this one does. Only an adopter checking a stale
+        // listing can hold its byte now, and lets go at once.
+        self.inner.extents.lock().busy.insert(record);
+        let owned = locks::lock(file, locks::owner(record), true, true).and_then(|_| {
+            slot.extents.push(record);
+            slot.boot = boot();
+            self.know(slot.end);
+            snapshot_after_claim(self, file, slot, reused, record)
+        });
+        if owned.is_err() {
             let _ = file.set_len(snapshot.slot.end);
-        })
+            let _ = locks::unlock(file, locks::owner(record));
+            self.inner.extents.lock().busy.remove(&record);
+        }
+        owned
     }
 
     /// Where `catalog`'s block `hash` is in an extent, as far as this
@@ -1448,20 +1666,32 @@ impl FileArchive {
             loose.sequence = snapshot.slot.sequence;
         }
         for &record in &snapshot.slot.extents {
-            let Some(used) = extent::used(bytes, record) else {
+            let (Some(used), Some(epoch)) =
+                (extent::used(bytes, record), extent::epoch(bytes, record))
+            else {
                 continue;
             };
-            let read = loose.read.get(&record).copied().unwrap_or(0);
-            // An extent emptied to be claimed again starts over.
-            let read = if used < read { 0 } else { read };
+            let (seen, read) = loose.read.get(&record).copied().unwrap_or((epoch, 0));
+            // An extent claimed again since it was read starts over, its
+            // old blocks gone from it: a count lower than what was read
+            // says so too, if the epoch is caught being written.
+            let read = if seen != epoch || used < read {
+                loose.blocks.retain(|_, (at, _)| *at != record);
+                0
+            } else {
+                read
+            };
+            let mut reached = read;
             if used > read {
-                for held in extent::held(bytes, record, read, used)? {
+                let (found, to) = extent::held(bytes, record, read, used)?;
+                for held in found {
                     loose
                         .blocks
                         .insert((held.catalog, held.hash), (record, held.at));
                 }
+                reached = to;
             }
-            loose.read.insert(record, used);
+            loose.read.insert(record, (epoch, reached));
         }
         let Some(&(_, at)) = loose.blocks.get(&(catalog_id, hash.clone())) else {
             return Ok(None);
@@ -1504,12 +1734,25 @@ impl FileArchive {
                 if let Some(at) = extents.idle.iter().position(|owned| owned.record == record) {
                     // An empty one stays ready for the next writer.
                     if all || extents.idle[at].used > 0 {
+                        // Busy while folded: this process holds its byte,
+                        // so only this set keeps another of its threads
+                        // from taking it (see `adopt`).
+                        extents.busy.insert(record);
                         ours.push(extents.idle.swap_remove(at));
                     }
                 } else if !extents.busy.contains(&record)
                     && locks::lock(file, locks::owner(record), true, false)?
                 {
-                    abandoned.push(record);
+                    if extent::used(snapshot.bytes(), record) == Some(0) {
+                        // Empty and no one's: left listed, for a process
+                        // with no extent to take without the turn.
+                        locks::unlock(file, locks::owner(record))?;
+                    } else {
+                        // Busy while folded, so no thread of this process
+                        // adopts it meanwhile.
+                        extents.busy.insert(record);
+                        abandoned.push(record);
+                    }
                 }
             }
         }
@@ -1522,16 +1765,27 @@ impl FileArchive {
             return Ok(());
         }
         let integrated = self.fold(turn, &snapshot, &records);
-        for record in &records {
+        // Let go under the mutex, each byte before its busy mark: a thread
+        // of this process that took it between the two would have its own
+        // lock let go.
+        let mut extents = self.inner.extents.lock();
+        let let_go: Vec<u64> = if integrated.is_ok() {
+            records
+        } else {
+            // This process's extents are kept, still held, for the next
+            // try; the abandoned ones are left for whoever comes next.
+            abandoned
+        };
+        for record in &let_go {
             let _ = locks::unlock(file, locks::owner(*record));
         }
-        if let Err(error) = integrated {
-            // Keep this process's extents for the next try.
-            let mut extents = self.inner.extents.lock();
-            extents.idle.extend(ours);
-            return Err(error);
+        for record in ours.iter().map(|owned| owned.record).chain(let_go) {
+            extents.busy.remove(&record);
         }
-        Ok(())
+        if integrated.is_err() {
+            extents.idle.extend(ours);
+        }
+        integrated
     }
 
     /// Appends the blocks the extents at `records` hold, then retires the
@@ -1541,7 +1795,7 @@ impl FileArchive {
         let mut by_catalog: HashMap<u16, Vec<Buffer>> = HashMap::new();
         for &record in records {
             let used = extent::used(bytes, record).unwrap_or(0);
-            for held in extent::held(bytes, record, 0, used)? {
+            for held in extent::held(bytes, record, 0, used)?.0 {
                 let block = snapshot.block(held.at)?;
                 by_catalog
                     .entry(held.catalog)
@@ -1555,6 +1809,10 @@ impl FileArchive {
                 .ok_or_else(|| invalid("an extent's block of a catalog the file lacks"))?
                 .to_string();
             self.append_in_turn(turn, &name, &blocks)?;
+        }
+        #[cfg(test)]
+        if self.inner.stop_before_retire.load(Ordering::Relaxed) {
+            return Err(invalid("stopped before retiring the extents, for a test"));
         }
         // Retire the extents: their blocks are frames now.
         let snapshot = self.newest_in_turn(turn)?;
@@ -2137,9 +2395,9 @@ fn write_index(
     Ok(pages)
 }
 
-/// Writes the slot that claims the extent at `record`, publishes it and
-/// takes the extent's owner's byte; an extent claimed again is emptied
-/// first.
+/// Writes the slot that claims the extent at `record`, whose owner's byte
+/// this process holds, and publishes it; an extent claimed again is
+/// emptied.
 fn snapshot_after_claim(
     archive: &FileArchive,
     file: &File,
@@ -2147,14 +2405,14 @@ fn snapshot_after_claim(
     reused: bool,
     record: u64,
 ) -> io::Result<Owned> {
+    // The slot's sequence is the extent's epoch, written with a new one's
+    // record or over a reused one's.
+    let epoch = slot.sequence;
     slot.write(file)?;
     archive.publish(snapshot(file, slot, Some(&archive.current()))?);
-    if !locks::lock(file, locks::owner(record), true, false)? {
-        return Err(invalid("an extent just claimed is held by another process"));
-    }
     let mut owned = Owned::of(archive.current().bytes(), record)?;
     if reused {
-        owned.clear(file)?;
+        owned.clear(file, epoch)?;
     }
     Ok(owned)
 }
@@ -2199,7 +2457,22 @@ impl FileArchive {
     fn truncate_free_tail(&self, turn: &Turn<'_>) -> io::Result<()> {
         let file = &self.inner.file;
         let snapshot = self.newest_in_turn(turn)?;
-        let mut slot = self.sync_point(snapshot.slot.clone())?;
+        let mut slot = snapshot.slot.clone();
+        // No other process has the file open: the empty extents left for
+        // one to take are retired, to be cut with the rest.
+        let empty: Vec<u64> = slot
+            .extents
+            .iter()
+            .copied()
+            .filter(|&record| extent::used(snapshot.bytes(), record) == Some(0))
+            .collect();
+        if !empty.is_empty() {
+            slot.sequence += 1;
+            slot.extents.retain(|record| !empty.contains(record));
+            slot.extents_pending.extend_from_slice(&empty);
+            slot.boot = boot();
+        }
+        let mut slot = self.sync_point(slot)?;
         self.publish(snapshot_of(file, slot.clone(), &self.current())?);
         let bytes = self.current();
         let mut cut = slot.end;
@@ -2286,15 +2559,15 @@ mod tests {
         let archive = FileArchive::open(&path)?;
         let first = block("first");
         archive.append("index", std::slice::from_ref(&first))?;
-        // Holding the turn, the writer kept an extent ready.
+        // Holding the turn, the writer kept an extent ready, and left one
+        // for a process that has none.
         let extents = archive.current().slot.extents.clone();
-        assert_eq!(extents.len(), 1, "a spare extent claimed in the turn");
-        let extent = extents[0];
-        // Another handle on the file, as another process reads it. Opened
-        // first: opening waits for an append under way to finish.
-        let other_path = directory.path().join("other");
-        std::fs::hard_link(&path, &other_path)?;
-        let other = FileArchive::open(&other_path)?;
+        assert_eq!(extents.len(), 2, "a spare, and one for another process");
+        let extent = archive.inner.extents.lock().idle[0].record;
+        // Another handle on the file with its own snapshot and its own
+        // read of the extents, as another process has (the concurrency
+        // tests read from one).
+        let other = FileArchive::open_unshared(&path, Options::default())?;
 
         let mut holder = crate::locks::tests::hold_turn(&path)?;
         let loose = [block("loose one"), block("loose two")];
@@ -2306,8 +2579,12 @@ mod tests {
         );
         assert_eq!(
             archive.current().slot.extents,
-            vec![extent],
+            extents,
             "it wrote to the spare extent, claiming none"
+        );
+        assert!(
+            extent::used(archive.current().bytes(), extent).is_some_and(|used| used > 0),
+            "the spare holds them"
         );
         for block in &loose {
             assert_eq!(
@@ -2349,6 +2626,8 @@ mod tests {
             );
         }
 
+        // Its close would take this process's locks for its own.
+        other.inner.dies.store(true, Ordering::Relaxed);
         drop((archive, other));
         let reopened = FileArchive::open(&path)?;
         for block in loose.iter().chain([&first, &last]) {
@@ -2361,8 +2640,8 @@ mod tests {
     }
 
     /// The last process to close the file cuts the free extents that end
-    /// it: the spare a lone writer kept goes, the file reopens whole, and
-    /// every block reads back.
+    /// it: the spare a lone writer kept, and the one it left for another
+    /// process, go; the file reopens whole, and every block reads back.
     #[test]
     fn it_cuts_free_extents_off_the_end_at_the_last_close() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
@@ -2371,13 +2650,13 @@ mod tests {
         let with_spare = {
             let archive = FileArchive::open(&path)?;
             archive.append("index", &blocks)?;
-            assert_eq!(archive.current().slot.extents.len(), 1, "a spare is kept");
+            assert_eq!(archive.current().slot.extents.len(), 2, "two are kept");
             std::fs::metadata(&path)?.len()
         };
         let closed = std::fs::metadata(&path)?.len();
         assert!(
-            closed + (1 << 20) <= with_spare,
-            "the spare extent is cut at the last close ({closed} against {with_spare})"
+            closed + (2 << 20) <= with_spare,
+            "both extents are cut at the last close ({closed} against {with_spare})"
         );
         let reopened = FileArchive::open(&path)?;
         let slot = reopened.current().slot.clone();
@@ -2410,8 +2689,16 @@ mod tests {
         holder.wait()?;
 
         let reopened = FileArchive::open(&path)?;
-        let left = reopened.current().slot.extents.clone();
-        assert_eq!(left.len(), 1);
+        let snapshot = reopened.current();
+        let left: Vec<u64> = snapshot
+            .slot
+            .extents
+            .iter()
+            .copied()
+            .filter(|&record| extent::used(snapshot.bytes(), record).is_some_and(|used| used > 0))
+            .collect();
+        drop(snapshot);
+        assert_eq!(left.len(), 1, "one extent holds what it left");
         assert_eq!(
             reopened.get("index", loose.blake3_hash())?.as_deref(),
             Some(loose.as_ref()),
@@ -2846,13 +3133,10 @@ mod tests {
         let path = directory.path().join("archive");
         let archive = FileArchive::open(&path)?;
         archive.append("index", &[entity_segment("base", &manifest)?])?;
-        // Another writer: the same file under another name, so it keeps an
-        // index of its own, as another process would, and keeps every block
-        // whole.
-        let other_path = directory.path().join("other");
-        std::fs::hard_link(&path, &other_path)?;
-        let other = FileArchive::open_with(
-            &other_path,
+        // Another writer with an index of its own, as another process has,
+        // that keeps every block whole.
+        let other = FileArchive::open_unshared(
+            &path,
             Options {
                 frames: false,
                 ..Options::default()
@@ -2881,6 +3165,8 @@ mod tests {
                 Some(content.as_ref())
             );
         }
+        // Its close would take this process's locks for its own.
+        other.inner.dies.store(true, Ordering::Relaxed);
         drop((archive, other));
         let reopened = FileArchive::open(&path)?;
         for content in &first {

@@ -11,7 +11,9 @@
 //! An extent's body is a byte of padding and the padding, so what follows
 //! starts on an eight-byte boundary; then how many bytes of frames it
 //! holds, twice, the second inverted, so a reader that catches the count
-//! being written tells it from a whole one; then its frames, each a block
+//! being written tells it from a whole one; then its epoch, the sequence of
+//! the slot that claimed it, so a reader tells an extent claimed again
+//! from the one it read before; then its frames, each a block
 //! kept whole as a [frame](Kind::Frame) record of the [whole](WHOLE) kind,
 //! exactly as the file keeps whole blocks elsewhere, so a block in an
 //! extent is read where it is, as any block kept whole.
@@ -32,8 +34,8 @@ use crate::file::{HEADER, Kind, put_record, record_in, write_at};
 use crate::rows::{Reader, invalid, put_varint};
 use crate::tokens::ALIGN;
 
-/// The bytes of the count, and its inverse.
-const COUNT: u64 = 16;
+/// The bytes of the count, its inverse and the epoch.
+const COUNT: u64 = 24;
 
 /// Where an extent's count is, from where its record starts: past the
 /// record's header and the padding that puts it on an eight-byte boundary.
@@ -42,8 +44,9 @@ fn count_at(record: u64) -> u64 {
     body + 1 + (8 - (body + 1) % 8) % 8
 }
 
-/// An extent's record, claiming `size` bytes of frames after `record`.
-pub(crate) fn record(record: u64, size: u64) -> io::Result<Vec<u8>> {
+/// An extent's record, claiming `size` bytes of frames after `record`, in
+/// `epoch`.
+pub(crate) fn record(record: u64, size: u64, epoch: u64) -> io::Result<Vec<u8>> {
     let count = count_at(record);
     let pad = count - (record + HEADER) - 1;
     let mut body = Vec::with_capacity((1 + pad + COUNT + size) as usize);
@@ -51,6 +54,7 @@ pub(crate) fn record(record: u64, size: u64) -> io::Result<Vec<u8>> {
     body.resize(1 + pad as usize, 0);
     body.extend_from_slice(&0u64.to_le_bytes());
     body.extend_from_slice(&(!0u64).to_le_bytes());
+    body.extend_from_slice(&epoch.to_le_bytes());
     body.resize(body.len() + size as usize, 0);
     let mut bytes = Vec::with_capacity(HEADER as usize + body.len());
     put_record(&mut bytes, Kind::Extent, &body)?;
@@ -58,13 +62,14 @@ pub(crate) fn record(record: u64, size: u64) -> io::Result<Vec<u8>> {
 }
 
 /// An extent this process writes: its record's offset, where its frames
-/// start and end, and how many bytes of them it holds.
+/// start and end, how many bytes of them it holds, and its epoch.
 #[derive(Debug)]
 pub(crate) struct Owned {
     pub record: u64,
     start: u64,
     end: u64,
     pub used: u64,
+    pub epoch: u64,
 }
 
 impl Owned {
@@ -82,6 +87,7 @@ impl Owned {
             start: count + COUNT,
             end: body_end as u64,
             used: used(bytes, record).unwrap_or(0),
+            epoch: epoch(bytes, record).unwrap_or(0),
         })
     }
 
@@ -132,15 +138,20 @@ impl Owned {
         write_count(file, self.record, self.used)
     }
 
-    /// Empties the extent, for a writer to claim it again.
-    pub fn clear(&mut self, file: &File) -> io::Result<()> {
+    /// Empties the extent, claimed again in `epoch`.
+    pub fn clear(&mut self, file: &File, epoch: u64) -> io::Result<()> {
         self.used = 0;
-        write_count(file, self.record, 0)
+        self.epoch = epoch;
+        let mut count = [0u8; COUNT as usize];
+        count[..8].copy_from_slice(&0u64.to_le_bytes());
+        count[8..16].copy_from_slice(&(!0u64).to_le_bytes());
+        count[16..].copy_from_slice(&epoch.to_le_bytes());
+        write_at(file, count_at(self.record), &count)
     }
 }
 
 fn write_count(file: &File, record: u64, used: u64) -> io::Result<()> {
-    let mut count = [0u8; COUNT as usize];
+    let mut count = [0u8; 16];
     count[..8].copy_from_slice(&used.to_le_bytes());
     count[8..].copy_from_slice(&(!used).to_le_bytes());
     write_at(file, count_at(record), &count)
@@ -150,10 +161,17 @@ fn write_count(file: &File, record: u64, used: u64) -> io::Result<()> {
 /// file, mapped) say; `None` while its count is being written.
 pub(crate) fn used(bytes: &[u8], record: u64) -> Option<u64> {
     let at = count_at(record) as usize;
-    let count = bytes.get(at..at + COUNT as usize)?;
+    let count = bytes.get(at..at + 16)?;
     let used = u64::from_le_bytes(count[..8].try_into().ok()?);
     let check = u64::from_le_bytes(count[8..].try_into().ok()?);
     (check == !used).then_some(used)
+}
+
+/// The epoch of the extent at `record`: the sequence of the slot that last
+/// claimed it.
+pub(crate) fn epoch(bytes: &[u8], record: u64) -> Option<u64> {
+    let at = count_at(record) as usize + 16;
+    Some(u64::from_le_bytes(bytes.get(at..at + 8)?.try_into().ok()?))
 }
 
 /// A block an extent holds: its catalog's number, its hash, and where its
@@ -166,9 +184,11 @@ pub(crate) struct Held {
 }
 
 /// The blocks the extent at `record` holds in its frames from byte `from`
-/// of them to byte `to`, as `bytes` (the file, mapped) say. A frame that is
-/// not whole ends the walk.
-pub(crate) fn held(bytes: &[u8], record: u64, from: u64, to: u64) -> io::Result<Vec<Held>> {
+/// of them to byte `to`, as `bytes` (the file, mapped) say, and the byte of
+/// its frames the walk reached. A frame that is not whole ends the walk:
+/// cut short by a crash, or read before its bytes all arrived, it is read
+/// again from there next time.
+pub(crate) fn held(bytes: &[u8], record: u64, from: u64, to: u64) -> io::Result<(Vec<Held>, u64)> {
     let start = count_at(record) + COUNT;
     let mut at = (start + from) as usize;
     let end = (start + to) as usize;
@@ -187,7 +207,7 @@ pub(crate) fn held(bytes: &[u8], record: u64, from: u64, to: u64) -> io::Result<
         });
         at = next;
     }
-    Ok(found)
+    Ok((found, at as u64 - start))
 }
 
 #[cfg(test)]
@@ -206,7 +226,7 @@ mod tests {
             .truncate(true)
             .open(directory.path().join("extent"))?;
         let at = DATA_FOR_TESTS;
-        let bytes = record(at, 4096)?;
+        let bytes = record(at, 4096, 1)?;
         write_at(&file, at, &bytes)?;
         let read = |len: u64| -> anyhow::Result<Vec<u8>> {
             let mut out = vec![0u8; len as usize];
@@ -217,14 +237,16 @@ mod tests {
 
         let mut owned = Owned::of(&read(len)?, at)?;
         assert_eq!(owned.used, 0);
-        assert!(held(&read(len)?, at, 0, owned.used)?.is_empty());
+        assert!(held(&read(len)?, at, 0, owned.used)?.0.is_empty());
+        assert_eq!(epoch(&read(len)?, at), Some(1));
 
         let blocks: Vec<Buffer> = (0..3u8).map(|n| Buffer::from(vec![n; 100])).collect();
         let refs: Vec<&Buffer> = blocks.iter().collect();
         let (frames, places) = owned.lay_out(7, &refs)?.expect("they fit");
         owned.write(&file, &frames)?;
-        let found = held(&read(len)?, at, 0, owned.used)?;
+        let (found, reached) = held(&read(len)?, at, 0, owned.used)?;
         assert_eq!(found.len(), 3);
+        assert_eq!(reached, owned.used);
         for ((found, block), place) in found.iter().zip(&blocks).zip(&places) {
             assert_eq!(&found.hash, block.blake3_hash());
             assert_eq!(found.catalog, 7);
@@ -232,9 +254,24 @@ mod tests {
         }
         assert_eq!(used(&read(len)?, at), Some(owned.used));
 
+        // A frame not whole ends the walk where it starts, for the next
+        // walk to start there.
+        let last = places[2] as u64 * ALIGN;
+        write_at(&file, last + 8, &[0xEE; 4])?;
+        let (found, reached) = held(&read(len)?, at, 0, owned.used)?;
+        assert_eq!(found.len(), 2);
+        assert!(reached < owned.used);
+        let (found, _) = held(&read(len)?, at, reached, owned.used)?;
+        assert!(found.is_empty(), "read again from where it stopped");
+
         // A count caught half written is not read as one.
         write_at(&file, count_at(at), &5u64.to_le_bytes())?;
         assert_eq!(used(&read(len)?, at), None);
+
+        // Claimed again: empty, in its new epoch.
+        owned.clear(&file, 2)?;
+        assert_eq!(used(&read(len)?, at), Some(0));
+        assert_eq!(epoch(&read(len)?, at), Some(2));
 
         // Too much for the extent does not lay out.
         let big = Buffer::from(vec![9u8; 8192]);
