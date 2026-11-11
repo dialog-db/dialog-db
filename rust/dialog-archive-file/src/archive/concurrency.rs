@@ -26,7 +26,7 @@ use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::time::Duration;
 
-use dialog_common::{Blake3Hash, Buffer};
+use dialog_common::{Blake3Hash, Buffer, ConditionalSend};
 use dialog_effects::memory::{MemoryError, Version};
 
 use super::{FileArchive, Options, extent};
@@ -246,9 +246,9 @@ fn appender(
 /// Runs `work` on another thread: its result if it finishes within
 /// `within`, else `None`, with the channel its result comes on when it
 /// does finish.
-fn within<T: Send + 'static>(
+fn within<T: ConditionalSend + 'static>(
     within: Duration,
-    work: impl FnOnce() -> T + Send + 'static,
+    work: impl FnOnce() -> T + ConditionalSend + 'static,
 ) -> (Option<T>, mpsc::Receiver<T>) {
     let (send, receive) = mpsc::channel();
     std::thread::spawn(move || {
@@ -378,6 +378,14 @@ fn child() -> anyhow::Result<()> {
                 // Ends without closing the file, as a crash would.
                 std::process::exit(0);
             }
+            drop(archive);
+        }
+        // open <path>: holds the file open until the input closes.
+        "open" => {
+            let archive = FileArchive::open(args[1])?;
+            say(READY);
+            let mut rest = Vec::new();
+            std::io::stdin().read_to_end(&mut rest)?;
             drop(archive);
         }
         // count <path> <cell> <times>
@@ -586,6 +594,76 @@ fn a_process_that_never_held_the_turn_writes_without_waiting() -> anyhow::Result
     archive.refresh()?;
     assert!(holding(&archive).is_empty(), "folded in at its close");
     all_read_back(&archive, &fresh)
+}
+
+/// Processes that have never held the turn, arriving together while
+/// another holds it throughout, all write without waiting: every process
+/// that opened the file with the turn free left an extent for one.
+#[test]
+fn processes_arriving_together_while_the_turn_is_held_do_not_wait() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let path = archive_in(&directory);
+    let archive = FileArchive::open(&path)?;
+    archive.append("index", &[block("first")])?;
+    let path_text = path.to_string_lossy().into_owned();
+    let open = (0..3)
+        .map(|_| Process::ready(&["open", &path_text]))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let holder = hold(&path, locks::TURN, true)?;
+    let mut writers = (0..4)
+        .map(|writer| appender(&path, &format!("arriving {writer}"), 5, 1 << 20, false))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    go(&mut writers)?;
+    for writer in &mut writers {
+        writer.expect(DONE)?;
+    }
+    holder.finish()?;
+    for writer in writers {
+        writer.finish()?;
+    }
+    for process in open {
+        process.finish()?;
+    }
+    let all: Vec<String> = (0..4)
+        .flat_map(|writer| names(&format!("arriving {writer}"), 5))
+        .collect();
+    archive.refresh()?;
+    all_read_back(&archive, &all)
+}
+
+/// The extents processes leave as they open are taken back as they close:
+/// processes opening and closing the file one after another, while
+/// another keeps it open, leave no more of them than were there.
+#[test]
+fn extents_left_for_others_do_not_pile_up() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let path = archive_in(&directory);
+    let archive = FileArchive::open(&path)?;
+    archive.append("index", &[block("first")])?;
+    let path_text = path.to_string_lossy().into_owned();
+    let empty = |archive: &FileArchive| -> anyhow::Result<usize> {
+        archive.refresh()?;
+        let snapshot = archive.current();
+        Ok(snapshot
+            .slot
+            .extents
+            .iter()
+            .filter(|&&record| extent::used(snapshot.bytes(), record) == Some(0))
+            .count())
+    };
+    let before = empty(&archive)?;
+    for _ in 0..10 {
+        Process::ready(&["open", &path_text])?.finish()?;
+    }
+    // A block appended makes the file grow, so this process reads the
+    // slots again.
+    archive.append("index", &[block("last")])?;
+    assert!(
+        empty(&archive)? <= before,
+        "{} empty extents after ten opens and closes, {before} before",
+        empty(&archive)?
+    );
+    Ok(())
 }
 
 /// A writer that finds the turn held by another process does not wait,
@@ -982,8 +1060,17 @@ fn only_the_last_process_to_close_cuts_the_file() -> anyhow::Result<()> {
         std::fs::metadata(&path)?.len() < before,
         "the last close cuts it"
     );
-    let reopened = FileArchive::open(&path)?;
-    assert!(reopened.current().slot.extents.is_empty());
+    let reopened = FileArchive::open_with(
+        &path,
+        Options {
+            leave_extent: false,
+            ..Options::default()
+        },
+    )?;
+    assert!(
+        reopened.current().slot.extents.is_empty(),
+        "every extent retired"
+    );
     all_read_back(&reopened, &["first".into()])
 }
 

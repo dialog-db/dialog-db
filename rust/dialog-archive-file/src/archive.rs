@@ -156,6 +156,11 @@ pub struct Options {
     /// The bytes of blocks an extent holds: what a writer that finds the
     /// writer's turn taken claims once, to append to without the turn.
     pub extent: u64,
+    /// Whether opening the file leaves an extent no process owns, for the
+    /// next process to open to write without waiting for a turn some
+    /// process holds; taken back as this process closes. On by default; a
+    /// process that only reads can leave none, and grow the file by none.
+    pub leave_extent: bool,
 }
 
 impl Default for Options {
@@ -165,6 +170,7 @@ impl Default for Options {
             chain: CHAIN,
             rows_cached: 4096,
             extent: 1 << 20,
+            leave_extent: true,
             verify: cfg!(debug_assertions) || std::env::var_os("DIALOG_ARCHIVE_VERIFY").is_some(),
         }
     }
@@ -335,6 +341,9 @@ struct Inner {
     loose: Mutex<Loose>,
     /// Each cell's lock in this process, by where its data starts.
     cell_locks: Mutex<HashMap<u64, Arc<Mutex<()>>>>,
+    /// Whether this process left an extent for another as it opened, to
+    /// take back as it closes.
+    left_extent: std::sync::atomic::AtomicBool,
     /// The end of what this process has read of the file or is writing to
     /// it, so a read that misses looks for another process's appends only
     /// when the file grew past it, and takes no lock otherwise.
@@ -1020,6 +1029,7 @@ impl FileArchive {
             extents: Mutex::new(Extents::default()),
             loose: Mutex::new(Loose::default()),
             cell_locks: Mutex::new(HashMap::new()),
+            left_extent: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             before_publish: Mutex::new(None),
             #[cfg(test)]
@@ -1027,7 +1037,19 @@ impl FileArchive {
             #[cfg(test)]
             stop_before_retire: std::sync::atomic::AtomicBool::new(false),
         });
-        Ok(Self { inner })
+        let archive = Self { inner };
+        // An extent for the next process to open, so it writes without
+        // waiting for a turn some process holds: one per process that has
+        // the file open, each taken back as its process closes. Left only
+        // when the turn is free now; a process that finds it held takes
+        // one instead.
+        if archive.inner.options.leave_extent
+            && let Ok(Some(turn)) = archive.try_turn()
+            && archive.leave_extent(&turn).is_ok()
+        {
+            archive.inner.left_extent.store(true, Ordering::Relaxed);
+        }
+        Ok(archive)
     }
 
     /// Where the file is.
@@ -1598,10 +1620,45 @@ impl FileArchive {
                 }
             }
         }
-        let lobby = self.claim_in_turn(turn)?;
-        let unlocked = locks::unlock(file, locks::owner(lobby.record));
-        self.inner.extents.lock().busy.remove(&lobby.record);
+        self.leave_extent(turn)
+    }
+
+    /// Claims an extent and leaves it to no process, for one that has
+    /// none to take (see [`adopt`](Self::adopt)).
+    fn leave_extent(&self, turn: &Turn<'_>) -> io::Result<()> {
+        let left = self.claim_in_turn(turn)?;
+        let unlocked = locks::unlock(&self.inner.file, locks::owner(left.record));
+        self.inner.extents.lock().busy.remove(&left.record);
         unlocked
+    }
+
+    /// Retires one empty extent no process owns, in the writer's turn: the
+    /// one a process left when it opened, taken back as it closes.
+    fn retire_left_extent(&self, turn: &Turn<'_>) -> io::Result<()> {
+        let snapshot = self.newest_in_turn(turn)?;
+        let file = &self.inner.file;
+        let extents = self.inner.extents.lock();
+        for &record in &snapshot.slot.extents {
+            if extents.busy.contains(&record)
+                || extents.idle.iter().any(|owned| owned.record == record)
+                || extent::used(snapshot.bytes(), record) != Some(0)
+                || !locks::lock(file, locks::owner(record), true, false)?
+            {
+                continue;
+            }
+            let mut slot = snapshot.slot.clone();
+            slot.sequence += 1;
+            slot.extents.retain(|listed| *listed != record);
+            slot.extents_pending.push(record);
+            slot.boot = boot();
+            let written = slot
+                .write(file)
+                .and_then(|()| self::snapshot(file, slot, Some(&self.current())));
+            let _ = locks::unlock(file, locks::owner(record));
+            self.publish(written?);
+            return Ok(());
+        }
+        Ok(())
     }
 
     /// Claims an extent in the writer's turn: one freed by an integration a
@@ -1615,9 +1672,11 @@ impl FileArchive {
             Some(record) => (record, true),
             None => {
                 let record = slot.end;
-                let bytes = extent::record(record, self.inner.options.extent, slot.sequence)?;
+                let (bytes, whole) =
+                    extent::record(record, self.inner.options.extent, slot.sequence)?;
                 write_at(file, record, &bytes)?;
-                slot.end += bytes.len() as u64;
+                file.set_len(record + whole)?;
+                slot.end += whole;
                 (record, false)
             }
         };
@@ -2436,6 +2495,9 @@ impl Drop for FileArchive {
         if let Ok(snapshot) = self.newest_in_turn(&turn) {
             let _ = self.integrate_some(&turn, snapshot, true);
         }
+        if self.inner.left_extent.load(Ordering::Relaxed) {
+            let _ = self.retire_left_extent(&turn);
+        }
         // The last process to close cuts free extents off the file's end.
         // Its shared hold on the present byte is let go first: a lock is
         // not upgraded in place on every platform.
@@ -2640,27 +2702,45 @@ mod tests {
     }
 
     /// The last process to close the file cuts the free extents that end
-    /// it: the spare a lone writer kept, and the one it left for another
-    /// process, go; the file reopens whole, and every block reads back.
+    /// it: the spare a lone writer kept goes. The one it left for another
+    /// process as it opened is before its blocks, so it stays, free, and
+    /// the next open takes it again instead of growing the file. The file
+    /// reopens whole, and every block reads back.
     #[test]
     fn it_cuts_free_extents_off_the_end_at_the_last_close() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("archive");
         let blocks = [block("one"), block("two")];
-        let with_spare = {
+        let (with_spare, left) = {
             let archive = FileArchive::open(&path)?;
+            let left = archive.current().slot.extents.clone();
+            assert_eq!(left.len(), 1, "one left as it opened");
             archive.append("index", &blocks)?;
-            assert_eq!(archive.current().slot.extents.len(), 2, "two are kept");
-            std::fs::metadata(&path)?.len()
+            assert_eq!(archive.current().slot.extents.len(), 2, "and a spare");
+            (std::fs::metadata(&path)?.len(), left[0])
         };
         let closed = std::fs::metadata(&path)?.len();
         assert!(
-            closed + (2 << 20) <= with_spare,
-            "both extents are cut at the last close ({closed} against {with_spare})"
+            closed + (1 << 20) <= with_spare,
+            "the spare is cut at the last close ({closed} against {with_spare})"
         );
+        {
+            let reopened = FileArchive::open_with(&path, recovering())?;
+            let slot = reopened.current().slot.clone();
+            assert!(slot.extents.is_empty());
+            assert_eq!(slot.extents_free, vec![left], "the one left is free");
+        }
         let reopened = FileArchive::open(&path)?;
-        let slot = reopened.current().slot.clone();
-        assert!(slot.extents.is_empty() && slot.extents_free.is_empty());
+        assert_eq!(
+            reopened.current().slot.extents,
+            vec![left],
+            "and left again by the next open"
+        );
+        assert_eq!(
+            std::fs::metadata(&path)?.len(),
+            closed,
+            "the file did not grow"
+        );
         for block in &blocks {
             assert_eq!(
                 reopened.get("index", block.blake3_hash())?.as_deref(),
@@ -2716,6 +2796,15 @@ mod tests {
                 .is_some()
         );
         Ok(())
+    }
+
+    /// Options for a test of what opening recovers: opening leaves no
+    /// extent after it, so the file is as recovery left it.
+    fn recovering() -> Options {
+        Options {
+            leave_extent: false,
+            ..Options::default()
+        }
     }
 
     fn subject() -> Subject {
@@ -2903,7 +2992,7 @@ mod tests {
         let kept: Vec<Buffer> = (0..10).map(|n| block(&format!("kept {n}"))).collect();
         let torn = block("torn");
         let whole = {
-            let archive = FileArchive::open(&path)?;
+            let archive = FileArchive::open_with(&path, recovering())?;
             archive.append("index", &kept)?;
             let whole = std::fs::metadata(&path)?.len();
             archive.append("index", std::slice::from_ref(&torn))?;
@@ -2916,7 +3005,7 @@ mod tests {
         file.set_len(whole + HEADER + 2)?;
         drop(file);
 
-        let archive = FileArchive::open(&path)?;
+        let archive = FileArchive::open_with(&path, recovering())?;
         assert_eq!(archive.len(), 10);
         assert!(archive.get("index", torn.blake3_hash())?.is_none());
         assert_eq!(std::fs::metadata(&path)?.len(), whole);
@@ -2924,7 +3013,7 @@ mod tests {
         // The next append follows the whole records, and reads back.
         archive.append("index", std::slice::from_ref(&torn))?;
         drop(archive);
-        let reopened = FileArchive::open(&path)?;
+        let reopened = FileArchive::open_with(&path, recovering())?;
         assert_eq!(reopened.len(), 11);
         assert_eq!(
             reopened.get("index", torn.blake3_hash())?.as_deref(),
@@ -2942,7 +3031,7 @@ mod tests {
         let first = block("first");
         let second = block("second");
         let (boundary, sequence) = {
-            let archive = FileArchive::open(&path)?;
+            let archive = FileArchive::open_with(&path, recovering())?;
             archive.append("index", std::slice::from_ref(&first))?;
             let boundary = std::fs::metadata(&path)?.len();
             archive.append("index", std::slice::from_ref(&second))?;
@@ -2957,7 +3046,7 @@ mod tests {
         bytes[newest + 20] ^= 0xFF;
         std::fs::write(&path, &bytes)?;
 
-        let archive = FileArchive::open(&path)?;
+        let archive = FileArchive::open_with(&path, recovering())?;
         assert_eq!(archive.len(), 1);
         assert!(archive.get("index", first.blake3_hash())?.is_some());
         assert!(archive.get("index", second.blake3_hash())?.is_none());
@@ -3349,7 +3438,7 @@ mod tests {
     fn it_goes_back_to_what_is_whole_after_a_power_loss() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("archive");
-        let archive = FileArchive::open(&path)?;
+        let archive = FileArchive::open_with(&path, recovering())?;
         let synced = appended(&archive, 0, 20)?;
         archive.sync()?;
         let durable = Slot::read_durable(&archive.inner.file)?.expect("a durable slot");
@@ -3369,7 +3458,7 @@ mod tests {
         drop(file);
         as_if_rebooted(&path)?;
 
-        let reopened = FileArchive::open(&path)?;
+        let reopened = FileArchive::open_with(&path, recovering())?;
         let slot = reopened.current().slot.clone();
         assert!(slot.sequence >= durable.sequence && slot.end < end);
         assert_eq!(
@@ -3406,7 +3495,7 @@ mod tests {
     fn it_goes_back_to_the_durable_slot_when_a_page_did_not_reach_the_disk() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("archive");
-        let archive = FileArchive::open(&path)?;
+        let archive = FileArchive::open_with(&path, recovering())?;
         let synced = appended(&archive, 0, 1500)?;
         archive.sync()?;
         let durable = Slot::read_durable(&archive.inner.file)?.expect("a durable slot");
@@ -3430,7 +3519,7 @@ mod tests {
         drop(file);
         as_if_rebooted(&path)?;
 
-        let reopened = FileArchive::open(&path)?;
+        let reopened = FileArchive::open_with(&path, recovering())?;
         assert_eq!(reopened.current().slot.sequence, durable.sequence);
         assert_eq!(reopened.current().slot.end, durable.end);
         for block in &synced {

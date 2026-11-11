@@ -44,21 +44,28 @@ fn count_at(record: u64) -> u64 {
     body + 1 + (8 - (body + 1) % 8) % 8
 }
 
-/// An extent's record, claiming `size` bytes of frames after `record`, in
-/// `epoch`.
-pub(crate) fn record(record: u64, size: u64, epoch: u64) -> io::Result<Vec<u8>> {
+/// The start of an extent's record, claiming `size` bytes of frames after
+/// `record`, in `epoch`: its header, padding, count and epoch, and how many
+/// bytes the whole record takes. Its frames are not written: nothing reads
+/// past the count, so the file is grown to the record's end without them
+/// (sparse, where the file system allows).
+pub(crate) fn record(record: u64, size: u64, epoch: u64) -> io::Result<(Vec<u8>, u64)> {
     let count = count_at(record);
     let pad = count - (record + HEADER) - 1;
-    let mut body = Vec::with_capacity((1 + pad + COUNT + size) as usize);
-    body.push(pad as u8);
-    body.resize(1 + pad as usize, 0);
-    body.extend_from_slice(&0u64.to_le_bytes());
-    body.extend_from_slice(&(!0u64).to_le_bytes());
-    body.extend_from_slice(&epoch.to_le_bytes());
-    body.resize(body.len() + size as usize, 0);
-    let mut bytes = Vec::with_capacity(HEADER as usize + body.len());
-    put_record(&mut bytes, Kind::Extent, &body)?;
-    Ok(bytes)
+    let mut start = Vec::with_capacity((1 + pad + COUNT) as usize);
+    start.push(pad as u8);
+    start.resize(1 + pad as usize, 0);
+    start.extend_from_slice(&0u64.to_le_bytes());
+    start.extend_from_slice(&(!0u64).to_le_bytes());
+    start.extend_from_slice(&epoch.to_le_bytes());
+    let body = start.len() as u64 + size;
+    let mut bytes = Vec::with_capacity(HEADER as usize + start.len());
+    put_record(&mut bytes, Kind::Extent, &start)?;
+    // The header names the whole body; an extent's is never checked
+    // against its checksum (see `Kind::checked`).
+    let length = u32::try_from(body).map_err(|_| invalid("an extent over 4 GiB"))?;
+    bytes[1..5].copy_from_slice(&length.to_le_bytes());
+    Ok((bytes, HEADER + body))
 }
 
 /// An extent this process writes: its record's offset, where its frames
@@ -226,14 +233,15 @@ mod tests {
             .truncate(true)
             .open(directory.path().join("extent"))?;
         let at = DATA_FOR_TESTS;
-        let bytes = record(at, 4096, 1)?;
+        let (bytes, whole) = record(at, 4096, 1)?;
         write_at(&file, at, &bytes)?;
+        file.set_len(at + whole)?;
         let read = |len: u64| -> anyhow::Result<Vec<u8>> {
             let mut out = vec![0u8; len as usize];
             read_at(&file, 0, &mut out)?;
             Ok(out)
         };
-        let len = at + bytes.len() as u64;
+        let len = at + whole;
 
         let mut owned = Owned::of(&read(len)?, at)?;
         assert_eq!(owned.used, 0);
