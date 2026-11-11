@@ -24,7 +24,7 @@ dialog-storage = { workspace = true }
 hashbrown = { workspace = true }
 memmap2 = { workspace = true }
 papaya = { workspace = true }
-parking_lot = { workspace = true }
+parking_lot = { workspace = true, features = ["arc_lock"] }
 arc-swap = { workspace = true }
 rkyv = { workspace = true }
 zerocopy = { workspace = true }

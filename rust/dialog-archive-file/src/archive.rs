@@ -22,6 +22,7 @@ use crate::node::{TreeNode, realize, rows_after, tree_node};
 use crate::rows::{Reader, Rows, get_rows, invalid, put_rows, put_varint, rename};
 use crate::tokens::{ALIGN, Draft, TokenRead};
 
+mod cells;
 mod extent;
 mod index;
 #[cfg(test)]
@@ -296,6 +297,8 @@ struct Inner {
     extents: Mutex<Extents>,
     /// The blocks extents hold, as far as this process has read them.
     loose: Mutex<Loose>,
+    /// Each cell's lock in this process, by where its data starts.
+    cell_locks: Mutex<HashMap<u64, Arc<Mutex<()>>>>,
     /// The end of what this process has read of the file or is writing to
     /// it, so a read that misses looks for another process's appends only
     /// when the file grew past it, and takes no lock otherwise.
@@ -619,7 +622,11 @@ fn whole_since(file: &File, durable: &Slot, slot: &Slot) -> io::Result<bool> {
     Ok(slot
         .root
         .pages_since(&view, Some(durable.sequence as u32), &mut pages)
-        .is_ok())
+        .is_ok()
+        && slot
+            .cells
+            .pages_since(&view, Some(durable.sequence as u32), &mut pages)
+            .is_ok())
 }
 
 /// `nodes` ordered so every node comes after the children it links to
@@ -883,6 +890,7 @@ impl FileArchive {
             synced: Mutex::new(Instant::now()),
             extents: Mutex::new(Extents::default()),
             loose: Mutex::new(Loose::default()),
+            cell_locks: Mutex::new(HashMap::new()),
             #[cfg(test)]
             before_publish: Mutex::new(None),
         });
@@ -1841,47 +1849,7 @@ impl FileArchive {
             }
         }
 
-        // The index's new entries, and the pages they rewrite: pages free to
-        // write over first, then new ones in a record of their own, each on
-        // a page boundary.
-        let body = start + bytes.len() as u64 + HEADER;
-        let first = (body + 2).div_ceil(PAGE as u64);
-        let mut writer = Writer {
-            snapshot,
-            sequence: slot.sequence as u32,
-            reusable: std::mem::take(&mut slot.reusable),
-            pending: std::mem::take(&mut slot.pending),
-            written: HashMap::new(),
-            unused: Vec::new(),
-            first: u32::try_from(first).map_err(|_| invalid("an index page past 16 TiB"))?,
-            next: first as u32,
-        };
-        let root = std::mem::take(&mut slot.root);
-        slot.root = root.insert(&mut writer, entries)?;
-        let mut pages = Vec::new();
-        let mut written = std::mem::take(&mut writer.written);
-        if writer.next > writer.first {
-            let pad = (first * PAGE as u64 - body - 2) as usize;
-            let mut record =
-                Vec::with_capacity(2 + pad + (writer.next - writer.first) as usize * PAGE);
-            record.extend_from_slice(&(pad as u16).to_le_bytes());
-            record.resize(2 + pad, 0);
-            for page in writer.first..writer.next {
-                match written.remove(&page) {
-                    Some(bytes) => record.extend_from_slice(&bytes),
-                    None => {
-                        // Written and freed again in this append: free.
-                        record.resize(record.len() + PAGE, 0);
-                    }
-                }
-            }
-            put_record(&mut bytes, Kind::Pages, &record)?;
-        }
-        pages.extend(written);
-        slot.reusable = writer.reusable;
-        slot.reusable.append(&mut writer.unused);
-        slot.pending = writer.pending;
-        slot.end = start + bytes.len() as u64;
+        let pages = write_index(snapshot, &mut slot, start, &mut bytes, entries, Vec::new())?;
         Ok(Some(Laid {
             start,
             bytes,
@@ -2085,6 +2053,66 @@ impl FileArchive {
             depth,
         }))
     }
+}
+
+/// Inserts `blocks` into the slot's index and `cells` into its cells'
+/// index, for an append laid out as `bytes` from `start`: the pages the
+/// inserts rewrite go to pages free to write over first, then to new ones
+/// in a record of their own after `bytes`, each on a page boundary. Sets
+/// the slot's end past them; returns the pages written over, and their
+/// bytes.
+fn write_index(
+    snapshot: &Snapshot,
+    slot: &mut Slot,
+    start: u64,
+    bytes: &mut Vec<u8>,
+    blocks: Vec<tree::Entry>,
+    cells: Vec<tree::Entry>,
+) -> io::Result<Vec<(u32, Vec<u8>)>> {
+    let body = start + bytes.len() as u64 + HEADER;
+    let first = (body + 2).div_ceil(PAGE as u64);
+    let mut writer = Writer {
+        snapshot,
+        sequence: slot.sequence as u32,
+        reusable: std::mem::take(&mut slot.reusable),
+        pending: std::mem::take(&mut slot.pending),
+        written: HashMap::new(),
+        unused: Vec::new(),
+        first: u32::try_from(first).map_err(|_| invalid("an index page past 16 TiB"))?,
+        next: first as u32,
+    };
+    if !blocks.is_empty() {
+        let root = std::mem::take(&mut slot.root);
+        slot.root = root.insert(&mut writer, blocks)?;
+    }
+    if !cells.is_empty() {
+        let root = std::mem::take(&mut slot.cells);
+        slot.cells = root.insert(&mut writer, cells)?;
+    }
+    let mut pages = Vec::new();
+    let mut written = std::mem::take(&mut writer.written);
+    if writer.next > writer.first {
+        let pad = (first * PAGE as u64 - body - 2) as usize;
+        let mut record = Vec::with_capacity(2 + pad + (writer.next - writer.first) as usize * PAGE);
+        record.extend_from_slice(&(pad as u16).to_le_bytes());
+        record.resize(2 + pad, 0);
+        for page in writer.first..writer.next {
+            match written.remove(&page) {
+                Some(page) => record.extend_from_slice(&page),
+                None => {
+                    // Written and freed again in this append: free.
+                    record.resize(record.len() + PAGE, 0);
+                }
+            }
+        }
+        put_record(bytes, Kind::Pages, &record)?;
+    }
+    pages.extend(written);
+    slot.reusable = writer.reusable;
+    slot.reusable.append(&mut writer.unused);
+    slot.pending = writer.pending;
+    slot.end = start + bytes.len() as u64;
+    Ok(pages)
 }
 
 /// Writes the slot that claims the extent at `record`, publishes it and
@@ -3151,7 +3179,7 @@ mod breakdown {
                         entries.push((index::token_key(crate::hash::hash(token)), id));
                     }
                 }
-                Kind::Pages | Kind::Extent => {}
+                Kind::Pages | Kind::Extent | Kind::Cell => {}
             }
             at = end;
         }

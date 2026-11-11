@@ -116,6 +116,32 @@ read. Read in place, the single-file archive's cold reads match the `fs`
 archive's, where rebuilding made them about 2× slower, and its cached nodes
 take about a third of the memory of cached blocks.
 
+### A space can keep its memory cells in its file, branch heads included
+
+[#733](https://github.com/dialog-db/dialog-db/pull/733),
+[design](./design/file-writers.md)
+
+`FileArchive` provides the memory effects (`Resolve`, `Publish`,
+`Retract`, `List`), so a `Space` can name it as its memory as well as its
+archive: `Space<FileArchive, FileArchive, ...>` keeps a space's blocks and
+its cells, branch heads among them, in one file. A cell is a record
+written over in place, in two halves taken in turn; its capacity is its
+first value's size and a fifth, and a value past it spills to a block. An
+update takes a lock on that cell alone, never the writer's turn, so
+writers of two branches never meet; creating a cell takes the turn once.
+
+What this changes for you:
+
+- A `Space` whose memory is a `FileArchive` keeps no `memory` directory:
+  its cells are in `archive.dialog`.
+- A cell's edition is the BLAKE3 hash of its value, as under `fs`, so a
+  `Publish` names the same version either way.
+- `List` walks the cells' own index, not the blocks'.
+
+Why: a space that is one file is one thing to copy, back up and keep
+consistent, and a head kept apart from the blocks it names was a second
+thing to keep in step with them.
+
 ### Writers to one space's file do not wait on one another
 
 [#733](https://github.com/dialog-db/dialog-db/pull/733),

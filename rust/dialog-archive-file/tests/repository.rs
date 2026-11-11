@@ -22,6 +22,10 @@ use futures_util::TryStreamExt as _;
 /// filesystem.
 type FileArchiveSpace = Space<FileArchive, FileSystem, FileSystem, FileSystem, FileSystem>;
 
+/// A space that keeps its blocks and its memory cells (branch heads among
+/// them) in one file.
+type FileSpace = Space<FileArchive, FileArchive, FileSystem, FileSystem, FileSystem>;
+
 fn fact(entity: &str, name: &str) -> anyhow::Result<Fact> {
     Ok(Fact {
         the: Relation::from_str("person/name")?,
@@ -34,8 +38,11 @@ fn fact(entity: &str, name: &str) -> anyhow::Result<Fact> {
 /// Opens the `main` branch of repository `name` in the peer at `peer`, with
 /// an operator allowed to act on it.
 macro_rules! open {
-    ($at:expr, $peer:expr, $name:expr) => {{
-        let storage = test_owned(Storage::<FileArchiveSpace>::new()).await;
+    ($at:expr, $peer:expr, $name:expr) => {
+        open!(FileArchiveSpace, $at, $peer, $name)
+    };
+    ($space:ty, $at:expr, $peer:expr, $name:expr) => {{
+        let storage = test_owned(Storage::<$space>::new()).await;
         let profile = open_peer(storage, Location::new($at.clone(), $peer.clone())).await?;
         let operator = profile
             .session(b"file-archive")
@@ -624,5 +631,69 @@ async fn it_keeps_a_node_of_another_layout_whole_unverified() -> anyhow::Result<
         Some(bytes.as_ref()),
         "it reads back as the bytes stored"
     );
+    Ok(())
+}
+
+/// With its cells in the file too, a repository commits, reopens and reads
+/// back, and no space keeps a memory directory: branch heads are in the
+/// file with the blocks they name.
+#[tokio::test]
+async fn it_keeps_branch_heads_in_the_file() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let at = Directory::At(directory.path().to_string_lossy().into_owned());
+    let (peer, name) = (unique_name("peer"), unique_name("repo"));
+    {
+        let (operator, branch) = open!(FileSpace, at, peer, name);
+        for commit in 0..5 {
+            let changes: Changes = (0..10)
+                .map(|row| {
+                    let entity = format!("did:test:person-{commit}-{row}");
+                    Ok(Instruction::Assert(fact(&entity, "someone")?, Pick::All))
+                })
+                .collect::<anyhow::Result<_>>()?;
+            branch
+                .transaction()
+                .integrate(changes)
+                .commit()
+                .publish()
+                .perform(&operator)
+                .await?;
+        }
+    }
+    let (operator, branch) = open!(FileSpace, at, peer, name);
+    let rows: Vec<Fact> = branch
+        .claims()
+        .select(Selector::new().the(Relation::from_str("person/name")?))
+        .to_owned()
+        .perform(&operator)
+        .await?
+        .try_collect()
+        .await?;
+    assert_eq!(
+        rows.len(),
+        50,
+        "the head read back from the file names them all"
+    );
+
+    let mut stack = vec![directory.path().to_path_buf()];
+    let mut files = 0;
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_dir() {
+                assert_ne!(
+                    path.file_name().and_then(|name| name.to_str()),
+                    Some("memory"),
+                    "a memory directory at {}",
+                    path.display()
+                );
+                stack.push(path);
+            } else if path.file_name().and_then(|name| name.to_str()) == Some(FILE_NAME) {
+                files += 1;
+            }
+        }
+    }
+    assert!(files > 0, "the spaces keep archive files");
     Ok(())
 }

@@ -24,7 +24,8 @@
 //! freed since the last sync point (each a count, then u32 each), then the
 //! extents writers hold, the extents free to claim again and the extents
 //! freed since the last sync point (each a count, then each record's
-//! offset as u64).
+//! offset as u64), then the root of the cells' index (its length, u32, then
+//! its bytes).
 
 use std::fs::File;
 use std::io;
@@ -117,6 +118,9 @@ pub(crate) struct Slot {
     pub extents_free: Vec<u64>,
     /// Extents integrated since the last sync point: free once the next is.
     pub extents_pending: Vec<u64>,
+    /// The root of the cells' index, from a key of each cell's name to
+    /// where its record's data starts (see the archive's `cells` module).
+    pub cells: tree::Node,
 }
 
 impl Default for Slot {
@@ -134,6 +138,7 @@ impl Default for Slot {
             extents: Vec::new(),
             extents_free: Vec::new(),
             extents_pending: Vec::new(),
+            cells: tree::Node::default(),
         }
     }
 }
@@ -170,6 +175,9 @@ impl Slot {
                 body.extend_from_slice(&extent.to_le_bytes());
             }
         }
+        let cells = self.cells.encode();
+        body.extend_from_slice(&(cells.len() as u32).to_le_bytes());
+        body.extend_from_slice(&cells);
         let mut out = Vec::with_capacity(8 + body.len());
         out.extend_from_slice(&(body.len() as u32).to_le_bytes());
         out.extend_from_slice(&crc32fast::hash(&body).to_le_bytes());
@@ -223,6 +231,8 @@ impl Slot {
             }
         }
         let [extents, extents_free, extents_pending] = extent_lists;
+        let cells_len = u32_of(&mut reader)? as usize;
+        let cells = tree::Node::decode(reader.take(cells_len).ok()?).ok()?;
         Some(Self {
             sequence,
             end,
@@ -236,6 +246,7 @@ impl Slot {
             extents,
             extents_free,
             extents_pending,
+            cells,
         })
     }
 

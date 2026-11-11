@@ -11,7 +11,9 @@
 //! index's, written over once no root reaches them, so its checksum holds
 //! only until the first is. Each page carries a checksum of its own. An
 //! [extent](Kind::Extent) record is the other: its body is space a writer
-//! fills later, each frame in it a record with a checksum of its own.
+//! fills later, each frame in it a record with a checksum of its own; and a
+//! [cell](Kind::Cell) record's halves are written over, each with a
+//! checksum of its own.
 
 use std::fs::File;
 use std::io;
@@ -40,13 +42,16 @@ pub(crate) enum Kind {
     /// Space claimed by one writer, which appends frames to it without the
     /// writer's turn (see the archive's `extent` module).
     Extent,
+    /// A memory cell, written over in place (see the archive's `cells`
+    /// module).
+    Cell,
 }
 
 impl Kind {
     /// Whether the record's checksum covers its body as it is now: not for
     /// records whose body is written to after the record is.
     fn checked(self) -> bool {
-        !matches!(self, Kind::Pages | Kind::Extent)
+        !matches!(self, Kind::Pages | Kind::Extent | Kind::Cell)
     }
 }
 
@@ -57,6 +62,7 @@ impl Kind {
             Kind::Frame => 5,
             Kind::Pages => 7,
             Kind::Extent => 8,
+            Kind::Cell => 9,
         }
     }
 
@@ -66,6 +72,7 @@ impl Kind {
             5 => Some(Kind::Frame),
             7 => Some(Kind::Pages),
             8 => Some(Kind::Extent),
+            9 => Some(Kind::Cell),
             _ => None,
         }
     }
@@ -139,9 +146,9 @@ pub(crate) fn read_record(file: &File, offset: u64, len: u64) -> io::Result<Opti
 
 /// The record at `at` in `bytes` (the file, mapped): its kind, where its
 /// body starts and where it ends. `None` when the bytes there are not a
-/// whole, intact record of a known kind; a [pages](Kind::Pages) or
-/// [extent](Kind::Extent) record's checksum is not checked, as their bodies
-/// are written to after them.
+/// whole, intact record of a known kind; a [pages](Kind::Pages),
+/// [extent](Kind::Extent) or [cell](Kind::Cell) record's checksum is not
+/// checked, as their bodies are written to after them.
 pub(crate) fn record_in(bytes: &[u8], at: usize) -> Option<(Kind, usize, usize)> {
     let header = bytes.get(at..at + HEADER as usize)?;
     let kind = Kind::from_tag(header[0])?;
