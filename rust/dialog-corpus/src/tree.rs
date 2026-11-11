@@ -766,6 +766,27 @@ pub trait CorpusExt {
             + Clone
             + 's;
 
+    /// [`scan`](Self::scan) in reverse: the same rows, in the opposite
+    /// order. It walks the same key range from its end, and matches and
+    /// filters each entry as [`scan`](Self::scan) does. The walk is lazy, so
+    /// a reader that stops after a few rows reads about those rows, and the
+    /// few more that the fetch of spilled values reads ahead.
+    fn scan_reverse<'s, S>(
+        self,
+        store: S,
+        cache: SpillCache,
+        selector: Selector<Constrained>,
+    ) -> impl Stream<Item = Result<FactView, DialogCorpusError>> + 's + ConditionalSend
+    where
+        Self: Sized,
+        S: Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + Provider<blob::Load>
+            + ConditionalSend
+            + ConditionalSync
+            + Clone
+            + 's;
+
     /// Like [`scan`](Self::scan), but yields every row as an owned
     /// [`Fact`] materialized from the scan's OWN key parse.
     ///
@@ -1075,86 +1096,45 @@ impl CorpusExt for Corpus {
             let range = selector_range(&selector, &manifest);
 
             let stream = tree.stream_range_handles(range, &storage);
-            // Stage one, synchronous per entry: parse the key ONCE into
-            // borrowed components for matching and spill resolution, and
-            // finish every inline-valued row on the spot. Nothing else is
-            // materialized: the entry's key and payload travel into the
-            // yielded view as-is, and the consumer decides per row whether
-            // to borrow a field or reconstruct the whole fact. A row whose
-            // value spilled is handed on with its block reference, so the
-            // fetch it needs runs alongside its neighbours' (stage two)
-            // instead of holding the scan for one round trip per row.
-            let staged = stream.map(|item| -> Result<Staged<_, FactView>, DialogCorpusError> {
-                let raw = item?;
-                // A key that does not parse is corruption; dropping it
-                // silently would make the corrupt entry vanish from results
-                // with no signal.
-                let layout = parse_key_layout(raw.key.as_ref()).ok_or_else(|| {
-                    DialogCorpusError::InvalidKey(
-                        "scanned entry's key does not parse".to_string(),
-                    )
-                })?;
-                let parts = layout.view(raw.key.as_ref());
-                let verdict = match_selector_and_key_ref(&selector, &parts, &manifest);
-                if verdict == SelectorMatch::Excluded || !matches!(raw.value, State::Added(_)) {
-                    return Ok(Staged::Skip);
+            let fetched =
+                scanned_views(stream, &selector, &manifest, &storage, &archive, &cache);
+            tokio::pin!(fetched);
+            for await item in fetched {
+                if let Some(view) = item? {
+                    yield view;
                 }
-                if let ValueRef::Spilled { hash, .. } = &parts.value {
-                    let hash = hash.to_vec();
-                    return Ok(Staged::Spilled { raw, layout, verdict, hash });
-                }
-                // A NeedsValue verdict means some value predicate's answer
-                // lies beyond what the key decides; re-check semantically
-                // before yielding. Only the value is decoded for the check,
-                // not the entity or attribute.
-                if verdict == SelectorMatch::NeedsValue
-                    && !value_predicates_admit(&selector, &decode_value_parts(&parts, None)?)
-                {
-                    return Ok(Staged::Skip);
-                }
-                let State::Added(datum) = raw.value else {
-                    unreachable!("Added state checked above")
-                };
-                Ok(Staged::Ready(FactView::new(raw.key, layout, datum, None)))
-            });
-            // Stage two: the spilled rows' block fetches, SPILL_LOOKAHEAD in
-            // flight, in row order.
-            let fetched = staged
-                .map(|staged| {
-                    let raw_store = &storage;
-                    let archive = &archive;
-                    let cache = &cache;
-                    let selector = &selector;
-                    async move {
-                        let (raw, layout, verdict, hash) = match staged? {
-                            Staged::Spilled { raw, layout, verdict, hash } => (raw, layout, verdict, hash),
-                            finished => return Ok(staged_ready(finished)),
-                        };
-                        let spilled = fetch_spilled_reference(raw_store, archive, cache, &hash).await?;
-                        // The block is in hand now (it was fetched for the
-                        // view anyway), so the value predicates can be
-                        // answered past the in-key prefix.
-                        if verdict == SelectorMatch::NeedsValue {
-                            let parts = layout.view(raw.key.as_ref());
-                            if !value_predicates_admit(
-                                selector,
-                                &decode_value_parts(&parts, Some(spilled.clone()))?,
-                            ) {
-                                return Ok(None);
-                            }
-                        }
-                        let State::Added(datum) = raw.value else {
-                            unreachable!("Added state checked above")
-                        };
-                        Ok::<_, DialogCorpusError>(Some(FactView::new(
-                            raw.key,
-                            layout,
-                            datum,
-                            Some(spilled),
-                        )))
-                    }
-                })
-                .buffered(SPILL_LOOKAHEAD);
+            }
+        }
+    }
+
+    fn scan_reverse<'s, S>(
+        self,
+        store: S,
+        cache: SpillCache,
+        selector: Selector<Constrained>,
+    ) -> impl Stream<Item = Result<FactView, DialogCorpusError>> + 's + ConditionalSend
+    where
+        S: Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + Provider<blob::Load>
+            + ConditionalSend
+            + ConditionalSync
+            + Clone
+            + 's,
+    {
+        let tree = self;
+        let archive = tree.catalog().archive();
+        let storage = store;
+        try_stream! {
+            // The range and the match of `scan`, under the manifest the
+            // facts were written with.
+            let manifest = tree.manifest(&storage).await?;
+            let selector = selector.for_manifest(&manifest);
+            let range = selector_range(&selector, &manifest);
+
+            let stream = tree.stream_range_handles_reverse(range, &storage);
+            let fetched =
+                scanned_views(stream, &selector, &manifest, &storage, &archive, &cache);
             tokio::pin!(fetched);
             for await item in fetched {
                 if let Some(view) = item? {
@@ -1247,6 +1227,117 @@ impl CorpusExt for Corpus {
             }
         }
     }
+}
+
+/// The rows of a scan of `raw`, in the order that `raw` yields its entries,
+/// which [`scan`](CorpusExt::scan) and
+/// [`scan_reverse`](CorpusExt::scan_reverse) share. An item is `None`
+/// for an entry whose spilled value fails the value predicates of
+/// `selector`.
+fn scanned_views<'r, S, R>(
+    raw: R,
+    selector: &'r Selector<Constrained>,
+    manifest: &'r Manifest,
+    storage: &'r S,
+    archive: &'r ArchiveScope,
+    cache: &'r SpillCache,
+) -> impl Stream<Item = Result<Option<FactView>, DialogCorpusError>> + 'r
+where
+    S: Provider<blob::Load> + ConditionalSync + 'r,
+    R: Stream<
+            Item = Result<
+                dialog_search_tree::Entry<dialog_search_tree::KeyHandle, State<Datum>>,
+                dialog_search_tree::DialogSearchTreeError,
+            >,
+        > + 'r,
+{
+    // Stage one, synchronous per entry: parse the key ONCE into
+    // borrowed components for matching and spill resolution, and
+    // finish every inline-valued row on the spot. Nothing else is
+    // materialized: the entry's key and payload travel into the
+    // yielded view as-is, and the consumer decides per row whether
+    // to borrow a field or reconstruct the whole fact. A row whose
+    // value spilled is handed on with its block reference, so the
+    // fetch it needs runs alongside its neighbours' (stage two)
+    // instead of holding the scan for one round trip per row.
+    let staged = raw.map(
+        move |item| -> Result<Staged<_, FactView>, DialogCorpusError> {
+            let raw = item?;
+            // A key that does not parse is corruption; dropping it
+            // silently would make the corrupt entry vanish from results
+            // with no signal.
+            let layout = parse_key_layout(raw.key.as_ref()).ok_or_else(|| {
+                DialogCorpusError::InvalidKey("scanned entry's key does not parse".to_string())
+            })?;
+            let parts = layout.view(raw.key.as_ref());
+            let verdict = match_selector_and_key_ref(selector, &parts, manifest);
+            if verdict == SelectorMatch::Excluded || !matches!(raw.value, State::Added(_)) {
+                return Ok(Staged::Skip);
+            }
+            if let ValueRef::Spilled { hash, .. } = &parts.value {
+                let hash = hash.to_vec();
+                return Ok(Staged::Spilled {
+                    raw,
+                    layout,
+                    verdict,
+                    hash,
+                });
+            }
+            // A NeedsValue verdict means some value predicate's answer
+            // lies beyond what the key decides; re-check semantically
+            // before yielding. Only the value is decoded for the check,
+            // not the entity or attribute.
+            if verdict == SelectorMatch::NeedsValue
+                && !value_predicates_admit(selector, &decode_value_parts(&parts, None)?)
+            {
+                return Ok(Staged::Skip);
+            }
+            let State::Added(datum) = raw.value else {
+                unreachable!("Added state checked above")
+            };
+            Ok(Staged::Ready(FactView::new(raw.key, layout, datum, None)))
+        },
+    );
+    // Stage two: the spilled rows' block fetches, SPILL_LOOKAHEAD in
+    // flight, in row order.
+    staged
+        .map(move |staged| {
+            let raw_store = storage;
+            async move {
+                let (raw, layout, verdict, hash) = match staged? {
+                    Staged::Spilled {
+                        raw,
+                        layout,
+                        verdict,
+                        hash,
+                    } => (raw, layout, verdict, hash),
+                    finished => return Ok(staged_ready(finished)),
+                };
+                let spilled = fetch_spilled_reference(raw_store, archive, cache, &hash).await?;
+                // The block is in hand now (it was fetched for the
+                // view anyway), so the value predicates can be
+                // answered past the in-key prefix.
+                if verdict == SelectorMatch::NeedsValue {
+                    let parts = layout.view(raw.key.as_ref());
+                    if !value_predicates_admit(
+                        selector,
+                        &decode_value_parts(&parts, Some(spilled.clone()))?,
+                    ) {
+                        return Ok(None);
+                    }
+                }
+                let State::Added(datum) = raw.value else {
+                    unreachable!("Added state checked above")
+                };
+                Ok::<_, DialogCorpusError>(Some(FactView::new(
+                    raw.key,
+                    layout,
+                    datum,
+                    Some(spilled),
+                )))
+            }
+        })
+        .buffered(SPILL_LOOKAHEAD)
 }
 
 /// How many spilled value blocks a scan keeps in flight ahead of the row
@@ -2664,6 +2755,234 @@ mod attribute_range_tests {
 
         let cells = window(10, 20).cells().expect("bounded cells");
         assert_eq!(cells, window(10, 20), "the cells keep the attribute bounds");
+    }
+
+    /// The rows a selector's reverse scan yields, in scan order.
+    async fn scanned_in_reverse(
+        tree: &Corpus,
+        store: &Blocks,
+        selector: Selector<Constrained>,
+    ) -> anyhow::Result<Vec<Fact>> {
+        let views: Vec<_> = tree
+            .clone()
+            .scan_reverse(store.clone(), spill_cache(), selector)
+            .try_collect()
+            .await?;
+        Ok(views
+            .into_iter()
+            .map(|view| view.to_owned())
+            .collect::<Result<_, _>>()?)
+    }
+
+    /// A reverse scan of a selector yields the rows of its forward scan, in
+    /// reverse order, for each index and each kind of bound on the key of a
+    /// collection: inclusive, exclusive, and open, on each side, beside a
+    /// prefix and beside the shape of a name.
+    #[dialog_common::test]
+    async fn it_scans_each_selector_in_reverse_as_a_reversed_forward_scan() -> anyhow::Result<()> {
+        let (tree, store) = chat().await?;
+        let log = || {
+            Selector::new()
+                .of(channel())
+                .the_starting_with("chat.channel.log/")
+        };
+        let selectors = vec![
+            log(),
+            log().the_at_least(entry(9997)),
+            log().the_greater_than(entry(9997)),
+            log().the_at_most(entry(2)),
+            log().the_less_than(entry(2)),
+            log().the_at_least(entry(4901)).the_less_than(entry(5000)),
+            log().the_greater_than(entry(4901)).the_at_most(entry(5000)),
+            log()
+                .the_greater_than("chat.channel.log/n00004x")
+                .the_less_than("chat.channel.log/n00007x"),
+            log().the_at_least(entry(50)).the_less_than(entry(10)),
+            Selector::new()
+                .of(channel())
+                .with_domain(&"chat.channel.log".parse()?)
+                .with_name_shape(crate::NameShape::Symbol)
+                .the_less_than(entry(300)),
+            Selector::new().of(channel()),
+            Selector::new()
+                .the_at_least(entry(4950))
+                .the_at_most(entry(4951)),
+            Selector::new().the_starting_with("chat.channel.zone/"),
+            Selector::new().is(Value::Entity("message:4950".parse()?)),
+            Selector::new().of_starting_with("channel:"),
+        ];
+        for selector in selectors {
+            let mut forward: Vec<Fact> = tree
+                .clone()
+                .scan_owned(store.clone(), spill_cache(), selector.clone())
+                .try_collect()
+                .await?;
+            forward.reverse();
+            let reverse = scanned_in_reverse(&tree, &store, selector.clone()).await?;
+            assert_eq!(
+                reverse, forward,
+                "the reverse scan of {selector:?} is the forward scan reversed"
+            );
+        }
+        Ok(())
+    }
+
+    /// A reverse read of the greatest entries of a log of 100,000 entries
+    /// reads about the blocks of one path of the tree, as a read of a log of
+    /// 1,000 does: it reads no leaf beside the ones that hold its rows. A
+    /// forward scan of the same log reads each of its leaves.
+    #[dialog_common::test]
+    async fn it_reads_the_greatest_entries_of_a_long_log_from_one_path() -> anyhow::Result<()> {
+        use crate::helpers::CountingBlocks;
+
+        async fn built(entries: usize) -> anyhow::Result<(Corpus, CountingBlocks)> {
+            let store = CountingBlocks::new();
+            let mut delta = ArchiveDelta::zero();
+            let mut tree = Corpus::empty_in(test_catalog());
+            tree.apply(
+                &store,
+                &mut delta,
+                stream::iter((0..entries).map(|number| {
+                    Instruction::Assert(
+                        fact(
+                            &format!("chat.channel.log/n{number:06}"),
+                            "channel:general",
+                            Value::Entity(format!("message:{number}").parse().expect("an entity")),
+                        ),
+                        crate::Pick::All,
+                    )
+                })),
+            )
+            .await?;
+            store.flush(&mut delta);
+            Ok((tree, store))
+        }
+        // A fresh handle, so that its node cache is cold and each node a
+        // read touches reaches the store.
+        let cold = |tree: &Corpus| Corpus::at(test_catalog(), tree.root().clone());
+
+        let log = Selector::new()
+            .of(channel())
+            .the_starting_with("chat.channel.log/");
+        let mut reads = Vec::new();
+        for entries in [1_000, 100_000] {
+            let (tree, store) = built(entries).await?;
+            store.reset();
+            let rows: Vec<_> = cold(&tree)
+                .scan_reverse(store.clone(), spill_cache(), log.clone())
+                .take(50)
+                .try_collect()
+                .await?;
+            let keys: Vec<String> = rows
+                .iter()
+                .map(|row| row.to_owned().map(|row| row.the.to_string()))
+                .collect::<Result<_, _>>()?;
+            let expected: Vec<String> = ((entries - 50)..entries)
+                .rev()
+                .map(|number| format!("chat.channel.log/n{number:06}"))
+                .collect();
+            assert_eq!(keys, expected, "the 50 greatest entries of {entries}");
+            reads.push(store.reads());
+            println!(
+                "the 50 greatest entries of {entries} read {} blocks",
+                store.reads()
+            );
+
+            if entries == 100_000 {
+                store.reset();
+                let all = cold(&tree)
+                    .scan(store.clone(), spill_cache(), log.clone())
+                    .count()
+                    .await;
+                assert_eq!(all, entries);
+                println!("a forward scan of {entries} reads {} blocks", store.reads());
+                assert!(
+                    store.reads() > 20 * reads[1],
+                    "a forward scan of the log reads each of its leaves: {} blocks against {}",
+                    store.reads(),
+                    reads[1]
+                );
+            }
+        }
+        let [small, large] = reads[..] else {
+            unreachable!("two reads")
+        };
+        assert!(
+            large <= small + 3,
+            "the read of 100,000 entries reads {large} blocks, and of 1,000 reads {small}"
+        );
+        assert!(
+            large <= 8,
+            "the read reads one path and a leaf or two: {large} blocks"
+        );
+        Ok(())
+    }
+
+    /// A reverse read of the 50 greatest entries of a log visits about 50
+    /// entries of the tree, for a log of 100,000 entries as for one of 1,000.
+    /// A counter on the walk counts each entry that it gives the scan: the
+    /// rows that the read takes, and the few that the fetch of spilled values
+    /// reads ahead. The walk is the one of `scan_reverse`, with the same
+    /// range, match, and stages.
+    #[dialog_common::test]
+    async fn it_visits_about_the_count_of_entries_for_the_greatest_entries() -> anyhow::Result<()> {
+        use super::{SPILL_LOOKAHEAD, scanned_views};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let log = Selector::new()
+            .of(channel())
+            .the_starting_with("chat.channel.log/");
+        let mut visits = Vec::new();
+        for entries in [1_000, 100_000] {
+            let store = Blocks::new();
+            let mut delta = ArchiveDelta::zero();
+            let mut tree = Corpus::empty_in(test_catalog());
+            tree.apply(
+                &store,
+                &mut delta,
+                stream::iter((0..entries).map(|number| {
+                    Instruction::Assert(
+                        fact(
+                            &format!("chat.channel.log/n{number:06}"),
+                            "channel:general",
+                            Value::Entity(format!("message:{number}").parse().expect("an entity")),
+                        ),
+                        crate::Pick::All,
+                    )
+                })),
+            )
+            .await?;
+            delta.flush_into(&store);
+
+            let manifest = tree.manifest(&store).await?;
+            let selector = log.clone().for_manifest(&manifest);
+            let range = selector_range(&selector, &manifest);
+            let cache = spill_cache();
+            let visited = AtomicUsize::new(0);
+            let walk = tree
+                .stream_range_handles_reverse(range, &store)
+                .inspect(|_| {
+                    visited.fetch_add(1, Ordering::SeqCst);
+                });
+            let archive = tree.catalog().archive();
+            let rows: Vec<_> = scanned_views(walk, &selector, &manifest, &store, &archive, &cache)
+                .take(50)
+                .try_collect()
+                .await?;
+            assert_eq!(rows.iter().flatten().count(), 50);
+            let visited = visited.load(Ordering::SeqCst);
+            println!("the 50 greatest entries of {entries} visit {visited} entries");
+            assert!(
+                visited <= 50 + SPILL_LOOKAHEAD,
+                "the read of 50 of {entries} entries visits {visited}"
+            );
+            visits.push(visited);
+        }
+        assert_eq!(
+            visits[0], visits[1],
+            "the visits follow the count, and not the length of the log"
+        );
+        Ok(())
     }
 }
 
