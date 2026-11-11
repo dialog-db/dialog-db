@@ -249,12 +249,6 @@ let
       targetAttributes = if isWasm then wasmAttributes else commonAttributes;
 
       targetArtifacts = if isWasm then wasmArtifacts else nativeArtifacts;
-
-      # wbg-pool is a native host binary and dialog-baseline is a native-only
-      # dev measurement crate (its examples pull native-only symbols); neither
-      # builds for wasm32, so keep them out of the wasm test archive.
-      excludeArgs =
-        if isWasm then "--workspace --exclude wbg-pool --exclude dialog-baseline" else "";
     in
     craneLib.mkCargoDerivation (
       targetAttributes
@@ -264,7 +258,6 @@ let
 
         buildPhaseCargoCommand = ''
           cargo nextest archive \
-            ${excludeArgs} \
             ${args} \
             --archive-file ./tests-${name}.tar.zst
         '';

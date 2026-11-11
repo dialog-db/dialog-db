@@ -126,33 +126,39 @@ Consequences to respect:
   address the provider chose (`127.0.0.1:<port>`), so the address must be a real
   URL the browser can reach, not a symbolic handle.
 
-## How CI runs it (verified against `nix/rust.nix` + `flake.nix`)
+## How CI runs it (verified against `flake.nix` + `.github/workflows/test.yml`)
 
-CI drives `cargo nextest archive` **workspace-wide**, passing the feature flag,
-then runs the archived tests. Your crate's `integration-tests` /
-`web-integration-tests` features delegate to `dialog-common`'s, so they hook
-into these flags automatically — no CI config change is needed to pick up a new
-integration test:
+CI runs `cargo nextest run` **workspace-wide** in the dev shell, passing the
+feature flag (`testArguments` in `flake.nix`). Your crate's
+`integration-tests` / `web-integration-tests` features delegate to
+`dialog-common`'s, so they hook into these flags automatically — no CI config
+change is needed to pick up a new integration test:
 
 - `test:native:debug` / `test:native:release`:
-  `cargo nextest archive --workspace ... --features integration-tests`
+  `cargo nextest run [--release] --features integration-tests`
   → provider starts natively, test body runs native, provider stops.
+- `test:web:debug` / `test:web:release`:
+  `cargo nextest run --workspace --exclude wbg-pool --exclude dialog-baseline --target wasm32-unknown-unknown [--release]`
+  → the unit tests in a headless browser. **Every crate's test targets must
+  build for wasm** here, with the `helpers` feature on.
 - `test:cross:integration`:
-  `cargo nextest archive --workspace ... --features web-integration-tests --target wasm32-unknown-unknown`
+  `cargo nextest run --features web-integration-tests`
   → native outer test starts the provider, serializes the address to an env
-  var, spawns the wasm inner test which deserializes it and runs the client in
-  a headless browser.
+  var, spawns the wasm inner test which reads it back from the test runner
+  and runs the client in a headless browser.
 - The `cargoChecks.clippy` gate runs `clippy --all-targets --all-features -D
   warnings`, so **the `helpers` feature and its server must be clippy-clean and
   must not break the wasm build** even though the server itself is native-only.
 
-Before pushing, reproduce all three locally:
+Before pushing, reproduce them locally, in the dev shell:
 
 ```
-# native archive (integration tests)
-cargo nextest archive --workspace --exclude wbg-pool --exclude dialog-baseline   --features integration-tests --archive-file /tmp/native.tar.zst
-# wasm archive (cross integration) — this is where server deps leaking to wasm bite
-cargo nextest archive --workspace --exclude wbg-pool --exclude dialog-baseline   --features web-integration-tests --target wasm32-unknown-unknown   --archive-file /tmp/wasm.tar.zst
+# native (integration tests)
+test:native:debug
+# wasm unit tests — this is where server deps leaking to wasm bite
+test:web:debug
+# cross-target (native provider, wasm client); narrow it with nextest's filter
+test:cross:integration -E 'package(<crate>)'
 # the CI clippy gate
 cargo clippy -p <crate> --all-targets --all-features -- -D warnings
 ```

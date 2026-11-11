@@ -140,6 +140,47 @@
 
         inherit (menuHelpers) makeMenu makeDevShellHook menuTestCommand;
 
+        # What each test configuration builds, as arguments to
+        # `cargo nextest`. The `test:*` commands run them and the `tests-*`
+        # packages archive them, so the two cannot drift apart.
+        #
+        # wbg-pool is a native host binary and dialog-baseline is a
+        # native-only dev measurement crate (its examples pull native-only
+        # symbols); neither builds for wasm32, so the web configurations
+        # leave them out.
+        #
+        # Without a target selection cargo also builds every example, 14
+        # binaries that no test runs. The debug configurations keep doing
+        # that, so an example that stops building for a target still
+        # fails here. The others pass `--tests`: an example that builds in
+        # debug builds in release.
+        testArguments =
+          let
+            web = "--workspace --exclude wbg-pool --exclude dialog-baseline --target wasm32-unknown-unknown";
+          in
+          {
+            native-debug = "--features integration-tests";
+            native-release = "--release --features integration-tests --tests";
+            web-debug = web;
+            web-release = "${web} --release --tests";
+            cross-integration = "${crossTargetPackages} --features web-integration-tests --tests";
+          };
+
+        # The packages with cross-target tests: those that declare the
+        # `web-integration-tests` feature, read from the manifests so a
+        # crate that gains the feature is picked up. The cross-target
+        # configuration builds only these. Built workspace-wide it also
+        # compiled and ran the tests of every crate without the feature
+        # (dialog-query's 970 among them), which are native tests the
+        # native configurations already run.
+        crossTargetPackages =
+          let
+            manifest = path: builtins.fromTOML (builtins.readFile (./. + "/${path}"));
+            members = map (member: manifest "${member}/Cargo.toml") (manifest "Cargo.toml").workspace.members;
+            crossTarget = builtins.filter (member: (member.features or { }) ? "web-integration-tests") members;
+          in
+          pkgs.lib.concatMapStringsSep " " (member: "--package ${member.package.name}") crossTarget;
+
         commands = {
           "bench" = {
             description = "Run all benchmarks";
@@ -313,27 +354,27 @@
 
           "test:native:debug" = menuTestCommand {
             description = "Unit and integration tests (${system}, debug)";
-            package = "tests-native-debug";
+            arguments = testArguments.native-debug;
           };
 
           "test:native:release" = menuTestCommand {
             description = "Unit and integration tests (${system}, release)";
-            package = "tests-native-release";
+            arguments = testArguments.native-release;
           };
 
           "test:web:debug" = menuTestCommand {
             description = "Unit and integration tests (wasm32-unknown-unknown, debug)";
-            package = "tests-web-debug";
+            arguments = testArguments.web-debug;
           };
 
           "test:web:release" = menuTestCommand {
             description = "Unit and integration tests (wasm32-unknown-unknown, release)";
-            package = "tests-web-release";
+            arguments = testArguments.web-release;
           };
 
           "test:cross:integration" = menuTestCommand {
             description = "Cross-target integration tests (${system} + wasm32-unknown-unknown, debug)";
-            package = "tests-cross-integration";
+            arguments = testArguments.cross-integration;
           };
 
         };
@@ -346,28 +387,29 @@
         packages = {
           tests-native-debug = buildTestArchive {
             name = "native-debug";
-            args = "--features integration-tests";
+            args = testArguments.native-debug;
           };
 
           tests-native-release = buildTestArchive {
             name = "native-release";
-            args = "--release --features integration-tests";
+            args = testArguments.native-release;
           };
 
           tests-web-debug = buildTestArchive {
             name = "web-debug";
+            args = testArguments.web-debug;
             target = "wasm32-unknown-unknown";
           };
 
           tests-web-release = buildTestArchive {
             name = "web-release";
+            args = testArguments.web-release;
             target = "wasm32-unknown-unknown";
-            args = "--release";
           };
 
           tests-cross-integration = buildTestArchive {
             name = "cross-integration";
-            args = "--features web-integration-tests";
+            args = testArguments.cross-integration;
           };
         };
 
