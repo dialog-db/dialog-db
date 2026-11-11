@@ -29,8 +29,8 @@ statuses mean.
   every build, main's included where it runs. Commands are 2.6–9× faster
   with the head dedupe and grouped seeding (#761, #763), which slow reads
   at 1× by 1.3–1.6×.
-- **Next:** a push is level with main off the disk and 1.5× on this
-  machine's; find what it waits on there.
+- **Next:** on a CI runner a push is level with main; what is behind is a
+  pull (1.10–1.20×) and the cold `v2/issue` view at 1× (1.13–1.17×).
 - **Open:** the writer's token dictionary (in memory today, as a cache);
   skipping unchanged entries on write; values yielded in place by the
   tree's scans; Windows; the web (OPFS); verified range reads.
@@ -2022,6 +2022,39 @@ the machine did.
 
 **Next.** Timers in a push for its walk, its block builds and its puts, to
 see which waits on the disk.
+
+## 2026-11-10: on a CI runner, against the main it last merged
+
+**Question.** Do this machine's numbers hold on another one? The push
+behind main here (1.4×) was put down to this disk.
+
+**Method.** The "File archive against main" workflow
+([run 10](https://github.com/dialog-db/dialog-db/actions/runs/42898275522)):
+a GitHub runner, 4 cores, the branch at 41eb5480 against main at the merge
+base 427546fa, tonk-shaped 1× on the runner's disk and on `/dev/shm`, three
+rounds alternated, and 10× once. Full tables:
+[results/2026-11-10-ci.md](results/2026-11-10-ci.md). The rounds there
+spread a few percent, where this machine's spread tens.
+
+**Results** (branch ÷ main):
+
+| | 1×, disk | 1×, `/dev/shm` | 10×, disk |
+|---|--:|--:|--:|
+| warm command | 1.01 | 1.10 | 1.00 |
+| push, in a round | 0.99 | 1.03 | |
+| pull, in a round | **1.10** | **1.20** | |
+| `v2/issue`, cold | **1.13** | **1.17** | 0.95 |
+| `v2/issue`, warm | 1.04 | 1.04 | 0.97 |
+| `v2/activity`, warm | 1.03 | 1.03 | 0.95 |
+| a member joining | 0.99 | 0.98 | 0.71 |
+| a member's replica | 0.01 | 0.01 | 0.23 |
+
+- Push is level with main on the runner's disk: the 1.4× here was this
+  machine's disk, as the RAM-disk runs said.
+- What is behind, with a spread too narrow to be noise: a pull in a round
+  (1.10–1.20×), the cold `v2/issue` view at 1× (1.13–1.17×), and a warm
+  command off the disk (1.10×).
+- At 10× the branch is ahead on every view (0.94–0.97×) and on joining.
 
 ## How to reproduce
 
