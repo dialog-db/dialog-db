@@ -79,23 +79,33 @@ is writing this rule, which says that `(task …)` stands for that read of `xyz.
   (when (expand (task ?t title: ?x))))
 ```
 
-A concept maps facts to itself and back, so its body holds reads of one entity and nothing else: fields, each with its type and pick, and every variable in the head. A check such as `(< ?n : 100)` has no inverse: `(assert! (cheap d:1 price: 200))` would have no answer. So a body with a check in it, or over more than one entity, is refused where the concept is defined, and what it meant to say is a rule that derives a relation, which is read and never written.
+A concept maps facts to itself and back. So its body holds reads and nothing else, and every variable in it is a parameter:
 
-A body may read several domains of that one entity. Its reads stand together, as `(all …)`, where the concept is written:
+- A check such as `(< ?n : 100)` has no inverse: `(assert! (cheap d:1 price: 200))` would have no answer. What it meant to say is a rule that derives a relation, which is read and never written.
+- A variable that is not a parameter has no value when the concept is written.
+
+Both are refused where the concept is defined. The reads may be of several entities, which dialog's concepts today are not, so a concept can be read from the other side:
 
 ```clj
+(concept (list-item ?l todo: ?t)
+  (xyz.todo ?t list: (:last (:entity ?l))))
+
 (concept (author ?p name: ?n email: ?e)
   (io.person ?p name: (:last (:text ?n)))
   (io.contact ?p email: (:last (:text ?e))))
 ```
 
+A body's reads stand together, as `(all …)`, where the concept is written:
+
 | Where the concept is written | What its reads become |
 |---|---|
 | in a `when` | premises, side by side |
 | in a write or a report | one head each |
-| in an `unless` | one read: `(io.person ?p name: … io.contact/email: …)` |
+| in an `unless` | one read when they are of one entity: `(io.person ?p name: … io.contact/email: …)` |
 
-The last row is there because `unless` negates one proposition: two reads side by side under it would mean neither holds, not that they do not hold together. A read of one entity may span domains, as a concept query does in dialog.
+The last row is there because `unless` negates one proposition: two reads side by side under it would mean neither holds, not that they do not hold together. A read of one entity may span domains, as a concept query does in dialog. The absence of a concept over several entities is not one proposition, and waits on dialog negating a conjunction.
+
+A rule may have several heads, asserts and retracts together. Dialog's inductive rule has one head today, for no reason beyond the shape tonk's notation had (Irakli, 2026-11-11).
 
 A command is an application around an application whose head names nothing. In a premise it reads the command's rows:
 
@@ -198,7 +208,8 @@ Held, in [model/checks.py](model/checks.py):
 - A description on a concept, on a rule and on an attribute is stored as a fact, and a search for a word in them finds the concept by name.
 - A concept's parameter may be named differently from the field it reads.
 - A concept over two domains is read, written through, and tested for absence as a whole.
-- A concept with a check in its body, or over two entities, is refused where it is defined.
+- A concept with a check in its body, or with a variable that is not a parameter, is refused where it is defined.
+- A backlink reads and writes from the other side, and a concept over two entities is read and written. Its absence is refused as not one read.
 
 Found:
 

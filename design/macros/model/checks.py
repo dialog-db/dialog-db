@@ -180,9 +180,28 @@ scene('the same as a rule that derives a relation, which is read and never writt
 ''',
       '(query (shop.item ?i price: ?n) (when (shop.item ?i price: ?n) (< ?n : 100)))')
 
-scene('a concept over two entities is refused',
+scene('a concept read from the other side: a backlink',
+      '''
+(concept (list-item ?l todo: ?t)
+  (xyz.todo ?t list: (:last (:entity ?l))))
+(assert! (xyz.todo todo:1 list: list:home))
+(assert! (list-item list:work todo: todo:9))
+''',
+      '(query (list-item list:home todo: ?t))',
+      '(query (xyz.todo ?t list: ?l))')
+
+scene('a concept over two entities: read and written; its absence is not one read',
       '''
 (concept (membership ?m person: ?p team: ?t)
   (org.member ?m person: ?p)
   (org.team ?t lead: ?p))
+(assert! (membership member:1 person: person:ada team: team:core))
+''',
+      '(query (membership ?m person: ?p team: ?t))',
+      '(query (org.member ?m person: ?p) (when (org.member ?m person: ?p)) (unless (membership ?m person: ?p)))')
+
+scene('a concept with a variable that is not a parameter is refused',
+      '''
+(concept (titled ?t)
+  (xyz.todo ?t text: ?x))
 ''')

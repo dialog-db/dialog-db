@@ -544,7 +544,7 @@ def together(forms, written):
         return forms[0]
     entities = {split(f[2])[0][0] for f in forms if is_relation(f)}
     if not all(is_relation(f) for f in forms) or len(entities) != 1:
-        raise ValueError(f'the absence of {show(written)} needs a rule: it is more than a read of one entity')
+        raise ValueError(f'the absence of {show(written)} is not one read: dialog negates one proposition, and this spans entities')
     domain = forms[0][1][1]
     parts = [('b', entities.pop())]
     for f in forms:
@@ -637,16 +637,23 @@ class Replica:
 
     def install(self, rule):
         heads, when, unless = clauses(rule)
-        # A concept maps facts to itself and back, so what a concept stands
-        # for is reads of one entity and nothing else: a check has no inverse.
+        # A concept maps facts to itself and back. So what it stands for is
+        # reads and nothing else, since a check has no inverse, and every
+        # variable in them is one of its parameters, since a write must
+        # know every value. The reads may be of several entities.
         for head in heads:
             if head[1] == ('sym', 'syntax') and head[2][0][1][0] == 'app':
                 said = members(head[2][0][1])
-                if all(is_relation(f) or is_formula(f) for f in said) and any(is_relation(f) for f in said):
-                    entities = {split(f[2])[0][0] for f in said if is_relation(f)}
-                    if any(is_formula(f) for f in said) or len(entities) != 1:
-                        raise ValueError('a concept is reads of one entity, so that what is read can be written: '
-                                         + ' '.join(show(f) for f in said))
+                if any(is_relation(f) for f in said) and all(is_relation(f) or is_formula(f) for f in said):
+                    if any(is_formula(f) for f in said):
+                        raise ValueError('a concept maps both ways, and a check has no inverse: '
+                                         + ' '.join(show(f) for f in said if is_formula(f)))
+                    given = [n for premise in when if premise[1] == ('sym', 'expand')
+                             for n in holes_in(premise[2][0][1])]
+                    own = [n for f in said for n in holes_in(f) if n not in given]
+                    if own:
+                        raise ValueError('a concept maps both ways, so every variable in it is a parameter: ?'
+                                         + ' ?'.join(own))
         writes = [h for h in heads if h[1] in HEAD_WORDS]
         # what a rule says about itself is kept as facts on its entity
         for label, said in about(rule).items():
