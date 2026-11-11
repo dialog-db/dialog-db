@@ -4,7 +4,7 @@
 
 |  | Understanding | Activity |
 |---|---|---|
-| **Status** | Direction chosen: one file, an extent per writer, native only (the web keeps IndexedDB). Writers never wait on one another's writes; claiming an extent takes a short lock once per extent filled. Two coordination points: integration, by the committer after its commit, and branch updates, under a byte-range lock per cell. Cells are slots at offsets an index names, of a capacity set at creation, written over in place; a moved head always means a replay. | Designing: branch heads and cells decided in design-branch-heads.md. |
+| **Status** | Direction chosen: one file, an extent per writer, native only (the web keeps IndexedDB). Writers never wait on one another's writes; claiming an extent takes a short lock once per extent filled. Two coordination points: integration, by the committer after its commit, and branch updates, under a byte-range lock per cell. Cells are slots at offsets an index names, of a capacity set at creation, written over in place; a moved head always means a replay. | Building, in the order in the top story. |
 | **Agenda** | Evaluating the page size, the chunk the file grows by and the run a writer claims. Applying a commit with updated versions over a moved head, keeping its instructions until it publishes. How extents are claimed and recorded; the cell index and its two tables; what integration does to extents and per-commit node records; a cell's default capacity. Replay avoidance is its own topic. | The next implementation decision: claiming extents. |
 
 ## 2026-11-10, Describing: the topic opens
@@ -462,3 +462,12 @@ are the space's history, kept by design; reusing them would be garbage
 collection of history, a topic of its own.
 
 **Decided.** Nothing new: noted so it is not proposed again as new.
+
+## 2026-11-11, Building: the order
+
+**Asked.** Irakli: we are in agreement; start implementing all of it now.
+
+**Decided.** Building, in the order in the top story: merge main, extents,
+integration, cells, retry, the last close. The page size, the chunk the
+file grows by and the run a writer claims start at fixed defaults, to be
+tuned by measurement.

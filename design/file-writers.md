@@ -1,6 +1,6 @@
 # Writers on separate branches wait on one another in the file archive
 
-**Phase: Designing.**
+**Phase: Building.**
 
 ## Description
 
@@ -69,3 +69,34 @@ coordination:
 How a branch update becomes visible before integration:
 [design-branch-heads.md](file-writers/design-branch-heads.md). The
 approaches weighed: [direction.md](file-writers/direction.md).
+
+## Build order
+
+Each stage is tested and pushed on its own, on the single-file branch.
+
+0. **Merge main** (#768: `dialog-artifacts` becomes `dialog-corpus`), so
+   the work starts from what main is.
+1. **Extents.** A writer claims a run of pages under a short lock, holds a
+   byte-range lock on it, and appends whole blocks and a record per commit
+   of their hashes and offsets, publishing the extent's end. A reader keeps
+   the records it has not seen integrated in memory, finds blocks through
+   them, and holds a shared lock on each extent it reads. A writer that
+   gets the file's turn without waiting writes as today.
+2. **Integration.** After its commit, a writer that left blocks in an
+   extent takes the turn, off the commit, and converts them into frames
+   and tokens with today's append; once that is durable, the extent's pages
+   go on the free list, from which new extents are claimed. Compact output
+   is appended at the end at first; written into free pages later.
+3. **Cells.** The archive keeps memory cells: an entry per cell in the
+   index, a slot of two halves at the offset it names, capacity the
+   value's size at creation plus 20%, a byte-range lock per slot for a
+   compare-and-swap, a spill past capacity. A space keeps its cells in its
+   file.
+4. **Retry.** A commit that finds its branch's head moved applies the same
+   commit with updated versions over the latest head, keeping its
+   instructions until it publishes.
+5. **The last close** truncates the file past what is integrated.
+
+Tests at each stage: two processes on two branches of one space, neither
+waiting on the other; a crash at each step of integration and of a spill;
+readers during integration.
