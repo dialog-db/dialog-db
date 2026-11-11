@@ -539,9 +539,14 @@ class Replica:
         return form
 
     def top(self, form):
-        """A top-level form, rewritten until it is a kernel rule."""
+        """A top-level form, rewritten until it is a kernel rule. A write at
+        the top level is a rule with that head and whatever clauses follow."""
         while form[1] != ('sym', 'rule'):
-            form = self.ask(form, 'head')
+            if form[1] in HEAD_WORDS:
+                head = ('app', form[1], form[2][:1])
+                form = ('app', ('sym', 'rule'), (('b', head),) + form[2][1:])
+            else:
+                form = self.ask(form, 'head')
         parts = []
         for p in form[2]:
             item = p[1]

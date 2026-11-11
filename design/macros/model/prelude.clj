@@ -14,42 +14,34 @@
         (:match ?form : ?pattern is: ?holes)
         (:fill ?template : ?holes is: ?out)))
 
-; 2. `macro`, stated once in the kernel so it can define the rest.
-(rule (assert! (dialog.macro macro:macro
-                pattern:  '(macro (?name ?part ... ...?fields) ?template)
-                template: '(rule (assert! (dialog.macro (:id :macro pattern: '(?name ?part ... ...?fields) template: '?template)
-                                           pattern:  '(?name ?part ... ...?fields)
-                                           template: '?template))
-                                 (assert! (dialog.name (:id :macro pattern: '(?name ?part ... ...?fields) template: '?template)
-                                           is: '?name)))))
-      (assert! (dialog.name macro:macro is: 'macro)))
+; 2. `define-syntax`, stated once in the kernel so it can define the rest.
+;    It takes a name and clauses, each a pattern and a template, as
+;    Racket's syntax-rules does. `_` stands where the name would.
+(rule (assert! (dialog.macro macro:define-syntax
+                 pattern:  '(define-syntax ?name [?pattern ?template] ...)
+                 template: '(rule (assert! (dialog.macro (:id :macro name: '?name pattern: '?pattern template: '?template)
+                                             pattern:  '?pattern
+                                             template: '?template)) ...
+                                  (assert! (dialog.name (:id :macro name: '?name pattern: '?pattern template: '?template)
+                                             is: '?name)) ...)))
+      (assert! (dialog.name macro:define-syntax is: 'define-syntax)))
 
 ; 3. The core forms.
 
 ; A query is a rule whose heads land in the report.
-(macro (query ?head)
-  (rule (report ?head) (when ?head)))
-(macro (query ?head ... (when ?premise ...))
-  (rule (report ?head) ... (when ?premise ...)))
-(macro (query ?head ... (when ?premise ...) (unless ?absent ...))
-  (rule (report ?head) ... (when ?premise ...) (unless ?absent ...)))
+(define-syntax query
+  [(_ ?head)
+   (rule (report ?head) (when ?head))]
+  [(_ ?head ... (when ?premise ...))
+   (rule (report ?head) ... (when ?premise ...))]
+  [(_ ?head ... (when ?premise ...) (unless ?absent ...))
+   (rule (report ?head) ... (when ?premise ...) (unless ?absent ...))])
 
-; A write at the top level is a rule with that head. With `!` it stays;
-; without, it holds for this round, which is how a command is issued.
-(macro (assert! ?fact)
-  (rule (assert! ?fact)))
-(macro (assert! ?fact (when ?premise ...))
-  (rule (assert! ?fact) (when ?premise ...)))
-(macro (retract! ?fact)
-  (rule (retract! ?fact)))
-(macro (retract! ?fact (when ?premise ...))
-  (rule (retract! ?fact) (when ?premise ...)))
-(macro (assert ?fact)
-  (rule (assert ?fact)))
-
-; A concept is a macro whose template is one read.
-(macro (concept (?name ?this ...?fields) ?body)
-  (macro (?name ?this ...?fields) ?body))
+; A concept is syntax whose template is one read.
+(define-syntax concept
+  [(_ (?name ?this ...?fields) ?body)
+   (define-syntax ?name
+     [(_ ?this ...?fields) ?body])])
 
 ; 4. Commands. An application around an application, whose head names
 ;    nothing, is a command. Its rows live in a domain of its own.

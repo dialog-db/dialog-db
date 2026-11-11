@@ -38,13 +38,13 @@ flowchart LR
 - `(:fill ?template : ?holes is: ?form)` builds a form. A hole nothing took is `_`.
 - `(:get ?holes : 'name is: ?value)` and `(:bind ?holes : 'name to: ?value is: ?more)`.
 - `(:id xyz.todo list: ?l text: ?x is: ?t)`: an entity from a domain and labelled values.
-- A walker. It rewrites a top-level form until it is a `rule`, then every head and premise until each is a read or a formula. It asks the rules what a form expands to, in one of two positions, `:head` or `:premise`. No answer and two different answers are both errors.
+- A walker. It rewrites a top-level form until it is a `rule` or a write, then every head and premise until each is a read or a formula. It asks the rules what a form expands to, in one of two positions, `:head` or `:premise`. No answer and two different answers are both errors.
 
 A pattern is a form with holes. Bare parts match in order and in number, and `p ...` takes any number of them. A labelled part the form leaves out leaves its hole unbound. `...?rest` takes the labelled parts the pattern does not name.
 
 ## The core forms
 
-All of [model/prelude.clj](model/prelude.clj), about 90 lines. One rule applies every macro:
+All of [model/prelude.clj](model/prelude.clj), about 100 lines. One rule applies every macro:
 
 ```clj
 (rule (dialog.syntax ?site expansion: ?out)
@@ -57,22 +57,26 @@ All of [model/prelude.clj](model/prelude.clj), about 90 lines. One rule applies 
         (:fill ?template : ?holes is: ?out)))
 ```
 
-`macro` is stated once in the kernel, as two facts asserted with `!`. Everything after is written with it:
+`define-syntax` is stated once in the kernel, as two facts asserted with `!`. It takes a name and clauses, each a pattern and a template, after Racket's `syntax-rules`; `_` stands where the name would. Everything after is written with it:
 
 ```clj
-(macro (query ?head)
-  (rule (report ?head) (when ?head)))
-(macro (query ?head ... (when ?premise ...))
-  (rule (report ?head) ... (when ?premise ...)))
+(define-syntax query
+  [(_ ?head)
+   (rule (report ?head) (when ?head))]
+  [(_ ?head ... (when ?premise ...))
+   (rule (report ?head) ... (when ?premise ...))])
 
-(macro (assert! ?fact)
-  (rule (assert! ?fact)))
-
-(macro (concept (?name ?this ...?fields) ?body)
-  (macro (?name ?this ...?fields) ?body))
+(define-syntax concept
+  [(_ (?name ?this ...?fields) ?body)
+   (define-syntax ?name
+     [(_ ?this ...?fields) ?body])])
 ```
 
-A concept is a macro whose template is one read. A command needs a rule of its own, since it reads whether its head names anything and derives a domain for its rows:
+Clauses of one name are not tried in order: a form two clauses both take, with different results, is ambiguous. A hole is a `?variable`, so a pattern needs no list of literals, and a concept's own variables are its holes.
+
+A write at the top level is kernel: `(assert! A)`, `(retract! A)` or `(assert A)`, with a `when` and an `unless` if it has them, is a rule with that head. An earlier draft defined these as macros of themselves, which hid that they apply at the top level only.
+
+A concept is syntax whose template is one read. A command needs a rule of its own, since it reads whether its head names anything and derives a domain for its rows:
 
 ```clj
 (rule (dialog.syntax ?site expansion: ?out)
