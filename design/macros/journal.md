@@ -232,3 +232,16 @@ Not examined yet. They are columns, not recommendations.
 - Irakli, the same sitting: most of these forms are in Rust already. They are: `Premise`, `Proposition`, `Parameters`, `Term` and the rule descriptors, each written as a map, named by a canonical reference that ignores variable names and the order of premises, and stored under a format number. `kernel.rs` copies them.
 
 **Decided.** By the maintainer: a node is a map with a `type`; an application has an operator and an operand of parameters. Not decided: where several parts without a label go. What is to be designed is narrower than it looked: the tree before names are resolved and syntax expanded, and nothing after.
+
+## 2026-11-11, Designing: what is left of the gaps
+
+**Asked.** Irakli went through the four things dialog's forms lack. An operator by name: tonk's analyzer parses to an application by reference and then resolves it inline; do the same. A nested application is sugar: where a premise's `is:` variable is used in one other premise, that premise may be written in the variable's place with `is:` left out. A map and a tuple: unsure what is missing. Several heads: close it in dialog. A head that reports: perhaps metadata, perhaps `query` as a command with a built-in rule, perhaps a macro to a rule and an assertion that its deductions be reported. And is `unless` over several propositions real, since several negations read as an or?
+
+**Learned.**
+
+- tonk's analyzer does what he recalled: `tonk_notation::Syntax` goes through *resolve*, which binds every reference and keeps the source shape, then *expand*, which lowers sugar to dialog's forms (`rust/tonk-analyzer/src/analyzer.rs`). Its expand also puts in an omitted `this:` as `id:<body-digest>`: an entity derived from what the application says.
+- The proof of concept already lifts a nested application to a premise with a variable of its own for `is:`.
+- By the same rule a map or a tuple written with variables is a nested application of what builds it. What dialog lacks is then a composite value and one proposition that relates it to its entries.
+- The agent had the `unless` gap wrong. A body with several negated atoms is ordinary datalog and means none of them holds; dialog has it as a list of negations. What no datalog has as a primitive is the negation of a conjunction, which is written as a helper rule and one negated atom. Bloom's `notin` takes one collection (Bud's `PushNotIn`). So nothing is missing in dialog: the notation's compiler writes the helper rule.
+
+**Decided.** By the maintainer: names resolve in a pass of their own, as in tonk; a nested application is sugar; rules of several heads are to be built in dialog. Not decided: how a query reports; where parts without a label go in the tree.
