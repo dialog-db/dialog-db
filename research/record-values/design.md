@@ -12,7 +12,9 @@ found, the options, the proposal and why, and what would test it.
 (the attribute as `encode_bytes` writes it in a key, the value's type byte,
 the value's order-preserving encoding with numbers in the one band), sorted
 by their bytes, repeats dropped, ended by a lone `0x00`. A field holding a
-record holds its encoding inline after the record type byte. In memory,
+record holds its encoding inline after the record type byte. Where the
+names sit, in each field or once in a header, is section 2's choice; the
+rest of this section holds either way. In memory,
 `Value::Record` holds these canonical bytes; equality is their equality, and
 `Hash` hashes them.
 
@@ -41,28 +43,51 @@ bindings, where each nested event repeats the same names. Under gzip over 64
 records, as a node's block would carry them, pairs and dag-cbor are level
 (1.00 to 1.05). Blocks are not compressed today.
 
+**Names once per record**, measured ([second sitting](results/2026-11-11b-layouts.md)):
+a header listing every name once, sorted, with fields naming attributes by
+index, takes tonk's bindings to 1.02 times dag-cbor; names written at first
+use with back-links after, to 1.05. Flat records gain nothing (revision
+records with versions as bytes: 1.25 to 1.24). Finding a field costs about
+the same in every layout. Taking a nested record out as a record of its own
+costs 6 to 7 times more, because its fields name attributes in its outer
+record's table.
+
+**Correction.** An earlier version of this section rejected names once per
+record for losing canonical bytes, the split into the file's tokens, and
+finding a field without a full read. None holds: a fixed rule for the
+table's order keeps one byte string per record; importing a record into the
+file interns each table entry once and maps indices to tokens; a header (or a
+trailer) finds a field without a full read. What it does give up is that the
+bytes order records by content, which only an index range over record values
+would use, and decided reads of records are equality and destructuring.
+
 **Options.**
 
 | | what it does | what it costs |
 |---|---|---|
-| a. accept | records as above | 1.25 to 1.89 times dag-cbor on the wire |
-| b. back-references inside a record | a repeated attribute names its first use (1.05 to 1.30 modelled) | the bytes no longer compare as the pairs do, and a record no longer splits as a key does: both are the layout's point |
-| c. compress blocks | every block, records or not, gzip or zstd on the wire and at rest | a decompress per block read; a change to every store and transport; unmeasured beyond the gzip proxy |
-| d. the tree's segment encoder splits a record into its parts | a node's block holds each distinct attribute and value once, as its columns already do for entities and attributes | a new node layout version; the encoder's cost per record |
+| a. names inline | each field writes its name | 1.25 to 1.89 times dag-cbor on the wire |
+| b. a header per record | each name once, sorted, at the front; fields by index | a nested record is not a record on its own: binding one either writes it again (2.5 to 3 µs a view here) or holds it as a view into its outer record |
+| c. names at first use, back-links after; a trailer for lookup | as b, written in one pass by a writer that does not know every name first | as b; without the trailer a reader cannot skip a nested record without reading it |
+| d. names once per node | the tree's segment encoder splits each record in a node into its parts, as its columns already do for entities and attributes | a new node layout version; the encoder's cost per record |
+| e. compress blocks | gzip or zstd on every block, on the wire and at rest | a decompress per block read; a change to every store and transport |
 
-**Proposal: d, with c as the fallback; not b.** The tree's columnar segment
-already writes an entity or an attribute once per node and points at it. A
-record split there into the same parts is the same move one level down, and
-it is the move the single-file archive makes in the file (section 4): one
-splitter, used by the node encoder for the wire and by the file for storage.
-That is the unification. Option b buys the same bytes by giving up the two
-properties the layout was chosen for. Option c is simpler and helps every
-block, but it hides repetition rather than removing it, and costs CPU on
-every read.
+Sharing across records (d, a stream's table, the single-file archive's
+tokens) is the same idea as b, one level up. It belongs to whatever carries
+many records, never to a record's own bytes: a record is hashed, signed and
+compared alone, so its canonical bytes cannot depend on what came before it
+in a stream. A stream that sends only new names in each packet (as HTTP/2's
+header compression does) is a transport encoding that decodes back to
+canonical records.
 
-**To test.** Encode the spike's records into segment blocks both ways (one
-column cell a record, against the record's parts as columns) and compare
-block bytes, encode time and read time, at 1× and 10× the dataset.
+**Proposal, for the maintainer to choose:** b for a record's canonical bytes,
+if a bound nested record may be a view into its outer record; a otherwise.
+Then d or a stream's table for what is shared across records. b over c,
+because a record is written whole, so a one-pass writer gains nothing, and
+the header finds a field without a trailer.
+
+**To test.** A nested record bound as a view (outer bytes and a span):
+taking one out, comparing two, and storing one. And d: the spike's records
+encoded into segment blocks both ways, block bytes, encode time and read time.
 
 ## 3. Versions and other fixed binary values in a record
 
@@ -203,8 +228,8 @@ history's records is a larger change and not needed for this one.
 
 ## What would settle it, in order
 
-1. The maintainer sets the bars, and says whether the wire matters
-   uncompressed (section 2).
+1. The maintainer sets the bars, and chooses between names inline and a
+   header per record (section 2).
 2. Interning value payloads apart in #733 (section 4): cheap, useful without
    records, and it measures the sharing the hypothesis rests on.
 3. The segment encoder splitting records (section 2, option d).

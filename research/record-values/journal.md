@@ -452,6 +452,47 @@ uncompressed). The [design](design.md) proposes what to do about each.
 
 Commits: this entry.
 
+## 2026-11-11 — Names once per record, measured
+
+**Question.** The maintainer: back-references need not lose what the design
+said they lose. A table's order can be fixed (sorted, or by first use), so
+the bytes stay canonical; importing into the file maps table entries to
+tokens; a header or trailer finds a field. What do they cost and save?
+
+**Method.** The same canonical content written three ways (names inline; a
+header of every name once, sorted, fields by index; names at first use with
+back-links after), checked to read back to the same content over the
+datasets and 20,000 generated records, then sized and timed
+([results](results/2026-11-11b-layouts.md)).
+
+**Results.**
+
+| | inline | header | first use, back-links |
+|---|--:|--:|--:|
+| tonk bindings ÷ dag-cbor | 1.89 | 1.02 | 1.05 |
+| revisions (versions as bytes) ÷ dag-cbor | 1.25 | 1.24 | 1.23 |
+| a revision's last field, ns | 253 | 172 | 268 |
+| a view's events taken out as records, ns | 433 | 3,054 | 2,570 |
+
+- The maintainer is right, and the design's section 2 was wrong to reject
+  names once per record on those grounds. What they give up is that bytes
+  order records by content, which only an index range over record values
+  uses: a scan can still filter a range, resolving as it goes.
+- What they cost is that a nested record names attributes in its outer
+  record's table, so it is not a record on its own: taking one out writes
+  it again, 6 to 7 times the cost of copying it inline.
+- Flat records gain nothing; a record that nests a set gains most of the
+  difference to dag-cbor.
+- Sharing names across records (a stream sending only new names, a node's
+  table, the file's tokens) is the same idea one level up, and has to stay
+  out of a record's own bytes, which are hashed and signed alone.
+
+**Decision.** Not decided. Proposed in the design: a header per record if a
+bound nested record may be a view into its outer record, names inline
+otherwise; sharing across records in the node, the stream or the file.
+
+Commits: this entry.
+
 ## How to reproduce
 
 The commands are in [the results](results/2026-11-11-spike.md#reproduce).

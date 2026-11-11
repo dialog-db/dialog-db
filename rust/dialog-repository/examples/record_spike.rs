@@ -29,6 +29,9 @@ mod data;
 #[cfg(not(target_arch = "wasm32"))]
 #[path = "record_spike/measure.rs"]
 mod measure;
+#[cfg(not(target_arch = "wasm32"))]
+#[path = "record_spike/variants.rs"]
+mod variants;
 
 /// A small deterministic generator, so a run replays from its seed.
 #[cfg(not(target_arch = "wasm32"))]

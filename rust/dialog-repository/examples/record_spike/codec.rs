@@ -96,7 +96,7 @@ fn terminated_len(bytes: &[u8]) -> Option<usize> {
 
 /// The length of a value of `kind` at the front of `bytes`, without
 /// decoding it.
-fn value_len(kind: u8, bytes: &[u8]) -> Option<usize> {
+pub fn value_len(kind: u8, bytes: &[u8]) -> Option<usize> {
     if kind == ValueDataType::Number as u8 {
         return dialog_number::encoded_len(bytes);
     }

@@ -1,8 +1,8 @@
 //! Sizes, the cost of reading one field, and a model of the single-file
 //! archive's tokens, for each dataset, printed as markdown tables.
 
-use super::codec;
 use super::data::{self, Bindings};
+use super::{check, codec, variants};
 use anyhow::Result;
 use dialog_corpus::history::RevisionRecord;
 use std::collections::BTreeSet;
@@ -406,6 +406,219 @@ fn version_tokens(set: &Set, keys: &BTreeSet<Vec<u8>>) {
     );
 }
 
+/// Where the names sit: inline, a header, or at first use with back-links
+/// after; each checked to hold the same content, then sized and timed.
+fn layouts(sets: &[Set], rounds: usize) -> Result<()> {
+    // Every layout reads back to the same content, over generated records
+    // as well as the datasets.
+    let generated: Vec<Vec<u8>> = (1..=20_000u64)
+        .map(|seed| codec::encode(&check::record(&mut super::Seeded(seed), 2)))
+        .collect();
+    for bytes in sets.iter().flat_map(|s| s.pairs.iter()).chain(&generated) {
+        let canon = variants::canon(bytes);
+        let header = variants::header(&canon);
+        let encounter = variants::encounter(&canon);
+        anyhow::ensure!(
+            &variants::pairs_of(&variants::header_read(&header)) == bytes,
+            "a header record does not read back"
+        );
+        anyhow::ensure!(
+            &variants::pairs_of(&variants::encounter_read(&encounter)) == bytes,
+            "an encounter record does not read back"
+        );
+    }
+    println!("### Where the names sit\n");
+    println!(
+        "Every layout read back to the same content over the datasets and 20,000 generated \
+         records. The trailer is estimated, not built: the encounter layout plus, per record, a \
+         count and an index and an offset (a byte each, or two past 127) for each distinct \
+         top-level name.\n"
+    );
+    println!(
+        "| dataset | dag-cbor | inline | header | encounter | encounter + trailer (estimate) |"
+    );
+    println!("|---|--:|--:|--:|--:|--:|");
+    for set in sets {
+        let cbor: usize = set.cbor.iter().map(Vec::len).sum();
+        let (mut inline, mut header, mut encounter, mut trailer) = (0, 0, 0, 0);
+        for bytes in &set.pairs {
+            let canon = variants::canon(bytes);
+            inline += bytes.len();
+            header += variants::header(&canon).len();
+            let e = variants::encounter(&canon).len();
+            encounter += e;
+            let distinct: BTreeSet<&[u8]> = canon.0.iter().map(|(n, _)| *n).collect();
+            let width = |n: usize| if n < 128 { 1 } else { 2 };
+            trailer += e + 1 + distinct.len() * (width(distinct.len()) + width(e));
+        }
+        let r = |n: usize| format!("{n} ({:.2})", n as f64 / cbor as f64);
+        println!(
+            "| {} | {cbor} | {} | {} | {} | {} |",
+            set.name,
+            r(inline),
+            r(header),
+            r(encounter),
+            r(trailer)
+        );
+    }
+    println!();
+
+    // Finding a top-level field's slots, and taking a view's events out as
+    // records of their own, in each layout.
+    let encode = |set: &Set, f: fn(&variants::Canon<'_>) -> Vec<u8>| -> Vec<Vec<u8>> {
+        set.pairs.iter().map(|b| f(&variants::canon(b))).collect()
+    };
+    let (revisions, views) = (&sets[1], &sets[2]);
+    let rev_header = encode(revisions, variants::header);
+    let rev_encounter = encode(revisions, variants::encounter);
+    let view_header = encode(views, variants::header);
+    let view_encounter = encode(views, variants::encounter);
+    let issuer = codec::attribute_key("dialog.revision/issuer");
+    let skip = codec::attribute_key("dialog.revision/skip");
+    let event = codec::attribute_key("tonk.view/event");
+    let count = |found: Vec<&[u8]>| found.len();
+    let mut readers: Vec<Reader> = vec![
+        (
+            "revision: issuer",
+            "inline",
+            Box::new(|| {
+                revisions
+                    .pairs
+                    .iter()
+                    .map(|b| count(codec::slots(b, &issuer).expect("walks")))
+                    .sum()
+            }),
+        ),
+        (
+            "revision: issuer",
+            "header",
+            Box::new(|| {
+                rev_header
+                    .iter()
+                    .map(|b| count(variants::header_slots(b, &issuer)))
+                    .sum()
+            }),
+        ),
+        (
+            "revision: issuer",
+            "encounter",
+            Box::new(|| {
+                rev_encounter
+                    .iter()
+                    .map(|b| count(variants::encounter_slots(b, &issuer)))
+                    .sum()
+            }),
+        ),
+        (
+            "revision: skips (the last field)",
+            "inline",
+            Box::new(|| {
+                revisions
+                    .pairs
+                    .iter()
+                    .map(|b| count(codec::slots(b, &skip).expect("walks")))
+                    .sum()
+            }),
+        ),
+        (
+            "revision: skips (the last field)",
+            "header",
+            Box::new(|| {
+                rev_header
+                    .iter()
+                    .map(|b| count(variants::header_slots(b, &skip)))
+                    .sum()
+            }),
+        ),
+        (
+            "revision: skips (the last field)",
+            "encounter",
+            Box::new(|| {
+                rev_encounter
+                    .iter()
+                    .map(|b| count(variants::encounter_slots(b, &skip)))
+                    .sum()
+            }),
+        ),
+        (
+            "view: its events, each a record of its own",
+            "inline",
+            Box::new(|| {
+                views
+                    .pairs
+                    .iter()
+                    .map(|b| {
+                        codec::slots(b, &event)
+                            .expect("walks")
+                            .iter()
+                            .map(|s| s[1..].to_vec().len())
+                            .sum::<usize>()
+                    })
+                    .sum()
+            }),
+        ),
+        (
+            "view: its events, each a record of its own",
+            "header",
+            Box::new(|| {
+                view_header
+                    .iter()
+                    .map(|b| {
+                        variants::header_slots(b, &event)
+                            .iter()
+                            .map(|s| variants::header_standalone(b, s).len())
+                            .sum::<usize>()
+                    })
+                    .sum()
+            }),
+        ),
+        (
+            "view: its events, each a record of its own",
+            "encounter",
+            Box::new(|| {
+                view_encounter
+                    .iter()
+                    .map(|b| {
+                        variants::encounter_standalone_all(b)
+                            .iter()
+                            .map(Vec::len)
+                            .sum::<usize>()
+                    })
+                    .sum()
+            }),
+        ),
+    ];
+    let shape = [
+        revisions.cbor.len(),
+        revisions.cbor.len(),
+        revisions.cbor.len(),
+        revisions.cbor.len(),
+        revisions.cbor.len(),
+        revisions.cbor.len(),
+        views.cbor.len(),
+        views.cbor.len(),
+        views.cbor.len(),
+    ];
+    let repeat = [20, 20, 20, 20, 20, 20, 400, 400, 400];
+    let mut samples: Vec<Vec<f64>> = vec![Vec::new(); readers.len()];
+    for _ in 0..rounds {
+        for (index, (_, _, run)) in readers.iter_mut().enumerate() {
+            samples[index].push(time(shape[index], repeat[index], run));
+        }
+    }
+    println!(
+        "### Finding a field, and taking nested records out, ns a record ({rounds} rounds, interleaved; min / median / max)\n"
+    );
+    println!("| read | layout | min | median | max |");
+    println!("|---|---|--:|--:|--:|");
+    for (index, (what, form, _)) in readers.iter().enumerate() {
+        let (low, mid, high) = spread(&mut samples[index]);
+        println!("| {what} | {form} | {low:.0} | {mid:.0} | {high:.0} |");
+    }
+    println!();
+    Ok(())
+}
+
 pub fn run(revisions: &str, bindings: &str, rounds: usize) -> Result<()> {
     let revision_cbor = read_revisions(revisions)?;
     let encode_all = |versions: data::Versions| -> Result<Vec<Vec<u8>>> {
@@ -488,5 +701,6 @@ pub fn run(revisions: &str, bindings: &str, rounds: usize) -> Result<()> {
     tokens(&sets);
     version_tokens(&sets[1], &keys);
     reads(&sets, rounds);
+    layouts(&sets, rounds)?;
     Ok(())
 }
