@@ -108,8 +108,19 @@ Everything is optional:
 | `WBG_POOL_DIR` | Daemon rendezvous dir (default `$XDG_RUNTIME_DIR/wbg-pool` or `$TMPDIR/wbg-pool-<uid>`) |
 | `WBG_POOL_URL` | Use an already-running daemon at this URL, skip discovery/spawn |
 | `WBG_POOL_FALLBACK_RUNNER` | Path to `wasm-bindgen-test-runner` for delegated modes (default: from PATH) |
+| `WBG_POOL_PASS_ENV` | Comma-separated names of environment variables to hand to the tests, which read them from `globalThis.__wbg_pool_env` (see below) |
 | `WASM_BINDGEN_TEST_TIMEOUT` | Per-invocation timeout in seconds (default 20, same as stock) |
 | `WASM_BINDGEN_NO_DEBUG`, `WASM_BINDGEN_SPLIT_LINKED_MODULES`, `WASM_BINDGEN_KEEP_LLD_EXPORTS`, `WASM_BINDGEN_TEST_NO_ORIGIN_ISOLATION` | Honored with stock-runner semantics |
+
+A wasm test has no process environment. To give one a value that is only
+known when it runs, such as the address of a service started for it, name
+the variable in `WBG_POOL_PASS_ENV`. Before the suite loads, the variables
+named there that are set are defined as string properties of a frozen
+`globalThis.__wbg_pool_env`, in the page for a browser suite and in the
+worker for a worker suite. The object is there and empty when nothing is
+passed. A value passed this way is not a build input, so changing it does
+not rebuild the test binary, as a value read with `env!` or `option_env!`
+would.
 
 Daemon management is automatic, but explicit control exists:
 

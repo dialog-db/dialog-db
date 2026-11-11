@@ -14,6 +14,42 @@ says how to cut a release.
 
 ## Unreleased
 
+### A provisioned wasm test is given its address when it runs
+
+A test that takes a provisioned address (`#[dialog_common::test]` with a
+parameter) runs under `web-integration-tests` as a native test that starts
+the service and a wasm test that uses it. The wasm test read the address
+from `option_env!`, so it was compiled into the test binary. It now reads
+it when it runs: the native test names the variable in `WBG_POOL_PASS_ENV`,
+and `wbg-pool` defines the variables named there on
+`globalThis.__wbg_pool_env` in the page or worker the suite runs in.
+
+What this changes for you:
+
+- A package's wasm test binary is built once for all of its provisioned
+  tests, where every test rebuilt and relinked it. Nothing in a test
+  changes.
+- The wasm side needs the `wbg-pool` of this release as its runner. Under
+  an older `wbg-pool`, or `wasm-bindgen-test-runner`, a provisioned wasm
+  test fails with `Missing PROVISIONED_SERVICE_ADDRESS environment
+  variable`. A dependent that builds `wbg-pool` from this repository takes
+  both together; patches it carries against `wbg-pool`'s `shim.rs`,
+  `daemon/harness.rs`, `daemon/server.rs` or the scripts under `daemon/js`
+  may need rebasing.
+- `dialog_common::helpers::address` reads the passed variable on
+  `wasm32-unknown-unknown` and the process environment elsewhere.
+  `dialog_common::helpers::PASSED_VARIABLES` is the name of the variable
+  that lists what to pass.
+- `wbg-pool` passes any variable named in `WBG_POOL_PASS_ENV`, not only
+  this one (see its README).
+
+Why: cargo tracks a variable read with `option_env!` as a build input, and
+every provisioned test has its own address. Each test of
+`dialog-repository` therefore rebuilt and relinked the crate's wasm test
+binary, 82 seconds a test on a CI runner, and the cross-target job spent
+over an hour of its 79 minutes of tests there. Two tests of one package
+could also build over each other's binary.
+
 ### The corpus crate is `dialog-corpus`, and it asks its environment for everything it reads
 
 [#768](https://github.com/dialog-db/dialog-db/pull/768), decided in

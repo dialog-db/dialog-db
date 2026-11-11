@@ -95,10 +95,23 @@ serialization, not shared memory:
 
 1. The native outer test provisions the service and gets the `Address`.
 2. It `serde_json`-serializes the `Address` into the `PROVISIONED_SERVICE_ADDRESS`
-   environment variable (`dialog_common::helpers::PROVISIONED_SERVICE_ADDRESS`).
-3. It spawns the wasm test subprocess.
-4. The wasm inner test reads that env var and `serde_json`-deserializes the
+   environment variable (`dialog_common::helpers::PROVISIONED_SERVICE_ADDRESS`),
+   and names that variable in `WBG_POOL_PASS_ENV`.
+3. It spawns the wasm test subprocess (`cargo test --target
+   wasm32-unknown-unknown` for the one inner test).
+4. The wasm test runner, `wbg-pool`, defines the variables `WBG_POOL_PASS_ENV`
+   names on `globalThis.__wbg_pool_env` in the page or worker the test runs
+   in. A wasm test in a browser has no process environment of its own.
+5. The wasm inner test reads the variable from there when it runs
+   (`dialog_common::helpers::address`) and `serde_json`-deserializes the
    `Address` back, then runs the client against it.
+
+The address is read when the test **runs**. It must never be compiled into
+the wasm test binary (`env!`, `option_env!`, a build script): cargo tracks
+such a variable as a build input, so every test, each with its own address,
+rebuilds and relinks its package's whole wasm test binary. That is what the
+macro did before, and it took over a minute per test in `dialog-repository`
+and more than an hour of the cross-target CI job.
 
 Consequences to respect:
 
