@@ -472,6 +472,46 @@ where
         TreeWalker::<Key, Value>::new(self.stored_root().cloned()).stream_handles(range, accessor)
     }
 
+    /// [`stream_range`](Self::stream_range) in reverse: the entries within
+    /// `range`, the greatest key first. A reader that stops after a few
+    /// entries reads about the leaves that hold them, from the end of the
+    /// range down.
+    pub fn stream_range_reverse<R, Env>(
+        &self,
+        range: R,
+        storage: &Env,
+    ) -> impl Stream<Item = Result<Entry<Key, Value>, DialogSearchTreeError>> + ConditionalSend
+    where
+        Env: Provider<Read<PersistentNode<Key, Value>>>
+            + Provider<Preload<PersistentNode<Key, Value>>>
+            + ConditionalSync,
+        R: RangeBounds<Key> + ConditionalSend,
+    {
+        let accessor = self.accessor(storage);
+
+        TreeWalker::new(self.stored_root().cloned()).stream_reverse(range, accessor)
+    }
+
+    /// [`stream_range_handles`](Self::stream_range_handles) in reverse, as
+    /// [`stream_range_reverse`](Self::stream_range_reverse) reads.
+    pub fn stream_range_handles_reverse<R, Env>(
+        &self,
+        range: R,
+        storage: &Env,
+    ) -> impl Stream<Item = Result<Entry<crate::KeyHandle, Value>, DialogSearchTreeError>>
+    + ConditionalSend
+    where
+        Env: Provider<Read<PersistentNode<Key, Value>>>
+            + Provider<Preload<PersistentNode<Key, Value>>>
+            + ConditionalSync,
+        R: RangeBounds<Key> + ConditionalSend,
+    {
+        let accessor = self.accessor(storage);
+
+        TreeWalker::<Key, Value>::new(self.stored_root().cloned())
+            .stream_handles_reverse(range, accessor)
+    }
+
     /// Returns a differential that produces changes to transform `self` into
     /// `other`.
     ///

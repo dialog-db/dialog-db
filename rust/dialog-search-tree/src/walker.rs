@@ -425,6 +425,201 @@ where
         self.stream_scan::<R, Env, KeyHandle>(range, accessor)
     }
 
+    /// [`stream`](Self::stream) in reverse: the entries within `range`, the
+    /// greatest key first. It yields what a forward walk of the same range
+    /// yields, buffered novelty included, in the opposite order.
+    pub fn stream_reverse<R, Env>(
+        self,
+        range: R,
+        accessor: Accessor<'_, Key, Value, Env>,
+    ) -> impl Stream<Item = Result<Entry<Key, Value>, DialogSearchTreeError>> + ConditionalSend
+    where
+        R: RangeBounds<Key> + ConditionalSend,
+        Env: Provider<Read<PersistentNode<Key, Value>>>
+            + Provider<Preload<PersistentNode<Key, Value>>>
+            + ConditionalSync,
+    {
+        futures_util::TryStreamExt::map_ok(
+            self.stream_scan_reverse::<R, Env, TypedKey<Key>>(range, accessor),
+            |entry| Entry::new(entry.key.0, entry.value),
+        )
+    }
+
+    /// [`stream_reverse`](Self::stream_reverse), yielding each entry's key
+    /// as a [`KeyHandle`] into the leaf's memoized decoded-keys arena.
+    pub fn stream_handles_reverse<R, Env>(
+        self,
+        range: R,
+        accessor: Accessor<'_, Key, Value, Env>,
+    ) -> impl Stream<Item = Result<Entry<KeyHandle, Value>, DialogSearchTreeError>> + ConditionalSend
+    where
+        R: RangeBounds<Key> + ConditionalSend,
+        Env: Provider<Read<PersistentNode<Key, Value>>>
+            + Provider<Preload<PersistentNode<Key, Value>>>
+            + ConditionalSync,
+    {
+        self.stream_scan_reverse::<R, Env, KeyHandle>(range, accessor)
+    }
+
+    /// The walk of [`stream_reverse`](Self::stream_reverse) and
+    /// [`stream_handles_reverse`](Self::stream_handles_reverse).
+    ///
+    /// It descends from the root to the last leaf that can hold a key
+    /// within the end bound, then steps to the previous child at each
+    /// level, reading each leaf from its last entry. At each leaf it merges
+    /// the buffered ops of the ancestors on its path, as the forward walk
+    /// does, in the opposite order: an op whose key sorts above a stored
+    /// entry yields first, and an op on the key of a stored entry takes its
+    /// place. The walk ends at the first stored key below the start bound.
+    ///
+    /// It reads no sibling ahead. A reader of the greatest keys stops after
+    /// a few of them, so a read-ahead would fetch leaves that no one reads.
+    fn stream_scan_reverse<R, Env, Out>(
+        self,
+        range: R,
+        accessor: Accessor<'_, Key, Value, Env>,
+    ) -> impl Stream<Item = Result<Entry<Out, Value>, DialogSearchTreeError>> + ConditionalSend
+    where
+        R: RangeBounds<Key> + ConditionalSend,
+        Env: Provider<Read<PersistentNode<Key, Value>>>
+            + Provider<Preload<PersistentNode<Key, Value>>>
+            + ConditionalSync,
+        Out: ScanKey + 'static,
+    {
+        try_stream! {
+            let Some(root) = self.root.clone() else {
+                return;
+            };
+            let start_bytes = match range.start_bound() {
+                Bound::Included(bound) => Bound::Included(bound.as_ref()),
+                Bound::Excluded(bound) => Bound::Excluded(bound.as_ref()),
+                Bound::Unbounded => Bound::Unbounded,
+            };
+            let end_bytes = match range.end_bound() {
+                Bound::Included(bound) => Bound::Included(bound.as_ref()),
+                Bound::Excluded(bound) => Bound::Excluded(bound.as_ref()),
+                Bound::Unbounded => Bound::Unbounded,
+            };
+
+            // The descent to the last leaf the range can visit: at each
+            // level, the last child that can hold a key within the end
+            // bound. Children past it hold only keys past the bound, and so
+            // does every buffered op routed to them.
+            const MAXIMUM_TREE_DEPTH: usize = 32;
+            let mut path: IndexedPath<Key, Value> = Vec::new();
+            let mut next = root;
+            loop {
+                if path.len() > MAXIMUM_TREE_DEPTH {
+                    Err(DialogSearchTreeError::Operation(format!(
+                        "Tree depth exceded the soft maximum ({MAXIMUM_TREE_DEPTH})"
+                    )))?;
+                }
+                let node = accessor.get_node(&next).await?;
+                let child = match node.body() {
+                    NodeBody::Index(index) if index.is_empty() => return,
+                    NodeBody::Index(index) => {
+                        let child = index.children_within(end_bytes)?.saturating_sub(1);
+                        next = index.hash_at(child)?.clone();
+                        Some(child)
+                    }
+                    NodeBody::Segment(_) => None,
+                };
+                let leaf = child.is_none();
+                path.push((node, child));
+                if leaf {
+                    break;
+                }
+            }
+
+            'walk: while let Some((node, maybe_index)) = path.pop() {
+                if let NodeBody::Index(index) = node.body() {
+                    let child_index = match maybe_index {
+                        // The first child is done: the parent steps left.
+                        Some(0) => continue,
+                        Some(at) => at - 1,
+                        None if index.is_empty() => continue,
+                        None => index.len() - 1,
+                    };
+                    let hash = index.hash_at(child_index)?;
+                    let next_node = accessor.get_node(hash).await?;
+                    path.push((node, Some(child_index)));
+                    path.push((next_node, None));
+                    continue;
+                }
+
+                // The buffered ops that cover this leaf, within the range,
+                // in key order: the same set the forward walk merges here.
+                let pending = pending_for_leaf::<Key, Value>(&path, start_bytes, end_bytes)?;
+                let mut buffered = pending.into_iter().rev().peekable();
+
+                // The walk enters the leaf from its end, so it decodes the
+                // leaf for random access and enters below the end bound.
+                let keys = node.memoized_keys()?;
+                let end_at = match &end_bytes {
+                    Bound::Included(bound) => {
+                        let at = keys.lower_bound(bound);
+                        if keys.get(at) == Some(*bound) { at + 1 } else { at }
+                    }
+                    Bound::Excluded(bound) => keys.lower_bound(bound),
+                    Bound::Unbounded => keys.len(),
+                };
+                let mut segment = None;
+                for at in (0..end_at).rev() {
+                    let key = keys.get(at).expect("index in range");
+                    // Buffered inserts sorting after this entry.
+                    while let Some((buffered_key, _)) = buffered.peek() {
+                        if buffered_key.as_slice() <= key {
+                            break;
+                        }
+                        let (buffered_key, op) = buffered.next().expect("peeked");
+                        if let NoveltyOp::Assert(value) = op {
+                            let entry_key = Out::from_entry_bytes(&buffered_key)?;
+                            yield Entry::new(entry_key, value);
+                        }
+                    }
+
+                    // A covering op supersedes the stored entry.
+                    if matches!(buffered.peek(), Some((buffered_key, _)) if buffered_key.as_slice() == key) {
+                        let (buffered_key, op) = buffered.next().expect("peeked");
+                        if let NoveltyOp::Assert(value) = op {
+                            let entry_key = Out::from_entry_bytes(&buffered_key)?;
+                            yield Entry::new(entry_key, value);
+                        }
+                        continue;
+                    }
+
+                    // Entries only descend, so a key below the start ends
+                    // the walk. Every buffered op left sorts below it, and
+                    // so below the start too.
+                    if below_start(&start_bytes, key) {
+                        break 'walk;
+                    }
+                    let segment = match &segment {
+                        Some(segment) => segment,
+                        None => {
+                            let NodeBody::Segment(resolved) = node.body() else {
+                                unreachable!("segment checked above")
+                            };
+                            segment.insert(resolved)
+                        }
+                    };
+                    let value = into_owned(segment.value_at(at)?)?;
+                    let entry_key = Out::from_arena(&keys, at)?;
+                    yield Entry::new(entry_key, value);
+                }
+
+                // Buffered inserts below the first stored entry of this
+                // leaf. Already range-restricted, so every assert yields.
+                for (buffered_key, op) in buffered {
+                    if let NoveltyOp::Assert(value) = op {
+                        let entry_key = Out::from_entry_bytes(&buffered_key)?;
+                        yield Entry::new(entry_key, value);
+                    }
+                }
+            }
+        }
+    }
+
     /// The walk shared by [`stream`](Self::stream) and
     /// [`stream_handles`](Self::stream_handles); `Out` decides how yielded
     /// keys materialize (see [`ScanKey`]).
@@ -1062,6 +1257,8 @@ impl<Key, Value> SearchResult<Key, Value> {
 mod walker_novelty_tests {
     #![allow(unexpected_cfgs)]
 
+    use std::ops::Bound;
+
     use crate::helpers::Blocks;
     use anyhow::Result;
     use dialog_common::Blake3Hash;
@@ -1298,6 +1495,164 @@ mod walker_novelty_tests {
         }
         Ok(())
     }
+
+    /// A range of keys, by its two bounds.
+    type Range = (Bound<[u8; 4]>, Bound<[u8; 4]>);
+
+    /// The entries of `range` in `tree`, read forward, or in reverse.
+    async fn scanned(
+        tree: &Tree,
+        storage: &Store,
+        range: Range,
+        reverse: bool,
+    ) -> Result<Vec<([u8; 4], Vec<u8>)>> {
+        let mut entries = Vec::new();
+        if reverse {
+            let stream = tree.stream_range_reverse(range, storage);
+            futures_util::pin_mut!(stream);
+            while let Some(entry) = stream.next().await {
+                let entry = entry?;
+                entries.push((entry.key, entry.value));
+            }
+        } else {
+            let stream = tree.stream_range(range, storage);
+            futures_util::pin_mut!(stream);
+            while let Some(entry) = stream.next().await {
+                let entry = entry?;
+                entries.push((entry.key, entry.value));
+            }
+        }
+        Ok(entries)
+    }
+
+    /// Each pair of bounds over `[low, high]`: inclusive, exclusive, and
+    /// open, on each side.
+    fn bounds(low: u32, high: u32) -> Vec<Range> {
+        let sides = |key: u32| {
+            [
+                Bound::Included(key.to_be_bytes()),
+                Bound::Excluded(key.to_be_bytes()),
+                Bound::Unbounded,
+            ]
+        };
+        sides(low)
+            .into_iter()
+            .flat_map(|start| sides(high).into_iter().map(move |end| (start, end)))
+            .collect()
+    }
+
+    /// A reverse scan of a range yields the entries of a forward scan of the
+    /// same range, in reverse order. The sweep covers random layouts, with
+    /// ops buffered on the links at each level and with none, and each kind
+    /// of bound on each side, including bounds on stored keys, bounds
+    /// between them, and ranges that hold nothing.
+    #[dialog_common::test]
+    async fn it_scans_in_reverse_as_a_reversed_forward_scan() -> Result<()> {
+        // Keys are drawn from `0..SPREAD`, and half that many are stored.
+        // Small segments make the tree several levels deep, so ops buffer
+        // on the links of more than one level.
+        const SPREAD: u32 = 4000;
+        for seed in 0..40u64 {
+            let mut rng = 0xD1B54A32D192ED03u64 ^ seed;
+            let mut next = || {
+                rng ^= rng << 13;
+                rng ^= rng >> 7;
+                rng ^= rng << 17;
+                (rng >> 32) as u32
+            };
+
+            let mut storage: Store = Blocks::new();
+            let base_keys: Vec<u32> = (0..SPREAD / 2).map(|_| next() % SPREAD).collect();
+            let manifest = crate::Manifest {
+                max_segment: 512,
+                frame_ceiling_factor: 0,
+                ..crate::Manifest::default()
+            };
+            let mut edit =
+                Tree::empty_with_manifest(crate::helpers::test_catalog(), manifest).edit();
+            for key in &base_keys {
+                edit = edit
+                    .insert(key.to_be_bytes(), key.to_be_bytes().to_vec(), &storage)
+                    .await?;
+            }
+            let mut delta = Delta::zero();
+            let base = edit.persist(&mut delta)?;
+            settle(&mut delta, &mut storage).await?;
+            let base = Tree::at(crate::helpers::test_catalog(), base.root().clone());
+
+            // Inserts and deletes buffered over the base, with a small
+            // buffer so they cascade across levels.
+            let mut buffered = HitchhikerTree::open(&base).with_op_buf_size(8);
+            for _ in 0..400 {
+                let insert = !next().is_multiple_of(3);
+                let key = next() % SPREAD;
+                buffered = if insert {
+                    buffered
+                        .insert(key.to_be_bytes(), vec![seed as u8], &storage)
+                        .await?
+                } else {
+                    buffered.delete(key.to_be_bytes(), &storage).await?
+                };
+            }
+            let mut delta = Delta::zero();
+            let buffered_root = buffered.persist(&mut delta)?;
+            settle(&mut delta, &mut storage).await?;
+            let buffered_tree = Tree::at(crate::helpers::test_catalog(), buffered_root);
+
+            // A stored key, so that some bounds land on an entry.
+            let stored = base_keys[(next() as usize) % base_keys.len()];
+            for tree in [&base, &buffered_tree] {
+                for (low, high) in [
+                    (0u32, SPREAD),
+                    (SPREAD / 8, SPREAD / 3),
+                    (SPREAD - 3000, SPREAD),
+                    (77, 78),
+                    (stored, stored),
+                    (stored, stored + 300),
+                    (2000, 1000),
+                ] {
+                    for range in bounds(low, high) {
+                        let mut forward = scanned(tree, &storage, range, false).await?;
+                        forward.reverse();
+                        let reverse = scanned(tree, &storage, range, true).await?;
+                        assert_eq!(
+                            reverse, forward,
+                            "seed {seed}: the reverse scan of {range:?} must be the forward \
+                             scan reversed"
+                        );
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// A tree with no stored root, and a stored tree with no entries, give
+    /// a reverse scan nothing.
+    #[dialog_common::test]
+    async fn it_scans_an_empty_tree_in_reverse() -> Result<()> {
+        let mut storage: Store = Blocks::new();
+        let unstored = Tree::empty_in(crate::helpers::test_catalog());
+        let range = (Bound::Unbounded, Bound::Unbounded);
+        assert!(scanned(&unstored, &storage, range, true).await?.is_empty());
+
+        let key = 7u32.to_be_bytes();
+        let mut delta = Delta::zero();
+        let emptied = unstored
+            .edit()
+            .insert(key, vec![1], &storage)
+            .await?
+            .persist(&mut delta)?;
+        settle(&mut delta, &mut storage).await?;
+        let emptied = emptied
+            .edit()
+            .delete(&key, &storage)
+            .await?
+            .persist(&mut delta)?;
+        settle(&mut delta, &mut storage).await?;
+        assert!(scanned(&emptied, &storage, range, true).await?.is_empty());
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -1518,6 +1873,49 @@ mod prefetch_tests {
         let leaf = load(&storage, path.last().expect("a read")).await?;
         assert!(matches!(leaf.body(), NodeBody::Segment(_)));
 
+        Ok(())
+    }
+
+    /// A reverse scan that stops after a few entries reads the descent to
+    /// the last leaf and nothing beside it: it reads no sibling ahead, so a
+    /// read of the greatest keys costs one path of the tree.
+    #[dialog_common::test]
+    async fn it_reads_one_path_for_the_greatest_entries() -> Result<()> {
+        use futures_util::StreamExt as _;
+
+        let mut storage = ObservingBlocks::new();
+        let tree = built_tree(&mut storage).await?;
+        let backend = storage.clone();
+
+        let scan_tree = Tree::at(crate::helpers::test_catalog(), tree.root().clone());
+        backend.reset();
+        let entries: Vec<_> = scan_tree
+            .stream_range_reverse(.., &storage)
+            .take(10)
+            .try_collect()
+            .await?;
+        let keys: Vec<u32> = entries
+            .iter()
+            .map(|entry| u32::from_be_bytes(entry.key))
+            .collect();
+        assert_eq!(keys, ((ENTRIES - 10)..ENTRIES).rev().collect::<Vec<_>>());
+
+        let path = backend.read_log();
+        assert!(path.len() > 1, "the tree has at least one index level");
+        assert_eq!(path.first(), Some(tree.root()));
+        for step in path.windows(2) {
+            let node = load(&storage, &step[0]).await?;
+            match node.body() {
+                NodeBody::Index(index) => assert_eq!(
+                    index.hash_at(index.len() - 1)?,
+                    &step[1],
+                    "each read is the last child of the read before it"
+                ),
+                NodeBody::Segment(_) => panic!("a segment cannot hold a further read"),
+            }
+        }
+        let leaf = load(&storage, path.last().expect("a read")).await?;
+        assert!(matches!(leaf.body(), NodeBody::Segment(_)));
         Ok(())
     }
 
