@@ -11,7 +11,10 @@ lookups, and dialog in a shared worker served by an owner worker that is
 replaced when its tab goes. Round three: a trace of the native file
 archive on a tonk-shaped workload, replayed against dialog's IndexedDB
 store, the file as IndexedDB slices, OPFS in every tab's worker and an
-owner worker, as a go/no-go against today's store. The questions, numbers and conclusions are in
+owner worker, as a go/no-go against today's store. Round four: the same
+trace against one dialog worker that a tab hosts behind the service
+worker, against dialog in the service worker on IndexedDB as today, and
+what losing either costs. The questions, numbers and conclusions are in
 [journal.md](journal.md); the background is
 [research/single-file-format/web-opfs.md](../single-file-format/web-opfs.md)
 and [design/file-writers.md](../../design/file-writers.md).
@@ -47,6 +50,24 @@ node round3-report.js results/<file>-round3.json
 
 The archive files named after the trace are what the native run left;
 every replay of the file checks it rebuilt them byte for byte.
+
+Round four replays the same trace, and the trace of the native archive
+opening the files it left (what a replacement host reads to recover them),
+made from copies of those files:
+
+```sh
+cargo run -p dialog-archive-file --features trace --example trace_open -- \
+  traces/open.trace copies copies/peer/archive.dialog copies/space-1/archive.dialog
+SPIKE_TRACES=traces node round4.js tonk-1x.trace open.trace \
+  scratch/file-cells/member-1/peer/archive.dialog \
+  scratch/file-cells/member-1/space-1/archive.dialog --rounds 3
+node round4-report.js results/<file>-round4.json
+node round4-chart.js results/<file>-round4.json --out results/<name>
+```
+
+It registers a service worker (`harness/sw4.js`) on the server's origin,
+as tonk's runs dialog; each run has a fresh profile, so registrations do
+not carry over.
 
 `run.js` starts `server.js` on an ephemeral port of `localhost` (a secure
 context, so OPFS and Web Locks are available), launches Chromium with a
@@ -92,6 +113,12 @@ off-the-record context.
 | `round3-report.js` | round three's tables, every design against today's store, with the kill criteria applied |
 | `harness/replay.js` | round three: the trace's parser and the replays (today's store from the block events; the file as IndexedDB slices or OPFS behind a page cache, its locks as Web Locks; the owner's messages) |
 | `harness/replayworker.js` | round three's dedicated worker: a tab replaying the trace, a reader tab, or the owner |
+| `round4.js` | round four's driver: today's dialog in the service worker against one dialog worker a tab hosts, every request timed in the tab that makes it; the failovers |
+| `round4-report.js` | round four's tables, with the kill criteria applied, the no-host reads and the failovers |
+| `round4-chart.js` | round four's headline chart |
+| `harness/sw4.js` | round four's service worker: today's dialog instance on IndexedDB (A), or the forwarder to the hosting tab's dialog worker (E) and the no-host reader through `getFile()` |
+| `harness/host4.js` | round four's dialog worker: the exclusive handle, the page cache, one operation at a time, the drain for a hand-off |
+| `harness/page4.js`, `harness/page4.html` | round four's tab: registers the service worker, waits on the host lock, makes and times the requests |
 | `results/` | the runs the journal cites |
 
 ## The questions
@@ -126,6 +153,12 @@ off-the-record context.
    IndexedDB store, the file as IndexedDB slices, OPFS in every tab's
    worker with Web Locks, and an owner worker; one tab and three; commit,
    cold read and poll latency and bytes on disk, against today's store.
+11. Round four (`round4.js`): one dialog worker in a tab elected by a Web
+   Lock, holding the file exclusively, behind the service worker that
+   answers the tabs' requests, against today's dialog in the service
+   worker on IndexedDB; one tab and three, every request timed in the tab
+   that makes it; the host tab closed, crashed or handing off, and the
+   service worker stopped; reads with no host, through `getFile()`.
 
 What a run here cannot tell: Firefox and WebKit were not available, so
 nothing is known from this spike about them; headless Chromium on a Linux

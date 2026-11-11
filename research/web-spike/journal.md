@@ -10,7 +10,7 @@ harness: [README.md](README.md). Raw numbers: `results/`, rendered with
 
 ## Where things stand
 
-**Status: Exploring** (a spike, three rounds; nothing here is built into the archive).
+**Status: Exploring** (a spike, four rounds; nothing here is built into the archive).
 
 - **One browser.** Headless Chromium 153.0.8010.12 on a 4-CPU Linux VM
   (Xeon 2.10 GHz, 16 GiB, ext4 on a virtio disk with online discard).
@@ -86,6 +86,29 @@ commit, cold read or poll, p50 or p95, at one tab or three:
   missing (Firefox, Safari).
 - **No store makes a whole commit 5 ms**: natively a commit is 16.8 ms
   p50, nearly all dialog's own work; C's storage work is 1.7–2.6 ms.
+
+Round four (below), one dialog worker hosted by a tab against dialog in
+the service worker on IndexedDB as tonk runs it today, every request timed
+in the tab that makes it, same trace and bars (the user's: "level with
+current and offers space savings"):
+
+- **E, one dialog worker in a tab elected by a Web Lock, holding the file
+  with the exclusive handle, behind the service worker: keep.** Every
+  round, at one tab and three: 0.14x A's bytes, commits 0.15–0.20x
+  (2.1–3.8 ms p50 against 14–20), polls 0.29–0.40x, cold view reads
+  0.66–0.96x at p50 with the host's cache dropped at every cold read. It
+  needs nothing Chromium-only.
+- **Losing the host costs what losing today's dialog instance does**:
+  50–90 ms to the first answer from a replacement (closed, crashed, or
+  handed off when hidden) against 74–85 ms for A's service worker
+  restarting, Wasm start excluded from both; nothing acknowledged lost,
+  nothing answered twice. A crash of the host tab also restarted the
+  service worker, and once took another tab with it.
+- **The service worker's `fetch` is about 1.5 ms of every request**, in
+  A and E alike; a port straight to the host takes a warm read to
+  0.07 ms and a commit to 0.4 ms.
+- **With no host, the service worker can only read, through `getFile()`**:
+  cold view reads 10–11x A's, polls level, no writes.
 
 ## 2026-11-11, the setup and what a Playwright benchmark gets wrong
 
@@ -1294,3 +1317,273 @@ does not (how each design's cold read is set up).
 **Decision.** Keep C; discard B; D only as the answer for browsers
 without `readwrite-unsafe`. Not decided: whether the whole commit can
 meet 5 ms, which is dialog's commit path, not the store.
+
+## 2026-11-11, round four: one dialog worker, hosted by a tab
+
+**Question.** The user's bar: "If this is level with current and offers
+space savings it's worth it." Design E: one dialog worker, a dedicated
+worker in a tab elected by a Web Lock, holds the file with the plain
+exclusive `readwrite` sync handle (every browser that ships sync handles
+has it: Chrome 102+, Firefox 111+, Safari 15.2+) and does every read and
+write itself; the service worker, which runs dialog today (tonk's
+`service_worker.js` answers every `/api/*` fetch through the Rust worker),
+forwards each request to it over a MessagePort and asks a live tab to spawn
+a replacement when the host's tab goes. Tabs make one request per logical
+operation (a commit, a view read, a poll), never one per block. Is it level
+with today's store at a fraction of the bytes, and what does losing the
+host cost against losing today's dialog instance?
+
+**Designs**, fed round three's trace (`tonk-1x-steady`, member 1), in one
+sitting, a fresh profile per run, interleaved round by round:
+
+- **A, today:** dialog's IndexedDB store in the service worker, as tonk
+  runs it: the page's request is a `fetch` of `/api/...` the service
+  worker answers by replaying the operation's block and cell events on
+  IndexedDB (round three's `BlockReplay`). Concurrent requests from tabs
+  interleave in the one service worker, as today.
+- **E, one dialog worker:** the same `fetch`; the service worker forwards
+  it to the host worker's port and answers with its reply. The host
+  replays the operation's file events on its OPFS handle behind round
+  three's page cache (64 MiB), one operation at a time (a port's storage
+  calls are synchronous), with no Web Locks (one writer). Its page cache
+  is dropped at every cold view read, as if the host were new for each
+  view a tab opens: the conservative case, the one judged.
+- **Ek:** E with the host's page cache kept, as one long-lived host would.
+- **Ed:** E with the request sent straight to the host over a port the
+  service worker brokered, no `fetch`: what the service worker's hop costs.
+
+Three tabs: the first tab opened hosts (E) and replays the cold view reads
+and polls over and over as a reader; the second reader is the next
+candidate; the writer, which replays the trace, opens last, so its
+requests always come from a tab that is not the host.
+
+**Kill criteria**, written before measuring, as round three's. On the
+trace, against A in the same sitting and round, E survives only if:
+
+1. **smaller on disk**: at most 0.8x A's bytes after closing; and
+2. **level**: commit, cold view read and poll, p50 and p95 each, timed in
+   the requesting tab with every hop included, at most 1.1x A's; at one
+   tab (the writer) and at three (the writer, and the reader tabs' cold
+   reads and polls).
+
+Ek and Ed are reported, not judged. The 5 ms commit budget is reported,
+not judged (round three: a whole commit is 16.8 ms natively).
+
+**Failover**, measured, not a kill criterion: E's host tab closed,
+crashed, and, as a voluntary hand-off, told it is hidden with other tabs
+visible (it drains, closes its handle and lets the lock go); against A's
+equivalent, the service worker stopped (`ServiceWorker.stopAllWorkers`),
+which loses today's dialog instance: the next request starts it, opens
+IndexedDB and answers. And E's service worker stopped, which loses its
+port to the host. Each: the time from the loss to the first answer, what
+the requesting tab saw, that the file still rebuilds byte for byte (no
+acknowledged write lost) and that no request was answered twice.
+
+**No host**: a request arriving when no tab hosts (the first navigation,
+or a Background Sync event with no tab open) can only be served by the
+service worker reading the file asynchronously through `getFile()` (a
+service worker has no sync access handle; `createWritable()` writes a swap
+file). Measured for the cold view reads and polls against A's same
+requests; writes there are impossible. Reported, not judged.
+
+**Method.** `round4.js` replays round three's trace (`tonk-1x-steady`,
+member 1: 236 operations; sha256 of the dataset `ce012eb67af6c628…`; not
+committed) in headless Chromium 153 on the same 4-CPU VM, one sitting of
+three rounds of A, E, Ek, Ed at one tab and at three, then the failovers
+(`results/2026-11-11T1733-chromium-153-round4.json`). Every request is a
+`fetch` of `/api/op` from the page (Ed: a message on a port), timed in the
+page, which is cross-origin isolated (5 µs timer). A fresh profile per run,
+a service worker registered in each. In E the host rebuilds both native
+files byte for byte in every run, the failovers included. At one tab the
+writer then makes the cold view reads and polls five more times, read
+only: with the host (`post`), then, for E, with no host, the service
+worker reading through `getFile()` (`nohost`); A's read-only pass is what
+the no-host reads are compared with. A replacement host replays what the
+native archive reads to open the files it left: a second trace, made with
+a new example (`cargo run -p dialog-archive-file --features trace
+--example trace_open`) that opens copies of member 1's two files under the
+trace and exits without closing them, as a tab that went would; it reads
+four ranges a file, about 260 KiB, and writes a slot and an extent's
+header, which the replay leaves out (writing the end state's slot into a
+file the replay is still building would break the byte-for-byte check).
+The harness loads the trace into each new dialog worker and into a
+restarted service worker of A, 0.6–0.8 s; a real one loads dialog's Wasm
+instead, so the failover numbers take it out ("trace excluded") and add
+the Wasm's start to neither design.
+
+**Results**, ms in the requesting tab, p50 / p95, the range over three
+rounds:
+
+| design | commit | cold read | poll | warm read (hops only) | pull | on disk, MiB |
+|---|---|---|---|---|---|---|
+| **A**, today | 13.9–14.9 / 42–55 | 3.2–3.6 / 52–60 | 6.5–6.6 / 22–25 | 1.42–1.63 / 1.8–2.0 | 117–121 / 164–183 | 43.6 |
+| **E**, judged | 2.1–2.3 / 3.5–5.0 | 2.7–2.8 / 4.8–5.7 | 1.9–2.1 / 3.1–3.5 | 1.78–1.85 / 2.1–2.3 | 4.7–5.4 / 7.6–10 | 6.2 |
+| Ek, cache kept | 1.9–2.1 / 3.1–3.8 | 1.7–2.1 / 4.8–5.8 | 1.8–1.9 / 2.7–3.3 | 1.62–1.78 / 2.1–2.6 | 4.5–5.3 / 6.3–8.1 | 6.2 |
+| Ed, a port, no fetch | 0.41–0.43 / 1.5–1.9 | 0.92–1.08 / 3.0–4.1 | 0.23–0.26 / 1.6–1.7 | 0.06–0.08 / 0.15–0.17 | 3.3–3.7 / 4.9–5.4 | 6.2 |
+
+Three tabs (the writer, a tab that never hosts; and the two reader tabs,
+one of them the host):
+
+| design | commit | cold read | poll | readers' cold read | readers' poll |
+|---|---|---|---|---|---|
+| **A3** | 17.4–19.7 / 50–58 | 3.3–3.9 / 55–81 | 9.5–12.0 / 45–49 | 4.5–5.2 / 111–124 | 8.4–8.8 / 44–50 |
+| **E3**, judged | 3.5–3.8 / 5.9–8.5 | 2.6–3.3 / 5.1–6.6 | 3.4–3.5 / 6.7–6.9 | 4.2–4.6 / 10–12 | 3.2–3.5 / 6.8–7.0 |
+| Ek3 | 3.4–3.7 / 6.3–7.6 | 1.8–1.9 / 4.1–6.3 | 3.2–3.3 / 4.8–5.7 | 3.1–3.3 / 6.3–7.9 | 3.2–3.4 / 6.9–7.1 |
+| Ed3 | 0.75–0.88 / 4.0–5.1 | 0.96–1.00 / 3.5–4.4 | 0.56–0.75 / 2.7–3.1 | 1.7–2.0 / 5.4–6.6 | 0.51–0.57 / 4.0–4.2 |
+
+Against A in the same round and at the same tabs (`node
+round4-report.js`):
+
+| design | disk | commit p50 / p95 | cold read p50 / p95 | poll p50 / p95 | readers' cold read | readers' poll | rounds survived |
+|---|---|---|---|---|---|---|---|
+| **E, 1 tab** | 0.14 | 0.15–0.16 / 0.08–0.12 | 0.77–0.86 / 0.08–0.11 | 0.29–0.32 / 0.12–0.16 | – | – | **3 of 3** |
+| **E3, 3 tabs** | 0.14 | 0.19–0.20 / 0.12–0.16 | 0.66–0.85 / 0.06–0.12 | 0.29–0.36 / 0.14–0.15 | 0.86–0.96 / 0.09–0.10 | 0.38–0.40 / 0.14–0.16 | **3 of 3** |
+| Ek | 0.14 | 0.13–0.14 / 0.07–0.09 | 0.51–0.66 / 0.08–0.11 | 0.28–0.29 / 0.10–0.15 | – | – | 3 of 3 |
+| Ek3 | 0.14 | 0.17–0.20 / 0.12–0.14 | 0.47–0.55 / 0.07–0.08 | 0.28–0.34 / 0.11–0.12 | 0.64–0.68 / 0.05–0.07 | 0.37–0.40 / 0.14–0.16 | 3 of 3 |
+| Ed | 0.14 | 0.03 / 0.03–0.04 | 0.25–0.33 / 0.05–0.07 | 0.04 / 0.07 | – | – | 3 of 3 |
+| Ed3 | 0.14 | 0.04–0.05 / 0.08–0.09 | 0.26–0.29 / 0.05–0.08 | 0.05–0.07 / 0.05–0.07 | 0.33–0.41 / 0.05–0.06 | 0.06–0.07 / 0.08–0.10 | 3 of 3 |
+
+![round four](results/2026-11-11-round4.png)
+
+```mermaid
+xychart-beta
+  title "Commit p50 in the requesting tab, ms (trace tonk-1x-steady)"
+  x-axis ["A today", "E", "E kept", "E direct", "A 3 tabs", "E 3 tabs", "E kept 3", "E direct 3"]
+  y-axis "ms" 0 --> 20
+  bar [14.4, 2.21, 1.98, 0.42, 18.1, 3.49, 3.43, 0.84]
+```
+
+```mermaid
+xychart-beta
+  title "Cold view read p50 in the requesting tab, ms"
+  x-axis ["A today", "E", "E kept", "E direct", "A 3 tabs", "E 3 tabs", "E kept 3", "E direct 3"]
+  y-axis "ms" 0 --> 5
+  bar [3.31, 2.74, 1.86, 0.98, 3.88, 2.59, 1.82, 1.00]
+```
+
+```mermaid
+xychart-beta
+  title "On disk after closing, MiB"
+  x-axis ["A today", "E", "E kept", "E direct", "A 3 tabs", "E 3 tabs", "E kept 3", "E direct 3"]
+  y-axis "MiB" 0 --> 50
+  bar [43.6, 6.2, 6.2, 6.2, 43.7, 6.2, 6.2, 6.2]
+```
+
+(Medians over the rounds; the tables hold the ranges.)
+
+**No host.** The service worker reading the file through `getFile()`, a
+fresh `File` for each operation, its own page cache dropped at each cold
+read, against A's read-only pass in the same round:
+
+| | cold read p50 / p95 | poll p50 / p95 |
+|---|---|---|
+| no host, ms | 35–38 / 81–87 | 4.1–4.5 / 15–16 |
+| A, ms | 3.2–3.7 / 44–52 | 4.9–5.1 / 18–20 |
+| ratio | **10.3–11.3** / 1.7–2.0 | 0.84–0.89 / 0.79–0.87 |
+
+A cold view read is 56 runs of pages, most of them misses; each miss is
+a `slice().arrayBuffer()` of a `File`, about a millisecond (round one
+measured 0.9–1.2 ms for 4 KiB), awaited one after another (2,935 reads in
+a first round's pass). Polls hit the cache. Writes are impossible there.
+
+**Failover**, the writer tab (which never hosts) making the week's
+requests, the loss 40% of the way through the week; ms from the loss to
+the first answer from the replacement, trace load excluded, the range
+over rounds (crash: two rounds, see below):
+
+| loss | first answer | lock granted | worker spawned | files opened | recovered (open trace) | resent / late | rebuilds native |
+|---|---|---|---|---|---|---|---|
+| E, host tab closed | 57–60 | 5.8–8.1 | 23–25 | 8.7–14.2 (2 tries) | 1.5–1.6 | 3 / 0 | yes |
+| E, host tab crashed | 74–90 | 25–32 | 28–33 | 6.4–7.6 (2 tries) | 1.1 | 2 / 0 | yes |
+| E, hand-off (hidden) | 50–69 | 7.0–13.4 | 20–29 | 6.8–10.2 (2 tries) | 1.5–1.7 | 3 / 0 | yes |
+| E, service worker stopped | 23–29 (port again at 17–23) | – | – | – | – | 3 / 0 | yes |
+| **A, service worker stopped** | **74–85** | – | – | IndexedDB 4.4–12.9 | – | – | n/a |
+
+- **Losing the host costs about what losing today's dialog instance
+  does**: 50–90 ms against A's 74–85 ms, before either loads dialog's
+  Wasm, which both would. Opening and recovering the real file is 8–16 ms
+  of it (the first `createSyncAccessHandle` is refused once while the
+  dead worker's handle goes); spawning the worker 20–33 ms; the lock
+  5–32 ms (a crash is noticed later than a close).
+- **The service worker restarting costs E less than A** (23–29 ms): it
+  only asks the host tab for its port again, where A opens IndexedDB and
+  starts its instance.
+- **A crash of the host tab took the service worker with it** in both
+  crash runs that completed (the service worker restarted: it ran in the
+  host tab's renderer process), and in the first round it took the
+  writer's tab too (Playwright saw the writer's page closed; the run
+  failed and is not in the table). Inferred: Chromium put those tabs and
+  the service worker in one renderer process; a crash there loses more
+  than the host. Each loss was recovered from the same way.
+- **Nothing acknowledged was lost and nothing was answered twice**: every
+  failover's file rebuilds the native ones byte for byte; the service
+  worker resent the 2–3 requests that were in flight to the new host, and
+  no answer arrived for a request already answered (`late` 0). A request
+  re-run by the new host rewrites the same bytes in the replay; a real
+  commit retried there is a compare-and-swap against the head the new
+  host reads (`Branch::transact`), which the replay does not exercise.
+
+**What the numbers say.**
+
+- **E is level or better on every judged measure, every round, at one
+  tab and at three, at a seventh of the bytes**: commits 0.15–0.20x A,
+  polls 0.29–0.40x, cold view reads 0.66–0.96x at p50 and about 0.1x at
+  p95. Its thinnest margin is the reader tabs' cold reads at p50
+  (0.86–0.96x), with the host's cache dropped at every cold read; kept
+  (Ek), 0.64–0.68x.
+- **The service worker's `fetch` is most of every request.** A warm view
+  read touches no storage: through the service worker it costs 1.4–1.6 ms
+  (A) and 1.6–1.9 ms (E, one more port hop); on a port straight to the
+  host (Ed), 0.06–0.08 ms. Ed's commit is 0.41–0.43 ms p50. Today's
+  design pays the same `fetch` on every request, so it is in A's numbers
+  too.
+- **A is slower here than in round three** (commit 14–15 ms against
+  12–14; cold read 3.2–3.6 against 1.5–2.1): it now runs where tonk runs
+  it, in the service worker behind a `fetch`, and its three tabs share one
+  instance.
+- **Without a host, reads from the service worker are 10–11x slower cold**
+  and level on polls; writes cannot happen. A first navigation does better
+  waiting for its tab to spawn the host (spawn 20–33 ms plus open 7–14 ms
+  measured here, plus Wasm) than reading through `getFile()`; a Background
+  Sync with no tab open can read, slowly, and cannot write.
+
+**Measured and inferred.** Measured: every latency, size and failover
+time in the tables; the byte-for-byte rebuild in every E run; the
+resends and late answers. Inferred: the format's CPU in Wasm, which no
+replay carries (natively about 600 µs to write a frame, 5 to 27 µs to
+decode a node's rows); recovery's CPU in Wasm (the replay replays its
+reads only; natively the open took 0.8 ms for both files); dialog's Wasm
+start in a new worker or a restarted service worker, which both designs
+pay; that the first crash run lost the writer's tab because it shared the
+host's renderer process; what a re-run commit does in a real archive.
+
+**What this cannot tell.** Firefox and Safari were not available; E uses
+only the exclusive handle and Web Locks, which they ship, but nothing here
+measured them. A real browser's freezing or discarding of a background
+host tab is not testable headless: the hand-off here is the handler a
+`visibilitychange` would run, called by the harness; a frozen host keeps
+its lock and its handle and stops answering, which needs a heartbeat and
+a hand-off before the freeze (round one: `steal` takes the lock, not the
+handle). One trace, one machine, a 6.2 MiB file: a space that outgrows
+the 64 MiB cache makes cold reads dearer in E and not in A. One writer:
+the trace is one process's, so three tabs are one writer and two readers.
+
+**Verdict.** **E, one dialog worker hosted by a tab: keep.** It meets the
+user's bar with room: a seventh of today's bytes, faster on commits and
+polls, level or better on cold reads, and losing it costs what losing
+today's dialog instance does. Next, in order:
+
+1. Tabs talk to the host on a port the service worker brokers (Ed), not
+   through `fetch`: the `fetch` is 1.5 ms of every request; keep `fetch`
+   for what must go through the service worker (guest iframes'
+   subresources).
+2. The archive's reads over a page cache instead of a mapping, in Wasm,
+   and its CPU measured there.
+3. Hosting rules: a host gives the role up when its tab is hidden and a
+   visible tab exists, a heartbeat for a host that stops answering, and a
+   first navigation that waits for its own tab's host rather than reading
+   through `getFile()`.
+4. Firefox and Safari: the same harness, once they are available.
+
+**Decision.** Keep E. Not decided: what to do with requests when no tab
+can host (Background Sync), which reads slowly and cannot write.
