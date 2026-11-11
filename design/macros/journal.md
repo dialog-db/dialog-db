@@ -257,3 +257,9 @@ Not examined yet. They are columns, not recommendations.
 - Nothing about that has to show in the notation or the syntax tree: `{text: ?x}` is written and kept as a struct either way.
 
 **Decided.** By the maintainer: a struct is a value in the notation, written as one, with no form to build it. Not decided: whether the value is `Record` given a structure or a new `Map`, and how dialog evaluates a struct that holds a variable.
+
+## 2026-11-11, Designing: several heads leave this topic
+
+**Asked.** Irakli: rules of several heads can be handled by an agent working on its own, and belong in the next rule body format.
+
+**Decided.** It is a topic of its own, `design/rule-heads.md` on #776, in the Describing phase and not picked up. This topic keeps compiling a rule of several heads to a rule a head until that lands.
