@@ -665,9 +665,11 @@ async fn it_answers_a_window_once_for_a_message_that_two_entries_hold() -> Resul
 }
 
 /// A head that holds the key of each entry is not determined by its entity:
-/// a message that two entries hold has two keys. Such a rule keeps one
-/// evaluation for each field, and the window answers the message once for each
-/// of its keys.
+/// a message that two entries hold has two keys. Each other field of the head
+/// follows from the message, so the body is evaluated once for all the fields,
+/// and the window answers the message once for each of its keys. The answer
+/// equals what one evaluation for each field gives: a stored fact of an
+/// attribute of the head turns the fast path off for the comparison.
 #[dialog_common::test]
 async fn it_answers_each_key_of_a_message_when_the_head_holds_the_key() -> Result<()> {
     let (branch, operator, keys) = opened(Keyed::Dictionary, &[400]).await?;
@@ -693,9 +695,423 @@ async fn it_answers_each_key_of_a_message_when_the_head_holds_the_key() -> Resul
     held.sort();
     assert_eq!(held, vec!["n00150".to_string(), "n00155x".to_string()]);
     assert!(
-        read > budget(21),
-        "the head is not determined by its entity, so each field reads the body: {read}"
+        read <= budget(21),
+        "21 entries of 20 messages read one entry and each field of each: {read}"
     );
+
+    lone_field(&branch, &operator).await?;
+    let (slow, slow_read) = first_read(&branch, &operator, window).await?;
+    assert_eq!(entries(&slow)?, entries(&rows)?);
+    assert!(
+        read * 2 < slow_read,
+        "the slow path reads the body for each field: {read} against {slow_read}"
+    );
+    Ok(())
+}
+
+/// A stored fact of one field of the head of a window, on an entity that no
+/// entry holds. It is no instance of the head, so the answer of a window stays
+/// the same. Each attribute of the head then has a stored source, which turns
+/// the fast path of a rule off: the window reads each field through the rule
+/// on its own.
+async fn lone_field(branch: &Branch, operator: &Operator) -> Result<()> {
+    let lone: Entity = "other:lone".parse()?;
+    branch
+        .transaction()
+        .assert(
+            dialog_query::the!("test.window/text")
+                .of(lone)
+                .is("alone".to_string()),
+        )
+        .commit()
+        .publish()
+        .perform(operator)
+        .await?;
+    Ok(())
+}
+
+/// Each of `rows` as a line of its entity, its key, and each field, sorted.
+fn entries(rows: &[ConceptConclusion]) -> Result<Vec<String>> {
+    let mut lines = rows
+        .iter()
+        .map(|row| {
+            Ok(format!(
+                "{} key={} channel={} number={} text={}",
+                row.entity(),
+                row.get::<String>("key")?,
+                row.get::<Entity>("channel")?,
+                row.get::<u64>("number")?,
+                row.get::<String>("text")?,
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    lines.sort();
+    Ok(lines)
+}
+
+/// The five fields of a message of a chat, each read once per entity under
+/// `last`: those of [`FIELDS`], and an author and a time.
+const MESSAGE: [(&str, &str); 5] = [
+    ("author", "entity:"),
+    ("channel", "entity:"),
+    ("number", "natural:"),
+    ("text", "text:"),
+    ("time", "natural:"),
+];
+
+/// The rule of a segment of a list of a collection: each entry of the log of
+/// `channel` from the key `lower` up to the key `upper`, which it leaves out,
+/// joined to its message of five fields. The head holds the key of each entry
+/// beside the five fields.
+fn segment(channel: &str, lower: &str, upper: &str) -> Result<(DeductiveRule, ConceptQuery)> {
+    let mut with = Map::new();
+    let mut read = Map::new();
+    let mut terms = Map::new();
+    let mut parameters = Parameters::new();
+    terms.insert("this".to_string(), json!({ "?": { "name": "this" } }));
+    parameters.insert("this".into(), Term::var("this"));
+    for (name, kind) in MESSAGE {
+        with.insert(
+            name.to_string(),
+            json!({ "the": format!("test.segment/{name}"), "as": kind }),
+        );
+        read.insert(
+            name.to_string(),
+            json!({ "the": format!("chat.message/{name}"), "as": kind }),
+        );
+        terms.insert(name.to_string(), json!({ "?": { "name": name } }));
+        parameters.insert(name.into(), Term::var(name));
+    }
+    with.insert(
+        "key".to_string(),
+        json!({ "the": "test.segment/key", "as": "text:", "pick": "all:" }),
+    );
+    parameters.insert("key".into(), Term::var("key"));
+    let head = json!({ "with": with });
+    let descriptor: DeductiveRuleDescriptor = serde_json::from_value(json!({
+        "deduce": head,
+        "when": [
+            {
+                "assert": log(Keyed::Dictionary),
+                "where": {
+                    "this": { "entity:": channel },
+                    "log": {
+                        "the": { "?": { "name": "key" } },
+                        "is": { "?": { "name": "this" } }
+                    }
+                }
+            },
+            {
+                "assert": ">=",
+                "where": { "of": { "?": { "name": "key" } }, "with": { "text:": lower } }
+            },
+            {
+                "assert": "<",
+                "where": { "of": { "?": { "name": "key" } }, "with": { "text:": upper } }
+            },
+            { "assert": { "with": read }, "where": terms },
+        ]
+    }))?;
+    let query = ConceptQuery {
+        predicate: serde_json::from_value(head)?,
+        terms: parameters,
+    };
+    Ok((descriptor.compile()?, query))
+}
+
+/// A segment of 20 entries of a log, whose head holds the key of each entry
+/// beside the five fields of a message, reads one entry and one row for each
+/// field of each message: 6 rows for each entry. With one evaluation of the
+/// body for each field of the head, it read 36.
+#[dialog_common::test]
+async fn it_reads_one_entry_and_each_field_of_a_message_when_the_head_holds_the_key() -> Result<()>
+{
+    let (branch, operator, keys) = opened(Keyed::Dictionary, &[200]).await?;
+    let of: Entity = channel(0).parse()?;
+    let author: Entity = "person:ana".parse()?;
+    let mut transaction = branch.transaction();
+    for number in 0..200u64 {
+        let this: Entity = format!("message:0-{number}").parse()?;
+        transaction = transaction
+            .assert(
+                dialog_query::the!("chat.message/author")
+                    .of(this.clone())
+                    .is(author.clone()),
+            )
+            .assert(
+                dialog_query::the!("chat.message/time")
+                    .of(this)
+                    .is(1_700_000_000_000 + number),
+            );
+    }
+    transaction.commit().publish().perform(&operator).await?;
+
+    let (rule, query) = segment(&channel(0), keys.at(100), keys.at(120))?;
+    let mut subscription = branch.query().with(rule).subscribe(query);
+    let first = subscription.poll(&operator).await?.expect("the first read");
+    assert_eq!(numbers(&first.asserted)?, (100..120).collect::<Vec<_>>());
+    for row in &first.asserted {
+        let number = row.get::<u64>("number")?;
+        assert_eq!(row.get::<String>("key")?, keys.at(number));
+        assert_eq!(row.get::<Entity>("author")?, author);
+        assert_eq!(row.get::<Entity>("channel")?, of);
+        assert_eq!(row.get::<u64>("time")?, 1_700_000_000_000 + number);
+    }
+    let read = subscription.rows_read();
+    println!("a segment of 20 entries with the key in its head reads {read} rows");
+    assert!(
+        read <= (1 + MESSAGE.len()) * 20 + 2,
+        "one entry and 5 fields for each of 20 entries, got {read}"
+    );
+    Ok(())
+}
+
+/// A live window whose head holds the key keeps the rows that a first read
+/// gives, with the fast path and with the slow path. A second entry of a
+/// message of the window adds a row with its own key, the first entry of that
+/// message leaves, a new message comes inside the window and another outside
+/// it, and a field of a message of the window changes. After each change, the
+/// rows that the live query holds are the rows of a first read, and they are
+/// the same rows on both paths.
+#[dialog_common::test]
+async fn it_keeps_a_live_window_that_holds_the_key_as_a_first_read_gives_it() -> Result<()> {
+    let fast = live_keyed_window(false).await?;
+    let slow = live_keyed_window(true).await?;
+    assert_eq!(fast, slow);
+    Ok(())
+}
+
+/// The rows of a live window whose head holds the key after each change of
+/// [`it_keeps_a_live_window_that_holds_the_key_as_a_first_read_gives_it`],
+/// each checked against a first read. With `slow`, a stored fact of a field of
+/// the head turns the fast path off first.
+async fn live_keyed_window(slow: bool) -> Result<Vec<Vec<String>>> {
+    let (branch, operator, keys) = opened(Keyed::Dictionary, &[200]).await?;
+    if slow {
+        lone_field(&branch, &operator).await?;
+    }
+    let general = channel(0);
+    let window = Window {
+        key_in_head: true,
+        keyed: Keyed::Dictionary,
+        channel: Some(&general),
+        lower: at_least(keys.at(140)),
+        upper: below(keys.at(160)),
+    };
+    let mut subscription = branch
+        .query()
+        .with(window.rule()?)
+        .subscribe(window.query()?);
+    subscription.poll(&operator).await?.expect("the first read");
+    let mut seen = vec![entries(subscription.results())?];
+
+    let of: Entity = general.parse()?;
+    let held: Entity = "message:0-150".parse()?;
+    let edited: Entity = "message:0-145".parse()?;
+    let entry = |key: &str| -> Result<Relation> {
+        Ok(Relation::from(CorpusRelation::try_from(format!(
+            "chat.channel.log/{key}"
+        ))?))
+    };
+    // Each step opens its transaction when it runs: a transaction commits
+    // against the head it opened at, so one opened before the step ahead of
+    // it published would be refused.
+    type Step<'s> = Box<
+        dyn Fn(
+                crate::Transaction<&'s crate::Branch>,
+            ) -> Result<crate::Transaction<&'s crate::Branch>>
+            + 's,
+    >;
+    let steps: Vec<Step<'_>> = vec![
+        Box::new(|transaction| {
+            Ok(transaction.assert(entry("n00155x")?.of(of.clone()).is(held.clone())))
+        }),
+        Box::new(|transaction| {
+            Ok(transaction.retract(entry("n00150")?.of(of.clone()).is(held.clone())))
+        }),
+        Box::new(|transaction| post(transaction, 0, "new", 900, "n00151x")),
+        Box::new(|transaction| post(transaction, 0, "late", 901, "n00170x")),
+        Box::new(|transaction| {
+            Ok(transaction
+                .retract(
+                    dialog_query::the!("chat.message/text")
+                        .of(edited.clone())
+                        .is("hello".to_string()),
+                )
+                .assert(
+                    dialog_query::the!("chat.message/text")
+                        .of(edited.clone())
+                        .is("edited".to_string()),
+                ))
+        }),
+    ];
+    for step in steps {
+        step(branch.transaction())?
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        subscription.poll(&operator).await?;
+        let live = entries(subscription.results())?;
+        let (fresh, _) = first_read(&branch, &operator, window).await?;
+        assert_eq!(live, entries(&fresh)?, "the live query holds a first read");
+        seen.push(live);
+    }
+    let last = seen.last().expect("a step");
+    let holds = |key: &str, number: u64| {
+        last.iter().any(|row| {
+            row.contains(&format!(" key={key} ")) && row.contains(&format!(" number={number} "))
+        })
+    };
+    assert!(holds("n00155x", 150), "the second entry of 150 stays");
+    assert!(!holds("n00150", 150), "the first entry of 150 left");
+    assert!(holds("n00151x", 900), "the new message inside the window");
+    assert!(!holds("n00170x", 901), "the new message outside the window");
+    assert!(
+        last.iter()
+            .any(|row| row.contains(" number=145 text=edited"))
+    );
+    Ok(seen)
+}
+
+/// The rule of a window of the log of `channel` from the key `lower` up to the
+/// key `upper`, which it leaves out, whose head holds the key of each entry
+/// beside the fields of its message. The body also joins each message to the
+/// entries of the log of `other` that hold it, and the head names no field of
+/// those entries. So the body gives one row for each pair of an entry of the
+/// window and an entry of `other` that hold one message.
+fn window_twice(
+    channel: &str,
+    other: &str,
+    lower: &str,
+    upper: &str,
+) -> Result<(DeductiveRule, ConceptQuery)> {
+    let window = Window {
+        key_in_head: true,
+        keyed: Keyed::Dictionary,
+        channel: Some(channel),
+        lower: at_least(lower),
+        upper: below(upper),
+    };
+    let head = window.head();
+    let mut terms = Map::new();
+    terms.insert("this".to_string(), json!({ "?": { "name": "this" } }));
+    for (name, _) in FIELDS {
+        terms.insert(name.to_string(), json!({ "?": { "name": name } }));
+    }
+    let descriptor: DeductiveRuleDescriptor = serde_json::from_value(json!({
+        "deduce": head,
+        "when": [
+            {
+                "assert": log(Keyed::Dictionary),
+                "where": {
+                    "this": { "entity:": channel },
+                    "log": {
+                        "the": { "?": { "name": "key" } },
+                        "is": { "?": { "name": "this" } }
+                    }
+                }
+            },
+            {
+                "assert": log(Keyed::Dictionary),
+                "where": {
+                    "this": { "entity:": other },
+                    "log": {
+                        "the": { "?": { "name": "elsewhere" } },
+                        "is": { "?": { "name": "this" } }
+                    }
+                }
+            },
+            {
+                "assert": ">=",
+                "where": { "of": { "?": { "name": "key" } }, "with": { "text:": lower } }
+            },
+            {
+                "assert": "<",
+                "where": { "of": { "?": { "name": "key" } }, "with": { "text:": upper } }
+            },
+            { "assert": fields("chat.message"), "where": terms },
+        ]
+    }))?;
+    Ok((descriptor.compile()?, window.query()?))
+}
+
+/// An entry of a window whose head holds the key gives one row, though the
+/// body derives it twice. Each message of the window has two entries in the
+/// log of a second channel, so the body gives two rows for each entry of the
+/// window, with the same key and the same fields. The window answers one row
+/// for each entry. When one of the two entries of the second channel leaves,
+/// the row stays, and when the other leaves too, the row leaves. After each
+/// change, the live query holds the rows of a first read.
+#[dialog_common::test]
+async fn it_answers_an_entry_that_the_body_derives_twice_once_when_the_head_holds_the_key()
+-> Result<()> {
+    let (branch, operator, keys) = opened(Keyed::Dictionary, &[200, 0]).await?;
+    let other: Entity = channel(1).parse()?;
+    let entry = |key: &str| -> Result<Relation> {
+        Ok(Relation::from(CorpusRelation::try_from(format!(
+            "chat.channel.log/{key}"
+        ))?))
+    };
+    let mut transaction = branch.transaction();
+    for number in 100..110u64 {
+        let message: Entity = format!("message:0-{number}").parse()?;
+        transaction = transaction
+            .assert(
+                entry(&format!("x{number}a"))?
+                    .of(other.clone())
+                    .is(message.clone()),
+            )
+            .assert(entry(&format!("x{number}b"))?.of(other.clone()).is(message));
+    }
+    transaction.commit().publish().perform(&operator).await?;
+
+    let (rule, query) = window_twice(&channel(0), &channel(1), keys.at(100), keys.at(110))?;
+    assert_eq!(
+        rule.head_keyed(),
+        Some("key"),
+        "the rule takes the path of one evaluation for each entry"
+    );
+    let mut subscription = branch.query().with(rule.clone()).subscribe(query.clone());
+    let first = subscription.poll(&operator).await?.expect("the first read");
+    assert_eq!(
+        numbers(&first.asserted)?,
+        (100..110).collect::<Vec<_>>(),
+        "one row for each entry"
+    );
+    for row in &first.asserted {
+        assert_eq!(
+            row.get::<String>("key")?,
+            keys.at(row.get::<u64>("number")?)
+        );
+    }
+
+    let message: Entity = "message:0-105".parse()?;
+    for (key, stays) in [("x105a", true), ("x105b", false)] {
+        branch
+            .transaction()
+            .retract(entry(key)?.of(other.clone()).is(message.clone()))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        subscription.poll(&operator).await?;
+        let mut fresh = branch.query().with(rule.clone()).subscribe(query.clone());
+        let fresh = fresh.poll(&operator).await?.expect("the first read");
+        assert_eq!(
+            entries(subscription.results())?,
+            entries(&fresh.asserted)?,
+            "the live query holds a first read"
+        );
+        let expected: Vec<u64> = (100..110)
+            .filter(|number| stays || *number != 105)
+            .collect();
+        assert_eq!(
+            numbers(subscription.results())?,
+            expected,
+            "after the leave of {key}"
+        );
+    }
     Ok(())
 }
 

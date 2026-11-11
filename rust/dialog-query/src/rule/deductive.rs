@@ -881,6 +881,87 @@ impl DeductiveRule {
     /// that holds a message, and reads each field of the head from the
     /// message itself.
     pub fn head_determined(&self) -> bool {
+        self.determined().is_some_and(|determined| {
+            self.conclusion()
+                .sorted_operands()
+                .iter()
+                .all(|operand| determined.contains(operand.as_str()))
+        })
+    }
+
+    /// The field of the head that holds the key of an entry, when the body
+    /// binds at most one distinct row of the head for each entry that holds
+    /// `this`. Each other field of the head is determined by `this`, as
+    /// [`head_determined`](Self::head_determined) finds it. The one field
+    /// that is not names the key of a read of a collection under `all`,
+    /// whose entries hold `this` itself:
+    /// `log { this: <general>, log: { ?key: ?this } }`. The collection is
+    /// the one field of its concept, with no concept that its members
+    /// conform to. The field of the key is required and read under `all`,
+    /// so a read of its attribute on its own gives each key of the entity.
+    ///
+    /// A message that two entries hold has two keys. A read of each
+    /// attribute of the head on its own then gives one row for each of its
+    /// keys, each with the one value of each other field. The body gives a
+    /// row for each entry, with the key of that entry and the same other
+    /// fields. So the rows of the body, with each repeat of an entity and a
+    /// key dropped, are that same answer.
+    ///
+    /// The rule of a segment of a list of a collection is the case: its head
+    /// holds the key of each entry beside the fields of the member.
+    pub fn head_keyed(&self) -> Option<&str> {
+        let determined = self.determined()?;
+        let operands = self.conclusion().sorted_operands();
+        let mut free = operands
+            .iter()
+            .filter(|operand| !determined.contains(operand.as_str()));
+        let key = free.next()?;
+        if free.next().is_some() {
+            return None;
+        }
+        let (name, field) = self
+            .conclusion()
+            .with()
+            .iter()
+            .find(|(name, _)| *name == key.as_str())?;
+        if field.is_optional()
+            || field.descriptor().pick().elects()
+            || field.descriptor().is_chain()
+            || !matches!(field.the(), The::Relation(_))
+        {
+            return None;
+        }
+        let is_variable = |term: Option<&Term<Any>>, variable: &str| {
+            term.and_then(|term| term.name()) == Some(variable)
+        };
+        let entry = self.analysis().premises().any(|premise| {
+            let Premise::Assert(Proposition::Concept(query)) = premise else {
+                return false;
+            };
+            let mut fields = query.predicate.with().iter();
+            let Some((collection, read)) = fields.next() else {
+                return false;
+            };
+            fields.next().is_none()
+                && matches!(read.the(), The::Collection { .. })
+                && !read.is_optional()
+                && read.conforms().is_none()
+                && !read.descriptor().pick().elects()
+                && !read.descriptor().is_chain()
+                && !query.widens()
+                && is_variable(query.terms.get(&The::key_operand(collection)), key)
+                && is_variable(query.terms.get(collection), "this")
+        });
+        entry.then_some(name)
+    }
+
+    /// The variables of the body that `this` determines: those that
+    /// [`single_valued`](Self::single_valued) finds determined, through
+    /// reads under a choosing pick of an entity already determined, and
+    /// through equalities. Each other read of a concept determines nothing.
+    /// `None` when the body holds a premise that the analysis does not
+    /// follow, such as a formula.
+    fn determined(&self) -> Option<BTreeSet<&str>> {
         let mut determined: BTreeSet<&str> = BTreeSet::from(["this"]);
         let mut pending: Vec<&ConceptQuery> = Vec::new();
         let mut equalities: Vec<&Equality> = Vec::new();
@@ -894,11 +975,11 @@ impl DeductiveRule {
                     | Constraint::GreaterThan(_)
                     | Constraint::AtLeast(_) => {}
                     Constraint::Coalesce(_) | Constraint::TypeOf(_) | Constraint::StartsWith(_) => {
-                        return false;
+                        return None;
                     }
                 },
                 Premise::Unless(_) => {}
-                _ => return false,
+                _ => return None,
             }
         }
         loop {
@@ -945,10 +1026,7 @@ impl DeductiveRule {
                 break;
             }
         }
-        self.conclusion()
-            .sorted_operands()
-            .iter()
-            .all(|operand| determined.contains(operand.as_str()))
+        Some(determined)
     }
 
     /// This rule re-headed onto `concept`: its body, with the variables of
@@ -2475,5 +2553,114 @@ mod tests {
         }));
         assert!(rule.single_valued());
         assert!(rule.head_determined());
+    }
+
+    /// The head of a window with the key of each entry, under `pick`.
+    fn keyed_head(pick: &str) -> serde_json::Value {
+        serde_json::json!({
+            "number": { "the": "test.window/number", "as": "natural:" },
+            "text": { "the": "test.window/text", "as": "text:" },
+            "key": { "the": "test.window/key", "as": "text:", "pick": pick }
+        })
+    }
+
+    /// A head that holds the key of each entry beside fields that each
+    /// follow from the member gives one row for each entry. The key is the
+    /// one field of the head that `this` does not determine.
+    #[dialog_common::test]
+    fn a_head_that_holds_the_key_beside_fields_of_this_is_keyed() {
+        let rule = window(keyed_head("all:"), message("last:"));
+        assert!(!rule.head_determined());
+        assert_eq!(rule.head_keyed(), Some("key"));
+    }
+
+    /// A head that each field of which follows from `this` holds no key,
+    /// and evaluates as it does without one.
+    #[dialog_common::test]
+    fn a_determined_head_is_not_keyed() {
+        let rule = window(
+            serde_json::json!({
+                "number": { "the": "test.window/number", "as": "natural:" },
+                "text": { "the": "test.window/text", "as": "text:" }
+            }),
+            message("last:"),
+        );
+        assert!(rule.head_determined());
+        assert_eq!(rule.head_keyed(), None);
+    }
+
+    /// A field of the key under a pick that elects keeps one key of each
+    /// entity, and not one for each entry.
+    #[dialog_common::test]
+    fn a_key_under_a_pick_that_elects_is_not_keyed() {
+        let rule = window(keyed_head("last:"), message("last:"));
+        assert_eq!(rule.head_keyed(), None);
+    }
+
+    /// A key beside a second field that `this` does not determine is not
+    /// keyed: a read of each field on its own pairs each value of one with
+    /// each value of the other.
+    #[dialog_common::test]
+    fn a_key_beside_a_field_read_under_all_is_not_keyed() {
+        let rule = window(keyed_head("all:"), message("all:"));
+        assert_eq!(rule.head_keyed(), None);
+    }
+
+    /// A key of a collection whose entries hold another entity than `this`
+    /// is not keyed.
+    #[dialog_common::test]
+    fn a_key_of_entries_of_another_entity_is_not_keyed() {
+        let rule = compiled(serde_json::json!({
+            "deduce": { "with": keyed_head("all:") },
+            "when": [
+                {
+                    "assert": { "with": { "log": {
+                        "the": { "domain": "chat.channel.log", "keyed": "dictionary" },
+                        "as": "entity:",
+                        "pick": "all:"
+                    } } },
+                    "where": {
+                        "this": { "entity:": "channel:general" },
+                        "log": {
+                            "the": { "?": { "name": "key" } },
+                            "is": { "?": { "name": "other" } }
+                        }
+                    }
+                },
+                {
+                    "assert": { "with": { "reply": { "the": "chat.message/reply", "as": "entity:" } } },
+                    "where": { "this": { "?": { "name": "this" } }, "reply": { "?": { "name": "other" } } }
+                },
+                message("last:"),
+            ]
+        }));
+        assert!(!rule.head_determined());
+        assert_eq!(rule.head_keyed(), None);
+    }
+
+    /// A key of a collection under a pick that elects is not keyed.
+    #[dialog_common::test]
+    fn a_key_of_a_collection_under_a_pick_that_elects_is_not_keyed() {
+        let rule = compiled(serde_json::json!({
+            "deduce": { "with": keyed_head("all:") },
+            "when": [
+                {
+                    "assert": { "with": { "log": {
+                        "the": { "domain": "chat.channel.log", "keyed": "dictionary" },
+                        "as": "entity:",
+                        "pick": "last:"
+                    } } },
+                    "where": {
+                        "this": { "entity:": "channel:general" },
+                        "log": {
+                            "the": { "?": { "name": "key" } },
+                            "is": { "?": { "name": "this" } }
+                        }
+                    }
+                },
+                message("last:"),
+            ]
+        }));
+        assert_eq!(rule.head_keyed(), None);
     }
 }

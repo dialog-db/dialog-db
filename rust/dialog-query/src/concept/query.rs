@@ -82,16 +82,48 @@ fn extract_parameters(source: &Match, terms: &Parameters) -> Result<Match, Evalu
     Ok(matched)
 }
 
+/// Which rows of a covering rule repeat a row of the head, and so leave
+/// once alone.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Repeats {
+    /// No row repeats: the body yields at most one row for each entity.
+    None,
+    /// A row of an entity that already left repeats it.
+    OfEntity,
+    /// A row of an entity and a key that already left repeats it. The
+    /// field names the parameter of the concept that holds the key.
+    OfEntry(String),
+}
+
 /// The entities that a plan already answered, for each row it was evaluated
-/// for. A row is held with its entities, so that its address stays its own
-/// for as long as it is a key here.
+/// for, each with the key of its entry when the head holds one. A row is
+/// held with its entities, so that its address stays its own for as long
+/// as it is a key here.
 #[derive(Default)]
-struct Answered(HashMap<usize, (Arc<Match>, HashSet<Vec<u8>>)>);
+struct Answered(HashMap<usize, (Arc<Match>, HashSet<Answer>)>);
+
+/// One answer of a plan: the encoded entity, and the encoded key of its
+/// entry, which is empty when the head holds no key.
+type Answer = (Vec<u8>, Vec<u8>);
 
 impl Answered {
-    /// Whether `result` is a second row of its entity for `caller`. The
-    /// first row of an entity is recorded, and is no repeat.
-    fn repeats(&mut self, caller: &Arc<Match>, result: &Match) -> Result<bool, EvaluationError> {
+    /// Whether `result` is a second row of its entity for `caller`, or of
+    /// its entity and its key under [`Repeats::OfEntry`]. The first such row
+    /// is recorded, and is no repeat.
+    fn repeats(
+        &mut self,
+        repeats: &Repeats,
+        caller: &Arc<Match>,
+        result: &Match,
+    ) -> Result<bool, EvaluationError> {
+        let key = match repeats {
+            Repeats::None => return Ok(false),
+            Repeats::OfEntity => Vec::new(),
+            Repeats::OfEntry(field) => match result.lookup(&Term::<Any>::var(field)) {
+                Ok(Binding::Present(key)) => encode_value(&key)?,
+                _ => return Ok(false),
+            },
+        };
         let Ok(Binding::Present(this)) = result.lookup(&Term::<Any>::var("this")) else {
             return Ok(false);
         };
@@ -100,7 +132,7 @@ impl Answered {
             .0
             .entry(Arc::as_ptr(caller) as usize)
             .or_insert_with(|| (caller.clone(), HashSet::new()));
-        Ok(!entities.insert(entity))
+        Ok(!entities.insert((entity, key)))
     }
 }
 
@@ -698,6 +730,13 @@ impl ConceptQuery {
             // a message, and each field from the message. Its rows, with
             // each repeat of an entity dropped, are that same one candidate
             // for each attribute.
+            //
+            // A head can hold the key of an entry beside fields that each
+            // follow from the entity (`DeductiveRule::head_keyed`): the rule
+            // of a segment of a list of a collection. A read of each
+            // attribute on its own gives a row for each key of an entity,
+            // and the rows of the body, with each repeat of an entity and a
+            // key dropped, are those same rows.
             if let Some(exact) = rules.exact()
                 && let Some(repeats) = app.exactly(exact)
                 && stored_absent(&exact.attributes, env).await?
@@ -801,12 +840,13 @@ impl ConceptQuery {
         Env: crate::Scope<'a>,
     {
         // Erased at the entry; see `evaluate`.
-        self.through_erased(plan, Box::pin(rows), env, elect, widen, false)
+        self.through_erased(plan, Box::pin(rows), env, elect, widen, Repeats::None)
     }
 
-    /// [`through`](Self::through), with `repeats` as whether the plan can
-    /// yield a row of one entity more than once for one row of `rows`. Each
-    /// such repeat is dropped, so one row leaves for each entity.
+    /// [`through`](Self::through), with `repeats` as which rows of the plan
+    /// repeat a row of the head for one row of `rows`: a second row of one
+    /// entity, or of one entity and one key. Each such repeat is dropped, so
+    /// one row leaves for each entity, or for each entry.
     fn through_erased<'a, Env>(
         &self,
         plan: &Disjunction,
@@ -814,7 +854,7 @@ impl ConceptQuery {
         env: &'a Env,
         elect: Option<Election>,
         widen: bool,
-        repeats: bool,
+        repeats: Repeats,
     ) -> Pin<Box<dyn Selection + 'a>>
     where
         Env: crate::Scope<'a>,
@@ -857,7 +897,7 @@ impl ConceptQuery {
                             "a concept's result lost the row it was evaluated for".to_string(),
                         )
                     })?;
-                    if repeats && answered.repeats(&caller, &result)? {
+                    if answered.repeats(&repeats, &caller, &result)? {
                         return Ok(None);
                     }
                     merge_parameters(&caller, &result, &back)
@@ -894,7 +934,7 @@ impl ConceptQuery {
                 }
                 matched.insert(caller_id);
                 if elect.is_none() {
-                    if repeats && answered.repeats(&caller, &result)? {
+                    if answered.repeats(&repeats, &caller, &result)? {
                         continue;
                     }
                     let merged = merge_parameters(&caller, &result, &back)
@@ -1175,20 +1215,26 @@ impl ConceptQuery {
     }
 
     /// Whether the rows of the covering rule `exact` are this concept's
-    /// answer, and if so whether a row of one entity can repeat among them.
+    /// answer, and if so which of them repeat a row of the head.
     ///
     /// They are the answer with no repeat for an attribute concept, whose
     /// rows are elected for each entity, and for a body that yields at most
-    /// one row for each entity. They are the answer once each repeat is
-    /// dropped for a body that determines each field of the head from the
-    /// entity (see [`DeductiveRule::head_determined`]).
-    fn exactly(&self, exact: &Exact) -> Option<bool> {
+    /// one row for each entity. They are the answer once each repeat of an
+    /// entity is dropped for a body that determines each field of the head
+    /// from the entity (see [`DeductiveRule::head_determined`]). And they
+    /// are the answer once each repeat of an entity and a key is dropped for
+    /// a head that holds the key of an entry beside such fields (see
+    /// [`DeductiveRule::head_keyed`]).
+    fn exactly(&self, exact: &Exact) -> Option<Repeats> {
         if self.predicate.attribute_field().is_some() || exact.rule.single_valued() {
-            Some(false)
+            Some(Repeats::None)
         } else if exact.rule.head_determined() {
-            Some(true)
+            Some(Repeats::OfEntity)
         } else {
-            None
+            exact
+                .rule
+                .head_keyed()
+                .map(|field| Repeats::OfEntry(field.to_string()))
         }
     }
 
