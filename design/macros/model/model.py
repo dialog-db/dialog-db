@@ -5,7 +5,9 @@ Kernel: rule (heads, when, unless), application of a relation (a domain,
 one entity, labelled fields), application of a formula (:name or an
 operator), the write relations assert! and retract!, assert for what
 holds one round, the report relation,
-and data with quoted forms.
+and data. Two directives carry syntax: (expand pattern) in a premise holds
+for the form being expanded, and (syntax template) in a head says what it
+expands to.
 """
 import hashlib
 import itertools
@@ -247,21 +249,24 @@ def match(form, pattern, env):
     return env if not extra else None
 
 
-def fill(template, env):
-    """`template` with its holes filled. A hole with no binding is `_`."""
+def fill(template, env, fresh):
+    """`template` with every variable the pattern bound replaced by what it
+    took. Any other variable is the template's own, and is renamed by
+    `fresh`, so no two expansions share it and it cannot capture a variable
+    of the form being expanded."""
     kind = template[0]
     if kind == 'var':
-        return env.get(template[1], ('blank',))
+        return env[template[1]] if template[1] in env else ('var', template[1] + '.' + fresh)
     if kind == 'quote':
-        return ('quote', fill(template[1], env))
+        return ('quote', fill(template[1], env, fresh))
     if kind == 'vec':
-        return ('vec', tuple(fill(i, env) for i in template[1]))
+        return ('vec', tuple(fill(i, env, fresh) for i in template[1]))
     if kind != 'app':
         return template
     parts, items = [], list(template[2])
     for at, p in enumerate(items):
         if p[0] == 'l':
-            parts.append(('l', p[1], fill(p[2], env)))
+            parts.append(('l', p[1], fill(p[2], env, fresh)))
             continue
         item = p[1]
         if item == ('ell',):
@@ -278,14 +283,14 @@ def fill(template, env):
                 each = dict(env)
                 for n in names:
                     each[n] = env[n][1][k]
-                parts.append(('b', fill(item, each)))
+                parts.append(('b', fill(item, each, fresh)))
             continue
-        value = fill(item, env)
+        value = fill(item, env, fresh)
         if value[0] == 'seq':
             parts.extend(('b', v) for v in value[1])
         else:
             parts.append(('b', value))
-    return ('app', fill(template[1], env), tuple(parts))
+    return ('app', fill(template[1], env, fresh), tuple(parts))
 
 
 # ------------------------------------------------------------- formulas
@@ -367,27 +372,12 @@ def apply_formula(form, env, want_is=False):
     if name in TYPES:
         subject = value(bare[0], env)
         return done(subject) if TYPES[name](subject) else []
-    if name == 'match':
-        holes = match(value(bare[0], env), value(labels[''], env), {})
-        return done(('holes', holes)) if holes is not None else []
-    if name == 'fill':
-        return done(fill(value(bare[0], env), value(labels[''], env)[1]))
-    if name == 'get':
-        holes = value(bare[0], env)[1]
-        key = value(labels[''], env)[1]
-        return done(holes[key]) if key in holes else []
-    if name == 'bind':
-        holes = dict(value(bare[0], env)[1])
-        holes[value(labels[''], env)[1]] = value(labels['to'], env)
-        return done(('holes', holes))
     if name == 'id':
         parts = [show(value(bare[0], env))] if bare else []
         parts += [l + ': ' + show(value(unwrap(t)[0], env)) for l, t in sorted(labels.items())]
         return done(entity_of(*parts))
     if name == 'command':
-        form_ = value(bare[0], env)
-        inner = split(form_[2])[0][0]
-        return done(('sym', 'dialog.command.' + form_[1][1] + '.' + inner[1][1]))
+        return done(('sym', 'dialog.command.' + value(bare[0], env)[1] + '.' + value(labels[''], env)[1]))
     if name == '+':
         return done(('num', str(int(value(bare[0], env)[1]) + int(value(labels[''], env)[1]))))
     raise ValueError(f'no formula {show(form[1])}')
@@ -447,11 +437,35 @@ def read_relation(form, env, facts):
     return out
 
 
+SITE = '%site'
+
+
+def expanding(premise, env, facts):
+    """(expand pattern) holds for the form being expanded when it has the
+    pattern's shape, and binds the pattern's variables to its parts.
+    (expand pattern in: :head) holds in that position only."""
+    bare, labelled, _ = split(premise[2])
+    position = dict(labelled).get('in')
+    out = []
+    for (site, attribute), forms in sorted(facts.items()):
+        if attribute != 'dialog.syntax/form':
+            continue
+        if position is not None and position not in facts[(site, 'dialog.syntax/position')]:
+            continue
+        for form in forms:
+            bound = match(form, bare[0], env)
+            if bound is not None:
+                out.append(dict(bound, **{SITE: site}))
+    return out
+
+
 def solve(premises, env, facts):
     if not premises:
         return [env]
     for at, premise in enumerate(premises):
-        if is_formula(premise):
+        if premise[0] == 'app' and premise[1] == ('sym', 'expand'):
+            found = expanding(premise, env, facts)
+        elif is_formula(premise):
             try:
                 found = apply_formula(premise, env)
             except Unbound:
@@ -492,6 +506,7 @@ def ground(application, env):
 
 # ------------------------------------------------------------ the walker
 HEAD_WORDS = {('sym', 'assert!'), ('sym', 'retract!'), ('sym', 'assert'), ('sym', 'report')}
+DIRECTIVES = {('sym', 'expand'), ('sym', 'syntax'), ('sym', 'warning')}
 
 
 class Replica:
@@ -519,11 +534,13 @@ class Replica:
         for rule in self.deductive:
             for heads, env in fire(rule, facts):
                 for head in heads:
-                    for (entity, attribute), val in ground(head, env):
-                        if entity == site and attribute == 'dialog.syntax/expansion' and val not in found:
+                    said = head[2][0][1]
+                    if head[1] == ('sym', 'syntax'):
+                        val = fill(said, env, site[1][3:7])
+                        if val not in found:
                             found.append(val)
-                        if entity == site and attribute == 'dialog.syntax/warning' and (form, val) not in self.diagnostics:
-                            self.diagnostics.append((form, val))
+                    elif head[1] == ('sym', 'warning') and (form, said) not in self.diagnostics:
+                        self.diagnostics.append((form, said))
         if not found:
             raise ValueError(f'nothing says what {show(form)} is')
         if len(found) > 1:
@@ -532,6 +549,8 @@ class Replica:
 
     def application(self, form, position):
         while not (is_relation(form) or is_formula(form)):
+            if form[0] == 'app' and form[1] in DIRECTIVES:
+                return form
             if position == 'head' and form[0] == 'app' and form[1] in HEAD_WORDS:
                 inner = self.application(form[2][0][1], 'head')
                 return ('app', form[1], (('b', inner),))
@@ -562,6 +581,10 @@ class Replica:
         writes = [h for h in heads if h[1] in HEAD_WORDS]
         if not writes:
             self.deductive.append(rule)
+            # the index of the names syntax is defined for
+            for premise in when:
+                if premise[1] == ('sym', 'expand') and premise[2][0][1][1][0] == 'sym':
+                    self.write((entity_of(show(rule)), 'dialog.name/is'), premise[2][0][1][1])
         elif when or unless or any(h[1] == ('sym', 'report') for h in heads):
             self.inductive.append(rule)
             # the index of what each rule reads, as dialog keeps `dialog.rule/on`
@@ -625,7 +648,8 @@ class Replica:
             for heads, env in fire(rule, self.facts):
                 for head in heads:
                     if head[1] == ('sym', 'report'):
-                        row = ' '.join('?' + n + ' = ' + show(v) for n, v in sorted(env.items()))
+                        # a variable an expansion introduced is not the author's to see
+                        row = ' '.join('?' + n + ' = ' + show(v) for n, v in sorted(env.items()) if '.' not in n)
                         if row not in reports:
                             reports.append(row)
         return reports

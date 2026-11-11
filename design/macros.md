@@ -38,8 +38,8 @@ Not stated. Irakli, 2026-11-10: "I don't want to justify why I want to build it 
 
 A slim kernel, and every other form a macro that is a rule. [kernel.md](macros/kernel.md) has it in full.
 
-- The kernel is `rule` with `when` and `unless`, application of a relation, application of a formula, `assert!` and `retract!` for what stays, `assert` for what holds one round, `report`, and data with quoted forms.
-- A macro is a stored pattern and template. One rule applies them all, and a macro that must read more has a rule of its own. `query`, `concept` and commands are defined this way in about 100 lines, the first two with `define-syntax` after Racket's `syntax-rules`.
+- The kernel is `rule` with `when` and `unless`, application of a relation, application of a formula, `assert!` and `retract!` for what stays, `assert` for what holds one round, `report`, and the two syntax directives.
+- A macro is a rule: `(expand pattern)` in its premise says which form it is about, and `(syntax template)` in its head says what the form becomes. `query`, `concept` and commands are defined this way in 64 lines.
 - A walker in native code rewrites a form until it is all kernel, asking the rules at each step. What runs afterwards is the descriptor dialog runs today.
 - Forms are fully inlined values with a canonical encoding. Each reference keeps its name, the revision and the entity it resolved to, so a form can be shown as written.
 - Types follow conduct: a lattice with full inference. A macro sees declarations, never inferred types.
