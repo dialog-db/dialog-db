@@ -91,3 +91,22 @@
         (:bind ?holes : 'domain to: ?domain is: ?filled)
         (:fill '(assert (?domain (:id ?domain of: ?subject ...?fields) of: ?subject ...?fields)) : ?filled is: ?out))
   (unless (dialog.name _ is: ?name)))
+
+; 5. Diagnostics. A rule may say something about a form without refusing it.
+
+; Issuing a command no rule reads is worth a warning.
+(rule (dialog.syntax ?site warning: "no rule reads this command")
+  (when (dialog.syntax ?site form: ?form position: :head)
+        (:match ?form : '(?command (?concept ...?fields)) is: ?holes)
+        (:get ?holes : 'command is: ?name)
+        (:command ?form is: ?domain))
+  (unless (dialog.name _ is: ?name)
+          (dialog.rule _ on: ?domain)))
+
+(rule (dialog.syntax ?site warning: "no rule reads this command")
+  (when (dialog.syntax ?site form: ?form position: :head)
+        (:match ?form : '(?command (?concept ?subject ...?fields)) is: ?holes)
+        (:get ?holes : 'command is: ?name)
+        (:command ?form is: ?domain))
+  (unless (dialog.name _ is: ?name)
+          (dialog.rule _ on: ?domain)))

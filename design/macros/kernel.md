@@ -142,4 +142,16 @@ Found:
 6. **Errors are the wrong ones.** A parameter the concept does not have is reported as an unknown form, and a missing field as `_`. The rules need a way to say why.
 7. **A report's rows are named by the fields**, since the head expands too. Showing them as written needs the call site kept, as the source map would.
 8. **A macro's identity is the `:id` of its pattern and template as written.** Two spellings that differ in a hole's name are two macros.
-9. **A command is defined by the rules that read it, so a misspelled one is issued and nothing happens.** `(incremnet (xyz.counter counter:a))` expands and runs with no complaint. Issuing has to check that some rule reads the command's domain; dialog keeps that index already, as `dialog.rule/on`.
+9. **A command is defined by the rules that read it, so a misspelled one is issued and nothing happens.** That is worth a warning, never a refusal (Irakli, 2026-11-11). A diagnostic is one more thing a rule derives about a form:
+
+   ```clj
+   (rule (dialog.syntax ?site warning: "no rule reads this command")
+     (when (dialog.syntax ?site form: ?form position: :head)
+           (:match ?form : '(?command (?concept ?subject ...?fields)) is: ?holes)
+           (:get ?holes : 'command is: ?name)
+           (:command ?form is: ?domain))
+     (unless (dialog.name _ is: ?name)
+             (dialog.rule _ on: ?domain)))
+   ```
+
+   In the model `(incremnet (xyz.counter counter:a))` is issued and comes back with that warning, and the right spelling comes back with none. Dialog keeps the index the rule reads, as `dialog.rule/on` for inductive rules and `dialog.rule/reads` for deductive ones. It already reports without refusing in two places: a rule that closes a cycle through an absence test is quarantined and listed, and a fact outside its placement is a divergence. Diagnostics would be the one relation all three are read from, and what a language server asks for.

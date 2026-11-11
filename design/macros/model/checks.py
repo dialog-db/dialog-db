@@ -80,10 +80,13 @@ for form, kernel in r.trace:
     print(model.pretty(kernel))
 for row in r.run():
     print('  ', row)
+print('   warnings:', len(r.diagnostics))
 
-print('-- the same command misspelled: nothing reads it, and nothing says so')
+print('-- the same command misspelled: it is issued, with a warning')
 r.commands = []; r.trace = []
 r.submit('(incremnet (xyz.counter counter:a))')
 print(model.pretty(r.trace[0][1]))
 for row in r.run():
     print('  ', row)
+for form, said in r.diagnostics:
+    print('   warning:', model.show(form), model.show(said))

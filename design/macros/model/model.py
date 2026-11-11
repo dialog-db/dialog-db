@@ -500,6 +500,7 @@ class Replica:
         self.deductive = []      # rules that derive a relation
         self.inductive = []      # rules that write or report
         self.commands = []       # issued this run, held for one round
+        self.diagnostics = []    # what the rules say about a form without refusing it
         self.trace = []
 
     def write(self, key, val, into=None):
@@ -521,6 +522,8 @@ class Replica:
                     for (entity, attribute), val in ground(head, env):
                         if entity == site and attribute == 'dialog.syntax/expansion' and val not in found:
                             found.append(val)
+                        if entity == site and attribute == 'dialog.syntax/warning' and (form, val) not in self.diagnostics:
+                            self.diagnostics.append((form, val))
         if not found:
             raise ValueError(f'nothing says what {show(form)} is')
         if len(found) > 1:
@@ -556,6 +559,10 @@ class Replica:
             self.deductive.append(rule)
         elif when or unless or any(h[1] == ('sym', 'report') for h in heads):
             self.inductive.append(rule)
+            # the index of what each rule reads, as dialog keeps `dialog.rule/on`
+            for premise in when:
+                if is_relation(premise):
+                    self.write((entity_of(show(rule)), 'dialog.rule/on'), premise[1])
         else:
             for head in heads:
                 for key, val in ground(head[2][0][1], {}):
