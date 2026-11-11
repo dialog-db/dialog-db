@@ -22,10 +22,10 @@
 //!   --example veto_census -- 10000
 //! ```
 
-use dialog_artifacts::Key;
 use dialog_baseline::nodes::walk;
 use dialog_baseline::repo::DialogRepo;
 use dialog_baseline::se::SeLog;
+use dialog_corpus::Key;
 use dialog_search_tree::{Distribution as _, Geometric, Manifest, NodeBody};
 use std::collections::BTreeMap;
 

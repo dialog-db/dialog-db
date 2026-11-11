@@ -48,11 +48,11 @@ fn bench_insert_batch_vs_sequential(c: &mut Criterion) {
                         .insert(*key, value.clone(), &storage)
                         .await
                         .unwrap()
-                        .persist(&mut delta, &storage)
+                        .persist(&mut delta)
                         .unwrap();
                     // Flush after each persist so the next edit can load the nodes this persist created.
-                    for (_, buffer) in delta.flush() {
-                        storage.store(buffer);
+                    for (_, node) in delta.flush() {
+                        storage.store(node.buffer().clone());
                     }
                 }
             });
@@ -70,7 +70,7 @@ fn bench_insert_batch_vs_sequential(c: &mut Criterion) {
                     edit = edit.insert(*key, value.clone(), &storage).await.unwrap();
                 }
                 let mut delta = Delta::zero();
-                let _tree = edit.persist(&mut delta, &storage).unwrap();
+                let _tree = edit.persist(&mut delta).unwrap();
             });
         });
     }
@@ -114,11 +114,11 @@ fn bench_mixed_batch_vs_sequential(c: &mut Criterion) {
                         .insert(*key, value.clone(), &storage)
                         .await
                         .unwrap()
-                        .persist(&mut delta, &storage)
+                        .persist(&mut delta)
                         .unwrap();
                     // Flush after each persist so the next edit can load the nodes this persist created.
-                    for (_, buffer) in delta.flush() {
-                        storage.store(buffer);
+                    for (_, node) in delta.flush() {
+                        storage.store(node.buffer().clone());
                     }
                 }
                 for (key, value) in fresh_keys.iter().zip(fresh_values.iter()) {
@@ -127,11 +127,11 @@ fn bench_mixed_batch_vs_sequential(c: &mut Criterion) {
                         .insert(*key, value.clone(), &storage)
                         .await
                         .unwrap()
-                        .persist(&mut delta, &storage)
+                        .persist(&mut delta)
                         .unwrap();
                     // Flush after each persist so the next edit can load the nodes this persist created.
-                    for (_, buffer) in delta.flush() {
-                        storage.store(buffer);
+                    for (_, node) in delta.flush() {
+                        storage.store(node.buffer().clone());
                     }
                 }
                 for key in delete_keys.iter() {
@@ -140,11 +140,11 @@ fn bench_mixed_batch_vs_sequential(c: &mut Criterion) {
                         .delete(key, &storage)
                         .await
                         .unwrap()
-                        .persist(&mut delta, &storage)
+                        .persist(&mut delta)
                         .unwrap();
                     // Flush after each persist so the next edit can load the nodes this persist created.
-                    for (_, buffer) in delta.flush() {
-                        storage.store(buffer);
+                    for (_, node) in delta.flush() {
+                        storage.store(node.buffer().clone());
                     }
                 }
             });
@@ -168,7 +168,7 @@ fn bench_mixed_batch_vs_sequential(c: &mut Criterion) {
                     edit = edit.delete(key, &storage).await.unwrap();
                 }
                 let mut delta = Delta::zero();
-                let _tree = edit.persist(&mut delta, &storage).unwrap();
+                let _tree = edit.persist(&mut delta).unwrap();
             });
         });
     }

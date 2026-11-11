@@ -2,9 +2,10 @@
 //!
 //! The picks are specified here on their own, over a cell's claims
 //! and their standings, apart from the code that implements them: `last`
-//! takes the newest claim, the greater standing and then the greater
-//! value; `max` and `min` the greater or the lesser value, then the
-//! newer; and a write under a choosing pick succeeds the claim the
+//! takes the newest claim, the greater standing and then, between claims
+//! that stand equal, the greater hash of the value's identity key; `max`
+//! and `min` the greater or the lesser value, then the newer; and a write
+//! under a choosing pick succeeds the claim the
 //! pick elects, leaving the cell alone when that claim holds the
 //! value written. A write under `all` succeeds nothing.
 //!
@@ -24,7 +25,7 @@ use crate::helpers::test_repo;
 use crate::repository::branch::session::{QueryEnv, QueryLayer};
 use crate::repository::source::Source;
 use anyhow::{Result, anyhow};
-use dialog_artifacts::{Entity, Pick, Relation as ArtifactsRelation, Value};
+use dialog_corpus::{Entity, Pick, Relation as CorpusRelation, Value, make_reference};
 use dialog_effects::authority::Identify;
 use dialog_peer::helpers::test_session_with_peer;
 use dialog_query::attribute::Relation;
@@ -56,9 +57,16 @@ enum Stand {
 type Entry = (u64, Stand);
 
 /// Whether `candidate` is the newer of two claims: the greater standing,
-/// then the greater value.
+/// then, between claims that stand equal, the greater BLAKE3 hash of the
+/// value's identity key, so the tie favours no value over another.
 fn newer(candidate: &Entry, incumbent: &Entry) -> bool {
-    candidate.1 > incumbent.1 || (candidate.1 == incumbent.1 && candidate.0 > incumbent.0)
+    candidate.1 > incumbent.1
+        || (candidate.1 == incumbent.1 && tiebreak(candidate.0) > tiebreak(incumbent.0))
+}
+
+/// The hash two equal-standing salaries are told apart by.
+fn tiebreak(salary: u64) -> [u8; 32] {
+    make_reference(Value::UnsignedInt(salary.into()).identity_key())
 }
 
 /// The claim `policy` elects among `entries`, by index. `None` over no
@@ -128,7 +136,7 @@ fn select_of(policy: &Pick) -> &'static str {
     }
 }
 
-fn salary_attribute() -> ArtifactsRelation {
+fn salary_attribute() -> CorpusRelation {
     "org/salary".parse().expect("an attribute")
 }
 

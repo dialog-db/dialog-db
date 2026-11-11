@@ -14,6 +14,348 @@ says how to cut a release.
 
 ## Unreleased
 
+### The corpus crate is `dialog-corpus`, and it asks its environment for everything it reads
+
+[#768](https://github.com/dialog-db/dialog-db/pull/768), decided in
+[design/tree-node-reads](./design/tree-node-reads.md); the spilled-value
+read is argued in
+[design-spilled-values.md](./design/tree-node-reads/design-spilled-values.md).
+
+The crate that held the data model and its indexes, `dialog-artifacts`, is
+`dialog-corpus`: the corpus is the body of claims a branch holds, in the
+search tree. Its storage side is named after it, and the crate
+no longer depends on a store crate. What it reads beside its nodes, a
+value spilled out of its key, it asks its environment for through
+`blob::Load`, performed in one place and checked against the reference;
+nothing in the crate reads a store by type. The word "artifact" is
+retired: what the model called an artifact is a fact, a claim with its
+cause.
+
+What this changes for you:
+
+- The crate is `dialog-corpus`; paths that began `dialog_artifacts::`
+  begin `dialog_corpus::`. `tree::ArtifactTree` is `tree::Corpus`,
+  `ArtifactTreeExt` is `CorpusExt`, `ArtifactNodeCache` is `CorpusCache`,
+  `BufferedArtifactTree` is `BufferedCorpus`, `ArtifactWriter` is
+  `CorpusWriter` and `DialogArtifactsError` is `DialogCorpusError`.
+- The model side is renamed the same way. `Artifact` is `Fact`,
+  `ArtifactView` is `FactView`, `ArtifactViewStream` is `FactViewStream`,
+  `ArtifactSelector` is `Selector`, `artifact_index_keys` and
+  `artifact_index_keys_with` are `fact_index_keys` and
+  `fact_index_keys_with`, and every `from_artifact`, `to_artifact` and
+  `for_artifact` is `from_fact`, `to_fact` and `for_fact`. The module that
+  held them, `artifacts`, is `model`. In `dialog-query` the re-export
+  module `artifact` is `corpus`, and its aliases `ArtifactsRelation` and
+  `ArtifactTypeError` are `CorpusRelation` and `CorpusTypeError`. `Fact`
+  prints as `Fact` in its `Debug` and `Display` forms.
+- The nightly fuzz soak is `soak:facts`, run by `--test fact_fuzz`, and
+  reads `DIALOG_FACT_FUZZ_SEEDS` and `DIALOG_FACT_FUZZ_OPS` where it read
+  `DIALOG_ARTIFACT_FUZZ_*`.
+- `dialog-corpus` does not depend on `dialog-storage`. `Blake3Hash` is
+  still `[u8; 32]` and is defined in the crate; the `HashType` re-export
+  is gone (it is `dialog_storage::HashType`). `IndexRoot`, a CBOR wrapper
+  nothing used, is removed. `From<DialogStorageError> for
+  DialogCorpusError` is gone: a storage error reaches the corpus as an
+  `ArchiveError`, a `BlobError` or the tree's error, each of which still
+  converts. `DialogSearchTreeError` implements `AuthorizationFailure` and
+  has `rejection()`, so a decision made beneath the tree is read without
+  naming the store's error type.
+- `ArchiveDelta::block` and `ArchiveDelta::flush_blocks` are gone, and
+  `DeltaOverlay` no longer answers `archive::Load`, `archive::Get` or
+  `Holds`: it answers the node layer's `Read`, `Preload` and `Write` for
+  `CorpusNode`, and `blob::Load` for a value the batch staged. A caller
+  that shipped a batch's nodes as blocks takes them with `flush_nodes()`
+  and writes them with `nodes::Write`, as a commit does.
+- `Provider<blob::Load>` is no longer asked of an environment by an
+  operation that never reaches a spilled value: `CorpusExt::select_data`,
+  `format_manifest`, `record` and `estimate`; `BlobIndexExt::get_blob`,
+  `has_blob` and `list_blobs`, and `blob_changes`; a buffered batch's
+  `record` and `seal`; `rekey_tree`; `history::context_in` and
+  `region_entry`; `spilled_refs`; `merge::screen_history`. It stays on
+  `apply`, `select_record`, `scan`, `write_instructions`, the buffered
+  applies, `observe_revisions`, `TreeHistory` and, through
+  `select_record`, `content_size` and `asset_size`. A caller that carried
+  the bound only to satisfy one of the former can drop it.
+
+Why: a crate named for artifacts no longer said what it held, and a crate
+that embodies the model should not depend on a store. #755 made the tree
+ask its environment for nodes; this makes the layer above it ask for
+everything else the same way, so what a store is and where it is stay the
+environment's business.
+
+### A tree asks its environment for nodes, and the environment keeps them
+
+[design/tree-node-reads.md](./design/tree-node-reads.md), planned in
+[#753](https://github.com/dialog-db/dialog-db/pull/753).
+
+A search tree no longer reads blocks and decodes them, nor finds the node
+cache for itself. It performs three commands on the environment it is
+given, defined in `dialog_search_tree::nodes`: `Read` (the node a name
+names, from anywhere or from this replica alone), `Preload` (make a node
+cheap to read soon) and `Write` (the nodes a persist sealed, to store and
+keep readable). The environment answers however it keeps nodes. A store
+that keeps blocks (`Volatile`, `FileSystem`, `IndexedDb`) answers through
+the translation layer in the tree crate, which loads, checks and decodes;
+`Storage` routes a request to the space the catalog's subject is mounted
+as, and `Space` hands it to its archive; a peer answers from the node cache
+it holds, then its storage, then a hydration from the subject's routes, and
+keeps what it read or wrote. A store that keeps nodes in a form of its own
+implements the three commands and is reached the same way.
+
+What this changes for you:
+
+- A request is written at the node it is about: `nodes::Read<N>`,
+  `nodes::Preload<N>` and `nodes::Write<N>` for an `N: nodes::Node`, a
+  sealed trait `PersistentNode<Key, Value>` implements. A tree operation's
+  environment bound is spelled out, `Env:
+  Provider<nodes::Read<PersistentNode<Key, Value>>> +
+  Provider<nodes::Preload<PersistentNode<Key, Value>>> + ConditionalSync`,
+  with no alias trait in between, instead of `Provider<archive::Load> + Holds + ConditionalSync` (and `+
+  Provider<archive::Get>` where a difference was computed). `Holds`, `Load`
+  and `Get` are no longer asked of a tree's environment.
+- `dialog_artifacts::tree::CorpusNode` names the node of the corpus, the
+  tree over claims (`PersistentNode<Key, State<Datum>>`), and an
+  environment a corpus is read through is bounded as
+  `Provider<nodes::Read<CorpusNode>> + Provider<nodes::Preload<CorpusNode>>`,
+  one that is written through as `Provider<nodes::Write<CorpusNode>>`.
+  There is no alias trait for either: a signature says which requests it
+  performs. "Corpus" is the name the crate's storage side will carry when
+  `dialog-artifacts` is renamed; everything new here uses it.
+- `TransientTree::persist(delta)`, `HitchhikerTree::persist(delta)`,
+  `HitchhikerTree::persist_mut(delta)` and `Node::into_link(delta,
+  manifest)` take no environment and no cache, and the delta they fill is
+  a `Delta<Blake3Hash, PersistentNode<Key, Value>>`: the sealed nodes, not
+  their blocks. A persist keeps nothing in any cache; the environment keeps
+  the nodes when the commit performs `Write`. `ArchiveDelta::nodes()`
+  replaces `blocks()`, `node(hash)` and `flush_nodes()` are new, and
+  `block(hash)` and `flush_blocks()` still hand out blocks to a caller that
+  ships them. A batch that reads a node it sealed before the flush gets
+  the staged node back from its `DeltaOverlay`.
+- `Accessor::new(env, catalog)` asks nothing of the environment;
+  `Accessor::cache`, `cached` and `keeps` are gone, and `load_node` needs
+  `Provider<nodes::Read<PersistentNode<Key, Value>>>` and
+  `Provider<nodes::Preload<PersistentNode<Key, Value>>>` of its environment.
+- An environment that answers `Load` and holds handles answers the node
+  requests through `dialog_search_tree::reads_nodes_through_blocks!` and
+  `writes_nodes_through_blocks!`; one with a store beneath it and a
+  hydration uses `dialog_repository::read_node_or_hydrate`,
+  `preload_node_or_hydrate` and `write_nodes`. `Peer`, `AccessEnv`, the
+  query session, `DeltaOverlay`, `Counting`, `Metered`, `Storage`, `Space`
+  and the three stores answer them; `PeerSpace` requires them of a space.
+- A difference's boundary side reads locally through the node layer
+  instead of performing `Get`: the environment's cache is consulted, which
+  changes no answer, since a scope's cache holds only what its archive has
+  produced or a successful write stored.
+- The query session no longer decodes and caches the blocks it loads; a
+  node read through it reaches the peer's cache. An integration opens its
+  read-ahead window once per batch of pending changes instead of when a
+  path misses the cache, since nothing outside the environment can tell.
+- A node the environment holds is answered at once, with nothing
+  allocated: the translation layer, `read_node_or_hydrate`, the overlay
+  and the query session return `Resume::now` on a hit (see the entry
+  below). Under `dialog-perf` the point-read scenarios are within 0.4% of
+  before and the commit scenarios 0.6% to 1.9% cheaper; the design topic's
+  journal has the table.
+
+Why: the tree was written before the capability model and only partly
+moved onto it, so what it needed from the world was not expressed as
+capabilities. It performed `Load` for bytes and then did a provider's work
+itself: found a cache through a lookup that could come back empty,
+checked, decoded and kept nodes, while other code kept them again its own
+way. A store that keeps nodes in a form of its own (the single-file
+archive of #733) could only reach the tree through a side channel. With
+nodes as the tree's requests, each concern sits with whoever owns it, and
+a store's byte representation is not the tree's concern.
+
+### A provider answers at once or later, and a caller cannot tell
+
+[#755](https://github.com/dialog-db/dialog-db/pull/755), argued in the
+journal of [design/tree-node-reads.md](./design/tree-node-reads.md).
+
+`Provider::execute` is no longer an `async fn` under `async_trait`. It
+returns a `Resume<'_, Output>`: either the output at once
+(`Resume::now`), or a future that produces it (`Resume::later`). A caller
+awaits either one the same way, so the change is invisible where a
+command is performed; what it changes is that a provider holding the
+answer (a cache that has the value, a check that fails before any I/O)
+hands it back without allocating a future, and a provider standing in
+front of another hands back what it was handed.
+
+What this changes for you:
+
+- A `Provider<C>` impl is written one of two ways. Under
+  `#[dialog_capability::provider]`, `async fn execute(&self, input) ->
+  Output` as before: the attribute replaces the `async_trait` pair, and
+  the body becomes the future. Without it, `fn execute(&self, input) ->
+  Resume<'_, Output>`, returning `Resume::now` on the paths that have the
+  answer and `Resume::later(async move { .. })` on the rest. A forwarding
+  impl returns what the inner provider returned, boxing nothing.
+- `#[derive(Provider)]` forwards without boxing, and no longer asks
+  `ConditionalSend` of the command's input or `ConditionalSync` of the
+  struct.
+- `Resume` implements `Future` and `Unpin`, and offers `is_now`,
+  `into_now` (the answer, or the future that waits for it) and `map`.
+  `dialog_capability::Pending<'a, T>` names the boxed future.
+- A generic provider whose future awaits another `execute` and holds its
+  output needs `C::Output: ConditionalSend`, since a `Resume` is `Send`
+  only when its output is; `async_trait` hid that bound inside the box.
+- `nodes::Ready` and `nodes::held_node`'s role as its answer are gone from
+  `dialog_search_tree`, and so is the `Nodes<Key, Value>` alias trait: a tree
+  operation bounds on `Provider<Read<PersistentNode<Key, Value>>> +
+  Provider<Preload<PersistentNode<Key, Value>>> + ConditionalSync` itself. `Read::through_blocks`,
+  `through_loader` and `through_held_blocks`, `Preload::through_blocks`
+  and `through_held_blocks`, `Write::through_blocks` and
+  `through_held_blocks`, every request's `perform`, and
+  `dialog_repository::read_node_or_hydrate`, `preload_node_or_hydrate`
+  and `write_nodes` return a `Resume` instead of being `async fn`;
+  `through_loader` takes an `FnOnce(Load) -> impl Future` instead of an
+  `AsyncFnOnce`.
+- `dialog_common::provider` (the test provisioning attribute) is
+  unchanged; in `dialog-macros` it is now `provision`.
+
+Why: the cost of crossing a provider boundary was a boxed future per
+call, paid even when the provider had the answer in hand. The first fix
+for the tree's node reads was a side door beside the capability model,
+which was a symptom of the model: a provider could only ever answer
+later. Answering now or later in the one trait keeps every answer inside
+the model, with sync and async providers written against the same
+signature, and takes the box off every hit in the workspace, not just the
+tree's.
+
+### Two claims that stand equal are told apart by the hash of their values
+
+[#752](https://github.com/dialog-db/dialog-db/pull/752)
+
+A cell read under `last` elects its newest claim: the greater standing
+(the version, then the cause, then the succession). Two claims stand
+equal when one revision wrote both under one cause, which is what two
+writes to one cell in one transaction are. Between those, the election
+fell to the values and the greater won. It now falls to the hash of each
+value's identity key (`Value::tiebreak`), the greater hash winning. Every
+place that elects does the same: the tree, a commit's settlement, a
+concept read, and `top` among values of one rank.
+
+What this changes for you:
+
+- Where one transaction writes two values to a cell under `last`, or
+  under `top` at one rank, the value a read returns may change: it is the
+  one whose hash is greater, not the greater value. Claims at different
+  standings, which is every concurrent edit between revisions, elect as
+  before.
+- `max` and `min` elect as before: by value, then between equal values
+  by standing. Equal values hash alike, so the hash never decides there.
+- Replicas on releases either side of this one can show different values
+  for such a cell. Nothing a replica stores is rewritten, and the claims
+  are the same on both; only which one a read returns differs.
+- `Value::tiebreak` is new.
+
+Why: a tie broken by value favours some values over others, so a writer
+can choose the value that wins (the greater number, `true` over `false`).
+The hash favours none, as the version's hash already does between
+concurrent revisions. It came up while designing record values, whose
+values all share one version, so every tie among them reaches this rule
+([#748](https://github.com/dialog-db/dialog-db/pull/748)).
+
+### A file store's write lock is never taken by two writers at once
+
+[#741](https://github.com/dialog-db/dialog-db/pull/741), on [#723](https://github.com/dialog-db/dialog-db/pull/723)
+
+A native file store guards each cell's compare-and-swap with a lock file.
+It was a PID lock taken through `pidlock`, whose acquire creates the file
+and writes the PID after; a second writer arriving in between read no PID,
+removed the file as corrupt, and took the lock too. Both then compared
+against the same version and both wrote, so the later write replaced the
+earlier one and each reported success: a commit racing a pull of the same
+branch could vanish without an error. Two writers that both found a dead
+holder's lock could also both remove it and both take it.
+
+The lock is still a file, `{cell}.lock`, now holding `{pid} {token}`: the
+holder's process and a random token naming that one hold. A lock file is
+held unless proven otherwise, so one that is empty or does not read as
+`pid token` is held and never deleted; the one exception is a bare PID,
+the previous release's lock file, read as that PID with token `0`. A writer writes its content to a
+temporary file first and hard-links it into place, which fails if a lock
+file is there, so a lock file never exists without its content; on a
+filesystem without hard links it creates the file and writes it after,
+and a writer arriving in between is refused. A lock naming a process
+that is not running is recovered by exactly one writer, which first
+links it to `{cell}.lock.stale.{token}` (a name only one writer can
+create) and checks the file still names the gone holder before removing
+it.
+
+What this changes for you:
+
+- Concurrent writers of one store, in one process or several, no longer
+  lose a write to each other. A writer that finds the lock held is
+  refused with `FileSystemError::Lock` (`Concurrent write in progress`),
+  as before.
+- A crashed writer's lock is recovered by the next writer, once the
+  crashed process is gone. Whether it is gone is asked of the OS in the
+  writer's own PID namespace, so writers sharing one store must share a
+  PID namespace. If the crashed writer's PID has been given to another
+  process, its lock looks held until the lock file is deleted by hand;
+  so does a crashed writer's lock on a filesystem without hard links.
+- A lock file that is empty or does not read as `pid token` (or as a
+  bare PID) is held, whoever wrote it, and has to be deleted by hand if
+  no writer is running.
+- Lock files are removed on release, by the writer that holds them
+  only: a writer whose lock file now names another holder leaves it.
+- Cells whose names differ only in extension (`a.x`, `a.y`) get a lock
+  each, instead of sharing `a.lock`.
+- `pidlock` is no longer a dependency.
+
+Why: a write lock that two writers can hold at once does not guard the
+compare-and-swap, and the writes it loses are reported as successes, so
+nothing downstream can notice or repair them. The lock stays a file
+rather than an OS lock (`flock`), which errors or is not enforced on
+network and FUSE filesystems that stores live on.
+### An environment bounds every cache it holds, and spilled values share one budget
+
+[#742](https://github.com/dialog-db/dialog-db/pull/742)
+
+`HeldCaches::builder()` returns a `CacheBudget` that sets the size of
+every cache an environment holds for its repositories: tree nodes and
+spilled values in bytes, the rest in entries. Spilled values are now kept
+in one cache for the whole environment, under one byte budget, instead of
+one 8 MiB cache per repository. A snapshot taken through the environment
+and the caches a transaction batch keeps to itself take their sizes from
+the same budget. Nothing configured, every cache keeps the size it had.
+
+What this changes for you:
+
+- `HeldCaches::builder().nodes(bytes).spills(bytes).entries(n).rules(n)
+  .plans(n).formulas(n).build()` builds caches that keep to each cap.
+  `entries` bounds each repository's causal verdicts, contexts, revision
+  records and rewritten trees; `rules` bounds the shared rule content
+  (heads, bodies, selecting rules) and `plans` the query plans. `HeldCaches::new()` and
+  `with_budget(bytes)` are shorthands for the defaults
+  (`CacheBudget::default()`), and `HeldCaches::limits()` reads the budget
+  back.
+- Memory for spilled values no longer grows with the number of open
+  repositories: the default 8 MiB (`SPILL_CACHE_BUDGET`) is now the total.
+  `HeldCaches::release(repository)` no longer drops spilled values, since
+  one cache holds them for every repository by content; they age out under
+  the budget, and `clear()` drops them.
+- `HeldCaches::bytes()` now counts spilled values as well as tree nodes.
+  `spill_bytes()` reads the spilled share, and `entries()` counts what the
+  entry-bounded caches hold (a count, not bytes).
+- `Repository::snapshot_in(env, revision)` takes a cold snapshot sized by
+  the caches `env` holds, reading spilled values, rule content and plans
+  through them. `Repository::snapshot(revision)` keeps the default sizes.
+- A cache bounded by entries now holds at most the capacity it was given
+  on native targets, however small. Below 2048 entries a sharded cache
+  used to keep at least one entry per shard, up to 16, so a capacity under
+  16 held more than asked. The default sizes keep all 16 shards.
+- New accessors: `CausalityCache::with_capacity`, `ContextCache::with_capacity`,
+  `PlanCache::with_capacity` (with `PLAN_CACHE_CAPACITY`), `len` on these and
+  on `dialog_search_tree::Cache` (with `capacity` and the now public
+  `CACHE_CAPACITY`), and `budget`, `bytes`, `len` and `clear` on `SpillCache`.
+
+Why: an embedder running in a fixed memory limit, such as a Cloudflare
+Durable Object with 128 MB for everything, could bound only the tree
+nodes. The spill budget multiplied with each repository opened, and every
+other cache was fixed when it was made (#706).
+
 ### A repository an earlier release left opens, whatever layout its registry is in
 
 Opening or loading a repository that predates layout versioning carries
@@ -62,7 +404,6 @@ What this changes for you:
 
 Why: a dependency that can only ever be one version across a whole wasm
 module should not be pinned by a library that uses one call of it.
-
 
 ### A pull or a push that meets another revision under its own head's version is refused
 
@@ -1033,6 +1374,15 @@ has a tree to canonicalize even when the link itself wrote nothing.
 
 #### Compatibility and migration
 
+- Nothing stored or synced changes for the corpus rename: keys, node
+  encodings, spilled-value references, revisions and the wire format are
+  the same bytes, nothing is rewritten on upgrade, and an older release
+  reads everything this one writes. Only Rust names and the crate graph
+  move.
+- Bounding the caches changes nothing stored or synced: caches hold only
+  what a replica can read again, nothing is rewritten on upgrade, and
+  releases on either side read what the other writes. Nothing for an
+  embedder to run.
 - Nothing stored or synced changes for trees reading through `Load`:
   blocks, nodes, spilled values and their hashes are the same bytes,
   `Get`'s wire shape is unchanged, nothing is rewritten on upgrade, and an
@@ -1569,9 +1919,9 @@ Why: numbers are one band and a rule compiles against types; what the body can b
   see what a flagged cell should hold, replay its writes one per commit
   on a scratch branch and compare. One difference is not the bug: when a
   choosing write lands on a cell holding two claims of its own
-  transaction, the two stand equal and the greater value is elected, so
-  one transaction and one commit per write can end differently, before this
-  release and after it.
+  transaction, the two stand equal and the value with the greater hash
+  is elected, so one transaction and one commit per write can end
+  differently, before this release and after it.
 - Nothing a replica stores or syncs is rewritten. A stored rule that no longer compiles under the head check (one that wrote a possibly negative integer into a `natural:` field, or a float into an `integer:` field) is held inert by `Branch::commit`, as any rule that fails to hydrate is: it stops firing and does not fail commits. Re-evaluate such a rule with a guard or a rounding formula, or widen the field, to have it fire again.
 
 ### A number binds a typed rule variable as the variable's type reads it
@@ -1997,6 +2347,18 @@ thread multiplies whatever it holds by the size of the thread pool.
 
 ### Compatibility and migration
 
+- Nothing stored or synced changes for the file store's lock; only the
+  lock files beside its cells do. A lock file the previous release left
+  behind holds a bare PID, which this release reads as a holder: one
+  left by a writer that crashed is recovered like any other, and one
+  whose writer is still running is held. Only a writer on the previous
+  release that is still running excludes nothing: it and a writer on
+  this release do not exclude each other while both write one store
+  during an upgrade, since the older one deletes a lock file it cannot
+  read as a PID as stale, and this release's is `pid token` (and for a
+  cell whose name has an extension, the two releases lock different
+  files). Stop writers on the previous release before starting ones on
+  this release.
 - A registry branch (`meta`) or host state branch an earlier release laid
   out is rewritten under the number band the first time this release
   writes it, as `Branch::migrate_storage` rewrites any branch: one pass

@@ -11,9 +11,9 @@
 //! sync re-resolves when the registry has moved since, or when a peer is
 //! now reached somewhere else.
 
-use dialog_artifacts::Entity;
 use dialog_capability::Provider;
 use dialog_capability::{Did, Subject};
+use dialog_corpus::Entity;
 use dialog_effects::MethodExt as _;
 use dialog_effects::authority::{Identify, OperatorExt as _};
 use dialog_effects::peer::prelude::*;
@@ -308,7 +308,7 @@ mod tests {
         SiteAddress, Upstream, contact,
     };
     use anyhow::Result;
-    use dialog_artifacts::Changes;
+    use dialog_corpus::Changes;
     use dialog_credentials::Credential;
     use dialog_peer::PeerSpace;
     use dialog_peer::helpers::test_session_with_peer;

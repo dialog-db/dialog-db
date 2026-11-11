@@ -10,7 +10,7 @@ use crate::{
     Schema, Term, try_stream,
 };
 use core::pin::Pin;
-use dialog_artifacts::Cause;
+use dialog_corpus::Cause;
 use std::fmt::Display;
 use std::fmt::{Formatter, Result as FmtResult};
 

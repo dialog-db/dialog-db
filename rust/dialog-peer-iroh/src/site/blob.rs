@@ -153,8 +153,7 @@ impl BlobSink for PeerBlobSink {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<ForkInvocation<Iroh, blob::Read>> for Iroh {
     async fn execute(
         &self,
@@ -184,8 +183,7 @@ impl Provider<ForkInvocation<Iroh, blob::Read>> for Iroh {
 macro_rules! writes_a_blob {
     ($($effect:ty),+ $(,)?) => {
         $(
-            #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-            #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+            #[dialog_capability::provider]
             impl Provider<ForkInvocation<Iroh, $effect>> for Iroh {
                 async fn execute(
                     &self,

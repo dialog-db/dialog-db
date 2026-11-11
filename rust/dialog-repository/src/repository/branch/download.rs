@@ -15,12 +15,14 @@
 //! the two acts — adopt the upstream head, then materialize it.
 
 use core::ops::RangeInclusive;
+use dialog_corpus::tree::CorpusNode;
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::blob::Load as BlobLoad;
+use dialog_search_tree::nodes;
 
-use dialog_artifacts::merge::data_scope;
 use dialog_capability::{Fork, Provider};
 use dialog_common::ConditionalSync;
+use dialog_corpus::merge::data_scope;
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify};
 use dialog_effects::blob::{Import as BlobImport, Read as BlobRead};
@@ -28,6 +30,7 @@ use dialog_effects::memory::{Publish, Resolve};
 use dialog_effects::peer::Connect;
 use futures_util::StreamExt as _;
 
+use crate::HeldCaches;
 use crate::repository::snapshot::Snapshot;
 use crate::{
     Branch, DownloadError, Pull, PullError, RemoteFallback, RemoteSite, Revision, Upstream,
@@ -113,9 +116,14 @@ impl Download<'_> {
             + Provider<BlobRead>
             + Provider<BlobImport>
             + Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
-            + Provider<dialog_artifacts::Preload>
-            + Provider<dialog_artifacts::Speculation>
+            + Provider<dialog_corpus::Preload>
+            + Provider<dialog_corpus::Speculation>
             + Provider<Fork<RemoteSite, BlobRead>>
             + dialog_common::Holds
             + ConditionalSync
@@ -146,7 +154,7 @@ impl Download<'_> {
         // The items themselves carry nothing the local store does not
         // already hold by the time they are yielded, so draining the
         // stream is the whole job.
-        let export = Snapshot::new(branch.subject(), revision)
+        let export = Snapshot::cold(branch.subject(), revision, &HeldCaches::of(env))
             .export()
             .download(remote);
         let export = match self.scope {
@@ -205,6 +213,8 @@ impl<'a> PullDownload<'a> {
         Env: Provider<Get>
             + Provider<Put>
             + Provider<Import>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
             + Provider<Resolve>
             + Provider<Publish>
             + Provider<Identify>
@@ -212,9 +222,14 @@ impl<'a> PullDownload<'a> {
             + Provider<BlobRead>
             + Provider<BlobImport>
             + Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
-            + Provider<dialog_artifacts::Preload>
-            + Provider<dialog_artifacts::Speculation>
+            + Provider<dialog_corpus::Preload>
+            + Provider<dialog_corpus::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + Provider<Fork<RemoteSite, BlobRead>>
             + Provider<Connect>
@@ -252,19 +267,19 @@ mod tests {
 
     use crate::helpers::test_repo;
     use anyhow::Result;
-    use dialog_artifacts::{Artifact, Instruction, Value};
+    use dialog_corpus::{Fact, Instruction, Value};
     use dialog_peer::helpers::test_session_with_peer;
     use futures_util::stream;
 
     fn name(of: &str, is: &str) -> Result<Instruction> {
         Ok(Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "user/name".parse()?,
                 of: of.parse()?,
                 is: Value::String(is.to_string()),
                 cause: None,
             },
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         ))
     }
 

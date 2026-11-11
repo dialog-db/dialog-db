@@ -168,8 +168,7 @@ where
 macro_rules! performs_by_value {
     ($($effect:ty),+ $(,)?) => {
         $(
-            #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-            #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+            #[dialog_capability::provider]
             impl Provider<ForkInvocation<Iroh, $effect>> for Iroh {
                 async fn execute(
                     &self,
@@ -197,8 +196,7 @@ performs_by_value!(
 /// which an exchange of one request and one answer is not. Until this site
 /// keeps one, a watch is refused by name, and the cell is read by resolving
 /// it again.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<ForkInvocation<Iroh, memory::Watch>> for Iroh {
     async fn execute(
         &self,

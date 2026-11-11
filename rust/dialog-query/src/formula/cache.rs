@@ -68,8 +68,18 @@ impl FormulaCache {
 
     /// A cache remembering up to `capacity` applications.
     pub fn with_capacity(capacity: usize) -> Self {
-        // SAFETY of the expect: a zero capacity is raised to one.
-        let cache = SieveCache::new(capacity.max(1)).expect("non-zero formula cache capacity");
+        let entries = capacity.max(1);
+        // A shard holds at least one entry, so a capacity below the shard
+        // count would remember more than asked: shards shrink with the
+        // capacity, as `dialog_search_tree::Cache` does, and the default
+        // keeps all sixteen.
+        // SAFETY of the expect: a zero capacity or shard count is raised
+        // to one.
+        #[cfg(not(target_arch = "wasm32"))]
+        let cache = SieveCache::with_shards(entries, (entries / 128).clamp(1, 16))
+            .expect("non-zero formula cache capacity");
+        #[cfg(target_arch = "wasm32")]
+        let cache = SieveCache::new(entries).expect("non-zero formula cache capacity");
         Self {
             #[cfg(not(target_arch = "wasm32"))]
             entries: Arc::new(cache),
@@ -182,4 +192,28 @@ fn key<F>(inputs: &[Value]) -> Result<[u8; 32], EvaluationError> {
         message: format!("formula inputs do not encode: {error}"),
     })?;
     Ok(*blake3::hash(&encoded).as_bytes())
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    use super::{FORMULA_CACHE_CAPACITY, FormulaCache};
+    use crate::Value;
+
+    /// A cache remembers no more applications than its capacity, however
+    /// small: a third into a cache of two lets one go.
+    #[dialog_common::test]
+    fn it_remembers_no_more_than_its_capacity() {
+        let cache = FormulaCache::with_capacity(2);
+        for input in 0..3u32 {
+            cache
+                .outputs::<u32>(&[Value::UnsignedInt(input.into())], || Ok(vec![input]))
+                .expect("the formula computes");
+        }
+        assert_eq!(cache.capacity(), 2);
+        assert_eq!(cache.len(), 2);
+        assert_eq!(FormulaCache::new().capacity(), FORMULA_CACHE_CAPACITY);
+    }
 }

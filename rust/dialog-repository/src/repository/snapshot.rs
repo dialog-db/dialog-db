@@ -48,22 +48,22 @@
 //! upstream as the walk proceeds, which is what makes the result complete.
 
 use core::ops::RangeInclusive;
+use dialog_corpus::tree::CorpusNode;
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::prelude::{ArchiveBlobExt as _, ReadBlobExt as _, WriteBlobExt as _};
+use dialog_search_tree::nodes;
 use std::collections::HashSet;
 
 use async_stream::try_stream;
-use dialog_artifacts::history::{
-    CausalityCache, ContextCache, RevisionRecord, TreeHistory, Version,
-};
-use dialog_artifacts::selector::Constrained;
-use dialog_artifacts::{
-    ArtifactSelector, BlobIndexExt as _, Datum, DialogArtifactsError, Entity, Key, ShipmentRef,
-    State, Statement, shipment_ref,
-};
 use dialog_capability::{Did, Fork, Provider, Subject};
 use dialog_common::{Blake3Hash as NodeHash, Buffer, ConditionalSync, Holds};
+use dialog_corpus::history::{CausalityCache, ContextCache, RevisionRecord, TreeHistory, Version};
+use dialog_corpus::selector::Constrained;
+use dialog_corpus::{
+    BlobIndexExt as _, Datum, DialogCorpusError, Entity, Key, Selector, ShipmentRef, State,
+    Statement, shipment_ref,
+};
 use dialog_effects::archive::prelude::{
     ArchiveExt as _, ArchiveScope, CatalogExt as _, CatalogScope, DEFAULT_CATALOG, PutBlockExt as _,
 };
@@ -86,6 +86,7 @@ use crate::{
     BlobArchive, Branch, ConnectedReplica, Ephemeral, Index, PublishError, RemoteSite, Repository,
     Revision, Select, SelectQuery, SnapshotError,
 };
+use crate::{CacheBudget, HeldCaches};
 use dialog_effects::MethodExt as _;
 
 pub mod codec;
@@ -153,7 +154,7 @@ impl Block {
 ///
 /// ```no_run
 /// # use dialog_repository::Snapshot;
-/// # async fn example<Env>(snapshot: Snapshot, env: &Env, facts: dialog_artifacts::Changes)
+/// # async fn example<Env>(snapshot: Snapshot, env: &Env, facts: dialog_corpus::Changes)
 /// # -> anyhow::Result<()>
 /// # where Env: dialog_capability::Provider<dialog_effects::memory::Resolve> {
 /// # let _ = (env, facts);
@@ -214,8 +215,26 @@ impl<C: Principal> Repository<C> {
     /// was minted on to be present. Starts with cold caches; prefer
     /// [`Branch::snapshot`] when a branch handle at the revision is at
     /// hand, so its warm caches carry over.
+    ///
+    /// Its caches are its own, at the default sizes
+    /// ([`CacheBudget::default`](crate::CacheBudget)), whatever caches the
+    /// environment it is read through holds. To keep a snapshot to the
+    /// budget an environment's caches were built with, take it with
+    /// [`snapshot_in`](Self::snapshot_in).
     pub fn snapshot(&self, revision: Revision) -> Snapshot {
         Snapshot::new(self.subject(), revision)
+    }
+
+    /// A view at `revision`, starting cold like [`snapshot`](Self::snapshot),
+    /// with caches sized by the [`HeldCaches`](crate::HeldCaches) `env`
+    /// holds.
+    ///
+    /// It reads tree nodes, spilled values, rule content and plans through
+    /// those caches, so it holds no more of them than their budget allows;
+    /// its caches keyed by version start empty and remember at most the
+    /// budget's [`entries`](crate::CacheBudget::entries) each.
+    pub fn snapshot_in<Env: Holds + ?Sized>(&self, env: &Env, revision: Revision) -> Snapshot {
+        Snapshot::cold(self.subject(), revision, &HeldCaches::of(env))
     }
 }
 
@@ -271,7 +290,21 @@ impl Snapshot {
                 revision,
                 lineage: None,
             }),
-            caches: Caches::new(),
+            caches: Caches::sized(CacheBudget::default()),
+            overlay: Ephemeral::default(),
+        }
+    }
+
+    /// A view of `subject`'s repository at `revision`, with cold caches
+    /// sized by `held` and sharing what it addresses by content.
+    pub(crate) fn cold(subject: Subject, revision: Revision, held: &HeldCaches) -> Self {
+        Snapshot {
+            caches: held.cold(subject.did()),
+            subject,
+            head: RwLock::new(Head {
+                revision,
+                lineage: None,
+            }),
             overlay: Ephemeral::default(),
         }
     }
@@ -364,9 +397,9 @@ impl Snapshot {
         &self.caches
     }
 
-    /// The snapshot's artifact index.
+    /// The snapshot's fact index.
     ///
-    /// Use `.select(selector).perform(&env)` to query artifacts.
+    /// Use `.select(selector).perform(&env)` to query facts.
     pub fn claims(&self) -> SnapshotClaims<'_> {
         SnapshotClaims { snapshot: self }
     }
@@ -414,7 +447,16 @@ impl Snapshot {
     /// does (see [`Routes`](crate::Routes)).
     pub fn history<'a, Env>(&self, env: &'a Env) -> TreeHistory<&'a Env>
     where
-        Env: Provider<ArchiveLoad> + Provider<BlobLoad> + Holds + ConditionalSync + ?Sized,
+        Env: Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + Provider<BlobLoad>
+            + Holds
+            + ConditionalSync
+            + ?Sized,
     {
         SourceRef::from(self).history(env)
     }
@@ -425,9 +467,18 @@ impl Snapshot {
         &self,
         env: &Env,
         limit: usize,
-    ) -> Result<Vec<(Version, RevisionRecord)>, DialogArtifactsError>
+    ) -> Result<Vec<(Version, RevisionRecord)>, DialogCorpusError>
     where
-        Env: Provider<ArchiveLoad> + Provider<BlobLoad> + Holds + ConditionalSync + ?Sized,
+        Env: Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + Provider<BlobLoad>
+            + Holds
+            + ConditionalSync
+            + ?Sized,
     {
         SourceRef::from(self).log(env, limit).await
     }
@@ -465,14 +516,14 @@ impl Clone for Snapshot {
     }
 }
 
-/// The snapshot's artifact index. Created by [`Snapshot::claims`].
+/// The snapshot's fact index. Created by [`Snapshot::claims`].
 pub struct SnapshotClaims<'a> {
     snapshot: &'a Snapshot,
 }
 
 impl<'a> SnapshotClaims<'a> {
-    /// Select artifacts matching the selector.
-    pub fn select(self, selector: ArtifactSelector<Constrained>) -> Select<'a> {
+    /// Select facts matching the selector.
+    pub fn select(self, selector: Selector<Constrained>) -> Select<'a> {
         Select::from_source(SourceRef::from(self.snapshot), selector)
     }
 }
@@ -596,9 +647,9 @@ impl SnapshotExport {
     /// Walk only the key regions in `scope`, leaving the rest of the tree
     /// by reference.
     ///
-    /// The artifact tree partitions by a leading tag byte, so this is how
+    /// The corpus partitions by a leading tag byte, so this is how
     /// a caller materializes some regions and not others — most usefully
-    /// [`data_scope`](dialog_artifacts::merge::data_scope), the
+    /// [`data_scope`](dialog_corpus::merge::data_scope), the
     /// operational indexes and the blob index, which is everything reads
     /// and authorization touch. The history and coverage regions it
     /// leaves behind grow with every edit ever made, while the data
@@ -652,9 +703,14 @@ impl SnapshotExport {
             + Provider<BlobRead>
             + Provider<BlobImport>
             + Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
-            + Provider<dialog_artifacts::Preload>
-            + Provider<dialog_artifacts::Speculation>
+            + Provider<dialog_corpus::Preload>
+            + Provider<dialog_corpus::Speculation>
             + Provider<Fork<RemoteSite, BlobRead>>
             + dialog_common::Holds
             + ConditionalSync
@@ -736,7 +792,7 @@ impl SnapshotExport {
                 // buffers, whose keys and values reference content
                 // exactly like stored entries (a buffered retract
                 // references nothing of its own). The closure only
-                // collects: classification returns artifact errors,
+                // collects: classification returns fact errors,
                 // which do not belong in a tree-walk callback. The
                 // buffer is sized from the node's own count first: grown
                 // entry by entry, its copies cost whatever the allocator's
@@ -795,7 +851,7 @@ impl SnapshotExport {
                         let bytes = load
                             .perform(storage)
                             .await
-                            .map_err(DialogArtifactsError::from);
+                            .map_err(DialogCorpusError::from);
                         (digest, bytes)
                     }
                 },
@@ -1059,7 +1115,7 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use anyhow::Result;
-    use dialog_artifacts::{Artifact, ArtifactSelector, Instruction, Value};
+    use dialog_corpus::{Fact, Instruction, Selector, Value};
     use dialog_credentials::Credential;
     use dialog_effects::archive::prelude::GetBlockExt as _;
     use dialog_effects::blob::BlobSource;
@@ -1158,19 +1214,19 @@ mod tests {
 
         let mut facts: Vec<Instruction> = generate_data(20)?
             .into_iter()
-            .map(|artifact| Instruction::Assert(artifact, dialog_artifacts::Pick::All))
+            .map(|fact| Instruction::Assert(fact, dialog_corpus::Pick::All))
             .collect();
         let large = Value::String(
             "spilled".repeat(dialog_search_tree::Manifest::default().inline_n as usize + 1),
         );
         facts.push(Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "document/body".parse()?,
                 of: "document:large".parse()?,
                 is: large,
                 cause: None,
             },
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         ));
         branch.commit(stream::iter(facts)).perform(&env).await?;
 
@@ -1342,7 +1398,7 @@ mod tests {
 
         let rows = branch
             .claims()
-            .select(ArtifactSelector::new().the("document/body".parse()?))
+            .select(Selector::new().the("document/body".parse()?))
             .to_owned()
             .perform(&destination)
             .await?

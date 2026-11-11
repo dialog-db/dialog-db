@@ -11,14 +11,14 @@ mod plan_cache;
 /// Per-concept rule management with adornment-keyed plan caching.
 pub mod rules;
 
-pub use plan_cache::PlanCache;
+pub use plan_cache::{PLAN_CACHE_CAPACITY, PlanCache};
 pub use rules::{ConceptRules, Exact, Installed};
 
 use std::fmt;
 
-use crate::artifact::{ArtifactsRelation, Type, Value};
 use crate::attribute::The;
 use crate::concept::descriptor::{ConceptDescriptor, ConceptFieldDescriptor};
+use crate::corpus::{CorpusRelation, Type, Value};
 use crate::planner::{Disjunction, Plan};
 use crate::rule::deductive::DeductiveRule;
 use crate::schema::CONCEPT_OVERHEAD;
@@ -30,8 +30,8 @@ use crate::{
     Binding, Cardinality, Environment, EvaluationError, Match, Parameters, Requirement, Schema,
     Term, try_stream,
 };
-use dialog_artifacts::{Pick, encode_value_owned};
 use dialog_capability::Provider;
+use dialog_corpus::{Pick, encode_value_owned};
 use futures_util::{StreamExt, TryStreamExt, stream};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -508,7 +508,7 @@ impl ConceptQuery {
                     let key = this
                         .as_ref()
                         .and_then(|term| row.value_of(term.name()?))
-                        .map(dialog_artifacts::encode_value_owned)
+                        .map(dialog_corpus::encode_value_owned)
                         .unwrap_or_default();
                     rows.push((key, row));
                 }
@@ -1120,7 +1120,7 @@ impl ConceptQuery {
 /// per attribute is kept on the query's memo, since the facts do not
 /// change within a query and a concept is evaluated many times in one.
 async fn stored_absent<'a, Env>(
-    attributes: &[ArtifactsRelation],
+    attributes: &[CorpusRelation],
     env: &'a Env,
 ) -> Result<bool, EvaluationError>
 where
@@ -1131,8 +1131,8 @@ where
         let absent = match env.memo().and_then(|memo| memo.stored_absent(&key)) {
             Some(absent) => absent,
             None => {
-                let selector = dialog_artifacts::ArtifactSelector::new().the(attribute.clone());
-                let mut rows = Provider::<dialog_artifacts::Select<'_>>::execute(env, selector)
+                let selector = dialog_corpus::Selector::new().the(attribute.clone());
+                let mut rows = Provider::<dialog_corpus::Select<'_>>::execute(env, selector)
                     .await
                     .map_err(|error| EvaluationError::Store(error.to_string()))?;
                 let absent = rows.next().await.is_none();
@@ -1528,7 +1528,7 @@ mod tests {
         use crate::attribute::{AttributeDescriptor, Keyed, The};
         use crate::concept::descriptor::ConceptFieldDescriptor;
         use crate::{Cardinality, ConceptDescriptor, ConceptQuery, Term, Type};
-        use dialog_artifacts::Symbol;
+        use dialog_corpus::Symbol;
         use std::str::FromStr;
 
         fn ordered() -> ConceptDescriptor {
@@ -1630,7 +1630,7 @@ mod tests {
         AttributeDescriptor, Cardinality, DeductiveRule, Negation, Parameters, Premise,
         Proposition, Query, Term, Type, Value,
     };
-    use dialog_artifacts::Entity;
+    use dialog_corpus::Entity;
     use dialog_peer::helpers::{test_repo, test_session_with_peer};
     use futures_util::TryStreamExt;
 

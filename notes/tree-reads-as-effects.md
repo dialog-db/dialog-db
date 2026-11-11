@@ -1,7 +1,14 @@
 # The search tree reads through capabilities
 
-Status: taken. Step two after the store-held node cache (#730); lands
-in #735.
+Status: taken, then superseded in part. Step two after the store-held
+node cache (#730); landed in #735. The design topic
+[`design/tree-node-reads.md`](../design/tree-node-reads.md) moved the tree
+off `Load` for its nodes: a tree now performs the node layer's requests
+(`dialog_search_tree::nodes`) and the environment answers them, consulting
+the cache it holds itself. What this note says about `Load`, `Get` and
+hydration still holds for readers of blocks; what it says about the tree
+finding the cache through `Holds` and persist keeping sealed nodes no
+longer does.
 
 ## Context
 
@@ -88,7 +95,7 @@ digest-verified import rather than loading a block.
 
 ### A tree is a root under a catalog
 
-`PersistentTree` (and so `Index` and `ArtifactTree`) carries the
+`PersistentTree` (and so `Index` and `FactTree`) carries the
 `CatalogScope` its blocks live in next to its root:
 `PersistentTree::at(catalog, root)` and `PersistentTree::empty_in(catalog)`.
 Every node read performs `Load` on the env, in one function in the tree
@@ -141,7 +148,7 @@ scan's stream, a history) be handed `&env` instead of a wrapper.
 ## What it removed
 
 `LoadBlock`, `LoadBlob`, `ArchiveReader`, `Reads`, `LocalIndex`,
-`NetworkedIndex`, `Nodes`, `Cached`, `ArtifactNodes`, `MemoryBlocks`,
+`NetworkedIndex`, `Nodes`, `Cached`, `FactNodes`, `MemoryBlocks`,
 `WithoutSpills`, the forwarding `Blocks` of dialog-diagnose and the
 forwarding loaders of dialog-query's test envs, and `Branch::fallback` on
 the read path. Tests read through dialog-storage's `Volatile` under a

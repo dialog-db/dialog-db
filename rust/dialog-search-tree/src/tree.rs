@@ -16,12 +16,13 @@ use rkyv::{
     validation::{Validator, archive::ArchiveValidator, shared::SharedValidator},
 };
 
-use crate::reads::*;
+use crate::nodes::{Preload, Read};
 use crate::{
     Accessor, DialogSearchTreeError, Differential, Distribution, Entry, Geometric, Key, Manifest,
     PersistentNode, Prefetch, Reading, SearchOptions, SearchResult, TreeDifference, TreeWalker,
     Value, into_owned,
 };
+use dialog_capability::Provider;
 
 /// A node on a range estimate's edge path, with the range's bound on each
 /// side it cuts through (`None` where the range runs past the node's edge).
@@ -270,7 +271,7 @@ where
     /// The reads of one operation on this tree, through `storage`.
     pub(crate) fn accessor<'a, Env>(&self, storage: &'a Env) -> Accessor<'a, Key, Value, Env>
     where
-        Env: Holds + ?Sized,
+        Env: ?Sized,
     {
         Accessor::new(storage, &self.catalog).reading(self.reading)
     }
@@ -290,7 +291,9 @@ where
         storage: &Env,
     ) -> Result<Option<Value>, DialogSearchTreeError>
     where
-        Env: Provider<Load> + Holds + ConditionalSync,
+        Env: Provider<Read<PersistentNode<Key, Value>>>
+            + Provider<Preload<PersistentNode<Key, Value>>>
+            + ConditionalSync,
     {
         // The search path is the copy-on-write frontier for an update; a read
         // ignores it and takes only the leaf. Building it is allocation-free
@@ -340,7 +343,9 @@ where
         storage: &'a Env,
     ) -> impl Stream<Item = Result<Entry<Key, Value>, DialogSearchTreeError>> + 'a
     where
-        Env: Provider<Load> + Holds + ConditionalSync,
+        Env: Provider<Read<PersistentNode<Key, Value>>>
+            + Provider<Preload<PersistentNode<Key, Value>>>
+            + ConditionalSync,
     {
         self.stream_range(.., storage)
     }
@@ -367,7 +372,9 @@ where
         storage: &Env,
     ) -> Result<Option<u64>, DialogSearchTreeError>
     where
-        Env: Provider<Load> + Holds + ConditionalSync,
+        Env: Provider<Read<PersistentNode<Key, Value>>>
+            + Provider<Preload<PersistentNode<Key, Value>>>
+            + ConditionalSync,
     {
         let Some(root) = self.stored_root() else {
             return Ok(None);
@@ -433,7 +440,9 @@ where
         storage: &Env,
     ) -> impl Stream<Item = Result<Entry<Key, Value>, DialogSearchTreeError>> + ConditionalSend
     where
-        Env: Provider<Load> + Holds + ConditionalSync,
+        Env: Provider<Read<PersistentNode<Key, Value>>>
+            + Provider<Preload<PersistentNode<Key, Value>>>
+            + ConditionalSync,
         R: RangeBounds<Key> + ConditionalSend,
     {
         let accessor = self.accessor(storage);
@@ -445,7 +454,7 @@ where
     /// [`KeyHandle`](crate::KeyHandle) instead of the typed `Key`: warm
     /// leaves' entries borrow the memoized decoded-keys arena with no
     /// per-entry key copy. For consumers that work directly on the raw key
-    /// bytes (the artifact scan paths).
+    /// bytes (the fact scan paths).
     pub fn stream_range_handles<R, Env>(
         &self,
         range: R,
@@ -453,7 +462,9 @@ where
     ) -> impl Stream<Item = Result<Entry<crate::KeyHandle, Value>, DialogSearchTreeError>>
     + ConditionalSend
     where
-        Env: Provider<Load> + Holds + ConditionalSync,
+        Env: Provider<Read<PersistentNode<Key, Value>>>
+            + Provider<Preload<PersistentNode<Key, Value>>>
+            + ConditionalSync,
         R: RangeBounds<Key> + ConditionalSend,
     {
         let accessor = self.accessor(storage);
@@ -475,7 +486,9 @@ where
         other_storage: &'a Env,
     ) -> impl Differential<Key, Value> + 'a
     where
-        Env: Provider<Load> + Provider<Get> + Holds + ConditionalSync,
+        Env: Provider<Read<PersistentNode<Key, Value>>>
+            + Provider<Preload<PersistentNode<Key, Value>>>
+            + ConditionalSync,
         Value: PartialEq,
     {
         async_stream::try_stream! {
@@ -504,7 +517,9 @@ where
         other_storage: &'a Env,
     ) -> impl Differential<Key, Value> + ConditionalSend + 'a
     where
-        Env: Provider<Load> + Provider<Get> + Holds + ConditionalSync,
+        Env: Provider<Read<PersistentNode<Key, Value>>>
+            + Provider<Preload<PersistentNode<Key, Value>>>
+            + ConditionalSync,
         // `Key`/`Value` bound `ConditionalSync` (not just the trait's
         // `ConditionalSend`) so that `&PersistentTree` — which the
         // returned `async_stream` captures — is `Send` on native.
@@ -534,7 +549,9 @@ where
         prefetch: Prefetch,
     ) -> impl Differential<Key, Value> + ConditionalSend + 'a
     where
-        Env: Provider<Load> + Provider<Get> + Holds + ConditionalSync,
+        Env: Provider<Read<PersistentNode<Key, Value>>>
+            + Provider<Preload<PersistentNode<Key, Value>>>
+            + ConditionalSync,
         Key: ConditionalSync,
         Value: PartialEq + ConditionalSync,
         D: ConditionalSync,
@@ -579,7 +596,9 @@ where
     /// and reports that without touching storage.
     pub async fn manifest<Env>(&self, storage: &Env) -> Result<Manifest, DialogSearchTreeError>
     where
-        Env: Provider<Load> + Holds + ConditionalSync,
+        Env: Provider<Read<PersistentNode<Key, Value>>>
+            + Provider<Preload<PersistentNode<Key, Value>>>
+            + ConditionalSync,
     {
         match &self.root {
             TreeRoot::Empty { manifest, .. } => Ok(manifest.clone()),
@@ -638,7 +657,9 @@ where
         options: SearchOptions,
     ) -> Result<Option<SearchResult<Key, Value>>, DialogSearchTreeError>
     where
-        Env: Provider<Load> + Holds + ConditionalSync,
+        Env: Provider<Read<PersistentNode<Key, Value>>>
+            + Provider<Preload<PersistentNode<Key, Value>>>
+            + ConditionalSync,
     {
         let accessor = self.accessor(storage);
 
@@ -699,9 +720,9 @@ mod tests {
                 .insert(i.to_le_bytes(), i.to_le_bytes().to_vec(), &storage)
                 .await?;
         }
-        tree = edit.persist(&mut delta, &storage)?;
-        for (_, buffer) in delta.flush() {
-            storage.store(buffer);
+        tree = edit.persist(&mut delta)?;
+        for (_, node) in delta.flush() {
+            storage.store(node.buffer().clone());
         }
 
         let accessor =
@@ -745,9 +766,9 @@ mod tests {
                 .insert(i.to_be_bytes(), i.to_be_bytes().to_vec(), &storage)
                 .await?;
         }
-        tree = edit.persist(&mut delta, &storage)?;
-        for (_, buffer) in delta.flush() {
-            storage.store(buffer);
+        tree = edit.persist(&mut delta)?;
+        for (_, node) in delta.flush() {
+            storage.store(node.buffer().clone());
         }
 
         let full = tree
@@ -812,9 +833,9 @@ mod tests {
                 .insert(i.to_le_bytes(), i.to_le_bytes().to_vec(), &storage)
                 .await?;
         }
-        tree = edit.persist(&mut delta, &storage)?;
-        for (_, buffer) in delta.flush() {
-            storage.store(buffer);
+        tree = edit.persist(&mut delta)?;
+        for (_, node) in delta.flush() {
+            storage.store(node.buffer().clone());
         }
 
         let accessor =
@@ -853,10 +874,10 @@ mod tests {
                 .edit()
                 .insert(i.to_le_bytes(), i.to_le_bytes().to_vec(), &storage)
                 .await?
-                .persist(&mut delta, &storage)?;
+                .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
-            for (_, buffer) in delta.flush() {
-                storage.store(buffer);
+            for (_, node) in delta.flush() {
+                storage.store(node.buffer().clone());
             }
         }
 
@@ -874,7 +895,7 @@ mod tests {
     }
 
     /// A key type whose component layout is dispatched by a leading tag byte,
-    /// like the dialog artifact key's EAV/AEV/VAE orderings. Two layouts:
+    /// like the dialog fact key's EAV/AEV/VAE orderings. Two layouts:
     /// tag 0 puts the 2-byte arena field first, tag 1 puts the 1-byte
     /// dictionary field first. Persisting keys of both tags into one tree and
     /// reading them all back proves the tag-dispatched columnar codec.
@@ -981,9 +1002,9 @@ mod tests {
                 .edit()
                 .insert(key.clone(), key.0.to_vec(), &storage)
                 .await?
-                .persist(&mut delta, &storage)?;
-            for (_, buffer) in delta.flush() {
-                storage.store(buffer);
+                .persist(&mut delta)?;
+            for (_, node) in delta.flush() {
+                storage.store(node.buffer().clone());
             }
         }
 
@@ -1023,10 +1044,10 @@ mod tests {
                 .edit()
                 .insert(i.to_le_bytes(), i.to_le_bytes().to_vec(), &storage)
                 .await?
-                .persist(&mut delta, &storage)?;
+                .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
-            for (_, buffer) in delta.flush() {
-                storage.store(buffer);
+            for (_, node) in delta.flush() {
+                storage.store(node.buffer().clone());
             }
         }
 
@@ -1036,10 +1057,10 @@ mod tests {
                 .edit()
                 .delete(&i.to_le_bytes(), &storage)
                 .await?
-                .persist(&mut delta, &storage)?;
+                .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
-            for (_, buffer) in delta.flush() {
-                storage.store(buffer);
+            for (_, node) in delta.flush() {
+                storage.store(node.buffer().clone());
             }
         }
 
@@ -1078,10 +1099,10 @@ mod tests {
                 .edit()
                 .insert(i.to_le_bytes(), i.to_le_bytes().to_vec(), &storage)
                 .await?
-                .persist(&mut delta, &storage)?;
+                .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
-            for (_, buffer) in delta.flush() {
-                storage.store(buffer);
+            for (_, node) in delta.flush() {
+                storage.store(node.buffer().clone());
             }
         }
 
@@ -1125,10 +1146,10 @@ mod tests {
                 .edit()
                 .insert(i.to_le_bytes(), i.to_le_bytes().to_vec(), &storage)
                 .await?
-                .persist(&mut delta, &storage)?;
+                .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
-            for (_, buffer) in delta.flush() {
-                storage.store(buffer);
+            for (_, node) in delta.flush() {
+                storage.store(node.buffer().clone());
             }
         }
 
@@ -1178,10 +1199,10 @@ mod tests {
                 .edit()
                 .insert(i.to_le_bytes(), i.to_le_bytes().to_vec(), &storage)
                 .await?
-                .persist(&mut delta, &storage)?;
+                .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
-            for (_, buffer) in delta.flush() {
-                storage.store(buffer);
+            for (_, node) in delta.flush() {
+                storage.store(node.buffer().clone());
             }
         }
         for i in 90..100u32 {
@@ -1189,10 +1210,10 @@ mod tests {
                 .edit()
                 .insert(i.to_le_bytes(), i.to_le_bytes().to_vec(), &storage)
                 .await?
-                .persist(&mut delta, &storage)?;
+                .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
-            for (_, buffer) in delta.flush() {
-                storage.store(buffer);
+            for (_, node) in delta.flush() {
+                storage.store(node.buffer().clone());
             }
         }
 
@@ -1239,7 +1260,7 @@ mod tests {
             .edit()
             .delete(&1u32.to_le_bytes(), &storage)
             .await?
-            .persist(&mut delta, &storage)?;
+            .persist(&mut delta)?;
         assert_eq!(tree_after_delete.root(), &empty_root_hash()?);
 
         // Stream on empty tree should yield no entries
@@ -1281,7 +1302,7 @@ mod tests {
             .edit()
             .delete(&1u32.to_le_bytes(), &storage)
             .await?
-            .persist(&mut delta, &storage)?;
+            .persist(&mut delta)?;
         storage.flush(&mut delta);
 
         let accessor =
@@ -1313,7 +1334,7 @@ mod tests {
             .edit()
             .insert(1u32.to_le_bytes(), vec![1], &storage)
             .await?
-            .persist(&mut delta, &storage)?;
+            .persist(&mut delta)?;
         storage.flush(&mut delta);
         assert_eq!(one.get(&1u32.to_le_bytes(), &storage).await?, Some(vec![1]));
         Ok(())
@@ -1344,23 +1365,23 @@ mod tests {
             .edit()
             .insert([0, 0, 0, 1], vec![1], &storage)
             .await?
-            .persist(&mut delta, &storage)?;
+            .persist(&mut delta)?;
         let from_fresh =
             PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_catalog())
                 .edit()
                 .insert([0, 0, 0, 1], vec![1], &storage)
                 .await?
-                .persist(&mut delta, &storage)?;
+                .persist(&mut delta)?;
         assert_eq!(from_legacy.root(), from_fresh.root());
 
         let edit = TransientTree::<[u8; 4], Vec<u8>>::new(
             crate::helpers::test_catalog(),
             Blake3Hash::from(LEGACY_EMPTY_ROOT),
         );
-        let emptied = edit.persist(&mut delta, &storage)?;
+        let emptied = edit.persist(&mut delta)?;
         assert_eq!(emptied.root(), &empty_root_hash()?);
-        for (_, buffer) in delta.flush() {
-            storage.store(buffer);
+        for (_, node) in delta.flush() {
+            storage.store(node.buffer().clone());
         }
 
         let difference = TreeDifference::compute(&legacy, &emptied, &storage, &storage).await?;
@@ -1379,11 +1400,11 @@ mod tests {
             .edit()
             .insert(42u32.to_le_bytes(), vec![1, 2, 3], &storage)
             .await?
-            .persist(&mut delta, &storage)?;
+            .persist(&mut delta)?;
 
         // Flush to storage
-        for (_, buffer) in delta.flush() {
-            storage.store(buffer);
+        for (_, node) in delta.flush() {
+            storage.store(node.buffer().clone());
         }
 
         // Verify initial value
@@ -1395,11 +1416,11 @@ mod tests {
             .edit()
             .insert(42u32.to_le_bytes(), vec![4, 5, 6, 7], &storage)
             .await?
-            .persist(&mut delta, &storage)?;
+            .persist(&mut delta)?;
 
         // Flush update
-        for (_, buffer) in delta.flush() {
-            storage.store(buffer);
+        for (_, node) in delta.flush() {
+            storage.store(node.buffer().clone());
         }
 
         // Verify updated value
@@ -1421,11 +1442,11 @@ mod tests {
             .edit()
             .insert(1u32.to_le_bytes(), vec![1], &storage)
             .await?
-            .persist(&mut delta_v1, &storage)?;
+            .persist(&mut delta_v1)?;
 
         // Flush v1
-        for (_, buffer) in delta_v1.flush() {
-            storage.store(buffer);
+        for (_, node) in delta_v1.flush() {
+            storage.store(node.buffer().clone());
         }
 
         let v1_root = tree_v1.root().clone();
@@ -1436,11 +1457,11 @@ mod tests {
             .edit()
             .insert(2u32.to_le_bytes(), vec![2], &storage)
             .await?
-            .persist(&mut delta_v2, &storage)?;
+            .persist(&mut delta_v2)?;
 
         // Flush v2
-        for (_, buffer) in delta_v2.flush() {
-            storage.store(buffer);
+        for (_, node) in delta_v2.flush() {
+            storage.store(node.buffer().clone());
         }
 
         // Verify v1 is unchanged
@@ -1477,10 +1498,10 @@ mod tests {
                 .edit()
                 .insert(i.to_le_bytes(), vec![i as u8], &storage)
                 .await?
-                .persist(&mut delta_base, &storage)?;
+                .persist(&mut delta_base)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
-            for (_, buffer) in delta_base.flush() {
-                storage.store(buffer);
+            for (_, node) in delta_base.flush() {
+                storage.store(node.buffer().clone());
             }
         }
 
@@ -1491,19 +1512,19 @@ mod tests {
             .edit()
             .insert(100u32.to_le_bytes(), vec![100], &storage)
             .await?
-            .persist(&mut delta_a, &storage)?;
+            .persist(&mut delta_a)?;
         let branch_b = base
             .edit()
             .insert(200u32.to_le_bytes(), vec![200], &storage)
             .await?
-            .persist(&mut delta_b, &storage)?;
+            .persist(&mut delta_b)?;
 
         // Flush both branches
-        for (_, buffer) in delta_a.flush() {
-            storage.store(buffer);
+        for (_, node) in delta_a.flush() {
+            storage.store(node.buffer().clone());
         }
-        for (_, buffer) in delta_b.flush() {
-            storage.store(buffer);
+        for (_, node) in delta_b.flush() {
+            storage.store(node.buffer().clone());
         }
 
         // Verify branch A
@@ -1540,11 +1561,11 @@ mod tests {
             .edit()
             .insert(1u32.to_le_bytes(), vec![1], &storage)
             .await?
-            .persist(&mut delta, &storage)?;
+            .persist(&mut delta)?;
 
         // Flush
-        for (_, buffer) in delta.flush() {
-            storage.store(buffer);
+        for (_, node) in delta.flush() {
+            storage.store(node.buffer().clone());
         }
 
         let root_after_insert = tree.root().clone();
@@ -1555,11 +1576,11 @@ mod tests {
             .edit()
             .insert(2u32.to_le_bytes(), vec![2], &storage)
             .await?
-            .persist(&mut delta, &storage)?;
+            .persist(&mut delta)?;
 
         // Flush
-        for (_, buffer) in delta.flush() {
-            storage.store(buffer);
+        for (_, node) in delta.flush() {
+            storage.store(node.buffer().clone());
         }
 
         let root_after_second_insert = tree.root().clone();
@@ -1570,11 +1591,11 @@ mod tests {
             .edit()
             .delete(&1u32.to_le_bytes(), &storage)
             .await?
-            .persist(&mut delta, &storage)?;
+            .persist(&mut delta)?;
 
         // Flush
-        for (_, buffer) in delta.flush() {
-            storage.store(buffer);
+        for (_, node) in delta.flush() {
+            storage.store(node.buffer().clone());
         }
 
         let root_after_delete = tree.root().clone();
@@ -1596,10 +1617,10 @@ mod tests {
                 .edit()
                 .insert(i.to_le_bytes(), vec![i as u8], &storage)
                 .await?
-                .persist(&mut delta_a, &storage)?;
+                .persist(&mut delta_a)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
-            for (_, buffer) in delta_a.flush() {
-                storage.store(buffer);
+            for (_, node) in delta_a.flush() {
+                storage.store(node.buffer().clone());
             }
         }
 
@@ -1612,10 +1633,10 @@ mod tests {
                 .edit()
                 .insert(i.to_le_bytes(), vec![i as u8], &storage)
                 .await?
-                .persist(&mut delta_b, &storage)?;
+                .persist(&mut delta_b)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
-            for (_, buffer) in delta_b.flush() {
-                storage.store(buffer);
+            for (_, node) in delta_b.flush() {
+                storage.store(node.buffer().clone());
             }
         }
 
@@ -1636,11 +1657,11 @@ mod tests {
             .edit()
             .insert(42u32.to_le_bytes(), vec![1, 2, 3], &storage)
             .await?
-            .persist(&mut delta, &storage)?;
+            .persist(&mut delta)?;
 
         // Flush
-        for (_, buffer) in delta.flush() {
-            storage.store(buffer);
+        for (_, node) in delta.flush() {
+            storage.store(node.buffer().clone());
         }
 
         // Get should work
@@ -1654,11 +1675,11 @@ mod tests {
             .edit()
             .delete(&42u32.to_le_bytes(), &storage)
             .await?
-            .persist(&mut delta, &storage)?;
+            .persist(&mut delta)?;
 
         // Flush
-        for (_, buffer) in delta.flush() {
-            storage.store(buffer);
+        for (_, node) in delta.flush() {
+            storage.store(node.buffer().clone());
         }
 
         // Should be empty again
@@ -1679,7 +1700,7 @@ mod tests {
             .edit()
             .delete(&1u32.to_le_bytes(), &storage)
             .await?
-            .persist(&mut delta, &storage)?;
+            .persist(&mut delta)?;
 
         assert_eq!(tree.root(), &empty_root_hash()?);
 
@@ -1697,11 +1718,11 @@ mod tests {
             .edit()
             .insert(1u32.to_le_bytes(), vec![1], &storage)
             .await?
-            .persist(&mut delta, &storage)?;
+            .persist(&mut delta)?;
 
         // Flush
-        for (_, buffer) in delta.flush() {
-            storage.store(buffer);
+        for (_, node) in delta.flush() {
+            storage.store(node.buffer().clone());
         }
 
         let root_before = tree.root().clone();
@@ -1711,7 +1732,7 @@ mod tests {
             .edit()
             .delete(&999u32.to_le_bytes(), &storage)
             .await?
-            .persist(&mut delta, &storage)?;
+            .persist(&mut delta)?;
 
         // Root should be unchanged
         assert_eq!(tree.root(), &root_before);
@@ -1736,11 +1757,11 @@ mod tests {
             .edit()
             .insert(1u32.to_le_bytes(), vec![1], &storage)
             .await?
-            .persist(&mut delta, &storage)?;
+            .persist(&mut delta)?;
 
         // Flush
-        for (_, buffer) in delta.flush() {
-            storage.store(buffer);
+        for (_, node) in delta.flush() {
+            storage.store(node.buffer().clone());
         }
 
         assert_eq!(
@@ -1753,11 +1774,11 @@ mod tests {
             .edit()
             .delete(&1u32.to_le_bytes(), &storage)
             .await?
-            .persist(&mut delta, &storage)?;
+            .persist(&mut delta)?;
 
         // Flush
-        for (_, buffer) in delta.flush() {
-            storage.store(buffer);
+        for (_, node) in delta.flush() {
+            storage.store(node.buffer().clone());
         }
 
         assert_eq!(tree.get(&1u32.to_le_bytes(), &storage).await?, None);
@@ -1767,11 +1788,11 @@ mod tests {
             .edit()
             .insert(1u32.to_le_bytes(), vec![2, 3], &storage)
             .await?
-            .persist(&mut delta, &storage)?;
+            .persist(&mut delta)?;
 
         // Flush
-        for (_, buffer) in delta.flush() {
-            storage.store(buffer);
+        for (_, node) in delta.flush() {
+            storage.store(node.buffer().clone());
         }
 
         assert_eq!(
@@ -1794,28 +1815,28 @@ mod tests {
             .edit()
             .insert(1u32.to_le_bytes(), vec![1], &storage)
             .await?
-            .persist(&mut delta_a, &storage)?;
+            .persist(&mut delta_a)?;
         // Flush after each persist so the next edit can load the nodes this persist created.
-        for (_, buffer) in delta_a.flush() {
-            storage.store(buffer);
+        for (_, node) in delta_a.flush() {
+            storage.store(node.buffer().clone());
         }
         tree_a = tree_a
             .edit()
             .insert(2u32.to_le_bytes(), vec![2], &storage)
             .await?
-            .persist(&mut delta_a, &storage)?;
+            .persist(&mut delta_a)?;
         // Flush after each persist so the next edit can load the nodes this persist created.
-        for (_, buffer) in delta_a.flush() {
-            storage.store(buffer);
+        for (_, node) in delta_a.flush() {
+            storage.store(node.buffer().clone());
         }
         tree_a = tree_a
             .edit()
             .insert(3u32.to_le_bytes(), vec![3], &storage)
             .await?
-            .persist(&mut delta_a, &storage)?;
+            .persist(&mut delta_a)?;
         // Flush after each persist so the next edit can load the nodes this persist created.
-        for (_, buffer) in delta_a.flush() {
-            storage.store(buffer);
+        for (_, node) in delta_a.flush() {
+            storage.store(node.buffer().clone());
         }
 
         // Build tree B with different insertion order
@@ -1826,28 +1847,28 @@ mod tests {
             .edit()
             .insert(3u32.to_le_bytes(), vec![3], &storage)
             .await?
-            .persist(&mut delta_b, &storage)?;
+            .persist(&mut delta_b)?;
         // Flush after each persist so the next edit can load the nodes this persist created.
-        for (_, buffer) in delta_b.flush() {
-            storage.store(buffer);
+        for (_, node) in delta_b.flush() {
+            storage.store(node.buffer().clone());
         }
         tree_b = tree_b
             .edit()
             .insert(1u32.to_le_bytes(), vec![1], &storage)
             .await?
-            .persist(&mut delta_b, &storage)?;
+            .persist(&mut delta_b)?;
         // Flush after each persist so the next edit can load the nodes this persist created.
-        for (_, buffer) in delta_b.flush() {
-            storage.store(buffer);
+        for (_, node) in delta_b.flush() {
+            storage.store(node.buffer().clone());
         }
         tree_b = tree_b
             .edit()
             .insert(2u32.to_le_bytes(), vec![2], &storage)
             .await?
-            .persist(&mut delta_b, &storage)?;
+            .persist(&mut delta_b)?;
         // Flush after each persist so the next edit can load the nodes this persist created.
-        for (_, buffer) in delta_b.flush() {
-            storage.store(buffer);
+        for (_, node) in delta_b.flush() {
+            storage.store(node.buffer().clone());
         }
 
         // Different insertion orders should produce same root hash
@@ -1867,28 +1888,28 @@ mod tests {
             .edit()
             .insert(1u32.to_le_bytes(), vec![1], &storage)
             .await?
-            .persist(&mut delta, &storage)?;
+            .persist(&mut delta)?;
         // Flush after each persist so the next edit can load the nodes this persist created.
-        for (_, buffer) in delta.flush() {
-            storage.store(buffer);
+        for (_, node) in delta.flush() {
+            storage.store(node.buffer().clone());
         }
         tree = tree
             .edit()
             .insert(2u32.to_le_bytes(), vec![2], &storage)
             .await?
-            .persist(&mut delta, &storage)?;
+            .persist(&mut delta)?;
         // Flush after each persist so the next edit can load the nodes this persist created.
-        for (_, buffer) in delta.flush() {
-            storage.store(buffer);
+        for (_, node) in delta.flush() {
+            storage.store(node.buffer().clone());
         }
         tree = tree
             .edit()
             .insert(3u32.to_le_bytes(), vec![3], &storage)
             .await?
-            .persist(&mut delta, &storage)?;
+            .persist(&mut delta)?;
         // Flush after each persist so the next edit can load the nodes this persist created.
-        for (_, buffer) in delta.flush() {
-            storage.store(buffer);
+        for (_, node) in delta.flush() {
+            storage.store(node.buffer().clone());
         }
 
         // Verify tree is not empty
@@ -1899,27 +1920,27 @@ mod tests {
             .edit()
             .delete(&1u32.to_le_bytes(), &storage)
             .await?
-            .persist(&mut delta, &storage)?;
-        for (_, buffer) in delta.flush() {
-            storage.store(buffer);
+            .persist(&mut delta)?;
+        for (_, node) in delta.flush() {
+            storage.store(node.buffer().clone());
         }
 
         tree = tree
             .edit()
             .delete(&2u32.to_le_bytes(), &storage)
             .await?
-            .persist(&mut delta, &storage)?;
-        for (_, buffer) in delta.flush() {
-            storage.store(buffer);
+            .persist(&mut delta)?;
+        for (_, node) in delta.flush() {
+            storage.store(node.buffer().clone());
         }
 
         tree = tree
             .edit()
             .delete(&3u32.to_le_bytes(), &storage)
             .await?
-            .persist(&mut delta, &storage)?;
-        for (_, buffer) in delta.flush() {
-            storage.store(buffer);
+            .persist(&mut delta)?;
+        for (_, node) in delta.flush() {
+            storage.store(node.buffer().clone());
         }
 
         // Tree should be back to the empty state: the canonical
@@ -1944,10 +1965,10 @@ mod tests {
                 .edit()
                 .insert(i.to_le_bytes(), vec![i as u8], &storage)
                 .await?
-                .persist(&mut delta, &storage)?;
+                .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
-            for (_, buffer) in delta.flush() {
-                storage.store(buffer);
+            for (_, node) in delta.flush() {
+                storage.store(node.buffer().clone());
             }
         }
 
@@ -2005,10 +2026,10 @@ mod tests {
                 .edit()
                 .insert(key, value, &storage)
                 .await?
-                .persist(&mut delta, &storage)?;
+                .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
-            for (_, buffer) in delta.flush() {
-                storage.store(buffer);
+            for (_, node) in delta.flush() {
+                storage.store(node.buffer().clone());
             }
         }
 
@@ -2042,10 +2063,10 @@ mod tests {
                 .edit()
                 .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), &storage)
                 .await?
-                .persist(&mut delta, &storage)?;
+                .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
-            for (_, buffer) in delta.flush() {
-                storage.store(buffer);
+            for (_, node) in delta.flush() {
+                storage.store(node.buffer().clone());
             }
         }
 
@@ -2084,10 +2105,10 @@ mod tests {
                 .edit()
                 .insert(i.to_le_bytes(), i.to_le_bytes().to_vec(), &storage)
                 .await?
-                .persist(&mut delta, &storage)?;
+                .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
-            for (_, buffer) in delta.flush() {
-                storage.store(buffer);
+            for (_, node) in delta.flush() {
+                storage.store(node.buffer().clone());
             }
         }
 
@@ -2125,10 +2146,10 @@ mod tests {
                 .edit()
                 .insert(i.to_le_bytes(), vec![i as u8], &storage)
                 .await?
-                .persist(&mut delta, &storage)?;
+                .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
-            for (_, buffer) in delta.flush() {
-                storage.store(buffer);
+            for (_, node) in delta.flush() {
+                storage.store(node.buffer().clone());
             }
         }
 
@@ -2138,10 +2159,10 @@ mod tests {
                 .edit()
                 .insert(i.to_le_bytes(), vec![i as u8], &storage)
                 .await?
-                .persist(&mut delta, &storage)?;
+                .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
-            for (_, buffer) in delta.flush() {
-                storage.store(buffer);
+            for (_, node) in delta.flush() {
+                storage.store(node.buffer().clone());
             }
         }
 
@@ -2177,10 +2198,10 @@ mod tests {
                 .edit()
                 .insert(i.to_le_bytes(), vec![i as u8], &storage)
                 .await?
-                .persist(&mut delta, &storage)?;
+                .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
-            for (_, buffer) in delta.flush() {
-                storage.store(buffer);
+            for (_, node) in delta.flush() {
+                storage.store(node.buffer().clone());
             }
         }
 
@@ -2190,10 +2211,10 @@ mod tests {
                 .edit()
                 .delete(&i.to_le_bytes(), &storage)
                 .await?
-                .persist(&mut delta, &storage)?;
+                .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
-            for (_, buffer) in delta.flush() {
-                storage.store(buffer);
+            for (_, node) in delta.flush() {
+                storage.store(node.buffer().clone());
             }
         }
 
@@ -2228,10 +2249,10 @@ mod tests {
                 .edit()
                 .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), &storage)
                 .await?
-                .persist(&mut delta, &storage)?;
+                .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
-            for (_, buffer) in delta.flush() {
-                storage.store(buffer);
+            for (_, node) in delta.flush() {
+                storage.store(node.buffer().clone());
             }
         }
 
@@ -2252,9 +2273,9 @@ mod tests {
                 .edit()
                 .delete(&bk.to_le_bytes(), &storage)
                 .await?
-                .persist(&mut delta, &storage)?;
-            for (_, buffer) in delta.flush() {
-                storage.store(buffer);
+                .persist(&mut delta)?;
+            for (_, node) in delta.flush() {
+                storage.store(node.buffer().clone());
             }
 
             // Deleted key should be gone
@@ -2293,10 +2314,10 @@ mod tests {
                 .edit()
                 .insert(i.to_le_bytes(), vec![i as u8], &storage)
                 .await?
-                .persist(&mut delta, &storage)?;
+                .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
-            for (_, buffer) in delta.flush() {
-                storage.store(buffer);
+            for (_, node) in delta.flush() {
+                storage.store(node.buffer().clone());
             }
         }
 
@@ -2306,10 +2327,10 @@ mod tests {
                 .edit()
                 .delete(&i.to_le_bytes(), &storage)
                 .await?
-                .persist(&mut delta, &storage)?;
+                .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
-            for (_, buffer) in delta.flush() {
-                storage.store(buffer);
+            for (_, node) in delta.flush() {
+                storage.store(node.buffer().clone());
             }
         }
 
@@ -2333,10 +2354,10 @@ mod tests {
                 .edit()
                 .insert(i.to_le_bytes(), vec![i as u8], &storage)
                 .await?
-                .persist(&mut delta, &storage)?;
+                .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
-            for (_, buffer) in delta.flush() {
-                storage.store(buffer);
+            for (_, node) in delta.flush() {
+                storage.store(node.buffer().clone());
             }
         }
 
@@ -2347,7 +2368,7 @@ mod tests {
             .edit()
             .insert(25u32.to_le_bytes(), vec![25u8], &storage)
             .await?
-            .persist(&mut delta, &storage)?;
+            .persist(&mut delta)?;
 
         assert_eq!(
             tree.root(),
@@ -2377,10 +2398,10 @@ mod tests {
                 .edit()
                 .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), &storage)
                 .await?
-                .persist(&mut delta, &storage)?;
+                .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
-            for (_, buffer) in delta.flush() {
-                storage.store(buffer);
+            for (_, node) in delta.flush() {
+                storage.store(node.buffer().clone());
             }
         }
 
@@ -2427,10 +2448,10 @@ mod tests {
                 .edit()
                 .insert(i.to_le_bytes(), vec![i as u8], &storage)
                 .await?
-                .persist(&mut delta, &storage)?;
+                .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
-            for (_, buffer) in delta.flush() {
-                storage.store(buffer);
+            for (_, node) in delta.flush() {
+                storage.store(node.buffer().clone());
             }
         }
 
@@ -2469,10 +2490,10 @@ mod tests {
                 .edit()
                 .insert(i.to_le_bytes(), vec![i as u8], &storage)
                 .await?
-                .persist(&mut delta, &storage)?;
+                .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
-            for (_, buffer) in delta.flush() {
-                storage.store(buffer);
+            for (_, node) in delta.flush() {
+                storage.store(node.buffer().clone());
             }
         }
 
@@ -2503,10 +2524,10 @@ mod tests {
                 .edit()
                 .insert(i.to_le_bytes(), vec![i as u8], &storage)
                 .await?
-                .persist(&mut delta, &storage)?;
+                .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
-            for (_, buffer) in delta.flush() {
-                storage.store(buffer);
+            for (_, node) in delta.flush() {
+                storage.store(node.buffer().clone());
             }
         }
 
@@ -2559,10 +2580,10 @@ mod tests {
                 .edit()
                 .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), &storage)
                 .await?
-                .persist(&mut delta_a, &storage)?;
+                .persist(&mut delta_a)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
-            for (_, buffer) in delta_a.flush() {
-                storage.store(buffer);
+            for (_, node) in delta_a.flush() {
+                storage.store(node.buffer().clone());
             }
         }
 
@@ -2575,10 +2596,10 @@ mod tests {
                 .edit()
                 .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), &storage)
                 .await?
-                .persist(&mut delta_b, &storage)?;
+                .persist(&mut delta_b)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
-            for (_, buffer) in delta_b.flush() {
-                storage.store(buffer);
+            for (_, node) in delta_b.flush() {
+                storage.store(node.buffer().clone());
             }
         }
 
@@ -2608,10 +2629,10 @@ mod tests {
                 .edit()
                 .insert(i.to_le_bytes(), vec![i as u8], &storage)
                 .await?
-                .persist(&mut delta_base, &storage)?;
+                .persist(&mut delta_base)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
-            for (_, buffer) in delta_base.flush() {
-                storage.store(buffer);
+            for (_, node) in delta_base.flush() {
+                storage.store(node.buffer().clone());
             }
         }
 
@@ -2626,37 +2647,37 @@ mod tests {
             .edit()
             .insert(100u32.to_le_bytes(), vec![100], &storage)
             .await?
-            .persist(&mut delta_a, &storage)?;
+            .persist(&mut delta_a)?;
         // Flush after each persist so the next edit can load the nodes this persist created.
-        for (_, buffer) in delta_a.flush() {
-            storage.store(buffer);
+        for (_, node) in delta_a.flush() {
+            storage.store(node.buffer().clone());
         }
         branch_b = branch_b
             .edit()
             .delete(&5u32.to_le_bytes(), &storage)
             .await?
-            .persist(&mut delta_b, &storage)?;
+            .persist(&mut delta_b)?;
         // Flush after each persist so the next edit can load the nodes this persist created.
-        for (_, buffer) in delta_b.flush() {
-            storage.store(buffer);
+        for (_, node) in delta_b.flush() {
+            storage.store(node.buffer().clone());
         }
         branch_a = branch_a
             .edit()
             .insert(101u32.to_le_bytes(), vec![101], &storage)
             .await?
-            .persist(&mut delta_a, &storage)?;
+            .persist(&mut delta_a)?;
         // Flush after each persist so the next edit can load the nodes this persist created.
-        for (_, buffer) in delta_a.flush() {
-            storage.store(buffer);
+        for (_, node) in delta_a.flush() {
+            storage.store(node.buffer().clone());
         }
         branch_b = branch_b
             .edit()
             .delete(&10u32.to_le_bytes(), &storage)
             .await?
-            .persist(&mut delta_b, &storage)?;
+            .persist(&mut delta_b)?;
         // Flush after each persist so the next edit can load the nodes this persist created.
-        for (_, buffer) in delta_b.flush() {
-            storage.store(buffer);
+        for (_, node) in delta_b.flush() {
+            storage.store(node.buffer().clone());
         }
 
         // Branch A: base + 100, 101
@@ -2705,10 +2726,10 @@ mod tests {
                 .edit()
                 .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), &storage)
                 .await?
-                .persist(&mut delta, &storage)?;
+                .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
-            for (_, buffer) in delta.flush() {
-                storage.store(buffer);
+            for (_, node) in delta.flush() {
+                storage.store(node.buffer().clone());
             }
         }
 
@@ -2732,10 +2753,10 @@ mod tests {
                 .edit()
                 .delete(&bk.to_le_bytes(), &storage)
                 .await?
-                .persist(&mut delta, &storage)?;
+                .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
-            for (_, buffer) in delta.flush() {
-                storage.store(buffer);
+            for (_, node) in delta.flush() {
+                storage.store(node.buffer().clone());
             }
 
             // Read every surviving key. Any missing new node in storage
@@ -2783,10 +2804,10 @@ mod tests {
                 .edit()
                 .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), storage)
                 .await?
-                .persist(&mut delta, storage)?;
+                .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
-            for (_, buffer) in delta.flush() {
-                storage.store(buffer);
+            for (_, node) in delta.flush() {
+                storage.store(node.buffer().clone());
             }
         }
         Ok(tree)
@@ -2813,9 +2834,9 @@ mod tests {
             .edit()
             .delete(&69161u32.to_le_bytes(), &storage)
             .await?
-            .persist(&mut delta, &storage)?;
-        for (_, buffer) in delta.flush() {
-            storage.store(buffer);
+            .persist(&mut delta)?;
+        for (_, node) in delta.flush() {
+            storage.store(node.buffer().clone());
         }
 
         let remaining: Vec<u32> = keys.iter().copied().filter(|&k| k != 69161).collect();
@@ -2855,9 +2876,9 @@ mod tests {
             .edit()
             .delete(&198936u32.to_le_bytes(), &storage)
             .await?
-            .persist(&mut delta, &storage)?;
-        for (_, buffer) in delta.flush() {
-            storage.store(buffer);
+            .persist(&mut delta)?;
+        for (_, node) in delta.flush() {
+            storage.store(node.buffer().clone());
         }
 
         let mut unreadable = vec![];
@@ -2918,20 +2939,20 @@ mod tests {
                 .edit()
                 .insert(i.to_le_bytes(), vec![i as u8], &storage)
                 .await?
-                .persist(&mut delta, &storage)?;
+                .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
-            for (_, buffer) in delta.flush() {
-                storage.store(buffer);
+            for (_, node) in delta.flush() {
+                storage.store(node.buffer().clone());
             }
         }
         tree = tree
             .edit()
             .insert([0xFF; 4], vec![0xFF], &storage)
             .await?
-            .persist(&mut delta, &storage)?;
+            .persist(&mut delta)?;
         // Flush after each persist so the next edit can load the nodes this persist created.
-        for (_, buffer) in delta.flush() {
-            storage.store(buffer);
+        for (_, node) in delta.flush() {
+            storage.store(node.buffer().clone());
         }
 
         let stream = tree.stream(&storage);
@@ -2982,7 +3003,7 @@ mod tests {
                         .edit()
                         .delete(&key.to_le_bytes(), &storage)
                         .await?
-                        .persist(&mut delta, &storage)?;
+                        .persist(&mut delta)?;
                     live.remove(&key);
                 } else {
                     let key = rng.gen_range(0..200_000u32);
@@ -2990,15 +3011,15 @@ mod tests {
                         .edit()
                         .insert(key.to_le_bytes(), key.to_le_bytes().to_vec(), &storage)
                         .await?
-                        .persist(&mut delta, &storage)?;
+                        .persist(&mut delta)?;
                     live.insert(key);
                 }
 
                 // Flush periodically so both the delta-resident and the
                 // storage-resident read paths get exercised.
                 if op % 10 == 9 {
-                    for (_, buffer) in delta.flush() {
-                        storage.store(buffer);
+                    for (_, node) in delta.flush() {
+                        storage.store(node.buffer().clone());
                     }
                 }
 

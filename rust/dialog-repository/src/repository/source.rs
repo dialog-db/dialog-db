@@ -8,24 +8,27 @@
 //! downstream of "which root, which store, which caches" is identical,
 //! so it is written once against [`SourceRef`] and both kinds plug in.
 
-use dialog_artifacts::history::{
-    CausalityCache, ContextCache, RevisionRecord, TreeHistory, Version, log,
-};
-use dialog_artifacts::tree::{ArtifactNodeCache, SpillCache, spill_cache};
-use dialog_artifacts::{Changes, DialogArtifactsError, Entity, SpineSlot, Statement as _};
 use dialog_capability::{Capability, Provider, Subject};
 use dialog_common::{Blake3Hash as NodeHash, ConditionalSync, Holds};
+use dialog_corpus::history::{
+    CausalityCache, ContextCache, RevisionRecord, TreeHistory, Version, log,
+};
+use dialog_corpus::tree::CorpusNode;
+use dialog_corpus::tree::{CorpusCache, SpillCache};
+use dialog_corpus::{Changes, DialogCorpusError, Entity, SpineSlot, Statement as _};
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::prelude::{ArchiveScope, CatalogScope};
 use dialog_effects::authority::{Operator, OperatorExt as _};
 use dialog_effects::blob::Load as BlobLoad;
 use dialog_query::concept::query::PlanCache;
 use dialog_search_tree::Cache;
+use dialog_search_tree::nodes;
 use dialog_storage::Blake3Hash;
 use std::sync::Arc;
 
 use crate::repository::branch::LayerMetadataMemo;
-use crate::rules::{RuleCache, SharedRuleCache};
+use crate::repository::caches::CacheBudget;
+use crate::rules::{RuleCache, RuleContent, SharedRuleCache};
 use crate::schema::Replica;
 use crate::{Branch, Ephemeral, Index, Revision, Snapshot};
 
@@ -249,7 +252,16 @@ impl<'a> SourceRef<'a> {
     /// locally, so an offline replica behaves as it always did.
     pub(crate) fn history<Env>(self, env: &Env) -> TreeHistory<&Env>
     where
-        Env: Provider<ArchiveLoad> + Provider<BlobLoad> + Holds + ConditionalSync + ?Sized,
+        Env: Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + Provider<BlobLoad>
+            + Holds
+            + ConditionalSync
+            + ?Sized,
     {
         let history = match self.root() {
             Some(root) => TreeHistory::from_root(self.catalog(), &root, env),
@@ -265,9 +277,18 @@ impl<'a> SourceRef<'a> {
         self,
         env: &Env,
         limit: usize,
-    ) -> Result<Vec<(Version, RevisionRecord)>, DialogArtifactsError>
+    ) -> Result<Vec<(Version, RevisionRecord)>, DialogCorpusError>
     where
-        Env: Provider<ArchiveLoad> + Provider<BlobLoad> + Holds + ConditionalSync + ?Sized,
+        Env: Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + Provider<BlobLoad>
+            + Holds
+            + ConditionalSync
+            + ?Sized,
     {
         let Some(head) = self.revision() else {
             return Ok(Vec::new());
@@ -284,7 +305,7 @@ impl<'a> SourceRef<'a> {
 #[derive(Debug, Clone)]
 pub(crate) struct Caches {
     /// Tree nodes by hash, so blocks one read fetched stay warm for the next.
-    pub(crate) nodes: ArtifactNodeCache,
+    pub(crate) nodes: CorpusCache,
     /// Spilled value blocks by content reference.
     pub(crate) spills: SpillCache,
     /// Deductive-rule discovery (by head) and hydrated bodies (by entity).
@@ -307,22 +328,29 @@ pub(crate) struct Caches {
     /// [`Branch::layer_metadata`](crate::Branch)), so a branch opened again
     /// does not derive and key it again.
     pub(crate) metadata: LayerMetadataMemo,
+    /// How large the caches of a set derived from this one (a transaction
+    /// batch's) may grow.
+    pub(crate) limits: CacheBudget,
 }
 
 impl Caches {
-    /// A cold set.
-    pub(crate) fn new() -> Self {
+    /// A cold set of its own, every cache at the size `limits` gives it.
+    pub(crate) fn sized(limits: CacheBudget) -> Self {
+        let entries = limits.entry_capacity();
         Self {
-            nodes: dialog_search_tree::NodeCache::new(),
-            spills: spill_cache(),
-            rules: Arc::new(RuleCache::new()),
-            plans: PlanCache::default(),
-            causality: CausalityCache::new(),
-            contexts: ContextCache::new(),
-            records: Cache::new(),
-            rewrites: Cache::new(),
+            nodes: dialog_search_tree::NodeCache::with_budget(limits.node_bytes()),
+            spills: SpillCache::with_budget(limits.spill_bytes()),
+            rules: Arc::new(RuleCache::sharing(Arc::new(RuleContent::with_capacity(
+                limits.rule_capacity(),
+            )))),
+            plans: PlanCache::with_capacity(limits.plan_capacity()),
+            causality: CausalityCache::with_capacity(entries),
+            contexts: ContextCache::with_capacity(entries),
+            records: Cache::with_capacity(entries),
+            rewrites: Cache::with_capacity(entries),
             spine: SpineSlot::new(),
             metadata: LayerMetadataMemo::default(),
+            limits,
         }
     }
 }

@@ -56,12 +56,10 @@ use std::ops::RangeInclusive;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 
-use dialog_artifacts::history::REVISION_ATTRIBUTE;
-use dialog_artifacts::selector::Constrained;
-use dialog_artifacts::tree::selector_range;
-use dialog_artifacts::{
-    Artifact, ArtifactSelector, Entity, Key, Relation, Statement, Update, Value,
-};
+use dialog_corpus::history::REVISION_ATTRIBUTE;
+use dialog_corpus::selector::Constrained;
+use dialog_corpus::tree::selector_range;
+use dialog_corpus::{Entity, Fact, Key, Relation, Selector, Statement, Update, Value};
 use dialog_query::concept::descriptor::ConceptDescriptor;
 use dialog_query::concept::query::{ConceptRules, Exact, Installed, PlanCache};
 use dialog_query::error::EvaluationError;
@@ -128,7 +126,7 @@ impl Statement for Transient {
             transient_attr(),
             self.0,
             Value::Boolean(true),
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         );
     }
 
@@ -140,8 +138,8 @@ impl Statement for Transient {
 /// Selector for `dialog.rule/derives is = <on:attribute>` — finds the rule
 /// entities deriving an attribute, whatever concept they were written
 /// against.
-pub(crate) fn derives_selector(on: &Entity) -> ArtifactSelector<Constrained> {
-    ArtifactSelector::new()
+pub(crate) fn derives_selector(on: &Entity) -> Selector<Constrained> {
+    Selector::new()
         .the(derives_attr())
         .is(Value::Entity(on.clone()))
 }
@@ -157,8 +155,8 @@ pub(crate) fn derives_keys(attribute: &ConceptDescriptor) -> Vec<Entity> {
 }
 
 /// Selector for `dialog.rule/source of = <rule>` — fetches a rule's body.
-pub(crate) fn source_selector(rule: &Entity) -> ArtifactSelector<Constrained> {
-    ArtifactSelector::new().the(source_attr()).of(rule.clone())
+pub(crate) fn source_selector(rule: &Entity) -> Selector<Constrained> {
+    Selector::new().the(source_attr()).of(rule.clone())
 }
 
 /// Hydrate a compiled [`DeductiveRule`] from a `dialog.rule/source` claim
@@ -170,13 +168,13 @@ pub(crate) fn hydrate(source: &[u8]) -> Result<DeductiveRule, EvaluationError> {
 }
 
 /// Extract the rule entities from a batch of `dialog.rule/conclusion`
-/// artifacts — each artifact's `of` is a rule entity.
-pub(crate) fn rule_entities(conclusion_claims: Vec<Artifact>) -> Vec<Entity> {
+/// facts — each fact's `of` is a rule entity.
+pub(crate) fn rule_entities(conclusion_claims: Vec<Fact>) -> Vec<Entity> {
     conclusion_claims.into_iter().map(|a| a.of).collect()
 }
 
-/// Extract the source bytes from a `dialog.rule/source` artifact batch.
-pub(crate) fn source_bytes(source_claims: Vec<Artifact>) -> Option<Vec<u8>> {
+/// Extract the source bytes from a `dialog.rule/source` fact batch.
+pub(crate) fn source_bytes(source_claims: Vec<Fact>) -> Option<Vec<u8>> {
     source_claims.into_iter().find_map(|a| match a.is {
         Value::Bytes(bytes) => Some(bytes),
         _ => None,
@@ -567,6 +565,30 @@ pub(crate) struct RuleContent {
     selecting: Cache<SelectingKey, Selecting>,
 }
 
+impl RuleContent {
+    /// Rule content remembering up to `capacity` entries of each kind:
+    /// heads, deductive bodies, inductive bodies and selecting rules.
+    pub(crate) fn with_capacity(capacity: usize) -> Self {
+        Self {
+            heads: Cache::with_capacity(capacity),
+            bodies: Cache::with_capacity(capacity),
+            inductive: Cache::with_capacity(capacity),
+            selecting: Cache::with_capacity(capacity),
+        }
+    }
+
+    /// How many entries it remembers now, of every kind.
+    pub(crate) fn len(&self) -> usize {
+        self.heads.len() + self.bodies.len() + self.inductive.len() + self.selecting.len()
+    }
+
+    /// How many entries of each kind this content may remember.
+    #[cfg(test)]
+    pub(crate) fn capacity(&self) -> usize {
+        self.heads.capacity()
+    }
+}
+
 /// How many spellings of one concept keep an assembled rule set each.
 const SPELLINGS: usize = 4;
 
@@ -584,7 +606,7 @@ struct Bundle {
 
 /// One rule-discovery read: the selector and the manifest it was keyed
 /// under.
-pub(crate) type RuleRead = (ArtifactSelector<Constrained>, Manifest);
+pub(crate) type RuleRead = (Selector<Constrained>, Manifest);
 
 /// The key ranges an entry's rule-discovery reads demanded, by the format
 /// they were keyed under, each read's range built once when the entry is

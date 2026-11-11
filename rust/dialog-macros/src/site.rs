@@ -454,8 +454,7 @@ fn generate_site(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
 
         #(#dispatch_bound_trait_defs)*
 
-        #[cfg_attr(not(target_arch = "wasm32"), ::async_trait::async_trait)]
-        #[cfg_attr(target_arch = "wasm32", ::async_trait::async_trait(?Send))]
+        #[dialog_capability::provider]
         impl<Fx> ::dialog_capability::Provider<
             ::dialog_capability::ForkInvocation<#struct_name, Fx>,
         > for #struct_name

@@ -24,15 +24,15 @@
 // own lib under the `dialog_query` name (its extern prelude), so bare
 // `dialog_query::…` resolves to the real crate in both.
 use anyhow::Result;
-use async_trait::async_trait;
-use dialog_artifacts::selector::Constrained;
-use dialog_artifacts::{
-    Artifact, ArtifactSelector, ArtifactStream, DialogArtifactsError, Instruction,
-    Relation as ArtifactsRelation, Select, Value,
-};
 use dialog_capability::{Fork, Provider, Subject};
 use dialog_common::Buffer;
 use dialog_common::{ConditionalSync, Held, Holdings, Holds};
+use dialog_corpus::selector::Constrained;
+use dialog_corpus::tree::CorpusNode;
+use dialog_corpus::{
+    DialogCorpusError, Fact, FactStream, Instruction, Relation as CorpusRelation, Select, Selector,
+    Value,
+};
 use dialog_effects::archive::ArchiveError;
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::{Get, Import, Put};
@@ -49,7 +49,9 @@ use dialog_peer::helpers::test_owned;
 use dialog_peer::helpers::{generate_data, open_peer, test_storage, unique_name};
 use dialog_peer::{Peer, Session};
 use dialog_repository::{Branch, HeldCaches, PeersEnv, RemoteSite, Repository, RepositoryExt as _};
+use dialog_search_tree::DialogSearchTreeError;
 use dialog_search_tree::audit as tree_audit;
+use dialog_search_tree::nodes;
 
 use dialog_storage::Blake3Hash;
 use dialog_storage::dup_audit;
@@ -266,8 +268,8 @@ where
 /// The outcome of running a single query through [`BenchEnv::run_query`].
 #[derive(Debug, Clone)]
 pub struct QueryRun {
-    /// The artifacts the query produced.
-    pub results: Vec<Artifact>,
+    /// The facts the query produced.
+    pub results: Vec<Fact>,
     /// Total number of block reads (including repeats) the query triggered.
     pub reads: usize,
     /// Number of distinct block keys the query read.
@@ -275,12 +277,12 @@ pub struct QueryRun {
 }
 
 impl QueryRun {
-    /// The number of artifacts the query produced.
+    /// The number of facts the query produced.
     pub fn len(&self) -> usize {
         self.results.len()
     }
 
-    /// Whether the query produced no artifacts.
+    /// Whether the query produced no facts.
     pub fn is_empty(&self) -> bool {
         self.results.is_empty()
     }
@@ -395,8 +397,7 @@ impl<Backend> Holds for CountingStore<Backend> {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl<Backend> Provider<ArchiveLoad> for CountingStore<Backend>
 where
     Backend: Provider<ArchiveLoad> + ConditionalSync,
@@ -411,8 +412,32 @@ where
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+// A node read is answered through this store's own counted loads, into the
+// node cache it holds; a write goes through the backend's import and keeps
+// the nodes here.
+dialog_search_tree::reads_nodes_through_blocks!(
+    impl[Backend,] CountingStore<Backend>
+    where [Backend: Provider<ArchiveLoad> + ConditionalSync,]
+);
+dialog_search_tree::writes_nodes_through_blocks!(
+    impl[Backend,] CountingStore<Backend>
+    where [Backend: Provider<Import> + ConditionalSync,]
+);
+
+#[dialog_capability::provider]
+impl<Backend> Provider<Import> for CountingStore<Backend>
+where
+    Backend: Provider<Import> + ConditionalSync,
+{
+    async fn execute(
+        &self,
+        import: dialog_capability::Capability<Import>,
+    ) -> Result<(), ArchiveError> {
+        import.perform(&self.backend).await
+    }
+}
+
+#[dialog_capability::provider]
 impl<Backend> Provider<BlobLoad> for CountingStore<Backend>
 where
     Backend: Provider<BlobLoad> + ConditionalSync,
@@ -469,26 +494,26 @@ impl<'a, Env> JoinEnv<'a, Env> {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl<'a, Env> Provider<Select<'a>> for JoinEnv<'a, Env>
 where
     Env: Provider<BlobRead>
         + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
+        + Provider<Import>
         + Provider<ArchiveLoad>
         + Provider<BlobLoad>
-        + Provider<dialog_artifacts::Preload>
-        + Provider<dialog_artifacts::Speculation>
+        + Provider<dialog_corpus::Preload>
+        + Provider<dialog_corpus::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
         + ConditionalSync
         + 'static,
 {
     async fn execute(
         &self,
-        input: ArtifactSelector<Constrained>,
-    ) -> Result<ArtifactStream<'a>, DialogArtifactsError> {
+        input: Selector<Constrained>,
+    ) -> Result<FactStream<'a>, DialogCorpusError> {
         let select = self.branch.claims().select(input);
         let store = self.operator;
         let counting = CountingStore::new(store, self.journal.clone());
@@ -497,34 +522,33 @@ where
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl<Env: ConditionalSync> Provider<SelectRules> for JoinEnv<'_, Env> {
     async fn execute(&self, input: ConceptDescriptor) -> Result<ConceptRules, EvaluationError> {
         self.rules.acquire(&input)
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Env> Provider<dialog_artifacts::Estimate> for JoinEnv<'_, Env>
+#[dialog_capability::provider]
+impl<Env> Provider<dialog_corpus::Estimate> for JoinEnv<'_, Env>
 where
     Env: Provider<BlobRead>
         + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
+        + Provider<Import>
         + Provider<ArchiveLoad>
         + Provider<BlobLoad>
-        + Provider<dialog_artifacts::Preload>
-        + Provider<dialog_artifacts::Speculation>
+        + Provider<dialog_corpus::Preload>
+        + Provider<dialog_corpus::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
         + ConditionalSync
         + 'static,
 {
     async fn execute(
         &self,
-        input: ArtifactSelector<Constrained>,
-    ) -> Result<Option<u64>, DialogArtifactsError> {
+        input: Selector<Constrained>,
+    ) -> Result<Option<u64>, DialogCorpusError> {
         // Route the estimate's root read through the same counting store as
         // the scans, so a bench sees the block it costs.
         let select = self.branch.claims().select(input);
@@ -536,10 +560,9 @@ where
 
 // Preload hints have no listener in the bench env: refuse them so the
 // measured read counts stay exactly the demand reads.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Env: ConditionalSync> Provider<dialog_artifacts::Preload> for JoinEnv<'_, Env> {
-    async fn execute(&self, _input: dialog_artifacts::PreloadRequest) -> bool {
+#[dialog_capability::provider]
+impl<Env: ConditionalSync> Provider<dialog_corpus::Preload> for JoinEnv<'_, Env> {
+    async fn execute(&self, _input: dialog_corpus::PreloadRequest) -> bool {
         false
     }
 }
@@ -548,8 +571,7 @@ impl<Env: ConditionalSync> Provider<dialog_artifacts::Preload> for JoinEnv<'_, E
 // the query reads: read the branch's archive catalog through the same
 // counting store scans use, so resolver block reads land in the shared
 // read journal too.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl<Env> Provider<ArchiveLoad> for JoinEnv<'_, Env>
 where
     Env: Provider<ArchiveLoad> + ConditionalSync,
@@ -565,9 +587,39 @@ where
     }
 }
 
+// Node reads for the scans and resolver premises, through the same
+// counting store, in the branch's catalog.
+#[dialog_capability::provider]
+impl<Env> Provider<nodes::Read<CorpusNode>> for JoinEnv<'_, Env>
+where
+    Env: Provider<ArchiveLoad> + ConditionalSync,
+{
+    async fn execute(
+        &self,
+        read: nodes::Read<CorpusNode>,
+    ) -> Result<Option<CorpusNode>, DialogSearchTreeError> {
+        let counting = CountingStore::new(self.operator, self.journal.clone());
+        let mut line = read;
+        line.catalog = self.branch.archive().index();
+        line.perform(&counting).await
+    }
+}
+
+#[dialog_capability::provider]
+impl<Env> Provider<nodes::Preload<CorpusNode>> for JoinEnv<'_, Env>
+where
+    Env: Provider<ArchiveLoad> + ConditionalSync,
+{
+    async fn execute(&self, preload: nodes::Preload<CorpusNode>) {
+        let counting = CountingStore::new(self.operator, self.journal.clone());
+        let mut line = preload;
+        line.catalog = self.branch.archive().index();
+        line.perform(&counting).await
+    }
+}
+
 // Spilled-value loads for `tree/value`, through the same counting store.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl<Env> Provider<BlobLoad> for JoinEnv<'_, Env>
 where
     Env: Provider<BlobLoad> + ConditionalSync,
@@ -626,7 +678,7 @@ fn parse_value(value_type: &str, raw: &str) -> Option<Value> {
         "integer" => raw.parse().ok().map(Value::SignedInt),
         "float" => raw.parse().ok().map(Value::Float),
         "boolean" => bool::from_str(raw).ok().map(Value::Boolean),
-        "attribute" => ArtifactsRelation::from_str(raw).ok().map(Value::Symbol),
+        "attribute" => CorpusRelation::from_str(raw).ok().map(Value::Symbol),
         _ => None,
     }
 }
@@ -698,9 +750,14 @@ where
         + Provider<List>
         + PeersEnv
         + Provider<ArchiveLoad>
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
         + Provider<BlobLoad>
-        + Provider<dialog_artifacts::Preload>
-        + Provider<dialog_artifacts::Speculation>
+        + Provider<dialog_corpus::Preload>
+        + Provider<dialog_corpus::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
         + Holds
         + ConditionalSync
@@ -715,7 +772,7 @@ where
     /// the branch via a single transaction.
     ///
     /// Seeding is intentionally not part of any measured path. The facts
-    /// come from [`generate_data`], which produces several artifacts per
+    /// come from [`generate_data`], which produces several facts per
     /// entity across a handful of attributes.
     pub async fn seed(&self, entity_count: usize) -> Result<usize> {
         let data = generate_data(entity_count)?;
@@ -729,7 +786,7 @@ where
 
         let instructions: Vec<Instruction> = data
             .into_iter()
-            .map(|artifact| Instruction::Assert(artifact, dialog_artifacts::Pick::All))
+            .map(|fact| Instruction::Assert(fact, dialog_corpus::Pick::All))
             .collect();
         branch
             .transaction()
@@ -762,19 +819,16 @@ where
     /// scan so warm-up reads (e.g. the eager root probe inside
     /// `execute`) are excluded from the recorded counts.
     pub async fn run_query(&self, attribute: &str) -> Result<QueryRun> {
-        let the: ArtifactsRelation = attribute.parse()?;
+        let the: CorpusRelation = attribute.parse()?;
         let branch = self.cold().await?;
 
-        let select = branch
-            .claims()
-            .select(ArtifactSelector::new().the(the))
-            .to_owned();
+        let select = branch.claims().select(Selector::new().the(the)).to_owned();
         let store = &self.operator;
         let journal = ReadJournal::default();
         let counting = CountingStore::new(store, journal.clone());
 
         let stream = select.execute(counting).await?;
-        let results: Vec<Artifact> = stream.try_collect().await?;
+        let results: Vec<Fact> = stream.try_collect().await?;
 
         let reads = journal.reads();
         let unique_reads = journal.unique_reads();
@@ -888,7 +942,7 @@ where
             memo: Memo::default(),
         };
         env.journal().clear();
-        let selector = ArtifactSelector::new()
+        let selector = Selector::new()
             .of(of.clone())
             .the("stuff/name".parse().expect("valid attribute"));
         let stream = Provider::<Select<'_>>::execute(&env, selector).await?;
@@ -912,7 +966,7 @@ where
             memo: Memo::default(),
         };
         env.journal().clear();
-        let selector = ArtifactSelector::new().the("stuff/name".parse().expect("valid attribute"));
+        let selector = Selector::new().the("stuff/name".parse().expect("valid attribute"));
         let stream = Provider::<Select<'_>>::execute(&env, selector).await?;
         let rows: Vec<_> = stream.try_collect().await?;
         Ok(JoinRun {
@@ -1171,7 +1225,7 @@ where
                 current = Some(row[txn_at].clone());
             }
 
-            let Ok(the) = ArtifactsRelation::from_str(&row[the_at]) else {
+            let Ok(the) = CorpusRelation::from_str(&row[the_at]) else {
                 continue;
             };
             let Ok(of) = Entity::from_str(&row[of_at]) else {
@@ -1185,13 +1239,13 @@ where
                 entities.push(of.clone());
             }
             pending.push(Instruction::Assert(
-                Artifact {
+                Fact {
                     the,
                     of,
                     is,
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             ));
         }
 
@@ -1820,9 +1874,14 @@ mod test {
             + Provider<List>
             + PeersEnv
             + Provider<ArchiveLoad>
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
-            + Provider<dialog_artifacts::Preload>
-            + Provider<dialog_artifacts::Speculation>
+            + Provider<dialog_corpus::Preload>
+            + Provider<dialog_corpus::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + Holds
             + ConditionalSync
@@ -1946,9 +2005,14 @@ mod test {
             + Provider<List>
             + PeersEnv
             + Provider<ArchiveLoad>
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
-            + Provider<dialog_artifacts::Preload>
-            + Provider<dialog_artifacts::Speculation>
+            + Provider<dialog_corpus::Preload>
+            + Provider<dialog_corpus::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + Holds
             + ConditionalSync
@@ -2023,7 +2087,7 @@ mod test {
     use super::*;
 
     #[cfg(not(target_arch = "wasm32"))]
-    use dialog_artifacts::tree::distribution;
+    use dialog_corpus::tree::distribution;
     #[cfg(not(target_arch = "wasm32"))]
     use std::fs::read_dir;
     #[cfg(not(target_arch = "wasm32"))]
@@ -2082,9 +2146,14 @@ mod test {
             + Provider<List>
             + PeersEnv
             + Provider<ArchiveLoad>
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
-            + Provider<dialog_artifacts::Preload>
-            + Provider<dialog_artifacts::Speculation>
+            + Provider<dialog_corpus::Preload>
+            + Provider<dialog_corpus::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + Holds
             + ConditionalSync
@@ -2107,11 +2176,8 @@ mod test {
         let root = *revision.tree.hash();
         // Any constrained selector works here; the catalog it names is the
         // branch's archive index, which is where the tree nodes live.
-        let the: ArtifactsRelation = "se.post/title".parse()?;
-        let select = branch
-            .claims()
-            .select(ArtifactSelector::new().the(the))
-            .to_owned();
+        let the: CorpusRelation = "se.post/title".parse()?;
+        let select = branch.claims().select(Selector::new().the(the)).to_owned();
         let store = env.operator();
         let stats = distribution::capture(&select.catalog(), &root, store).await?;
         distribution::report(&format!("se-replay-{limit}"), &stats);
@@ -2189,7 +2255,7 @@ mod test {
     /// A realistic bug-tracker concept query, over a fact base large enough to
     /// span multiple leaves, must both round-trip and filter correctly. The
     /// [`Bug`] concept joins six attributes including a `Float` `ordering`
-    /// field, so this is the concept-layer analogue of the artifact-layer float
+    /// field, so this is the concept-layer analogue of the fact-layer float
     /// key-width regression: before that fix, committing enough float-valued
     /// bugs to fill a leaf failed outright, and no bug query could run.
     #[dialog_common::test]
@@ -2460,9 +2526,14 @@ where
         + Provider<List>
         + PeersEnv
         + Provider<ArchiveLoad>
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
         + Provider<BlobLoad>
-        + Provider<dialog_artifacts::Preload>
-        + Provider<dialog_artifacts::Speculation>
+        + Provider<dialog_corpus::Preload>
+        + Provider<dialog_corpus::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
         + Holds
         + ConditionalSync

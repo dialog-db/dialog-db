@@ -27,7 +27,7 @@
 //! # async fn example<Env>(
 //! #     branch: &Branch,
 //! #     env: &Env,
-//! #     entity: dialog_artifacts::Entity,
+//! #     entity: dialog_corpus::Entity,
 //! #     range: ByteRange,
 //! #     chunks: futures_util::stream::Iter<std::vec::IntoIter<Result<Vec<u8>, BlobError>>>,
 //! # ) -> Result<(), CommitError>
@@ -44,6 +44,9 @@
 //! #         + Provider<BlobImport>
 //! #         + Provider<dialog_effects::archive::Load>
 //! #         + Provider<dialog_effects::blob::Load>
+//! #         + dialog_capability::Provider<dialog_search_tree::nodes::Read<dialog_corpus::tree::CorpusNode>>
+//! #         + dialog_capability::Provider<dialog_search_tree::nodes::Preload<dialog_corpus::tree::CorpusNode>>
+//! #         + dialog_capability::Provider<dialog_search_tree::nodes::Write<dialog_corpus::tree::CorpusNode>>
 //! #         + Provider<Fork<RemoteSite, Resolve>>
 //! #         + Provider<Fork<RemoteSite, BlobRead>>
 //! #         + dialog_common::Holds
@@ -75,10 +78,11 @@ use crate::repository::branch::asset::recorded_size;
 use crate::repository::remote::Step;
 use crate::repository::source::SourceRef;
 use crate::{Branch, CommitError, Index, RemoteFallback, RemoteSite, Snapshot};
-use dialog_artifacts::{Asset, BlobIndexExt as _, BlobRecord, Entity, Instruction};
 use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync};
+use dialog_corpus::tree::CorpusNode;
+use dialog_corpus::{Asset, BlobIndexExt as _, BlobRecord, Entity, Instruction};
 use dialog_effects::MethodExt as _;
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::prelude::ArchiveExt as _;
@@ -90,6 +94,7 @@ use dialog_effects::blob::{
     BlobError, BlobReader, ByteRange, Import as BlobImport, Read as BlobRead, Write as BlobWrite,
 };
 use dialog_effects::memory::{Publish, Resolve};
+use dialog_search_tree::nodes;
 use futures_util::{Stream, stream};
 
 /// A line's blob store: the target that blob reads and writes bind to.
@@ -240,6 +245,11 @@ where
         + Provider<Put>
         + Provider<Resolve>
         + Provider<ArchiveLoad>
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
         + Provider<BlobLoad>
         + dialog_common::Holds
         + ConditionalSync
@@ -268,6 +278,11 @@ where
         + Provider<Put>
         + Provider<Resolve>
         + Provider<ArchiveLoad>
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
         + Provider<BlobLoad>
         + dialog_common::Holds
         + ConditionalSync
@@ -299,6 +314,11 @@ impl BlobSize<'_> {
             + Provider<Put>
             + Provider<Resolve>
             + Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
             + dialog_common::Holds
             + ConditionalSync
@@ -333,6 +353,11 @@ impl ReadBlob<'_> {
             + Provider<BlobImport>
             + Provider<Resolve>
             + Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
             + Provider<Fork<RemoteSite, BlobRead>>
             + dialog_common::Holds
@@ -455,11 +480,18 @@ where
             + Provider<Get>
             + Provider<Put>
             + Provider<Import>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
             + Provider<Resolve>
             + Provider<Publish>
             + Provider<Identify>
             + Provider<Attest>
             + Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
             + Provider<Fork<RemoteSite, Resolve>>
             + dialog_common::Holds
@@ -475,7 +507,7 @@ where
             branch
                 .commit(stream::iter(vec![Instruction::Assert(
                     asset.fact()?,
-                    dialog_artifacts::Pick::Last,
+                    dialog_corpus::Pick::Last,
                 )]))
                 .machinery()
                 .perform(env),
@@ -515,11 +547,18 @@ impl RetractBlob<'_> {
             + Provider<Get>
             + Provider<Put>
             + Provider<Import>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
             + Provider<Resolve>
             + Provider<Publish>
             + Provider<Identify>
             + Provider<Attest>
             + Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
             + Provider<Fork<RemoteSite, Resolve>>
             + dialog_common::Holds
@@ -564,8 +603,8 @@ mod tests {
     use super::Blob;
     use crate::RepositoryExt as _;
     use anyhow::Result;
-    use dialog_artifacts::{BlobIndexExt as _, BlobRecord, Entity};
     use dialog_capability::Subject;
+    use dialog_corpus::{BlobIndexExt as _, BlobRecord, Entity};
     use dialog_effects::blob::{BlobError, BlobReader, ByteRange};
     use dialog_peer::helpers::{open_peer, test_storage, unique_name};
 
@@ -839,7 +878,7 @@ mod tests {
             .await?;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
-        let entity: dialog_artifacts::Entity = "user:alice".parse()?;
+        let entity: dialog_corpus::Entity = "user:alice".parse()?;
         let result = Blob::from(entity)
             .read((&branch).into())
             .perform(&operator)

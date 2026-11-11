@@ -36,7 +36,7 @@ tokio = { workspace = true, features = ["sync"] }
 dialog-repository = { workspace = true }
 dialog-peer = { workspace = true, features = ["helpers"] }
 dialog-network = { workspace = true }
-dialog-artifacts = { workspace = true }
+dialog-corpus = { workspace = true }
 anyhow = { workspace = true }
 dialog-common = { workspace = true, features = ["helpers"] }
 dialog-credentials = { workspace = true }

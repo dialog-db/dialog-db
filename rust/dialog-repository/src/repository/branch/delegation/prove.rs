@@ -20,15 +20,17 @@
 //! delegation graph cannot loop the walk; `MAX_DEPTH` still bounds honest
 //! depth exactly like the certificate-store walk.
 
-use dialog_artifacts::{Artifact, ArtifactSelector, Entity, Value};
 use dialog_capability::access::{AuthorizeError, Certificate as _, Proof as _, TimeRange};
 use dialog_capability::{ANY_SUBJECT, Did, Fork, Provider};
 use dialog_common::{ConditionalSend, ConditionalSync};
+use dialog_corpus::tree::CorpusNode;
+use dialog_corpus::{Entity, Fact, Selector, Value};
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::{Import as BlobImport, Read as BlobRead};
 use dialog_effects::memory::Resolve;
+use dialog_search_tree::nodes;
 use dialog_ucan::{Scope, UcanCertificate, UcanDelegation, UcanProof};
 use dialog_ucan_core::DelegationChain;
 use dialog_ucan_core::command::Command;
@@ -97,6 +99,11 @@ impl IssuedBy<'_> {
             + Provider<BlobRead>
             + Provider<BlobImport>
             + Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
             + Provider<Fork<RemoteSite, Resolve>>
             + Provider<Fork<RemoteSite, BlobRead>>
@@ -134,6 +141,11 @@ impl IssuedTo<'_> {
             + Provider<BlobRead>
             + Provider<BlobImport>
             + Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
             + Provider<Fork<RemoteSite, Resolve>>
             + Provider<Fork<RemoteSite, BlobRead>>
@@ -172,6 +184,11 @@ impl Retained<'_> {
             + Provider<BlobRead>
             + Provider<BlobImport>
             + Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
             + Provider<Fork<RemoteSite, Resolve>>
             + Provider<Fork<RemoteSite, BlobRead>>
@@ -204,6 +221,11 @@ where
         + Provider<BlobRead>
         + Provider<BlobImport>
         + Provider<ArchiveLoad>
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
         + Provider<BlobLoad>
         + Provider<Fork<RemoteSite, Resolve>>
         + Provider<Fork<RemoteSite, BlobRead>>
@@ -219,10 +241,10 @@ where
         .parse()
         .map_err(|error| malformed("delegation attribute", error))?;
     let selector = match did {
-        Some(did) => ArtifactSelector::new()
+        Some(did) => Selector::new()
             .the(attribute)
             .is(Value::String(did.to_string())),
-        None => ArtifactSelector::new().the(attribute),
+        None => Selector::new().the(attribute),
     };
     let facts = Select::new(branch, selector)
         .execute(store)
@@ -231,7 +253,7 @@ where
     futures_util::pin_mut!(facts);
     let mut entities = Vec::new();
     while let Some(item) = facts.next().await {
-        let fact: Artifact = item
+        let fact: Fact = item
             .and_then(|view| view.to_owned())
             .map_err(|error| malformed("delegation fact undecodable", error))?;
         entities.push(fact.of);
@@ -329,6 +351,11 @@ impl ProveDelegation<'_> {
             + Provider<BlobRead>
             + Provider<BlobImport>
             + Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
             + Provider<Fork<RemoteSite, Resolve>>
             + Provider<Fork<RemoteSite, BlobRead>>
@@ -367,7 +394,7 @@ impl ProveDelegation<'_> {
             // their facts filter and order them without a single decode.
             let candidates = Select::new(
                 branch,
-                ArtifactSelector::new()
+                Selector::new()
                     .the(DELEGATION_AUDIENCE.parse().expect("valid attribute"))
                     .is(Value::String(hop.audience.to_string())),
             )
@@ -458,13 +485,18 @@ impl ProveDelegation<'_> {
     ) -> Result<Option<Candidate>, AuthorizeError>
     where
         S: Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
             + dialog_common::Holds
             + ConditionalSend
             + ConditionalSync
             + Clone,
     {
-        let facts = Select::new(branch, ArtifactSelector::new().of(entity.clone()))
+        let facts = Select::new(branch, Selector::new().of(entity.clone()))
             .execute(store.clone())
             .await
             .map_err(|error| malformed("candidate read failed", error))?;
@@ -476,7 +508,7 @@ impl ProveDelegation<'_> {
         let mut not_before = None;
         let mut expiration = None;
         while let Some(item) = facts.next().await {
-            let fact: Artifact = item
+            let fact: Fact = item
                 .and_then(|view| view.to_owned())
                 .map_err(|error| malformed("candidate fact undecodable", error))?;
             match (fact.the.as_str(), fact.is) {
@@ -553,6 +585,11 @@ impl ProveDelegation<'_> {
             + Provider<BlobRead>
             + Provider<BlobImport>
             + Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
             + Provider<Fork<RemoteSite, Resolve>>
             + Provider<Fork<RemoteSite, BlobRead>>
@@ -1132,18 +1169,18 @@ mod tests {
         audience: &Did,
         subject: &Did,
     ) -> Result<()> {
-        use dialog_artifacts::{Instruction, Relation};
+        use dialog_corpus::{Instruction, Relation};
         use futures_util::stream;
 
         let fact = |attribute: &str, value: &str| -> Result<Instruction> {
             Ok(Instruction::Assert(
-                Artifact {
+                Fact {
                     the: Relation::try_from(attribute.to_string())?,
                     of: entity.clone(),
                     is: Value::String(value.to_string()),
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             ))
         };
         let command = Command(vec!["storage".to_string()]).to_string();

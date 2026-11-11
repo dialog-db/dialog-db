@@ -30,18 +30,20 @@
 //! keep hot-attribute fan-out flat, delta-restricted body evaluation,
 //! and the `retract!` head polarity.
 
+use dialog_corpus::tree::CorpusNode;
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::Read as BlobRead;
+use dialog_search_tree::nodes;
 use std::collections::{BTreeSet, HashMap};
 
-use dialog_artifacts::selector::Constrained;
-use dialog_artifacts::{
-    Artifact, ArtifactSelector, Change, Changes, DialogArtifactsError, Entity, Instruction,
-    Relation, Select, Statement, Value,
-};
 use dialog_capability::{Fork, Provider};
 use dialog_common::{ConditionalSync, Holds};
+use dialog_corpus::selector::Constrained;
+use dialog_corpus::{
+    Change, Changes, DialogCorpusError, Entity, Fact, Instruction, Relation, Select, Selector,
+    Statement, Value,
+};
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::Identify;
 use dialog_effects::memory::Resolve;
@@ -85,9 +87,14 @@ where
         + Provider<Resolve>
         + Provider<Identify>
         + Provider<ArchiveLoad>
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
         + Provider<BlobLoad>
-        + Provider<dialog_artifacts::Preload>
-        + Provider<dialog_artifacts::Speculation>
+        + Provider<dialog_corpus::Preload>
+        + Provider<dialog_corpus::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
         + Holds
         + ConditionalSync
@@ -96,9 +103,7 @@ where
     // Transients never commit, so an asset among them would be dropped:
     // refuse the commit before anything is written instead.
     if transients.has_assets() {
-        return Err(
-            DialogArtifactsError::AssetsUnsupported("a dispatched transient".into()).into(),
-        );
+        return Err(DialogCorpusError::AssetsUnsupported("a dispatched transient".into()).into());
     }
 
     // Round 1 stimulus: everything the commit changes, plus the
@@ -144,7 +149,7 @@ where
         // decide when a candidate needs the full-body fallback (a
         // removal can newly enable a rule only through `unless`, which
         // a seed cannot express).
-        let mut assert_rows: Vec<Artifact> = Vec::new();
+        let mut assert_rows: Vec<Fact> = Vec::new();
         let mut retract_attrs: BTreeSet<Relation> = BTreeSet::new();
         let mut replace_attrs: BTreeSet<Relation> = BTreeSet::new();
         for instruction in &stimulus {
@@ -410,9 +415,14 @@ impl<'a> Dispatch<'a> {
             + Provider<Put>
             + Provider<Resolve>
             + Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
-            + Provider<dialog_artifacts::Preload>
-            + Provider<dialog_artifacts::Speculation>
+            + Provider<dialog_corpus::Preload>
+            + Provider<dialog_corpus::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + dialog_common::Holds
             + ConditionalSync
@@ -433,14 +443,12 @@ impl<'a> Dispatch<'a> {
             Some(footprint) => footprint,
             None => {
                 let mut footprint = TriggerFootprint::default();
-                for claim in committed(source, ArtifactSelector::new().the(on_attr()), env).await? {
+                for claim in committed(source, Selector::new().the(on_attr()), env).await? {
                     if let Value::Entity(key) = claim.is {
                         footprint.on.insert(key);
                     }
                 }
-                for claim in
-                    committed(source, ArtifactSelector::new().the(reads_attr()), env).await?
-                {
+                for claim in committed(source, Selector::new().the(reads_attr()), env).await? {
                     if let Value::Entity(key) = claim.is {
                         footprint.reads.insert(key);
                     }
@@ -471,9 +479,14 @@ impl<'a> Dispatch<'a> {
             + Provider<Put>
             + Provider<Resolve>
             + Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
-            + Provider<dialog_artifacts::Preload>
-            + Provider<dialog_artifacts::Speculation>
+            + Provider<dialog_corpus::Preload>
+            + Provider<dialog_corpus::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + dialog_common::Holds
             + ConditionalSync
@@ -487,9 +500,7 @@ impl<'a> Dispatch<'a> {
             let committed_entities = match cache.triggers(on, head) {
                 Some(entities) => entities,
                 None => {
-                    let selector = ArtifactSelector::new()
-                        .the(on_attr())
-                        .is(Value::Entity(on.clone()));
+                    let selector = Selector::new().the(on_attr()).is(Value::Entity(on.clone()));
                     let entities: Vec<Entity> = committed(self.source, selector, env)
                         .await?
                         .into_iter()
@@ -528,9 +539,14 @@ impl<'a> Dispatch<'a> {
             + Provider<Put>
             + Provider<Resolve>
             + Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
-            + Provider<dialog_artifacts::Preload>
-            + Provider<dialog_artifacts::Speculation>
+            + Provider<dialog_corpus::Preload>
+            + Provider<dialog_corpus::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + dialog_common::Holds
             + ConditionalSync
@@ -547,7 +563,7 @@ impl<'a> Dispatch<'a> {
                     let committed_readers = match cache.reads(&on, head) {
                         Some(entities) => entities,
                         None => {
-                            let selector = ArtifactSelector::new()
+                            let selector = Selector::new()
                                 .the(reads_attr())
                                 .is(Value::Entity(on.clone()));
                             let entities: Vec<Entity> = committed(self.source, selector, env)
@@ -598,9 +614,14 @@ impl<'a> Dispatch<'a> {
             + Provider<Put>
             + Provider<Resolve>
             + Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
-            + Provider<dialog_artifacts::Preload>
-            + Provider<dialog_artifacts::Speculation>
+            + Provider<dialog_corpus::Preload>
+            + Provider<dialog_corpus::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + dialog_common::Holds
             + ConditionalSync
@@ -643,9 +664,14 @@ impl<'a> Dispatch<'a> {
             + Provider<Put>
             + Provider<Resolve>
             + Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
-            + Provider<dialog_artifacts::Preload>
-            + Provider<dialog_artifacts::Speculation>
+            + Provider<dialog_corpus::Preload>
+            + Provider<dialog_corpus::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + dialog_common::Holds
             + ConditionalSync
@@ -693,9 +719,14 @@ impl<'a> Dispatch<'a> {
             + Provider<Put>
             + Provider<Resolve>
             + Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
-            + Provider<dialog_artifacts::Preload>
-            + Provider<dialog_artifacts::Speculation>
+            + Provider<dialog_corpus::Preload>
+            + Provider<dialog_corpus::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + dialog_common::Holds
             + ConditionalSync
@@ -714,9 +745,7 @@ impl<'a> Dispatch<'a> {
         if let Some(verdict) = cache.transient(concept, head) {
             return Ok(verdict);
         }
-        let selector = ArtifactSelector::new()
-            .the(transient_attr())
-            .of(concept.clone());
+        let selector = Selector::new().the(transient_attr()).of(concept.clone());
         let verdict = !committed(self.source, selector, env).await?.is_empty();
         cache.record_transient(concept.clone(), head.clone(), verdict);
         Ok(verdict)
@@ -734,9 +763,14 @@ impl<'a> Dispatch<'a> {
             + Provider<Put>
             + Provider<Resolve>
             + Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
-            + Provider<dialog_artifacts::Preload>
-            + Provider<dialog_artifacts::Speculation>
+            + Provider<dialog_corpus::Preload>
+            + Provider<dialog_corpus::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + dialog_common::Holds
             + ConditionalSync
@@ -745,9 +779,7 @@ impl<'a> Dispatch<'a> {
         if self.head.is_none() {
             return Ok(None);
         }
-        let selector = ArtifactSelector::new()
-            .the(source_attr())
-            .of(entity.clone());
+        let selector = Selector::new().the(source_attr()).of(entity.clone());
         Ok(committed(self.source, selector, env)
             .await?
             .into_iter()
@@ -781,17 +813,22 @@ where
         + Provider<Put>
         + Provider<Resolve>
         + Provider<ArchiveLoad>
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
         + Provider<BlobLoad>
-        + Provider<dialog_artifacts::Preload>
-        + Provider<dialog_artifacts::Speculation>
+        + Provider<dialog_corpus::Preload>
+        + Provider<dialog_corpus::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
         + dialog_common::Holds
         + ConditionalSync
         + 'static,
 {
-    use dialog_artifacts::tree::fetch_spilled;
-    use dialog_artifacts::{EntityKey, Key, KeyViewConstruct, State};
     use dialog_common::Blake3Hash as NodeHash;
+    use dialog_corpus::tree::fetch_spilled;
+    use dialog_corpus::{EntityKey, Key, KeyViewConstruct, State};
     use dialog_search_tree::Change as TreeChange;
 
     let SourceRef::Branch(branch) = source else {
@@ -844,7 +881,7 @@ where
         let spilled = fetch_spilled(&raw_store, &archive, &entry.key)
             .await
             .map_err(|error| CommitError::Induction(format!("watermark spilled: {error:?}")))?;
-        let fact = Artifact::from_key_datum_with_value(&entry.key, datum, spilled)
+        let fact = Fact::from_key_datum_with_value(&entry.key, datum, spilled)
             .map_err(|error| CommitError::Induction(format!("watermark datum: {error:?}")))?;
         if induction_ignores(&fact.the.to_string()) {
             continue;
@@ -858,7 +895,7 @@ where
             continue;
         }
         lag.push(if arriving {
-            Instruction::Assert(fact, dialog_artifacts::Pick::All)
+            Instruction::Assert(fact, dialog_corpus::Pick::All)
         } else {
             Instruction::Retract(fact)
         });
@@ -882,22 +919,27 @@ pub(crate) fn induction_ignores(the: &str) -> bool {
         && !the.starts_with("dialog.concept/")
 }
 
-/// Collect the artifacts a selector matches on the line's committed
+/// Collect the facts a selector matches on the line's committed
 /// tree (no overlay — the cacheable slice).
 async fn committed<Env>(
     source: SourceRef<'_>,
-    selector: ArtifactSelector<Constrained>,
+    selector: Selector<Constrained>,
     env: &Env,
-) -> Result<Vec<Artifact>, CommitError>
+) -> Result<Vec<Fact>, CommitError>
 where
     Env: Provider<BlobRead>
         + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
         + Provider<ArchiveLoad>
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
         + Provider<BlobLoad>
-        + Provider<dialog_artifacts::Preload>
-        + Provider<dialog_artifacts::Speculation>
+        + Provider<dialog_corpus::Preload>
+        + Provider<dialog_corpus::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
         + dialog_common::Holds
         + ConditionalSync
@@ -914,11 +956,11 @@ where
         .map_err(|error| CommitError::Induction(format!("committed probe: {error}")))
 }
 
-/// Collect the artifacts a selector matches in the layered view.
+/// Collect the facts a selector matches in the layered view.
 async fn select<'a>(
     view: &QueryEnv<'a>,
-    selector: ArtifactSelector<Constrained>,
-) -> Result<Vec<Artifact>, CommitError> {
+    selector: Selector<Constrained>,
+) -> Result<Vec<Fact>, CommitError> {
     let stream = Provider::<Select<'_>>::execute(view, selector)
         .await
         .map_err(|error| CommitError::Induction(format!("dispatch probe: {error}")))?;
@@ -983,7 +1025,7 @@ fn premise_reach(rule: &InductiveRule) -> (BTreeSet<Reach>, BTreeSet<Reach>) {
 async fn fire_seeded<'a>(
     rule: &InductiveRule,
     transient_head: bool,
-    rows: &[Artifact],
+    rows: &[Fact],
     view: &QueryEnv<'a>,
     novelty: &mut Changes,
     transients: &mut Changes,
@@ -1133,13 +1175,13 @@ async fn emit_matches<'a>(
                 // A retracting head dissociates the exact bound
                 // triple, cardinality-independent.
                 Polarity::Retract => {
-                    dialog_artifacts::Update::dissociate(&mut head, attribute, this.clone(), value);
+                    dialog_corpus::Update::dissociate(&mut head, attribute, this.clone(), value);
                 }
                 // An asserting head writes as the field's pick says: a
                 // set appends, and a choosing pick succeeds the claim
                 // it elects, resolved against the view at commit.
                 Polarity::Assert => {
-                    dialog_artifacts::Update::associate(
+                    dialog_corpus::Update::associate(
                         &mut head,
                         attribute,
                         this.clone(),
@@ -1162,10 +1204,10 @@ async fn emit_matches<'a>(
             if is_novel(view, &instruction).await? {
                 match instruction {
                     Instruction::Assert(a, policy) => {
-                        dialog_artifacts::Update::associate(novelty, a.the, a.of, a.is, policy)
+                        dialog_corpus::Update::associate(novelty, a.the, a.of, a.is, policy)
                     }
                     Instruction::Retract(a) => {
-                        dialog_artifacts::Update::dissociate(novelty, a.the, a.of, a.is)
+                        dialog_corpus::Update::dissociate(novelty, a.the, a.of, a.is)
                     }
                 }
             }
@@ -1182,13 +1224,13 @@ async fn emit_matches<'a>(
 /// frozen round view, so siblings within a round judge novelty against
 /// identical state.
 async fn is_novel<'a>(view: &QueryEnv<'a>, instruction: &Instruction) -> Result<bool, CommitError> {
-    let artifact = match instruction {
+    let fact = match instruction {
         Instruction::Assert(a, _) | Instruction::Retract(a) => a,
     };
-    let selector = ArtifactSelector::new()
-        .the(artifact.the.clone())
-        .of(artifact.of.clone())
-        .is(artifact.is.clone());
+    let selector = Selector::new()
+        .the(fact.the.clone())
+        .of(fact.of.clone())
+        .is(fact.is.clone());
     let present = !select(view, selector).await?.is_empty();
     Ok(match instruction {
         Instruction::Assert(_, _) => !present,
@@ -1207,15 +1249,17 @@ mod tests {
     use crate::rules::Transient;
     use crate::{Branch, CommitError, RemoteSite, Revision};
     use anyhow::Result;
-    use dialog_artifacts::{ArtifactSelector, Changes, Entity, Instruction, Value};
     use dialog_capability::{Fork, Provider};
     use dialog_common::ConditionalSync;
+    use dialog_corpus::tree::CorpusNode;
+    use dialog_corpus::{Changes, Entity, Instruction, Selector, Value};
     use dialog_effects::archive::{Get, Put};
     use dialog_effects::blob::Read as BlobRead;
     use dialog_effects::memory::Resolve;
     use dialog_peer::helpers::test_session_with_peer;
     use dialog_query::rule::statement::on_entities;
     use dialog_query::{ConceptDescriptor, InductiveRule};
+    use dialog_search_tree::nodes;
     use futures_util::StreamExt as _;
     use serde_json::json;
 
@@ -1227,23 +1271,28 @@ mod tests {
             + Provider<Put>
             + Provider<Resolve>
             + Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
-            + Provider<dialog_artifacts::Preload>
-            + Provider<dialog_artifacts::Speculation>
+            + Provider<dialog_corpus::Preload>
+            + Provider<dialog_corpus::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + dialog_common::Holds
             + ConditionalSync
             + 'static,
     {
-        let selector = ArtifactSelector::new().the(the.parse()?).of(of.clone());
+        let selector = Selector::new().the(the.parse()?).of(of.clone());
         let stream = branch.claims().select(selector).perform(env).await?;
-        let artifacts: Vec<_> = stream.collect().await;
-        Ok(artifacts
+        let facts: Vec<_> = stream.collect().await;
+        Ok(facts
             .into_iter()
             .map(|item| item.and_then(|view| view.to_owned()))
             .collect::<Result<Vec<_>, _>>()?
             .into_iter()
-            .map(|artifact| artifact.is)
+            .map(|fact| fact.is)
             .collect())
     }
 
@@ -1563,7 +1612,7 @@ mod tests {
     /// would, so the increment after a merge commits.
     #[dialog_common::test]
     async fn it_increments_an_integer_counter_after_a_pulled_count() -> Result<()> {
-        use dialog_artifacts::{Artifact, Instruction};
+        use dialog_corpus::{Fact, Instruction};
         use futures_util::stream;
 
         let (operator, profile) = test_session_with_peer().await;
@@ -1583,13 +1632,13 @@ mod tests {
         // The other replica's count lands without local induction.
         branch
             .commit(stream::iter(vec![Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "counter/count".parse()?,
                     of: counter.clone(),
                     is: Value::SignedInt(1),
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             )]))
             .perform(&operator)
             .await?;
@@ -2813,7 +2862,7 @@ mod tests {
     /// is, and the next inducing instant catches up over both.
     #[dialog_common::test]
     async fn it_carries_the_watermark_over_a_machinery_commit() -> Result<()> {
-        use dialog_artifacts::{Artifact, Instruction};
+        use dialog_corpus::{Fact, Instruction};
         use futures_util::stream;
 
         let (operator, profile) = test_session_with_peer().await;
@@ -2836,13 +2885,13 @@ mod tests {
 
         let record = |audience: &str| -> Result<Instruction> {
             Ok(Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "dialog.ucan/audience".parse()?,
                     of: "ucan:1".parse()?,
                     is: Value::String(audience.into()),
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             ))
         };
 
@@ -2864,13 +2913,13 @@ mod tests {
         let doc: Entity = "doc:1".parse()?;
         branch
             .commit(stream::iter(vec![Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "doc/title".parse()?,
                     of: doc.clone(),
                     is: Value::String("hello".into()),
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             )]))
             .perform(&operator)
             .await?;
@@ -2924,7 +2973,7 @@ mod tests {
     /// is a no-op — the watermark is at the head.
     #[dialog_common::test]
     async fn it_catches_up_over_a_raw_commit() -> Result<()> {
-        use dialog_artifacts::{Artifact, Instruction};
+        use dialog_corpus::{Fact, Instruction};
         use futures_util::stream;
 
         let (operator, profile) = test_session_with_peer().await;
@@ -2944,13 +2993,13 @@ mod tests {
         let doc: Entity = "doc:1".parse()?;
         branch
             .commit(stream::iter(vec![Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "doc/title".parse()?,
                     of: doc.clone(),
                     is: Value::String("hello".into()),
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             )]))
             .perform(&operator)
             .await?;
@@ -2984,7 +3033,7 @@ mod tests {
     /// conjunction completes at the instant it first exists.
     #[dialog_common::test]
     async fn it_completes_a_conjunction_across_instants() -> Result<()> {
-        use dialog_artifacts::{Artifact, Instruction};
+        use dialog_corpus::{Fact, Instruction};
         use futures_util::stream;
 
         let (operator, profile) = test_session_with_peer().await;
@@ -3030,13 +3079,13 @@ mod tests {
         let subject: Entity = "pair:1".parse()?;
         branch
             .commit(stream::iter(vec![Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "fact.p/v".parse()?,
                     of: subject.clone(),
                     is: Value::String("p".into()),
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             )]))
             .perform(&operator)
             .await?;
@@ -3069,7 +3118,7 @@ mod tests {
     /// facts arriving after adoption do.
     #[dialog_common::test]
     async fn it_adopts_a_branch_without_retroactive_firing() -> Result<()> {
-        use dialog_artifacts::{Artifact, Instruction};
+        use dialog_corpus::{Fact, Instruction};
         use futures_util::stream;
 
         let (operator, profile) = test_session_with_peer().await;
@@ -3079,7 +3128,7 @@ mod tests {
         // Rule and a matching fact both land through raw commits: the
         // branch has state and rules, but no induction ever ran and no
         // watermark exists.
-        let mut install = dialog_artifacts::Changes::new();
+        let mut install = dialog_corpus::Changes::new();
         install.assert(tagger());
         let old: Entity = "doc:old".parse()?;
         branch
@@ -3089,13 +3138,13 @@ mod tests {
         branch.refresh(&operator).await?;
         branch
             .commit(stream::iter(vec![Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "doc/title".parse()?,
                     of: old.clone(),
                     is: Value::String("old".into()),
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             )]))
             .perform(&operator)
             .await?;
@@ -3117,13 +3166,13 @@ mod tests {
         let fresh: Entity = "doc:new".parse()?;
         branch
             .commit(stream::iter(vec![Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "doc/title".parse()?,
                     of: fresh.clone(),
                     is: Value::String("new".into()),
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             )]))
             .perform(&operator)
             .await?;
@@ -3283,25 +3332,30 @@ mod tests {
             + Provider<Put>
             + Provider<Resolve>
             + Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
-            + Provider<dialog_artifacts::Preload>
-            + Provider<dialog_artifacts::Speculation>
+            + Provider<dialog_corpus::Preload>
+            + Provider<dialog_corpus::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + dialog_common::Holds
             + ConditionalSync
             + 'static,
     {
-        let selector = ArtifactSelector::new()
+        let selector = Selector::new()
             .the_starting_with("todo.list/".to_string())
             .of(list.clone());
         let stream = branch.claims().select(selector).perform(env).await?;
-        let artifacts: Vec<_> = stream.collect().await;
-        let mut entries: Vec<(String, Value)> = artifacts
+        let facts: Vec<_> = stream.collect().await;
+        let mut entries: Vec<(String, Value)> = facts
             .into_iter()
             .map(|item| item.and_then(|view| view.to_owned()))
             .collect::<Result<Vec<_>, _>>()?
             .into_iter()
-            .map(|artifact| (artifact.the.name().to_owned(), artifact.is))
+            .map(|fact| (fact.the.name().to_owned(), fact.is))
             .collect();
         entries.sort_by(|a, b| a.0.cmp(&b.0));
         Ok(entries)
@@ -3419,7 +3473,7 @@ mod tests {
             .await?;
         branch.refresh(&operator).await?;
 
-        let member: dialog_artifacts::Relation = "todo.list/N5".parse()?;
+        let member: dialog_corpus::Relation = "todo.list/N5".parse()?;
         branch
             .transaction()
             .assert(

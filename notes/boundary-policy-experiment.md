@@ -10,7 +10,7 @@ Three-arm experiment for taming the unbounded leaves the Phase A capture exposed
 
 ## The arms
 
-All three run against the same captures, switched by manifest fields (with an env override in `Manifest::default()` as experiment plumbing, so the whole artifact stack picks the arm up for fresh trees):
+All three run against the same captures, switched by manifest fields (with an env override in `Manifest::default()` as experiment plumbing, so the whole fact stack picks the arm up for fresh trees):
 
 - `DIALOG_TREE_MAX_SEGMENT` sets `Manifest::max_segment` (arm 1; 0 = off = baseline),
 - `DIALOG_TREE_INLINE_N` sets `Manifest::inline_n` (arm 3).
@@ -23,14 +23,14 @@ Keep the demotion coin exactly as-is; add `max_segment` (new `Manifest` field, e
 
 Mechanics as implemented:
 
-- **Weight proxy.** The cap compares against a pure per-entry weight: `key length + 32` (`ENTRY_WEIGHT_OVERHEAD`, covering the value slot and per-entry encoding overhead). True encoded size is not available at cut time (front coding and per-node dictionaries are computed at persist), and any deterministic proxy preserves convergence; for artifact trees the key carries the value (value-in-key epoch), so key length dominates real cost. Front coding means real blocks come in somewhat under the proxy.
+- **Weight proxy.** The cap compares against a pure per-entry weight: `key length + 32` (`ENTRY_WEIGHT_OVERHEAD`, covering the value slot and per-entry encoding overhead). True encoded size is not available at cut time (front coding and per-node dictionaries are computed at persist), and any deterministic proxy preserves convergence; for fact trees the key carries the value (value-in-key epoch), so key length dominates real cost. Front coding means real blocks come in somewhat under the proxy.
 - **Break positions.** Candidate seams inside a run are those whose forced separator would exceed `max_separator` (see below); this makes forced seams self-identifying in stored form and structurally quiet at index levels. The run is split recursively: while a piece exceeds the cap, cut at the best candidate, preferring seams where the adjacent keys share the fewest leading key components (the biggest semantic change), tie-broken by lowest `blake3(right key)`. This is a pure function of the run's entry list, so different edit histories converge.
 - **Forced separators.** A forced seam's separator is `right[.. max(lcp+1, min(max_separator+1, len(right)))]`: the shortest prefix of the right key that both sorts above the left key and exceeds `max_separator` when the right key allows it. Demoted keys are all longer than `max_separator`, so every forced seam inside a demoted run carries a separator longer than `max_separator`, which the existing seam-coin length guard ranks 0: forced seams are leaf-level only and can never punch index cuts, with no new mechanism. Front coding amortizes the length: the run shares the prefix.
 - **Runs of short keys.** A run made only of natural-length keys can exceed the cap (probability ~1.4% at 256-entry expected runs and ~118 B entries) but has no eligible candidate seam (a short forced separator could not be told apart from a natural one, which would break both index-quietness and incremental run detection). Such runs stay uncapped. The pathology being fixed lives entirely in the demoted band, so this is a deliberate non-goal.
 - **Incremental convergence (the load-bearing part).** Cap decisions are a function of the whole run, so any edit whose leaf touches a capped run must re-shape the whole run. Forced seams never punch index cuts, hence a run's segments are always contiguous children of one parent index node, and membership in a run is detectable from stored separators alone (separator longer than `max_separator` joins a segment to its left sibling). The edit path widens its window before shape decisions: it merges the touched leaf with its contiguous run siblings (lifting them), and the boundary-delete / orphan-append path does the same for the right neighbor's run head, since deleting a run's terminating boundary joins two runs whose union re-caps. The rare natural separator of exactly `max_separator + 1` bytes matches the join predicate too; that only widens the window, and a wider regroup reproduces the same canonical shape.
 - **Fast-path bypass.** The in-place fast path is skipped whenever the window merged more than one segment or the post-edit weight exceeds the cap, so a cap-relevant edit always reaches the regroup.
 
-Known gaps (documented, not blocking the experiment): `stitch`/`carve` and the differential merge path do not widen to whole runs, so stitching trees built under a non-zero `max_segment` may produce non-canonical (still correct, just not byte-converged) shapes at piece seams. Artifacts does not use stitch; the convergence gate exercises the insert/delete path.
+Known gaps (documented, not blocking the experiment): `stitch`/`carve` and the differential merge path do not widen to whole runs, so stitching trees built under a non-zero `max_segment` may produce non-canonical (still correct, just not byte-converged) shapes at piece seams. Facts does not use stitch; the convergence gate exercises the insert/delete path.
 
 ### Arm 2 "veto + cap" (veto IMPLEMENTED as step 1, see below; cap retained, off by default)
 
@@ -96,11 +96,11 @@ Smaller than hoped at these depths because per-link novelty buffering already am
 
 ### Convergence gates: PASS
 
-`it_converges_on_capped_runs_across_insertion_orders` (three insertion orders, persist per edit, byte-identical roots, plus a proof the cap actually fired) and `it_matches_rebuild_after_deletes_in_capped_runs` (incremental deletes, including a whole demoted cluster, land on the fresh-build root) both pass, and are permanent tests in dialog-search-tree. The full search-tree (244) and artifacts (158) suites pass both with the cap off (baseline unchanged) and with `DIALOG_TREE_MAX_SEGMENT=131072` exported.
+`it_converges_on_capped_runs_across_insertion_orders` (three insertion orders, persist per edit, byte-identical roots, plus a proof the cap actually fired) and `it_matches_rebuild_after_deletes_in_capped_runs` (incremental deletes, including a whole demoted cluster, land on the fresh-build root) both pass, and are permanent tests in dialog-search-tree. The full search-tree (244) and corpus (158) suites pass both with the cap off (baseline unchanged) and with `DIALOG_TREE_MAX_SEGMENT=131072` exported.
 
 ### Arm 3 SE replay: BLOCKED by a spill-read bug in the repository commit path
 
-`DIALOG_TREE_INLINE_N=512` SE replay fails in the first commits with `Artifact decode failed during commit: spilled value block missing from store`. The tonk harness (which commits through `Artifacts::commit_instructions`) works fine under the same setting, so the repository branch-commit path reads a value spilled by the same batch through a store view that does not yet contain the block. Lowering the threshold merely surfaces it: any value in the 512-4096 band asserted and re-read within one batch should reproduce it at defaults with a >4096 value. Needs its own investigation.
+`DIALOG_TREE_INLINE_N=512` SE replay fails in the first commits with `Fact decode failed during commit: spilled value block missing from store`. The tonk harness (which commits through `Facts::commit_instructions`) works fine under the same setting, so the repository branch-commit path reads a value spilled by the same batch through a store view that does not yet contain the block. Lowering the threshold merely surfaces it: any value in the 512-4096 band asserted and re-read within one batch should reproduce it at defaults with a >4096 value. Needs its own investigation.
 
 ## Step 1: the veto replaces demotion (2026-07-21)
 
@@ -110,7 +110,7 @@ What makes the veto edit-stable (the reason the old edit-sensitivity fear did no
 
 ### Convergence gates: PASS
 
-The two arm-1 capped tests pass unchanged under the veto coin. New permanent tests: `it_converges_on_vetoed_clusters_across_insertion_orders` (three orders, byte-identical roots, in-cluster seams provably absent, and a wide-bound control proving the veto is what shaped the tree), `it_matches_rebuild_after_deletes_in_vetoed_clusters` (delete oracle incl. a whole cluster), `it_handles_a_band_of_fully_vetoed_seams` (rewrite of the demotion band test: near-duplicate 600-byte keys, one open segment, delete convergence), and the fast-path pin above. Suites: dialog-search-tree 251, dialog-artifacts 158, dialog-query 737+43, all green; clippy `-D warnings` and wasm32 check clean.
+The two arm-1 capped tests pass unchanged under the veto coin. New permanent tests: `it_converges_on_vetoed_clusters_across_insertion_orders` (three orders, byte-identical roots, in-cluster seams provably absent, and a wide-bound control proving the veto is what shaped the tree), `it_matches_rebuild_after_deletes_in_vetoed_clusters` (delete oracle incl. a whole cluster), `it_handles_a_band_of_fully_vetoed_seams` (rewrite of the demotion band test: near-duplicate 600-byte keys, one open segment, delete convergence), and the fast-path pin above. Suites: dialog-search-tree 251, dialog-corpus 158, dialog-query 737+43, all green; clippy `-D warnings` and wasm32 check clean.
 
 ### Seam-flip sensitivity: PASS (≤ 2, asserted permanently)
 
@@ -212,7 +212,7 @@ Edit path: the arm-1 window machinery returns as `merge_vetoed_stretch`, gated t
 
 ### Gates: PASS
 
-Full suites green (search-tree 251, artifacts 158, query 737+43), clippy `-D warnings`, fmt, wasm32 check. New permanent tests: `it_backstops_fully_vetoed_stretches_at_the_target` (a 48-key fully vetoed cluster force-splits into pieces that each weigh in under the target, interior piece heads carry the long forced separators, everything reads back) and the weight-paced convergence pair now exercises the backstop live (the 60-key clusters exceed the 512 target, so forced anchors must converge across insertion orders and the delete-vs-rebuild oracle — they do, via the widening).
+Full suites green (search-tree 251, corpus 158, query 737+43), clippy `-D warnings`, fmt, wasm32 check. New permanent tests: `it_backstops_fully_vetoed_stretches_at_the_target` (a 48-key fully vetoed cluster force-splits into pieces that each weigh in under the target, interior piece heads carry the long forced separators, everything reads back) and the weight-paced convergence pair now exercises the backstop live (the 60-key clusters exceed the 512 target, so forced anchors must converge across insertion orders and the delete-vs-rebuild oracle — they do, via the widening).
 
 ### Anchor flap rate (the new step-3 metric)
 

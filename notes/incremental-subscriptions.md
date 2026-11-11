@@ -97,7 +97,7 @@ over-deleted set. Cardinality-one winner-selection is an instance: retracting th
 - **The planner already computes a SIPS**: the conceptual core of magic sets. A SIPS is a partial
   order over body atoms plus a function recording which variables each atom binds for later ones, driven
   by bound/free adornments. That is precisely `Candidate`/`Planner::plan` threading
-  `env`/`binds`/`requires`, with `TryFrom<&AttributeQueryAll> for ArtifactSelector` restricting fetches
+  `env`/`binds`/`requires`, with `TryFrom<&AttributeQueryAll> for Selector` restricting fetches
   to bound slots. The engine is already a top-down, SIPS-driven demand evaluator; what's absent is
   *reifying* that SIPS into a demand program.
 - **`dialog-search-tree::differentiate(other)`** yields `Stream<Change = Add | Remove>`: a signed delta

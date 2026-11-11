@@ -51,7 +51,7 @@ pub use revision_ext::*;
 pub(crate) mod rules;
 pub use rules::{RuleCache, Transient};
 
-pub use dialog_artifacts::{Exporter, Importer};
+pub use dialog_corpus::{Exporter, Importer};
 
 /// Test helpers for setting up profiles, operators, repositories, and test data.
 #[cfg(any(test, feature = "helpers"))]

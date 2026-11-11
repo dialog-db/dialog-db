@@ -1,4 +1,5 @@
-use crate::reads::*;
+use crate::nodes::{Preload, Read};
+use dialog_capability::Provider;
 use std::{
     collections::HashSet,
     future::Future,
@@ -33,7 +34,7 @@ use crate::{
 /// entry bytes — one allocation and copy per yielded entry. The
 /// [`KeyHandle`] instantiation instead hands out handles into the leaf's
 /// memoized decoded-keys arena, so a warm leaf's entries yield with NO
-/// per-entry copy; consumers that only need the key BYTES (the artifact
+/// per-entry copy; consumers that only need the key BYTES (the fact
 /// scan, which re-splits them itself) read through `as_ref`.
 pub trait ScanKey: Sized + ConditionalSend {
     /// Build a yielded key from plain bytes: a buffered novelty op, or a
@@ -392,7 +393,9 @@ where
     ) -> impl Stream<Item = Result<Entry<Key, Value>, DialogSearchTreeError>> + ConditionalSend
     where
         R: RangeBounds<Key> + ConditionalSend,
-        Env: Provider<Load> + Holds + ConditionalSync,
+        Env: Provider<Read<PersistentNode<Key, Value>>>
+            + Provider<Preload<PersistentNode<Key, Value>>>
+            + ConditionalSync,
     {
         // A thin adapter, not another generator: wrapping the walk in a
         // second `try_stream!` layer measurably bloats every future that
@@ -415,7 +418,9 @@ where
     ) -> impl Stream<Item = Result<Entry<KeyHandle, Value>, DialogSearchTreeError>> + ConditionalSend
     where
         R: RangeBounds<Key> + ConditionalSend,
-        Env: Provider<Load> + Holds + ConditionalSync,
+        Env: Provider<Read<PersistentNode<Key, Value>>>
+            + Provider<Preload<PersistentNode<Key, Value>>>
+            + ConditionalSync,
     {
         self.stream_scan::<R, Env, KeyHandle>(range, accessor)
     }
@@ -430,7 +435,9 @@ where
     ) -> impl Stream<Item = Result<Entry<Out, Value>, DialogSearchTreeError>> + ConditionalSend
     where
         R: RangeBounds<Key> + ConditionalSend,
-        Env: Provider<Load> + Holds + ConditionalSync,
+        Env: Provider<Read<PersistentNode<Key, Value>>>
+            + Provider<Preload<PersistentNode<Key, Value>>>
+            + ConditionalSync,
         Out: ScanKey + 'static,
     {
         try_stream! {
@@ -490,15 +497,14 @@ where
                             Bound::Excluded(bound) => Bound::Excluded(bound.as_ref()),
                             Bound::Unbounded => Bound::Unbounded,
                         })?;
-                        // A store that keeps nothing has nowhere for a
-                        // read-ahead to land: the walk would read each
-                        // sibling twice, so it reads them as it reaches them.
-                        if accessor.keeps() {
-                            for sibling in (child_index + 1)..visitable {
-                                let hash = index.hash_at(sibling)?.clone();
-                                if queued.insert(hash.clone()) {
-                                    warming.push(accessor.warm(hash));
-                                }
+                        // Whether there is anywhere for a read-ahead to
+                        // land is the environment's business: one that
+                        // keeps nothing does nothing with a preload, and
+                        // the walk reads each sibling as it reaches it.
+                        for sibling in (child_index + 1)..visitable {
+                            let hash = index.hash_at(sibling)?.clone();
+                            if queued.insert(hash.clone()) {
+                                warming.push(accessor.warm(hash));
                             }
                         }
 
@@ -708,7 +714,9 @@ where
         options: SearchOptions,
     ) -> Result<Option<SearchResult<Key, Value>>, DialogSearchTreeError>
     where
-        Env: Provider<Load> + Holds + ConditionalSync,
+        Env: Provider<Read<PersistentNode<Key, Value>>>
+            + Provider<Preload<PersistentNode<Key, Value>>>
+            + ConditionalSync,
     {
         let Some(root) = &self.root else {
             return Ok(None);
@@ -844,7 +852,9 @@ where
             Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
         + ConditionalSync,
-    Env: Provider<Load> + Holds + ConditionalSync,
+    Env: Provider<Read<PersistentNode<Key, Value>>>
+        + Provider<Preload<PersistentNode<Key, Value>>>
+        + ConditionalSync,
 {
     // Only prefetch when the caller's key matches the leaf's last entry;
     // boundary-delete overflow can't happen otherwise.
@@ -1057,7 +1067,7 @@ mod walker_novelty_tests {
     use dialog_common::Blake3Hash;
     use futures_util::StreamExt as _;
 
-    use crate::{Buffer, Delta, HitchhikerTree, PersistentTree};
+    use crate::{Delta, HitchhikerTree, PersistentNode, PersistentTree};
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
@@ -1065,9 +1075,12 @@ mod walker_novelty_tests {
     type Store = Blocks;
     type Tree = PersistentTree<[u8; 4], Vec<u8>>;
 
-    async fn settle(delta: &mut Delta<Blake3Hash, Buffer>, storage: &mut Store) -> Result<()> {
-        for (_, buffer) in delta.flush() {
-            storage.store(buffer);
+    async fn settle<K, V>(
+        delta: &mut Delta<Blake3Hash, PersistentNode<K, V>>,
+        storage: &mut Store,
+    ) -> Result<()> {
+        for (_, node) in delta.flush() {
+            storage.store(node.buffer().clone());
         }
         Ok(())
     }
@@ -1094,7 +1107,7 @@ mod walker_novelty_tests {
                 .insert(key, value.clone(), &storage)
                 .await?;
             let mut delta = Delta::zero();
-            let root = buffered.persist(&mut delta, &storage)?;
+            let root = buffered.persist(&mut delta)?;
             settle(&mut delta, &mut storage).await?;
             tree = Tree::at(crate::helpers::test_catalog(), root);
 
@@ -1132,7 +1145,7 @@ mod walker_novelty_tests {
     }
 
     /// Several writes in ONE buffered batch, repeated across batches. The
-    /// artifact layer writes 3+ keys per fact (EAV/AEV/VAE orderings) plus
+    /// fact layer writes 3+ keys per fact (EAV/AEV/VAE orderings) plus
     /// history records, so a commit buffers many keys at once and the next
     /// commit buffers many more over it.
     #[dialog_common::test]
@@ -1151,7 +1164,7 @@ mod walker_novelty_tests {
             let mut expected: std::collections::BTreeMap<[u8; 4], Vec<u8>> = Default::default();
 
             for batch in 0..20u32 {
-                // Scattered keys, like content-hashed artifact keys.
+                // Scattered keys, like content-hashed fact keys.
                 let keys: Vec<u32> = (0..6).map(|_| next() % 100_000).collect();
 
                 let mut buffered = HitchhikerTree::open(&tree).with_op_buf_size(8);
@@ -1163,7 +1176,7 @@ mod walker_novelty_tests {
                     expected.insert(key.to_be_bytes(), value);
                 }
                 let mut delta = Delta::zero();
-                let root = buffered.persist(&mut delta, &storage)?;
+                let root = buffered.persist(&mut delta)?;
                 settle(&mut delta, &mut storage).await?;
                 tree = Tree::at(crate::helpers::test_catalog(), root);
 
@@ -1214,7 +1227,7 @@ mod walker_novelty_tests {
                     .edit()
                     .insert(key.to_be_bytes(), key.to_be_bytes().to_vec(), &storage)
                     .await?
-                    .persist(&mut delta, &storage)?;
+                    .persist(&mut delta)?;
                 settle(&mut delta, &mut storage).await?;
             }
 
@@ -1240,7 +1253,7 @@ mod walker_novelty_tests {
             }
 
             let mut delta = Delta::zero();
-            let buffered_root = buffered.persist(&mut delta, &storage)?;
+            let buffered_root = buffered.persist(&mut delta)?;
             settle(&mut delta, &mut storage).await?;
             let buffered_tree = Tree::at(crate::helpers::test_catalog(), buffered_root);
 
@@ -1328,9 +1341,9 @@ mod prefetch_tests {
                 .await?;
         }
 
-        let tree = edit.persist(&mut delta, storage)?;
-        for (_, buffer) in delta.flush() {
-            storage.store(buffer);
+        let tree = edit.persist(&mut delta)?;
+        for (_, node) in delta.flush() {
+            storage.store(node.buffer().clone());
         }
 
         Ok(Tree::at(

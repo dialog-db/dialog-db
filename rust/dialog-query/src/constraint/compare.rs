@@ -29,7 +29,7 @@ use std::fmt;
 use std::fmt::Display;
 use std::ops::Not;
 
-use crate::artifact::{Value, encode_value_owned};
+use crate::corpus::{Value, encode_value_owned};
 use crate::error::EvaluationError;
 use crate::formula::number::Numeric;
 use crate::selection::Selection;
@@ -275,7 +275,7 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
-    use crate::artifact::{ArtifactsRelation, Type as ValueType, decode_value};
+    use crate::corpus::{CorpusRelation, Type as ValueType, decode_value};
     use crate::rule::TypeEnv;
     use crate::selection::Match;
     use crate::types::Scalar;
@@ -389,7 +389,7 @@ mod tests {
         assert_eq!(count(below("zzz".to_string()), symbol.clone()).await?, 0);
         let below_symbol = LessThan::new(
             Term::var("x"),
-            Term::constant(ArtifactsRelation::try_from("user/name".to_string()).expect("valid")),
+            Term::constant(CorpusRelation::try_from("user/name".to_string()).expect("valid")),
         );
         let mut row = Match::new();
         row.bind(&Term::var("x"), Value::String("aaa".into()))?;

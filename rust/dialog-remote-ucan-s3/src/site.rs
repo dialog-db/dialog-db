@@ -301,8 +301,7 @@ mod tests {
         asked: std::sync::Mutex<Option<TimeRange>>,
     }
 
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    #[dialog_capability::provider]
     impl Provider<authority::Identify> for RecordingEnv {
         async fn execute(
             &self,
@@ -315,8 +314,7 @@ mod tests {
         }
     }
 
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    #[dialog_capability::provider]
     impl Provider<AuthorizeEffect<Ucan>> for RecordingEnv {
         async fn execute(
             &self,

@@ -10,11 +10,11 @@ This should drive the design, because the two groups want *different treatment*.
 
 **Misparses existing data** (read back at fixed offsets or as unlength-prefixed fields, so a mismatched peer reads plausible garbage rather than failing):
 
-- The per-layout column `Schema` table (`dialog-artifacts/src/key.rs:293`) - the leaf stores `layout: u8` but NOT the schema it selects
+- The per-layout column `Schema` table (`dialog-corpus/src/key.rs:293`) - the leaf stores `layout: u8` but NOT the schema it selects
 - `VERSION_LENGTH = 40` (`dialog-capability/src/history/version.rs:12`) - `parse_key` does `split_at_checked(VERSION_LENGTH)` with no delimiter
-- `ValueDataType` discriminants (`artifacts/value.rs:832`)
+- `ValueDataType` discriminants (`facts/value.rs:832`)
 - `SPILL_FLAG = 0x80` (`key/varkey.rs:39`)
-- ordkey `TERMINATOR = 0x00` / `ESCAPE = 0xFF` (`artifacts/ordkey.rs:31,41`)
+- ordkey `TERMINATOR = 0x00` / `ESCAPE = 0xFF` (`facts/ordkey.rs:31,41`)
 - `VALUE_REFERENCE_LENGTH = 32` (`key/varkey.rs:29`)
 
 These must be **pinned and hard-rejected on mismatch**, not made settable. The manifest's existing "unknown version is rejected rather than silently misread" discipline is the right model; extend it to cover these.
@@ -42,9 +42,9 @@ Note they are *already* per-tree settable via `with_op_buf_size`/`with_flush_pol
 
 `Manifest::default()` is assumed in **three** places, not one. All three are correct only while every tree uses the default manifest, so all three activate the moment the manifest becomes genuinely configurable, i.e. the moment this project succeeds.
 
-1. **`inline_threshold()`** (`dialog-artifacts/src/key.rs:120`) returns `Manifest::default().inline_n`. Roughly 8 call sites (`key.rs`, `key/entity.rs`, `key/attribute.rs`, `key/value.rs`, `key/history.rs`, `artifacts/match.rs`).
+1. **`inline_threshold()`** (`dialog-corpus/src/key.rs:120`) returns `Manifest::default().inline_n`. Roughly 8 call sites (`key.rs`, `key/entity.rs`, `key/attribute.rs`, `key/value.rs`, `key/history.rs`, `facts/match.rs`).
 
-   **Correction to an earlier framing of mine:** I described this as `inline_n` being "honored on one path and ignored on the other", i.e. a live two-path disagreement with the search tree's boundary coin. That is wrong. Grepping `inline_n` inside `dialog-search-tree` finds it only in `manifest.rs` and tests: the coin reads `max_separator` and `branch_factor` only. `inline_n` is inert inside the search tree, and its sole consumer is `dialog-artifacts`. So this was a single global that would have disagreed with the tree's own *recorded* value once manifests became configurable, not a disagreement between two live paths today. Still worth fixing, for the same reason, but the severity was overstated.
+   **Correction to an earlier framing of mine:** I described this as `inline_n` being "honored on one path and ignored on the other", i.e. a live two-path disagreement with the search tree's boundary coin. That is wrong. Grepping `inline_n` inside `dialog-search-tree` finds it only in `manifest.rs` and tests: the coin reads `max_separator` and `branch_factor` only. `inline_n` is inert inside the search tree, and its sole consumer is `dialog-corpus`. So this was a single global that would have disagreed with the tree's own *recorded* value once manifests became configurable, not a disagreement between two live paths today. Still worth fixing, for the same reason, but the severity was overstated.
 
 2. **`TransientTree::new`** (`tree/transient.rs:123`) stamps `Manifest::default()`, discarding the loaded root's actual manifest. Its own TODO (line 88) states the blocker precisely: adopting it means reading the root node, which is *async*, and the synchronous `edit()`/`new` entry cannot do that.
 
@@ -69,8 +69,8 @@ Each is a place where a future edit changes one copy and not the other, which is
 
 - `HISTORY_KEY_TAG = 3` defined twice (`key.rs:54`, `key/history.rs:58`)
 - `VALUE_REFERENCE_LENGTH = 32` defined twice (`key.rs:88`, `key/varkey.rs:29`)
-- `BRANCH_FACTOR = 254` defined twice (`distribution.rs:161`, `artifacts/constants.rs:11`), both apparently dead - production reads `manifest.branch_factor()`
-- `HISTORY_KEY_LENGTH` + offsets (`artifacts/history/key.rs:9`): apparently-dead pre-M3 fixed-width history key layout; a stale parallel key layout is a real misread hazard
+- `BRANCH_FACTOR = 254` defined twice (`distribution.rs:161`, `facts/constants.rs:11`), both apparently dead - production reads `manifest.branch_factor()`
+- `HISTORY_KEY_LENGTH` + offsets (`facts/history/key.rs:9`): apparently-dead pre-M3 fixed-width history key layout; a stale parallel key layout is a real misread hazard
 
 ## Explicitly NOT the manifest (runtime-only, byte-identical output)
 

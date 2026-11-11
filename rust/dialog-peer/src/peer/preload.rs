@@ -12,14 +12,13 @@
 
 use std::sync::Arc;
 
-use dialog_artifacts::{Preload, PreloadQueue, PreloadRequest, Speculation};
 use dialog_capability::Provider;
 use dialog_common::{ConditionalSend, ConditionalSync};
+use dialog_corpus::{Preload, PreloadQueue, PreloadRequest, Speculation};
 
 use super::{Mode, Peer};
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl<S, M: Mode> Provider<Preload> for Peer<S, M>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
@@ -30,8 +29,7 @@ where
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl<S, M: Mode> Provider<Speculation> for Peer<S, M>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,

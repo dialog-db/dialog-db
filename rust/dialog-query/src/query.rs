@@ -12,8 +12,8 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
-    use crate::artifact::Entity;
     use crate::attribute::query::AttributeQuery;
+    use crate::corpus::Entity;
     use crate::session::RuleRegistry;
     use crate::source::test::TestEnv;
     use crate::{Term, the};

@@ -49,9 +49,10 @@
 //! queried mid-transaction or after commit — it's part of evaluating a
 //! query, not an optional composition.
 
-use dialog_artifacts::DialogArtifactsError;
 use dialog_capability::{Fork, Provider};
 use dialog_common::{ConditionalSync, Holds};
+use dialog_corpus::DialogCorpusError;
+use dialog_corpus::tree::CorpusNode;
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::Identify;
@@ -59,6 +60,7 @@ use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::Read as BlobRead;
 use dialog_effects::memory::Resolve;
 use dialog_query::query::{Application, Output};
+use dialog_search_tree::nodes;
 
 use crate::repository::branch::QueryLayer;
 use crate::repository::branch::session::QueryEnv;
@@ -125,9 +127,14 @@ impl<'a, Q: Application> TransactionSelectQuery<'a, Q> {
             + Provider<Resolve>
             + Provider<Identify>
             + Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
-            + Provider<dialog_artifacts::Preload>
-            + Provider<dialog_artifacts::Speculation>
+            + Provider<dialog_corpus::Preload>
+            + Provider<dialog_corpus::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + Holds
             + ConditionalSync
@@ -142,7 +149,7 @@ impl<'a, Q: Application> TransactionSelectQuery<'a, Q> {
             let operator = Identify
                 .perform(env)
                 .await
-                .map_err(|e| DialogArtifactsError::InvalidSignature(format!("identify: {e}")))?;
+                .map_err(|e| DialogCorpusError::InvalidSignature(format!("identify: {e}")))?;
 
             // The same schema-injected metadata Branch::query() folds
             // in (Session, SessionBranch, per-branch BranchMetadata),
@@ -160,7 +167,7 @@ impl<'a, Q: Application> TransactionSelectQuery<'a, Q> {
             let results = Box::pin(query.perform(&query_env));
             // Mid-transaction queries drive the ambient preload queue
             // like any other evaluation (see `crate::repository::fetch`).
-            let queue = Provider::<dialog_artifacts::Speculation>::execute(env, ()).await;
+            let queue = Provider::<dialog_corpus::Speculation>::execute(env, ()).await;
             let driven = crate::repository::fetch::Driven::new(results, sources, env, queue);
             for await result in driven {
                 yield result?;
@@ -177,7 +184,7 @@ mod tests {
     use crate::helpers::test_repo;
     use crate::schema;
     use crate::schema::DidExt as _;
-    use dialog_artifacts::Entity;
+    use dialog_corpus::Entity;
     use dialog_peer::helpers::test_session_with_peer;
     use dialog_query::query::Output;
     use dialog_query::{Concept, ConceptDescriptor, Query, Term, the};
@@ -211,7 +218,7 @@ mod tests {
     /// ported back.
     #[dialog_common::test]
     async fn it_integrates_external_changes_into_branch_transaction() -> anyhow::Result<()> {
-        use dialog_artifacts::Changes;
+        use dialog_corpus::Changes;
 
         let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
@@ -791,7 +798,7 @@ mod tests {
     /// constant with it.
     #[dialog_common::test]
     async fn it_derives_through_a_committed_rule_matching_uri_shaped_text() -> anyhow::Result<()> {
-        use dialog_artifacts::Value;
+        use dialog_corpus::Value;
         use dialog_query::rule::DeductiveRuleDescriptor;
         use dialog_query::{ConceptQuery, Parameters, Proposition};
 

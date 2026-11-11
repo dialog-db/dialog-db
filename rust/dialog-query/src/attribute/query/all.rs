@@ -1,8 +1,8 @@
 use crate::Cardinality;
 use crate::Claim;
-use crate::artifact::{ArtifactSelector, ArtifactsRelation, Constrained, decode_value};
 use crate::attribute::Relation;
 use crate::attribute::query::pipelined;
+use crate::corpus::{Constrained, CorpusRelation, Selector, decode_value};
 use crate::environment::Environment;
 use crate::formula::number::Numeric;
 use crate::query::Application;
@@ -14,15 +14,15 @@ use crate::{
     Binding, Entity, EvaluationError, Field, Parameters, Requirement, Schema, Term, Type, Value,
     try_stream,
 };
-use dialog_artifacts::history::Edition;
-use dialog_artifacts::{Artifact, Cause, DialogArtifactsError, Select};
 use dialog_capability::Provider;
+use dialog_corpus::history::Edition;
+use dialog_corpus::{Cause, DialogCorpusError, Fact, Select};
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 use std::fmt::{Formatter, Result as FmtResult};
 use std::pin::Pin;
 
-/// Base EAV scan query that yields all matching artifacts.
+/// Base EAV scan query that yields all matching facts.
 ///
 /// Represents a query against the fact store in the form
 /// `(the, of, is, cause)` where each position is a [`Term`]: either a
@@ -145,8 +145,8 @@ impl AttributeQueryAll {
         &self.source
     }
 
-    /// Map `Term<Relation>` to `Term<ArtifactsRelation>`.
-    pub fn attribute(&self) -> Term<ArtifactsRelation> {
+    /// Map `Term<Relation>` to `Term<CorpusRelation>`.
+    pub fn attribute(&self) -> Term<CorpusRelation> {
         match &self.the {
             Term::Constant(value) => Term::Constant(value.clone()),
             Term::Variable {
@@ -156,19 +156,19 @@ impl AttributeQueryAll {
         }
     }
 
-    /// Merge a matched artifact into a match: store the claim and bind
+    /// Merge a matched fact into a match: store the claim and bind
     /// the/of/is/cause values to the corresponding terms.
     ///
-    /// Takes the artifact by value: its fields move into the cited
+    /// Takes the fact by value: its fields move into the cited
     /// claim, and each slot is bound by name, so a row pays for one
     /// copy of each bound value and none of the terms' names.
     pub(crate) fn merge(
         &self,
         candidate: &mut Match,
-        artifact: Artifact,
+        fact: Fact,
         version: Option<(Edition, [u8; 32])>,
     ) -> Result<(), EvaluationError> {
-        let claim = Claim::from(artifact);
+        let claim = Claim::from(fact);
         let standing = Standing::new(version, claim.cause().clone());
         candidate.reserve(4);
         if let Some(name) = self.the.shared_name() {
@@ -230,19 +230,19 @@ impl AttributeQueryAll {
     /// never an error. This filter is [`Match::bind`]'s contract:
     /// binding treats a kind mismatch as a violation, on the
     /// premise that scans never feed one.
-    /// `artifact` as this query's typed slots read it, or `None` when they
+    /// `fact` as this query's typed slots read it, or `None` when they
     /// do not admit it: a number reaches a slot of another number type
     /// through its view ([`Kind::view`]).
-    pub(crate) fn admit(&self, mut artifact: Artifact) -> Option<Artifact> {
+    pub(crate) fn admit(&self, mut fact: Fact) -> Option<Fact> {
         if let Some(kind) = self.is.kind() {
-            artifact.is = kind.view(artifact.is)?;
+            fact.is = kind.view(fact.is)?;
         }
-        self.admits(&artifact).then_some(artifact)
+        self.admits(&fact).then_some(fact)
     }
 
-    pub(crate) fn admits(&self, artifact: &Artifact) -> bool {
+    pub(crate) fn admits(&self, fact: &Fact) -> bool {
         if let Some(kind) = self.is.kind()
-            && !kind.admits(&artifact.is)
+            && !kind.admits(&fact.is)
         {
             return false;
         }
@@ -251,7 +251,7 @@ impl AttributeQueryAll {
         // selector already ranged over.
         if let Some(kind) = self.the.kind()
             && kind.refinement().is_some()
-            && !kind.admits(&Value::Symbol(artifact.the.clone()))
+            && !kind.admits(&Value::Symbol(fact.the.clone()))
         {
             return false;
         }
@@ -365,7 +365,7 @@ impl AttributeQueryAll {
         params
     }
 
-    /// Evaluate yielding all matching artifacts.
+    /// Evaluate yielding all matching facts.
     ///
     /// Standard EAV semantics: zero rows are yielded for an input
     /// when no fact matches the lookup: the premise filters the
@@ -411,18 +411,18 @@ impl AttributeQueryAll {
                 let selection = selector.resolve(&base);
 
                 let stream = Provider::<Select<'_>>::execute(env, (&selection).try_into()?).await?;
-                for await artifact in stream {
+                for await fact in stream {
                     // Every admitted row becomes a binding, so each one
                     // materializes exactly once here — the merge and
                     // tombstone layers upstream never did. A row whose
                     // stored bytes fail validation (`CorruptEntry`) is a
                     // corrupt or foreign-written tree entry: ignore it
                     // rather than failing the query.
-                    let artifact = artifact?;
-                    let standing = artifact.standing();
-                    let artifact = match artifact.to_owned() {
-                        Ok(artifact) => artifact,
-                        Err(DialogArtifactsError::CorruptEntry(reason)) => {
+                    let fact = fact?;
+                    let standing = fact.standing();
+                    let fact = match fact.to_owned() {
+                        Ok(fact) => fact,
+                        Err(DialogCorpusError::CorruptEntry(reason)) => {
                             tracing::warn!(%reason, "ignoring corrupt stored row");
                             continue;
                         }
@@ -430,11 +430,11 @@ impl AttributeQueryAll {
                     };
                     // Typed `is`/`the` slots filter facts falling
                     // outside their kinds.
-                    let Some(artifact) = selector.admit(artifact) else {
+                    let Some(fact) = selector.admit(fact) else {
                         continue;
                     };
                     let mut extension = base.clone();
-                    selector.merge(&mut extension, artifact, standing)?;
+                    selector.merge(&mut extension, fact, standing)?;
                     yield extension;
                 }
             }
@@ -466,19 +466,19 @@ impl Application for AttributeQueryAll {
     }
 }
 
-impl TryFrom<&AttributeQueryAll> for ArtifactSelector<Constrained> {
+impl TryFrom<&AttributeQueryAll> for Selector<Constrained> {
     type Error = EvaluationError;
 
     fn try_from(from: &AttributeQueryAll) -> Result<Self, Self::Error> {
-        let mut selector: Option<ArtifactSelector<Constrained>> = None;
+        let mut selector: Option<Selector<Constrained>> = None;
 
         match &from.the {
             Term::Constant(the) => {
-                let relation = ArtifactsRelation::try_from(the.clone()).map_err(|_| {
+                let relation = CorpusRelation::try_from(the.clone()).map_err(|_| {
                     EvaluationError::Store("Could not convert value to Attribute".to_string())
                 })?;
                 selector = Some(match selector {
-                    None => ArtifactSelector::new().the(relation),
+                    None => Selector::new().the(relation),
                     Some(s) => s.the(relation),
                 });
             }
@@ -495,7 +495,7 @@ impl TryFrom<&AttributeQueryAll> for ArtifactSelector<Constrained> {
                     .and_then(|refinement| refinement.prefix.clone())
                 {
                     selector = Some(match selector {
-                        None => ArtifactSelector::new().the_starting_with(prefix),
+                        None => Selector::new().the_starting_with(prefix),
                         Some(s) => s.the_starting_with(prefix),
                     });
                 }
@@ -523,7 +523,7 @@ impl TryFrom<&AttributeQueryAll> for ArtifactSelector<Constrained> {
                     EvaluationError::Store("Could not convert value to Entity".to_string())
                 })?;
                 selector = Some(match selector {
-                    None => ArtifactSelector::new().of(entity.clone()),
+                    None => Selector::new().of(entity.clone()),
                     Some(s) => s.of(entity),
                 });
             }
@@ -540,7 +540,7 @@ impl TryFrom<&AttributeQueryAll> for ArtifactSelector<Constrained> {
                     .and_then(|refinement| refinement.prefix.clone())
                 {
                     selector = Some(match selector {
-                        None => ArtifactSelector::new().of_starting_with(prefix),
+                        None => Selector::new().of_starting_with(prefix),
                         Some(s) => s.of_starting_with(prefix),
                     });
                 }
@@ -550,7 +550,7 @@ impl TryFrom<&AttributeQueryAll> for ArtifactSelector<Constrained> {
         match &from.is {
             Term::Constant(value) => {
                 selector = Some(match selector {
-                    None => ArtifactSelector::new().is(value.clone()),
+                    None => Selector::new().is(value.clone()),
                     Some(s) => s.is(value.clone()),
                 });
             }
@@ -576,7 +576,7 @@ impl TryFrom<&AttributeQueryAll> for ArtifactSelector<Constrained> {
                         .and_then(|refinement| refinement.prefix.clone())
                 {
                     selector = Some(match selector {
-                        None => ArtifactSelector::new().is_starting_with(prefix),
+                        None => Selector::new().is_starting_with(prefix),
                         Some(s) => s.is_starting_with(prefix),
                     });
                 }
@@ -612,7 +612,7 @@ impl TryFrom<&AttributeQueryAll> for ArtifactSelector<Constrained> {
                         selector = Some(push_bound(selector.take(), value, bound.inclusive, false));
                     }
                     if across {
-                        selector = selector.map(ArtifactSelector::across_numbers);
+                        selector = selector.map(Selector::across_numbers);
                     }
                 }
             }
@@ -629,7 +629,7 @@ impl TryFrom<&AttributeQueryAll> for ArtifactSelector<Constrained> {
 /// A kind of several number types pushes its literal as written, marked to
 /// admit every number type: a tree keying numbers in one band scans that
 /// range, and one keying each type in its own band scans without it (see
-/// `ArtifactSelector::across_numbers`).
+/// `Selector::across_numbers`).
 fn pushable_type(primitive: Primitive, literal: Type) -> Option<(Type, bool)> {
     if let Some(single) = single_comparable_type(primitive) {
         return Some((single, false));
@@ -682,11 +682,11 @@ fn adapt_bound(literal_type: Type, encoded: &[u8], data_type: Type) -> Option<Va
 /// Extends `selector` with one interval bound, choosing the matching
 /// range constructor.
 fn push_bound(
-    selector: Option<ArtifactSelector<Constrained>>,
+    selector: Option<Selector<Constrained>>,
     value: Value,
     inclusive: bool,
     lower: bool,
-) -> ArtifactSelector<Constrained> {
+) -> Selector<Constrained> {
     match selector {
         Some(constrained) => match (lower, inclusive) {
             (true, true) => constrained.is_at_least(value),
@@ -695,10 +695,10 @@ fn push_bound(
             (false, false) => constrained.is_less_than(value),
         },
         None => match (lower, inclusive) {
-            (true, true) => ArtifactSelector::new().is_at_least(value),
-            (true, false) => ArtifactSelector::new().is_greater_than(value),
-            (false, true) => ArtifactSelector::new().is_at_most(value),
-            (false, false) => ArtifactSelector::new().is_less_than(value),
+            (true, true) => Selector::new().is_at_least(value),
+            (true, false) => Selector::new().is_greater_than(value),
+            (false, true) => Selector::new().is_at_most(value),
+            (false, false) => Selector::new().is_less_than(value),
         },
     }
 }
@@ -720,8 +720,8 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
-    use crate::artifact::encode_value_owned;
     use crate::attribute::query::DynamicAttributeQuery;
+    use crate::corpus::encode_value_owned;
     use crate::query::Output;
     use crate::session::RuleRegistry;
     use crate::source::test::TestEnv;
@@ -744,7 +744,7 @@ mod tests {
             Term::var("v"),
             Term::var("cause"),
         );
-        let selector = ArtifactSelector::<Constrained>::try_from(&query)?;
+        let selector = Selector::<Constrained>::try_from(&query)?;
         assert_eq!(selector.entity_prefix(), Some("did:key:"));
 
         let attribute_kind = Kind::from(Type::Symbol)
@@ -756,7 +756,7 @@ mod tests {
             Term::var("v"),
             Term::var("cause"),
         );
-        let selector = ArtifactSelector::<Constrained>::try_from(&query)?;
+        let selector = Selector::<Constrained>::try_from(&query)?;
         assert_eq!(selector.attribute_prefix(), Some("person/"));
 
         // A name-shape refinement rides the same lowering: the
@@ -774,7 +774,7 @@ mod tests {
             Term::var("v"),
             Term::var("cause"),
         );
-        let selector = ArtifactSelector::<Constrained>::try_from(&query)?;
+        let selector = Selector::<Constrained>::try_from(&query)?;
         assert_eq!(selector.attribute_prefix(), Some("todo.list/"));
         assert_eq!(selector.name_shape(), Some(NameShape::Position));
 
@@ -789,7 +789,7 @@ mod tests {
             Term::var("v").with_kind(value_kind),
             Term::var("cause"),
         );
-        let selector = ArtifactSelector::<Constrained>::try_from(&query)?;
+        let selector = Selector::<Constrained>::try_from(&query)?;
         assert_eq!(selector.value_prefix(), Some("alice"));
 
         // An unrefined variable contributes nothing, as before.
@@ -799,7 +799,7 @@ mod tests {
             Term::var("v"),
             Term::var("cause"),
         );
-        let selector = ArtifactSelector::<Constrained>::try_from(&query)?;
+        let selector = Selector::<Constrained>::try_from(&query)?;
         assert_eq!(selector.entity_prefix(), None);
         assert_eq!(selector.attribute_prefix(), None);
         assert_eq!(selector.value_prefix(), None);
@@ -822,7 +822,7 @@ mod tests {
             Term::var("v").with_kind(kind),
             Term::var("cause"),
         );
-        let selector = ArtifactSelector::<Constrained>::try_from(&query)?;
+        let selector = Selector::<Constrained>::try_from(&query)?;
         let lower = selector.value_lower().expect("the bound is pushed");
         assert_eq!(lower.value, Value::UnsignedInt(30));
         assert!(lower.inclusive);
@@ -838,7 +838,7 @@ mod tests {
             Term::var("v").with_kind(kind),
             Term::var("cause"),
         );
-        let selector = ArtifactSelector::<Constrained>::try_from(&query)?;
+        let selector = Selector::<Constrained>::try_from(&query)?;
         let upper = selector.value_upper().expect("the bound is pushed");
         assert_eq!(upper.value, Value::Float(30.0));
         assert!(!upper.inclusive);
@@ -856,7 +856,7 @@ mod tests {
             Term::var("v").with_kind(kind),
             Term::var("cause"),
         );
-        let selector = ArtifactSelector::<Constrained>::try_from(&query)?;
+        let selector = Selector::<Constrained>::try_from(&query)?;
         assert_eq!(
             selector.value_lower().expect("lower pushed").value,
             Value::UnsignedInt(10)
@@ -882,7 +882,7 @@ mod tests {
             Term::var("v").with_kind(kind),
             Term::var("cause"),
         );
-        let selector = ArtifactSelector::<Constrained>::try_from(&query)?;
+        let selector = Selector::<Constrained>::try_from(&query)?;
         let lower = selector.value_lower().expect("the bound is pushed");
         assert_eq!(lower.value, Value::String("Q".into()));
         assert!(lower.inclusive);
@@ -907,7 +907,7 @@ mod tests {
             Term::var("v").with_kind(wide),
             Term::var("cause"),
         );
-        let selector = ArtifactSelector::<Constrained>::try_from(&query)?;
+        let selector = Selector::<Constrained>::try_from(&query)?;
         let lower = selector.value_lower().expect("the bound is pushed");
         assert_eq!(lower.value, Value::UnsignedInt(30));
         assert!(lower.across, "it spans every number type");
@@ -925,7 +925,7 @@ mod tests {
             Term::var("v").with_kind(narrowed),
             Term::var("cause"),
         );
-        let selector = ArtifactSelector::<Constrained>::try_from(&query)?;
+        let selector = Selector::<Constrained>::try_from(&query)?;
         assert!(
             selector.value_lower().is_some(),
             "the narrowed membership admits only String, so the bound pushes"
@@ -957,7 +957,7 @@ mod tests {
             Term::var("v").with_kind(string_like),
             Term::var("cause"),
         );
-        let selector = ArtifactSelector::<Constrained>::try_from(&query)?;
+        let selector = Selector::<Constrained>::try_from(&query)?;
         assert!(
             selector.value_lower().is_none() && selector.value_upper().is_none(),
             "a kind still admitting Symbol pushes no String bound"
@@ -972,7 +972,7 @@ mod tests {
             Term::var("v").with_kind(unadaptable),
             Term::var("cause"),
         );
-        let selector = ArtifactSelector::<Constrained>::try_from(&query)?;
+        let selector = Selector::<Constrained>::try_from(&query)?;
         assert!(
             selector.value_lower().is_none() && selector.value_upper().is_none(),
             "a literal that cannot adapt losslessly pushes nothing"
@@ -1005,7 +1005,7 @@ mod tests {
             Term::var("v").with_kind(cross_type),
             Term::var("cause"),
         );
-        let selector = ArtifactSelector::<Constrained>::try_from(&query)?;
+        let selector = Selector::<Constrained>::try_from(&query)?;
         assert!(
             selector.value_lower().is_none() && selector.value_upper().is_none(),
             "a string literal never adapts to a symbol column"
@@ -1043,7 +1043,7 @@ mod tests {
 
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let results = query.perform(&source).try_vec().await?;
-        let values: Vec<&Value> = results.iter().map(|artifact| artifact.is()).collect();
+        let values: Vec<&Value> = results.iter().map(|fact| fact.is()).collect();
         assert_eq!(values.len(), 2, "10 is below the bound");
         assert!(
             values.contains(&&Value::UnsignedInt(30)),
@@ -1091,7 +1091,7 @@ mod tests {
 
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let results = query.perform(&source).try_vec().await?;
-        let values: Vec<&Value> = results.iter().map(|artifact| artifact.is()).collect();
+        let values: Vec<&Value> = results.iter().map(|fact| fact.is()).collect();
         assert_eq!(values.len(), 2, "Alice sorts below the bound");
         assert!(values.contains(&&Value::String("Quinn".into())));
         assert!(values.contains(&&Value::String("Zed".into())));
@@ -1222,10 +1222,7 @@ mod tests {
 
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let results = query.perform(&source).try_vec().await?;
-        let mut values: Vec<Value> = results
-            .iter()
-            .map(|artifact| artifact.is().clone())
-            .collect();
+        let mut values: Vec<Value> = results.iter().map(|fact| fact.is().clone()).collect();
         values.sort_by_key(|value| format!("{value:?}"));
         assert_eq!(
             values,
@@ -1245,7 +1242,7 @@ mod tests {
     /// a mixed domain. Pinning a shape is for premises that want
     /// one half; a consumer of both halves leaves the shape
     /// unpinned — one scan, classified per row downstream (the
-    /// artifacts-layer `Directory`/`Sequence` `admit` split).
+    /// facts-layer `Directory`/`Sequence` `admit` split).
     #[dialog_common::test]
     async fn it_filters_domain_scans_by_name_shape() -> anyhow::Result<()> {
         let (operator, profile) = test_session_with_peer().await;
@@ -1256,7 +1253,7 @@ mod tests {
         // One domain, both name shapes: a dictionary entry and an
         // ordered member. A position name is uppercase, outside the
         // `the!` notation, so it is composed at runtime.
-        let member = Relation::from(ArtifactsRelation::try_from("todo.list/N".to_string())?);
+        let member = Relation::from(CorpusRelation::try_from("todo.list/N".to_string())?);
         branch
             .transaction()
             .assert(
@@ -1312,8 +1309,8 @@ mod tests {
         // One domain, both name shapes: a dictionary entry plus two
         // ordered members. Position names are uppercase, outside the
         // `the!` notation, so they are composed at runtime.
-        let first = Relation::from(ArtifactsRelation::try_from("todo.list/N".to_string())?);
-        let second = Relation::from(ArtifactsRelation::try_from("todo.list/N5".to_string())?);
+        let first = Relation::from(CorpusRelation::try_from("todo.list/N".to_string())?);
+        let second = Relation::from(CorpusRelation::try_from("todo.list/N5".to_string())?);
         branch
             .transaction()
             .assert(
@@ -1380,7 +1377,7 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let e = Entity::new()?;
-        let symbol = ArtifactsRelation::try_from("user/name".to_string())?;
+        let symbol = CorpusRelation::try_from("user/name".to_string())?;
         branch
             .transaction()
             .assert(the!("tag/kind").of(e.clone()).is(symbol))

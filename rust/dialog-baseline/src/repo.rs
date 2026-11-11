@@ -10,17 +10,19 @@
 //! commit path. The branch handle is opened once and held across commits —
 //! the realistic application shape, which also keeps the branch-owned record
 //! and node caches warm the way a running app would.
+use dialog_corpus::tree::CorpusNode;
 use dialog_effects::blob::Import as BlobImport;
 use dialog_effects::blob::Size as BlobSize;
+use dialog_search_tree::nodes;
 use std::str::FromStr;
 
 use anyhow::Result;
-use dialog_artifacts::selector::Constrained;
-use dialog_artifacts::tree::ArtifactTree;
-use dialog_artifacts::{Artifact, ArtifactSelector, Changes, Entity, Relation, Value};
 use dialog_capability::{Fork, Provider, Subject};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::{ConditionalSync, Holds};
+use dialog_corpus::selector::Constrained;
+use dialog_corpus::tree::Corpus;
+use dialog_corpus::{Changes, Entity, Fact, Relation, Selector, Value};
 use dialog_effects::archive::prelude::CatalogScope;
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify};
@@ -40,9 +42,7 @@ use futures_util::{StreamExt as _, TryStreamExt as _};
 
 use crate::metered::{Meter, Metered, Tally};
 use crate::se::{SeLog, se_instructions};
-use crate::{
-    FactRow, Instruction, NAME_ATTRIBUTE, ROLE_ATTRIBUTE, artifacts_for, instructions_for,
-};
+use crate::{FactRow, Instruction, NAME_ATTRIBUTE, ROLE_ATTRIBUTE, facts_for, instructions_for};
 
 /// Remove every store under the temp storage base. Benchmark plumbing:
 /// the `repo_*` disk rows create a fresh uniquely-named store per
@@ -121,8 +121,13 @@ where
         + PeersEnv
         + Provider<dialog_effects::archive::Load>
         + Provider<dialog_effects::blob::Load>
-        + Provider<dialog_artifacts::Preload>
-        + Provider<dialog_artifacts::Speculation>
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
+        + Provider<dialog_corpus::Preload>
+        + Provider<dialog_corpus::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
         + Holds
         + ConditionalSync
@@ -161,9 +166,9 @@ where
     /// Commit each row as its own branch commit (the small-commit shape).
     pub async fn insert_per_row_transactions(&self, rows: &[FactRow]) -> Result<()> {
         for row in rows {
-            let changes: Changes = artifacts_for(row)?
+            let changes: Changes = facts_for(row)?
                 .into_iter()
-                .map(|artifact| Instruction::Assert(artifact, dialog_artifacts::Pick::All))
+                .map(|fact| Instruction::Assert(fact, dialog_corpus::Pick::All))
                 .collect();
             self.branch
                 .transaction()
@@ -200,12 +205,10 @@ where
     }
 
     /// The tree the branch head names.
-    pub fn tree(&self) -> ArtifactTree {
+    pub fn tree(&self) -> Corpus {
         match self.branch.revision() {
-            Some(revision) => {
-                ArtifactTree::at(self.catalog(), NodeHash::from(*revision.tree.hash()))
-            }
-            None => ArtifactTree::empty_in(self.catalog()),
+            Some(revision) => Corpus::at(self.catalog(), NodeHash::from(*revision.tree.hash())),
+            None => Corpus::empty_in(self.catalog()),
         }
     }
 
@@ -216,7 +219,7 @@ where
     }
 
     /// Every fact matching `selector`, materialized.
-    pub async fn collect(&self, selector: ArtifactSelector<Constrained>) -> Result<Vec<Artifact>> {
+    pub async fn collect(&self, selector: Selector<Constrained>) -> Result<Vec<Fact>> {
         let rows = self
             .branch
             .claims()
@@ -230,10 +233,7 @@ where
     /// The `(entity, value)` pairs `selector` matches, materialized per row
     /// to exactly the degree the SQLite arms materialize theirs (a
     /// `String` per column read off the statement row).
-    async fn scan_pairs(
-        &self,
-        selector: ArtifactSelector<Constrained>,
-    ) -> Result<Vec<(String, Value)>> {
+    async fn scan_pairs(&self, selector: Selector<Constrained>) -> Result<Vec<(String, Value)>> {
         let rows = self
             .branch
             .claims()
@@ -253,7 +253,7 @@ where
 
     /// Point lookup: the value of `(entity, stuff/name)`.
     pub async fn point_get(&self, entity: &str) -> Result<Option<Value>> {
-        let selector = ArtifactSelector::new()
+        let selector = Selector::new()
             .the(Relation::from_str(NAME_ATTRIBUTE)?)
             .of(Entity::from_str(entity)?);
         Ok(self
@@ -265,7 +265,7 @@ where
 
     /// Attribute scan: every `stuff/name` fact.
     pub async fn attribute_scan(&self) -> Result<usize> {
-        let selector = ArtifactSelector::new().the(Relation::from_str(NAME_ATTRIBUTE)?);
+        let selector = Selector::new().the(Relation::from_str(NAME_ATTRIBUTE)?);
         Ok(self.scan_pairs(selector).await?.len())
     }
 
@@ -274,10 +274,10 @@ where
     /// `query_join` engine benchmark.
     pub async fn join(&self) -> Result<usize> {
         let names = self
-            .scan_pairs(ArtifactSelector::new().the(Relation::from_str(NAME_ATTRIBUTE)?))
+            .scan_pairs(Selector::new().the(Relation::from_str(NAME_ATTRIBUTE)?))
             .await?;
         let roles = self
-            .scan_pairs(ArtifactSelector::new().the(Relation::from_str(ROLE_ATTRIBUTE)?))
+            .scan_pairs(Selector::new().the(Relation::from_str(ROLE_ATTRIBUTE)?))
             .await?;
         let names_by_entity: std::collections::HashMap<String, Value> = names.into_iter().collect();
         Ok(roles
@@ -288,7 +288,7 @@ where
 
     /// The current title of a post (point read of a superseded pair).
     pub async fn se_title(&self, post: &str) -> Result<Option<Value>> {
-        let selector = ArtifactSelector::new()
+        let selector = Selector::new()
             .the(Relation::from_str("se.post/title")?)
             .of(Entity::from_str(post)?);
         Ok(self.collect(selector).await?.pop().map(|found| found.is))
@@ -296,7 +296,7 @@ where
 
     /// All entities whose `se.post/kind` is `kind` (a VAE-indexed lookup).
     pub async fn se_by_kind(&self, kind: &str) -> Result<usize> {
-        let selector = ArtifactSelector::new()
+        let selector = Selector::new()
             .the(Relation::from_str("se.post/kind")?)
             .is(Value::String(kind.to_owned()));
         Ok(self.collect(selector).await?.len())
@@ -336,8 +336,8 @@ where
     pub async fn collect_from(
         &self,
         branch: &Branch,
-        selector: ArtifactSelector<Constrained>,
-    ) -> Result<Vec<Artifact>> {
+        selector: Selector<Constrained>,
+    ) -> Result<Vec<Fact>> {
         let rows = branch
             .claims()
             .select(selector)

@@ -68,6 +68,7 @@ impl OpenBranch {
             induction,
             node_cache: caches.nodes,
             spill_cache: caches.spills,
+            cache_limits: caches.limits,
             rule_cache: caches.rules,
             plan_cache: caches.plans,
             causality_cache: caches.causality,
@@ -129,8 +130,7 @@ mod tests {
         }
     }
 
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    #[dialog_capability::provider]
     impl Provider<Resolve> for Holding {
         async fn execute(
             &self,

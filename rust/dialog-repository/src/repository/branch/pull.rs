@@ -1,18 +1,18 @@
-use dialog_artifacts::history::{
+use dialog_corpus::history::{
     Record as HistoryRecord, RevisionRecord, TreeHistory, Version, novelty,
 };
 use std::collections::BTreeSet;
 use std::mem;
 use std::sync::{Arc, Mutex};
 
-use dialog_artifacts::ArchiveDelta;
-use dialog_artifacts::FromKey as _;
-use dialog_artifacts::history::{Context, History as _, region_writes};
-use dialog_artifacts::merge;
-use dialog_artifacts::tree::ArtifactTreeExt as _;
 use dialog_capability::Provider;
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::ConditionalSync;
+use dialog_corpus::ArchiveDelta;
+use dialog_corpus::FromKey as _;
+use dialog_corpus::history::{Context, History as _, region_writes};
+use dialog_corpus::merge;
+use dialog_corpus::tree::CorpusExt as _;
 use dialog_effects::archive::prelude::CatalogScope;
 use dialog_effects::authority::{Attest, Identify, OperatorExt};
 use dialog_effects::memory::{Publish, Resolve};
@@ -326,11 +326,11 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
         // the signature is the named issuer's — a forged or tampered head
         // (wrong tree root, reattributed issuer, adjusted edition) is
         // rejected here, before any of its blocks are walked.
-        // Surface head verification as an artifact error, the shape callers
+        // Surface head verification as a fact error, the shape callers
         // (and the forged-head test) match on.
         upstream_revision
             .verify()
-            .map_err(dialog_artifacts::DialogArtifactsError::from)?;
+            .map_err(dialog_corpus::DialogCorpusError::from)?;
 
         // A rival head: the upstream's head is another revision under our
         // head's own version, minted by a replica writing with our key on
@@ -859,7 +859,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                         let dialog_search_tree::Change::Add(entry) = change? else {
                             continue;
                         };
-                        let dialog_artifacts::State::Added(record) = &entry.value else {
+                        let dialog_corpus::State::Added(record) = &entry.value else {
                             continue;
                         };
                         if record.supersedes.is_empty() {
@@ -880,7 +880,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                                 futures_util::StreamExt::next(&mut candidates).await
                             {
                                 let candidate = candidate?;
-                                if let dialog_artifacts::State::Added(datum) = &candidate.value
+                                if let dialog_corpus::State::Added(datum) = &candidate.value
                                     && datum
                                         .versions()
                                         .any(|version| record.supersedes.contains(version))
@@ -893,10 +893,9 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                             }
                         }
                         for (key, surviving) in retire {
-                            let entity_key = dialog_artifacts::EntityKey(key);
-                            let attribute_key =
-                                dialog_artifacts::AttributeKey::from_key(&entity_key);
-                            let value_key = dialog_artifacts::ValueKey::from_key(&entity_key);
+                            let entity_key = dialog_corpus::EntityKey(key);
+                            let attribute_key = dialog_corpus::AttributeKey::from_key(&entity_key);
+                            let value_key = dialog_corpus::ValueKey::from_key(&entity_key);
                             for key in [
                                 entity_key.into_key(),
                                 attribute_key.into_key(),
@@ -908,7 +907,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                                         stitched
                                             .insert(
                                                 key,
-                                                dialog_artifacts::State::Added(datum.clone()),
+                                                dialog_corpus::State::Added(datum.clone()),
                                                 &tree_store,
                                             )
                                             .await?
@@ -920,7 +919,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 }
 
                 let mut delta = ArchiveDelta::zero();
-                let mut merged = stitched.persist(delta.blocks(), &tree_store)?;
+                let mut merged = stitched.persist(delta.nodes())?;
                 let merged_tree = TreeReference::from(*merged.root().as_bytes());
 
                 // Head selection mirrors the other merge paths, so
@@ -1085,7 +1084,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 let mut delta = ArchiveDelta::zero();
                 merged = Box::pin(merged.edit().integrate(screened, &tree_store))
                     .await?
-                    .persist(delta.blocks(), &tree_store)?;
+                    .persist(delta.nodes())?;
                 let merged_tree = TreeReference::from(*merged.root().as_bytes());
 
                 // The replay can degenerate, and the head selection must
@@ -1256,7 +1255,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
         let mut delta = ArchiveDelta::zero();
         merged = Box::pin(merged.edit().integrate(screened, &tree_store))
             .await?
-            .persist(delta.blocks(), &tree_store)?;
+            .persist(delta.nodes())?;
 
         let merged_tree = TreeReference::from(*merged.root().as_bytes());
 
@@ -1340,7 +1339,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 // A merge records no skip table: a skip chain must never
                 // cross a revision with more than one parent, or leaping
                 // it would lose the ancestry entering through the other
-                // parent (see `dialog_artifacts::history::skip`). Sign the
+                // parent (see `dialog_corpus::history::skip`). Sign the
                 // record before it enters the tree, and the head once the
                 // merged root is final — same order as `Commit`.
                 let mut record =
@@ -1537,8 +1536,8 @@ impl PreparedPull<'_> {
     /// is new: a revision the branch records needs no second look. A
     /// revision of the upstream's history whose record is not present — a
     /// head whose history the peer does not serve — fails the walk with
-    /// [`IncompleteHistory`](dialog_artifacts::DialogArtifactsError::IncompleteHistory),
-    /// where a history walk of [`log`](dialog_artifacts::history::log)
+    /// [`IncompleteHistory`](dialog_corpus::DialogCorpusError::IncompleteHistory),
+    /// where a history walk of [`log`](dialog_corpus::history::log)
     /// would skip it. Each record is verified as it is read, so a forged
     /// one fails too.
     ///
@@ -1726,7 +1725,7 @@ mod tests {
     use anyhow::Result;
     use dialog_peer::helpers::test_session_with_peer;
 
-    use dialog_artifacts::{Artifact, Instruction, Value};
+    use dialog_corpus::{Fact, Instruction, Value};
     use futures_util::stream;
 
     #[dialog_common::test]
@@ -1736,13 +1735,13 @@ mod tests {
 
         let main = repo.branch("main").open().perform(&operator).await?;
         main.commit(stream::iter(vec![Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "user/name".parse()?,
                 of: "user:seed".parse()?,
                 is: Value::String("Seed".to_string()),
                 cause: None,
             },
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -1762,13 +1761,13 @@ mod tests {
 
         let main = repo.branch("main").open().perform(&operator).await?;
         main.commit(stream::iter(vec![Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "user/name".parse()?,
                 of: "user:main".parse()?,
                 is: Value::String("Main data".to_string()),
                 cause: None,
             },
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -1792,7 +1791,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_pulls_from_a_non_default_upstream_and_tracks_it() -> Result<()> {
         use crate::Upstream;
-        use dialog_artifacts::ArtifactSelector;
+        use dialog_corpus::Selector;
         use futures_util::StreamExt as _;
 
         let (operator, profile) = test_session_with_peer().await;
@@ -1800,26 +1799,26 @@ mod tests {
 
         let main = repo.branch("main").open().perform(&operator).await?;
         main.commit(stream::iter(vec![Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "user/name".parse()?,
                 of: "user:main".parse()?,
                 is: Value::String("Main data".to_string()),
                 cause: None,
             },
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         )]))
         .perform(&operator)
         .await?;
 
         let dev = repo.branch("dev").open().perform(&operator).await?;
         dev.commit(stream::iter(vec![Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "user/email".parse()?,
                 of: "user:dev".parse()?,
                 is: Value::String("dev@test.com".to_string()),
                 cause: None,
             },
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -1835,7 +1834,7 @@ mod tests {
         // Both data sets are visible on the feature branch.
         let emails = feature
             .claims()
-            .select(ArtifactSelector::new().the("user/email".parse()?))
+            .select(Selector::new().the("user/email".parse()?))
             .to_owned()
             .perform(&operator)
             .await?
@@ -1884,13 +1883,13 @@ mod tests {
 
         let main = repo.branch("main").open().perform(&operator).await?;
         main.commit(stream::iter(vec![Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "user/name".parse()?,
                 of: "user:main".parse()?,
                 is: Value::String("Main data".to_string()),
                 cause: None,
             },
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -1900,13 +1899,13 @@ mod tests {
         feature.set_upstream(&main).perform(&operator).await?;
         feature
             .commit(stream::iter(vec![Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "user/email".parse()?,
                     of: "user:feature".parse()?,
                     is: Value::String("feature@test.com".to_string()),
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             )]))
             .perform(&operator)
             .await?;
@@ -1941,7 +1940,7 @@ mod tests {
     /// fetched.
     #[dialog_common::test]
     async fn it_fails_a_pull_racing_a_commit_then_reconciles_on_refresh() -> Result<()> {
-        use dialog_artifacts::ArtifactSelector;
+        use dialog_corpus::Selector;
         use futures_util::StreamExt as _;
 
         let (operator, profile) = test_session_with_peer().await;
@@ -1950,13 +1949,13 @@ mod tests {
         // Upstream `main` has a change to pull in.
         let main = repo.branch("main").open().perform(&operator).await?;
         main.commit(stream::iter(vec![Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "user/name".parse()?,
                 of: "user:main".parse()?,
                 is: Value::String("Main data".to_string()),
                 cause: None,
             },
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -1972,13 +1971,13 @@ mod tests {
         // feature head in storage. `feature_pull`'s cache is now stale.
         feature_commit
             .commit(stream::iter(vec![Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "user/email".parse()?,
                     of: "user:feature".parse()?,
                     is: Value::String("feature@test.com".to_string()),
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             )]))
             .perform(&operator)
             .await?;
@@ -2005,7 +2004,7 @@ mod tests {
         let feature = repo.branch("feature").open().perform(&operator).await?;
         let committed: Vec<_> = feature
             .claims()
-            .select(ArtifactSelector::new().the("user/email".parse()?))
+            .select(Selector::new().the("user/email".parse()?))
             .to_owned()
             .perform(&operator)
             .await?
@@ -2018,7 +2017,7 @@ mod tests {
 
         let pulled: Vec<_> = feature
             .claims()
-            .select(ArtifactSelector::new().the("user/name".parse()?))
+            .select(Selector::new().the("user/name".parse()?))
             .to_owned()
             .perform(&operator)
             .await?
@@ -2048,13 +2047,13 @@ mod tests {
         let repo = test_repo(&operator, &profile).await;
         let assert = |the: &str, of: &str| -> Result<Instruction> {
             Ok(Instruction::Assert(
-                Artifact {
+                Fact {
                     the: the.parse()?,
                     of: of.parse()?,
                     is: Value::String(of.to_string()),
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             ))
         };
 
@@ -2108,13 +2107,13 @@ mod tests {
 
         let main = repo.branch("main").open().perform(&operator).await?;
         main.commit(stream::iter(vec![Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "user/name".parse()?,
                 of: "user:main".parse()?,
                 is: Value::String("Main data".to_string()),
                 cause: None,
             },
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -2157,13 +2156,13 @@ mod tests {
         let repo = test_repo(&operator, &profile).await;
         let assert = |entity: &str, name: &str| -> Result<Vec<Instruction>> {
             Ok(vec![Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "user/name".parse()?,
                     of: entity.parse()?,
                     is: Value::String(name.to_string()),
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             )])
         };
 
@@ -2229,13 +2228,13 @@ mod tests {
 
         let main = repo.branch("main").open().perform(&operator).await?;
         main.commit(stream::iter(vec![Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "user/name".parse()?,
                 of: "user:main".parse()?,
                 is: Value::String("Main data".to_string()),
                 cause: None,
             },
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -2286,7 +2285,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_pulls_from_every_upstream() -> Result<()> {
-        use dialog_artifacts::ArtifactSelector;
+        use dialog_corpus::Selector;
         use futures_util::StreamExt as _;
 
         let (operator, profile) = test_session_with_peer().await;
@@ -2296,13 +2295,13 @@ mod tests {
             let source = repo.branch(name).open().perform(&operator).await?;
             source
                 .commit(stream::iter(vec![Instruction::Assert(
-                    Artifact {
+                    Fact {
                         the: "user/name".parse()?,
                         of: format!("user:{name}").parse()?,
                         is: Value::String(value.to_string()),
                         cause: None,
                     },
-                    dialog_artifacts::Pick::All,
+                    dialog_corpus::Pick::All,
                 )]))
                 .perform(&operator)
                 .await?;
@@ -2322,7 +2321,7 @@ mod tests {
 
         let names: Vec<_> = feature
             .claims()
-            .select(ArtifactSelector::new().the("user/name".parse()?))
+            .select(Selector::new().the("user/name".parse()?))
             .to_owned()
             .perform(&operator)
             .await?
@@ -2346,20 +2345,20 @@ mod tests {
         use crate::RepositoryMemoryExt as _;
         use crate::registry::{apply, pull};
         use crate::schema::Replica;
-        use dialog_artifacts::Changes;
+        use dialog_corpus::Changes;
         use dialog_query::Statement as _;
 
         let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let main = repo.branch("main").open().perform(&operator).await?;
         main.commit(stream::iter(vec![Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "user/name".parse()?,
                 of: "user:main".parse()?,
                 is: Value::String("Main data".to_string()),
                 cause: None,
             },
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -2410,13 +2409,13 @@ mod tests {
             let upstream = repo.branch(name).open().perform(&operator).await?;
             upstream
                 .commit(stream::iter(vec![Instruction::Assert(
-                    Artifact {
+                    Fact {
                         the: "user/name".parse()?,
                         of: format!("user:{name}").parse()?,
                         is: Value::String(name.to_string()),
                         cause: None,
                     },
-                    dialog_artifacts::Pick::All,
+                    dialog_corpus::Pick::All,
                 )]))
                 .perform(&operator)
                 .await?;
@@ -2466,10 +2465,10 @@ mod history_tests {
     use anyhow::Result;
     use dialog_peer::helpers::{test_session_with_peer, unique_name};
 
-    use dialog_artifacts::history::{
+    use dialog_corpus::history::{
         Causality, History as _, HistorySelector, causality, common_ancestor,
     };
-    use dialog_artifacts::{Artifact, Instruction, Value};
+    use dialog_corpus::{Fact, Instruction, Value};
     use futures_util::{TryStreamExt as _, stream};
 
     /// A scenario-2 pull ("upstream moved, but with things we already
@@ -2525,13 +2524,13 @@ mod history_tests {
 
     fn assert_one(the: &str, of: &str, value: &str) -> Instruction {
         Instruction::Assert(
-            Artifact {
+            Fact {
                 the: the.parse().unwrap(),
                 of: of.parse().unwrap(),
                 is: Value::String(value.to_string()),
                 cause: None,
             },
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         )
     }
 
@@ -2804,7 +2803,7 @@ mod history_tests {
                     .query()
                     .select(AttributeQuery::from(
                         Term::<Relation>::from(the!("post/title"))
-                            .of(Term::<dialog_artifacts::Entity>::var("of"))
+                            .of(Term::<dialog_corpus::Entity>::var("of"))
                             .is(Term::<String>::var("is")),
                     ))
                     .perform(operator)
@@ -2858,7 +2857,7 @@ mod history_tests {
         // Minted against the fused entry, the retraction's record
         // covers every claim version the entry collapsed. It reaches
         // `b` through the tracked pull.
-        a.commit(stream::iter(vec![Instruction::Retract(Artifact {
+        a.commit(stream::iter(vec![Instruction::Retract(Fact {
             the: "post/title".parse()?,
             of: "post:1".parse()?,
             is: Value::String("Hej".to_string()),
@@ -2935,7 +2934,7 @@ mod history_tests {
                     .query()
                     .select(AttributeQuery::from(
                         Term::<Relation>::from(the!("post/title"))
-                            .of(Term::<dialog_artifacts::Entity>::var("of"))
+                            .of(Term::<dialog_corpus::Entity>::var("of"))
                             .is(Term::<String>::var("is")),
                     ))
                     .perform(operator)
@@ -2948,7 +2947,7 @@ mod history_tests {
 
         // Feature deletes the fact.
         feature
-            .commit(stream::iter(vec![Instruction::Retract(Artifact {
+            .commit(stream::iter(vec![Instruction::Retract(Fact {
                 the: "post/title".parse()?,
                 of: "post:1".parse()?,
                 is: Value::String("Hej".to_string()),
@@ -3033,13 +3032,13 @@ mod history_tests {
         // of main's claim, because the pulled data is version-tagged.
         feature
             .commit(stream::iter(vec![Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "post/title".parse()?,
                     of: "post:1".parse()?,
                     is: Value::String("Hi".to_string()),
                     cause: None,
                 },
-                dialog_artifacts::Pick::Last,
+                dialog_corpus::Pick::Last,
             )]))
             .perform(&operator)
             .await?;
@@ -3124,11 +3123,11 @@ mod history_tests {
         // The supersession holds in the merged *data* region too: the
         // replaced value must not resurrect when the deletion crosses the
         // sync boundary through the differential.
-        use dialog_artifacts::ArtifactSelector;
+        use dialog_corpus::Selector;
         use futures_util::StreamExt as _;
         let titles: Vec<_> = feature
             .claims()
-            .select(ArtifactSelector::new().the("post/title".parse()?))
+            .select(Selector::new().the("post/title".parse()?))
             .to_owned()
             .perform(&operator)
             .await?
@@ -3201,13 +3200,13 @@ mod history_tests {
         feature.pull().perform(&operator).await?;
         feature
             .commit(stream::iter(vec![Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "post/title".parse()?,
                     of: "post:1".parse()?,
                     is: Value::String("Hi".to_string()),
                     cause: None,
                 },
-                dialog_artifacts::Pick::Last,
+                dialog_corpus::Pick::Last,
             )]))
             .perform(&operator)
             .await?;
@@ -3339,8 +3338,8 @@ mod history_tests {
     #[dialog_common::test]
     async fn it_refuses_to_pull_a_forged_head() -> Result<()> {
         use crate::{Revision, TreeReference};
-        use dialog_artifacts::DialogArtifactsError;
-        use dialog_artifacts::history::Edition;
+        use dialog_corpus::DialogCorpusError;
+        use dialog_corpus::history::Edition;
 
         let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
@@ -3368,9 +3367,9 @@ mod history_tests {
         assert!(
             matches!(
                 pulled,
-                Err(crate::PullError::Artifact(
-                    DialogArtifactsError::InvalidSignature(_)
-                ))
+                Err(crate::PullError::Fact(DialogCorpusError::InvalidSignature(
+                    _
+                )))
             ),
             "pulling a forged head must fail verification; got {pulled:?}"
         );
@@ -3389,7 +3388,7 @@ mod history_tests {
     /// reports them concurrent — resolution is deferred to whoever asks.
     #[dialog_common::test]
     async fn it_surfaces_concurrent_replacements_after_a_merge() -> Result<()> {
-        use dialog_artifacts::ArtifactSelector;
+        use dialog_corpus::Selector;
         use futures_util::StreamExt as _;
 
         let (operator, profile) = test_session_with_peer().await;
@@ -3411,13 +3410,13 @@ mod history_tests {
         // Both sides replace it, without seeing each other.
         let replace = |value: &str| -> Result<Instruction> {
             Ok(Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "post/title".parse()?,
                     of: "post:1".parse()?,
                     is: Value::String(value.to_string()),
                     cause: None,
                 },
-                dialog_artifacts::Pick::Last,
+                dialog_corpus::Pick::Last,
             ))
         };
         main.commit(stream::iter(vec![replace("MainSide")?]))
@@ -3440,7 +3439,7 @@ mod history_tests {
         // the cardinality-one (entity, attribute).
         let titles: Vec<_> = feature
             .claims()
-            .select(ArtifactSelector::new().the("post/title".parse()?))
+            .select(Selector::new().the("post/title".parse()?))
             .to_owned()
             .perform(&operator)
             .await?
@@ -3448,7 +3447,7 @@ mod history_tests {
             .await
             .into_iter()
             .collect::<Result<Vec<_>, _>>()?;
-        let mut values: Vec<_> = titles.iter().map(|artifact| artifact.is.clone()).collect();
+        let mut values: Vec<_> = titles.iter().map(|fact| fact.is.clone()).collect();
         values.sort_by_key(|value| value.to_utf8());
         assert_eq!(
             values,
@@ -3491,7 +3490,7 @@ mod history_tests {
     /// merged tree must not resurrect the retracted value.
     #[dialog_common::test]
     async fn it_propagates_a_retraction_across_a_merge() -> Result<()> {
-        use dialog_artifacts::ArtifactSelector;
+        use dialog_corpus::Selector;
         use futures_util::StreamExt as _;
 
         let (operator, profile) = test_session_with_peer().await;
@@ -3512,7 +3511,7 @@ mod history_tests {
 
         // Feature retracts the title — causally after the assertion.
         feature
-            .commit(stream::iter(vec![Instruction::Retract(Artifact {
+            .commit(stream::iter(vec![Instruction::Retract(Fact {
                 the: "post/title".parse()?,
                 of: "post:1".parse()?,
                 is: Value::String("Hej".to_string()),
@@ -3538,7 +3537,7 @@ mod history_tests {
 
         let titles: Vec<_> = feature
             .claims()
-            .select(ArtifactSelector::new().the("post/title".parse()?))
+            .select(Selector::new().the("post/title".parse()?))
             .to_owned()
             .perform(&operator)
             .await?
@@ -3561,7 +3560,7 @@ mod history_tests {
     /// is it gone everywhere.
     #[dialog_common::test]
     async fn it_keeps_a_concurrent_assertion_the_retraction_never_observed() -> Result<()> {
-        use dialog_artifacts::ArtifactSelector;
+        use dialog_corpus::Selector;
         use futures_util::StreamExt as _;
 
         let (operator, profile) = test_session_with_peer().await;
@@ -3572,7 +3571,7 @@ mod history_tests {
             async move {
                 let rows: Vec<_> = branch
                     .claims()
-                    .select(ArtifactSelector::new().the("task/label".parse().unwrap()))
+                    .select(Selector::new().the("task/label".parse().unwrap()))
                     .to_owned()
                     .perform(operator)
                     .await
@@ -3584,13 +3583,13 @@ mod history_tests {
         };
         let label = |value: &str| {
             Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "task/label".parse().unwrap(),
                     of: "task:7".parse().unwrap(),
                     is: Value::String(value.to_string()),
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             )
         };
 
@@ -3611,7 +3610,7 @@ mod history_tests {
         // Concurrently: Alice retracts (observing only Bob's claim);
         // Mallory re-asserts the same value under her own claim.
         alice
-            .commit(stream::iter(vec![Instruction::Retract(Artifact {
+            .commit(stream::iter(vec![Instruction::Retract(Fact {
                 the: "task/label".parse()?,
                 of: "task:7".parse()?,
                 is: Value::String("urgent".to_string()),
@@ -3640,7 +3639,7 @@ mod history_tests {
 
         // Jordan, having now seen both, retracts — and it clears everywhere.
         jordan
-            .commit(stream::iter(vec![Instruction::Retract(Artifact {
+            .commit(stream::iter(vec![Instruction::Retract(Fact {
                 the: "task/label".parse()?,
                 of: "task:7".parse()?,
                 is: Value::String("urgent".to_string()),
@@ -3669,7 +3668,7 @@ mod history_tests {
     /// divergence with all further pulls quiescing.
     #[dialog_common::test]
     async fn it_retracts_collapsed_same_value_claims_everywhere() -> Result<()> {
-        use dialog_artifacts::ArtifactSelector;
+        use dialog_corpus::Selector;
         use futures_util::StreamExt as _;
 
         let (operator, profile) = test_session_with_peer().await;
@@ -3680,7 +3679,7 @@ mod history_tests {
             async move {
                 let rows: Vec<_> = branch
                     .claims()
-                    .select(ArtifactSelector::new().the("task/label".parse().unwrap()))
+                    .select(Selector::new().the("task/label".parse().unwrap()))
                     .to_owned()
                     .perform(operator)
                     .await
@@ -3690,7 +3689,7 @@ mod history_tests {
                 rows.len()
             }
         };
-        let urgent = || Artifact {
+        let urgent = || Fact {
             the: "task/label".parse().unwrap(),
             of: "task:7".parse().unwrap(),
             is: Value::String("urgent".to_string()),
@@ -3701,7 +3700,7 @@ mod history_tests {
         let bob = repo.branch("bob").open().perform(&operator).await?;
         bob.commit(stream::iter(vec![Instruction::Assert(
             urgent(),
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -3719,7 +3718,7 @@ mod history_tests {
         mallory
             .commit(stream::iter(vec![Instruction::Assert(
                 urgent(),
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             )]))
             .perform(&operator)
             .await?;
@@ -3761,7 +3760,7 @@ mod history_tests {
     /// `notes/version-control.md`.
     #[dialog_common::test]
     async fn it_resurrects_a_deleted_fact_and_the_resurrection_survives() -> Result<()> {
-        use dialog_artifacts::ArtifactSelector;
+        use dialog_corpus::Selector;
         use futures_util::StreamExt as _;
 
         let (operator, profile) = test_session_with_peer().await;
@@ -3772,7 +3771,7 @@ mod history_tests {
             async move {
                 let rows: Vec<_> = branch
                     .claims()
-                    .select(ArtifactSelector::new().the("post/title".parse().unwrap()))
+                    .select(Selector::new().the("post/title".parse().unwrap()))
                     .to_owned()
                     .perform(operator)
                     .await
@@ -3803,7 +3802,7 @@ mod history_tests {
         // Laptop deletes, then brings it back — the tablet never learns
         // of either.
         laptop
-            .commit(stream::iter(vec![Instruction::Retract(Artifact {
+            .commit(stream::iter(vec![Instruction::Retract(Fact {
                 the: "post/title".parse()?,
                 of: "post:1".parse()?,
                 is: Value::String("Hej".to_string()),
@@ -3852,7 +3851,7 @@ mod history_tests {
     /// the record's (entity, attribute) slot, not probe the record's keys.
     #[dialog_common::test]
     async fn it_retires_a_replaced_value_on_an_empty_base_pull() -> Result<()> {
-        use dialog_artifacts::ArtifactSelector;
+        use dialog_corpus::Selector;
         use futures_util::StreamExt as _;
 
         let (operator, profile) = test_session_with_peer().await;
@@ -3874,13 +3873,13 @@ mod history_tests {
         let main = repo.branch("main").open().perform(&operator).await?;
         main.pull().from(&feature).perform(&operator).await?;
         main.commit(stream::iter(vec![Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "user/name".parse()?,
                 of: "user:1".parse()?,
                 is: Value::String("Bob".to_string()),
                 cause: None,
             },
-            dialog_artifacts::Pick::Last,
+            dialog_corpus::Pick::Last,
         )]))
         .perform(&operator)
         .await?;
@@ -3892,7 +3891,7 @@ mod history_tests {
 
         let names: Vec<_> = feature
             .claims()
-            .select(ArtifactSelector::new().the("user/name".parse()?))
+            .select(Selector::new().the("user/name".parse()?))
             .to_owned()
             .perform(&operator)
             .await?
@@ -3928,7 +3927,7 @@ mod history_tests {
     /// an over-watermark drops live claims).
     #[dialog_common::test]
     async fn it_maintains_the_context_memo_incrementally() -> Result<()> {
-        use dialog_artifacts::history::{Context, context_of};
+        use dialog_corpus::history::{Context, context_of};
 
         let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
@@ -4006,10 +4005,10 @@ mod history_tests {
     #[dialog_common::test]
     async fn it_publishes_the_watermark_with_the_head() -> Result<()> {
         use crate::Index;
-        use dialog_artifacts::history::{
+        use dialog_common::Blake3Hash;
+        use dialog_corpus::history::{
             Edition, HistoryError, Origin, Version, context_in, context_of,
         };
-        use dialog_common::Blake3Hash;
 
         let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
@@ -4076,7 +4075,7 @@ mod history_tests {
     async fn it_adopts_an_upstream_head_without_reading_its_novelty() -> Result<()> {
         use crate::RepositoryExt as _;
         use crate::helpers::Counting;
-        use dialog_artifacts::ArtifactSelector;
+        use dialog_corpus::Selector;
         use futures_util::StreamExt as _;
 
         let (operator, profile) = test_session_with_peer().await;
@@ -4139,7 +4138,7 @@ mod history_tests {
         // The adopted data is really there: reads hydrate lazily.
         let rows: Vec<_> = feature
             .claims()
-            .select(ArtifactSelector::new().the("user/name".parse()?))
+            .select(Selector::new().the("user/name".parse()?))
             .to_owned()
             .perform(&env)
             .await?
@@ -4221,7 +4220,7 @@ mod history_tests {
     /// rejects the stale fact.
     #[dialog_common::test]
     async fn it_refuses_adoption_when_local_knowledge_exceeds_the_upstreams() -> Result<()> {
-        use dialog_artifacts::ArtifactSelector;
+        use dialog_corpus::Selector;
         use futures_util::StreamExt as _;
 
         let (operator, profile) = test_session_with_peer().await;
@@ -4244,7 +4243,7 @@ mod history_tests {
         moderator.set_upstream(&author).perform(&operator).await?;
         moderator.pull().perform(&operator).await?;
         moderator
-            .commit(stream::iter(vec![Instruction::Retract(Artifact {
+            .commit(stream::iter(vec![Instruction::Retract(Fact {
                 the: "post/title".parse()?,
                 of: "post:1".parse()?,
                 is: Value::String("Spam".to_string()),
@@ -4309,7 +4308,7 @@ mod history_tests {
 
         let titles: Vec<_> = replica
             .claims()
-            .select(ArtifactSelector::new().the("post/title".parse()?))
+            .select(Selector::new().the("post/title".parse()?))
             .to_owned()
             .perform(&operator)
             .await?
@@ -4338,7 +4337,7 @@ mod history_tests {
     async fn it_replays_local_novelty_onto_an_upstream_without_reading_its_churn() -> Result<()> {
         use crate::RepositoryExt as _;
         use crate::helpers::Counting;
-        use dialog_artifacts::ArtifactSelector;
+        use dialog_corpus::Selector;
         use futures_util::StreamExt as _;
 
         let (operator, profile) = test_session_with_peer().await;
@@ -4396,7 +4395,7 @@ mod history_tests {
         // Both sides' content is present.
         let titles: Vec<_> = feature
             .claims()
-            .select(ArtifactSelector::new().the("post/title".parse()?))
+            .select(Selector::new().the("post/title".parse()?))
             .to_owned()
             .perform(&env)
             .await?
@@ -4407,7 +4406,7 @@ mod history_tests {
         assert_eq!(titles.len(), 2, "seed and local novelty both present");
         let churn: Vec<_> = feature
             .claims()
-            .select(ArtifactSelector::new().the("user/name".parse()?))
+            .select(Selector::new().the("user/name".parse()?))
             .to_owned()
             .perform(&env)
             .await?
@@ -4427,7 +4426,7 @@ mod history_tests {
     /// upstream tree.
     #[dialog_common::test]
     async fn it_carries_a_covering_record_when_replaying_onto_a_stale_holder() -> Result<()> {
-        use dialog_artifacts::ArtifactSelector;
+        use dialog_corpus::Selector;
         use futures_util::StreamExt as _;
 
         let (operator, profile) = test_session_with_peer().await;
@@ -4463,7 +4462,7 @@ mod history_tests {
         // f retracts it: net zero in f's data diff against its base
         // with m (the fact was never in that base), so only f's retract
         // record carries the deletion into the replay.
-        f.commit(stream::iter(vec![Instruction::Retract(Artifact {
+        f.commit(stream::iter(vec![Instruction::Retract(Fact {
             the: "post/title".parse()?,
             of: "post:1".parse()?,
             is: Value::String("Spam".to_string()),
@@ -4512,7 +4511,7 @@ mod history_tests {
 
         let values: Vec<_> = f
             .claims()
-            .select(ArtifactSelector::new().the("post/title".parse()?))
+            .select(Selector::new().the("post/title".parse()?))
             .to_owned()
             .perform(&operator)
             .await?
@@ -4543,7 +4542,7 @@ mod history_tests {
     /// above the watermark and land as news.
     #[dialog_common::test]
     async fn it_drops_observed_adds_when_replaying_onto_a_covering_upstream() -> Result<()> {
-        use dialog_artifacts::ArtifactSelector;
+        use dialog_corpus::Selector;
         use futures_util::StreamExt as _;
 
         let (operator, profile) = test_session_with_peer().await;
@@ -4573,7 +4572,7 @@ mod history_tests {
         .perform(&operator)
         .await?;
         m.pull().from(&a).perform(&operator).await?;
-        m.commit(stream::iter(vec![Instruction::Retract(Artifact {
+        m.commit(stream::iter(vec![Instruction::Retract(Fact {
             the: "post/title".parse()?,
             of: "post:1".parse()?,
             is: Value::String("Spam".to_string()),
@@ -4597,7 +4596,7 @@ mod history_tests {
 
         let values: Vec<_> = f
             .claims()
-            .select(ArtifactSelector::new().the("post/title".parse()?))
+            .select(Selector::new().the("post/title".parse()?))
             .to_owned()
             .perform(&operator)
             .await?
@@ -4629,7 +4628,7 @@ mod history_tests {
     async fn it_first_contacts_a_churning_upstream_from_the_small_side() -> Result<()> {
         use crate::RepositoryExt as _;
         use crate::helpers::Counting;
-        use dialog_artifacts::ArtifactSelector;
+        use dialog_corpus::Selector;
         use futures_util::StreamExt as _;
 
         let (operator, profile) = test_session_with_peer().await;
@@ -4682,7 +4681,7 @@ mod history_tests {
         // Both sides' content is present in the merged state.
         let ours: Vec<_> = feature
             .claims()
-            .select(ArtifactSelector::new().the("post/title".parse()?))
+            .select(Selector::new().the("post/title".parse()?))
             .to_owned()
             .perform(&env)
             .await?
@@ -4693,7 +4692,7 @@ mod history_tests {
         assert_eq!(ours.len(), 2, "our facts survive");
         let theirs: Vec<_> = feature
             .claims()
-            .select(ArtifactSelector::new().the("user/name".parse()?))
+            .select(Selector::new().the("user/name".parse()?))
             .to_owned()
             .perform(&env)
             .await?
@@ -4741,19 +4740,19 @@ mod history_tests {
         for _round in 0..12 {
             // Every branch performs one pseudo-random write.
             for branch in branches {
-                let of: dialog_artifacts::Entity = entity(next(4)).parse()?;
-                let the: dialog_artifacts::Relation = "bench/field".parse()?;
+                let of: dialog_corpus::Entity = entity(next(4)).parse()?;
+                let the: dialog_corpus::Relation = "bench/field".parse()?;
                 let is = value(next(3));
-                let artifact = Artifact {
+                let fact = Fact {
                     the,
                     of,
                     is,
                     cause: None,
                 };
                 let instruction = match next(3) {
-                    0 => Instruction::Assert(artifact, dialog_artifacts::Pick::All),
-                    1 => Instruction::Assert(artifact, dialog_artifacts::Pick::Last),
-                    _ => Instruction::Retract(artifact),
+                    0 => Instruction::Assert(fact, dialog_corpus::Pick::All),
+                    1 => Instruction::Assert(fact, dialog_corpus::Pick::Last),
+                    _ => Instruction::Retract(fact),
                 };
                 // A retract of an absent fact is a no-op commit; both
                 // outcomes are fine for the property.
@@ -4818,7 +4817,7 @@ mod history_tests {
     async fn it_grafts_a_tracked_merge_without_walking_adopted_bulk() -> Result<()> {
         use crate::RepositoryExt as _;
         use crate::helpers::Counting;
-        use dialog_artifacts::ArtifactSelector;
+        use dialog_corpus::Selector;
         use futures_util::StreamExt as _;
 
         let (operator, profile) = test_session_with_peer().await;
@@ -4912,13 +4911,13 @@ mod history_tests {
 
         // Everything is present afterwards.
         let count = |the: &str| {
-            let the: dialog_artifacts::Relation = the.parse().unwrap();
+            let the: dialog_corpus::Relation = the.parse().unwrap();
             let us = us.clone();
             let env = &env;
             async move {
                 anyhow::Ok(
                     us.claims()
-                        .select(ArtifactSelector::new().the(the))
+                        .select(Selector::new().the(the))
                         .to_owned()
                         .perform(env)
                         .await?
@@ -4947,7 +4946,7 @@ mod history_tests {
     #[dialog_common::test]
     async fn it_propagates_deletions_across_a_graft_merge() -> Result<()> {
         use crate::RepositoryExt as _;
-        use dialog_artifacts::ArtifactSelector;
+        use dialog_corpus::Selector;
         use futures_util::StreamExt as _;
 
         let (operator, profile) = test_session_with_peer().await;
@@ -4994,7 +4993,7 @@ mod history_tests {
             .perform(&operator)
             .await?;
         }
-        bob.commit(stream::iter(vec![Instruction::Retract(Artifact {
+        bob.commit(stream::iter(vec![Instruction::Retract(Fact {
             the: "task/label".parse()?,
             of: "task:bobs-victim".parse()?,
             is: Value::String("urgent".to_string()),
@@ -5002,7 +5001,7 @@ mod history_tests {
         })]))
         .perform(&operator)
         .await?;
-        us.commit(stream::iter(vec![Instruction::Retract(Artifact {
+        us.commit(stream::iter(vec![Instruction::Retract(Fact {
             the: "task/label".parse()?,
             of: "task:ours-victim".parse()?,
             is: Value::String("blocked".to_string()),
@@ -5029,7 +5028,7 @@ mod history_tests {
 
         let labels: Vec<_> = us
             .claims()
-            .select(ArtifactSelector::new().the("task/label".parse()?))
+            .select(Selector::new().the("task/label".parse()?))
             .to_owned()
             .perform(&operator)
             .await?
@@ -5044,13 +5043,13 @@ mod history_tests {
 
         // Both sides' churn crossed the merge intact.
         let count = |the: &str| {
-            let the: dialog_artifacts::Relation = the.parse().unwrap();
+            let the: dialog_corpus::Relation = the.parse().unwrap();
             let us = us.clone();
             let operator = &operator;
             async move {
                 anyhow::Ok(
                     us.claims()
-                        .select(ArtifactSelector::new().the(the))
+                        .select(Selector::new().the(the))
                         .to_owned()
                         .perform(operator)
                         .await?

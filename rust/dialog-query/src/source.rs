@@ -20,13 +20,16 @@ pub(crate) mod test {
     use super::*;
     use crate::recall::{BodyMemo, Memo};
     use crate::session::RuleRegistry;
-    use dialog_artifacts::selector::Constrained;
-    use dialog_artifacts::{ArtifactSelector, ArtifactStream, DialogArtifactsError, Select};
     use dialog_capability::Provider;
+    use dialog_capability::Resume;
+    use dialog_corpus::selector::Constrained;
+    use dialog_corpus::tree::CorpusNode;
+    use dialog_corpus::{DialogCorpusError, FactStream, Select, Selector};
     use dialog_effects::archive::{self, ArchiveError};
     use dialog_effects::blob;
     use dialog_peer::Peer as DialogOperator;
     use dialog_repository::Branch;
+    use dialog_search_tree::nodes;
     use dialog_storage::provider::storage::VolatileSpace;
 
     type Operator = DialogOperator<VolatileSpace, dialog_peer::Session>;
@@ -76,13 +79,12 @@ pub(crate) mod test {
         }
     }
 
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    #[dialog_capability::provider]
     impl<'a> Provider<Select<'a>> for TestEnv<'a> {
         async fn execute(
             &self,
-            input: ArtifactSelector<Constrained>,
-        ) -> Result<ArtifactStream<'a>, DialogArtifactsError> {
+            input: Selector<Constrained>,
+        ) -> Result<FactStream<'a>, DialogCorpusError> {
             let stream = self
                 .branch
                 .claims()
@@ -93,21 +95,19 @@ pub(crate) mod test {
         }
     }
 
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    #[dialog_capability::provider]
     impl Provider<SelectRules> for TestEnv<'_> {
         async fn execute(&self, input: ConceptDescriptor) -> Result<ConceptRules, EvaluationError> {
             self.rules.acquire(&input)
         }
     }
 
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-    impl Provider<dialog_artifacts::Estimate> for TestEnv<'_> {
+    #[dialog_capability::provider]
+    impl Provider<dialog_corpus::Estimate> for TestEnv<'_> {
         async fn execute(
             &self,
-            input: ArtifactSelector<Constrained>,
-        ) -> Result<Option<u64>, DialogArtifactsError> {
+            input: Selector<Constrained>,
+        ) -> Result<Option<u64>, DialogCorpusError> {
             self.branch
                 .claims()
                 .select(input)
@@ -118,18 +118,16 @@ pub(crate) mod test {
 
     // Preload hints have no listener in the test env: refuse them so
     // evaluation stops composing hints after the first.
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-    impl Provider<dialog_artifacts::Preload> for TestEnv<'_> {
-        async fn execute(&self, _input: dialog_artifacts::PreloadRequest) -> bool {
+    #[dialog_capability::provider]
+    impl Provider<dialog_corpus::Preload> for TestEnv<'_> {
+        async fn execute(&self, _input: dialog_corpus::PreloadRequest) -> bool {
             false
         }
     }
 
     // Raw node loads for resolver premises, which ask for a block anywhere
     // the query reads: the branch's archive catalog, through the operator.
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    #[dialog_capability::provider]
     impl Provider<archive::Load> for TestEnv<'_> {
         async fn execute(
             &self,
@@ -144,9 +142,30 @@ pub(crate) mod test {
         }
     }
 
-    // Spilled-value loads for `tree/value`, from the branch's archive.
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    // Node reads for the scans, in the branch's catalog: what the operator
+    /// answers at once is at once here too.
+    impl Provider<nodes::Read<CorpusNode>> for TestEnv<'_> {
+        fn execute(
+            &self,
+            read: nodes::Read<CorpusNode>,
+        ) -> Resume<'_, Result<Option<CorpusNode>, dialog_search_tree::DialogSearchTreeError>>
+        {
+            let mut line = read;
+            line.catalog = self.branch.archive().index();
+            line.perform(self.operator)
+        }
+    }
+
+    #[dialog_capability::provider]
+    impl Provider<nodes::Preload<CorpusNode>> for TestEnv<'_> {
+        async fn execute(&self, preload: nodes::Preload<CorpusNode>) {
+            let mut line = preload;
+            line.catalog = self.branch.archive().index();
+            line.perform(self.operator).await
+        }
+    }
+
+    #[dialog_capability::provider]
     impl Provider<blob::Load> for TestEnv<'_> {
         async fn execute(
             &self,

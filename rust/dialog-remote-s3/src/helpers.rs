@@ -3,8 +3,6 @@
 //! Provides [`S3Network`] for testing `Fork<S3, Fx>` capabilities
 //! without a full Operator, and address types for passing server
 //! configuration into tests.
-
-use async_trait::async_trait;
 use dialog_capability::{Capability, Constraint, Effect, Provider};
 use dialog_capability::{Fork, ForkInvocation};
 use dialog_common::{ConditionalSend, ConditionalSync};
@@ -77,8 +75,7 @@ impl From<S3Credential> for S3Network {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl<Fx> Provider<Fork<S3, Fx>> for S3Network
 where
     Fx: Effect + 'static,
