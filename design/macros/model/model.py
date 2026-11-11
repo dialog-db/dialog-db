@@ -135,6 +135,9 @@ def pretty(f, indent=0):
         pad = ' ' * (indent + 2)
         lines = ['(rule']
         for p in f[2]:
+            if p[0] == 'l':
+                lines.append(pad + p[1] + ': ' + show(p[2]))
+                continue
             item = p[1]
             if item[0] == 'app' and item[1] in (('sym', 'when'), ('sym', 'unless')):
                 inner = [show(q[1]) for q in item[2]]
@@ -378,6 +381,9 @@ def apply_formula(form, env, want_is=False):
         return done(entity_of(*parts))
     if name == 'command':
         return done(('sym', 'dialog.command.' + value(bare[0], env)[1] + '.' + value(labels[''], env)[1]))
+    if name == 'like':
+        pattern = re.escape(value(labels[''], env)[1]).replace('%', '.*')
+        return done(bare[0]) if re.fullmatch(pattern, value(bare[0], env)[1], re.S) else []
     if name == '+':
         return done(('num', str(int(value(bare[0], env)[1]) + int(value(labels[''], env)[1]))))
     raise ValueError(f'no formula {show(form[1])}')
@@ -400,6 +406,8 @@ def unify(term, val, env):
 def clauses(rule):
     heads, when, unless = [], [], []
     for p in rule[2]:
+        if p[0] == 'l':
+            continue
         item = p[1]
         if item[0] == 'app' and item[1] == ('sym', 'when'):
             when += [q[1] for q in item[2]]
@@ -477,6 +485,16 @@ def solve(premises, env, facts):
         rest = premises[:at] + premises[at + 1:]
         return [e for one in found for e in solve(rest, one, facts)]
     raise ValueError('no premise can run: ' + ' '.join(show(p) for p in premises))
+
+
+def about(rule):
+    """What a rule says about itself: its labelled parts."""
+    return {p[1]: p[2] for p in rule[2] if p[0] == 'l'}
+
+
+def identity(rule):
+    """A rule's entity. What it says about itself is no part of it."""
+    return entity_of(show(('app', rule[1], tuple(p for p in rule[2] if p[0] == 'b'))))
 
 
 def fire(rule, facts):
@@ -568,6 +586,9 @@ class Replica:
                 form = self.ask(form, 'head')
         parts = []
         for p in form[2]:
+            if p[0] == 'l':
+                parts.append(p)
+                continue
             item = p[1]
             if item[0] == 'app' and item[1] in (('sym', 'when'), ('sym', 'unless')):
                 inner = tuple(('b', self.application(q[1], 'premise')) for q in item[2])
@@ -579,18 +600,21 @@ class Replica:
     def install(self, rule):
         heads, when, unless = clauses(rule)
         writes = [h for h in heads if h[1] in HEAD_WORDS]
+        # what a rule says about itself is kept as facts on its entity
+        for label, said in about(rule).items():
+            self.write((identity(rule), 'dialog.meta/' + label), said)
         if not writes:
             self.deductive.append(rule)
             # the index of the names syntax is defined for
             for premise in when:
                 if premise[1] == ('sym', 'expand') and premise[2][0][1][1][0] == 'sym':
-                    self.write((entity_of(show(rule)), 'dialog.name/is'), premise[2][0][1][1])
+                    self.write((identity(rule), 'dialog.name/is'), premise[2][0][1][1])
         elif when or unless or any(h[1] == ('sym', 'report') for h in heads):
             self.inductive.append(rule)
             # the index of what each rule reads, as dialog keeps `dialog.rule/on`
             for premise in when:
                 if is_relation(premise):
-                    self.write((entity_of(show(rule)), 'dialog.rule/on'), premise[1])
+                    self.write((identity(rule), 'dialog.rule/on'), premise[1])
         else:
             for head in heads:
                 for key, val in ground(head[2][0][1], {}):

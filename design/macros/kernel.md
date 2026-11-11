@@ -52,7 +52,7 @@ The walker rewrites a top-level form until it is a `rule` or a write, then every
 
 ## The core forms
 
-All of [model/prelude.clj](model/prelude.clj), 64 lines. `syntax` with two parts is the short way to write such a rule, and is itself one:
+All of [model/prelude.clj](model/prelude.clj), 65 lines. `syntax` with two parts is the short way to write such a rule, and is itself one:
 
 ```clj
 (rule (syntax (rule (syntax ?template) (when (expand ?pattern))))
@@ -104,6 +104,36 @@ A rule may also say something about a form without refusing it:
           (dialog.rule _ on: ?domain)))
 ```
 
+## Describing things
+
+A description is a fact about an entity, `dialog.meta/description`, never part of what the entity is. Dialog's descriptors already carry a description and leave it out of identity (`without_description`), and the stored body of a rule drops it; tonk keeps it as `dialog.meta/description` today.
+
+- A `rule` takes `description:` as a labelled part. It lands as that fact on the rule's entity.
+- `syntax` and `concept` pass what they are told about themselves to the rule they write:
+
+  ```clj
+  (concept (todo ?t list: ?l text: ?x state: ?s)
+    description: "Something to do, on a list."
+    (xyz.todo ?t list: (:last (:entity ?l)) text: (:last (:text ?x)) state: (:top ?s)))
+  ```
+
+- What has no form of its own, such as an attribute, is described with a plain write:
+
+  ```clj
+  (assert! (dialog.meta xyz.todo/text description: "What is to be done."))
+  ```
+
+- Finding is a query, since the descriptions are facts:
+
+  ```clj
+  (query (dialog.name ?thing is: ?name)
+    (when (dialog.name ?thing is: ?name)
+          (dialog.meta ?thing description: ?text)
+          (:like ?text : "%list%")))
+  ```
+
+In the model that answers `?name = todo`. Any other labelled part of a rule is kept the same way, under `dialog.meta`.
+
 ## The to-do, expanded
 
 [model/todo.clj](model/todo.clj) through the prelude, as the model printed it:
@@ -153,6 +183,7 @@ Held, in [model/checks.py](model/checks.py):
 - An unknown form is refused. Two concepts under one name are refused, and the error lists both expansions.
 - A write through a concept that leaves a field out is refused, and so is one whose value is the wrong type.
 - A misspelled command is issued and comes back with a warning; the right spelling comes back with none.
+- A description on a concept, on a rule and on an attribute is stored as a fact, and a search for a word in them finds the concept by name.
 
 Found:
 
@@ -166,3 +197,4 @@ Found:
 8. **A macro is a rule, so its identity is the rule's.** Whether dialog's canonical spelling of a rule extends to the syntax inside `expand` and `syntax` is not looked at.
 9. **A command is defined by the rules that read it, so a misspelled one is issued and nothing happens.** That is worth a warning, never a refusal (Irakli, 2026-11-11). Dialog keeps the index the warning rule reads, as `dialog.rule/on` for inductive rules and `dialog.rule/reads` for deductive ones. It already reports without refusing in two places: a rule that closes a cycle through an absence test is quarantined and listed, and a fact outside its placement is a divergence. Diagnostics would be the one relation all three are read from, and what a language server asks for.
 10. **A template that writes syntax with a variable of its own needs an escape**, as Racket's `(... ...)` is for a literal ellipsis: an unbound variable in the outer template is renamed, so it cannot be meant for the inner one. No core form needs it.
+11. **A description follows the entity, so a changed definition starts without one.** A new body is a new rule and a new entity. Whether the description is carried over, or belongs to the name, is not decided.

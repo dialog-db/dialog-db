@@ -7,9 +7,10 @@
 ; A variable the pattern binds is replaced in the template. Any other
 ; variable in a template is the template's own, fresh at each expansion.
 
-; 1. Syntax, the short way to write such a rule.
-(rule (syntax (rule (syntax ?template) (when (expand ?pattern))))
-  (when (expand (syntax ?pattern ?template))))
+; 1. Syntax, the short way to write such a rule. What it says about
+;    itself, such as description:, goes to the rule.
+(rule (syntax (rule ...?about (syntax ?template) (when (expand ?pattern))))
+  (when (expand (syntax ?pattern ?template ...?about))))
 
 ; 2. The core forms.
 
@@ -22,8 +23,8 @@
   (rule (report ?head) ... (when ?premise ...) (unless ?absent ...)))
 
 ; A concept is syntax whose template is one read.
-(syntax (concept (?name ?this ...?fields) ?body)
-  (syntax (?name ?this ...?fields) ?body))
+(syntax (concept (?name ?this ...?fields) ?body ...?about)
+  (syntax (?name ?this ...?fields) ?body ...?about))
 
 ; 3. Commands. An application around an application, whose head names
 ;    nothing, is a command. Its rows live in a domain of its own.

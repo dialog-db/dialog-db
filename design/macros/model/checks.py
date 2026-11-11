@@ -90,3 +90,39 @@ for row in r.run():
     print('  ', row)
 for form, said in r.diagnostics:
     print('   warning:', model.show(form), model.show(said))
+
+print('-- descriptions: on a concept, on a rule, on an attribute, and found by search')
+r = model.Replica()
+r.submit(open('prelude.clj').read(), quiet=True)
+r.submit('''
+(concept (todo ?t list: ?l text: ?x state: ?s)
+  description: "Something to do, on a list."
+  (xyz.todo ?t list: (:last (:entity ?l)) text: (:last (:text ?x)) state: (:top ?s)))
+
+(rule description: "Adding the same text to the same list twice makes one to-do."
+  (assert! (todo ?t list: ?l text: ?x state: :open))
+  (when (add (todo list: ?l text: ?x))
+        (:id xyz.todo list: ?l text: ?x is: ?t)))
+
+(assert! (dialog.meta xyz.todo/text description: "What is to be done."))
+''')
+print(model.pretty(r.trace[0][1]))
+r.trace = []
+r.submit('''
+(query (dialog.meta ?thing description: ?text))
+''')
+for row in r.run():
+    print('  ', row)
+print('   search for "list", with the name where there is one')
+r.inductive = []
+r.submit('''
+(query (dialog.meta ?thing description: ?text)
+  (when (dialog.meta ?thing description: ?text)
+        (:like ?text : "%list%")))
+(query (dialog.name ?thing is: ?name)
+  (when (dialog.name ?thing is: ?name)
+        (dialog.meta ?thing description: ?text)
+        (:like ?text : "%list%")))
+''')
+for row in r.run():
+    print('  ', row)
