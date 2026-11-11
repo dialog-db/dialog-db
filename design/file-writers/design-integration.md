@@ -55,3 +55,38 @@ Decided: a reader holds a shared byte-range lock on each extent it reads
 from, and an integrator frees an extent only once it can take that lock
 exclusively without waiting; the operating system releases a dead reader's
 locks.
+
+## Where integration's output goes: SQLite's answer
+
+Integration needs somewhere to write the compact form. Sliding it left
+into a gap behind the extents works only if the gap is there when needed;
+appending it at the end instead means records keep moving (Irakli).
+SQLite avoids the question:
+
+- its database file is fixed-size pages, each with a home: a checkpoint
+  copies each committed page from the WAL to its page's home, so output
+  always fits ([fileformat2.html](https://www.sqlite.org/fileformat2.html),
+  [wal.html](https://www.sqlite.org/wal.html));
+- freed pages go on a free list in the file, which later writes take from
+  before the file grows ([fileformat2.html](https://www.sqlite.org/fileformat2.html), "the freelist");
+- the file grows in chunks (`SQLITE_FCNTL_CHUNK_SIZE`), and shrinks only
+  on request (`auto_vacuum`, `incremental_vacuum`,
+  [pragma.html](https://www.sqlite.org/pragma.html#pragma_auto_vacuum));
+- once a checkpoint has copied everything and no reader uses the WAL, the
+  next writer starts again at its beginning (the WAL reset).
+
+Here, by the same rules: extents are runs of pages, claimed from the free
+list or from the file's end, the file growing in chunks; integration
+writes its compact output into free pages, and gives an extent's pages
+back to the free list once the integration that converted them is
+durable. No gap has to be kept, and nothing slides. The file's index pages
+are already pages reused after a sync point (format 10).
+
+And readers find a block not yet integrated as SQLite's readers find a
+page in the WAL: SQLite keeps a hash table from page to its newest WAL
+frame (`-shm`), updated as frames are appended; here, a record per commit
+maps its blocks' hashes to their offsets, and each reader keeps those it
+has not seen integrated in memory.
+
+Open, to evaluate: the page size, the chunk the file grows by, and the run
+a writer claims at once.

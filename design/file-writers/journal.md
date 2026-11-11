@@ -5,7 +5,7 @@
 |  | Understanding | Activity |
 |---|---|---|
 | **Status** | Direction chosen: one file, an extent per writer, native only (the web keeps IndexedDB). Writers never wait on one another's writes; claiming an extent takes a short lock once per extent filled. Two coordination points: integration, by the committer after its commit, and branch updates, under a byte-range lock per cell. Cells are slots at offsets an index names, of a capacity set at creation, written over in place; a moved head always means a replay. | Designing: branch heads and cells decided in design-branch-heads.md. |
-| **Agenda** | Applying a commit with updated versions over a moved head, keeping its instructions until it publishes. How extents are claimed and recorded; the cell index and its two tables; what integration does to extents and per-commit node records; a cell's default capacity. Replay avoidance is its own topic. | The next implementation decision: claiming extents. |
+| **Agenda** | Evaluating the page size, the chunk the file grows by and the run a writer claims. Applying a commit with updated versions over a moved head, keeping its instructions until it publishes. How extents are claimed and recorded; the cell index and its two tables; what integration does to extents and per-commit node records; a cell's default capacity. Replay avoidance is its own topic. | The next implementation decision: claiming extents. |
 
 ## 2026-11-10, Describing: the topic opens
 
@@ -420,3 +420,22 @@ then the old bytes are the only copy the durable index names.
 an integrator frees an extent only once it can take that lock exclusively,
 without waiting. Integrating a block frees its space, once its integration
 is durable.
+
+**Asked.** Extent size, node lookup, cell index? Irakli: no answers yet;
+evaluate and see. Perhaps SQLite has an answer to borrow; otherwise append
+whatever needs appending to the extents. The nuance from the last turn: a
+gap is needed so integration's compact output fits, or it has to append,
+which is doable but makes things move around a lot.
+
+**Learned.** SQLite does not keep a gap: its file is fixed-size pages with
+homes, a free list of freed pages reused before the file grows, growth in
+chunks, shrinking only by vacuum. Borrowed: extents as runs of pages from
+the free list or the file's end, integration writing into free pages and
+returning an extent's pages once durable. Its WAL index also answers how a
+reader finds a block not yet integrated: a map from key to newest location,
+here a record per commit of hashes and offsets.
+
+**Decided.** Pages and a free list, as SQLite, in
+[design-integration.md](design-integration.md). Readers find blocks not yet
+integrated through per-commit records. Open, to evaluate: page size, chunk
+and claimed run.
