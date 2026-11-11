@@ -410,6 +410,7 @@ fn child() -> anyhow::Result<()> {
             say(READY);
             go()?;
             let mut took = Vec::new();
+            let mut waited = Vec::new();
             let mut current: Option<Version> = None;
             for commit in 0..args[3].parse::<usize>()? {
                 let blocks: Vec<Buffer> = (0..20)
@@ -428,16 +429,16 @@ fn child() -> anyhow::Result<()> {
                     current.as_ref(),
                 )?);
                 took.push(started.elapsed().as_micros() as u64);
+                waited.push(archive.inner.turn_waited.load(Ordering::Relaxed));
             }
-            took.sort_unstable();
-            let at = |q: f64| took[((took.len() - 1) as f64 * q) as usize];
-            say(&format!(
-                "LATENCY {} {} {} {}",
-                at(0.5),
-                at(0.9),
-                at(0.99),
-                took[took.len() - 1]
-            ));
+            let quantiles = |mut values: Vec<u64>| {
+                values.sort_unstable();
+                let at = |q: f64| values[((values.len() - 1) as f64 * q) as usize];
+                let max = values[values.len() - 1];
+                format!("{} {} {} {max}", at(0.5), at(0.9), at(0.99))
+            };
+            say(&format!("LATENCY {}", quantiles(took)));
+            say(&format!("WAITED {}", quantiles(waited)));
             say(DONE);
         }
         // count <path> <cell> <times>
@@ -1415,16 +1416,18 @@ fn measure_how_long_a_cell_update_waits() -> anyhow::Result<()> {
         go(&mut writers)?;
         for (n, writer) in writers.iter_mut().enumerate() {
             let said = writer.expect(DONE)?;
-            let latency = said
-                .iter()
-                .find(|line| line.contains("LATENCY"))
-                .cloned()
-                .unwrap_or_default();
-            let numbers: Vec<&str> = latency.split_whitespace().rev().take(4).collect();
-            println!(
-                "{processes} processes, writer {n}: publish p50 {} us, p90 {} us, p99 {} us, max {} us",
-                numbers[3], numbers[2], numbers[1], numbers[0]
-            );
+            for (marker, what) in [("LATENCY", "publish"), ("WAITED", "waited for the turn")] {
+                let line = said
+                    .iter()
+                    .find(|line| line.contains(marker))
+                    .cloned()
+                    .unwrap_or_default();
+                let numbers: Vec<&str> = line.split_whitespace().rev().take(4).collect();
+                println!(
+                    "{processes} processes, writer {n}: {what} p50 {} us, p90 {} us, p99 {} us, max {} us",
+                    numbers[3], numbers[2], numbers[1], numbers[0]
+                );
+            }
         }
         for writer in writers {
             writer.finish()?;

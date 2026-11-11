@@ -777,3 +777,46 @@ other writers' block appends and sync points, which hold the turn for
 milliseconds, not behind heads. Only C, or block appends that take the
 turn less, removes that. A lone writer's p99 is a sync point's two
 fsyncs inside the turn.
+
+## 2026-11-11, Building: the turn held for laying out and writing only
+
+Irakli agreed to the cheaper route before C. Three changes, measured on
+the same harness (four processes, each 200 times: 20 blocks of 4 KiB,
+then its own cell):
+
+1. **An append prepares before its turn again.** The extents work had
+   put splitting and encoding (most of an append's cost) back inside the
+   turn, undoing `97abe73`. An append now prepares against the snapshot it
+   has, and in the turn lays out against the newest, preparing again only
+   when a node it split is held whole by then.
+2. **A fold is gathered and prepared before the turn**, then laid out,
+   written and retired in it.
+3. **A sync point is made after the turn**: a commit that finds one due
+   marks it; under a sync byte of its own (taken before the turn, never
+   while holding it) the newest slot is read, the file synced, the durable
+   slot written and synced; then, briefly in the turn, the newest rolling
+   slot is told what pages and extents the durable slot freed.
+
+Splitting the publish into waiting and the rest, with four writers:
+
+| | p50 | p90 | p99 | max |
+|---|---|---|---|---|
+| waited for the turn | 0–0.2 ms | 1.3–2.0 ms | 2.9–5.5 ms | 4–8.5 ms |
+| whole publish | 0.12–0.38 ms | 2.8–6.6 ms | 9.7–13.8 ms | 10.6–16 ms |
+
+A writer alone never waits (p99 under 1 µs). What a publish takes beyond
+its wait is mostly the writer making a sync point due after its own
+turn: two syncs of about 4 ms each on this VM, in its own call.
+
+**Found on the way.** Repository tests running together failed once in
+ten with EDEADLK: the system refused a wait for the turn, seeing a cycle
+of processes waiting on one another. The turn's holder waited for an
+extent's owner byte when it claimed a free extent. It now only tries;
+the turn's holder waits on no lock, so no cycle runs through it, and a
+wait refused anyway (another file's locks, held by another thread of a
+process, as POSIX locks are the process's) is waited again after a
+millisecond. Fifteen runs of fifteen pass.
+
+**Open.** A background thread for sync points would take them out of the
+writer's call. C (heads written without the turn) would take the 1.3 to
+2 ms p90 wait away; whether that is worth its cost is the question.

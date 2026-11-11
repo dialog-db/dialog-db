@@ -180,7 +180,9 @@ What this changes for you:
   every memory store.
 - A cell's update takes the writer's turn for the append of one small
   record, as a SQLite commit takes its write lock: an update waits while
-  another process holds the turn (for its own appends and sync points).
+  another process holds the turn, for its own appends' laying out and
+  writing. Splitting and encoding an append, folding extents in and
+  syncing are done before or after the turn, not in it.
   A `Resolve` takes no lock, and reads the newest update another process
   made.
 - A value of any size is kept in its record.

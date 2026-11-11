@@ -29,6 +29,11 @@ pub(crate) const PRESENT: u64 = BASE - 1;
 /// repairs it holds it throughout, so no other opens from what it repairs.
 pub(crate) const RECOVERY: u64 = BASE - 2;
 
+/// The byte a process holds exclusive while it makes a sync point: the
+/// durable slot is written by one at a time, without the writer's turn.
+/// It is taken before the turn, never while holding it.
+pub(crate) const SYNC: u64 = BASE - 3;
+
 /// The byte an extent's owner holds while the extent is its own, by the
 /// extent's record offset.
 pub(crate) fn owner(extent: u64) -> u64 {
@@ -103,6 +108,17 @@ mod unix {
             let error = io::Error::last_os_error();
             match error.raw_os_error() {
                 Some(libc::EINTR) => continue,
+                // The system refuses a wait it takes to close a cycle of
+                // processes waiting on one another. The archive's own order
+                // closes none (the turn's holder waits on no lock), so the
+                // cycle runs through another file's locks, held by another
+                // thread of a process waiting here, as POSIX locks belong to
+                // the process: no deadlock, as that thread goes on. Wait
+                // again shortly.
+                Some(libc::EDEADLK) if wait => {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                    continue;
+                }
                 Some(libc::EACCES) | Some(libc::EAGAIN) if !wait => return Ok(false),
                 _ => return Err(error),
             }

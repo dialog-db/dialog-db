@@ -261,7 +261,14 @@ impl FileArchive {
         value: Option<&[u8]>,
         admit: impl FnOnce(Option<&[u8]>) -> Result<bool, MemoryError>,
     ) -> Result<(), MemoryError> {
+        #[cfg(test)]
+        let waiting = std::time::Instant::now();
         let turn = self.turn().map_err(storage)?;
+        #[cfg(test)]
+        self.inner.turn_waited.store(
+            waiting.elapsed().as_micros() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         let snapshot = self.newest_in_turn(&turn).map_err(storage)?;
         let filed = self.find_cell(&snapshot, name).map_err(storage)?;
         let current = match &filed {
@@ -301,7 +308,9 @@ impl FileArchive {
         .inspect_err(|_| {
             let _ = crate::file::set_len(&self.inner.file, snapshot.slot.end);
         })
-        .map_err(storage)
+        .map_err(storage)?;
+        drop(turn);
+        self.sync_if_due().map_err(storage)
     }
 
     /// Publishes `content` to the cell, if it holds what `when` names (or

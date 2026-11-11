@@ -339,6 +339,16 @@ struct Inner {
     /// a sync point.
     writer: Mutex<()>,
     synced: Mutex<Instant>,
+    /// Whether a commit found a sync point due: made after the turn is let
+    /// go (see [`FileArchive::sync_now`]).
+    sync_due: std::sync::atomic::AtomicBool,
+    /// This process's sync points, one at a time: the sync byte belongs to
+    /// the process, not the thread.
+    syncing: Mutex<()>,
+    /// How long the last cell update waited for the turn, in microseconds,
+    /// for the measurement of it.
+    #[cfg(test)]
+    turn_waited: AtomicU64,
     /// The extents this process writes.
     extents: Mutex<Extents>,
     /// The blocks extents hold, as far as this process has read them.
@@ -556,6 +566,15 @@ struct Turn<'a> {
     _process: parking_lot::MutexGuard<'a, ()>,
 }
 
+/// Extents taken to be folded in, with the blocks they hold by catalog:
+/// this process's own, and those whose owner is gone.
+struct Gathered {
+    ours: Vec<Owned>,
+    abandoned: Vec<u64>,
+    records: Vec<u64>,
+    appends: Vec<(String, Vec<Buffer>)>,
+}
+
 /// The extents this process writes: those idle, free for a writer to take,
 /// and the records of those a writer has taken.
 #[derive(Default)]
@@ -657,6 +676,23 @@ fn in_use(file: &File) -> io::Result<Option<Slot>> {
     Ok(slots
         .into_iter()
         .find(|slot| slot.end <= len && slot.sequence >= durable.sequence))
+}
+
+/// The sync byte (see the `locks` module), held while a process makes a
+/// sync point. Let go when dropped.
+struct SyncPoint<'a>(&'a File);
+
+impl<'a> SyncPoint<'a> {
+    fn take(file: &'a File) -> io::Result<Self> {
+        locks::lock(file, locks::SYNC, true, true)?;
+        Ok(Self(file))
+    }
+}
+
+impl Drop for SyncPoint<'_> {
+    fn drop(&mut self) {
+        let _ = locks::unlock(self.0, locks::SYNC);
+    }
 }
 
 /// The recovery byte (see the `locks` module), held while a process opens
@@ -1125,6 +1161,10 @@ impl FileArchive {
             options,
             writer: Mutex::new(()),
             synced: Mutex::new(Instant::now()),
+            sync_due: std::sync::atomic::AtomicBool::new(false),
+            syncing: Mutex::new(()),
+            #[cfg(test)]
+            turn_waited: AtomicU64::new(0),
             extents: Mutex::new(Extents::default()),
             loose: Mutex::new(Loose::default()),
             left_extent: std::sync::atomic::AtomicBool::new(false),
@@ -1259,21 +1299,77 @@ impl FileArchive {
     /// Makes everything appended so far durable: a sync point (see
     /// [`FileArchive`]).
     pub fn sync(&self) -> Result<(), ArchiveError> {
-        let _turn = self.inner.writer.lock();
-        let file = &self.inner.file;
-        Exclusive::take(file)
-            .and_then(|_exclusive| {
-                let slot = newest(file, true)?;
-                let slot = if slot.sequence > self.current().slot.sequence {
-                    slot
-                } else {
-                    self.current().slot.clone()
-                };
-                let slot = self.sync_point(slot)?;
-                self.publish(snapshot(file, slot, Some(&self.current()))?);
-                Ok(())
-            })
+        self.sync_now(true)
             .map_err(|error| storage_error(&self.inner.path, error))
+    }
+
+    /// Whether a sync point is due after `slot`.
+    fn sync_is_due(&self, slot: &Slot) -> bool {
+        slot.pending.len() >= SYNC_PAGES
+            || slot.sequence - slot.durable >= SYNC_APPENDS
+            || self.inner.synced.lock().elapsed() >= SYNC_AFTER
+    }
+
+    /// Makes the sync point a commit found due, if one did, now that its
+    /// turn is let go.
+    fn sync_if_due(&self) -> io::Result<()> {
+        if self.inner.sync_due.swap(false, Ordering::Relaxed) {
+            self.sync_now(false)?;
+        }
+        Ok(())
+    }
+
+    /// A sync point made without holding the writer's turn but for its
+    /// last step: under the sync byte (see the `locks` module), the newest
+    /// slot is read, the file synced, the durable slot written as that slot
+    /// and synced; then, briefly in the turn, the newest rolling slot is
+    /// told which pages and extents that made free (those still waiting
+    /// that the durable slot freed). Appends go on meanwhile, so the turn is
+    /// never held for a sync. `always` makes one even if, by the time the
+    /// sync byte is had, another process made one and none is due.
+    fn sync_now(&self, always: bool) -> io::Result<()> {
+        let file = &self.inner.file;
+        let _process = self.inner.syncing.lock();
+        let _sync = SyncPoint::take(file)?;
+        let target = newest(file, false)?;
+        if target.durable == target.sequence || !(always || self.sync_is_due(&target)) {
+            return Ok(());
+        }
+        let started = Instant::now();
+        crate::file::sync(file)?;
+        let mut durable = target.clone();
+        durable.reusable.append(&mut durable.pending);
+        durable.extents_free.append(&mut durable.extents_pending);
+        durable.durable = durable.sequence;
+        durable.write_durable(file)?;
+        crate::file::sync(file)?;
+        let turn = self.turn()?;
+        let newest = self.newest_in_turn(&turn)?;
+        let mut slot = newest.slot.clone();
+        let pages: HashSet<u32> = target.pending.iter().copied().collect();
+        let (freed, still): (Vec<u32>, Vec<u32>) = slot
+            .pending
+            .drain(..)
+            .partition(|page| pages.contains(page));
+        slot.pending = still;
+        slot.reusable.extend(freed);
+        let extents: HashSet<u64> = target.extents_pending.iter().copied().collect();
+        let (freed, still): (Vec<u64>, Vec<u64>) = slot
+            .extents_pending
+            .drain(..)
+            .partition(|record| extents.contains(record));
+        slot.extents_pending = still;
+        slot.extents_free.extend(freed);
+        slot.durable = target.sequence;
+        slot.sequence += 1;
+        slot.boot = boot();
+        slot.write(file)?;
+        self.publish(snapshot(file, slot, Some(&self.current()))?);
+        drop(turn);
+        *self.inner.synced.lock() = Instant::now();
+        Timings::add(&self.inner.timings.sync, started);
+        self.inner.timings.syncs.fetch_add(1, Ordering::Relaxed);
+        Ok(())
     }
 
     /// The block `hash` names in `catalog`, if the archive holds it.
@@ -1450,6 +1546,7 @@ impl FileArchive {
         let started = Instant::now();
         let appended = self
             .append_somewhere(catalog, blocks)
+            .and_then(|()| self.sync_if_due())
             .map_err(|error| storage_error(&self.inner.path, error));
         Timings::add(&self.inner.timings.append, started);
         self.inner.timings.appends.fetch_add(1, Ordering::Relaxed);
@@ -1461,24 +1558,58 @@ impl FileArchive {
     /// process's, waiting for the turn only to claim one, and then folding
     /// in if the turn is free by then.
     fn append_somewhere(&self, catalog: &str, blocks: &[Buffer]) -> io::Result<()> {
+        // Split and encoded before the turn, this append and what extents
+        // hold to fold in alike: the turn is held to lay them out and write
+        // them, so a head waiting for it waits that long.
+        let snapshot = self.current();
+        let prepared = self.prepare(snapshot.clone(), catalog, blocks)?;
+        let gathered = self.gather_fold(&snapshot, false)?;
+        let folds = self.prepare_fold(&snapshot, gathered.as_ref())?;
         if let Some(turn) = self.try_turn()? {
-            self.append_in_turn(&turn, catalog, blocks)?;
-            // Nothing else writes in the turn: the append's own snapshot is
-            // the newest.
-            self.integrate(&turn, self.current())?;
+            let appended = self.append_prepared(&turn, catalog, blocks, prepared);
+            let folded = match &gathered {
+                Some(gathered) if appended.is_ok() => self.finish_fold(&turn, gathered, folds),
+                _ => {
+                    drop(folds);
+                    Ok(())
+                }
+            };
+            if let Some(gathered) = gathered {
+                self.release_fold(gathered, appended.is_ok() && folded.is_ok());
+            }
+            appended?;
+            folded?;
             return self.keep_spare(&turn);
         }
+        drop((prepared, folds));
+        if let Some(gathered) = gathered {
+            self.release_fold(gathered, false);
+        }
         if self.append_loose(catalog, blocks)? {
-            if let Some(turn) = self.try_turn()? {
-                let snapshot = self.newest_in_turn(&turn)?;
-                self.integrate(&turn, snapshot)?;
-            }
-            return Ok(());
+            return self.fold_if_free();
         }
         let turn = self.turn()?;
         self.append_in_turn(&turn, catalog, blocks)?;
         self.integrate(&turn, self.current())?;
         self.keep_spare(&turn)
+    }
+
+    /// Folds in what extents hold if the turn is free, prepared before
+    /// taking it.
+    fn fold_if_free(&self) -> io::Result<()> {
+        let snapshot = self.current();
+        let Some(gathered) = self.gather_fold(&snapshot, false)? else {
+            return Ok(());
+        };
+        let folds = self.prepare_fold(&snapshot, Some(&gathered))?;
+        let Some(turn) = self.try_turn()? else {
+            drop(folds);
+            self.release_fold(gathered, false);
+            return Ok(());
+        };
+        let folded = self.finish_fold(&turn, &gathered, folds);
+        self.release_fold(gathered, folded.is_ok());
+        folded
     }
 
     /// The writer's turn, waiting for it.
@@ -1523,9 +1654,36 @@ impl FileArchive {
         let Some(prepared) = self.prepare(snapshot.clone(), catalog, blocks)? else {
             return Ok(());
         };
-        let laid = self
-            .lay_out(&snapshot, prepared)?
-            .ok_or_else(|| invalid("an append prepared in its turn did not lay out"))?;
+        self.append_prepared(turn, catalog, blocks, Some(prepared))
+    }
+
+    /// Appends `blocks`, split and encoded before the turn as `prepared`
+    /// (`None`: the file held them all then), laid out against the file as
+    /// it is in the turn: what other appends landed since takes its place,
+    /// and the append is prepared again only if a node it split is held
+    /// whole by now. The turn is held for laying out and writing, not for
+    /// splitting and encoding.
+    fn append_prepared(
+        &self,
+        turn: &Turn<'_>,
+        catalog: &str,
+        blocks: &[Buffer],
+        prepared: Option<Prepared<'_>>,
+    ) -> io::Result<()> {
+        let snapshot = self.newest_in_turn(turn)?;
+        let Some(prepared) = prepared else {
+            return Ok(());
+        };
+        let laid = match self.lay_out(&snapshot, prepared)? {
+            Some(laid) => laid,
+            None => {
+                let Some(prepared) = self.prepare(snapshot.clone(), catalog, blocks)? else {
+                    return Ok(());
+                };
+                self.lay_out(&snapshot, prepared)?
+                    .ok_or_else(|| invalid("an append prepared in its turn did not lay out"))?
+            }
+        };
         self.commit(laid).inspect_err(|_| {
             // Drop what of the append reached the file: no slot names it.
             let _ = crate::file::set_len(&self.inner.file, snapshot.slot.end);
@@ -1796,29 +1954,58 @@ impl FileArchive {
         let file = &self.inner.file;
         let mut slot = snapshot.slot.clone();
         slot.sequence += 1;
-        let (record, reused) = match slot.extents_free.pop() {
+        // Owned before any slot lists it, so no process adopts it, and
+        // marked busy before this process's snapshot lists it, so no thread
+        // of this one does. Only an adopter checking a stale listing can
+        // hold its byte now, and lets go at once. The byte is tried, never
+        // waited for: the turn's holder waiting on a lock could close a
+        // cycle of processes waiting on one another, which the system
+        // refuses (EDEADLK), whether real or only through a process's
+        // threads sharing its locks.
+        let take = |record: u64| -> io::Result<bool> {
+            self.inner.extents.lock().busy.insert(record);
+            let taken = locks::lock(file, locks::owner(record), true, false);
+            if !matches!(taken, Ok(true)) {
+                self.inner.extents.lock().busy.remove(&record);
+            }
+            taken
+        };
+        let mut reused = None;
+        for at in (0..slot.extents_free.len()).rev() {
+            if take(slot.extents_free[at])? {
+                reused = Some(slot.extents_free.remove(at));
+                break;
+            }
+        }
+        let (record, reused) = match reused {
             Some(record) => (record, true),
             None => {
                 let record = slot.end;
+                let mut tries = 0;
+                while !take(record)? {
+                    tries += 1;
+                    if tries > 1000 {
+                        return Err(invalid("a new extent's byte held by another process"));
+                    }
+                    std::thread::sleep(Duration::from_micros(100));
+                }
                 let (bytes, whole) =
                     extent::record(record, self.inner.options.extent, slot.sequence)?;
-                write_at(file, record, &bytes)?;
-                crate::file::set_len(file, record + whole)?;
+                let written = write_at(file, record, &bytes)
+                    .and_then(|()| crate::file::set_len(file, record + whole));
+                if let Err(error) = written {
+                    let _ = locks::unlock(file, locks::owner(record));
+                    self.inner.extents.lock().busy.remove(&record);
+                    return Err(error);
+                }
                 slot.end += whole;
                 (record, false)
             }
         };
-        // Owned before any slot lists it, so no process adopts it, and
-        // marked busy before this process's snapshot lists it, so no
-        // thread of this one does. Only an adopter checking a stale
-        // listing can hold its byte now, and lets go at once.
-        self.inner.extents.lock().busy.insert(record);
-        let owned = locks::lock(file, locks::owner(record), true, true).and_then(|_| {
-            slot.extents.push(record);
-            slot.boot = boot();
-            self.know(slot.end);
-            snapshot_after_claim(self, file, slot, reused, record)
-        });
+        slot.extents.push(record);
+        slot.boot = boot();
+        self.know(slot.end);
+        let owned = snapshot_after_claim(self, file, slot, reused, record);
         if owned.is_err() {
             let _ = crate::file::set_len(file, snapshot.slot.end);
             let _ = locks::unlock(file, locks::owner(record));
@@ -1909,8 +2096,21 @@ impl FileArchive {
         snapshot: Arc<Snapshot>,
         all: bool,
     ) -> io::Result<()> {
-        if snapshot.slot.extents.is_empty() {
+        let Some(gathered) = self.gather_fold(&snapshot, all)? else {
             return Ok(());
+        };
+        let folded = self.finish_fold(turn, &gathered, Vec::new());
+        self.release_fold(gathered, folded.is_ok());
+        folded
+    }
+
+    /// The extents to fold in, as `snapshot` lists them, taken for it: this
+    /// process's idle ones that hold blocks (all of them, with `all`), and
+    /// any whose owner is gone; with the blocks they hold, by catalog.
+    /// `None` when there is none.
+    fn gather_fold(&self, snapshot: &Snapshot, all: bool) -> io::Result<Option<Gathered>> {
+        if snapshot.slot.extents.is_empty() {
+            return Ok(None);
         }
         let file = &self.inner.file;
         let mut ours = Vec::new();
@@ -1948,60 +2148,88 @@ impl FileArchive {
             .map(|owned| owned.record)
             .chain(abandoned.iter().copied())
             .collect();
-        if records.is_empty() {
-            return Ok(());
-        }
-        let integrated = self.fold(turn, &snapshot, &records);
-        // Let go under the mutex, each byte before its busy mark: a thread
-        // of this process that took it between the two would have its own
-        // lock let go.
-        let mut extents = self.inner.extents.lock();
-        let let_go: Vec<u64> = if integrated.is_ok() {
-            records
-        } else {
-            // This process's extents are kept, still held, for the next
-            // try; the abandoned ones are left for whoever comes next.
-            abandoned
+        let mut gathered = Gathered {
+            ours,
+            abandoned,
+            records,
+            appends: Vec::new(),
         };
-        for record in &let_go {
-            let _ = locks::unlock(file, locks::owner(*record));
+        if gathered.records.is_empty() {
+            return Ok(None);
         }
-        for record in ours.iter().map(|owned| owned.record).chain(let_go) {
-            extents.busy.remove(&record);
-        }
-        if integrated.is_err() {
-            extents.idle.extend(ours);
-        }
-        integrated
-    }
-
-    /// Appends the blocks the extents at `records` hold, then retires the
-    /// extents.
-    fn fold(&self, turn: &Turn<'_>, snapshot: &Snapshot, records: &[u64]) -> io::Result<()> {
-        let bytes = snapshot.bytes();
-        let mut by_catalog: HashMap<u16, Vec<Buffer>> = HashMap::new();
-        for &record in records {
-            let used = extent::used(bytes, record).unwrap_or(0);
-            for held in extent::held(bytes, record, 0, used)?.0 {
-                let block = snapshot.block(held.at)?;
-                by_catalog
-                    .entry(held.catalog)
-                    .or_default()
-                    .push(Buffer::from(block.to_vec()));
+        let read = || -> io::Result<Vec<(String, Vec<Buffer>)>> {
+            let bytes = snapshot.bytes();
+            let mut by_catalog: HashMap<u16, Vec<Buffer>> = HashMap::new();
+            for &record in &gathered.records {
+                let used = extent::used(bytes, record).unwrap_or(0);
+                for held in extent::held(bytes, record, 0, used)?.0 {
+                    let block = snapshot.block(held.at)?;
+                    by_catalog
+                        .entry(held.catalog)
+                        .or_default()
+                        .push(Buffer::from(block.to_vec()));
+                }
+            }
+            by_catalog
+                .into_iter()
+                .map(|(catalog, blocks)| {
+                    let name = snapshot
+                        .catalog(catalog)
+                        .ok_or_else(|| invalid("an extent's block of a catalog the file lacks"))?;
+                    Ok((name.to_string(), blocks))
+                })
+                .collect()
+        };
+        match read() {
+            Ok(appends) => {
+                gathered.appends = appends;
+                Ok(Some(gathered))
+            }
+            Err(error) => {
+                self.release_fold(gathered, false);
+                Err(error)
             }
         }
-        for (catalog, blocks) in by_catalog {
-            let name = snapshot
-                .catalog(catalog)
-                .ok_or_else(|| invalid("an extent's block of a catalog the file lacks"))?
-                .to_string();
-            self.append_in_turn(turn, &name, &blocks)?;
+    }
+
+    /// What folding `gathered` in appends, split and encoded against
+    /// `snapshot` before the turn.
+    fn prepare_fold<'a>(
+        &'a self,
+        snapshot: &Arc<Snapshot>,
+        gathered: Option<&'a Gathered>,
+    ) -> io::Result<Vec<Option<Prepared<'a>>>> {
+        let Some(gathered) = gathered else {
+            return Ok(Vec::new());
+        };
+        gathered
+            .appends
+            .iter()
+            .map(|(catalog, blocks)| self.prepare(snapshot.clone(), catalog, blocks))
+            .collect()
+    }
+
+    /// Appends the blocks `gathered` holds, as `prepared` (prepared again
+    /// in the turn where it has none), then retires its extents.
+    fn finish_fold(
+        &self,
+        turn: &Turn<'_>,
+        gathered: &Gathered,
+        prepared: Vec<Option<Prepared<'_>>>,
+    ) -> io::Result<()> {
+        let mut prepared = prepared.into_iter();
+        for (catalog, blocks) in &gathered.appends {
+            match prepared.next() {
+                Some(draft) => self.append_prepared(turn, catalog, blocks, draft)?,
+                None => self.append_in_turn(turn, catalog, blocks)?,
+            }
         }
         #[cfg(test)]
         if self.inner.stop_before_retire.load(Ordering::Relaxed) {
             return Err(invalid("stopped before retiring the extents, for a test"));
         }
         // Retire the extents: their blocks are frames now.
+        let records = &gathered.records;
         let snapshot = self.newest_in_turn(turn)?;
         let mut slot = snapshot.slot.clone();
         slot.sequence += 1;
@@ -2015,6 +2243,33 @@ impl FileArchive {
             Some(&self.current()),
         )?);
         Ok(())
+    }
+
+    /// Gives back the extents `gathered` took: let go of, once `folded`
+    /// retired them; otherwise this process's kept, still held, for the
+    /// next try, and the abandoned ones left for whoever comes next.
+    fn release_fold(&self, gathered: Gathered, folded: bool) {
+        let file = &self.inner.file;
+        let Gathered {
+            ours,
+            abandoned,
+            records,
+            ..
+        } = gathered;
+        // Let go under the mutex, each byte before its busy mark: a thread
+        // of this process that took it between the two would have its own
+        // lock let go.
+        let mut extents = self.inner.extents.lock();
+        let let_go: Vec<u64> = if folded { records } else { abandoned };
+        for record in &let_go {
+            let _ = locks::unlock(file, locks::owner(*record));
+        }
+        for record in ours.iter().map(|owned| owned.record).chain(let_go) {
+            extents.busy.remove(&record);
+        }
+        if !folded {
+            extents.idle.extend(ours);
+        }
     }
 
     /// What an append of `blocks` to `catalog` writes, worked out without
@@ -2349,11 +2604,10 @@ impl FileArchive {
         slot.boot = boot();
         slot.write(file)?;
         Timings::add(&self.inner.timings.write, started);
-        if slot.pending.len() >= SYNC_PAGES
-            || slot.sequence - slot.durable >= SYNC_APPENDS
-            || self.inner.synced.lock().elapsed() >= SYNC_AFTER
-        {
-            slot = self.sync_point(slot)?;
+        if self.sync_is_due(&slot) {
+            // Made once the turn is let go: a sync point's syncs take
+            // milliseconds, and writers waiting for the turn would wait them.
+            self.inner.sync_due.store(true, Ordering::Relaxed);
         }
         for (at, rows, manifest) in laid.rows {
             self.inner.rows.put(at, (rows, manifest));
