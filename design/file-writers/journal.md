@@ -370,3 +370,18 @@ names.
 condition; the argument is written in
 [design-branch-heads.md](design-branch-heads.md), "Spills and integration",
 and its two hypotheses have tests named in the ledger.
+
+**Asked.** Irakli: integration does move things in extents, does it not?
+
+**Learned.** Not in what the agent wrote: it assumed writers append the
+final form (frames and tokens), so that integration only indexes. That was
+a choice never put to Irakli, and the spill argument rests on it. With
+whole blocks in extents and integration converting them, which is what his
+first idea did and what takes splitting off every commit, records move:
+a slot naming a spill by offset is left pointing at freed space unless it
+names it by hash or integration rewrites it, and an extent's space is
+reused only after a sync point and once no reader can hold an old offset.
+The ledger's "integration never writes where a spill depends on" is a
+hypothesis that holds only under the first.
+
+**Decided.** Not decided: [design-integration.md](design-integration.md).
