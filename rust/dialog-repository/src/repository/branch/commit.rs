@@ -33,7 +33,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// How many times a commit that lost its branch's race to another writer
 /// applies its instructions again over the head that won, before it gives
 /// up with the publish's `VersionMismatch`.
-const RETRIES: usize = 64;
+pub(crate) const RETRIES: usize = 64;
 
 /// Command that commits a stream of changes (assert/retract) to a branch
 /// or a snapshot.
@@ -1200,6 +1200,62 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(results.len(), 2, "both racing commits survive");
 
+        Ok(())
+    }
+
+    /// A transaction that loses its branch's race is staged again over the
+    /// head that won and published on top of it, as a commit is: both
+    /// writers' facts survive. (A batch its caller staged explicitly is
+    /// refused instead; `transaction::batch` pins that.)
+    #[dialog_common::test]
+    async fn it_publishes_a_transaction_racing_another_over_the_winner() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let writer_a = repo.branch("main").open().perform(&operator).await?;
+        let writer_b = repo.branch("main").open().perform(&operator).await?;
+        let name = |entity: &str, name: &str| -> Result<dialog_corpus::Changes> {
+            Ok(vec![Instruction::Assert(
+                Fact {
+                    the: "user/name".parse()?,
+                    of: entity.parse()?,
+                    is: Value::String(name.to_string()),
+                    cause: None,
+                },
+                dialog_corpus::Pick::All,
+            )]
+            .into_iter()
+            .collect())
+        };
+
+        let first = writer_a
+            .transaction()
+            .integrate(name("user:a", "Alice")?)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        // B's handle still holds the head A built on.
+        let second = writer_b
+            .transaction()
+            .integrate(name("user:b", "Bob")?)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        assert_ne!(second.version(), first.version());
+
+        let fresh = repo.branch("main").open().perform(&operator).await?;
+        let results: Vec<_> = fresh
+            .claims()
+            .select(Selector::new().the("user/name".parse()?))
+            .to_owned()
+            .perform(&operator)
+            .await?
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(results.len(), 2, "both racing transactions survive");
         Ok(())
     }
 }

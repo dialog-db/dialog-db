@@ -24,7 +24,7 @@ use super::succession;
 use super::{Transaction, TransactionCommit, carry_footprint, touches_rule_facts, touches_rules};
 use crate::Ephemeral;
 use crate::repository::branch::asset::store_assets;
-use crate::repository::branch::commit::{Amended, Mint, Minted, Outcome};
+use crate::repository::branch::commit::{Amended, Mint, Minted, Outcome, RETRIES};
 use crate::repository::source::{Caches, SourceRef};
 use crate::{
     Branch, Cell, Checkpoint, CommitError, PublishError, QueryLayer, RemoteSite, Revision,
@@ -412,6 +412,16 @@ impl TransactionPublish<&Branch> {
     /// Run induction, mint the commit, and publish it — returning the
     /// newly-published [`Revision`] (or the unchanged head when the
     /// settled batch is a no-op).
+    ///
+    /// When another writer moved the head first, the transaction's writes
+    /// are staged again over the head that won (its rules run again
+    /// there) and published, up to the same number of times a commit
+    /// tries; [`VersionMismatch`](PublishError::VersionMismatch) is
+    /// returned only once those run out. A write the caller computed from
+    /// a read of the transaction is applied again as it was computed:
+    /// express it as a rule, or read and write again, to have it computed
+    /// over the head that won. A [`TransactionBatch`] staged explicitly is
+    /// not staged again: its caller saw what it staged on.
     pub async fn perform<Env>(self, env: &Env) -> Result<Revision, CommitError>
     where
         Env: Provider<BlobSize>
@@ -440,8 +450,19 @@ impl TransactionPublish<&Branch> {
             + ConditionalSync
             + 'static,
     {
-        let batch = Box::pin(self.commit.perform(env)).await?;
-        batch.publish().perform(env).await
+        let mut attempts = 0;
+        loop {
+            let batch = Box::pin(self.commit.clone().perform(env)).await?;
+            match batch.publish().perform(env).await {
+                Err(CommitError::Publish(PublishError::VersionMismatch { .. }))
+                    if attempts < RETRIES =>
+                {
+                    attempts += 1;
+                    self.commit.line.revision.resolve().perform(env).await?;
+                }
+                done => return done,
+            }
+        }
     }
 }
 

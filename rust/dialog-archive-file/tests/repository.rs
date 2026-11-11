@@ -13,7 +13,7 @@ use dialog_corpus::{
     Changes, Entity, Fact, Instruction, Pick, Relation, Selector, Update as _, Value,
 };
 use dialog_effects::storage::{Directory, Location};
-use dialog_peer::helpers::{open_peer, test_owned, unique_name};
+use dialog_peer::helpers::{Seed, open_peer_as, test_owned, unique_name};
 use dialog_repository::RepositoryExt as _;
 use dialog_storage::provider::{FileSystem, Space, Storage};
 use futures_util::TryStreamExt as _;
@@ -41,9 +41,21 @@ macro_rules! open {
     ($at:expr, $peer:expr, $name:expr) => {
         open!(FileArchiveSpace, $at, $peer, $name)
     };
-    ($space:ty, $at:expr, $peer:expr, $name:expr) => {{
+    ($space:ty, $at:expr, $peer:expr, $name:expr) => {
+        open!($space, $at, $peer, $name, "main")
+    };
+    ($space:ty, $at:expr, $peer:expr, $name:expr, $branch:expr) => {{
         let storage = test_owned(Storage::<$space>::new()).await;
-        let profile = open_peer(storage, Location::new($at.clone(), $peer.clone())).await?;
+        // A key of its own per process would make another process opening
+        // the peer a different peer: every process derives the same one
+        // from the peer's name.
+        let credential = Seed::new(0).credential(&$peer).await?;
+        let profile = open_peer_as(
+            storage,
+            Location::new($at.clone(), $peer.clone()),
+            credential,
+        )
+        .await?;
         let operator = profile
             .session(b"file-archive")
             .space(profile.state())
@@ -54,7 +66,7 @@ macro_rules! open {
             .open()
             .perform(&operator)
             .await?;
-        let branch = repository.branch("main").open().perform(&operator).await?;
+        let branch = repository.branch($branch).open().perform(&operator).await?;
         (operator, branch)
     }};
 }
@@ -695,5 +707,264 @@ async fn it_keeps_branch_heads_in_the_file() -> anyhow::Result<()> {
         }
     }
     assert!(files > 0, "the spaces keep archive files");
+    Ok(())
+}
+
+/// What a [`committing_process`] commits to, and how it is told to start:
+/// the peer's directory, the peer, the repository, the branch, a tag its
+/// facts are named by, how many commits, and the directory its signals
+/// go in.
+const COMMIT: &str = "DIALOG_COMMIT";
+
+/// The facts of commit `commit` from the writer tagged `tag`: ten, each
+/// its own entity.
+fn tagged(tag: &str, commit: usize) -> anyhow::Result<Changes> {
+    (0..10)
+        .map(|row| {
+            let entity = format!("did:test:{}-{commit}-{row}", tag.replace(' ', "-"));
+            Ok(Instruction::Assert(
+                fact(&entity, &format!("{tag} {commit}.{row}"))?,
+                Pick::All,
+            ))
+        })
+        .collect()
+}
+
+/// The names of the facts on `branch`, as its head has them.
+async fn names_on(
+    at: &Directory,
+    peer: &str,
+    name: &str,
+    branch: &str,
+) -> anyhow::Result<std::collections::HashSet<String>> {
+    let (at, peer, name) = (at.clone(), peer.to_string(), name.to_string());
+    let (operator, branch) = open!(FileSpace, at, peer, name, branch);
+    let rows: Vec<Fact> = branch
+        .claims()
+        .select(Selector::new().the(Relation::from_str("person/name")?))
+        .to_owned()
+        .perform(&operator)
+        .await?
+        .try_collect()
+        .await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| match row.is {
+            Value::String(name) => Some(name),
+            _ => None,
+        })
+        .collect())
+}
+
+/// Waits for `signal` to appear, up to twenty seconds; whether it did.
+fn signalled(signal: &Path) -> bool {
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while std::time::Instant::now() < until {
+        if signal.exists() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    false
+}
+
+/// The other processes of the branch tests below: open the repository's
+/// branch, commit once, say ready, wait to be told to go, make their
+/// commits, say done, and close. Does nothing unless a test started it.
+#[tokio::test]
+#[ignore = "run by the branch tests in processes of its own"]
+async fn committing_process() -> anyhow::Result<()> {
+    let Ok(setting) = std::env::var(COMMIT) else {
+        return Ok(());
+    };
+    let parts: Vec<&str> = setting.split('\u{1f}').collect();
+    let [at, peer, name, branch, tag, commits, signals] = parts[..] else {
+        anyhow::bail!("a setting of seven parts: {setting:?}");
+    };
+    let at = Directory::At(at.to_string());
+    let (peer, name) = (peer.to_string(), name.to_string());
+    let signals = Path::new(signals);
+    let (operator, branch) = open!(FileSpace, at, peer, name, branch);
+    branch
+        .transaction()
+        .integrate(tagged(&format!("{tag} warm"), 0)?)
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    std::fs::write(signals.join(format!("{tag}.ready")), b"")?;
+    anyhow::ensure!(signalled(&signals.join("go")), "never told to go");
+    for commit in 0..commits.parse()? {
+        branch
+            .transaction()
+            .integrate(tagged(tag, commit)?)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+    }
+    std::fs::write(signals.join(format!("{tag}.done")), b"")?;
+    Ok(())
+}
+
+/// Starts a [`committing_process`] and waits until it is ready.
+fn committer(
+    at: &str,
+    peer: &str,
+    name: &str,
+    branch: &str,
+    tag: &str,
+    commits: usize,
+    signals: &Path,
+) -> anyhow::Result<std::process::Child> {
+    let setting = [
+        at,
+        peer,
+        name,
+        branch,
+        tag,
+        &commits.to_string(),
+        &signals.to_string_lossy(),
+    ]
+    .join("\u{1f}");
+    let child = std::process::Command::new(std::env::current_exe()?)
+        .args(["committing_process", "--exact", "--ignored", "--nocapture"])
+        .env(COMMIT, setting)
+        .spawn()?;
+    anyhow::ensure!(
+        signalled(&signals.join(format!("{tag}.ready"))),
+        "{tag} never got ready"
+    );
+    Ok(child)
+}
+
+/// The writer's turn of the file at `path`, held through a descriptor of
+/// this process's own, until the returned file is closed: as a process
+/// folding a long integration in holds it.
+#[cfg(unix)]
+fn hold_turn(path: &Path) -> anyhow::Result<std::fs::File> {
+    use std::os::fd::AsRawFd;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)?;
+    // SAFETY: a zeroed flock is valid; fcntl reads it and the descriptor
+    // is open while `file` is.
+    let mut region: libc::flock = unsafe { std::mem::zeroed() };
+    region.l_type = libc::F_WRLCK as _;
+    region.l_whence = libc::SEEK_SET as _;
+    region.l_start = (1u64 << 62) as _;
+    region.l_len = 1;
+    // SAFETY: as above.
+    let locked = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETLKW, &region) };
+    anyhow::ensure!(locked != -1, "{}", std::io::Error::last_os_error());
+    Ok(file)
+}
+
+/// Two processes commit to two branches of one repository at once, while
+/// a third holds the file's writer's turn throughout: neither waits for
+/// it, or for the other. Every commit of each lands on its own branch, and
+/// the file reopens with all of them.
+///
+/// Unix only: the turn is held here with a POSIX lock. On Windows the
+/// archive's own tests hold it (`archive::concurrency`, through the
+/// `locks` module), and `it_commits_concurrently_to_one_branch_from_many_processes`
+/// runs the commits.
+#[cfg(unix)]
+#[tokio::test]
+async fn it_commits_to_two_branches_from_two_processes_without_waiting() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let at_text = directory.path().to_string_lossy().into_owned();
+    let at = Directory::At(at_text.clone());
+    let (peer, name) = (unique_name("peer"), unique_name("repo"));
+    let signals = directory.path().join("signals");
+    std::fs::create_dir(&signals)?;
+    for branch in ["alpha", "beta"] {
+        let (operator, branch_handle) = open!(FileSpace, at, peer, name, branch);
+        branch_handle
+            .transaction()
+            .integrate(tagged(&format!("{branch} first"), 0)?)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+    }
+    let file = directory.path().join(&name).join(FILE_NAME);
+    let mut alpha = committer(&at_text, &peer, &name, "alpha", "alpha", 10, &signals)?;
+    let mut beta = committer(&at_text, &peer, &name, "beta", "beta", 10, &signals)?;
+
+    let turn = hold_turn(&file)?;
+    std::fs::write(signals.join("go"), b"")?;
+    let finished = (
+        signalled(&signals.join("alpha.done")),
+        signalled(&signals.join("beta.done")),
+    );
+    drop(turn);
+    assert!(alpha.wait()?.success());
+    assert!(beta.wait()?.success());
+    assert_eq!(
+        finished,
+        (true, true),
+        "both committed while the turn was held"
+    );
+
+    for (branch, other) in [("alpha", "beta"), ("beta", "alpha")] {
+        let names = names_on(&at, &peer, &name, branch).await?;
+        assert_eq!(names.len(), 10 * (1 + 1 + 10), "{branch}: every commit");
+        for commit in 0..10 {
+            for row in 0..10 {
+                assert!(names.contains(&format!("{branch} {commit}.{row}")));
+            }
+        }
+        assert!(
+            !names.iter().any(|name| name.starts_with(other)),
+            "{branch} holds none of {other}'s"
+        );
+    }
+    Ok(())
+}
+
+/// Processes committing to one branch at once all land: a transaction that
+/// loses the race for the head is staged again over the one that won, so
+/// no commit's facts are lost.
+#[tokio::test]
+async fn it_commits_concurrently_to_one_branch_from_many_processes() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let at_text = directory.path().to_string_lossy().into_owned();
+    let at = Directory::At(at_text.clone());
+    let (peer, name) = (unique_name("peer"), unique_name("repo"));
+    let signals = directory.path().join("signals");
+    std::fs::create_dir(&signals)?;
+    {
+        let (operator, branch) = open!(FileSpace, at, peer, name);
+        branch
+            .transaction()
+            .integrate(tagged("first", 0)?)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+    }
+    let tags = ["one", "two", "three"];
+    let mut writers = tags
+        .iter()
+        .map(|tag| committer(&at_text, &peer, &name, "main", tag, 5, &signals))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    std::fs::write(signals.join("go"), b"")?;
+    for writer in &mut writers {
+        assert!(writer.wait()?.success());
+    }
+    let names = names_on(&at, &peer, &name, "main").await?;
+    assert_eq!(names.len(), 10 * (1 + tags.len() * (1 + 5)), "every commit");
+    for tag in tags {
+        for commit in 0..5 {
+            for row in 0..10 {
+                assert!(
+                    names.contains(&format!("{tag} {commit}.{row}")),
+                    "{tag} {commit}.{row}"
+                );
+            }
+        }
+    }
     Ok(())
 }

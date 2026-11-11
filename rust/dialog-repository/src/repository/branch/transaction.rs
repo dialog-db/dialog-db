@@ -205,6 +205,7 @@ impl Snapshot {
 /// [`canonicalize`](Self::canonicalize)); the difference is the
 /// induction step in front and that transients never reach the
 /// durable batch.
+#[derive(Clone)]
 pub struct TransactionCommit<Line> {
     pub(super) line: Line,
     pub(super) changes: Staged,
