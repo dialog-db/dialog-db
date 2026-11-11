@@ -8,7 +8,15 @@ What we tried, what it measured, and what we decided, newest last. The
 **Status: Exploring.** See the [research index](../README.md) for what the
 statuses mean.
 
-- **Built:** nothing.
+- **Built:** a spike, `rust/dialog-repository/examples/record_spike.rs`:
+  the codec (pairs as key tails), its canonicality checks, a dataset of
+  revision records through the repository, and the measurements.
+- **Headline** ([results](results/2026-11-11-spike.md)): canonical over
+  200,000 generated records; one field reads in 0.33 to 0.82 of the time
+  dag-cbor takes to decode; split in the file (modelled), revision records
+  take 0.40 of dag-cbor; on the wire, pairs are 1.25 to 1.89 of dag-cbor,
+  most of it attribute names, and 1.00 to 1.05 once compressed in a node's
+  worth of records.
 - **Decided:**
   - A record is an atomic value.
   - It carries no type tag. Its fields are typed on read by attributes,
@@ -24,7 +32,8 @@ statuses mean.
   - Equality follows tokens as key comparison does, resolving them across
     sources, and the wire carries the canonical form.
   - Repetition is expected mostly across records, and shared through the
-    replica's tokens.
+    replica's tokens. Measured otherwise for records nesting a set: in
+    tonk's bindings, repeated attribute names are half the record.
 - **Decided, continued:** in destructuring, a field is named by an
   attribute, which brings its pick and its type. `last` over a field
   holding several values elects by the hash of each value, the tiebreak
@@ -39,12 +48,18 @@ statuses mean.
   tree node has in the file, canonical bytes and rows over the file's
   tokens, and is keyed as its tails rather than as one escaped byte string,
   so the file splits it as it splits a key.
-- **Next:** a census of the records in tonk-team's history: how many, their
-  sizes, how many spill, and how much repeats across them and with the
-  replica's claims.
-- **Blocked:** neither dataset is in this session's container.
+- **Next:** the maintainer sets the bars; the [design](design.md) proposes
+  a solution for each open question. Then the census on tonk-team's real
+  history, and a commit through the perf gate.
+- **Blocked:** tonk-team's history is not in this session's container.
 
 ## Datasets
+
+- **revisions-600-7, revisions-4000-11:** revision records a repository
+  wrote over 600 and 4,000 steps on three branches, by `record_spike
+  revisions`; one issuer. sha256 `0f22104a…31a7e63` and `0fada0fe…3e02f85`.
+- **tonk-bindings:** each view's bindings in tonk's library at `bfb2d72`, by
+  `bench/tonk_bindings.py`; 13 views, 38 events. sha256 `a06cf2ca…970ed8d16`.
 
 - **tonk-team:** the team space's pushed history, the 9,070 blocks #733
   fetched (568.5 MiB). Its records are revision records and tonk's view
@@ -394,6 +409,49 @@ the new keying, and the word.
 
 Commits: this entry.
 
+## 2026-11-11 — The first spike: pairs against dag-cbor
+
+**Question.** Is a record as key-tail pairs canonical, cheaper to read a
+field of, and smaller in the file, and what does it cost on the wire?
+
+**Method.** The spike's codec over three datasets: revision records a
+repository wrote (versions written as nested records and, apart, as their
+key bytes), and tonk's view bindings rebuilt from its library. Canonical
+properties over 200,000 generated records, each check seen to fail with its
+property broken. Sizes against dag-cbor, raw and under gzip in groups of 64; a
+model of the file's tokens; one-field reads, seven interleaved rounds. Full
+tables in [the results](results/2026-11-11-spike.md).
+
+**Results.**
+
+| | revisions, versions as records | revisions, versions as bytes | tonk bindings |
+|---|--:|--:|--:|
+| on the wire ÷ dag-cbor | 1.44 | 1.25 | 1.89 |
+| the same, each attribute once a record | 1.30 | 1.23 | 1.05 |
+| gzip over 64 records ÷ dag-cbor's | 1.05 | 1.02 | 1.00 |
+| in the file, split (model) ÷ dag-cbor whole | 0.40 | 0.47 | 1.26 |
+| one field, median ÷ dag-cbor decode | 0.33 to 0.82 | 0.51 | 0.51 |
+
+- The canonical form holds every property checked.
+- Attribute names are 33 to 70% of a record's bytes. In tonk's bindings,
+  where every event repeats the same names, repeats are half the record.
+  That contradicts the earlier entry's expectation that repetition sits
+  across records, not inside one: it holds for flat records, not for a
+  record that nests a set.
+- A version's entity is a hash, from which its edition does not come back,
+  so a revision record cannot write its versions as entities and keep what
+  it holds. Written as bytes or as records, it can.
+- Every version a record names is already a token in the file, as a history
+  key's 40 raw bytes, and none is shared: a value slot carries the type byte
+  and escapes the edition's zero bytes.
+- Blocks are not compressed today, on the wire or at rest.
+
+**Decision.** Not decided: the bars are the maintainer's, and the results
+sit between them (revisions pass, bindings fail the wire and file bars
+uncompressed). The [design](design.md) proposes what to do about each.
+
+Commits: this entry.
+
 ## How to reproduce
 
-Nothing to run yet.
+The commands are in [the results](results/2026-11-11-spike.md#reproduce).

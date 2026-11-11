@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="380" font-family="sans-serif" font-size="12">
+<rect width="760" height="380" fill="white"/>
+<text x="380.0" y="22" text-anchor="middle" font-size="15">Pairs ÷ dag-cbor (revisions-4000-11, tonk-bindings)</text>
+<line x1="60" x2="740" y1="310.0" y2="310.0" stroke="#ddd"/>
+<text x="54" y="314.0" text-anchor="end">0.00</text>
+<line x1="60" x2="740" y1="260.0" y2="260.0" stroke="#ddd"/>
+<text x="54" y="264.0" text-anchor="end">0.43</text>
+<line x1="60" x2="740" y1="210.0" y2="210.0" stroke="#ddd"/>
+<text x="54" y="214.0" text-anchor="end">0.87</text>
+<line x1="60" x2="740" y1="160.0" y2="160.0" stroke="#ddd"/>
+<text x="54" y="164.0" text-anchor="end">1.30</text>
+<line x1="60" x2="740" y1="110.0" y2="110.0" stroke="#ddd"/>
+<text x="54" y="114.0" text-anchor="end">1.74</text>
+<line x1="60" x2="740" y1="60.0" y2="60.0" stroke="#ddd"/>
+<text x="54" y="64.0" text-anchor="end">2.17</text>
+<line x1="60" x2="740" y1="195.0" y2="195.0" stroke="#333" stroke-dasharray="5,4"/>
+<text x="64" y="190.0" text-anchor="start">dag-cbor</text>
+<rect x="82.7" y="144.4" width="58.4" height="165.6" fill="#4e79a7"/>
+<text x="111.9" y="140.4" text-anchor="middle" font-size="11">1.44</text>
+<rect x="143.1" y="189.2" width="58.4" height="120.8" fill="#f28e2b"/>
+<text x="172.3" y="185.2" text-anchor="middle" font-size="11">1.05</text>
+<rect x="203.6" y="264.0" width="58.4" height="46.0" fill="#59a14f"/>
+<text x="232.8" y="260.0" text-anchor="middle" font-size="11">0.4</text>
+<text x="173.3" y="328" text-anchor="middle">revisions, versions as records</text>
+<rect x="309.3" y="166.2" width="58.4" height="143.8" fill="#4e79a7"/>
+<text x="338.6" y="162.2" text-anchor="middle" font-size="11">1.25</text>
+<rect x="369.8" y="192.7" width="58.4" height="117.3" fill="#f28e2b"/>
+<text x="399.0" y="188.7" text-anchor="middle" font-size="11">1.02</text>
+<rect x="430.2" y="255.9" width="58.4" height="54.1" fill="#59a14f"/>
+<text x="459.4" y="251.9" text-anchor="middle" font-size="11">0.47</text>
+<text x="400.0" y="328" text-anchor="middle">revisions, versions as bytes</text>
+<rect x="536.0" y="92.6" width="58.4" height="217.4" fill="#4e79a7"/>
+<text x="565.2" y="88.6" text-anchor="middle" font-size="11">1.89</text>
+<rect x="596.4" y="195.0" width="58.4" height="115.0" fill="#f28e2b"/>
+<text x="625.7" y="191.0" text-anchor="middle" font-size="11">1</text>
+<rect x="656.9" y="165.1" width="58.4" height="144.9" fill="#59a14f"/>
+<text x="686.1" y="161.1" text-anchor="middle" font-size="11">1.26</text>
+<text x="626.7" y="328" text-anchor="middle">tonk view bindings</text>
+<rect x="60" y="350" width="12" height="12" fill="#4e79a7"/>
+<text x="78" y="360">on the wire</text>
+<rect x="290" y="350" width="12" height="12" fill="#f28e2b"/>
+<text x="308" y="360">on the wire, gzip over 64</text>
+<rect x="520" y="350" width="12" height="12" fill="#59a14f"/>
+<text x="538" y="360">in the file, split (model)</text>
+<text x="14" y="185.0" transform="rotate(-90 14 185.0)" text-anchor="middle">÷ dag-cbor</text>
+</svg>
