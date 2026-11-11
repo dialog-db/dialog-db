@@ -143,6 +143,11 @@ fn term(form: &Form) -> Result<Term, Error> {
         Form::Symbol(name) if form.kind() == Some(Kind::Entity) => Term::Entity(name.clone()),
         Form::Symbol(name) => Term::Symbol(name.clone()),
         application if application.is_formula() => Term::Formula(Box::new(formula(application)?)),
+        Form::Map(_) => {
+            return Err(Error::Unsupported(format!(
+                "{form} where a term stands: Dialog-DB has no premise that builds a record yet"
+            )));
+        }
         other => return Err(Error::Refused(format!("{other} is not a term"))),
     })
 }

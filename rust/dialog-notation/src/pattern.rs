@@ -38,6 +38,10 @@ pub fn variables(pattern: &Form, into: &mut Vec<String>) {
     match pattern {
         Form::Variable(name) => into.push(name.clone()),
         Form::Vector(items) => items.iter().for_each(|item| variables(item, into)),
+        Form::Map(entries) => entries.iter().for_each(|(key, value)| {
+            variables(key, into);
+            variables(value, into);
+        }),
         Form::Application(head, parts) => {
             variables(head, into);
             for part in parts {
@@ -76,6 +80,22 @@ pub fn matches(form: &Form, pattern: &Form, bindings: Bindings) -> Option<Bindin
                 .zip(patterns)
                 .try_fold(bindings, |bindings, (item, pattern)| {
                     matches(item, pattern, bindings)
+                })
+        }
+        // A map is taken apart by key: the pattern's keys are what they
+        // are, and each has to be a key of the form.
+        Form::Map(patterns) => {
+            let Form::Map(entries) = form else {
+                return None;
+            };
+            if entries.len() != patterns.len() {
+                return None;
+            }
+            patterns
+                .iter()
+                .try_fold(bindings, |bindings, (key, pattern)| {
+                    let (_, value) = entries.iter().find(|(given, _)| given == key)?;
+                    matches(value, pattern, bindings)
                 })
         }
         Form::Application(pattern_head, _) => {
@@ -174,6 +194,12 @@ pub fn fill(template: &Form, bindings: &Bindings, fresh: &str) -> Form {
             items
                 .iter()
                 .map(|item| fill(item, bindings, fresh))
+                .collect(),
+        ),
+        Form::Map(entries) => Form::Map(
+            entries
+                .iter()
+                .map(|(key, value)| (fill(key, bindings, fresh), fill(value, bindings, fresh)))
                 .collect(),
         ),
         Form::Application(head, parts) => {

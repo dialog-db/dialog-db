@@ -6,7 +6,12 @@
 //! and fires, and a command is a dispatched transient.
 
 use anyhow::Result;
-use dialog_notation::Error;
+use dialog_corpus::Value;
+use dialog_notation::{Error, Form, read};
+use dialog_query::concept::descriptor::ConceptStatement;
+use dialog_query::query::Output as _;
+use dialog_query::{Any, AttributeDescriptor, ConceptConclusion, ConceptQuery, Term};
+use serde_json::json;
 
 #[path = "../examples/notebook/session.rs"]
 mod session;
@@ -382,6 +387,55 @@ async fn it_elects_one_of_two_writes_of_one_round_whatever_their_order() -> Resu
         elected.push(last);
     }
     assert_eq!(elected[0], elected[1]);
+    Ok(())
+}
+
+/// A form is held by a branch today: as a `record:` value, under the
+/// entity its reference names. What comes back reads as the form that
+/// went in, and names the same entity.
+#[dialog_common::test]
+async fn it_keeps_a_form_on_a_branch_under_the_entity_that_names_it() -> Result<()> {
+    let notebook = Notebook::open().await?;
+    let form = read(TODO)?.remove(0);
+    let entity = form.entity()?;
+
+    let is: AttributeDescriptor =
+        serde_json::from_value(json!({ "the": "syntax.form/is", "as": "record:" }))?;
+    notebook
+        .branch
+        .transaction()
+        .assert(ConceptStatement {
+            this: entity.clone(),
+            with: vec![is.resolve(Value::Record(form.encode()?))?],
+        })
+        .commit()
+        .publish()
+        .perform(&notebook.operator)
+        .await?;
+    notebook.branch.refresh(&notebook.operator).await?;
+
+    let select: ConceptQuery = serde_json::from_value(json!({
+        "assert": { "with": { "is": { "the": "syntax.form/is", "as": "record:" } } },
+        "where": { "this": { "entity:": entity.to_string() }, "is": { "?": { "name": "is" } } }
+    }))?;
+    let found: Vec<ConceptConclusion> = notebook
+        .branch
+        .query()
+        .select(select)
+        .perform(&notebook.operator)
+        .try_vec()
+        .await?;
+    assert_eq!(found.len(), 1);
+    let Value::Record(bytes) = found[0]
+        .source()
+        .lookup(&Term::<Any>::var("is"))?
+        .content()?
+    else {
+        panic!("a record");
+    };
+    let kept = Form::decode(&bytes)?;
+    assert_eq!(kept.entity()?, entity);
+    assert_eq!(kept.reference()?, form.reference()?);
     Ok(())
 }
 

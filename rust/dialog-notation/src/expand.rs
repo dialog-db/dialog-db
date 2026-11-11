@@ -379,8 +379,22 @@ impl Expander {
     /// What the rules say `form` expands to in `position`. No answer and
     /// two different answers are both refused.
     fn ask(&mut self, form: &Form, position: Position) -> Result<Form, Error> {
-        let site =
-            blake3::hash(format!("{form} {position:?}").as_bytes()).to_hex()[..4].to_string();
+        // What the template's own variables are named apart by: the form
+        // being expanded and where it stands, by reference, so the names
+        // do not move with how either is spelled.
+        let site = Form::application(
+            Form::symbol("site"),
+            vec![
+                Part::Bare(form.clone()),
+                Part::Bare(Form::symbol(match position {
+                    Position::Head => "head",
+                    Position::Premise => "premise",
+                })),
+            ],
+        )
+        .reference()?
+        .to_string()[..4]
+            .to_string();
         let mut found: Vec<Form> = Vec::new();
         for rule in &self.syntax {
             if let (Answer::Syntax(template), Some(bindings)) =

@@ -157,7 +157,14 @@ pub fn compile(form: &Form) -> Result<Vec<Step>, Error> {
             // A concept of several reads is reported as several heads.
             // A read the query named no field of says nothing.
             Head::Report(read) if kept(read, &bound).is_empty() => {}
-            Head::Report(read) => steps.push(report(&rule, read, &format!("{form} {at}"))?),
+            Head::Report(read) => {
+                // The relation a report is derived into is named by the
+                // rule and which of its heads this is.
+                let site = Form::Vector(vec![form.clone(), Form::Number(at.to_string())])
+                    .reference()?
+                    .to_string();
+                steps.push(report(&rule, read, &site)?);
+            }
         }
     }
     if steps.is_empty() {
@@ -795,7 +802,7 @@ fn report(rule: &Rule, read: &Read, site: &str) -> Result<Step, Error> {
         }
     }
 
-    let relation = format!("report.q{}", &blake3::hash(site.as_bytes()).to_hex()[..12]);
+    let relation = format!("report.q{}", &site[..12]);
     let mut scope = Scope::default();
     let entity = match (&read.entity, shown(&read.entity)) {
         (Term::Variable(name), _) => {

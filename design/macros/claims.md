@@ -40,6 +40,12 @@
 | an attribute of no domain is a `Relation` today, and a value a branch stores | fact | `Relation::try_from`; `it_holds_a_symbol_with_no_domain_as_a_value_and_not_as_an_attribute` | holds; `Relation::split` refuses it |
 | a claim under an attribute of no domain is refused | fact | the same test | holds where the descriptor is read; not checked below the query layer |
 | every key of a form can be an attribute | hypothesis | confirmed by `prelude.clj` written as records under positions and labels of no domain | open; needs one position for the nth part |
+| what is stored is versioned, and named by merkle reference so a layout does not move a name | opinion | Irakli, 2026-11-11 | decides |
+| every form of the prelude and the examples is data: it lays out as bytes and reads back | fact | `it_lays_out_every_form_of_the_prelude_and_the_examples`, `rust/dialog-notation/src/data.rs` | holds; H1 confirmed with variables as symbols |
+| a form's name does not depend on its layout | fact | `Form::reference` is made of its parts' references; `it_names_apart_from_the_layout` | holds for the form's own reference |
+| a record value's name does not depend on its layout | hypothesis | `Value::reference`, `rust/dialog-corpus/src/identity.rs` | refuted today: `RECORD.reference_of(bytes)` |
+| a list and a map are referenced under the generic types, an application under `form:` | opinion | the agent, 2026-11-11 | open until something real is stored; every name follows from it |
+| a branch keeps a form as a record under its `form:` entity | fact | `it_keeps_a_form_on_a_branch_under_the_entity_that_names_it` | holds |
 | a rule can build a record from what it has bound | hypothesis | H5 of [design-forms.md](design-forms.md): confirmed by a record premise planned as a concept query is, running both ways | open; #748 speaks only of reading one |
 | a premise may take parameters that differ by application | fact | `ConceptQuery::schema`, `rust/dialog-query/src/concept/query.rs` | holds |
 | the two-cell `entity/derive` names the entities a record will | hypothesis | refuted by its own definition: a chain of pairs under a seed is not a record's canonical form | refuted; it is a stand-in |

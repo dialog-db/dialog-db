@@ -27,6 +27,7 @@
 //! ```
 
 pub mod compile;
+pub mod data;
 pub mod expand;
 pub mod form;
 pub mod kernel;

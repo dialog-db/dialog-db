@@ -1600,7 +1600,8 @@ name = "dialog-notation"
 version = "0.4.0-rc.7"
 dependencies = [
  "anyhow",
- "blake3",
+ "base58",
+ "bijoux",
  "dialog-common",
  "dialog-corpus",
  "dialog-peer",
@@ -1608,6 +1609,7 @@ dependencies = [
  "dialog-repository",
  "dialog-storage",
  "futures-util",
+ "merkle-reference",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",

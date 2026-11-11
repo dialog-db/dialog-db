@@ -12,8 +12,8 @@ use dialog_storage::provider::storage::VolatileSpace;
 
 /// A branch and the syntax submitted to it so far.
 pub struct Notebook {
-    operator: Peer<VolatileSpace, Session>,
-    branch: Branch,
+    pub operator: Peer<VolatileSpace, Session>,
+    pub branch: Branch,
     expander: Expander,
 }
 

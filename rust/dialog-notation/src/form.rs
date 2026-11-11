@@ -31,6 +31,8 @@ pub enum Form {
     Rest(String),
     /// `[a b]`.
     Vector(Vec<Form>),
+    /// `{key value}` and `{label: value}`: entries in the order written.
+    Map(Vec<(Form, Form)>),
     /// `(head part...)`.
     Application(Box<Form>, Vec<Part>),
 }
@@ -192,7 +194,7 @@ fn tokens(text: &str) -> Result<Vec<String>, Error> {
                     }
                 }
             }
-            '(' | ')' | '[' | ']' => {
+            '(' | ')' | '[' | ']' | '{' | '}' => {
                 tokens.push(next.to_string());
                 chars.next();
             }
@@ -216,7 +218,7 @@ fn tokens(text: &str) -> Result<Vec<String>, Error> {
             _ => {
                 let mut token = String::new();
                 while let Some(&c) = chars.peek() {
-                    if c.is_whitespace() || "()[];\"".contains(c) {
+                    if c.is_whitespace() || "()[]{};\"".contains(c) {
                         break;
                     }
                     token.push(c);
@@ -236,7 +238,9 @@ fn label(token: &str) -> Option<&str> {
     (!token.starts_with('"') && !name.ends_with(':')).then_some(name)
 }
 
-fn atom(token: &str) -> Form {
+/// The atom a token is. A symbol read back from data is told apart
+/// the same way, by its spelling alone.
+pub(crate) fn atom(token: &str) -> Form {
     if token == "..." {
         Form::Ellipsis
     } else if let Some(name) = token.strip_prefix("...?") {
@@ -277,6 +281,26 @@ fn form(tokens: &[String], at: &mut usize) -> Result<Form, Error> {
             *at += 1;
             Ok(Form::Vector(items))
         }
+        "{" => {
+            let mut entries = Vec::new();
+            loop {
+                let next = tokens.get(*at).ok_or_else(ended)?;
+                if next == "}" {
+                    break;
+                }
+                let key = match label(next) {
+                    Some("") => return Err(Error::Read("a map key with no name".into())),
+                    Some(name) => {
+                        *at += 1;
+                        Form::symbol(name)
+                    }
+                    None => form(tokens, at)?,
+                };
+                entries.push((key, form(tokens, at)?));
+            }
+            *at += 1;
+            Ok(Form::Map(entries))
+        }
         "(" => {
             let head = form(tokens, at)?;
             let mut parts = Vec::new();
@@ -296,7 +320,7 @@ fn form(tokens: &[String], at: &mut usize) -> Result<Form, Error> {
             *at += 1;
             Ok(Form::application(head, parts))
         }
-        ")" | "]" => Err(Error::Read(format!("a `{token}` that closes nothing"))),
+        ")" | "]" | "}" => Err(Error::Read(format!("a `{token}` that closes nothing"))),
         other => Ok(atom(other)),
     }
 }
@@ -323,6 +347,21 @@ impl Display for Form {
                     write!(f, "{item}")?;
                 }
                 write!(f, "]")
+            }
+            Form::Map(entries) => {
+                write!(f, "{{")?;
+                for (at, (key, value)) in entries.iter().enumerate() {
+                    if at > 0 {
+                        write!(f, " ")?;
+                    }
+                    match key.kind() {
+                        Some(Kind::Name | Kind::Domain | Kind::Attribute) => {
+                            write!(f, "{key}: {value}")?
+                        }
+                        _ => write!(f, "{key} {value}")?,
+                    }
+                }
+                write!(f, "}}")
             }
             Form::Application(head, parts) => {
                 write!(f, "({head}")?;
@@ -373,9 +412,23 @@ mod tests {
     }
 
     #[test]
+    fn it_reads_a_map_by_label_or_by_pair() {
+        let text = r#"{name: "Ada" xyz.person/age: 36 :open true [1 2] ?x}"#;
+        let forms = read(text).unwrap();
+        let Form::Map(entries) = &forms[0] else {
+            panic!("a map");
+        };
+        assert_eq!(entries.len(), 4);
+        assert_eq!(entries[0].0, Form::symbol("name"));
+        assert_eq!(entries[2].0, Form::Keyword("open".into()));
+        assert_eq!(forms[0].to_string(), text);
+    }
+
+    #[test]
     fn it_skips_comments_and_refuses_what_does_not_close() {
         assert_eq!(read("; nothing\n(a) ; more").unwrap().len(), 1);
         assert!(read("(a (b)").is_err());
+        assert!(read("{a: 1").is_err());
         assert!(read(")").is_err());
     }
 }

@@ -9,7 +9,9 @@ license.workspace = true
 [dependencies]
 dialog-corpus = { workspace = true }
 dialog-query = { workspace = true }
-blake3 = { workspace = true }
+merkle-reference = { workspace = true }
+base58 = { workspace = true }
+bijoux = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 

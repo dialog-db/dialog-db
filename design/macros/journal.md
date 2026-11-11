@@ -4,8 +4,8 @@
 
 |  | Understanding | Activity |
 |---|---|---|
-| **Status** | The kernel and the 65 lines of core forms run on a real branch through `rust/dialog-notation` ([poc.md](poc.md)). Syntax is held by the crate, not stored. A form is a record, and `entity/derive` takes one ([design-forms.md](design-forms.md)); the two-cell formula in the tree is a stand-in. | **Designing.** Direction decided by the maintainer. The kernel is built as a proof of concept. What a form is to dialog is decided; how a rule builds and takes apart a record is not. |
-| **Agenda** | How a rule builds a record, and whether one premise both builds and takes apart (H5). What a variable is as a value (H1). Whether dialog can be asked for an expansion a form at a time (H3, measurable now). What a read with no pick reads. | Design the record premise, with #748. Then `:id` over a record, then `expand` and `syntax`. Measure H3 as a research topic. |
+| **Status** | The kernel and the core forms run on a real branch through `rust/dialog-notation` ([poc.md](poc.md)). A form is data in four types, named by a merkle reference and laid out under a version, and a branch keeps one as a record ([design-forms.md](design-forms.md)). Syntax is still held by the crate. The two-cell `entity/derive` is a stand-in. | **Designing.** Direction decided by the maintainer. The kernel and the data under a form are built as a proof of concept. How a rule builds and takes apart a record is not. |
+| **Agenda** | How a rule builds a record, and whether one premise both builds and takes apart (H5). Whether dialog can be asked for an expansion a form at a time (H3, measurable now). What a read with no pick reads. | The record premise. Then `entity/derive` over a record, then syntax kept on the branch and the walker asking it. Measure H3 as a research topic. |
 
 ## Candidate problems
 
@@ -153,3 +153,16 @@ Not examined yet. They are columns, not recommendations.
 - Keys staying `Relation`s keeps #748's storage hypothesis whole. The agent's worry of the sitting before, that one value for map and record would cost it, does not arise.
 
 **Decided.** Not decided; advised, in [design-forms.md](design-forms.md), "What to store, and how": store the record, leave the map a type; no domain is the special domain; a form is a record as written; an atom that is not a value is a symbol with no domain.
+
+## 2026-11-11, Designing: plates
+
+**Asked.** Whether the advice on what to store stands. Irakli, by voice: he cannot decide the ideal now; go with the advice and version what is stored, records and syntax trees, so it can be upgraded. Name by merkle reference now, so a layout does not move a name. Take EDN's lesson, a syntax tree as data in a few types, so syntax changes without the format changing. What is nearer the center moves less.
+
+**Learned.**
+
+- Three things were being treated as one. The data types, the name over them and the layout under them move at different rates, and only the types are dear to change.
+- With an application as a data type of its own, a form needs no positions. The open point about one position for the nth part goes.
+- The data need not know a variable from a name: both are symbols. Only the syntax reads `?`.
+- `Value::Record` is referenced over its bytes today, so a record value's own name does follow its layout. A form's name has to be the form's reference, kept beside the bytes, not taken from them.
+
+**Decided.** By the maintainer: go with the advice, versioned; names are merkle references. By the agent, open until something real is stored: a list and a map are referenced under the generic types, an application under `form:`. Built as `rust/dialog-notation/src/data.rs`.

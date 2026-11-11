@@ -123,6 +123,47 @@ What each use here needs:
 
 Not decided: whether dialog has one compound value, a map of which #748's record is the case where every key is an attribute, or two, as conduct has. One value is less to build and one layout. It reopens two things #748 has decided: a field is named by an attribute, and a field may hold several values.
 
+## Decided: data at the center, a name over it, a layout under a version
+
+Irakli, 2026-11-11: the ideal cannot be decided now, so go with the advice below and make what is stored versioned, records and syntax trees both, so it can be upgraded. Name things by merkle reference, now, so a later layout does not move a name. Take EDN's lesson: a syntax tree is data in a few types, so the syntax can change and the format does not. What is nearer the center should move less.
+
+```
+ moves most    syntax        which forms mean what            nothing stored moves
+               ─────────────────────────────────────────────
+               layout        bytes, under a version           bytes are rewritten; no name moves
+               ─────────────────────────────────────────────
+               name          merkle reference of the parts    moves only if a type does
+               ─────────────────────────────────────────────
+ moves least   data types    atom, list, map, application
+```
+
+Built, in `rust/dialog-notation/src/data.rs`:
+
+| written | data | dialog value | referenced under |
+|---|---|---|---|
+| `"text"`, `42`, `-3`, `1.5`, `true` | text, number, truth | as dialog has them | as dialog does |
+| `todo:1`, `:open` | entity | `Value::Entity` | `entity:` |
+| `todo`, `xyz.todo`, `?x`, `_`, `...`, `+` | symbol of no domain | `Value::Symbol`, `/todo` | `symbol:` |
+| `xyz.todo/text` | symbol | `Value::Symbol` | `symbol:` |
+| `[a b]` | list | none yet | `Type::LIST` |
+| `{k v}`, `{label: v}` | map | none yet | `Type::MAP` |
+| `(head part… label: part…)` | application: a head, its bare parts in order, its labelled parts as a map | none yet | `form:` |
+
+- **The data knows no syntax.** A variable, `_` and `...` are symbols. The reader's own view still tells them apart, by spelling, and so does a form read back from bytes.
+- **The name** is `Form::reference`, and `form:` with it in base58 is the entity. Two orders of the same labels are one name. So are the natural 3 and the float 3.0, as they are one number to dialog, though they are two byte strings: a name does not follow the layout.
+- **The layout** is `Form::encode`: a version byte, then tags, lengths as bijou64, entries sorted. `Form::decode` refuses another version by its number, and refuses bytes that are not the one way a form is written. It is version 1 and a stand-in for #748's.
+- A form is kept on a real branch as a `record:` value under its `form:` entity and read back (`it_keeps_a_form_on_a_branch_under_the_entity_that_names_it`). Every form of the prelude and the examples lays out and reads back, which is what H1 asked.
+- The crate no longer hashes text anywhere. The names an expansion gives its own variables, and the relation a query is derived into, come from references.
+
+What this changes in the advice below: an application is a data type of its own, so its parts need no positions and the open point about them is closed. A label and a name are still symbols of no domain.
+
+**The one choice here that is dear to change** is what each thing is referenced under, since every name follows from it. Chosen by the agent, and open until something real is stored:
+
+- A list and a map under the types every list and map have. A type of our own for "a list in a form" would put the syntax into the name.
+- An application under `form:`, so `(f a b)` and `[f a b]` are not one name.
+
+**A limit.** `Value::Record` is referenced over its bytes today (`RECORD.reference_of`, `rust/dialog-corpus/src/identity.rs`). So a form kept as a record has two names: its own, which holds across layouts, and the record value's, which does not. Whatever points at a form has to point at its `form:` entity. Making a record's own name structural is #748's.
+
 ## What to store, and how
 
 Irakli, 2026-11-11: a record is a constrained map, its keys attributes, as an integer is a constrained number. His hope: a label is an attribute by default, of no domain or a fixed one, read `last`, so an attribute is a key like any other, as Clojure's `:name` and `:ns/name` are both keywords. He asked for advice on what to store.
@@ -170,9 +211,9 @@ H2 is now a requirement in the table above, not a hypothesis. H3 and H4 stand.
 
 ## Next
 
-0. Whether the advice in "What to store, and how" stands.
-1. How a rule builds a record: the premise of H5, and how it is written.
-2. What a variable is as a value (H1).
-3. H3, measured, as a research topic.
+1. How a rule builds a record: the premise of H5. `{…}` is read now and refused where a term stands.
+2. `entity/derive` over a record: the entity is named by the map's reference, so it is one more name that no layout moves.
+3. Syntax kept on the branch as forms, and the walker asking the branch.
+4. H3, measured, as a research topic.
 
 The first is #748's missing half, and it unblocks `:id` before it unblocks syntax.

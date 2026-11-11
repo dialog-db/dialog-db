@@ -11,6 +11,7 @@ text ──read──▶ forms ──expand──▶ kernel rules ──compile�
 - `form.rs` reads the notation. A symbol's kind is told from its spelling: a domain has a `.`, an attribute a `/`, an entity a `:`, an operator is `+-*/<>=` only, and anything else is a name. So syntax can ask `(:domain ?x)` and `(:name ?x)`.
 - `expand.rs` is the walker. It keeps the rules about syntax and rewrites a form until every head and premise applies a relation or a formula. The prelude is the 65 lines of `prelude.clj`.
 - `compile.rs` turns a kernel rule into what Dialog-DB has. It evaluates nothing.
+- `data.rs` is a form as data: four types, a merkle reference that names it, and a layout under a version. See [design-forms.md](design-forms.md).
 
 | kernel | Dialog-DB |
 |---|---|
