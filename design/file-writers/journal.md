@@ -385,3 +385,21 @@ The ledger's "integration never writes where a spill depends on" is a
 hypothesis that holds only under the first.
 
 **Decided.** Not decided: [design-integration.md](design-integration.md).
+
+**Asked.** Final form or whole blocks? Irakli: whole blocks. He expected
+the integrated form to come out smaller, so the tail just marks the offset
+where the extents begin and integration continues from there; it can move
+spills left and update their offsets; and with everything integrated it
+can truncate the file, unless that messes up writers.
+
+**Learned.** Three steps as stated lose or corrupt data, and each has a
+rule that keeps it safe: compact output goes only into space freed by an
+earlier, durable integration, never over input still being converted; a
+spill moves by new copy, sync, then slot; and truncation waits for the
+last process to close, since a mapped reader touching a page past a
+shorter end gets `SIGBUS`. Writers are the lesser concern: an integrator
+can try an extent's lock before truncating past it.
+
+**Decided.** Whole blocks in extents, integration converting them, records
+moving left. Open: how a reader keeps integration from moving or reusing
+bytes it is still reading.

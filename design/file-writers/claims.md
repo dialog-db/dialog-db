@@ -85,4 +85,9 @@
 | anything that later reclaims space in extents must keep every block a slot names | fact | follows from slots naming spilled blocks by offset | holds |
 | integration moves things in extents | opinion | Irakli, 2026-11-11: his expectation of the design | - |
 | splitting nodes into rows is about 60% of an append | fact | research/single-file-format/journal.md, 2026-11-07, "Where MusicBrainz's time goes" and the index-in-the-file entry | holds |
+| writers append whole blocks to their extents and integration converts them into the compact form, moving records left; a mark records where the extents not yet integrated begin; spills move left and their offsets are updated; when everything is integrated the file can be truncated | opinion | Irakli, 2026-11-11 | - |
+| writing compact output over extent bytes not yet durably integrated loses data on a crash between the overwrite and the compact copy becoming durable | fact | follows from the overwrite destroying the only copy; the file's index pages are reused only after a sync point for the same reason (research/single-file-format, format 10) | holds |
+| the compact form is always smaller than the whole blocks it replaces | hypothesis | true of the file as a whole (66× at tonk-team); not guaranteed for each step, so not relied on | open |
+| touching a mapped page past the end of a file that was truncated raises `SIGBUS` | fact | POSIX `mmap`: "references within the address range ... beyond the end of the object shall result in ... SIGBUS" | holds |
+| truncating only when the last process closes avoids both writers' extents and readers' mappings: every process holds a shared lock on one byte while open, and the one that takes it exclusively without waiting is the last | hypothesis | SQLite's WAL is cleaned up on the last connection's close ([wal.html](https://www.sqlite.org/wal.html)); confirmed by a test that closes processes in turn and reads after each | open |
 

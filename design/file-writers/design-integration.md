@@ -19,3 +19,33 @@ cell past its capacity spills to a block its slot names
 | frames against their predecessor | against a predecessor already indexed, or the writer's own earlier node | against any predecessor, integration seeing them all |
 | what the file holds at rest | the final form, with tokens a few writers wrote twice | the final form, compact |
 | what exists to build on | 🟢 today's append, unchanged, into an extent | 🟡 today's append, run by the integrator; moving records and reusing extents are new |
+
+## Decided: whole blocks in the extent (Irakli, 2026-11-11)
+
+Writers append whole blocks; integration converts them into frames and
+tokens, and the file comes out compact. The file is laid out as the
+integrated region, then the extents; a mark records where the extents not
+yet integrated begin, and integration works from there.
+
+What keeps it from losing or corrupting data:
+
+1. **Output only into space already free.** The compact form is written
+   into space an earlier integration freed and made durable (past a sync
+   point), never over an extent's bytes it is still converting: a crash
+   between overwriting them and the compact copy becoming durable would
+   lose both. That the compact form comes out smaller holds of the file as
+   a whole (66× at tonk-team), not of every step, so integration does not
+   rely on its write position staying behind its read position.
+2. **A spill moved left:** the new copy written, synced, then the slot
+   written under the cell's lock; the old place is free once no reader can
+   hold its offset.
+3. **Truncation at the last close only.** A reader with the file mapped
+   that touches a page past a new, shorter end gets `SIGBUS`. Every process
+   holds a shared lock on one byte while it has the space open; one that
+   takes it exclusively at close, without waiting, is the last and may
+   truncate past what is integrated (SQLite cleans its WAL up on the last
+   connection's close). While the file is open, freed space is reused
+   instead.
+
+Open: how a reader keeps integration from moving or reusing bytes it is
+still reading (shared byte-range locks per extent, or epochs).
