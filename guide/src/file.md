@@ -1189,38 +1189,39 @@ Any number of processes can have the file open: Alice's app, a sync daemon, a co
 A writer holds the turn only while it lays out and writes its records. Even so, a writer that finds the turn taken does not wait. It writes its blocks whole into an **extent**, space it claimed earlier, in a turn of its own. In the example, a helper process plays Alice's and holds the turn, while the example's own peer plays Bob's and commits *the `demo.grocery/name` of `item:3` is "Eggs"*:
 
 <figure class="dg">
-<svg class="dg" viewBox="0 0 760 380" width="760" height="380" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Bob&#x27;s process commits while Alice&#x27;s holds the turn: his block goes into his extent at once, and his head waits for the turn">
+<svg class="dg" viewBox="0 0 760 430" width="760" height="430" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Bob&#x27;s process commits while Alice&#x27;s holds the turn: his block goes into his extent at once, and his head waits for the turn">
 <defs><marker id="tp-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z"/></marker></defs>
 <text class="alice" x="130" y="20" text-anchor="middle">Alice&#x27;s process</text>
 <text class="title" x="380" y="20" text-anchor="middle">the file</text>
 <text class="bob" x="630" y="20" text-anchor="middle">Bob&#x27;s process</text>
-<line class="dashed" x1="130" y1="28" x2="130" y2="360"/>
-<line class="dashed" x1="380" y1="28" x2="380" y2="360"/>
-<line class="dashed" x1="630" y1="28" x2="630" y2="360"/>
-<line class="alice" x1="130" y1="50" x2="376" y2="50" marker-end="url(#tp-arrow)"/>
-<text class="small alice" x="250" y="44" text-anchor="middle">takes the turn</text>
-<rect class="alice" x="118" y="56" width="24" height="220"/>
-<line class="bob" x1="630" y1="80" x2="384" y2="80" marker-end="url(#tp-arrow)"/>
-<text class="small bob" x="506" y="74" text-anchor="middle">tries the turn: taken</text>
-<line class="bob" x1="630" y1="110" x2="384" y2="110" marker-end="url(#tp-arrow)"/>
-<text class="small bob" x="506" y="104" text-anchor="middle">writes the block whole into</text>
-<text class="small bob" x="506" y="124" text-anchor="middle">its extent at 1,246,469</text>
-<line class="bob" x1="630" y1="150" x2="384" y2="150" marker-end="url(#tp-arrow)"/>
-<text class="small bob" x="506" y="144" text-anchor="middle">count: 8,059 bytes</text>
-<text class="small muted" x="392" y="176">readers in any process find</text>
-<text class="small muted" x="392" y="190">the block now</text>
-<rect class="bob" x="618" y="206" width="24" height="74"/>
-<text class="small bob" x="650" y="230">the head waits</text>
-<text class="small bob" x="650" y="244">for the turn</text>
-<line class="alice" x1="130" y1="280" x2="376" y2="280" marker-end="url(#tp-arrow)"/>
-<text class="small alice" x="250" y="274" text-anchor="middle">lets go</text>
-<line class="bob" x1="630" y1="300" x2="384" y2="300" marker-end="url(#tp-arrow)"/>
-<text class="small bob" x="506" y="294" text-anchor="middle">takes the turn, appends the head</text>
-<text class="small bob" x="506" y="314" text-anchor="middle">needs: extent 1,246,469, epoch 4, 8,059 B</text>
-<line class="bob" x1="630" y1="340" x2="384" y2="340" marker-end="url(#tp-arrow)"/>
-<text class="small bob" x="506" y="334" text-anchor="middle">next commit, in the turn: folds</text>
-<text class="small bob" x="506" y="354" text-anchor="middle">the block in as frame 143,847</text>
-<text class="label small muted" x="16" y="376">In the example, a helper process holds the turn for 300 ms while the example&#x27;s peer commits item:3.</text>
+<line class="dashed" x1="130" y1="28" x2="130" y2="410"/>
+<line class="dashed" x1="380" y1="28" x2="380" y2="410"/>
+<line class="dashed" x1="630" y1="28" x2="630" y2="410"/>
+<line class="alice" x1="130" y1="52" x2="376" y2="52" marker-end="url(#tp-arrow)"/>
+<text class="small alice" x="250" y="46" text-anchor="middle">takes the turn</text>
+<rect class="alice" x="118" y="58" width="24" height="248"/>
+<line class="bob" x1="630" y1="86" x2="384" y2="86" marker-end="url(#tp-arrow)"/>
+<text class="small bob" x="506" y="80" text-anchor="middle">tries the turn: taken</text>
+<line class="bob" x1="630" y1="134" x2="384" y2="134" marker-end="url(#tp-arrow)"/>
+<text class="small bob" x="506" y="110" text-anchor="middle">writes the block whole into</text>
+<text class="small bob" x="506" y="126" text-anchor="middle">its extent at 1,246,469</text>
+<line class="bob" x1="630" y1="168" x2="384" y2="168" marker-end="url(#tp-arrow)"/>
+<text class="small bob" x="506" y="162" text-anchor="middle">count: 8,059 bytes</text>
+<text class="small muted" x="392" y="192">readers in any process</text>
+<text class="small muted" x="392" y="206">find the block now</text>
+<rect class="bob" x="618" y="226" width="24" height="80"/>
+<text class="small bob" x="650" y="256">the head</text>
+<text class="small bob" x="650" y="270">waits for</text>
+<text class="small bob" x="650" y="284">the turn</text>
+<line class="alice" x1="130" y1="306" x2="376" y2="306" marker-end="url(#tp-arrow)"/>
+<text class="small alice" x="250" y="300" text-anchor="middle">lets go</text>
+<line class="bob" x1="630" y1="350" x2="384" y2="350" marker-end="url(#tp-arrow)"/>
+<text class="small bob" x="506" y="326" text-anchor="middle">takes the turn, appends the head:</text>
+<text class="small bob" x="506" y="342" text-anchor="middle">needs extent 1,246,469, epoch 4</text>
+<line class="bob" x1="630" y1="396" x2="384" y2="396" marker-end="url(#tp-arrow)"/>
+<text class="small bob" x="506" y="372" text-anchor="middle">its next commit, in the turn,</text>
+<text class="small bob" x="506" y="388" text-anchor="middle">folds the block in as frame 143,847</text>
+<text class="label small muted" x="16" y="424">In the example, a helper process holds the turn for 300 ms while the example&#x27;s peer commits item:3.</text>
 </svg>
 </figure>
 
