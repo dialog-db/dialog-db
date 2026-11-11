@@ -187,6 +187,17 @@ async fn it_joins_the_reads_a_concept_holds_and_negates_them_as_one() -> Result<
         .await?,
         vec![r#"(io.person person:bob name: "Bob")"#]
     );
+    // What must not hold may stand inside `when`: the same rule.
+    assert_eq!(
+        report(
+            &mut notebook,
+            "(query (io.person ?p name: ?n)
+               (when (io.person ?p name: (:text ?n))
+                     (unless (author ?p))))"
+        )
+        .await?,
+        vec![r#"(io.person person:bob name: "Bob")"#]
+    );
     Ok(())
 }
 

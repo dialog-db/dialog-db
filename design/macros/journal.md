@@ -263,3 +263,14 @@ Not examined yet. They are columns, not recommendations.
 **Asked.** Irakli: rules of several heads can be handled by an agent working on its own, and belong in the next rule body format.
 
 **Decided.** It is a topic of its own, `design/rule-heads.md` on #776, in the Describing phase and not picked up. This topic keeps compiling a rule of several heads to a rule a head until that lands.
+
+## 2026-11-11, Designing: `unless` inside `when`, and rules for syntax
+
+**Asked.** Where parts without a label go. Irakli: option B is fine, or stick to rules and drop the `syntax` macro. A macro should read any form, not an application only. And since several negated atoms mean none holds, `unless` nested in `when` reads correctly and should be supported as well as beside it.
+
+**Learned.**
+
+- The walker already asks about any form that is not kernel, so a pattern in brackets at the top level expands with no change.
+- A struct as a pattern does not: `(expand {note: ?n})` is read as `(expand note: ?n)`, by the reading of a trailing record as labelled parts built earlier the same day. That reading and "a struct is a value like 5" contradict each other.
+
+**Decided.** By the maintainer: `unless` may stand inside `when`; a pattern is any form; the `syntax` of two parts goes and the prelude is rules. Built, with tests. Not decided: the label for a concept's body, and which of the two readings of a trailing struct stays.

@@ -97,8 +97,16 @@ impl Clauses {
         for part in parts {
             match part {
                 Part::Labelled(label, form) => clauses.said.push((label.clone(), form.clone())),
+                // What must not hold may stand among what must, as in
+                // `A, not B, not C`: each is one more "and not".
                 Part::Bare(form) if form.is("when") => {
-                    clauses.when.extend(form.bare().into_iter().cloned());
+                    for premise in form.bare() {
+                        if premise.is("unless") {
+                            clauses.unless.extend(premise.bare().into_iter().cloned());
+                        } else {
+                            clauses.when.push(premise.clone());
+                        }
+                    }
                 }
                 Part::Bare(form) if form.is("unless") => {
                     clauses.unless.extend(form.bare().into_iter().cloned());
@@ -552,6 +560,44 @@ mod tests {
         expander.submit(setup)?;
         let (kernel, _) = expander.submit(text)?;
         Ok(kernel.iter().map(Form::to_string).collect())
+    }
+
+    /// `unless` beside `when` and `unless` inside it are one rule.
+    #[test]
+    fn it_reads_unless_beside_when_or_inside_it() {
+        let beside = expanded(
+            TODO,
+            "(rule (xyz.lonely ?t text: ?x)
+               (when (todo ?t text: ?x))
+               (unless (xyz.tag ?t name: _) (xyz.star ?t by: _)))",
+        )
+        .unwrap();
+        let inside = expanded(
+            TODO,
+            "(rule (xyz.lonely ?t text: ?x)
+               (when (todo ?t text: ?x)
+                     (unless (xyz.tag ?t name: _))
+                     (unless (xyz.star ?t by: _))))",
+        )
+        .unwrap();
+        assert_eq!(beside, inside);
+        assert!(beside[0].contains("(unless (xyz.tag ?t name: _) (xyz.star ?t by: _))"));
+    }
+
+    /// A pattern is any form, not an application only: here a form in
+    /// brackets at the top level.
+    #[test]
+    fn it_expands_a_form_that_is_not_an_application() {
+        let kernel = expanded(
+            r#"(rule (syntax (assert! (xyz.note ?n text: (:text ?x))))
+                 (when (expand [note ?n ?x])))"#,
+            r#"[note note:1 "hi"]"#,
+        )
+        .unwrap();
+        assert_eq!(
+            kernel,
+            vec![r#"(rule (assert! (xyz.note note:1 text: (:text "hi"))))"#]
+        );
     }
 
     #[test]

@@ -53,17 +53,19 @@ The walker rewrites a top-level form until it is a `rule` or a write, then every
 
 ## The core forms
 
-All of [model/prelude.clj](model/prelude.clj), about 70 lines. `syntax` with two parts is the short way to write such a rule, and is itself one:
+The prelude in `rust/dialog-notation/src/prelude.clj` is rules and nothing else. There was a `syntax` of two parts as the short way to write one; it is gone (2026-11-11), since its two parts had no labels and different jobs:
 
-```clj
-(rule (syntax (rule (syntax ?template) (when (expand ?pattern))))
-  (when (expand (syntax ?pattern ?template))))
+```clojure
+(rule (syntax (rule (report ?head) (when ?head)))
+  (when (expand (query ?head))))
 
-(syntax (query ?head)
-  (rule (report ?head) (when ?head)))
-(syntax (query ?head ... (when ?premise ...))
-  (rule (report ?head) ... (when ?premise ...)))
+(rule (syntax (rule ...?about
+                (syntax ?body)
+                (when (expand (?name ?this ...?fields)))))
+  (when (expand (concept (?name ?this ...?fields) ?body ...?about))))
 ```
+
+A pattern is any form, not an application only. `unless` may stand beside `when` or inside it, each premise in it one more "and not": `(when A (unless B) (unless C))` is `A, not B, not C`.
 
 A concept is syntax for what its body says. The variables tie its parameters to the body's fields, so the names need not agree. Writing
 

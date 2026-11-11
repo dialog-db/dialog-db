@@ -278,7 +278,9 @@ Two things the example does not yet say, both from the count above:
 - **An operator is a node.** 20 of the 151 applications have a variable for a head, `(?name ?this ...?fields)`.
 - **Where several parts without a label go.** 38 of 151 have several, and `terms` is a map. Whatever the answer, it cannot depend on how many there are: the pattern `(when ?premise ...)` has to meet `(when A)` and `(when A B)` as one shape. Dialog's own answer for a rule is a field a run: `when` and `unless` are lists in a map. That covers `rule`, `when` and `unless`. It leaves `query`, `all`, `syntax`, `concept`, and patterns.
 
-Not decided.
+Decided 2026-11-11, by the maintainer: every part has a label but the primary (option B of the journal), or the form with two is not had. The `syntax` of two parts is gone and the prelude is rules. `concept` still has two, its signature and its body, and needs a label for one.
+
+Found while testing that a pattern may be any form: `(expand {note: ?n})` reads as `(expand note: ?n)`, because a record at the end of a tuple was made its labelled parts an hour before, for `(todo {of: ?t state: :open})`. So a struct cannot be passed as the one part without a label, which a struct being a value like 5 says it can. The two cannot both hold. With the syntax tree apart from the notation, the parameters of an application are a node of the tree and not a struct someone writes, so the reading to drop is the first. Not decided.
 
 ## What to store, and how
 
