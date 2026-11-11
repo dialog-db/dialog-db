@@ -245,3 +245,15 @@ Not examined yet. They are columns, not recommendations.
 - The agent had the `unless` gap wrong. A body with several negated atoms is ordinary datalog and means none of them holds; dialog has it as a list of negations. What no datalog has as a primitive is the negation of a conjunction, which is written as a helper rule and one negated atom. Bloom's `notin` takes one collection (Bud's `PushNotIn`). So nothing is missing in dialog: the notation's compiler writes the helper rule.
 
 **Decided.** By the maintainer: names resolve in a pass of their own, as in tonk; a nested application is sugar; rules of several heads are to be built in dialog. Not decided: how a query reports; where parts without a label go in the tree.
+
+## 2026-11-11, Designing: a struct is a value
+
+**Asked.** How a map with variables is built, for which the agent had proposed a `map` application lifted to a premise. Irakli: the notation should support structs and need no map form. A struct is `Value::Record`, or a `Value::Map` is added; the point is that it is a value, just like 5.
+
+**Learned.**
+
+- A struct with nothing to bind in it is a constant, and needs only a composite value dialog understands. `Value::Record` is opaque bytes today, written by revision records in a layout that is the reader's own (`history/revision_record.rs`).
+- A struct with a variable in it is a value once the variable is bound. Until then it is a term with terms inside, which `Term` has no case for. A `where` slot already holds two terms for a keyed field (`Bound::Entry { the, is }`).
+- Nothing about that has to show in the notation or the syntax tree: `{text: ?x}` is written and kept as a struct either way.
+
+**Decided.** By the maintainer: a struct is a value in the notation, written as one, with no form to build it. Not decided: whether the value is `Record` given a structure or a new `Map`, and how dialog evaluates a struct that holds a variable.
