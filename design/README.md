@@ -55,6 +55,11 @@ Backtracking moves a topic to an earlier phase and says so in its journal.
 
 ## Topics
 
+- [A read follows the head it should have pinned](query-isolation.md):
+  **Building.** Every unit of isolation (a query, a select, a poll, a
+  transaction) reads one revision, and the types make a live read
+  unwritable; the [journal](query-isolation/journal.md) records what the
+  harness found on main.
 - [The search tree's concerns are not expressed as capabilities](tree-node-reads.md):
   **Building.** The tree talks in nodes through capabilities it performs on
   the environment; caching, decoding and storage form belong to providers.
