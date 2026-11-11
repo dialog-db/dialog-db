@@ -30,6 +30,11 @@ use futures_util::{Stream, StreamExt as _, stream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+/// How many times a commit that lost its branch's race to another writer
+/// applies its instructions again over the head that won, before it gives
+/// up with the publish's `VersionMismatch`.
+const RETRIES: usize = 64;
+
 /// Command that commits a stream of changes (assert/retract) to a branch
 /// or a snapshot.
 ///
@@ -246,8 +251,11 @@ where
         }
     }
 
-    /// The branch path: build on the checkpointed head, publish CAS'd
-    /// against it.
+    /// The branch path: build on the checkpointed head and publish CAS'd
+    /// against it. A plain commit that loses the race to another writer
+    /// applies the same instructions again over the head that won, minted
+    /// afresh against it (the rules it triggers run again there), and tries
+    /// again; a merging commit merges with the winner instead.
     async fn perform_on_branch<Env>(
         self,
         branch: &Branch,
@@ -282,6 +290,78 @@ where
         // under its origin and would otherwise take the same edition.
         let writer = branch.writer();
         let _writing = writer.lock().await;
+        if self.merge || self.rebuild.is_some() {
+            return self.attempt_on_branch(branch, env).await;
+        }
+        let Commit {
+            source,
+            changes,
+            allow_empty,
+            canonicalize,
+            scope,
+            entries,
+            merge,
+            machinery,
+            rebuild,
+        } = self;
+        let instructions: Vec<Instruction> = changes.collect().await;
+        let mut attempts = 0;
+        loop {
+            let attempt = Commit {
+                source,
+                changes: stream::iter(instructions.clone()),
+                allow_empty,
+                canonicalize,
+                scope,
+                entries: entries.clone(),
+                merge,
+                machinery: machinery.clone(),
+                rebuild: rebuild.clone(),
+            };
+            match attempt.attempt_on_branch(branch, env).await {
+                Err(CommitError::Publish(PublishError::VersionMismatch { .. }))
+                    if attempts < RETRIES =>
+                {
+                    attempts += 1;
+                    branch.revision.resolve().perform(env).await?;
+                }
+                done => return done,
+            }
+        }
+    }
+
+    /// One attempt of the branch path, in the branch's writer lock: build
+    /// on the checkpointed head, publish CAS'd against it.
+    async fn attempt_on_branch<Env>(
+        self,
+        branch: &Branch,
+        env: &Env,
+    ) -> Result<Revision, CommitError>
+    where
+        Env: Provider<BlobImport>
+            + Provider<BlobRead>
+            + Provider<Get>
+            + Provider<Put>
+            + Provider<Import>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<Resolve>
+            + Provider<Publish>
+            + Provider<Identify>
+            + Provider<Attest>
+            + Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + Provider<BlobLoad>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + dialog_common::Holds
+            + ConditionalSync
+            + 'static,
+    {
+        let writer = branch.writer();
 
         // A merging commit builds on a head its own writer moved since
         // this handle read it, a pull of its own say: that is not a
@@ -1053,20 +1133,17 @@ mod tests {
     }
 
     /// A commit made through one handle, while another handle to the same
-    /// branch commits from a stale snapshot, must not be silently lost — the
-    /// stale commit fails loudly, and refreshing then re-committing reconciles.
+    /// branch commits from a stale snapshot, is not lost, and the stale one
+    /// is not refused: it applies its instructions again over the head that
+    /// won and publishes on top of it.
     ///
-    /// `commit` checkpoints the head it builds on, then publishes CAS'd against
-    /// that version. Two independent handles (the shape the service worker hits
-    /// once `/transact` no longer serializes writes under a single lock) both
-    /// snapshot the same head; one commits and advances storage, so the other's
-    /// publish CAS fails with a `VersionMismatch` rather than overwriting the
-    /// first commit with a tree built from the now-stale snapshot. Recovery is
-    /// refresh + re-commit.
+    /// `commit` checkpoints the head it builds on, then publishes CAS'd
+    /// against that version. Two independent handles both snapshot the same
+    /// head; one commits and advances storage, so the other's publish CAS
+    /// fails, and the commit retries over the new head rather than
+    /// overwriting the first commit with a tree built from the stale one.
     #[dialog_common::test]
-    async fn it_fails_a_commit_racing_another_then_reconciles_on_refresh() -> Result<()> {
-        use crate::PublishError;
-
+    async fn it_applies_a_commit_racing_another_over_the_winner() -> Result<()> {
         let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
@@ -1077,7 +1154,7 @@ mod tests {
 
         // A commits first, advancing the head in storage. B's cache is now
         // stale.
-        writer_a
+        let first = writer_a
             .commit(stream::iter(vec![Instruction::Assert(
                 Fact {
                     the: "user/name".parse()?,
@@ -1090,33 +1167,8 @@ mod tests {
             .perform(&operator)
             .await?;
 
-        // B commits from its stale snapshot — must fail loudly, not silently
-        // drop A's commit.
-        let raced = writer_b
-            .commit(stream::iter(vec![Instruction::Assert(
-                Fact {
-                    the: "user/name".parse()?,
-                    of: "user:b".parse()?,
-                    is: Value::String("Bob".to_string()),
-                    cause: None,
-                },
-                dialog_corpus::Pick::All,
-            )]))
-            .perform(&operator)
-            .await;
-        assert!(
-            matches!(
-                raced,
-                Err(crate::CommitError::Publish(
-                    PublishError::VersionMismatch { .. }
-                ))
-            ),
-            "a commit racing another must fail with a version mismatch; got {raced:?}"
-        );
-
-        // Recovery: refresh B's view of the head, then re-commit.
-        writer_b.refresh(&operator).await?;
-        writer_b
+        // B commits from its stale snapshot: it lands on top of A's commit.
+        let second = writer_b
             .commit(stream::iter(vec![Instruction::Assert(
                 Fact {
                     the: "user/name".parse()?,
@@ -1128,6 +1180,11 @@ mod tests {
             )]))
             .perform(&operator)
             .await?;
+        assert_ne!(
+            second.version(),
+            first.version(),
+            "B minted its own revision"
+        );
 
         // Both commits survive.
         let fresh = repo.branch("main").open().perform(&operator).await?;
@@ -1141,11 +1198,7 @@ mod tests {
             .await
             .into_iter()
             .collect::<Result<Vec<_>, _>>()?;
-        assert_eq!(
-            results.len(),
-            2,
-            "both racing commits must survive recovery"
-        );
+        assert_eq!(results.len(), 2, "both racing commits survive");
 
         Ok(())
     }

@@ -116,6 +116,34 @@ read. Read in place, the single-file archive's cold reads match the `fs`
 archive's, where rebuilding made them about 2× slower, and its cached nodes
 take about a third of the memory of cached blocks.
 
+### A commit that loses its branch's race to another writer applies itself again over the winner
+
+[#733](https://github.com/dialog-db/dialog-db/pull/733),
+[design](./design/file-writers.md)
+
+A branch commit publishes its new head compare-and-swapped against the
+head it built on. When another writer moved the head first, the commit no
+longer fails: it applies the same instructions again over the head that
+won, minted afresh against it (the rules it triggers run again there), and
+publishes that, up to 64 times. A merging commit (`.merge()`) still merges
+with the winner instead.
+
+What this changes for you:
+
+- `Branch::commit(...).perform(...)` and `.commit().publish()` succeed
+  where they returned `CommitError::Publish(PublishError::VersionMismatch)`
+  after a concurrent commit, landing on top of it; the error is returned
+  only once the retries run out.
+- A write computed outside the rules from an earlier read (read a value,
+  assert one derived from it) is applied again as it was computed; express
+  it as a rule, or read and commit again on the caller's side, to have it
+  computed over the head that won.
+- `dialog_corpus::Instruction` is `Clone`.
+
+Why: processes writing one branch concurrently should not have to catch
+and retry every commit themselves; the commit already holds everything it
+needs to try again over the newer head.
+
 ### A space can keep its memory cells in its file, branch heads included
 
 [#733](https://github.com/dialog-db/dialog-db/pull/733),
