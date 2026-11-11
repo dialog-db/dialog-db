@@ -491,12 +491,13 @@ fn snapshot(file: &File, slot: Slot, previous: Option<&Snapshot>) -> io::Result<
         });
     }
     // Past a file's end, a mapping on Unix reads nothing until the file
-    // grows there; on Windows it would grow the file, so there the mapping
-    // is the file as it is.
+    // grows there; on Windows it would grow the file, and Windows refuses to
+    // cut a file under a view past the cut, so there the mapping is what the
+    // slot names.
     let reserve = if cfg!(unix) {
         slot.end.saturating_mul(2).max(MAPPED)
     } else {
-        file.metadata()?.len()
+        slot.end.min(file.metadata()?.len())
     };
     let len = usize::try_from(reserve).unwrap_or(usize::MAX);
     // SAFETY: frames and tokens are never written again once a slot names
@@ -725,8 +726,19 @@ fn recover(file: &File) -> io::Result<Slot> {
         .filter(|slot| slot.end <= len && slot.sequence >= durable.sequence)
         .collect();
     let this_boot = boot();
+    // Another process with the file open has it in use in this boot, so it
+    // was recovered when the first of them opened it: as good as a slot
+    // known to be from this boot, where the platform does not say.
+    let present = if locks::lock(file, locks::PRESENT, true, false)? {
+        locks::unlock(file, locks::PRESENT)?;
+        false
+    } else {
+        true
+    };
     let chosen = match candidates.first() {
-        Some(newest) if this_boot != 0 && newest.boot == this_boot => Some(newest.clone()),
+        Some(newest) if present || (this_boot != 0 && newest.boot == this_boot) => {
+            Some(newest.clone())
+        }
         _ => {
             let mut chosen = None;
             for candidate in candidates {
@@ -759,7 +771,9 @@ fn recover(file: &File) -> io::Result<Slot> {
         }
     };
     if len > slot.end {
-        crate::file::set_len(file, slot.end)?;
+        // Best kept short, not needed (see `newest`): Windows refuses while
+        // another process has the file mapped.
+        let _ = crate::file::set_len(file, slot.end);
     }
     Ok(slot)
 }
