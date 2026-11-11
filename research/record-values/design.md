@@ -6,6 +6,56 @@ question and the decisions made; the [spike's results](results/2026-11-11-spike.
 hold the numbers cited below. Each section is one open question: what was
 found, the options, the proposal and why, and what would test it.
 
+## 0. The model: a record is a view over a buffer
+
+The maintainer's framing, which the rest of this design follows: every record
+is a view over the buffer that holds it, its names (and values) resolved
+through that buffer's table. A buffer is whatever holds records: a tree
+node's block, a stream's packet, the single-file archive, and a record on its
+own, which is a buffer of one.
+
+- **A record on its own** (a spilled value's block, a rule constant, a value
+  a caller builds, anything hashed or signed) is a buffer of one record: a
+  table of its names, sorted, and its fields naming them by index. That is
+  the header layout of section 2, and it is the canonical form.
+- **A record in a buffer of many** names attributes (and values) in the
+  buffer's table. Modelled over buffers of 64 records, rows over one table
+  take 0.83 to 0.87 of dag-cbor for revision records with names in the
+  table, 0.29 to 0.45 with values in it too, and 0.53 to 0.66 for tonk's
+  bindings ([results](results/2026-11-11b-layouts.md#records-as-rows-over-one-table-per-buffer)).
+- **Equality** inside one buffer compares rows, provided a buffer holds
+  each distinct token once; across buffers it resolves tokens, or compares
+  canonical forms.
+- **Identity** (`Hash`, a spilled value's reference, a rule's identity) is
+  over the canonical form, so a view realizes it to be hashed; or identity is
+  defined over its parts' hashes, which a buffer can keep, and nothing is
+  realized. Which is a decision (section 13).
+
+**Where it stands** (#733 at `5b1ba37`): inside the single-file archive this
+is how nodes are served already: rows of token references into the file's
+mapping, keys compared in place, values read in place, nothing copied out.
+It stops at two places: the tree's scans hand values out owned
+(`into_owned`), which #733 lists as open, and blocks for sync and for every
+other store are rebuilt whole, a record one opaque value in them. The file's
+table is the whole file, not one per node, and no record is split into its
+fields anywhere yet.
+
+**What it takes**, in the order the measurements say to try it:
+
+1. a record keyed so it splits into its parts (sections 1, 5);
+2. the file splitting records into its tokens, and interning a value's
+   payload apart from its type byte (section 4);
+3. the tree's segment encoder holding a node's records as rows over the
+   node's table, so blocks carry them that way on the wire (section 2, d);
+4. the tree's scans yielding views, and `Value::Record` holding a view (a
+   buffer and a span) or canonical bytes;
+5. streams sending only the table entries a peer lacks (section 2).
+
+**Risks.** A view keeps its buffer alive: a small record can pin a node or a
+mapping. Moving a record between buffers (a query's result asserted into a
+transaction) writes it again into the target's table. Hashing a view costs a
+realization unless identity is over parts.
+
 ## 1. The layout
 
 **Proposal.** A record is its attribute and value pairs, each a key's tail
@@ -79,11 +129,14 @@ in a stream. A stream that sends only new names in each packet (as HTTP/2's
 header compression does) is a transport encoding that decodes back to
 canonical records.
 
-**Proposal, for the maintainer to choose:** b for a record's canonical bytes,
-if a bound nested record may be a view into its outer record; a otherwise.
-Then d or a stream's table for what is shared across records. b over c,
-because a record is written whole, so a one-pass writer gains nothing, and
-the header finds a field without a trailer.
+**Proposal.** b for a record on its own, which is a buffer of one (section
+0); every record held in a buffer of many is a view over that buffer's table
+(d for a node, a stream's table, the file's tokens). The maintainer settled
+the condition this section first asked about: all records are views over
+the buffer that holds them, so a nested record bound in a query is a view,
+and taking one out costs nothing until it leaves its buffer. b over c,
+because a record on its own is written whole, so a one-pass writer gains
+nothing, and the header finds a field without a trailer.
 
 **To test.** A nested record bound as a view (outer bytes and a span):
 taking one out, comparing two, and storing one. And d: the spike's records
@@ -226,10 +279,19 @@ since it is the type's name in the notation and in tonk, and call the file's
 units something else (entries) while #733 is still a draft. Renaming the
 history's records is a larger change and not needed for this one.
 
+## 13. Identity of a view
+
+**Options.** The hash of the canonical form (a view realizes it to be hashed,
+once, kept with the value), or a hash over the hashes of its parts (a buffer
+keeps each token's hash, as the single-file archive's index already keys
+tokens by one, and a record's identity combines them without realizing
+anything). The second changes what a record's reference is, everywhere it is
+used, so it is a decision, not an optimization.
+
 ## What would settle it, in order
 
-1. The maintainer sets the bars, and chooses between names inline and a
-   header per record (section 2).
+1. The maintainer sets the bars, and decides how a view's identity is
+   computed (section 13).
 2. Interning value payloads apart in #733 (section 4): cheap, useful without
    records, and it measures the sharing the hypothesis rests on.
 3. The segment encoder splitting records (section 2, option d).

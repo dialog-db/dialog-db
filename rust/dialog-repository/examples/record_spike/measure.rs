@@ -619,6 +619,99 @@ fn layouts(sets: &[Set], rounds: usize) -> Result<()> {
     Ok(())
 }
 
+/// Records as rows over one shared table per buffer of `group` records, as
+/// a node's block or a stream's packet would hold them: the table lists
+/// each distinct name (and, in the second form, each distinct value slot)
+/// once, length-prefixed; a record is a row of varint indices into it, a
+/// nested record a marker and its own row.
+fn buffers(sets: &[Set]) {
+    fn width(n: usize) -> usize {
+        let mut w = 1;
+        let mut n = n >> 7;
+        while n > 0 {
+            w += 1;
+            n >>= 7;
+        }
+        w
+    }
+    fn row(
+        bytes: &[u8],
+        names: &mut BTreeSet<Vec<u8>>,
+        values: &mut BTreeSet<Vec<u8>>,
+        parts: &mut Vec<(bool, usize)>,
+    ) {
+        for part in codec::parts(bytes).expect("parts") {
+            names.insert(part.attribute.to_vec());
+            if part.slot[0] == dialog_corpus::ValueDataType::Record as u8 {
+                parts.push((true, 0));
+                row(&part.slot[1..], names, values, parts);
+                parts.push((true, 1));
+            } else {
+                values.insert(part.slot.to_vec());
+                parts.push((false, part.slot.len()));
+            }
+        }
+    }
+    println!("### Records as rows over one table per buffer\n");
+    println!(
+        "A buffer of 64 records (a view's 13 all in one) holds one table; each record is a row of \
+         varint indices into it. Names only: values written in the row. Names and values: every \
+         distinct value slot in the table too, the row all indices. Against dag-cbor raw, and \
+         names inline under gzip over the same groups for reference.\n"
+    );
+    println!("| dataset | dag-cbor | names in the table | names and values in the table |");
+    println!("|---|--:|--:|--:|");
+    for set in sets {
+        let group = if set.pairs.len() > 64 {
+            64
+        } else {
+            set.pairs.len()
+        };
+        let cbor: usize = set.cbor.iter().map(Vec::len).sum();
+        let (mut names_only, mut both) = (0, 0);
+        for chunk in set.pairs.chunks(group) {
+            let mut names = BTreeSet::new();
+            let mut values = BTreeSet::new();
+            let mut rows = Vec::new();
+            for bytes in chunk {
+                let mut parts = Vec::new();
+                row(bytes, &mut names, &mut values, &mut parts);
+                rows.push(parts);
+            }
+            let table = |set: &BTreeSet<Vec<u8>>| -> usize {
+                width(set.len()) + set.iter().map(|t| width(t.len()) + t.len()).sum::<usize>()
+            };
+            let (nw, vw) = (width(names.len()), width(values.len() + 2));
+            let names_table = table(&names);
+            let values_table = table(&values);
+            let mut a = names_table;
+            let mut b = names_table + values_table;
+            for parts in &rows {
+                a += width(parts.len()) + 1;
+                b += width(parts.len()) + 1;
+                for (nested, len) in parts {
+                    if *nested {
+                        a += 1;
+                        b += 1;
+                    } else {
+                        a += nw + len;
+                        b += nw + vw;
+                    }
+                }
+            }
+            names_only += a;
+            both += b;
+        }
+        println!(
+            "| {} | {cbor} | {names_only} ({:.2}) | {both} ({:.2}) |",
+            set.name,
+            names_only as f64 / cbor as f64,
+            both as f64 / cbor as f64
+        );
+    }
+    println!();
+}
+
 pub fn run(revisions: &str, bindings: &str, rounds: usize) -> Result<()> {
     let revision_cbor = read_revisions(revisions)?;
     let encode_all = |versions: data::Versions| -> Result<Vec<Vec<u8>>> {
@@ -702,5 +795,6 @@ pub fn run(revisions: &str, bindings: &str, rounds: usize) -> Result<()> {
     version_tokens(&sets[1], &keys);
     reads(&sets, rounds);
     layouts(&sets, rounds)?;
+    buffers(&sets);
     Ok(())
 }

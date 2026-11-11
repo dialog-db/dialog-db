@@ -29,6 +29,10 @@ statuses mean.
     record's fields are never claims: they are reached by destructuring a
     bound record, never by selection, and a record cannot stand where an
     entity is expected (`of`).
+  - Every record is a view over the buffer that holds it (a node's block,
+    a stream's packet, the single-file archive); a record on its own is a
+    buffer of one, its canonical form a sorted table of its names and fields
+    by index.
   - Equality follows tokens as key comparison does, resolving them across
     sources, and the wire carries the canonical form.
   - Repetition is expected mostly across records, and shared through the
@@ -490,6 +494,37 @@ datasets and 20,000 generated records, then sized and timed
 **Decision.** Not decided. Proposed in the design: a header per record if a
 bound nested record may be a view into its outer record, names inline
 otherwise; sharing across records in the node, the stream or the file.
+
+Commits: this entry.
+
+## 2026-11-11 — Every record is a view over the buffer that holds it
+
+**Question.** The maintainer: all records are views over the same memory
+buffer. What does that settle, and is it how the single-file archive works?
+
+**Method.** A model of records as rows over one table per buffer of 64
+records ([results](results/2026-11-11b-layouts.md#records-as-rows-over-one-table-per-buffer));
+#733 read at `5b1ba37` (`archive/served.rs`, the tree's scans in
+`dialog-search-tree/src/differential.rs`).
+
+**Results.**
+
+- Rows over one table per buffer: revision records 0.83 to 0.87 of
+  dag-cbor with names in the table, 0.29 to 0.45 with values too; tonk's
+  bindings 0.53 to 0.66.
+- The single-file archive serves nodes this way already: rows of token
+  references into the file's mapping, keys compared in place, values read in
+  place ("Nothing a node holds is copied out of the file"). It stops at the
+  tree's scans, which hand values out owned (`into_owned`, open in #733),
+  and at blocks, which sync and every other store rebuild whole. Its table
+  is the whole file; no record is split into fields anywhere.
+
+**Decision.** Decided by the maintainer: every record is a view over the
+buffer that holds it. That settles the previous entry's open condition, so a
+nested record bound in a query is a view. A record on its own is a buffer of
+one, its canonical form a sorted table and fields by index (the header
+layout). Open: whether identity is the hash of the canonical form or a hash
+over its parts' hashes ([design](design.md), sections 0 and 13).
 
 Commits: this entry.
 
