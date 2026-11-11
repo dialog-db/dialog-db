@@ -1299,12 +1299,14 @@ dependencies = [
  "dialog-storage",
  "futures-util",
  "hashbrown 0.16.1",
+ "libc",
  "memmap2",
  "papaya",
  "parking_lot",
  "rkyv",
  "tempfile",
  "tokio",
+ "windows-sys 0.61.2",
  "zerocopy",
 ]
 
