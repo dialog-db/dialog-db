@@ -222,6 +222,23 @@ pub(crate) fn set_len(file: &File, len: u64) -> io::Result<()> {
     file.set_len(len)
 }
 
+/// Grows the file to `len`. On Unix by setting its length, which leaves
+/// what is not written a hole; on Windows by writing its last byte, as
+/// Windows refuses to set the length of a file another process has mapped.
+pub(crate) fn grow(file: &File, len: u64) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        set_len(file, len)
+    }
+    #[cfg(windows)]
+    {
+        if len > file.metadata()?.len() {
+            write_at(file, len - 1, &[0])?;
+        }
+        Ok(())
+    }
+}
+
 /// Makes what was written to the file durable.
 pub(crate) fn sync(file: &File) -> io::Result<()> {
     #[cfg(test)]

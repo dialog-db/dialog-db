@@ -1992,7 +1992,7 @@ impl FileArchive {
                 let (bytes, whole) =
                     extent::record(record, self.inner.options.extent, slot.sequence)?;
                 let written = write_at(file, record, &bytes)
-                    .and_then(|()| crate::file::set_len(file, record + whole));
+                    .and_then(|()| crate::file::grow(file, record + whole));
                 if let Err(error) = written {
                     let _ = locks::unlock(file, locks::owner(record));
                     self.inner.extents.lock().busy.remove(&record);
@@ -2941,9 +2941,24 @@ impl FileArchive {
         // what is kept is made: Windows refuses to cut a file under a view
         // that reaches past the cut.
         drop((snapshot, bytes));
+        #[cfg(unix)]
         self.inner
             .current
             .store(Arc::new(self::snapshot(file, slot.clone(), None)?));
+        // Windows refuses to set the length of a file while any view of it
+        // is open, so this process, closing, lets go of its views: nothing
+        // reads through this handle after its last close.
+        #[cfg(windows)]
+        self.inner.current.store(Arc::new(Snapshot {
+            slot: slot.clone(),
+            map: Arc::new(
+                memmap2::MmapOptions::new()
+                    .len(1)
+                    .map_anon()?
+                    .make_read_only()?,
+            ),
+            pages: Default::default(),
+        }));
         crate::file::set_len(file, cut)?;
         let slot = self.sync_point(slot)?;
         self.inner.known.store(slot.end, Ordering::Release);
