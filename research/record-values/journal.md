@@ -35,8 +35,13 @@ statuses mean.
   - documents that grow (options in the third entry);
   - whether an attribute can require its records to satisfy a concept;
   - how a reader tells today's dag-cbor records from the new layout.
+- **Proposed, from the single-file archive:** a record has the two forms a
+  tree node has in the file, canonical bytes and rows over the file's
+  tokens, and is keyed as its tails rather than as one escaped byte string,
+  so the file splits it as it splits a key.
 - **Next:** a census of the records in tonk-team's history: how many, their
-  sizes, and how much repeats across them.
+  sizes, how many spill, and how much repeats across them and with the
+  replica's claims.
 - **Blocked:** neither dataset is in this session's container.
 
 ## Datasets
@@ -334,6 +339,58 @@ values, given that they share one version.
 of each value. The same tiebreak replaces the value order in dialog's
 elections; that change is separate from this topic. This replaces the
 proposal to refuse `last` over several values.
+
+Commits: this entry.
+
+## 2026-11-11 — What the single-file archive already does for records
+
+**Question.** What of the single-file archive (#733) records can share,
+and what it changes in this topic.
+
+**Method.** Read the single-file topic's design and journal and
+`dialog-archive-file/src/node.rs` on `worker/pensive-edison-fu3bx5`
+(`f39b10f`), and `Datum` in `dialog-corpus`. Nothing measured.
+
+**Results.**
+
+- A leaf entry in the file is a row: the key's form, the tokens of its
+  parts (entity, attribute, value), and a datum token (`entry_row`). A
+  value token is the key's value slot, its type byte and its
+  order-preserving payload. Keys compare part by part over the tokens
+  (`KeyParts::cmp_bytes`), and a node's wire block is realized from its
+  rows. Tokens are named by where they sit, and a writer that finds a token
+  another appended first takes theirs, so a canonical value has one token
+  in a file: the condition equality by token needs.
+- History keys had no column schema and were kept whole; splitting them
+  into version, entity, attribute and value tokens
+  (`split_record_components`) took tonk-team's modern nodes from 15.3 to
+  5.7 MiB. Splitting composites so their parts share the replica's tokens
+  is the file's largest measured win after frames themselves.
+- `Datum` holds no value (its cause, versions and blob), so a value is
+  stored once, in the key, inline or spilled. A record is not stored
+  twice.
+- A `record:` value is keyed today as one escaped, terminated byte string
+  (`ordvalue::encode_value`). The file keeps it as one value token, and
+  could split it only after unescaping it. A record keyed as its tails
+  themselves would split as a key does.
+- Rows have a fixed shape: a form and at most four parts. A record has any
+  number of pairs.
+- Costs the file measured: splitting nodes into rows is its own largest
+  cost (12.6 to 13.7% of a warm command), and a node's tokens sit on about
+  500 pages written across the whole history.
+- The file is native. The web keeps records canonical only, until the
+  OPFS work lands.
+- "Record" names three things in the code this topic touches: a file's
+  records, history records (`RevisionRecord`, the claim records), and
+  `Value::Record`.
+
+**Decision.** Proposed, for the maintainer: a record has the two forms a
+tree node has in the file, canonical bytes and rows over tokens; it is
+keyed as its tails, so it is splittable as a key is; and the census and
+the tokenized variant measure the two costs above, a commit and a cold
+destructure. Open, added: how the file holds a record's parts (a value
+token of token names, or rows of its own), how the tree's manifest names
+the new keying, and the word.
 
 Commits: this entry.
 

@@ -20,6 +20,14 @@ tokens as the replica's claims, so in the single-file archive a record
 costs mostly references, far less than its dag-cbor bytes, and
 destructuring one field costs less than decoding the whole record.
 
+In the key, a record is that sequence of tails itself, ended by a byte no
+attribute starts with, not the sequence escaped as one byte string as a
+`record:` value is keyed today. Its parts are then the key's own parts,
+and the file splits a record the way it splits a key. A record then has
+the two forms a tree node already has in the file: canonical bytes, which
+are hashed and sent, and rows over the file's tokens, which local reads
+use and which realize the canonical bytes.
+
 ## Why
 
 Some values are compound but atomic: a location is a latitude and a
@@ -64,8 +72,7 @@ Decided, each in a journal entry:
   record's version, so `last` over several values ends on the tiebreak
   every election ends on when the version cannot decide: the hash of the
   value (proposed: of `Value::identity_key`; for a record, of its
-  canonical form). Dialog's elections tie by the value today; moving them
-  to the hash is a separate change.
+  canonical form). Dialog's elections tie the same way since #752.
 - **Equality follows tokens**, as key comparison does: records read over
   the same source compare by their token references, records from
   different sources resolve their tokens, and the wire carries the
@@ -88,6 +95,11 @@ Decided, each in a journal entry:
   archive is native.
 - **A breaking change, said so.** It changes what a replica stores, so it
   gets a changelog entry under Compatibility and migration.
+- **Splittable.** The file splits a key into tokens only where its parts
+  delimit themselves and compare part by part in the key's order (key
+  tails do; an escaped byte string has to be unescaped first). A record's
+  canonical form has to be splittable the same way, recursively, for its
+  parts to be the file's tokens.
 
 ## Not in scope
 
@@ -113,7 +125,17 @@ Decided, each in a journal entry:
 - **Telling today's records from the new layout.** With no type tag, a
   reader still has to know which layout a record's bytes are in: a layout
   version at the front, as tree nodes have, or a new value type, leaving
-  `record:` to today's bytes.
+  `record:` to today's bytes. A record keyed as its tails is also a change
+  to how a tree keys a value, which the tree's manifest would name, as it
+  names the number band.
+- **How the file holds a record's parts.** A file row has a fixed shape (a
+  key's form, at most four parts, a datum), and a record has any number of
+  pairs. A value token made of token names, or a section of rows of its
+  own.
+- **The word.** "Record" already names a file's records (`kind | length |
+  crc32 | body`), a history record (`RevisionRecord`, and the claim records
+  `split_record_components` splits) and `Value::Record`. Three meanings
+  in the code this topic changes.
 
 ## What it is measured against
 
@@ -129,8 +151,16 @@ token each in #733's file archive. Each variant runs on the same dataset:
 
 The measurements re-encode signed records to size them; nothing re-encodes
 them in a replica. Before the variants, a census of the dataset's records:
-how many, their sizes, and how much of each repeats across records and
-with the replica's claims.
+how many, their sizes, how many spill past `inline_n`, and how much of each
+repeats across records and with the replica's claims (a revision record's
+parents, for one, are versions the history keys already hold as tokens).
+
+Two costs the file has measured bear on the tokenized variant: splitting
+nodes into rows is already the file's own largest cost (about 13% of a
+warm command), and a node's tokens sit on hundreds of pages written across
+the whole history. Splitting records adds to the first, and reading one
+record from its parts may touch more pages than reading it whole. Both
+are measured: the cost of a commit, and a cold destructure.
 
 ## Success
 
