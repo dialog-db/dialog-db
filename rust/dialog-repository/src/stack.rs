@@ -95,7 +95,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::{mem, slice};
+use std::{mem, slice, str};
 
 use base58::ToBase58 as _;
 use dialog_capability::{Fork, Provider};
@@ -103,25 +103,30 @@ use dialog_common::{Blake3Hash, ConditionalSync};
 use dialog_corpus::history::Version as HistoryVersion;
 use dialog_corpus::selector::Constrained;
 use dialog_corpus::{
-    AssetChange, Changes, DialogCorpusError, Entity, Fact, FactView, Instruction, Pick, Selector,
-    Statement, Update as _, Value,
+    AssetChange, Changes, DialogCorpusError, Entity, Fact, FactView, Instruction, Name, NameShape,
+    Pick, Selector, Statement, Symbol, Update as _, Value,
 };
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::Identify;
 use dialog_effects::blob::{Import as BlobImport, Read as BlobRead, Size as BlobSize};
 use dialog_effects::memory::{Publish, Resolve, Version as MemoryVersion};
+use dialog_query::Keyed;
 use dialog_query::error::EvaluationError;
 use dialog_query::query::{Application, Output};
+use futures_util::StreamExt as _;
 use futures_util::lock::Mutex as AsyncMutex;
 use parking_lot::{Mutex, RwLock};
 use serde::Serialize;
 use thiserror::Error;
 
 mod guide;
+#[cfg(test)]
+mod keys_tests;
 
 pub use guide::Divergence;
 pub(crate) use guide::{Divergences, Guide, GuidedLayer, RuleShape};
 
+use crate::layer::Order;
 use crate::placement::{Bindings, Placements, Target, elected};
 use crate::repository::branch::registry::RegistryEnv;
 use crate::repository::branch::resolve::ResolveEnv;
@@ -3317,6 +3322,38 @@ impl StackQuery {
             uncommitted: self.uncommitted.clone(),
         }
     }
+
+    /// Stage a read of the greatest keys of one collection: the entries of
+    /// `of` under `domain` whose key is of the kind `keyed`. With `below`,
+    /// the read takes only the keys less than it. It answers at most
+    /// `count` keys, the greatest first, each once. Call `.perform(&env)`
+    /// to execute.
+    ///
+    /// The read is one reverse scan of the entity index of each layer, which
+    /// stops after `count` keys. It reads the rows that a query of the
+    /// stack reads: each layer gives only the attributes that the
+    /// placements of the stack put on it, and the layers merge in the order
+    /// of the keys. It is not a query, so it holds no rule, no limit in a
+    /// rule, and no subscription.
+    pub fn keys(
+        &self,
+        of: Entity,
+        domain: Symbol,
+        keyed: Keyed,
+        below: Option<Name>,
+        count: usize,
+    ) -> StackKeys {
+        StackKeys {
+            composite: self.composite.clone(),
+            changes: self.changes.clone(),
+            uncommitted: self.uncommitted.clone(),
+            of,
+            domain,
+            keyed,
+            below,
+            count,
+        }
+    }
 }
 
 /// A query command over a stack's composite, ready to be performed.
@@ -3354,6 +3391,121 @@ impl<Q: Application> StackSelect<Q> {
                 yield result?;
             }
         }
+    }
+}
+
+/// A read of the greatest keys of one collection over a stack's composite,
+/// ready to be performed. Created by [`StackQuery::keys`].
+pub struct StackKeys {
+    composite: Composite,
+    changes: Changes,
+    uncommitted: Option<Uncommitted>,
+    of: Entity,
+    domain: Symbol,
+    keyed: Keyed,
+    below: Option<Name>,
+    count: usize,
+}
+
+/// What a [`StackKeys`] read answers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CollectionKeys {
+    /// The keys, the greatest first, each once. A key is the name half of
+    /// the attribute of an entry: the part after the domain and its `/`.
+    pub keys: Vec<String>,
+    /// How many rows the read took from the merged layers of the stack. Two
+    /// entries that share a key are two rows, so this is the count of keys
+    /// plus the entries that repeat a key.
+    ///
+    /// The count is of the rows that reach the merge, after the placements
+    /// and the tombstones filter the rows of each layer. The walk of a layer
+    /// also visits each row that a placement keeps from that layer, and each
+    /// row that a retraction hides, and this count leaves those rows out. So
+    /// the count does not measure the work of the walk. For example, when a
+    /// transaction retracts many entries of a tree above the keys that the
+    /// read answers, the walk of the tree visits each of those entries, and
+    /// they add nothing to this count.
+    pub rows: usize,
+}
+
+impl StackKeys {
+    /// Execute the read.
+    ///
+    /// A `below` whose kind is not `keyed` fails with
+    /// [`DialogCorpusError::InvalidRelation`]: a symbol sorts above each
+    /// position, so it would bound nothing.
+    pub async fn perform<Env>(self, env: &Env) -> Result<CollectionKeys, DialogCorpusError>
+    where
+        Env: StackEnv,
+    {
+        let StackKeys {
+            composite,
+            changes,
+            uncommitted,
+            of,
+            domain,
+            keyed,
+            below,
+            count,
+        } = self;
+        let shape = NameShape::from(keyed);
+        if let Some(below) = &below
+            && below.shape() != shape
+        {
+            return Err(DialogCorpusError::InvalidRelation(format!(
+                "{below} is not a key of a {keyed:?} collection"
+            )));
+        }
+        let mut answer = CollectionKeys {
+            keys: Vec::new(),
+            rows: 0,
+        };
+        if count == 0 {
+            return Ok(answer);
+        }
+        // The environment of a query of the stack, built as
+        // `StackSelect::perform` builds it.
+        let operator = Identify
+            .perform(env)
+            .await
+            .map_err(|e| DialogCorpusError::Storage(format!("identify: {e}")))?;
+        let overlay = composite.overlay(&changes, &operator);
+        let (composite, layers) = reading(uncommitted.as_ref(), composite, env)
+            .await
+            .map_err(|error| DialogCorpusError::Storage(error.to_string()))?;
+        let query_env = QueryEnv::over(composite, overlay, env).with_layers(layers);
+
+        let prefix = format!("{domain}/");
+        let mut selector = Selector::new()
+            .of(of)
+            .with_domain(&domain)
+            .with_name_shape(shape);
+        if let Some(below) = &below {
+            selector = selector.the_less_than(format!("{prefix}{below}"));
+        }
+        let mut rows = query_env.select_in(selector, Order::Descending).await?;
+        // The rows of one key sit side by side, as the index sorts them by
+        // the attribute, so a key that repeats the last one is the same key.
+        while answer.keys.len() < count
+            && let Some(row) = rows.next().await
+        {
+            let view = row?;
+            answer.rows += 1;
+            let the = view.the_bytes()?;
+            let key = the
+                .strip_prefix(prefix.as_bytes())
+                .and_then(|key| str::from_utf8(key).ok())
+                .ok_or_else(|| {
+                    DialogCorpusError::InvalidRelation(format!(
+                        "a row of the collection {domain} has the attribute {}",
+                        String::from_utf8_lossy(&the)
+                    ))
+                })?;
+            if answer.keys.last().map(String::as_str) != Some(key) {
+                answer.keys.push(key.to_owned());
+            }
+        }
+        Ok(answer)
     }
 }
 
