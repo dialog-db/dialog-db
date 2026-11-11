@@ -157,6 +157,12 @@ impl Owned {
     }
 }
 
+/// Writes that the extent at `record` holds `used` bytes of frames: for
+/// recovery, when the frames reached the disk and the count did not.
+pub(crate) fn set_used(file: &File, record: u64, used: u64) -> io::Result<()> {
+    write_count(file, record, used)
+}
+
 fn write_count(file: &File, record: u64, used: u64) -> io::Result<()> {
     let mut count = [0u8; 16];
     count[..8].copy_from_slice(&used.to_le_bytes());

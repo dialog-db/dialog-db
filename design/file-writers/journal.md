@@ -737,3 +737,43 @@ The first run of `file-archive-platforms.yml` failed on both.
 - **Children failed within 20 ms on Windows** (3 tests), saying why only on
   their error output, which the harness did not read. It does now; the next
   run says.
+
+## 2026-11-11, Deciding: a head waits briefly (B), measured against A
+
+Irakli, on waiting commits: "Maybe me saying do what SQLite does was not
+well thought out"; then, given three options (A: what was built; B: a head
+takes the turn only to append its record, naming the extents it depends
+on; C: heads written to the writer's own extent, no turn): "At least B, C
+seems better, but costs matter here".
+
+SQLite has two ideas, and only one was needed: a commit trusted only with
+everything before it in the log, and one writer at a time. B keeps the
+first without folding inside the turn: a cell's record names each of the
+writer's extents still holding blocks (record, epoch, bytes of frames),
+and recovery takes it as whole only if every one the slot still lists in
+that epoch holds whole frames that far. Built, format 14.
+
+The power-loss test found one more case on the way: an extent's frames
+reached the disk and its count, written after them, did not, so readers
+did not find blocks a recovered head names. Recovery writes the count
+when it takes such a record. Without the dependency check 203 of 3,600
+images fail; without the count repair 3 to 9 do; with both, five seeds
+pass.
+
+**What a head waits, measured** (`measure_how_long_a_cell_update_waits`,
+release build, this VM; each process appends 20 blocks of 4 KiB then
+publishes its own cell, 200 times; two runs):
+
+| publish | B, 1 process | B, 4 at once | A, 1 process | A, 4 at once |
+|---|---|---|---|---|
+| p50 | 44–48 µs | 0.12–0.66 ms | 87–97 µs | 0.15–0.18 ms |
+| p90 | 86–88 µs | 6.2–7.9 ms | 141–170 µs | 6.6–8.9 ms |
+| p99 | 4.4–5.3 ms | 11–14 ms | 4.3–4.6 ms | 16–23 ms |
+| max | 5.2–5.8 ms | 13–18 ms | 5.2–5.4 ms | 21–27 ms |
+
+B halves an uncontended publish and cuts the contended tail by a third.
+The p90 under contention hardly moves: there a head waits behind the
+other writers' block appends and sync points, which hold the turn for
+milliseconds, not behind heads. Only C, or block appends that take the
+turn less, removes that. A lone writer's p99 is a sync point's two
+fsyncs inside the turn.

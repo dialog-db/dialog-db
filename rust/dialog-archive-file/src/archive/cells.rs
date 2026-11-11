@@ -5,26 +5,34 @@
 //! update appends a record of the [cell](Kind::Cell) kind holding the
 //! cell's name and its value (or that it was retracted), and the cells' own
 //! index (a tree like the blocks', rooted in the slot) files the name, by a
-//! key from it, at the newest such record. The record is appended in the
-//! writer's turn, after this process's extents are folded in, and the slot
-//! that names it is written after it. So a value is never in the file
-//! without what it names before it: whatever a power loss keeps, recovery
-//! returns to a slot whose every record since the durable slot is whole,
-//! and a cell's record and the blocks before it are kept or dropped
-//! together. As in SQLite with `synchronous=NORMAL`, an update is made
-//! durable by the next sync point, not by one of its own; a power loss can
-//! undo the last updates, never leave one naming what is gone.
+//! key from it, at the newest such record. The slot that names the record
+//! is written after it, so whatever a power loss keeps, recovery returns to
+//! a slot whose every record since the durable slot is whole: a value in
+//! the file's log is there with every block the log holds before it. As in
+//! SQLite with `synchronous=NORMAL`, an update is made durable by the next
+//! sync point, not by one of its own; a power loss can undo the last
+//! updates, never leave one naming what is gone.
 //!
-//! Writers of cells take turns, as SQLite's writers take its write lock,
-//! for as long as an append of one small record takes. Readers take no
-//! lock: a read looks again at the slots when the file grew, as a SQLite
-//! reader looks for a newer commit when it starts.
+//! Unlike SQLite, a writer's blocks need not be in the log before the
+//! value: they may still be in this process's extents, written without the
+//! turn. The record names them instead: each of this process's extents
+//! that holds blocks, by its record, epoch and how many bytes of frames it
+//! held. A record is whole only if every extent it names that the slot
+//! still lists in that epoch holds whole frames up to there (one the slot
+//! no longer lists, or lists claimed again, was folded into the log before
+//! the slot). So a cell's update holds the writer's turn for the append of
+//! one small record, never for folding blocks in.
+//!
+//! Readers take no lock: a read looks again at the slots when the file
+//! grew, as a SQLite reader looks for a newer commit when it starts.
 //!
 //! The record's body: a byte of padding and the padding, so what follows
 //! starts on an [`ALIGN`] boundary (the index names the record by where
 //! that is); the name's length (u16) and the name (the memory space, a
 //! zero byte, the cell); a byte, 1 when a value follows and 0 when the
-//! cell was retracted; the value's length (u32) and the value.
+//! cell was retracted; the value's length (u32) and the value; then how
+//! many extents it names (u16), each its record, epoch and bytes of frames
+//! (u64 each).
 
 use std::io;
 
@@ -59,7 +67,12 @@ fn key(name: &[u8]) -> u32 {
 /// A cell's record, to be appended at `start`: named `name`, holding
 /// `value`, or retracted when `None`. Returns the record and where its data
 /// starts, divided by [`ALIGN`], as the index names it.
-pub(crate) fn record(start: u64, name: &[u8], value: Option<&[u8]>) -> io::Result<(Vec<u8>, u32)> {
+pub(crate) fn record(
+    start: u64,
+    name: &[u8],
+    value: Option<&[u8]>,
+    needs: &[Needed],
+) -> io::Result<(Vec<u8>, u32)> {
     let name_len = u16::try_from(name.len()).map_err(|_| invalid("a cell's name over 64 KiB"))?;
     let value_len = u32::try_from(value.map_or(0, <[u8]>::len))
         .map_err(|_| invalid("a cell's value over 4 GiB"))?;
@@ -74,10 +87,65 @@ pub(crate) fn record(start: u64, name: &[u8], value: Option<&[u8]>) -> io::Resul
     bytes.push(u8::from(value.is_some()));
     bytes.extend_from_slice(&value_len.to_le_bytes());
     bytes.extend_from_slice(value.unwrap_or_default());
+    let count =
+        u16::try_from(needs.len()).map_err(|_| invalid("a cell naming too many extents"))?;
+    bytes.extend_from_slice(&count.to_le_bytes());
+    for needed in needs {
+        bytes.extend_from_slice(&needed.record.to_le_bytes());
+        bytes.extend_from_slice(&needed.epoch.to_le_bytes());
+        bytes.extend_from_slice(&needed.used.to_le_bytes());
+    }
     let mut out = Vec::with_capacity(HEADER as usize + bytes.len());
     put_record(&mut out, Kind::Cell, &bytes)?;
     let at = u32::try_from(data / ALIGN).map_err(|_| invalid("a cell past 64 GiB"))?;
     Ok((out, at))
+}
+
+/// An extent a cell's record needs whole: by its record, in the epoch it
+/// was claimed in, up to how many bytes of frames it held.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Needed {
+    pub record: u64,
+    pub epoch: u64,
+    pub used: u64,
+}
+
+/// The extents the cell record whose body starts at `body` in `bytes`
+/// needs whole (see the module docs).
+pub(crate) fn needs(bytes: &[u8], body: usize) -> io::Result<Vec<Needed>> {
+    let pad = *bytes
+        .get(body)
+        .ok_or_else(|| invalid("a cell past the file's end"))? as usize;
+    let data = body + 1 + pad;
+    let (name, value) = read(bytes, data as u64)?;
+    let mut at = data + 2 + name.len() + 1 + 4 + value.map_or(0, <[u8]>::len);
+    let word = |at: usize| -> io::Result<u64> {
+        Ok(u64::from_le_bytes(
+            bytes
+                .get(at..at + 8)
+                .ok_or_else(|| invalid("a cell past the file's end"))?
+                .try_into()
+                .expect("eight bytes"),
+        ))
+    };
+    let count = u16::from_le_bytes(
+        bytes
+            .get(at..at + 2)
+            .ok_or_else(|| invalid("a cell past the file's end"))?
+            .try_into()
+            .expect("two bytes"),
+    );
+    at += 2;
+    (0..count)
+        .map(|n| {
+            let at = at + n as usize * 24;
+            Ok(Needed {
+                record: word(at)?,
+                epoch: word(at + 8)?,
+                used: word(at + 16)?,
+            })
+        })
+        .collect()
 }
 
 /// The name and the value of the cell record whose data starts at `data` in
@@ -132,6 +200,27 @@ fn holding(content: Option<Vec<u8>>) -> Current {
 }
 
 impl FileArchive {
+    /// This process's extents that hold blocks, as `snapshot` maps them: what
+    /// a cell's record it appends now needs whole.
+    fn loose_needed(&self, snapshot: &Snapshot) -> Vec<Needed> {
+        let extents = self.inner.extents.lock();
+        let ours = extents
+            .idle
+            .iter()
+            .map(|owned| owned.record)
+            .chain(extents.busy.iter().copied());
+        ours.filter_map(|record| {
+            let used = super::extent::used(snapshot.bytes(), record)?;
+            let epoch = super::extent::epoch(snapshot.bytes(), record)?;
+            (used > 0).then_some(Needed {
+                record,
+                epoch,
+                used,
+            })
+        })
+        .collect()
+    }
+
     /// Where `snapshot` files the cell named `name`.
     fn find_cell(&self, snapshot: &Snapshot, name: &[u8]) -> io::Result<Filed> {
         let mut key = key(name);
@@ -173,10 +262,6 @@ impl FileArchive {
         admit: impl FnOnce(Option<&[u8]>) -> Result<bool, MemoryError>,
     ) -> Result<(), MemoryError> {
         let turn = self.turn().map_err(storage)?;
-        // What this process wrote into its extents goes into the file
-        // first, so whatever the value names is before it.
-        let snapshot = self.newest_in_turn(&turn).map_err(storage)?;
-        self.integrate(&turn, snapshot).map_err(storage)?;
         let snapshot = self.newest_in_turn(&turn).map_err(storage)?;
         let filed = self.find_cell(&snapshot, name).map_err(storage)?;
         let current = match &filed {
@@ -192,7 +277,10 @@ impl FileArchive {
         let mut slot = snapshot.slot.clone();
         slot.sequence += 1;
         let start = slot.end;
-        let (mut bytes, at) = record(start, name, value).map_err(storage)?;
+        // The blocks the value may name that are not in the log yet: in
+        // this process's extents, as far as each held whole frames.
+        let needs = self.loose_needed(&snapshot);
+        let (mut bytes, at) = record(start, name, value, &needs).map_err(storage)?;
         let pages = write_index(
             &snapshot,
             &mut slot,

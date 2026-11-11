@@ -730,7 +730,13 @@ fn recover(file: &File) -> io::Result<Slot> {
         _ => {
             let mut chosen = None;
             for candidate in candidates {
-                if whole_since(file, &durable, &candidate)? {
+                if let Some(behind) = whole_since(file, &durable, &candidate)? {
+                    // An extent whose frames a cell needs are whole but
+                    // whose count did not reach the disk is told how far
+                    // they go, so readers find its blocks.
+                    for needed in behind {
+                        extent::set_used(file, needed.record, needed.used)?;
+                    }
                     chosen = Some(candidate);
                     break;
                 }
@@ -759,32 +765,62 @@ fn recover(file: &File) -> io::Result<Slot> {
 }
 
 /// Whether everything `slot` names that was written since the `durable`
-/// slot is whole: its records, each by its checksum, and the index pages it
-/// reaches that were written since, each by its own.
-fn whole_since(file: &File, durable: &Slot, slot: &Slot) -> io::Result<bool> {
+/// slot is whole: its records, each by its checksum, a cell's with the
+/// extents it needs (see the `cells` module), and the index pages it
+/// reaches that were written since, each by its own. When it is, the
+/// extents a cell needs whose frames reached the disk but whose count did
+/// not, for recovery to write the count.
+fn whole_since(file: &File, durable: &Slot, slot: &Slot) -> io::Result<Option<Vec<cells::Needed>>> {
     let view = snapshot(file, slot.clone(), None)?;
     let bytes = view.bytes();
+    let mut behind = Vec::new();
     let mut at = durable.end as usize;
     while at < slot.end as usize {
         match record_in(bytes, at) {
+            Some((Kind::Cell, body, end)) => {
+                // A cell's value is whole only with the blocks it may name
+                // that its writer had in an extent (see the `cells`
+                // module): each extent it names that the slot still lists
+                // in that epoch holds whole frames up to where it says.
+                let Ok(needs) = cells::needs(bytes, body) else {
+                    return Ok(None);
+                };
+                for needed in needs {
+                    let listed = slot.extents.contains(&needed.record)
+                        && extent::epoch(bytes, needed.record) == Some(needed.epoch);
+                    if !listed {
+                        continue;
+                    }
+                    if !extent::held(bytes, needed.record, 0, needed.used)
+                        .is_ok_and(|(_, reached)| reached >= needed.used)
+                    {
+                        return Ok(None);
+                    }
+                    if extent::used(bytes, needed.record).is_none_or(|used| used < needed.used) {
+                        behind.push(needed);
+                    }
+                }
+                at = end;
+            }
             Some((_, _, end)) => at = end,
-            None => return Ok(false),
+            None => return Ok(None),
         }
     }
     if at != slot.end as usize {
-        return Ok(false);
+        return Ok(None);
     }
     // A page that fails its check, or does not read as a node, is not
     // whole.
     let mut pages = Vec::new();
-    Ok(slot
+    let whole = slot
         .root
         .pages_since(&view, Some(durable.sequence as u32), &mut pages)
         .is_ok()
         && slot
             .cells
             .pages_since(&view, Some(durable.sequence as u32), &mut pages)
-            .is_ok())
+            .is_ok();
+    Ok(whole.then_some(behind))
 }
 
 /// `nodes` ordered so every node comes after the children it links to

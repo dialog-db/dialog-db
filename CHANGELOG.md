@@ -163,11 +163,12 @@ transaction again computes them over the head that won.
 archive: `Space<FileArchive, FileArchive, ...>` keeps a space's blocks and
 its cells, branch heads among them, in one file. A cell is kept as SQLite
 keeps a commit in its write-ahead log: each update appends a record with
-the cell's value, in the writer's turn, after the process's extents are
-folded in, and the cells' own index files the cell at its newest record.
-So a head is never in the file without the blocks it names before it, and
-a power loss can undo the last updates (synced at the next sync point, as
-SQLite's `synchronous=NORMAL`), never leave a head naming what is gone.
+the cell's value, in the writer's turn, and the cells' own index files the
+cell at its newest record. The record names the writer's extents that
+still hold blocks, and recovery takes it as whole only with those
+extents' frames, so a power loss can undo the last updates (synced at the
+next sync point, as SQLite's `synchronous=NORMAL`), never leave a head
+naming what is gone.
 
 What this changes for you:
 
@@ -177,9 +178,10 @@ What this changes for you:
   `Publish` names the same version either way, and publishing the value a
   cell already holds succeeds whatever edition the writer expected, as on
   every memory store.
-- A cell's update takes the writer's turn, as a SQLite commit takes its
-  write lock: an update waits while another process holds the turn. A
-  `Resolve` takes no lock, and reads the newest update another process
+- A cell's update takes the writer's turn for the append of one small
+  record, as a SQLite commit takes its write lock: an update waits while
+  another process holds the turn (for its own appends and sync points).
+  A `Resolve` takes no lock, and reads the newest update another process
   made.
 - A value of any size is kept in its record.
 - `List` walks the cells' own index, not the blocks'.
@@ -244,7 +246,7 @@ What this changes for you:
 - A block another process holds only in its extent is written again into
   the writer's own, so a head it commits never names a block another
   process has not yet folded into the file.
-- The file's format is version 13: a file written by an earlier build of
+- The file's format is version 14: a file written by an earlier build of
   `dialog-archive-file` does not open.
 
 Why: many processes work on separate branches of one space at once, and on
@@ -1598,8 +1600,8 @@ has a tree to canonicalize even when the link itself wrote nothing.
 
 #### Compatibility and migration
 
-- A `FileArchive` file is format 13; one written by an earlier build of
-  this branch's `dialog-archive-file` (format 10, 11 or 12) does not open, and is
+- A `FileArchive` file is format 14; one written by an earlier build of
+  this branch's `dialog-archive-file` (format 10 to 13) does not open, and is
   moved again from the replica it came from with `dialog-migrate`. Nothing
   else stored or synced changes: blocks, their hashes and what a replica
   syncs are the same.

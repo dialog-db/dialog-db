@@ -403,6 +403,43 @@ fn child() -> anyhow::Result<()> {
             std::io::stdin().read_to_end(&mut rest)?;
             drop(archive);
         }
+        // commits <path> <cell> <times>: each time 20 blocks of 4 KiB, then
+        // the cell; says how long publishing the cell took, in microseconds.
+        "commits" => {
+            let archive = FileArchive::open(args[1])?;
+            say(READY);
+            go()?;
+            let mut took = Vec::new();
+            let mut current: Option<Version> = None;
+            for commit in 0..args[3].parse::<usize>()? {
+                let blocks: Vec<Buffer> = (0..20)
+                    .map(|n| {
+                        let mut bytes = format!("{} {commit} {n} ", args[2]).into_bytes();
+                        bytes.resize(4096, b'.');
+                        Buffer::from(bytes)
+                    })
+                    .collect();
+                archive.append("index", &blocks)?;
+                let started = std::time::Instant::now();
+                current = Some(archive.publish_cell(
+                    "local",
+                    args[2],
+                    format!("{commit}").as_bytes(),
+                    current.as_ref(),
+                )?);
+                took.push(started.elapsed().as_micros() as u64);
+            }
+            took.sort_unstable();
+            let at = |q: f64| took[((took.len() - 1) as f64 * q) as usize];
+            say(&format!(
+                "LATENCY {} {} {} {}",
+                at(0.5),
+                at(0.9),
+                at(0.99),
+                took[took.len() - 1]
+            ));
+            say(DONE);
+        }
         // count <path> <cell> <times>
         "count" => {
             let archive = FileArchive::open(args[1])?;
@@ -1358,5 +1395,40 @@ fn a_stale_retraction_is_refused() -> anyhow::Result<()> {
     );
     archive.retract_cell("local", "main", &second)?;
     assert_eq!(archive.resolve_cell("local", "main")?, None);
+    Ok(())
+}
+
+/// How long a cell's update waits, with one process or four committing
+/// to cells of their own at once. A measurement, not a check: run it by
+/// name, with `--ignored --nocapture`.
+#[test]
+#[ignore = "a measurement, run by name"]
+fn measure_how_long_a_cell_update_waits() -> anyhow::Result<()> {
+    for processes in [1, 4] {
+        let directory = tempfile::tempdir()?;
+        let path = archive_in(&directory);
+        FileArchive::open(&path)?.append("index", &[block("first")])?;
+        let path_text = path.to_string_lossy().into_owned();
+        let mut writers = (0..processes)
+            .map(|n| Process::ready(&["commits", &path_text, &format!("branch {n}"), "200"]))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        go(&mut writers)?;
+        for (n, writer) in writers.iter_mut().enumerate() {
+            let said = writer.expect(DONE)?;
+            let latency = said
+                .iter()
+                .find(|line| line.contains("LATENCY"))
+                .cloned()
+                .unwrap_or_default();
+            let numbers: Vec<&str> = latency.split_whitespace().rev().take(4).collect();
+            println!(
+                "{processes} processes, writer {n}: publish p50 {} us, p90 {} us, p99 {} us, max {} us",
+                numbers[3], numbers[2], numbers[1], numbers[0]
+            );
+        }
+        for writer in writers {
+            writer.finish()?;
+        }
+    }
     Ok(())
 }
