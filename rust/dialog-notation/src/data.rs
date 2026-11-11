@@ -3,11 +3,13 @@
 //! Three things that change at different rates are kept apart, so the
 //! one that changes most often touches the least:
 //!
-//! - **The data types.** A form is an atom, a list, a map or an
-//!   application. An atom is a value Dialog-DB has: a truth, a number,
-//!   text, an entity or a symbol. Nothing here knows what a form means.
-//!   `?x`, `_` and `...` are symbols like any other, and it is the
-//!   syntax above that reads a symbol starting with `?` as a variable.
+//! - **The data types.** A form is a value Dialog-DB has (a truth, a
+//!   number, text, an entity or a symbol), a list, or a map. Nothing
+//!   here knows what a form means. `?x`, `_` and `...` are symbols like
+//!   any other, and it is the syntax above that reads a symbol starting
+//!   with `?` as a variable. `( )` is a tuple, which is a list: the
+//!   head, the parts with no label in order, and the labelled parts as
+//!   one map at its end. `[ ]` writes the same list.
 //! - **The name.** A form's [`reference`](Form::reference) is a merkle
 //!   reference, made of the references of its parts under the type of
 //!   each. It does not depend on the bytes a form is laid out in, nor
@@ -26,9 +28,14 @@
 //! | `todo:1`, `:open` | entity | `Value::Entity` | `entity:` |
 //! | `todo`, `xyz.todo`, `?x`, `_`, `+` | symbol of no domain | `Value::Symbol`, `/todo` | `symbol:` |
 //! | `xyz.todo/text` | symbol | `Value::Symbol` | `symbol:` |
-//! | `[a b]` | list | none yet | the list type |
+//! | `[a b]`, `(a b)` | list | none yet | the list type |
 //! | `{k v}`, `{label: v}` | map | none yet | the map type |
-//! | `(head part… label: part…)` | application | none yet | `form:` |
+//! | `(head part… label: part…)` | the list `head part… {label: part…}` | none yet | the list type |
+//!
+//! What a call's parts mean is not here either. `(todo ?t state: :open)`
+//! and `(todo state: :open of: ?t)` are one call and two lists: that the
+//! part with no label is `of:` is the syntax's to say, in
+//! [`Form::bare`].
 //!
 //! The layout written here is a stand-in for the one the record values
 //! research decides. That is the reason it carries a version.
@@ -46,12 +53,6 @@ use crate::form::{Form, Kind, Part, atom};
 /// The layout [`Form::encode`] writes.
 pub const VERSION: u8 = 1;
 
-/// The type an application is referenced under, `form:`. A list and a
-/// map are referenced under the types every list and map are.
-pub const FORM: Type = Type::from_reference(Reference::from_hex(
-    "2e66365ecf2b89a7742f56ce97a9d37834d0e0d82d75696769df7d4a9d6d4ab2",
-));
-
 const TRUTH: u8 = 1;
 const NATURAL: u8 = 2;
 const INTEGER: u8 = 3;
@@ -61,7 +62,6 @@ const ENTITY: u8 = 6;
 const SYMBOL: u8 = 7;
 const LIST: u8 = 8;
 const MAP: u8 = 9;
-const APPLICATION: u8 = 10;
 
 fn refused(what: &str, error: impl std::fmt::Display) -> Error {
     Error::Refused(format!("{what}: {error}"))
@@ -115,8 +115,8 @@ fn sorted<T>(mut entries: Vec<(Vec<u8>, T)>, what: &str) -> Result<Vec<(Vec<u8>,
 }
 
 impl Form {
-    /// The Dialog-DB value an atom is. `None` for a list, a map and an
-    /// application, which Dialog-DB has no value for yet.
+    /// The Dialog-DB value a form is, where it is one. `None` for a list
+    /// and a map, which Dialog-DB has no value for yet.
     pub fn value(&self) -> Result<Option<Value>, Error> {
         Ok(Some(match self {
             Form::Text(text) => Value::String(text.clone()),
@@ -141,45 +141,27 @@ impl Form {
     }
 
     /// What names the form: a merkle reference, made of the references
-    /// of its parts. Two forms that say the same thing in another order
-    /// of labels have one reference, and no layout has a part in it.
+    /// of its parts, a list under the type every list has and a map
+    /// under the type every map has. Two forms that say the same thing
+    /// in another order of labels have one reference, and no layout has
+    /// a part in it.
     pub fn reference(&self) -> Result<Reference, Error> {
         if let Some(value) = self.value()? {
             return Ok(value.reference());
         }
         Ok(match self {
-            Form::Vector(items) => Type::LIST.list(
-                items
-                    .iter()
-                    .map(Form::reference)
-                    .collect::<Result<Vec<_>, _>>()?,
-            ),
             Form::Map(entries) => Type::MAP.map(
                 entries
                     .iter()
                     .map(|(key, value)| Ok((key.reference()?, value.reference()?)))
                     .collect::<Result<Vec<_>, Error>>()?,
             ),
-            _ => {
-                let head = self
-                    .as_application()
-                    .map(|(head, _)| head.reference())
-                    .transpose()?
-                    .ok_or_else(|| Error::Refused(format!("{self} is not data")))?;
-                let bare = Type::LIST.list(
-                    self.bare_parts()
-                        .into_iter()
-                        .map(Form::reference)
-                        .collect::<Result<Vec<_>, _>>()?,
-                );
-                let labelled = Type::MAP.map(
-                    self.labelled()
-                        .into_iter()
-                        .map(|(label, part)| Ok((symbol(label)?.reference(), part.reference()?)))
-                        .collect::<Result<Vec<_>, Error>>()?,
-                );
-                FORM.list([head, bare, labelled])
-            }
+            _ => Type::LIST.list(
+                self.tuple()
+                    .iter()
+                    .map(Form::reference)
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
         })
     }
 
@@ -192,20 +174,30 @@ impl Form {
         .map_err(|error| refused("not an entity", error))
     }
 
-    /// Every bare part, a `...?rest` among them: a rest is a symbol like
-    /// any other here.
-    fn bare_parts(&self) -> Vec<&Form> {
-        self.as_application()
-            .map(|(_, parts)| {
-                parts
-                    .iter()
-                    .filter_map(|part| match part {
-                        Part::Bare(form) => Some(form),
-                        Part::Labelled(..) => None,
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
+    /// The list a `[ ]` or a `( )` is. For a tuple: the head, then the
+    /// parts with no label as written, a `...?rest` among them, then
+    /// the labelled parts as one map, where there are any.
+    fn tuple(&self) -> Vec<Form> {
+        match self {
+            Form::Vector(items) => items.clone(),
+            Form::Application(head, parts) => {
+                let mut items = vec![(**head).clone()];
+                let mut labelled = Vec::new();
+                for part in parts {
+                    match part {
+                        Part::Bare(form) => items.push(form.clone()),
+                        Part::Labelled(label, form) => {
+                            labelled.push((Form::symbol(label), form.clone()));
+                        }
+                    }
+                }
+                if !labelled.is_empty() {
+                    items.push(Form::Map(labelled));
+                }
+                items
+            }
+            _ => Vec::new(),
+        }
     }
 
     /// The form as bytes: the version, then the form. One form has one
@@ -248,13 +240,6 @@ impl Form {
                 return Err(Error::Refused(format!("{self} is not data")));
             }
             None => match self {
-                Form::Vector(items) => {
-                    out.push(LIST);
-                    length(items.len(), out);
-                    for item in items {
-                        item.write(out)?;
-                    }
-                }
                 Form::Map(entries) => {
                     out.push(MAP);
                     let mut written = Vec::new();
@@ -271,28 +256,11 @@ impl Form {
                     }
                 }
                 _ => {
-                    let (head, _) = self
-                        .as_application()
-                        .ok_or_else(|| Error::Refused(format!("{self} is not data")))?;
-                    out.push(APPLICATION);
-                    head.write(out)?;
-                    let bare = self.bare_parts();
-                    length(bare.len(), out);
-                    for part in bare {
-                        part.write(out)?;
-                    }
-                    let mut labelled = Vec::new();
-                    for (label, part) in self.labelled() {
-                        let Value::Symbol(relation) = symbol(label)? else {
-                            unreachable!("a symbol is a symbol");
-                        };
-                        labelled.push((relation.to_string().into_bytes(), part));
-                    }
-                    let labelled = sorted(labelled, "an application names a label")?;
-                    length(labelled.len(), out);
-                    for (label, part) in labelled {
-                        bytes(&label, out);
-                        part.write(out)?;
+                    let items = self.tuple();
+                    out.push(LIST);
+                    length(items.len(), out);
+                    for item in &items {
+                        item.write(out)?;
                     }
                 }
             },
@@ -395,9 +363,19 @@ impl Reader<'_> {
                 }
             }
             SYMBOL => atom(&self.name()?),
+            // A list reads back as a tuple, its first member the head.
+            // A map at its end whose keys are labels is its labelled
+            // parts, which is what one written out there is anyway.
             LIST => {
                 let count = self.length()?;
-                Form::Vector((0..count).map(|_| self.form()).collect::<Result<_, _>>()?)
+                let mut items = (0..count)
+                    .map(|_| self.form())
+                    .collect::<Result<Vec<_>, _>>()?
+                    .into_iter();
+                match items.next() {
+                    None => Form::Vector(Vec::new()),
+                    Some(head) => Form::application(head, items.map(Part::Bare).collect()),
+                }
             }
             MAP => {
                 let count = self.length()?;
@@ -406,17 +384,6 @@ impl Reader<'_> {
                         .map(|_| Ok((self.form()?, self.form()?)))
                         .collect::<Result<_, Error>>()?,
                 )
-            }
-            APPLICATION => {
-                let head = self.form()?;
-                let mut parts = Vec::new();
-                for _ in 0..self.length()? {
-                    parts.push(Part::Bare(self.form()?));
-                }
-                for _ in 0..self.length()? {
-                    parts.push(Part::Labelled(self.name()?, self.form()?));
-                }
-                Form::application(head, parts)
             }
             other => {
                 return Err(Error::Read(format!(
@@ -434,11 +401,6 @@ mod tests {
 
     fn one(text: &str) -> Form {
         read(text).unwrap().remove(0)
-    }
-
-    #[test]
-    fn it_names_the_type_of_an_application() {
-        assert_eq!(Type::named("form:"), Ok(FORM));
     }
 
     /// Every form the prelude and the examples are written in is data:
@@ -469,14 +431,14 @@ mod tests {
             one(r#"(xyz.todo ?t state: :open list: list:home text: "Buy milk" n: -3 ok: true)"#);
         assert_eq!(
             Form::decode(&form.encode().unwrap()).unwrap().to_string(),
-            r#"(xyz.todo ?t list: list:home n: -3 ok: true state: :open text: "Buy milk")"#
+            r#"(xyz.todo ?t n: -3 ok: true list: list:home text: "Buy milk" state: :open)"#
         );
         let pattern = one("(syntax (?name ?this ...?fields) [?body ...] {kind: _ 1 1.5})");
         assert_eq!(
             Form::decode(&pattern.encode().unwrap())
                 .unwrap()
                 .to_string(),
-            "(syntax (?name ?this ...?fields) [?body ...] {1 1.5 kind: _})"
+            "(syntax (?name ?this ...?fields) (?body ...) {1 1.5 kind: _})"
         );
     }
 
@@ -497,16 +459,36 @@ mod tests {
             form.reference().unwrap(),
             one("(xyz.todo ?t list: ?l text: ?y)").reference().unwrap()
         );
-        assert_ne!(
+        assert_eq!(
             one("(f a b)").reference().unwrap(),
             one("[f a b]").reference().unwrap(),
-            "an application is not the list of its parts"
+            "a tuple is the list of its parts"
+        );
+        assert_eq!(
+            one("(f a k: 1)").reference().unwrap(),
+            one("[f a {k: 1}]").reference().unwrap(),
+            "its labelled parts are the map at its end"
         );
         assert_eq!(
             one("{a: 1 b: 2}").reference().unwrap(),
             one("{b: 2 a: 1}").reference().unwrap()
         );
         assert!(form.entity().unwrap().as_str().starts_with("form:"));
+    }
+
+    /// One call written three ways is two lists: the primary under its
+    /// label is the same data as the record written out, and the primary
+    /// with no label is another list. That they are one call is for the
+    /// syntax to say.
+    #[test]
+    fn it_keeps_a_call_as_it_was_written() {
+        let labelled = one("(todo state: :open of: ?t)");
+        let record = one("(todo {of: ?t state: :open})");
+        let bare = one("(todo ?t state: :open)");
+        assert_eq!(labelled.reference().unwrap(), record.reference().unwrap());
+        assert_ne!(labelled.reference().unwrap(), bare.reference().unwrap());
+        assert_eq!(labelled.bare(), bare.bare());
+        assert_eq!(labelled.labelled(), bare.labelled());
     }
 
     /// The natural 3 and the float 3.0 are one number to Dialog-DB and
@@ -534,8 +516,8 @@ mod tests {
         let a = one("(f a: 1)").encode().unwrap();
         let b = one("(f b: 2)").encode().unwrap();
         let both = one("(f a: 1 b: 2)").encode().unwrap();
-        let part = |bytes: &[u8]| bytes[bytes.len() - 5..].to_vec();
-        let mut swapped = both[..both.len() - 10].to_vec();
+        let part = |bytes: &[u8]| bytes[bytes.len() - 6..].to_vec();
+        let mut swapped = both[..both.len() - 12].to_vec();
         swapped.extend(part(&b));
         swapped.extend(part(&a));
         assert_eq!(swapped.len(), both.len());

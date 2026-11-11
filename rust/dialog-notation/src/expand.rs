@@ -562,7 +562,7 @@ mod tests {
             kernel.iter().map(Form::to_string).collect::<Vec<_>>(),
             vec![
                 "(rule (assert! (xyz.todo ?t list: (:last (:entity ?l)) text: (:last (:text ?x)) state: (:last :open))) \
-                 (when (command.add.todo _ of: ?t list: ?l text: ?x)))"
+                 (when (command.add.todo _ about: ?t list: ?l text: ?x)))"
             ]
         );
         assert!(diagnostics.is_empty());
@@ -598,7 +598,7 @@ mod tests {
         assert!(
             kernel[0]
                 .to_string()
-                .starts_with("(rule (assert (command.add.todo (:id command.add.todo of: todo:1")
+                .starts_with("(rule (assert (command.add.todo (:id command.add.todo about: todo:1")
         );
         assert!(diagnostics.is_empty());
 

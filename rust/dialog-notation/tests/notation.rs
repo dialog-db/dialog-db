@@ -80,7 +80,7 @@ async fn it_defines_a_concept_and_runs_a_command_through_it() -> Result<()> {
 
     // The command held for one round and is not on the branch.
     assert!(
-        report(&mut notebook, "(query (command.add.todo ?c of: ?t))")
+        report(&mut notebook, "(query (command.add.todo ?c about: ?t))")
             .await?
             .is_empty()
     );
@@ -261,23 +261,27 @@ async fn it_derives_a_relation_from_itself() -> Result<()> {
     let mut notebook = Notebook::open().await?;
     notebook
         .submit(
-            "(assert! (fam.parent person:ann of: person:bea))
-             (assert! (fam.parent person:bea of: person:cal))
-             (assert! (fam.parent person:cal of: person:dee))
+            "(assert! (fam.parent person:ann child: person:bea))
+             (assert! (fam.parent person:bea child: person:cal))
+             (assert! (fam.parent person:cal child: person:dee))
 
-             (rule (fam.ancestor ?a of: ?c)
-               (when (fam.parent ?a of: ?c)))
-             (rule (fam.ancestor ?a of: ?c)
-               (when (fam.parent ?a of: ?b)
-                     (fam.ancestor ?b of: ?c)))",
+             (rule (fam.ancestor ?a descendant: ?c)
+               (when (fam.parent ?a child: ?c)))
+             (rule (fam.ancestor ?a descendant: ?c)
+               (when (fam.parent ?a child: ?b)
+                     (fam.ancestor ?b descendant: ?c)))",
         )
         .await?;
     assert_eq!(
-        report(&mut notebook, "(query (fam.ancestor ?a of: person:dee))").await?,
+        report(
+            &mut notebook,
+            "(query (fam.ancestor ?a descendant: person:dee))"
+        )
+        .await?,
         vec![
-            "(fam.ancestor person:ann of: person:dee)",
-            "(fam.ancestor person:bea of: person:dee)",
-            "(fam.ancestor person:cal of: person:dee)",
+            "(fam.ancestor person:ann descendant: person:dee)",
+            "(fam.ancestor person:bea descendant: person:dee)",
+            "(fam.ancestor person:cal descendant: person:dee)",
         ]
     );
     Ok(())
@@ -332,9 +336,12 @@ async fn it_lets_a_rule_issue_a_command_another_rule_reads() -> Result<()> {
     );
     // Neither command is on the branch.
     assert!(
-        report(&mut notebook, "(query (command.complete.todo ?c of: ?t))")
-            .await?
-            .is_empty()
+        report(
+            &mut notebook,
+            "(query (command.complete.todo ?c about: ?t))"
+        )
+        .await?
+        .is_empty()
     );
     Ok(())
 }
@@ -387,6 +394,46 @@ async fn it_elects_one_of_two_writes_of_one_round_whatever_their_order() -> Resu
         elected.push(last);
     }
     assert_eq!(elected[0], elected[1]);
+    Ok(())
+}
+
+/// One call, three ways to write it: the primary with no label, under
+/// `of:`, and as the record the labelled parts are. A concept and a
+/// relation read the same through each, and a write lands the same.
+#[dialog_common::test]
+async fn it_reads_a_call_the_same_however_its_primary_is_written() -> Result<()> {
+    let mut notebook = Notebook::open().await?;
+    notebook.submit(TODO).await?;
+    notebook
+        .submit(
+            r#"(add (todo todo:1 list: list:home text: "Buy milk"))
+               (assert! (xyz.note text: (:text "by label") of: note:1))
+               (assert! (xyz.note {of: note:2 text: (:text "by record")}))"#,
+        )
+        .await?;
+
+    let milk = vec![r#"(xyz.todo todo:1 text: "Buy milk")"#];
+    for query in [
+        "(query (todo ?t text: ?x))",
+        "(query (todo text: ?x of: ?t))",
+        "(query (todo {of: ?t text: ?x}))",
+    ] {
+        assert_eq!(report(&mut notebook, query).await?, milk, "{query}");
+    }
+    assert_eq!(
+        report(&mut notebook, "(query (xyz.note of: ?n text: ?x))").await?,
+        vec![
+            r#"(xyz.note note:1 text: "by label")"#,
+            r#"(xyz.note note:2 text: "by record")"#,
+        ]
+    );
+
+    // Beside a part with no label, `of:` would be the primary twice.
+    let twice = notebook
+        .submit("(query (xyz.note ?n of: ?m))")
+        .await
+        .map_err(|error| error.downcast::<Error>());
+    assert!(matches!(twice, Err(Ok(Error::Refused(_)))));
     Ok(())
 }
 

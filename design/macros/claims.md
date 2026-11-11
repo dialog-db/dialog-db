@@ -44,7 +44,10 @@
 | every form of the prelude and the examples is data: it lays out as bytes and reads back | fact | `it_lays_out_every_form_of_the_prelude_and_the_examples`, `rust/dialog-notation/src/data.rs` | holds; H1 confirmed with variables as symbols |
 | a form's name does not depend on its layout | fact | `Form::reference` is made of its parts' references; `it_names_apart_from_the_layout` | holds for the form's own reference |
 | a record value's name does not depend on its layout | hypothesis | `Value::reference`, `rust/dialog-corpus/src/identity.rs` | refuted today: `RECORD.reference_of(bytes)` |
-| a list and a map are referenced under the generic types, an application under `form:` | opinion | the agent, 2026-11-11 | open until something real is stored; every name follows from it |
+| a list and a map are referenced under the generic types, and `( )` is a list | opinion | the agent, 2026-11-11, on Irakli's tuple | open until something real is stored; every name follows from it |
+| `(todo ?t state: :open)` is sugar for `(todo {of: ?t state: :open})` | opinion | Irakli, 2026-11-11 | decides; built as the syntax's reading, `Form::bare` |
+| the reader can fold the primary into the record | hypothesis | the count in `examples/shapes.rs` | refuted: four heads stand with one unlabelled part and with several |
+| one call reads the same however its primary is written | fact | `it_reads_a_call_the_same_however_its_primary_is_written` | holds |
 | a branch keeps a form as a record under its `form:` entity | fact | `it_keeps_a_form_on_a_branch_under_the_entity_that_names_it` | holds |
 | every application has at most one part without a label | hypothesis | `examples/shapes.rs` over the prelude and the examples | refuted: 38 of 151 as written have several; holds for calls |
 | the part with no label is `of:`, and `:` is the label of no name | opinion | Irakli, 2026-11-11; `research/notation/design.md` in #728 | decides; the prelude's command row breaks it |

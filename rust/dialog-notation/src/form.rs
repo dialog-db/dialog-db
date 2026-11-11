@@ -66,8 +66,59 @@ const OPERATOR: &str = "+-*/<>=";
 
 impl Form {
     /// An application of `head` to `parts`.
-    pub fn application(head: Form, parts: Vec<Part>) -> Self {
+    ///
+    /// Its labelled parts are one record at its end, so a record written
+    /// out there is the same thing: `(todo {of: ?t state: :open})` is
+    /// `(todo of: ?t state: :open)`.
+    pub fn application(head: Form, mut parts: Vec<Part>) -> Self {
+        let labelled = parts.iter().any(|part| matches!(part, Part::Labelled(..)));
+        if !labelled
+            && let Some(Part::Bare(Form::Map(entries))) = parts.last()
+            && !entries.is_empty()
+            && entries.iter().all(|(key, _)| key.label().is_some())
+        {
+            let Some(Part::Bare(Form::Map(entries))) = parts.pop() else {
+                unreachable!("the last part is a record");
+            };
+            parts.extend(
+                entries.into_iter().filter_map(|(key, value)| {
+                    Some(Part::Labelled(key.label()?.to_string(), value))
+                }),
+            );
+        }
         Form::Application(Box::new(head), parts)
+    }
+
+    /// The label a map's key is written as, where it can be one: the
+    /// name of a symbol that is not an entity or an operator.
+    pub fn label(&self) -> Option<&str> {
+        match (self, self.kind()) {
+            (Form::Symbol(name), Some(Kind::Name | Kind::Domain | Kind::Attribute)) => Some(name),
+            _ => None,
+        }
+    }
+
+    /// Every part of an application as it was written.
+    pub fn parts(&self) -> &[Part] {
+        self.as_application()
+            .map(|(_, parts)| parts)
+            .unwrap_or_default()
+    }
+
+    /// The part labelled `of:`, where no part is written without a
+    /// label: the primary, spelled out.
+    fn of(&self) -> Option<&Form> {
+        let mut bare = self
+            .parts()
+            .iter()
+            .filter(|part| matches!(part, Part::Bare(form) if !matches!(form, Form::Rest(_))));
+        if bare.next().is_some() {
+            return None;
+        }
+        self.parts().iter().find_map(|part| match part {
+            Part::Labelled(label, form) if label == "of" => Some(form),
+            _ => None,
+        })
     }
 
     /// A symbol.
@@ -101,17 +152,19 @@ impl Form {
         let Form::Symbol(name) = self else {
             return None;
         };
-        Some(if name.chars().all(|c| OPERATOR.contains(c)) {
-            Kind::Operator
-        } else if name.contains(':') {
-            Kind::Entity
-        } else if name.contains('/') {
-            Kind::Attribute
-        } else if name.contains('.') {
-            Kind::Domain
-        } else {
-            Kind::Name
-        })
+        Some(
+            if !name.is_empty() && name.chars().all(|c| OPERATOR.contains(c)) {
+                Kind::Operator
+            } else if name.contains(':') {
+                Kind::Entity
+            } else if name.contains('/') {
+                Kind::Attribute
+            } else if name.contains('.') {
+                Kind::Domain
+            } else {
+                Kind::Name
+            },
+        )
     }
 
     /// Whether this applies a relation: its head is a domain.
@@ -128,34 +181,35 @@ impl Form {
         })
     }
 
-    /// The bare parts of an application, a `...?rest` left out.
+    /// The parts of an application that stand without a label, a
+    /// `...?rest` left out. The part with no label may also be written
+    /// `of:`, anywhere, so where none stands without a label the part
+    /// labelled `of:` is the one.
     pub fn bare(&self) -> Vec<&Form> {
-        self.as_application()
-            .map(|(_, parts)| {
-                parts
-                    .iter()
-                    .filter_map(|part| match part {
-                        Part::Bare(Form::Rest(_)) | Part::Labelled(..) => None,
-                        Part::Bare(form) => Some(form),
-                    })
-                    .collect()
+        if let Some(primary) = self.of() {
+            return vec![primary];
+        }
+        self.parts()
+            .iter()
+            .filter_map(|part| match part {
+                Part::Bare(Form::Rest(_)) | Part::Labelled(..) => None,
+                Part::Bare(form) => Some(form),
             })
-            .unwrap_or_default()
+            .collect()
     }
 
-    /// The labelled parts of an application, in the order written.
+    /// The labelled parts of an application, in the order written,
+    /// without an `of:` that is its primary.
     pub fn labelled(&self) -> Vec<(&str, &Form)> {
-        self.as_application()
-            .map(|(_, parts)| {
-                parts
-                    .iter()
-                    .filter_map(|part| match part {
-                        Part::Labelled(label, form) => Some((label.as_str(), form)),
-                        Part::Bare(_) => None,
-                    })
-                    .collect()
+        let primary = self.of().is_some();
+        self.parts()
+            .iter()
+            .filter_map(|part| match part {
+                Part::Labelled(label, _) if primary && label == "of" => None,
+                Part::Labelled(label, form) => Some((label.as_str(), form)),
+                Part::Bare(_) => None,
             })
-            .unwrap_or_default()
+            .collect()
     }
 
     /// The form under `label`.
@@ -354,11 +408,9 @@ impl Display for Form {
                     if at > 0 {
                         write!(f, " ")?;
                     }
-                    match key.kind() {
-                        Some(Kind::Name | Kind::Domain | Kind::Attribute) => {
-                            write!(f, "{key}: {value}")?
-                        }
-                        _ => write!(f, "{key} {value}")?,
+                    match key.label() {
+                        Some(label) => write!(f, "{label}: {value}")?,
+                        None => write!(f, "{key} {value}")?,
                     }
                 }
                 write!(f, "}}")
@@ -409,6 +461,27 @@ mod tests {
         assert_eq!(Form::symbol("list:home").kind(), Some(Kind::Entity));
         assert_eq!(Form::symbol("<=").kind(), Some(Kind::Operator));
         assert_eq!(Form::symbol("xyz.todo/text").kind(), Some(Kind::Attribute));
+    }
+
+    /// One call, three ways to write it. The last two read as the same
+    /// form, and the first has the same primary and the same labels.
+    #[test]
+    fn it_reads_the_primary_with_or_without_its_label() {
+        let bare = &read("(todo ?t state: :open)").unwrap()[0];
+        let labelled = &read("(todo state: :open of: ?t)").unwrap()[0];
+        let record = &read("(todo {state: :open of: ?t})").unwrap()[0];
+        assert_eq!(labelled, record);
+        for form in [bare, labelled, record] {
+            assert_eq!(form.bare(), vec![&Form::Variable("t".into())]);
+            assert_eq!(
+                form.labelled(),
+                vec![("state", &Form::Keyword("open".into()))]
+            );
+        }
+        // Beside a part with no label, `of:` is a label like any other.
+        let twice = &read("(fam.parent ?a of: ?b)").unwrap()[0];
+        assert_eq!(twice.bare(), vec![&Form::Variable("a".into())]);
+        assert_eq!(twice.labelled().len(), 1);
     }
 
     #[test]

@@ -933,7 +933,7 @@ mod tests {
     #[test]
     fn it_compiles_a_command_a_rule_issues_to_a_rule_over_a_transient_concept() {
         let steps = steps(
-            "(rule (assert (command.go.x (:id command.go.x of: ?c) of: ?c))
+            "(rule (assert (command.go.x (:id command.go.x about: ?c) about: ?c))
                (when (xyz.counter ?c count: ?n)))",
         )
         .unwrap();

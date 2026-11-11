@@ -110,7 +110,7 @@ A rule may have several heads, asserts and retracts together. Dialog's inductive
 A command is an application around an application whose head names nothing. In a premise it reads the command's rows:
 
 ```clj
-(rule (syntax (?domain _ of: ?subject ...?fields))
+(rule (syntax (?domain _ about: ?subject ...?fields))
   (when (expand (?command (?concept ?subject ...?fields)) in: :premise)
         (:command ?command : ?concept is: ?domain))
   (unless (dialog.name _ is: ?command)))

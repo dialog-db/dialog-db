@@ -145,9 +145,11 @@ Built, in `rust/dialog-notation/src/data.rs`:
 | `todo:1`, `:open` | entity | `Value::Entity` | `entity:` |
 | `todo`, `xyz.todo`, `?x`, `_`, `...`, `+` | symbol of no domain | `Value::Symbol`, `/todo` | `symbol:` |
 | `xyz.todo/text` | symbol | `Value::Symbol` | `symbol:` |
-| `[a b]` | list | none yet | `Type::LIST` |
+| `[a b]`, `(a b)` | list | none yet | `Type::LIST` |
 | `{k v}`, `{label: v}` | map | none yet | `Type::MAP` |
-| `(head part… label: part…)` | application: a head, its bare parts in order, its labelled parts as a map | none yet | `form:` |
+| `(head part… label: part…)` | the list `head part… {label: part…}` | none yet | `Type::LIST` |
+
+`( )` is a tuple, and a tuple is a list: there is no type for an application (see "Built: a tuple, with `of:` said by the syntax" below).
 
 - **The data knows no syntax.** A variable, `_` and `...` are symbols. The reader's own view still tells them apart, by spelling, and so does a form read back from bytes.
 - **The name** is `Form::reference`, and `form:` with it in base58 is the entity. Two orders of the same labels are one name. So are the natural 3 and the float 3.0, as they are one number to dialog, though they are two byte strings: a name does not follow the layout.
@@ -155,12 +157,12 @@ Built, in `rust/dialog-notation/src/data.rs`:
 - A form is kept on a real branch as a `record:` value under its `form:` entity and read back (`it_keeps_a_form_on_a_branch_under_the_entity_that_names_it`). Every form of the prelude and the examples lays out and reads back, which is what H1 asked.
 - The crate no longer hashes text anywhere. The names an expansion gives its own variables, and the relation a query is derived into, come from references.
 
-What this changes in the advice below: an application is a data type of its own, so its parts need no positions and the open point about them is closed. A label and a name are still symbols of no domain.
+What this changes in the advice below: a form's parts are a list, so they need no positions and the open point about them is closed. A label and a name are still symbols of no domain.
 
 **The one choice here that is dear to change** is what each thing is referenced under, since every name follows from it. Chosen by the agent, and open until something real is stored:
 
 - A list and a map under the types every list and map have. A type of our own for "a list in a form" would put the syntax into the name.
-- An application under `form:`, so `(f a b)` and `[f a b]` are not one name.
+- `(f a b)` and `[f a b]` are one list and one name. Asked of the maintainer and not answered.
 
 **A limit.** `Value::Record` is referenced over its bytes today (`RECORD.reference_of`, `rust/dialog-corpus/src/identity.rs`). So a form kept as a record has two names: its own, which holds across layouts, and the record value's, which does not. Whatever points at a form has to point at its `form:` entity. Making a record's own name structural is #748's.
 
@@ -186,7 +188,29 @@ Two readings of `( )` were on the table on 2026-11-11, both Irakli's. Counted ov
 
 Found on the way: where the part with no label may also be written `of:` (#728's design), the prelude's own command row says `of:` twice, `(command.add.todo _ of: ?t …)`: 3 forms as written, 17 in the kernel. The row's field for what the command is about needs another name.
 
-Not decided. The agent's reading of the count: the tuple, with the labelled parts a map at its end.
+The agent's reading of the count: the tuple, with the labelled parts a map at its end.
+
+## Built: a tuple, with `of:` said by the syntax
+
+Irakli, 2026-11-11: `(todo ?t state: :open)` is sugar for `(todo {of: ?t state: :open})`, done by the reader or derived by the syntax. The empty label is to be revisited, with whether `{: 1 : 2}` writes a set.
+
+```
+ written                        data, a list
+ (todo ?t state: :open)         todo  ?t  {state: :open}
+ (todo state: :open of: ?t)     todo  {state: :open  of: ?t}      one list,
+ (todo {of: ?t state: :open})   todo  {of: ?t  state: :open}      written two ways
+
+ read by the syntax, all three: the primary ?t, and state: :open
+```
+
+- **The reader cannot do it.** It does not know a call from `when`, and `when`, `unless`, `query` and `rule` each stand with one part without a label in some places and several in others (10 and 7 for `when`). A reader that folded one such part into the record would give those heads two shapes.
+- **So the syntax says it**, in one place: `Form::bare` and `Form::labelled`, which the matcher and the kernel both read a form through. Where no part stands without a label, the part labelled `of:` is the primary.
+- A record written at the end of a tuple is its labelled parts, so the second and third lines above are one form already.
+- `of:` beside a part with no label is the primary twice, and a relation read refuses it. A relation with a field truly named `of` is read by the field's full name.
+- The command row said what a command is about under `of:`, beside the row's own entity. It says `about:` now. The count of `of:` beside a primary went from 3 and 17 to none.
+- Tested on a branch: one concept and one relation read the same through all three, and written through two (`it_reads_a_call_the_same_however_its_primary_is_written`).
+
+Open: the empty label and how a set is written; whether `[ ]` stays a second way to write a list. No set is built: nothing in the prelude or the examples writes one.
 
 ## What to store, and how
 

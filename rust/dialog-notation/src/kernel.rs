@@ -225,6 +225,11 @@ fn read(form: &Form) -> Result<Read, Error> {
         .into_iter()
         .map(|(label, part)| field(&domain, label, part))
         .collect::<Result<Vec<_>, _>>()?;
+    if fields.iter().any(|field| field.label == "of") {
+        return Err(Error::Refused(format!(
+            "{form} says `of:` twice: the part with no label is `of:`"
+        )));
+    }
     if fields.is_empty() {
         return Err(Error::Refused(format!("{form} names no field")));
     }
@@ -295,7 +300,7 @@ mod tests {
     fn it_reads_a_rule_into_heads_and_premises() {
         let form = forms(
             "(rule (assert! (xyz.counter ?c count: (:last (:natural (+ ?n : 1)))))
-               (when (command.increment.xyz.counter _ of: ?c)
+               (when (command.increment.xyz.counter _ about: ?c)
                      (xyz.counter ?c count: (:last (:natural ?n)))))",
         )
         .unwrap()

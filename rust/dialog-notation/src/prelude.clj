@@ -27,7 +27,9 @@
   (syntax (?name ?this ...?fields) (all ?first ?second ?more ...) ...?about))
 
 ; A command is an application around an application, whose head names
-; nothing. Its rows live in a domain of its own.
+; nothing. Its rows live in a domain of its own, and say what the
+; command is about under `about:`. The part with no label is `of:`,
+; the row itself, so that name is taken.
 
 ; In a premise it reads the command's rows.
 (rule (syntax (?domain _ ...?fields))
@@ -35,7 +37,7 @@
         (:command ?command : ?concept is: ?domain))
   (unless (dialog.name _ is: ?command)))
 
-(rule (syntax (?domain _ of: ?subject ...?fields))
+(rule (syntax (?domain _ about: ?subject ...?fields))
   (when (expand (?command (?concept ?subject ...?fields)) in: :premise)
         (:command ?command : ?concept is: ?domain))
   (unless (dialog.name _ is: ?command)))
@@ -46,7 +48,7 @@
         (:command ?command : ?concept is: ?domain))
   (unless (dialog.name _ is: ?command)))
 
-(rule (syntax (assert (?domain (:id ?domain of: ?subject ...?fields) of: ?subject ...?fields)))
+(rule (syntax (assert (?domain (:id ?domain about: ?subject ...?fields) about: ?subject ...?fields)))
   (when (expand (?command (?concept ?subject ...?fields)) in: :head)
         (:command ?command : ?concept is: ?domain))
   (unless (dialog.name _ is: ?command)))
