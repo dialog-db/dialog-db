@@ -140,3 +140,16 @@ Not examined yet. They are columns, not recommendations.
 - `:id` needs only attribute keys. A form needs positions and plain names as keys, which are not attributes.
 
 **Decided.** Not decided: one compound value or two. Written out in [design-forms.md](design-forms.md), "A record with any value as its key".
+
+## 2026-11-11, Designing: what to store
+
+**Asked.** One compound value or two. Irakli: a record is a constrained map, its keys attributes, as an integer is a constrained number. He hoped a label could be an attribute by default, of no domain or a fixed one, read `last`, and asked for advice on what to store and how.
+
+**Learned.**
+
+- `Relation` already takes `/text`: it asks for a `/` and nothing of the domain. `Relation::split` does not.
+- A symbol with no domain is stored and read back as a value today, `/?x` and `/+` included. A claim under one is refused where the descriptor is read.
+- With labels as attributes of no domain and bare parts under positions, every key of a form is an attribute. Nothing at hand needs a key that is not.
+- Keys staying `Relation`s keeps #748's storage hypothesis whole. The agent's worry of the sitting before, that one value for map and record would cost it, does not arise.
+
+**Decided.** Not decided; advised, in [design-forms.md](design-forms.md), "What to store, and how": store the record, leave the map a type; no domain is the special domain; a form is a record as written; an atom that is not a value is a symbol with no domain.

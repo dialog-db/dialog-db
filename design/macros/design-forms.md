@@ -123,6 +123,41 @@ What each use here needs:
 
 Not decided: whether dialog has one compound value, a map of which #748's record is the case where every key is an attribute, or two, as conduct has. One value is less to build and one layout. It reopens two things #748 has decided: a field is named by an attribute, and a field may hold several values.
 
+## What to store, and how
+
+Irakli, 2026-11-11: a record is a constrained map, its keys attributes, as an integer is a constrained number. His hope: a label is an attribute by default, of no domain or a fixed one, read `last`, so an attribute is a key like any other, as Clojure's `:name` and `:ns/name` are both keywords. He asked for advice on what to store.
+
+The advice, the agent's:
+
+**Store one thing, the record. Leave the map as the type above it.** Once a label is an attribute, nothing here has a key that is not one. The map already has an identity (`Type::map`) and needs no layout until something has a key that is not an attribute.
+
+**No domain is the special domain.** `text:` in a record is the attribute `/text`.
+
+- `Relation` takes it today: it asks only for a `/`, 64 bytes at most and no NUL, with a note that more is undecided (`rust/dialog-corpus/src/model/relation.rs`).
+- A fixed domain would spend its bytes in every key's 64, and anyone could write it by hand. The empty domain cannot collide with a real one: the domain half of an attribute is a `Symbol`, which is never empty.
+- A claim under it is refused today, where the attribute descriptor is read. That is the line to keep. A claim is selected by attribute across a replica, where a bare name collides between applications; a key in a record is never selected (#748), so there a bare name is local.
+- It reads `last` and has no type. A record written with one value a key is then a Clojure map, and #748's several values a field stay possible without a form using them.
+
+**A form is a record, stored as written.**
+
+```
+(xyz.todo ?t text: ?x)   ──▶   { /A0: /xyz.todo      head and bare parts under positions,
+                                 /A1: /?t            the name half an attribute already may be
+                                 /text: /?x }        labels under their own names
+```
+
+Every key is an attribute, so a form is a record in the constrained sense, and H6 is not needed.
+
+**An atom that is not a value is a symbol with no domain.** `/todo`, `/xyz.todo`, `/?x`, `/+`, `/_`, `/assert!`. Datomic and Clojure do the same: a variable in a query that is data is a symbol whose name starts with `?`. `Value::Symbol` holds these today and a branch stores and returns them (`it_holds_a_symbol_with_no_domain_as_a_value_and_not_as_an_attribute`). So H1 needs no new type of value. What it costs: a name is 63 bytes at most, and `Value::Symbol`, which is documented as an attribute, becomes a symbol of which an attribute is the constrained case.
+
+**The layout is #748's candidate, unchanged.** A pair is still a key's tail, the attribute, the value's type byte and its order-preserving encoding (`ordvalue.rs`), because a key is still a `Relation`. So a record's keys are still the tokens claims use, which is what #748's storage hypothesis rests on. A map of any key would have given that up.
+
+Open in this:
+
+- **Positions.** `Position` is made for members inserted concurrently, with a bias from the member's identity. A form is written whole, so its parts need the one position the nth part always gets, or equal forms are not equal bytes.
+- **`Relation::split` refuses an empty domain**, and whatever calls it on a symbol that is a value has to stop doing so.
+- **A read with no pick.** The proof of concept reads `all`; dialog's descriptor and the hope above say `last`.
+
 ## Hypotheses, after the decision
 
 | hypothesis | confirmed by | refuted by |
@@ -135,7 +170,7 @@ H2 is now a requirement in the table above, not a hypothesis. H3 and H4 stand.
 
 ## Next
 
-0. One compound value or two: the map and #748's record.
+0. Whether the advice in "What to store, and how" stands.
 1. How a rule builds a record: the premise of H5, and how it is written.
 2. What a variable is as a value (H1).
 3. H3, measured, as a research topic.

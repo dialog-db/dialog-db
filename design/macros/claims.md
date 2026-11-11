@@ -36,6 +36,10 @@
 | a record's key may be any value, as a Clojure map's | opinion | Irakli, 2026-11-11 | conflicts with #748, where a field is named by an attribute and may hold several values; not reconciled |
 | conduct's records take any value as a key | hypothesis | `notes/language.md` and `DECISIONS.md` in Gozala/conduct | refuted for its record and dictionary; holds for `conduct.map` |
 | a map of any keys has an identity in dialog today | fact | `Type::map`, `rust/merkle-reference/src/lib.rs` | holds |
+| a record is a constrained map, its keys attributes | opinion | Irakli, 2026-11-11 | decides: one compound value, the record a case of it |
+| an attribute of no domain is a `Relation` today, and a value a branch stores | fact | `Relation::try_from`; `it_holds_a_symbol_with_no_domain_as_a_value_and_not_as_an_attribute` | holds; `Relation::split` refuses it |
+| a claim under an attribute of no domain is refused | fact | the same test | holds where the descriptor is read; not checked below the query layer |
+| every key of a form can be an attribute | hypothesis | confirmed by `prelude.clj` written as records under positions and labels of no domain | open; needs one position for the nth part |
 | a rule can build a record from what it has bound | hypothesis | H5 of [design-forms.md](design-forms.md): confirmed by a record premise planned as a concept query is, running both ways | open; #748 speaks only of reading one |
 | a premise may take parameters that differ by application | fact | `ConceptQuery::schema`, `rust/dialog-query/src/concept/query.rs` | holds |
 | the two-cell `entity/derive` names the entities a record will | hypothesis | refuted by its own definition: a chain of pairs under a seed is not a record's canonical form | refuted; it is a stand-in |

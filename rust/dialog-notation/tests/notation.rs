@@ -385,6 +385,32 @@ async fn it_elects_one_of_two_writes_of_one_round_whatever_their_order() -> Resu
     Ok(())
 }
 
+/// What a form as a record rests on: a symbol with no domain is a value
+/// today, a variable or an operator spelled as one included, and it is
+/// not an attribute a claim can be made under.
+#[dialog_common::test]
+async fn it_holds_a_symbol_with_no_domain_as_a_value_and_not_as_an_attribute() -> Result<()> {
+    let mut notebook = Notebook::open().await?;
+    notebook
+        .submit("(assert! (xyz.form form:1 head: /todo var: /?x op: /+))")
+        .await?;
+    assert_eq!(
+        report(
+            &mut notebook,
+            "(query (xyz.form ?f head: ?h var: ?v op: ?o))"
+        )
+        .await?,
+        vec!["(xyz.form form:1 head: /todo var: /?x op: /+)"]
+    );
+
+    let claim = notebook
+        .submit(r#"(assert! (xyz.form form:1 /text: "x"))"#)
+        .await
+        .map_err(|error| error.downcast::<Error>());
+    assert!(matches!(claim, Err(Ok(Error::Refused(_)))));
+    Ok(())
+}
+
 /// What is not allowed is refused, and what Dialog-DB cannot yet run is
 /// said, not approximated.
 #[dialog_common::test]
