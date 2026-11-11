@@ -14,6 +14,34 @@ says how to cut a release.
 
 ## Unreleased
 
+### `wbg-pool` gives every test's tab focus
+
+[#774](https://github.com/dialog-db/dialog-db/pull/774).
+
+`wbg-pool` runs each test in a tab of its own, many at once, and Chrome
+shows only the latest tab of a window. The rest are hidden: their
+`visibilityState` is `hidden`, `hasFocus()` is false, and animation frames
+and `ResizeObserver` deliveries are held back. `wbg-pool` now turns on
+focus emulation for a tab as it opens it, so each page acts as the focused,
+active one.
+
+What this changes for you:
+
+- A wasm test that waits on an animation frame, a `ResizeObserver`, focus
+  or visibility passes beside other tests as it does alone. Run eight at
+  once in headless Chromium and 15 of 24 tabs passed before; all 24 do now.
+- A tab that cannot be given focus is closed and its run fails with
+  `failed to give a test's tab focus`, where the tab would have run without
+  it.
+- A dependent that carries this as a patch against `wbg-pool` (tonk's
+  `wbg-pool-focus-tabs.patch`) drops it when it builds `wbg-pool` from this
+  release.
+
+Why: a test that depended on rendering failed or hung only in a full run,
+with nothing in its output to say its tab was in the background. Chrome's
+flags against backgrounding (`--disable-renderer-backgrounding` and its
+kin) do not change it; focus emulation does.
+
 ### A provisioned wasm test is given its address when it runs
 
 [#774](https://github.com/dialog-db/dialog-db/pull/774).

@@ -84,6 +84,13 @@ cargo nextest ──spawns──▶ wbg-pool (shim, one per test)
 - Each run gets a unique loopback origin — Chrome resolves any
   `*.localhost` subdomain to 127.0.0.1, and such origins are secure
   contexts, so OPFS, service workers and friends all work.
+- Each tab is told it is the focused one (CDP focus emulation). Chrome
+  shows only the latest tab of a window and hides the rest, where
+  `visibilityState` is `hidden`, `hasFocus()` is false, and animation
+  frames and `ResizeObserver` deliveries are held back. A test that waits
+  on any of those would pass alone and fail beside others. The
+  `a_tab_among_many_renders` test in `fixtures/isolation-fixture` shows it
+  when several invocations run at once.
 - Generated assets are served from one fixed origin
   (`assets.localhost`, fingerprinted immutable paths, CORS +
   `Cross-Origin-Resource-Policy` for COEP pages), and the browser is
