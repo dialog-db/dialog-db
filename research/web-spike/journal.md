@@ -10,7 +10,7 @@ harness: [README.md](README.md). Raw numbers: `results/`, rendered with
 
 ## Where things stand
 
-**Status: Exploring** (a spike; nothing here is built into the archive).
+**Status: Exploring** (a spike, two rounds; nothing here is built into the archive).
 
 - **One browser.** Headless Chromium 153.0.8010.12 on a 4-CPU Linux VM
   (Xeon 2.10 GHz, 16 GiB, ext4 on a virtio disk with online discard).
@@ -40,6 +40,31 @@ harness: [README.md](README.md). Raw numbers: `results/`, rendered with
   (15–20 µs against 230–440 µs) and do not queue behind commits.
 - **Flush numbers here describe this VM, not Chromium**: `fdatasync` on
   its disk is sometimes 40–300 µs and sometimes 4 ms flat, natively too.
+
+Round two (below), against dialog's IndexedDB store on one tonk-shaped
+workload, goal "space savings without becoming slow":
+
+- **Space comes from the format, not the medium.** The same raw blocks
+  take 0.97–1.0x of today's bytes in every medium. The same compact payload
+  (an emulation at 1/3 and 1/20 of the raw bytes) takes 0.33–0.35x and
+  0.05–0.08x of today's in IndexedDB records and in an OPFS file alike;
+  pages in IndexedDB take 0.35–0.66x and 0.19x, because rewritten pages
+  wait for LevelDB to compact them.
+- **Every compact design was smaller and not slower** than today's store
+  in the emulation; compact records in IndexedDB commit in 0.5–0.7x
+  today's time and read a chain of 8 in 0.55–0.6x. No raw-block design was
+  smaller, so none meets the goal without a new format.
+- **OPFS is much faster, not smaller.** An OPFS file in the tab's worker
+  commits in 0.05x today's time and reads a chain of 8 in 0.03–0.04x;
+  behind an owner worker in another tab, 0.23x and 0.08x.
+- **Sync reads are worth 0.2–0.3 ms a dependent read** against IndexedDB
+  and 0.13–0.19 ms against an RPC per read. That is 2–3 ms for a chain of
+  8 today, and, inferred, much more for the native format, whose cold
+  node read is a frame against its predecessors plus the tokens it names.
+- **Dialog in a shared worker with a replaceable owner works**: 42
+  failovers with no acknowledged write lost, no request answered twice
+  and no error; tabs saw 81–151 ms of outage, 60–110 ms of it the new
+  owner rebuilding its index from the file.
 
 ## 2026-11-11, the setup and what a Playwright benchmark gets wrong
 
@@ -541,3 +566,419 @@ batched turns, is the next step.
   better.
 - Wasm: the prototype is plain JavaScript; the archive in Wasm would add
   copies into linear memory and its own CPU cost per commit.
+
+## 2026-11-11, round two: what would replace dialog's IndexedDB store
+
+**Questions.** The maintainer's direction, and, part way through, the
+goal it serves: "space savings without becoming slow".
+
+1. Against the IndexedDB store dialog uses on the web today, on one
+   workload, what do a paged file in IndexedDB, an OPFS file held in the
+   tab's own worker, and an OPFS file behind an owner worker in another
+   tab cost, in commit and read latency and in bytes on disk?
+2. Are synchronous reads crucial? Dialog walks a search tree, so a read
+   is a chain of dependent lookups (each node names the next). What does a
+   chain of depth 1, 4 and 8 cost with an awaited IndexedDB get per hop,
+   an RPC per hop to the worker holding an OPFS handle, and the whole
+   chain walked synchronously where the file is (one RPC for the chain)?
+3. Is dialog in a shared worker, served by one owner dedicated worker that
+   a tab creates and that another tab replaces when it goes, viable? What
+   does an operation cost from the shared worker, how long does a failover
+   take, and is any acknowledged write lost or any request answered twice
+   or wrongly?
+4. Which designs are smaller than today's store and not slower than it?
+   Separating format from medium: is the saving the native file gets a
+   property of OPFS, or of the format, which could sit in IndexedDB?
+
+**The baseline, mirrored from dialog.** From
+`rust/dialog-storage/src/storage/provider/indexeddb.rs`, `archive.rs` and
+`memory.rs`, mirrored in `IdbArchive` (`harness/store.js`): one database
+per space; object store `archive/<catalog>` keyed by the base58 of the
+block's digest, value a `Uint8Array` copy of the bytes; `memory` keyed
+`<space>/<cell>`, value the content's bytes; one connection per context,
+shared; a get is its own read-only transaction, answered when its request
+succeeds (not on `complete`); an import is one read-write transaction that
+awaits each put's request before issuing the next, answered on
+`complete`; a publish is one read-write transaction that gets the cell,
+checks it (a cell already holding the content succeeds without writing;
+otherwise the expected version must match, or the cell be empty) and puts
+it; no durability is passed, so the browser's default applies (Chromium
+reports it as `default`). Simplified: both stores are made at open
+instead of by a version upgrade on first use, there is no schema mutex
+around starting a transaction, a version is a 32-bit hash rather than
+BLAKE3, keys are computed before timing, and there is no Wasm (no copies
+in or out of linear memory, no hashing). `pipelined` is the one change
+measured on top: issue every put of an import before waiting.
+
+**The other stores.** All in `harness/store.js`, one interface:
+
+- **The log archive** (`LogArchive`): blocks appended as records (a
+  64-byte header with the key and a word checksum, then the bytes), two
+  rolling slots naming the log's end and the memory cells, an index from
+  key to record in memory, rebuilt on open by walking the record headers
+  (the native file reads index pages instead). An import writes its new
+  blocks in one write, then the next slot; a publish writes the next slot.
+  Blocks already held are skipped, so a retried import writes nothing.
+- **Over an OPFS file** (`OpfsFile`): the exclusive sync access handle
+  (`readwrite`, the portable mode). `opfs` holds it in the tab's own
+  worker, so dialog would run where the file is; `owner` holds it in an
+  owner worker in another tab and serves the archive over a MessagePort
+  (`serveArchive`), each request answered in the task that received it.
+- **Over pages in IndexedDB** (`PagedIdbFile`, `pidb`): the same file's
+  bytes as page records (`<space>.paged`, store `pages`, key the page
+  number, value the page), in the style of absurd-sql and wa-sqlite's
+  IDBBatchAtomicVFS. Writes go to cached pages; an import or publish puts
+  its dirty pages in one read-write transaction, which is atomic, so
+  records and slot land together. Reads come from the page cache
+  synchronously; a miss fetches the pages it spans with one `getAll`.
+  Unbounded cache unless a size is given; "cold" drops it before each
+  read.
+
+**The workload** (`harness/host.js`), the same for every store, written
+from seeds so every store is given the same bytes (77.1 MB per
+single-tab run). Blocks are 1 to 8 KiB, one in ten 64 KiB, of
+incompressible bytes whose first 48 bytes name the next block of a chain.
+A commit imports 10 to 50 new blocks (about 300 KiB) and publishes the
+committer's head cell, compare-and-swap on the version it last got. A
+preload writes 3,000 blocks, 150 of them chains of 8. Reads: single gets;
+16 gets at once; chains of depth 1, 4 and 8 from a random chain's root,
+per hop (`hop`) or walked by the store (`walk`: synchronously over OPFS
+or cached pages, one request to an owner); a get issued just after an
+import starts. Three tabs run a mixed loop: a commit, chains of depth 1,
+4, 8 and one more, and a batch. Every block written is read back and
+checked at the end, and every cell must hold the last acknowledged
+content.
+
+**Durability, like with like.** IndexedDB `relaxed` (and `default`,
+which is relaxed in Chromium since 121): `complete` fires once LevelDB has
+the write, before it is flushed; it survives the tab, worker or renderer
+dying, not the machine (from Chromium's documented semantics; nothing
+here cut the power). `strict`: flushed before `complete`. OPFS without
+flush: the bytes are in the operating system's file before the answer,
+the same class as relaxed (the failovers below check the process-death
+half). OPFS with flush: `flush()` (fdatasync) after the records and after
+the slot, three per commit. The paged file follows IndexedDB's setting.
+Unflushed is compared with relaxed, flushed with strict.
+
+**Where it is timed.** Question 6: in the tab's dedicated worker
+(cross-origin isolated, 5 µs timer). Question 7: dialog runs in the shared
+worker, which is not isolated (100 µs timer, measured), so each operation
+is timed in the tab that asked for it, which adds the tab-to-shared-worker
+round trip (`echo`, 0.10–0.14 ms). Every configuration ran in a fresh
+persistent profile; bytes on disk are the profile's `IndexedDB` and `File
+System` directories, measured from Node after the context closed, beside
+`navigator.storage.estimate()`. Two full runs, `T1131` and `T1139`
+(`node run.js q6 q7 q8 q9`, 7 minutes each); ranges below are the two
+runs, medians and p95 in milliseconds.
+
+**Question 6, one tab, dialog in the tab's own worker** (commit is import
+then publish; 100 commits):
+
+| store | commit p50 | commit p95 | commits/s | on disk / logical |
+|---|---:|---:|---:|---:|
+| today: idb, default | 12.9–14.3 | 20.2–25.0 | 65–76 | 1.03x, 724 of 7,157 blocks as blob files |
+| idb, relaxed | 14.3–16.4 | 24.4–26.5 | 59–68 | 1.03x |
+| idb, strict | 14.7–15.6 | 24.4–26.8 | 60–67 | 1.03x |
+| idb, pipelined puts | 9.2–9.3 | 15.4–18.6 | 99 | 1.03x |
+| pidb, 4 KiB pages | 9.6–10.4 | 16.1–17.3 | 92–98 | 1.04x |
+| pidb, 32 KiB pages, relaxed | 4.9–5.4 | 17.3–24.9 | 135–137 | 1.01–1.07x |
+| pidb, 32 KiB pages, strict | 8.4–9.0 | 14.9–16.6 | 101–107 | 1.01–1.17x |
+| pidb, 64 KiB pages | 11.6–12.1 | 17.8–19.2 | 76–80 | 1.05x, every page a blob file |
+| opfs in the tab's worker, no flush | 0.81–0.83 | 1.53–1.65 | 621–655 | 1.01x |
+| opfs in the tab's worker, flush | 2.0–2.4 | 3.5–4.2 | 319–360 | 1.01x |
+| owner in another tab, no flush | 2.90–2.96 | 4.8–5.0 | 278–284 | 1.01x |
+| owner in another tab, flush | 4.7–5.2 | 6.7–11.5 | 160–190 | 1.01x |
+
+Reads, same runs (pidb's single gets and batches ran after a cold phase
+had emptied its cache, so they are partly cold):
+
+| store | get 1–8 KiB | get 64 KiB | 16 gets at once | get issued during an import (answered before it) |
+|---|---:|---:|---:|---:|
+| today: idb, default | 0.17–0.25 / 0.28–0.42 | 0.92–1.20 / 1.25–1.47 | 2.2–2.8 / 5.6 | 13.5–14.5, the import's own time (0 of 30) |
+| pidb, 32 KiB | 0.34–0.38 / 0.64–0.66 | 0.74–0.83 / 1.05–1.14 | 1.4–1.6 / 4.0 | 3.5–4.3 (8–9 of 30) |
+| opfs, no flush | 0.01 / 0.01 | 0.04–0.05 / 0.09 | 0.19–0.22 / 0.32–0.40 | 0.56–0.68 (0 of 30) |
+| owner, no flush | 0.13–0.14 / 0.20–0.38 | 0.23 / 0.39–0.63 | 0.89–1.05 / 1.5–1.6 | 2.9–3.1 (0 of 30) |
+
+Chains of dependent reads, p50 / p95:
+
+| store, how | depth 1 | depth 4 | depth 8 | per hop at depth 8 |
+|---|---:|---:|---:|---:|
+| today: idb, an awaited get per hop | 0.25 / 1.8–2.0 | 0.83–0.98 / 2.4–2.6 | 2.1–2.4 / 3.9–6.4 | 0.27–0.30 |
+| owner, an RPC per hop | 0.13–0.14 / 0.27–0.28 | 0.58–0.59 / 1.0–1.3 | 1.22–1.40 / 2.3–3.0 | 0.15–0.17 |
+| owner, walked in the owner (one RPC) | 0.13–0.14 / 0.28–0.36 | 0.17–0.23 / 0.35–0.52 | 0.31–0.32 / 0.53–0.69 | 0.02 past the RPC |
+| opfs, walked in the tab's worker | 0.01 / 0.04 | 0.03 / 0.09 | 0.07–0.10 / 0.17–0.18 | 0.01 |
+| pidb 32 KiB, cached, walked | 0.01 / 0.05–0.20 | 0.03 / 0.12–0.23 | 0.09 / 0.23–0.58 | 0.01 |
+| pidb 32 KiB, cold, per hop | 0.40–0.61 / 1.5–1.6 | 0.74–0.92 / 1.7–2.2 | 1.31–1.40 / 3.0–3.3 | 0.16–0.18 |
+
+Three tabs, each with its own worker and store (IndexedDB: three
+connections to one database; owner: one owner, three clients), running
+the mixed loop for 3 s:
+
+| store | commits/s, all tabs | commit p50, per tab | chain 8 p50, per tab | batch 16 p50 |
+|---|---:|---:|---:|---:|
+| today: idb, relaxed | 48–51 | 14.6–20.5 | 6.3–14.1 | 3.2–3.7 |
+| idb, strict | 42 | 19.6–25.7 | 6.5–16.0 | 3.4–4.6 |
+| owner, no flush (RPC per hop) | 207–211 | 3.7–4.0 | 2.6–3.0 | 1.2–1.3 |
+| owner, flush | 156–168 | 6.1–6.8 | 2.8–3.1 | 1.2–1.4 |
+
+**Question 7, dialog in the shared worker**, timed in the tab (one tab
+first, then three tabs driving the shared worker at once):
+
+| store | commit p50 / p95 | chain 8 p50 / p95 | batch 16 p50 | three tabs: commits/s | three tabs: chain 8 p50 |
+|---|---:|---:|---:|---:|---:|
+| today: idb, relaxed (per hop) | 16.3–17.4 / 30.0–32.8 | 3.06–3.27 / 6.6–7.9 | 3.1–3.2 | 38–41 | 6.8–12.3 |
+| idb, strict | 18.2–19.6 / 30.9–37.6 | 3.21–3.23 / 5.3–5.9 | 3.0 | 39 | 7.2–13.5 |
+| pidb 32 KiB, whole file cached, walked | 5.9–6.2 / 12.2–12.6 | 0.23–0.26 / 0.52–0.58 | 0.45–0.46 | 135–144 | 0.35–0.44 |
+| pidb 32 KiB, 8 MiB cache, per hop | 5.7–6.0 / 11.3–11.6 | 1.83–2.00 / 4.1 | 3.4–3.6 | 75–79 | 4.5–5.6 |
+| pidb 32 KiB, strict, walked | 8.8–9.6 / 16.7–18.4 | 0.27–0.31 / 0.50–0.71 | 0.47–0.51 | 98–99 | 0.35–0.40 |
+| owner, no flush, RPC per hop | 3.81–3.85 / 6.2–7.0 | 1.61–1.63 / 2.95–3.05 | 1.21–1.25 | 150–153 | 4.0–5.4 |
+| owner, no flush, walked in the owner | 3.52–3.77 / 6.4 | 0.41–0.47 / 0.74–0.91 | 1.26–1.35 | 207–210 | 0.58–0.70 |
+| owner, flush, walked in the owner | 5.4–5.6 / 8.7–10.0 | 0.48–0.55 / 0.96–1.05 | 1.3–1.5 | 143–176 | 0.60–0.79 |
+
+The shared worker adds its round trip to everything (0.10–0.14 ms), and,
+being one thread, queues every tab's operations: three tabs' commits
+through it take 14–15 ms on the paged store against 6 ms for one tab.
+With an RPC per hop, a chain of 8 waits behind other tabs' commits at the
+owner eight times (4.0–5.4 ms); walked in the owner it waits once
+(0.58–0.70 ms).
+
+**Question 8, failover.** Three tabs drive the shared worker for 6 s; at
+2 s the owner's tab is closed, its renderer crashed (`Page.crash`), or
+its owner worker terminated (the tab stays). `cold`: the shared worker
+queues on the owner lock and, granted, asks another live tab for a new
+owner. `standby`: a second owner, already loaded in another tab, waits
+on the lock and takes over itself. Milliseconds from the runner's action;
+three trials of each per run, both runs:
+
+| standby | owner goes by | detected | lock taken | file open (tries) | index rebuilt | first request served | longest gap a tab saw |
+|---|---|---:|---:|---:|---:|---:|---:|
+| cold | tab closed | 11.5–15.8 | 28–35 | 29–37 (1) | 95–132 | 97–137 | 96–138 |
+| cold | renderer crashed | 11.4–17.9 | 28–47 | 31–50 (1) | 95–136 | 100–137 | 97–137 |
+| cold | worker terminated | 2.0–4.5 | 19–32 | 21–35 (1) | 89–136 | 93–138 | 92–145 |
+| standby | tab closed | | 11–22 | 13–27 (1) | 88–110 | 90–112 | 87–112 |
+| standby | renderer crashed | | 8–18 | 14–22 (1) | 81–123 | 83–125 | 81–129 |
+| standby | worker terminated | | 2–4 | 6–7 (1) | 97–104 | 99–109 | 101–126 |
+| cold, flushed | tab closed | 12–25 | 30–43 | 32–45 (1) | 96–122 | 108–124 | 104–151 |
+
+| check, over all 42 failovers | result |
+|---|---:|
+| requests in flight retried against the new owner | 2–18 a failover |
+| answers to a request already answered | 0 |
+| requests answered with an error, in the tabs or the link | 0 |
+| acknowledged blocks read back and checked afterwards | 23,326–31,073 a run, 0 wrong or missing |
+| head cells not holding their last acknowledged content | 0 |
+| the shared worker lost | never; the owner was always in the tab that created the shared worker, so every crash run crashed that tab |
+
+The new owner always opened the file at its first try. What the tabs
+wait for is the new owner rebuilding its index: walking 11,000–13,300
+record headers of a 114–142 MB file took 62–109 ms, 5–9 µs a record.
+Without it a cold failover is about 20–50 ms and a standby one 6–27 ms;
+the standby saves the 15–25 ms of starting a worker and nothing else.
+
+**Question 9, format against medium.** The native file is smaller
+because of its format: tree nodes as frames of rows over shared tokens,
+each written against the version it supersedes and whole every 32
+(`research/single-file-format/journal.md`, 2026-11-05). Porting that to
+JavaScript is out of scope, so a compact format is emulated: every block
+is stored as a payload of a fixed fraction of its bytes (incompressible,
+link kept readable), and the same written dataset is stored four ways.
+Gzip of the blocks as a stand-in would have measured my generator, whose
+bytes are random; the ratio is set instead. The brief suggested a third
+to a half of the raw bytes; I could not find that figure in the native
+journal, which records much larger savings over whole histories (568.5
+MiB of tonk-team's blocks in 25.4 MiB, 22x; Stack Exchange 1,160.7 MiB in
+13.4 MiB, 87x; a member's replica 2.0 MiB against main's 170 MiB, and
+frames of token offsets alone, written whole, 9.9–20x). So 1/3 and 1/20
+were run. Single tab, dialog in the tab's worker, unflushed (relaxed)
+throughout; today's layout is 79.6 MB on disk, `estimate()` 79.6 MB,
+commit 12.9–13.0 / 21.2–21.9 ms, chain of 8 2.35–2.47 / 4.96–5.11 ms.
+"x" is the ratio to today's layout (p50 / p95):
+
+| format | medium | on disk MB | size x | commit x | chain 8 x (best way) | smaller and not slower |
+|---|---|---:|---:|---:|---:|---|
+| raw | idb records (today) | 79.6 | 1.00 | 1 / 1 | 1 / 1 | the baseline |
+| raw | pidb pages | 78.2 | 0.98 | 0.38–0.39 / 0.50–0.52 | 0.03–0.04 / 0.04 warm; 0.55–0.65 cold | no, not smaller |
+| raw | opfs, tab's worker | 77.6 | 0.97 | 0.05–0.06 / 0.06–0.07 | 0.03–0.04 / 0.03–0.04 | no, not smaller |
+| raw | owner, other tab | 77.6 | 0.97 | 0.23 / 0.24 | 0.08–0.09 / 0.07–0.09 | no, not smaller |
+| 1/3 | idb records | 27.9 | 0.35 | 0.59–0.70 / 0.63–0.84 | 0.57–0.58 / 0.34–0.43 | yes |
+| 1/3 | pidb pages | 27.8–52.7 | 0.35–0.66 | 0.23–0.24 / 0.24–0.33 | 0.01–0.02 / 0.04–0.05 warm | yes |
+| 1/3 | opfs, tab's worker | 26.2 | 0.33 | 0.02–0.03 / 0.03–0.05 | 0.02 / 0.01–0.02 | yes |
+| 1/3 | owner, other tab | 26.2 | 0.33 | 0.15 / 0.13–0.15 | 0.07 / 0.05–0.07 | yes |
+| 1/20 | idb records | 6.0 | 0.08 | 0.48–0.50 / 0.46–0.49 | 0.55–0.59 / 0.38–0.41 | yes |
+| 1/20 | pidb pages | 15.1 | 0.19 | 0.13–0.16 / 0.18–0.19 | 0.01 / 0.01 warm | yes |
+| 1/20 | opfs, tab's worker | 4.3 | 0.05 | 0.01 / 0.02 | 0.01 / 0.01 | yes |
+| 1/20 | owner, other tab | 4.3 | 0.05 | 0.07 / 0.07–0.10 | 0.07–0.08 / 0.07–0.13 | yes |
+
+"Smaller" is at most 0.8x; "not slower" is commit and chain-of-8 p50 and
+p95 each at most 1.1x today's. In the shared worker the compact records
+in IndexedDB hold the same relation (question 7): at 1/20, commit
+6.6–7.3 / 10.9–14.4 ms against today's 16.3–17.4 / 30.0–32.8, chain of 8
+1.59–1.67 / 2.5–3.1 against 3.06–3.27 / 6.6–7.9. (Sizes there do not
+compare: those runs write for a fixed time, so faster stores write more.)
+
+How the bytes are spent: IndexedDB records hold a payload with little
+overhead at 1/3 (27.9 MB for 25.7) and 1.6x at 1/20 (6.0 MB for 3.9 MB,
+values of about 200 bytes each carrying a 44-byte key and LevelDB's
+framing). The OPFS file holds the payload plus 64-byte headers. Pages in
+IndexedDB rewrite their tail page and the slot's page at every import and
+publish, and LevelDB keeps the superseded versions until it compacts: the
+same 1/3 dataset took 52.7 MB in one run and 27.8 MB in the other, and
+1/20 took 15.1 MB for 3.9 MB in both (inferred from the variance; I did
+not inspect LevelDB's levels). `estimate()` matches the disk for
+IndexedDB and over-reports OPFS: 134.2 MB (128 MiB) for a 77.6 MB file,
+33.6 MB for 26.2, 8.4 for 4.3, as if rounded up to a power of two
+(measured with the handle open; inferred to be quota Chromium reserves
+for the handle).
+
+**What surprised me.**
+
+- **Today's store writes every 64 KiB block as a file of its own.** 724
+  of 7,157 blocks, 47.5 of 79.6 MB, sat in the profile's
+  `.indexeddb.blob` directory, one file each: Chromium wraps values above
+  about 64 KiB as blobs. Reading one costs 0.9–1.2 ms against 0.17–0.25
+  ms for a small block, and they are why a raw chain of 8 costs 2.1–2.5
+  ms. Pages of 64 KiB fall over the same line (every page a blob file,
+  commits 2.3x slower than 32 KiB pages); 32 KiB pages stay under it.
+- **A read waits for any write in flight.** A read-only IndexedDB
+  transaction created after a read-write one on the same store waits for
+  it: 0 of 30 gets issued during an import were answered before it, and
+  took the import's 13–14 ms. With three tabs a chain of 8 went from 2–3
+  to 6–16 ms. The OPFS archive serializes too, but its import takes 0.6–3
+  ms; the paged store's cache answers hits during a commit (8–15 of 30).
+- **Strict costs nothing over relaxed here** (commit 14.7–15.6 against
+  14.3–16.4 ms), and `default` is relaxed's speed: on this VM IndexedDB's
+  commit is the browser's work per value and per blob file, not the
+  flush. The flush is this VM's (round one); a laptop's disk may not
+  agree.
+- **Awaiting each put is a third of today's commit.** Issuing all of an
+  import's puts before waiting takes commits from 12.9–14.3 to 9.2–9.3
+  ms, a one-line change to `indexeddb/archive.rs` that needs none of the
+  rest.
+- **Failover is the index, not the locks.** Detection (2–25 ms) and
+  starting a worker are small; rebuilding the in-memory index from the
+  file is two thirds of every outage.
+
+**What it means.**
+
+- **Does any OPFS design beat the IndexedDB baseline?** On speed, by a
+  lot: in the tab's worker a commit is 16–18x faster and a chain of 8
+  21–34x; behind an owner in another tab, 4.4–4.9x and 6.6–7.7x (walked
+  in the owner); from the shared worker, commits 4.3–4.9x faster and chains of 8 walked in the
+  owner 6.5–8x. On size, not at all: raw blocks take the same bytes in
+  every medium (0.97–1.0x). OPFS is not where the space saving comes
+  from.
+- **Where the paged IndexedDB design falls.** Between the two: commits
+  2.4–2.9x faster than today in the tab's worker and in the shared worker
+  (5–6 ms against 13–17), reads as fast as OPFS while the file is in its
+  cache and about 0.55–0.65x of today's when cold (one `getAll` a hop,
+  without blob files). It needs one instance per space, so its home is
+  the shared worker, where it needs no owner and no failover. What it
+  costs: the cache in the shared worker's memory (an 8 MiB cache over a
+  file of about 180 MB gave chains of 8 at 1.8–2.0 ms, still 0.6x of
+  today's), and space amplification from rewriting pages, which LevelDB
+  reclaims only when it compacts.
+- **Are sync reads crucial? Quantified:** a dependent read costs
+  0.17–0.30 ms awaited from IndexedDB (0.9–1.2 ms for a 64 KiB block),
+  0.13–0.19 ms as an RPC to an owner, and 0.01–0.02 ms synchronously from
+  an OPFS handle or a cached page. A chain of 8 is 2.1–3.3 ms against
+  IndexedDB, 1.2–1.6 ms with an RPC per hop, 0.3–0.5 ms walked in the
+  owner and 0.07–0.10 ms walked locally; under three tabs, RPC per hop is
+  4–5 ms and walking 0.6–0.7 ms, so where the reads run decides more than
+  the medium. For today's layout (a block per node, descents of a few
+  nodes, a node cache above) that is 1–3 ms per cold descent: noticeable,
+  not decisive. For the native format it is decisive, inferred, not
+  measured: serving a cold node decodes its frame against its
+  predecessor (written whole every 32 versions, so a chain of up to 31
+  frames) and reads the tokens its rows name by position
+  (`research/single-file-format/design.md`, "Rows" and "Reads"). That is
+  tens of small dependent reads per node: at 0.2 ms each, several
+  milliseconds a node in IndexedDB records, against well under one
+  millisecond from a file read synchronously. The emulation in question 9
+  gives each block one payload and does not see this.
+- **Smaller and not slower, per design** (question 9, single tab, against
+  today's layout; size, then commit and chain-of-8 p50 / p95):
+  - compact records in IndexedDB: 0.35x at 1/3, 0.08x at 1/20; commit
+    0.59–0.70 / 0.63–0.84x and 0.48–0.50 / 0.46–0.49x; chain 0.57–0.58 /
+    0.34–0.43x and 0.55–0.59 / 0.38–0.41x. **Meets it, in the
+    emulation**, mostly because small values avoid blob files.
+  - compact pages in IndexedDB: 0.35–0.66x and 0.19x; commit 0.23–0.24 /
+    0.24–0.33x and 0.13–0.16 / 0.18–0.19x; chain 0.01–0.02 / 0.04–0.05x
+    warm. **Meets it**, smaller by less than records until LevelDB
+    compacts.
+  - compact OPFS file in the tab's worker: 0.33x and 0.05x; commit
+    0.02–0.03x and 0.01–0.02x; chain 0.01–0.02x. **Meets it**, by the
+    widest margin.
+  - compact OPFS file behind an owner: 0.33x and 0.05x; commit 0.13–0.15x
+    and 0.07–0.10x; chain 0.05–0.07x and 0.07–0.13x. **Meets it.**
+  - raw blocks in pages, in OPFS, behind an owner: 0.97–0.98x. **Faster,
+    not smaller: fails the goal.**
+
+  So a compact format gets the space in IndexedDB too, and OPFS is not
+  needed for space. Whether the compact format stays fast in IndexedDB
+  records depends on its read pattern, which this emulation does not
+  model; the native one argues for a medium with synchronous reads: an
+  OPFS file read where it is held, or pages in IndexedDB behind a page
+  cache in the shared worker. Not modelled either: the format's own CPU.
+  Natively a frame took about 600 µs to write (2.3 ms a commit) when
+  first built and a node's rows 5–27 µs to decode (journal, 2026-11-05);
+  in Wasm it will be at least that, which the 4–7 ms a compact IndexedDB
+  commit saves can pay for but a compact OPFS commit's 0.1–0.4 ms cannot.
+- **Is the shared worker with a replaceable owner viable?** Yes, in
+  Chromium: from the shared worker a commit is 3.5–3.9 ms, a chain of 8
+  walked in the owner 0.41–0.47 ms, 128–210 commits a second from one to
+  three tabs; 42 failovers lost nothing acknowledged and answered nothing
+  twice, retrying 2–18 requests each, with 81–151 ms of outage. What it
+  relies on, and what would break it:
+  - idempotent retries: an import skips blocks it holds; a publish finds
+    the cell already holding its content. A publish whose cell another
+    writer moved on between the first try and the retry would be refused
+    though it had succeeded; each tab had its own cell here, so that case
+    was not exercised;
+  - the owner lock dying with the owner (it did, in 2–25 ms) and the
+    exclusive handle with it (the new owner opened first time, every
+    time);
+  - a live tab to host the owner, read from held `page/<id>` locks; the
+    dead owner's tab is avoided, since its page lock is released some
+    milliseconds after its owner lock;
+  - Chromium's shared worker: web-opfs.md records it disabled by default
+    on Android, iOS and Safari, where this design has no host and a tab
+    elected by a Web Lock would have to run dialog instead;
+  - the owner's tab staying awake: a frozen or discarded background tab
+    would keep the lock and stop answering, which needs a heartbeat and a
+    steal, and round one found a stolen holder keeps writing unless it
+    checks. Not tested.
+  - the index rebuild on open: 5–9 µs a record in JavaScript, so a file
+    of a million records would take seconds to fail over; the native
+    file's index pages, or a standby that keeps its own index current
+    from the owner's answers, would remove it.
+
+**Measured and inferred.** Measured: every latency, rate and size in the
+tables; the blob files and the read waiting behind a write; no loss or
+double answer across the failovers; the shared worker surviving the
+crash of the tab that created it. Inferred: what an acknowledgement
+survives (no power was cut); why `estimate()` over-reports OPFS; that
+LevelDB compaction explains the paged store's size spread; everything
+about the native format's read pattern and CPU in Wasm, and therefore
+whether a compact format stays fast in IndexedDB records.
+
+**What this cannot tell.**
+
+- Firefox and Safari were not available, and nothing here is guessed for
+  them. Outside Chromium the exclusive handle is the only OPFS mode, which
+  is what these OPFS designs use; IndexedDB there is a different engine
+  (Firefox and Safari use SQLite), so the baseline and the paged store
+  would both move.
+- Chromium's IndexedDB here stores into LevelDB (the profile's
+  `.indexeddb.leveldb` and `.indexeddb.blob` directories); a different
+  backend would change the baseline and the blob-file cliff.
+- Real disks, mobile, Windows and macOS: flushes here are this VM's
+  (round one), and strict costing what relaxed does may not hold on a
+  laptop.
+- Sizes over time: measured minutes after writing, at close; LevelDB
+  compaction later could shrink the paged store and today's store
+  further.
+- Tab freezing, discarding and memory pressure in a real browser, and
+  Android, where there is no shared worker.
+- The real format: an emulated payload, its read indirection and CPU not
+  modelled; and no Wasm.
+- Four CPUs: three tabs, a shared worker and an owner oversubscribe them.

@@ -156,4 +156,179 @@ if (d.q5) {
   );
 }
 
+// Round two. Latencies are stored in microseconds; tables give milliseconds.
+const ms = (x) => (x === undefined || x === null ? '' : x >= 10000 ? (x / 1000).toFixed(1) : (x / 1000).toFixed(2));
+const mm = (s) => (s && s.n ? `${ms(s.median)} / ${ms(s.p95)}` : '');
+const mb = (x) => (x / 1e6).toFixed(1);
+const lbl = (c) => {
+  const dur = c.design === 'idb' || c.design === 'pidb' ? c.durability : c.flush ? 'flush' : 'no flush';
+  return `${c.ratio && c.ratio < 1 ? `1/${Math.round(1 / c.ratio)} ` : ''}${c.design}${c.pipeline ? ' pipelined' : ''}${c.pageSize ? ` ${c.pageSize / 1024}K` : ''}${c.cachePages ? ` cache ${(c.cachePages * c.pageSize) / 2 ** 20}M` : ''}, ${dur}`;
+};
+const diskCell = (r) => {
+  if (!r.disk) return '';
+  const total = r.disk.indexedDB + r.disk.fileSystem;
+  const ratio = r.logicalBytes ? ` (${(total / r.logicalBytes).toFixed(2)}x)` : '';
+  const stored = r.storedBytes && r.cfg.ratio && r.cfg.ratio < 1 ? `, payload ${mb(r.storedBytes)}` : '';
+  return `${mb(total)} of ${r.logicalBytes ? mb(r.logicalBytes) : '?'}${ratio}${stored}${r.disk.blobFiles ? `, ${r.disk.blobFiles} blob files ${mb(r.disk.blobs)}` : ''}`;
+};
+const checks = (r) => {
+  const bad = (r.verify ? [].concat(r.verify) : []).reduce((n, v) => n + v.bad.length, 0) + (r.status ? r.status.bad : 0);
+  const read = (r.verify ? [].concat(r.verify) : []).reduce((n, v) => n + v.read, 0);
+  const cells = (r.verify ? [].concat(r.verify) : []).flatMap((v) => Object.values(v.cells)).filter((x) => x !== 'ok').length;
+  return `${read} read, ${bad} bad, ${cells} cells wrong${r.error ? `, error: ${r.error}` : ''}`;
+};
+
+if (d.q6) {
+  const one = d.q6.runs.filter((r) => r.cfg.pages === 1);
+  const many = d.q6.runs.filter((r) => r.cfg.pages > 1);
+  p('### 6. The workload in a tab\'s own worker (ms, median / p95)');
+  p();
+  table(
+    ['store', 'commit', 'import', 'publish', 'commits/s', 'MiB/s', 'preload MiB/s', 'on disk, MB of logical MB', 'checks'],
+    one.map((r) => [lbl(r.cfg), mm(r.commits && r.commits.commitUs), mm(r.commits && r.commits.importUs), mm(r.commits && r.commits.publishUs), r.commits ? Math.round(r.commits.commitsPerSecond) : '', r.commits ? r.commits.mibPerSecond.toFixed(1) : '', r.preload ? r.preload.mibPerSecond.toFixed(1) : '', diskCell(r), checks(r)]),
+  );
+  table(
+    ['store', 'get 1-8 KiB', 'get 64 KiB', '16 gets at once', '16 at once, cold', 'get during an import', 'that import', 'get answered first'],
+    one.map((r) => [
+      lbl(r.cfg),
+      mm(r.gets && r.gets.smallUs),
+      mm(r.gets && r.gets.largeUs),
+      mm(r.batches && r.batches[0].us),
+      r.batches && r.batches[1] ? mm(r.batches[1].us) : '',
+      mm(r.contend && r.contend.getDuringImportUs),
+      mm(r.contend && r.contend.importUs),
+      r.contend ? `${r.contend.readAnsweredBeforeImport} of ${r.contend.n}` : '',
+    ]),
+  );
+  const rows = [];
+  for (const r of one) {
+    if (!r.chains) continue;
+    const groups = {};
+    for (const c of r.chains) (groups[`${c.mode}${c.cold ? ', cold' : ''}`] = groups[`${c.mode}${c.cold ? ', cold' : ''}`] || {})[c.depth] = c;
+    for (const [g, byDepth] of Object.entries(groups)) rows.push([lbl(r.cfg), g, ...[1, 4, 8].map((k) => mm(byDepth[k] && byDepth[k].us)), byDepth[8] ? ms(byDepth[8].meanUs) : '']);
+  }
+  table(['store', 'chain read', 'depth 1', 'depth 4', 'depth 8', 'depth 8 mean'], rows);
+  if (many.length) {
+    p('Three tabs at once, each its own worker running the mixed loop (a commit, chain reads of depth 1, 4, 8 and one random, a batch of 16):');
+    p();
+    table(
+      ['store', 'commits/s, all tabs', 'commit, per tab', 'chain 1', 'chain 8', 'batch 16', 'on disk', 'checks'],
+      many.map((r) => [
+        lbl(r.cfg),
+        r.mixed ? Math.round(r.mixed.reduce((a, m) => a + m.commitsPerSecond, 0)) : '',
+        r.mixed ? r.mixed.map((m) => mm(m.commit)).join('; ') : '',
+        r.mixed ? r.mixed.map((m) => ms(m.chain1.median)).join('; ') : '',
+        r.mixed ? r.mixed.map((m) => ms(m.chain8.median)).join('; ') : '',
+        r.mixed ? r.mixed.map((m) => ms(m.batch.median)).join('; ') : '',
+        diskCell(r),
+        checks(r),
+      ]),
+    );
+  }
+}
+
+if (d.q7) {
+  const one = d.q7.runs.filter((r) => r.cfg.pages === 1);
+  const many = d.q7.runs.filter((r) => r.cfg.pages > 1);
+  p('### 7. Dialog in the shared worker (ms, median / p95, timed in the tab)');
+  p();
+  if (one[0] && one[0].swEnv) p(`Shared worker: crossOriginIsolated ${one[0].swEnv.crossOriginIsolated}, timer step ${one[0].swEnv.timerStepUs} us, so "inside" numbers are coarse.`);
+  p();
+  const drows = [];
+  for (const r of one) {
+    for (const [mode, arr] of Object.entries(r.drive || {})) {
+      const x = arr[0];
+      drows.push([lbl(r.cfg), mode, ms(r.echo && r.echo.median), mm(x.lat.commit), mm(x.lat.chain1), mm(x.lat.chain4), mm(x.lat.chain8), mm(x.lat.batch), Math.round(x.lat.commit.n / x.seconds), x.errors]);
+    }
+  }
+  table(['store', 'chain read', 'echo', 'commit', 'chain 1', 'chain 4', 'chain 8', 'batch 16', 'commits/s', 'errors'], drows);
+  const irows = [];
+  for (const r of one) {
+    if (!r.inner) continue;
+    const ch = {};
+    for (const c of r.inner.chains) ch[`${c.mode}${c.depth}`] = c;
+    irows.push([lbl(r.cfg), mm(r.inner.commits.commitUs), ms(r.inner.commits.commitUs.mean), Math.round(r.inner.commits.commitsPerSecond), ...['hop1', 'hop4', 'hop8', 'walk1', 'walk4', 'walk8'].map((k) => (ch[k] ? ms(ch[k].meanUs) : ''))]);
+  }
+  p('Inside the shared worker, one operation at a time (commit median / p95 and mean; chain means, from 100 us steps):');
+  p();
+  table(['store', 'commit', 'commit mean', 'commits/s', 'hop 1', 'hop 4', 'hop 8', 'walk 1', 'walk 4', 'walk 8'], irows);
+  const mrows = [];
+  for (const r of many) {
+    for (const [mode, arr] of Object.entries(r.drive || {})) {
+      const total = arr.reduce((a, x) => a + x.lat.commit.n / x.seconds, 0);
+      mrows.push([lbl(r.cfg), mode, Math.round(total), arr.map((x) => ms(x.lat.commit.median)).join('; '), arr.map((x) => ms(x.lat.chain1.median)).join('; '), arr.map((x) => ms(x.lat.chain8.median)).join('; '), arr.map((x) => ms(x.lat.batch.median)).join('; '), arr.reduce((a, x) => a + x.errors, 0)]);
+    }
+  }
+  p('Three tabs driving the shared worker at once (per tab: commit, chain 1, chain 8, batch medians):');
+  p();
+  table(['store', 'chain read', 'commits/s, all tabs', 'commit', 'chain 1', 'chain 8', 'batch 16', 'errors'], mrows);
+  table(['store', 'tabs', 'on disk, MB of logical MB', 'checks'], d.q7.runs.map((r) => [lbl(r.cfg), r.cfg.pages, diskCell(r), checks(r)]));
+}
+
+if (d.q8) {
+  p('### 8. Failover of the owner (ms after the runner closed, crashed or terminated it)');
+  p();
+  table(
+    ['standby', 'owner goes by', 'flush', 'detected', 'new owner: script', 'lock', 'open (tries)', 'recovered (records, MB, scan ms)', 'ready', 'first served', 'longest gap per tab', 'resent / answered twice / errors', 'checks'],
+    d.q8.runs.map((r) => {
+      const f8 = r.failover || {};
+      const o = f8.owner || {};
+      const rec = o.recovery || {};
+      return [
+        r.cfg.mode,
+        r.cfg.kill,
+        r.cfg.flush ? 'yes' : 'no',
+        f8.detectedMs !== null && f8.detectedMs !== undefined ? f(f8.detectedMs) : '',
+        r.cfg.mode === 'standby' ? 'waiting' : f(o.scriptStartedMs),
+        f(o.lockedMs),
+        `${f(o.openedMs)} (${o.openAttempts})`,
+        `${f(o.recoveredMs)} (${rec.records}, ${rec.logEnd ? mb(rec.logEnd) : ''}, ${f(rec.ms)})`,
+        f(f8.readyMs),
+        f(f8.firstServedMs),
+        (f8.clientGapMs || []).map(f).join('; '),
+        r.link ? `${r.link.resent} / ${r.link.unexpectedAnswers} / ${r.link.errors + (r.drive || []).reduce((a, x) => a + x.errors, 0)}` : '',
+        checks(r),
+      ];
+    }),
+  );
+}
+
+if (d.q9) {
+  const runs = d.q9.runs;
+  const base = runs.find((r) => r.cfg.design === 'idb' && (!r.cfg.ratio || r.cfg.ratio === 1));
+  const disk = (r) => (r.disk ? r.disk.indexedDB + r.disk.fileSystem : NaN);
+  const ch = (r, mode, depth) => r.chains && r.chains.find((c) => c.mode === mode && c.depth === depth && !c.cold);
+  const best = (r, depth) => ch(r, 'walk', depth) || ch(r, 'hop', depth);
+  const x = (a, b) => (a && b ? (a / b).toFixed(2) : '');
+  p('### 9. Format against medium: one written dataset, today\'s layout = 1');
+  p();
+  p(`Today's layout (dialog's IndexedDB records, raw blocks): ${mb(disk(base))} MB on disk for ${mb(base.logicalBytes)} MB of blocks; estimate() ${mb(base.estimate.usage)} MB.`);
+  p();
+  table(
+    ['format', 'medium', 'on disk MB', 'estimate MB', 'size x', 'commit p50 / p95 ms', 'x p50 / p95', 'chain 8 p50 / p95 ms', 'x p50 / p95', 'get 1-8 KiB p50 / p95', 'smaller and not slower'],
+    runs.map((r) => {
+      const c = r.commits ? r.commits.commitUs : null;
+      const b = best(r, 8);
+      const bb = best(base, 8);
+      const sx = disk(r) / disk(base);
+      const ok =
+        c && b && sx <= 0.8 && c.median <= 1.1 * base.commits.commitUs.median && c.p95 <= 1.1 * base.commits.commitUs.p95 && b.us.median <= 1.1 * bb.us.median && b.us.p95 <= 1.1 * bb.us.p95;
+      return [
+        r.cfg.ratio && r.cfg.ratio < 1 ? `1/${Math.round(1 / r.cfg.ratio)}` : 'raw',
+        `${r.cfg.design}${b && b.mode === 'walk' ? ' (walk)' : ''}`,
+        mb(disk(r)),
+        r.estimate ? mb(r.estimate.usage) : '',
+        sx.toFixed(2),
+        mm(c),
+        c ? `${x(c.median, base.commits.commitUs.median)} / ${x(c.p95, base.commits.commitUs.p95)}` : '',
+        mm(b && b.us),
+        b ? `${x(b.us.median, bb.us.median)} / ${x(b.us.p95, bb.us.p95)}` : '',
+        mm(r.gets && r.gets.smallUs),
+        ok ? 'yes' : 'no',
+      ];
+    }),
+  );
+  table(['format', 'medium', 'chain 8 per hop p50 / p95', 'batch 16 p50 / p95', 'get during import', 'checks'], runs.map((r) => [r.cfg.ratio && r.cfg.ratio < 1 ? `1/${Math.round(1 / r.cfg.ratio)}` : 'raw', r.cfg.design, mm(ch(r, 'hop', 8) && ch(r, 'hop', 8).us), mm(r.batches && r.batches[0].us), mm(r.contend && r.contend.getDuringImportUs), checks(r)]));
+}
+
 console.log(out.join('\n'));
