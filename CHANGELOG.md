@@ -16,6 +16,8 @@ says how to cut a release.
 
 ### A provisioned wasm test is given its address when it runs
 
+[#774](https://github.com/dialog-db/dialog-db/pull/774).
+
 A test that takes a provisioned address (`#[dialog_common::test]` with a
 parameter) runs under `web-integration-tests` as a native test that starts
 the service and a wasm test that uses it. The wasm test read the address
