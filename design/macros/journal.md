@@ -166,3 +166,16 @@ Not examined yet. They are columns, not recommendations.
 - `Value::Record` is referenced over its bytes today, so a record value's own name does follow its layout. A form's name has to be the form's reference, kept beside the bytes, not taken from them.
 
 **Decided.** By the maintainer: go with the advice, versioned; names are merkle references. By the agent, open until something real is stored: a list and a map are referenced under the generic types, an application under `form:`. Built as `rust/dialog-notation/src/data.rs`.
+
+## 2026-11-11, Designing: what the parts of a form are
+
+**Asked.** Irakli asked what an atom is beside a `Value`, what `{k v}` and `{label: v}` differ in, and what an application is as data, since EDN, JSON and IPLD have none. Then, by voice: the part with no label is short for `of:`, and `:` is a label whose name is empty. As provocations: `( )` as a set, its head under `operator:` and the part with no label under `operand:`, so everything has a label; or `( )` as a tuple, which he called the more honest framing. He asked for it to be tested.
+
+**Learned.**
+
+- An atom is a `Value`. `{k v}` and `{label: v}` are one map written two ways. The application type was the reader's shape, not data anything else has.
+- #728's design says every definition has exactly one primary, written without a label, which may also be written `of:`. That holds for calls. It does not hold for `rule`, `when`, `unless`, `query`, `all`, `syntax` and `concept`, there or here.
+- Counted: 113 of 151 applications as written have at most one part without a label. Of the 38 with several, 27 are runs of forms that say what they are, and 11 are `syntax` and `concept`, whose two parts have different jobs.
+- The prelude's command row uses `of:` for what the command is about, beside the entity. Under #728 that is `of:` twice.
+
+**Decided.** Not decided between set and tuple. The count is in [design-forms.md](design-forms.md).

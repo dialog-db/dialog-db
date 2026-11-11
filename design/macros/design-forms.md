@@ -164,6 +164,30 @@ What this changes in the advice below: an application is a data type of its own,
 
 **A limit.** `Value::Record` is referenced over its bytes today (`RECORD.reference_of`, `rust/dialog-corpus/src/identity.rs`). So a form kept as a record has two names: its own, which holds across layouts, and the record value's, which does not. Whatever points at a form has to point at its `form:` entity. Making a record's own name structural is #748's.
 
+## Tested: what the parts of a form are
+
+Two readings of `( )` were on the table on 2026-11-11, both Irakli's. Counted over every application in `prelude.clj` and the two examples, 151 as written and the 70 of the kernel rules they expand to (`cargo run -p dialog-notation --example shapes -- <files>`):
+
+| parts without a label | as written | kernel | which heads |
+|---|---|---|---|
+| none or one | 113 | 64 | every read, formula, command, `assert!`, `report`, `expand` |
+| several | 38 | 6 | `rule` 15, `when` 7, `unless` 2, `query` 2, `all` 1; `syntax` 8, `concept` 3 |
+| a run, `p ...` | 12 | 0 | `when`, `unless`, `rule`, `query`, `all`, `concept` |
+
+| | a set of labelled values: the head is `operator:`, the part with no label `operand:` | a tuple: parts in order, the labelled ones a map at its end |
+|---|---|---|
+| the 113 with none or one | fit | fit |
+| `rule`, `when`, `unless`, `query`, `all`: 27 | fit only if `operand:` may be said several times, which makes a form #748's record, pairs and not a map | fit; the order of premises is in the data, though it means nothing |
+| `(syntax pattern template)`, `(concept signature body)`: 11 | 🔴 two operands with different jobs: one of them needs a label the notation does not have | 🟢 fit, by position |
+| `p ...` | "every other member", as `...?rest` is every other label | 🟢 what it is now |
+| one call written two ways, `(todo ?t state: :open)` and `(todo state: :open of: ?t)` | 🟢 one form | two, unless the reader puts `of:` first |
+| what data it is | a set of pairs; only #748 has it, and it is not built | a list and a map, which EDN, JSON and IPLD all have |
+| forms that have to be written differently | 11, and a new label | 0 |
+
+Found on the way: where the part with no label may also be written `of:` (#728's design), the prelude's own command row says `of:` twice, `(command.add.todo _ of: ?t …)`: 3 forms as written, 17 in the kernel. The row's field for what the command is about needs another name.
+
+Not decided. The agent's reading of the count: the tuple, with the labelled parts a map at its end.
+
 ## What to store, and how
 
 Irakli, 2026-11-11: a record is a constrained map, its keys attributes, as an integer is a constrained number. His hope: a label is an attribute by default, of no domain or a fixed one, read `last`, so an attribute is a key like any other, as Clojure's `:name` and `:ns/name` are both keywords. He asked for advice on what to store.
