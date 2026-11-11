@@ -59,3 +59,6 @@ Backtracking moves a topic to an earlier phase and says so in its journal.
   **Building.** The tree talks in nodes through capabilities it performs on
   the environment; caching, decoding and storage form belong to providers.
   The [plan](tree-node-reads/plan.md) is for whoever builds it.
+- [Macros as rules](macros.md): **Diagnosing.** The notation's forms get
+  their meaning in a Rust parser and analyzer. The title is still the
+  feature; the problem it answers is not stated yet.
