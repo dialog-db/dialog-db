@@ -342,6 +342,8 @@ A remote call, Unison's `fork` and `await`, is a layer on top: a request sent, a
 
 ## Views, events and routes
 
+**Proposed.** [macros](macros.md) has a different proposal: a view is a key on its concept's entity, installed by a `view` macro, and displaying is a command the view handles. What follows is the earlier sketch.
+
 **Proposed.** `view`, `event` and `route` are top-level forms like `rule` and `concept`: installed by a transaction, and named by their first argument.
 
 A view attaches templates to a concept by facet:

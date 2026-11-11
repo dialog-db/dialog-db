@@ -710,6 +710,16 @@ xychart-beta
 
 **Decision.** Taken. Open: whether a type filters before a pick elects or after, what retract takes for a keyed concept, and what two concurrent blind writes leave.
 
+## 2026-11-10 — Forms as commands, macros as rules
+
+**Question.** Can `concept`, `view` and `query` be written in the notation, as macros that write into the database, so the language has one kind of top-level form?
+
+**Method.** Picked up the macro system in the tonk journal (2026-05-16, 2026-05-21) and wrote the kernel and the prelude macros out by hand in [macros](macros.md), then expanded the to-do sketch through them. Not a measurement.
+
+**Results.** Every top-level form is issued as `(expand form)`; a macro is a rule that matches the syntax and asserts the facts describing it. `concept`, `view` and `query` are prelude rules; `rule` is the one built-in form, since it installs the first macro. A query becomes schema-driven, because a macro that is a rule reads the concept facts. A view is a key on its concept's entity, and displaying is a command the view handles. The hard part is assembling one form from a macro's rows, which a query compiled to a descriptor needs once.
+
+**Decision.** Proposed, for the maintainer. Next: H2, whether agents learn the language from a space's macro facts.
+
 ## How to reproduce
 
 1. Take a variant's prompt from its round's results file and save it as `<variant>.txt`.
