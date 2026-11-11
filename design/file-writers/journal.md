@@ -403,3 +403,20 @@ can try an extent's lock before truncating past it.
 **Decided.** Whole blocks in extents, integration converting them, records
 moving left. Open: how a reader keeps integration from moving or reusing
 bytes it is still reading.
+
+**Asked.** Shared locks per extent, or epochs? Irakli: that sounds good.
+And: integration comes out smaller by its nature, since it tokenizes; if it
+did not, there would be no point integrating, the block being already at
+its smallest. So integrating a block can be assumed to free the space the
+block took.
+
+**Learned.** It holds by construction: integration keeps a block whole when
+its compact form is not smaller, so it never writes more than a block took.
+What the size does not settle is when the freed space may be written over:
+only once the integration that converted the block is durable, since until
+then the old bytes are the only copy the durable index names.
+
+**Decided.** Readers hold a shared byte-range lock on each extent they read;
+an integrator frees an extent only once it can take that lock exclusively,
+without waiting. Integrating a block frees its space, once its integration
+is durable.

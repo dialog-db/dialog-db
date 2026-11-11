@@ -29,13 +29,17 @@ yet integrated begin, and integration works from there.
 
 What keeps it from losing or corrupting data:
 
-1. **Output only into space already free.** The compact form is written
-   into space an earlier integration freed and made durable (past a sync
-   point), never over an extent's bytes it is still converting: a crash
-   between overwriting them and the compact copy becoming durable would
-   lose both. That the compact form comes out smaller holds of the file as
-   a whole (66× at tonk-team), not of every step, so integration does not
-   rely on its write position staying behind its read position.
+1. **A block frees its space, once its integration is durable.**
+   Integration writes no block's compact form larger than the block: one
+   that would not be smaller is kept whole, as the file already keeps whole
+   a node whose frame does not pay. So integrating a block frees the space
+   it took, or breaks even (Irakli). That space may be written over only
+   after the integration that converted it reaches a sync point: until
+   then, the old bytes are the only copy the durable index names, and a
+   crash after overwriting them would reopen to an index naming other
+   bytes. So the compact form goes into space already free and durable,
+   never over a block still being converted. Index entries go to the
+   index's own pages, reused after a sync point as today.
 2. **A spill moved left:** the new copy written, synced, then the slot
    written under the cell's lock; the old place is free once no reader can
    hold its offset.
@@ -47,5 +51,7 @@ What keeps it from losing or corrupting data:
    connection's close). While the file is open, freed space is reused
    instead.
 
-Open: how a reader keeps integration from moving or reusing bytes it is
-still reading (shared byte-range locks per extent, or epochs).
+Decided: a reader holds a shared byte-range lock on each extent it reads
+from, and an integrator frees an extent only once it can take that lock
+exclusively without waiting; the operating system releases a dead reader's
+locks.
