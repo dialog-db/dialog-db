@@ -25,7 +25,10 @@
 | a recursive group of rules is evaluated bottom-up in full; a non-recursive rule gets the caller's bindings | fact | `rust/dialog-query/src/concept/query/fixpoint.rs`, `adornment.rs` | holds |
 | a formula has fixed cells and no environment; a resolver gets the evaluation scope and may read content-addressed storage only | fact | `rust/dialog-query/src/formula.rs`, `resolver.rs` | holds |
 | a query can run at one revision | fact | `Snapshot`, `rust/dialog-repository/src/repository/snapshot.rs` | holds |
-| the core forms expand and run as written | fact | `design/macros/model`, `python3 -I model.py . todo.clj` and `checks.py` | holds in the model; nothing is built in dialog |
+| the core forms expand and run as written | fact | `design/macros/model`; `rust/dialog-notation/tests/notation.rs` on a real branch | holds, except a rule that issues a command |
+| the kernel compiles to descriptors Dialog-DB already has | fact | `rust/dialog-notation/src/compile.rs`, [poc.md](poc.md) | holds for reads, writes, the three rule kinds and queries; four refusals listed |
+| a rule about syntax can be a stored rule Dialog-DB evaluates | hypothesis | confirmed by `expand` as a premise over a stored form, with the walker asking the branch; refuted if a form cannot be a value a premise takes apart | open; the crate holds syntax in memory |
+| a rule and the command it reads can share a document | fact | `it_fires_a_rule_in_the_document_that_installs_it` | holds |
 | what runs after expansion costs what it costs today | hypothesis | a perf scenario over a document expanded cold and warm, with its bar set first | open; cold expansion is not measured |
 | nothing in dialog may depend on conduct or on a wasm runtime | opinion | Irakli, 2026-11-10 | decides |
 | the notation should be minimal and defined in itself, as McCarthy's evaluator is | opinion | Irakli, 2026-11-10 | - |

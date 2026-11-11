@@ -4,8 +4,8 @@
 
 |  | Understanding | Activity |
 |---|---|---|
-| **Status** | The kernel is small and the core forms are about 90 lines over it; a model runs them on the to-do document. Eight findings say what the kernel still has to settle ([kernel.md](kernel.md)). | **Designing.** Direction decided by the maintainer. The core forms are defined; the kernel is not built. |
-| **Agenda** | What a write with `_` means. Whether a pick wraps a term. What a plain `assert` head on a command means: this round or the next. How a rule says why a form is refused. How `:id` takes open labels. | Decide the findings that change the kernel, then build it: reader, `match` and `fill`, the walker, `compile` to today's descriptors. |
+| **Status** | The kernel is small and the core forms are 65 lines over it. They run on a real branch through `rust/dialog-notation`, which compiles the kernel to descriptors Dialog-DB has ([poc.md](poc.md)). Syntax is held by the crate, not stored. | **Designing.** Direction decided by the maintainer. The kernel is built as a proof of concept; storing syntax is not. |
+| **Agenda** | Whether a form can be a value a premise takes apart, so syntax is stored. Whether `report` takes a template. Whether a write through a concept may leave fields out. What a read with no pick reads. What makes an entity from a rule's bindings. What expansion costs. | Decide the open findings of [kernel.md](kernel.md) and [poc.md](poc.md), then design forms as values. |
 
 ## Candidate problems
 
@@ -78,3 +78,19 @@ Not examined yet. They are columns, not recommendations.
 - A diagnostic is something a rule derives about a form.
 
 **Decided.** Syntax is a rule with `expand` and `syntax`. A top-level write is kernel. A misspelled command is a warning. Not decided: whether `concept` stays a word of its own, since it only shortens a rule.
+
+## 2026-11-11, Designing: the kernel on Dialog-DB
+
+**Asked.** Irakli asked for a proof of concept in dialog itself: concepts, rules and queries defined in the notation and evaluated. He asked that domains be told from other names, since syntax needs them. He corrected a concept the agent wrote with a check in its body: a concept maps facts to itself and back, and a check has no inverse. He then said a concept may read several entities, a backlink being one, and a rule may have several heads of different kinds; what dialog lacks for these it can be given.
+
+**Learned.**
+
+- The kernel compiles to descriptors Dialog-DB already has, and the to-do, the counter, a backlink, a recursive relation and a query of several premises run on a real branch. See [poc.md](poc.md).
+- A rule and the command it reads can share a document: the rule fires in the transaction that installs it.
+- Dialog-DB has no formula that makes an entity, so a rule cannot issue a command yet.
+- `unless` takes one proposition whose own variables are blank. A formula inside it, a concept spanning entities under it, and a variable repeated inside it are each out of reach.
+- The rules about syntax are held and matched by the crate, not stored. That part of the direction is not shown.
+- A report comes back in relations, not in the words the query used.
+- Two commands in one document share a round. Where both write one `last` field, the cell holds both claims.
+
+**Decided.** Nothing new. The proof of concept is evidence for the kernel table, not a decision about it. Open for the maintainer: whether `report` takes a template; whether a write through a concept may leave fields out; what a read with no pick reads.

@@ -1596,6 +1596,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "dialog-notation"
+version = "0.4.0-rc.7"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "dialog-common",
+ "dialog-corpus",
+ "dialog-peer",
+ "dialog-query",
+ "dialog-repository",
+ "dialog-storage",
+ "futures-util",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "wasm-bindgen-test",
+]
+
+[[package]]
 name = "dialog-number"
 version = "0.4.0-rc.7"
 dependencies = [
