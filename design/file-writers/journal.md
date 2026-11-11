@@ -830,3 +830,17 @@ sync point now only tries the turn; when another holds it, the next commit
 in the turn reads the durable slot and takes up what it freed.
 `a_sync_point_due_while_another_holds_the_turn_does_not_wait` pins it,
 and fails after 20 s with the wait put back.
+
+**An extent retired twice.** `processes_append_to_one_file_at_once`
+failed once on macOS: a block a writer appended, the writer closed
+cleanly, did not read back. Opening with no boot id (as on macOS, which
+reads the file whole on every first open and so changes the timing)
+reproduced it on Linux in 2 to 3 of 300 runs. The newest slot listed
+extents free twice, and one both free and in use: two writers could claim
+it, and one wrote over the other's blocks. A fold gathers an abandoned
+extent from the snapshot it has, which can be older than a fold another
+process made of the same extent and retired; the second fold retired it
+again. A fold now retires only the extents the newest slot still lists in
+the epoch they were read in. Every slot a test writes is checked for an
+extent listed twice: with the old retire put back, 216 of 240 runs trip
+it; with the fix, 320 runs pass.

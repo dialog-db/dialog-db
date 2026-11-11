@@ -570,6 +570,9 @@ struct Gathered {
     ours: Vec<Owned>,
     abandoned: Vec<u64>,
     records: Vec<u64>,
+    /// Each record's epoch as it was read, to retire it only if the newest
+    /// slot still lists it in that epoch.
+    epochs: Vec<Option<u64>>,
     appends: Vec<(String, Vec<Buffer>)>,
 }
 
@@ -2169,10 +2172,20 @@ impl FileArchive {
             .map(|owned| owned.record)
             .chain(abandoned.iter().copied())
             .collect();
+        let epochs = ours
+            .iter()
+            .map(|owned| Some(owned.epoch))
+            .chain(
+                abandoned
+                    .iter()
+                    .map(|&record| extent::epoch(snapshot.bytes(), record)),
+            )
+            .collect();
         let mut gathered = Gathered {
             ours,
             abandoned,
             records,
+            epochs,
             appends: Vec::new(),
         };
         if gathered.records.is_empty() {
@@ -2249,13 +2262,31 @@ impl FileArchive {
         if self.inner.stop_before_retire.load(Ordering::Relaxed) {
             return Err(invalid("stopped before retiring the extents, for a test"));
         }
-        // Retire the extents: their blocks are frames now.
-        let records = &gathered.records;
+        // Retire the extents: their blocks are frames now. Only those the
+        // newest slot still lists in the epoch they were read in: the
+        // snapshot an abandoned one was gathered from can be older than a
+        // fold another process made of it since, which retired it already
+        // (and a sync point may have freed it, and a writer claimed it
+        // again). Retired twice, it would be listed free twice, and two
+        // writers could claim it at once.
         let snapshot = self.newest_in_turn(turn)?;
+        let records: Vec<u64> = gathered
+            .records
+            .iter()
+            .zip(&gathered.epochs)
+            .filter(|(record, epoch)| {
+                snapshot.slot.extents.contains(record)
+                    && extent::epoch(snapshot.bytes(), **record) == **epoch
+            })
+            .map(|(record, _)| *record)
+            .collect();
+        if records.is_empty() {
+            return Ok(());
+        }
         let mut slot = snapshot.slot.clone();
         slot.sequence += 1;
         slot.extents.retain(|record| !records.contains(record));
-        slot.extents_pending.extend_from_slice(records);
+        slot.extents_pending.extend_from_slice(&records);
         slot.boot = boot();
         slot.write(&self.inner.file)?;
         self.publish(self::snapshot(

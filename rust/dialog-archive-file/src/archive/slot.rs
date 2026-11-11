@@ -253,6 +253,8 @@ impl Slot {
     /// Writes this slot over the older rolling slot: the one its sequence
     /// number picks.
     pub fn write(&self, file: &File) -> io::Result<()> {
+        #[cfg(test)]
+        self.check_extents();
         write_at(
             file,
             MAGIC.len() as u64 + (self.sequence % 2) * SLOT,
@@ -260,8 +262,32 @@ impl Slot {
         )
     }
 
+    /// In tests, that no extent is listed twice, in one list or across
+    /// them: one listed free twice is claimed by two writers at once.
+    #[cfg(test)]
+    fn check_extents(&self) {
+        let mut seen = std::collections::HashSet::new();
+        for record in self
+            .extents
+            .iter()
+            .chain(&self.extents_free)
+            .chain(&self.extents_pending)
+        {
+            assert!(
+                seen.insert(*record),
+                "extent {record} listed twice in slot {}: in use {:?}, free {:?}, pending {:?}",
+                self.sequence,
+                self.extents,
+                self.extents_free,
+                self.extents_pending
+            );
+        }
+    }
+
     /// Writes this slot as the durable one.
     pub fn write_durable(&self, file: &File) -> io::Result<()> {
+        #[cfg(test)]
+        self.check_extents();
         write_at(file, DURABLE, &self.encode()?)
     }
 
