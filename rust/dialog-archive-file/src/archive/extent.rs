@@ -85,6 +85,11 @@ impl Owned {
         })
     }
 
+    /// Where the extent's record ends.
+    pub fn end(&self) -> u64 {
+        self.end
+    }
+
     /// Whether `bytes` more bytes of frames fit.
     pub fn fits(&self, bytes: u64) -> bool {
         self.start + self.used + bytes <= self.end

@@ -307,6 +307,10 @@ struct Inner {
     /// publishes them: for tests that read while an append is under way.
     #[cfg(test)]
     before_publish: Mutex<Option<Box<dyn FnMut() + Send>>>,
+    /// Set by a test to close as a process that died would: without
+    /// folding in or cutting anything.
+    #[cfg(test)]
+    dies: std::sync::atomic::AtomicBool,
 }
 
 /// What a [`FileArchive`] holds, and what holding it costs.
@@ -875,6 +879,10 @@ impl FileArchive {
         let current = recover(&file)
             .and_then(|slot| snapshot(&file, slot, None))
             .map_err(|error| storage_error(&path, error))?;
+        // Present while open: the last process to close is the one that
+        // can take this byte exclusive.
+        locks::lock(&file, locks::PRESENT, false, true)
+            .map_err(|error| storage_error(&path, error))?;
         let inner = Arc::new(Inner {
             known: AtomicU64::new(current.slot.end),
             current: ArcSwap::from_pointee(current),
@@ -893,6 +901,8 @@ impl FileArchive {
             cell_locks: Mutex::new(HashMap::new()),
             #[cfg(test)]
             before_publish: Mutex::new(None),
+            #[cfg(test)]
+            dies: std::sync::atomic::AtomicBool::new(false),
         });
         open.insert(key, Arc::downgrade(&inner));
         Ok(Self { inner })
@@ -1470,6 +1480,18 @@ impl FileArchive {
     /// an extent's blocks are appended, the extent is retired; a sync point
     /// frees it to be claimed again.
     fn integrate(&self, turn: &Turn<'_>, snapshot: Arc<Snapshot>) -> io::Result<()> {
+        self.integrate_some(turn, snapshot, false)
+    }
+
+    /// Folds in what extents hold, as [`integrate`](Self::integrate) does;
+    /// with `all`, this process's empty extents are retired too, as it is
+    /// closing.
+    fn integrate_some(
+        &self,
+        turn: &Turn<'_>,
+        snapshot: Arc<Snapshot>,
+        all: bool,
+    ) -> io::Result<()> {
         if snapshot.slot.extents.is_empty() {
             return Ok(());
         }
@@ -1481,7 +1503,7 @@ impl FileArchive {
             for &record in &snapshot.slot.extents {
                 if let Some(at) = extents.idle.iter().position(|owned| owned.record == record) {
                     // An empty one stays ready for the next writer.
-                    if extents.idle[at].used > 0 {
+                    if all || extents.idle[at].used > 0 {
                         ours.push(extents.idle.swap_remove(at));
                     }
                 } else if !extents.busy.contains(&record)
@@ -2143,15 +2165,72 @@ fn snapshot_after_claim(
 /// does, as the extent's owner is gone.
 impl Drop for FileArchive {
     fn drop(&mut self) {
-        if Arc::strong_count(&self.inner) != 1 || self.inner.extents.lock().idle.is_empty() {
+        if Arc::strong_count(&self.inner) != 1 {
             return;
         }
-        if let Ok(turn) = self.turn()
-            && let Ok(snapshot) = self.newest_in_turn(&turn)
-        {
-            let _ = self.integrate(&turn, snapshot);
+        #[cfg(test)]
+        if self.inner.dies.load(Ordering::Relaxed) {
+            return;
+        }
+        let Ok(turn) = self.turn() else {
+            return;
+        };
+        if let Ok(snapshot) = self.newest_in_turn(&turn) {
+            let _ = self.integrate_some(&turn, snapshot, true);
+        }
+        // The last process to close cuts free extents off the file's end.
+        // Its shared hold on the present byte is let go first: a lock is
+        // not upgraded in place on every platform.
+        let file = &self.inner.file;
+        let _ = locks::unlock(file, locks::PRESENT);
+        if let Ok(true) = locks::lock(file, locks::PRESENT, true, false) {
+            let _ = self.truncate_free_tail(&turn);
+            let _ = locks::unlock(file, locks::PRESENT);
         }
     }
+}
+
+impl FileArchive {
+    /// Cuts the free extents that end the file off it, in the writer's
+    /// turn, once a sync point has made them free: what another process
+    /// could still read is past no one's reach, as no other process has
+    /// the file open. The slot that names the shorter end is made durable
+    /// before the cut and after it.
+    fn truncate_free_tail(&self, turn: &Turn<'_>) -> io::Result<()> {
+        let file = &self.inner.file;
+        let snapshot = self.newest_in_turn(turn)?;
+        let mut slot = self.sync_point(snapshot.slot.clone())?;
+        self.publish(snapshot_of(file, slot.clone(), &self.current())?);
+        let bytes = self.current();
+        let mut cut = slot.end;
+        loop {
+            let tail = slot.extents_free.iter().copied().find(|&record| {
+                Owned::of(bytes.bytes(), record).is_ok_and(|owned| owned.end() == cut)
+            });
+            let Some(record) = tail else {
+                break;
+            };
+            slot.extents_free.retain(|free| *free != record);
+            cut = record;
+        }
+        if cut == slot.end {
+            return Ok(());
+        }
+        slot.sequence += 1;
+        slot.end = cut;
+        slot.boot = boot();
+        slot.write(file)?;
+        file.set_len(cut)?;
+        let slot = self.sync_point(slot)?;
+        self.inner.known.store(slot.end, Ordering::Release);
+        self.publish(snapshot_of(file, slot, &self.current())?);
+        Ok(())
+    }
+}
+
+/// A snapshot of `slot`, sharing `previous`'s mapping when it reaches.
+fn snapshot_of(file: &File, slot: Slot, previous: &Snapshot) -> io::Result<Snapshot> {
+    snapshot(file, slot, Some(previous))
 }
 
 /// The nodes an append frames before any is in the file: their rows,
@@ -2281,6 +2360,37 @@ mod tests {
         Ok(())
     }
 
+    /// The last process to close the file cuts the free extents that end
+    /// it: the spare a lone writer kept goes, the file reopens whole, and
+    /// every block reads back.
+    #[test]
+    fn it_cuts_free_extents_off_the_end_at_the_last_close() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("archive");
+        let blocks = [block("one"), block("two")];
+        let with_spare = {
+            let archive = FileArchive::open(&path)?;
+            archive.append("index", &blocks)?;
+            assert_eq!(archive.current().slot.extents.len(), 1, "a spare is kept");
+            std::fs::metadata(&path)?.len()
+        };
+        let closed = std::fs::metadata(&path)?.len();
+        assert!(
+            closed + (1 << 20) <= with_spare,
+            "the spare extent is cut at the last close ({closed} against {with_spare})"
+        );
+        let reopened = FileArchive::open(&path)?;
+        let slot = reopened.current().slot.clone();
+        assert!(slot.extents.is_empty() && slot.extents_free.is_empty());
+        for block in &blocks {
+            assert_eq!(
+                reopened.get("index", block.blake3_hash())?.as_deref(),
+                Some(block.as_ref())
+            );
+        }
+        Ok(())
+    }
+
     /// An extent a writer left before folding it in (its process gone) is
     /// read from where it is after reopening, and folded in by the next
     /// writer to take the turn.
@@ -2293,9 +2403,8 @@ mod tests {
         let mut holder = crate::locks::tests::hold_turn(&path)?;
         let loose = block("left in an extent");
         archive.append("index", std::slice::from_ref(&loose))?;
-        // The process goes without folding it in: its extents are forgotten
-        // as if it had died.
-        archive.inner.extents.lock().idle.clear();
+        // The process goes without folding it in, as if it had died.
+        archive.inner.dies.store(true, Ordering::Relaxed);
         drop(archive);
         drop(holder.stdin.take());
         holder.wait()?;
@@ -2511,6 +2620,8 @@ mod tests {
             archive.append("index", &kept)?;
             let whole = std::fs::metadata(&path)?.len();
             archive.append("index", std::slice::from_ref(&torn))?;
+            // The process dies: it does not close the file.
+            archive.inner.dies.store(true, Ordering::Relaxed);
             whole
         };
         // Cut the last append off in the middle of its block record.
@@ -2548,6 +2659,8 @@ mod tests {
             archive.append("index", std::slice::from_ref(&first))?;
             let boundary = std::fs::metadata(&path)?.len();
             archive.append("index", std::slice::from_ref(&second))?;
+            // The process dies: it does not close the file.
+            archive.inner.dies.store(true, Ordering::Relaxed);
             (boundary, archive.current().slot.sequence)
         };
         // The second append's sequence picks the slot it wrote: flip a byte
@@ -2960,6 +3073,8 @@ mod tests {
         }
         let end = archive.current().slot.end;
         assert!(end > durable.end, "appends came after the sync point");
+        // The power goes: nothing closes the file.
+        archive.inner.dies.store(true, Ordering::Relaxed);
         drop(archive);
 
         // The power loss: the last record's bytes never reached the disk.
@@ -3020,6 +3135,8 @@ mod tests {
             .first()
             .expect("an index page written since the sync point");
         drop(current);
+        // The power goes: nothing closes the file.
+        archive.inner.dies.store(true, Ordering::Relaxed);
         drop(archive);
 
         let file = OpenOptions::new().read(true).write(true).open(&path)?;

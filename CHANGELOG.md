@@ -192,7 +192,9 @@ What this changes for you:
 - The writer's turn is a lock on one byte of the file rather than on the
   whole file, on every platform.
 - `Options::extent` sets how many bytes of blocks an extent holds (1 MiB
-  by default). Each process that writes keeps one extent claimed.
+  by default). Each process that writes keeps one extent claimed while it
+  has the file open; the last process to close the file retires its
+  extents and cuts free extents that end the file off it.
 - The file's format is version 11: a file written by an earlier build of
   `dialog-archive-file` does not open.
 
