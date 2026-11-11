@@ -30,7 +30,7 @@ A run goes on tick by tick while inductive heads produce something, up to a turn
 
 | Term | Spelling |
 |---|---|
-| Variable | `?t`, `?state`. It belongs to the one rule or question it appears in. |
+| Variable | `?t`, `?state`. It belongs to the one rule or question it appears in. `_` matches anything and binds nothing. |
 | Text | `"Buy milk"` |
 | Number | `16`, `0.5` |
 | Keyword | `:done`, `:text`. A keyword is an entity: `:done` is `done:`, with the colon in front so it is not read as a label. Keywords serve where other languages use them: types, picks and the cases of a variant. |
@@ -178,6 +178,8 @@ A pick elects among the live claims of one entity and field. `(pick :last from: 
 - A variable has one pick. To read one field two ways, use two variables.
 - A pick on a variable that only appears as an entity is an error: an entity has no claims to elect.
 - A pick is per cell, not per row: whether a claim survives depends on the others in its cell, so adding a claim can take away a row. A rule that picks from a field it also writes recurses through an election, and is checked as `unless` is.
+
+A pick elects over every candidate for a cell, whether stored or derived by a rule. A derived row counts as the newest fact it consumed, so `:last` over a derived relation works as it does over stored claims.
 
 Writes normally leave one live claim in a cell, so `:all` usually returns one row, and several only after replicas that wrote concurrently merge. Leaving the pick out shows those conflicts; a concept's picks say how they are elected.
 
@@ -399,6 +401,8 @@ Comparing the design with [Bloom](http://bloom-lang.net), Dedalus and LogiQL set
 - Optional parameters. `(option ?x)` in a head read correctly once in six (R2).
 - Whether a query holds several calls answered jointly, and whether questions stay calls or become rules into a relation head.
 - How text spans lines or holds `"`. The sketches write templates as `"""…"""`, which is not part of the notation.
+- How aggregation is spelled. Dialog's deductive rules have a `reduce` clause (`count`, `count-distinct`, `sum`, `min`, `max`, `avg`, grouped by the head fields not reduced; `notes/aggregation.md`); the notation has no form for it.
+- Rows without an entity, such as a set of pairs, and relations without a value, such as a set of entities: every fact needs an entity and a field.
 - Record types: there is no type for a record yet.
 - Concurrent claims under `:last` are ordered by standing and last by the value's hash, so every replica elects alike (#752). A write after them settles them only once [#759](https://github.com/dialog-db/dialog-db/issues/759) lands.
 - Whether a command's parameters are a conduct record type, one field whose value is a record. Dialog's `Record` value is opaque to queries today ([record-value](../../notes/record-value.md)).
