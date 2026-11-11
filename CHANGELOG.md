@@ -116,6 +116,37 @@ read. Read in place, the single-file archive's cold reads match the `fs`
 archive's, where rebuilding made them about 2× slower, and its cached nodes
 take about a third of the memory of cached blocks.
 
+### Writers to one space's file do not wait on one another
+
+[#733](https://github.com/dialog-db/dialog-db/pull/733),
+[design](./design/file-writers.md)
+
+A writer to a `FileArchive` tries the file's turn without waiting. With
+it, it appends as before. Without it, it writes its blocks whole into an
+extent of its own, space it claimed in an earlier turn, and they read back
+at once, in its process and in others. The next writer to get the turn,
+usually the same one after its commit, turns those blocks into frames and
+tokens, and the extent is freed once a sync point makes that durable. A
+writer waits for the turn only to claim an extent when its process had
+none ready; one that holds the turn keeps one ready.
+
+What this changes for you:
+
+- Processes writing one space (separate branches, or the same one) no
+  longer queue behind each other's appends, as they did not on the `fs`
+  store either.
+- The writer's turn is a lock on one byte of the file rather than on the
+  whole file, on every platform.
+- `Options::extent` sets how many bytes of blocks an extent holds (1 MiB
+  by default). Each process that writes keeps one extent claimed.
+- The file's format is version 11: a file written by an earlier build of
+  `dialog-archive-file` does not open.
+
+Why: many processes work on separate branches of one space at once, and on
+main they never wait on one another to write. A file whose every append
+took one turn made them wait, which would rule the file out wherever such
+processes run.
+
 ### A space can keep its blocks in one file
 
 [#733](https://github.com/dialog-db/dialog-db/pull/733),
@@ -1462,6 +1493,11 @@ has a tree to canonicalize even when the link itself wrote nothing.
 
 #### Compatibility and migration
 
+- A `FileArchive` file is format 11; one written by an earlier build of
+  this branch's `dialog-archive-file` (format 10) does not open, and is
+  moved again from the replica it came from with `dialog-migrate`. Nothing
+  else stored or synced changes: blocks, their hashes and what a replica
+  syncs are the same.
 - Nothing stored or synced changes for the corpus rename: keys, node
   encodings, spilled-value references, revisions and the wire format are
   the same bytes, nothing is rewritten on upgrade, and an older release

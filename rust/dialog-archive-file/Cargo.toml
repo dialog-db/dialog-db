@@ -29,6 +29,13 @@ arc-swap = { workspace = true }
 rkyv = { workspace = true }
 zerocopy = { workspace = true }
 
+# Locks on single bytes of the file (the writer's turn, extents' owners).
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_IO"] }
+
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 anyhow = { workspace = true }
 dialog-peer = { workspace = true, features = ["helpers"] }

@@ -31,6 +31,7 @@
 mod archive;
 mod file;
 mod hash;
+mod locks;
 mod node;
 mod resource;
 mod rows;

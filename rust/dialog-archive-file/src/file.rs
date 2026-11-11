@@ -7,16 +7,18 @@
 //! from a torn one: a record whose length runs past the end of the file, or
 //! whose checksum does not match, ends the file there.
 //!
-//! A [pages](Kind::Pages) record is the exception: its pages are the
+//! A [pages](Kind::Pages) record is an exception: its pages are the
 //! index's, written over once no root reaches them, so its checksum holds
-//! only until the first is. Each page carries a checksum of its own.
+//! only until the first is. Each page carries a checksum of its own. An
+//! [extent](Kind::Extent) record is the other: its body is space a writer
+//! fills later, each frame in it a record with a checksum of its own.
 
 use std::fs::File;
 use std::io;
 
 /// The first bytes of every archive file. The last byte is the format
 /// version.
-pub(crate) const MAGIC: &[u8; 8] = b"DIALOGA\x0a";
+pub(crate) const MAGIC: &[u8; 8] = b"DIALOGA\x0b";
 
 /// The bytes of a record before its body.
 pub(crate) const HEADER: u64 = 1 + 4 + 4;
@@ -35,6 +37,17 @@ pub(crate) enum Kind {
     /// padding's length (u16) and the padding, then pages, each on a page
     /// boundary of the file.
     Pages,
+    /// Space claimed by one writer, which appends frames to it without the
+    /// writer's turn (see the archive's `extent` module).
+    Extent,
+}
+
+impl Kind {
+    /// Whether the record's checksum covers its body as it is now: not for
+    /// records whose body is written to after the record is.
+    fn checked(self) -> bool {
+        !matches!(self, Kind::Pages | Kind::Extent)
+    }
 }
 
 impl Kind {
@@ -43,6 +56,7 @@ impl Kind {
             Kind::Tokens => 4,
             Kind::Frame => 5,
             Kind::Pages => 7,
+            Kind::Extent => 8,
         }
     }
 
@@ -51,6 +65,7 @@ impl Kind {
             4 => Some(Kind::Tokens),
             5 => Some(Kind::Frame),
             7 => Some(Kind::Pages),
+            8 => Some(Kind::Extent),
             _ => None,
         }
     }
@@ -116,7 +131,7 @@ pub(crate) fn read_record(file: &File, offset: u64, len: u64) -> io::Result<Opti
     }
     let mut body = vec![0u8; length as usize];
     read_at(file, offset + HEADER, &mut body)?;
-    if kind != Kind::Pages && checksum(header[0], &body) != expected {
+    if kind.checked() && checksum(header[0], &body) != expected {
         return Ok(None);
     }
     Ok(Some(Record { offset, kind, body }))
@@ -124,15 +139,16 @@ pub(crate) fn read_record(file: &File, offset: u64, len: u64) -> io::Result<Opti
 
 /// The record at `at` in `bytes` (the file, mapped): its kind, where its
 /// body starts and where it ends. `None` when the bytes there are not a
-/// whole, intact record of a known kind; a [pages](Kind::Pages) record's
-/// checksum is not checked, as its pages may be written over.
+/// whole, intact record of a known kind; a [pages](Kind::Pages) or
+/// [extent](Kind::Extent) record's checksum is not checked, as their bodies
+/// are written to after them.
 pub(crate) fn record_in(bytes: &[u8], at: usize) -> Option<(Kind, usize, usize)> {
     let header = bytes.get(at..at + HEADER as usize)?;
     let kind = Kind::from_tag(header[0])?;
     let len = u32::from_le_bytes(header[1..5].try_into().ok()?) as usize;
     let start = at + HEADER as usize;
     let body = bytes.get(start..start + len)?;
-    if kind != Kind::Pages
+    if kind.checked()
         && checksum(header[0], body) != u32::from_le_bytes(header[5..9].try_into().ok()?)
     {
         return None;

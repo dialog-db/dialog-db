@@ -17,10 +17,12 @@ use dialog_search_tree::{Manifest, NodeBody};
 use parking_lot::Mutex;
 
 use crate::file::{HEADER, Kind, MAGIC, put_record, read_at, record_in, write_at};
+use crate::locks;
 use crate::node::{TreeNode, realize, rows_after, tree_node};
 use crate::rows::{Reader, Rows, get_rows, invalid, put_rows, put_varint, rename};
 use crate::tokens::{ALIGN, Draft, TokenRead};
 
+mod extent;
 mod index;
 #[cfg(test)]
 mod model;
@@ -28,6 +30,7 @@ mod served;
 mod slot;
 mod tree;
 
+use extent::Owned;
 use index::{
     FrameHeader, Place, Snapshot, WHOLE, block_key, catalog_in, lineage_key, next, token_id,
 };
@@ -113,6 +116,9 @@ pub struct Options {
     /// checks that a frame decodes back to its rows, and keeps a node of
     /// another layout whole without framing it.
     pub verify: bool,
+    /// The bytes of blocks an extent holds: what a writer that finds the
+    /// writer's turn taken claims once, to append to without the turn.
+    pub extent: u64,
 }
 
 impl Default for Options {
@@ -121,6 +127,7 @@ impl Default for Options {
             frames: true,
             chain: CHAIN,
             rows_cached: 4096,
+            extent: 1 << 20,
             verify: cfg!(debug_assertions) || std::env::var_os("DIALOG_ARCHIVE_VERIFY").is_some(),
         }
     }
@@ -285,6 +292,10 @@ struct Inner {
     /// a sync point.
     writer: Mutex<()>,
     synced: Mutex<Instant>,
+    /// The extents this process writes.
+    extents: Mutex<Extents>,
+    /// The blocks extents hold, as far as this process has read them.
+    loose: Mutex<Loose>,
     /// The end of what this process has read of the file or is writing to
     /// it, so a read that misses looks for another process's appends only
     /// when the file grew past it, and takes no lock otherwise.
@@ -450,21 +461,52 @@ fn snapshot(file: &File, slot: Slot, previous: Option<&Snapshot>) -> io::Result<
     })
 }
 
-/// The exclusive lock on the file, which writers take turns holding: one
-/// append at a time, from any process. Released when dropped.
+/// The writer's turn across processes: the turn's byte of the file (see
+/// the `locks` module), held exclusive. Released when dropped.
 struct Exclusive<'a>(&'a File);
 
 impl<'a> Exclusive<'a> {
+    /// Waits for the turn.
     fn take(file: &'a File) -> io::Result<Self> {
-        file.lock()?;
+        locks::lock(file, locks::TURN, true, true)?;
         Ok(Self(file))
+    }
+
+    /// The turn, if no other process holds it.
+    fn try_take(file: &'a File) -> io::Result<Option<Self>> {
+        Ok(locks::lock(file, locks::TURN, true, false)?.then_some(Self(file)))
     }
 }
 
 impl Drop for Exclusive<'_> {
     fn drop(&mut self) {
-        let _ = self.0.unlock();
+        let _ = locks::unlock(self.0, locks::TURN);
     }
+}
+
+/// The writer's turn, in this process and across processes.
+struct Turn<'a> {
+    _process: parking_lot::MutexGuard<'a, ()>,
+    _file: Exclusive<'a>,
+}
+
+/// The extents this process writes: those idle, free for a writer to take,
+/// and the records of those a writer has taken.
+#[derive(Default)]
+struct Extents {
+    idle: Vec<Owned>,
+    busy: HashSet<u64>,
+}
+
+/// What this process knows of the blocks extents hold, its own and other
+/// processes': how far it has read each extent, and where each block it
+/// found is, by its catalog's number and hash, with the extent it is in.
+#[derive(Default)]
+struct Loose {
+    read: HashMap<u64, u64>,
+    blocks: HashMap<(u16, Blake3Hash), (u64, u32)>,
+    /// The slot the extents were last read as of.
+    sequence: u64,
 }
 
 /// The newest slot of `file` whose records are all in it. Holding the
@@ -839,6 +881,8 @@ impl FileArchive {
             options,
             writer: Mutex::new(()),
             synced: Mutex::new(Instant::now()),
+            extents: Mutex::new(Extents::default()),
+            loose: Mutex::new(Loose::default()),
             #[cfg(test)]
             before_publish: Mutex::new(None),
         });
@@ -987,10 +1031,19 @@ impl FileArchive {
         hash: &Blake3Hash,
     ) -> io::Result<(Arc<Snapshot>, Option<Place>)> {
         let (snapshot, place) = self.look(|snapshot| snapshot.place(catalog, hash))?;
-        if place.is_some() || !self.reread()? {
+        if place.is_some() {
             return Ok((snapshot, place));
         }
-        self.look(|snapshot| snapshot.place(catalog, hash))
+        let (snapshot, place) = if self.reread()? {
+            self.look(|snapshot| snapshot.place(catalog, hash))?
+        } else {
+            (snapshot, None)
+        };
+        if place.is_some() {
+            return Ok((snapshot, place));
+        }
+        let loose = self.loose(&snapshot, catalog, hash)?;
+        Ok((snapshot, loose))
     }
 
     /// `find` over the current snapshot, again over a newer one while an
@@ -1135,23 +1188,358 @@ impl FileArchive {
     /// one append.
     pub fn append(&self, catalog: &str, blocks: &[Buffer]) -> Result<(), ArchiveError> {
         let started = Instant::now();
-        let error = |error| storage_error(&self.inner.path, error);
-        // The work an append can do without its turn, done before taking
-        // it: other writers append meanwhile.
-        let prepared = loop {
-            let snapshot = self.current();
-            match self.prepare(snapshot.clone(), catalog, blocks) {
-                Err(failed) if is_stale(&failed) => self.newer(&snapshot).map_err(error)?,
-                prepared => break prepared.map_err(error)?,
-            }
-        };
-        let appended = match prepared {
-            Some(prepared) => self.flush(prepared, catalog, blocks),
-            None => Ok(()),
-        };
+        let appended = self
+            .append_somewhere(catalog, blocks)
+            .map_err(|error| storage_error(&self.inner.path, error));
         Timings::add(&self.inner.timings.append, started);
         self.inner.timings.appends.fetch_add(1, Ordering::Relaxed);
         appended
+    }
+
+    /// Appends with the writer's turn if it is free, folding in what other
+    /// writers left in extents; without it into an extent of this
+    /// process's, waiting for the turn only to claim one, and then folding
+    /// in if the turn is free by then.
+    fn append_somewhere(&self, catalog: &str, blocks: &[Buffer]) -> io::Result<()> {
+        if let Some(turn) = self.try_turn()? {
+            self.append_in_turn(&turn, catalog, blocks)?;
+            // Nothing else writes in the turn: the append's own snapshot is
+            // the newest.
+            self.integrate(&turn, self.current())?;
+            return self.keep_spare(&turn);
+        }
+        if self.append_loose(catalog, blocks)? {
+            if let Some(turn) = self.try_turn()? {
+                let snapshot = self.newest_in_turn(&turn)?;
+                self.integrate(&turn, snapshot)?;
+            }
+            return Ok(());
+        }
+        let turn = self.turn()?;
+        self.append_in_turn(&turn, catalog, blocks)?;
+        self.integrate(&turn, self.current())?;
+        self.keep_spare(&turn)
+    }
+
+    /// The writer's turn, waiting for it.
+    fn turn(&self) -> io::Result<Turn<'_>> {
+        let process = self.inner.writer.lock();
+        let file = Exclusive::take(&self.inner.file)?;
+        Ok(Turn {
+            _process: process,
+            _file: file,
+        })
+    }
+
+    /// The writer's turn, if nobody in this process or another holds it.
+    fn try_turn(&self) -> io::Result<Option<Turn<'_>>> {
+        let Some(process) = self.inner.writer.try_lock() else {
+            return Ok(None);
+        };
+        Ok(Exclusive::try_take(&self.inner.file)?.map(|file| Turn {
+            _process: process,
+            _file: file,
+        }))
+    }
+
+    /// The file's newest state, read in the writer's turn, which another
+    /// process may have written since this one looked; an append cut short
+    /// is dropped.
+    fn newest_in_turn(&self, _turn: &Turn<'_>) -> io::Result<Arc<Snapshot>> {
+        let file = &self.inner.file;
+        let slot = newest(file, true)?;
+        if slot.sequence > self.current().slot.sequence {
+            self.publish(snapshot(file, slot, Some(&self.current()))?);
+        }
+        let current = self.current();
+        self.know(current.slot.end);
+        Ok(current)
+    }
+
+    /// Appends `blocks` in the writer's turn: tokens, frames and the
+    /// index's entries, laid out against the file as it is in the turn.
+    fn append_in_turn(&self, turn: &Turn<'_>, catalog: &str, blocks: &[Buffer]) -> io::Result<()> {
+        let snapshot = self.newest_in_turn(turn)?;
+        let Some(prepared) = self.prepare(snapshot.clone(), catalog, blocks)? else {
+            return Ok(());
+        };
+        let laid = self
+            .lay_out(&snapshot, prepared)?
+            .ok_or_else(|| invalid("an append prepared in its turn did not lay out"))?;
+        self.commit(laid).inspect_err(|_| {
+            // Drop what of the append reached the file: no slot names it.
+            let _ = self.inner.file.set_len(snapshot.slot.end);
+            self.inner
+                .known
+                .store(self.current().slot.end, Ordering::Release);
+        })
+    }
+
+    /// Appends `blocks` whole into an extent of this process's, without the
+    /// writer's turn. `false` when it cannot: a catalog the file does not
+    /// number yet, or blocks that would not fit an extent; the caller
+    /// appends in the turn then.
+    fn append_loose(&self, catalog: &str, blocks: &[Buffer]) -> io::Result<bool> {
+        let snapshot = self.current();
+        let Some(catalog_id) = snapshot.catalog_id(catalog) else {
+            return Ok(false);
+        };
+        let mut seen = HashSet::new();
+        let mut fresh = Vec::new();
+        for block in blocks {
+            let hash = block.blake3_hash();
+            if seen.insert(hash.clone())
+                && snapshot.place(catalog, hash)?.is_none()
+                && self.loose(&snapshot, catalog, hash)?.is_none()
+            {
+                fresh.push(block);
+            }
+        }
+        if fresh.is_empty() {
+            return Ok(true);
+        }
+        let mut owned = self.take_extent()?;
+        let laid = match owned.lay_out(catalog_id, &fresh)? {
+            Some(laid) => laid,
+            None => {
+                // Full: keep it for integration, and start another.
+                self.give_back(owned);
+                owned = self.claim()?;
+                match owned.lay_out(catalog_id, &fresh)? {
+                    Some(laid) => laid,
+                    None => {
+                        self.give_back(owned);
+                        return Ok(false);
+                    }
+                }
+            }
+        };
+        let (bytes, places) = laid;
+        let written = owned.write(&self.inner.file, &bytes);
+        if written.is_ok() {
+            let mut loose = self.inner.loose.lock();
+            for (block, at) in fresh.iter().zip(places) {
+                loose.blocks.insert(
+                    (catalog_id, block.blake3_hash().clone()),
+                    (owned.record, at),
+                );
+            }
+            loose.read.insert(owned.record, owned.used);
+        }
+        self.give_back(owned);
+        written.map(|()| true)
+    }
+
+    /// An extent of this process's for a writer to append to: an idle one,
+    /// else a new one claimed.
+    fn take_extent(&self) -> io::Result<Owned> {
+        let taken = {
+            let mut extents = self.inner.extents.lock();
+            let taken = extents.idle.pop();
+            if let Some(owned) = &taken {
+                extents.busy.insert(owned.record);
+            }
+            taken
+        };
+        match taken {
+            Some(owned) => Ok(owned),
+            None => self.claim(),
+        }
+    }
+
+    /// Returns an extent a writer took, for the next to take.
+    fn give_back(&self, owned: Owned) {
+        let mut extents = self.inner.extents.lock();
+        extents.busy.remove(&owned.record);
+        extents.idle.push(owned);
+    }
+
+    /// Claims an extent for this process, waiting for the writer's turn:
+    /// the one wait a writer without the turn has, and only when its
+    /// process had no extent ready.
+    fn claim(&self) -> io::Result<Owned> {
+        let turn = self.turn()?;
+        let claimed = self.claim_in_turn(&turn)?;
+        self.inner.extents.lock().busy.insert(claimed.record);
+        Ok(claimed)
+    }
+
+    /// Keeps an extent ready for this process's writers, claimed while it
+    /// holds the turn anyway, so a writer that later finds the turn taken
+    /// writes at once instead of waiting to claim one.
+    fn keep_spare(&self, turn: &Turn<'_>) -> io::Result<()> {
+        {
+            let extents = self.inner.extents.lock();
+            if !extents.idle.is_empty() || !extents.busy.is_empty() {
+                return Ok(());
+            }
+        }
+        let spare = self.claim_in_turn(turn)?;
+        self.inner.extents.lock().idle.push(spare);
+        Ok(())
+    }
+
+    /// Claims an extent in the writer's turn: one freed by an integration a
+    /// sync point has made durable, else a new one at the file's end.
+    fn claim_in_turn(&self, turn: &Turn<'_>) -> io::Result<Owned> {
+        let snapshot = self.newest_in_turn(turn)?;
+        let file = &self.inner.file;
+        let mut slot = snapshot.slot.clone();
+        slot.sequence += 1;
+        let (record, reused) = match slot.extents_free.pop() {
+            Some(record) => (record, true),
+            None => {
+                let record = slot.end;
+                let bytes = extent::record(record, self.inner.options.extent)?;
+                write_at(file, record, &bytes)?;
+                slot.end += bytes.len() as u64;
+                (record, false)
+            }
+        };
+        slot.extents.push(record);
+        slot.boot = boot();
+        self.know(slot.end);
+        snapshot_after_claim(self, file, slot, reused, record).inspect_err(|_| {
+            let _ = file.set_len(snapshot.slot.end);
+        })
+    }
+
+    /// Where `catalog`'s block `hash` is in an extent, as far as this
+    /// process has read the extents `snapshot` names: read again past where
+    /// it stopped, and checked against the hash before it is trusted.
+    fn loose(
+        &self,
+        snapshot: &Snapshot,
+        catalog: &str,
+        hash: &Blake3Hash,
+    ) -> io::Result<Option<Place>> {
+        if snapshot.slot.extents.is_empty() {
+            return Ok(None);
+        }
+        let Some(catalog_id) = snapshot.catalog_id(catalog) else {
+            return Ok(None);
+        };
+        let bytes = snapshot.bytes();
+        let mut loose = self.inner.loose.lock();
+        if loose.sequence != snapshot.slot.sequence {
+            // Extents integrated since are dropped: their blocks are in
+            // the index now.
+            let live: HashSet<u64> = snapshot.slot.extents.iter().copied().collect();
+            loose.read.retain(|record, _| live.contains(record));
+            loose.blocks.retain(|_, (record, _)| live.contains(record));
+            loose.sequence = snapshot.slot.sequence;
+        }
+        for &record in &snapshot.slot.extents {
+            let Some(used) = extent::used(bytes, record) else {
+                continue;
+            };
+            let read = loose.read.get(&record).copied().unwrap_or(0);
+            // An extent emptied to be claimed again starts over.
+            let read = if used < read { 0 } else { read };
+            if used > read {
+                for held in extent::held(bytes, record, read, used)? {
+                    loose
+                        .blocks
+                        .insert((held.catalog, held.hash), (record, held.at));
+                }
+            }
+            loose.read.insert(record, used);
+        }
+        let Some(&(_, at)) = loose.blocks.get(&(catalog_id, hash.clone())) else {
+            return Ok(None);
+        };
+        drop(loose);
+        // A block whose extent was emptied and written over since is not
+        // there any more: its bytes no longer hash to it.
+        match snapshot.block(at) {
+            Ok(block) if Blake3Hash::hash(block) == *hash => Ok(Some(Place::Block(at))),
+            _ => Ok(None),
+        }
+    }
+
+    /// Folds what extents hold into the file as frames, in the writer's
+    /// turn: this process's idle extents, and any whose owner is gone. Once
+    /// an extent's blocks are appended, the extent is retired; a sync point
+    /// frees it to be claimed again.
+    fn integrate(&self, turn: &Turn<'_>, snapshot: Arc<Snapshot>) -> io::Result<()> {
+        if snapshot.slot.extents.is_empty() {
+            return Ok(());
+        }
+        let file = &self.inner.file;
+        let mut ours = Vec::new();
+        let mut abandoned = Vec::new();
+        {
+            let mut extents = self.inner.extents.lock();
+            for &record in &snapshot.slot.extents {
+                if let Some(at) = extents.idle.iter().position(|owned| owned.record == record) {
+                    // An empty one stays ready for the next writer.
+                    if extents.idle[at].used > 0 {
+                        ours.push(extents.idle.swap_remove(at));
+                    }
+                } else if !extents.busy.contains(&record)
+                    && locks::lock(file, locks::owner(record), true, false)?
+                {
+                    abandoned.push(record);
+                }
+            }
+        }
+        let records: Vec<u64> = ours
+            .iter()
+            .map(|owned| owned.record)
+            .chain(abandoned.iter().copied())
+            .collect();
+        if records.is_empty() {
+            return Ok(());
+        }
+        let integrated = self.fold(turn, &snapshot, &records);
+        for record in &records {
+            let _ = locks::unlock(file, locks::owner(*record));
+        }
+        if let Err(error) = integrated {
+            // Keep this process's extents for the next try.
+            let mut extents = self.inner.extents.lock();
+            extents.idle.extend(ours);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// Appends the blocks the extents at `records` hold, then retires the
+    /// extents.
+    fn fold(&self, turn: &Turn<'_>, snapshot: &Snapshot, records: &[u64]) -> io::Result<()> {
+        let bytes = snapshot.bytes();
+        let mut by_catalog: HashMap<u16, Vec<Buffer>> = HashMap::new();
+        for &record in records {
+            let used = extent::used(bytes, record).unwrap_or(0);
+            for held in extent::held(bytes, record, 0, used)? {
+                let block = snapshot.block(held.at)?;
+                by_catalog
+                    .entry(held.catalog)
+                    .or_default()
+                    .push(Buffer::from(block.to_vec()));
+            }
+        }
+        for (catalog, blocks) in by_catalog {
+            let name = snapshot
+                .catalog(catalog)
+                .ok_or_else(|| invalid("an extent's block of a catalog the file lacks"))?
+                .to_string();
+            self.append_in_turn(turn, &name, &blocks)?;
+        }
+        // Retire the extents: their blocks are frames now.
+        let snapshot = self.newest_in_turn(turn)?;
+        let mut slot = snapshot.slot.clone();
+        slot.sequence += 1;
+        slot.extents.retain(|record| !records.contains(record));
+        slot.extents_pending.extend_from_slice(records);
+        slot.boot = boot();
+        slot.write(&self.inner.file)?;
+        self.publish(self::snapshot(
+            &self.inner.file,
+            slot,
+            Some(&self.current()),
+        )?);
+        Ok(())
     }
 
     /// What an append of `blocks` to `catalog` writes, worked out without
@@ -1255,9 +1643,11 @@ impl FileArchive {
         }))
     }
 
-    /// Takes the writer's turn and writes `prepared` (of `blocks`), laid
-    /// out against the file as it is in the turn; prepares again in the
-    /// turn if it cannot be.
+    /// Writes `prepared` (of `blocks`, worked out before the turn) in the
+    /// writer's turn, laid out against the file as it is then; prepares
+    /// again in the turn if it cannot be. For tests of an append another
+    /// lands ahead of.
+    #[cfg(test)]
     fn flush(
         &self,
         prepared: Prepared<'_>,
@@ -1265,41 +1655,24 @@ impl FileArchive {
         blocks: &[Buffer],
     ) -> Result<(), ArchiveError> {
         let error = |error| storage_error(&self.inner.path, error);
-        let _turn = self.inner.writer.lock();
-        let file = &self.inner.file;
-        let written = Exclusive::take(file).and_then(|_exclusive| {
-            // This process's turn: read the newest slot, which another
-            // process may have written since, and drop any append cut short.
-            let slot = newest(file, true)?;
-            let snapshot = if slot.sequence > self.current().slot.sequence {
-                self.publish(snapshot(file, slot, Some(&self.current()))?);
-                self.current()
-            } else {
-                self.current()
-            };
-            self.know(snapshot.slot.end);
-            let laid = match self.lay_out(&snapshot, prepared)? {
-                Some(laid) => laid,
-                // What was prepared names a node another writer kept whole:
-                // prepare again, in the turn, where nothing moves.
-                None => match self.prepare(snapshot.clone(), catalog, blocks)? {
-                    Some(prepared) => self
-                        .lay_out(&snapshot, prepared)?
-                        .ok_or_else(|| invalid("an append prepared in its turn did not lay out"))?,
-                    None => return Ok(()),
-                },
-            };
-            self.commit(laid).inspect_err(|_| {
-                // Drop what of the append reached the file: no slot names it.
-                let _ = file.set_len(snapshot.slot.end);
-            })
-        });
-        written.map_err(|failed| {
-            self.inner
-                .known
-                .store(self.current().slot.end, Ordering::Release);
-            error(failed)
-        })
+        let turn = self.turn().map_err(error)?;
+        let snapshot = self.newest_in_turn(&turn).map_err(error)?;
+        let laid = match self.lay_out(&snapshot, prepared).map_err(error)? {
+            Some(laid) => laid,
+            None => match self
+                .prepare(snapshot.clone(), catalog, blocks)
+                .map_err(error)?
+            {
+                Some(prepared) => self
+                    .lay_out(&snapshot, prepared)
+                    .map_err(error)?
+                    .ok_or_else(|| {
+                        error(invalid("an append prepared in its turn did not lay out"))
+                    })?,
+                None => return Ok(()),
+            },
+        };
+        self.commit(laid).map_err(error)
     }
 
     /// `prepared` laid out after `snapshot`'s end: blocks the file holds by
@@ -1566,6 +1939,7 @@ impl FileArchive {
         file.sync_data()?;
         let mut durable = slot;
         durable.reusable.append(&mut durable.pending);
+        durable.extents_free.append(&mut durable.extents_pending);
         durable.durable = durable.sequence;
         durable.write_durable(file)?;
         file.sync_data()?;
@@ -1713,6 +2087,45 @@ impl FileArchive {
     }
 }
 
+/// Writes the slot that claims the extent at `record`, publishes it and
+/// takes the extent's owner's byte; an extent claimed again is emptied
+/// first.
+fn snapshot_after_claim(
+    archive: &FileArchive,
+    file: &File,
+    slot: Slot,
+    reused: bool,
+    record: u64,
+) -> io::Result<Owned> {
+    slot.write(file)?;
+    archive.publish(snapshot(file, slot, Some(&archive.current()))?);
+    if !locks::lock(file, locks::owner(record), true, false)? {
+        return Err(invalid("an extent just claimed is held by another process"));
+    }
+    let mut owned = Owned::of(archive.current().bytes(), record)?;
+    if reused {
+        owned.clear(file)?;
+    }
+    Ok(owned)
+}
+
+/// The last handle of a file in this process folds what its extents hold
+/// into the file before it goes, waiting for the turn: closing a space
+/// waits for it. What it cannot fold, the next writer to take the turn
+/// does, as the extent's owner is gone.
+impl Drop for FileArchive {
+    fn drop(&mut self) {
+        if Arc::strong_count(&self.inner) != 1 || self.inner.extents.lock().idle.is_empty() {
+            return;
+        }
+        if let Ok(turn) = self.turn()
+            && let Ok(snapshot) = self.newest_in_turn(&turn)
+        {
+            let _ = self.integrate(&turn, snapshot);
+        }
+    }
+}
+
 /// The nodes an append frames before any is in the file: their rows,
 /// ids, lineages and depths, for the next node to name or be written
 /// against. Ids from `first` up are this append's.
@@ -1753,6 +2166,133 @@ mod tests {
     use super::*;
     use dialog_capability::{Did, Subject};
     use dialog_effects::prelude::*;
+
+    /// A writer that finds the writer's turn taken by another process does
+    /// not wait for it: its blocks go into an extent of its own and read
+    /// back at once, here and through another handle. Once the turn is
+    /// free, the next append folds them into the file and retires the
+    /// extent; everything reads back after reopening.
+    #[test]
+    fn it_appends_without_waiting_while_another_process_holds_the_turn() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("archive");
+        let archive = FileArchive::open(&path)?;
+        let first = block("first");
+        archive.append("index", std::slice::from_ref(&first))?;
+        // Holding the turn, the writer kept an extent ready.
+        let extents = archive.current().slot.extents.clone();
+        assert_eq!(extents.len(), 1, "a spare extent claimed in the turn");
+        let extent = extents[0];
+        // Another handle on the file, as another process reads it. Opened
+        // first: opening waits for an append under way to finish.
+        let other_path = directory.path().join("other");
+        std::fs::hard_link(&path, &other_path)?;
+        let other = FileArchive::open(&other_path)?;
+
+        let mut holder = crate::locks::tests::hold_turn(&path)?;
+        let loose = [block("loose one"), block("loose two")];
+        let started = Instant::now();
+        archive.append("index", &loose)?;
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the append did not wait for the turn"
+        );
+        assert_eq!(
+            archive.current().slot.extents,
+            vec![extent],
+            "it wrote to the spare extent, claiming none"
+        );
+        for block in &loose {
+            assert_eq!(
+                archive.get("index", block.blake3_hash())?.as_deref(),
+                Some(block.as_ref()),
+                "read back from the extent"
+            );
+        }
+        for block in &loose {
+            assert_eq!(
+                other.get("index", block.blake3_hash())?.as_deref(),
+                Some(block.as_ref()),
+                "another handle reads the extent too"
+            );
+        }
+
+        drop(holder.stdin.take());
+        holder.wait()?;
+        let last = block("last");
+        archive.append("index", std::slice::from_ref(&last))?;
+        let slot = archive.current().slot.clone();
+        assert!(!slot.extents.contains(&extent), "the extent is folded in");
+        assert_eq!(
+            slot.extents_pending,
+            vec![extent],
+            "and retired until a sync point"
+        );
+        for block in loose.iter().chain([&first, &last]) {
+            assert_eq!(
+                archive.get("index", block.blake3_hash())?.as_deref(),
+                Some(block.as_ref())
+            );
+            assert!(
+                archive
+                    .current()
+                    .place("index", block.blake3_hash())?
+                    .is_some(),
+                "the index holds it"
+            );
+        }
+
+        drop((archive, other));
+        let reopened = FileArchive::open(&path)?;
+        for block in loose.iter().chain([&first, &last]) {
+            assert_eq!(
+                reopened.get("index", block.blake3_hash())?.as_deref(),
+                Some(block.as_ref())
+            );
+        }
+        Ok(())
+    }
+
+    /// An extent a writer left before folding it in (its process gone) is
+    /// read from where it is after reopening, and folded in by the next
+    /// writer to take the turn.
+    #[test]
+    fn it_reads_and_folds_in_an_extent_its_writer_left() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("archive");
+        let archive = FileArchive::open(&path)?;
+        archive.append("index", &[block("first")])?;
+        let mut holder = crate::locks::tests::hold_turn(&path)?;
+        let loose = block("left in an extent");
+        archive.append("index", std::slice::from_ref(&loose))?;
+        // The process goes without folding it in: its extents are forgotten
+        // as if it had died.
+        archive.inner.extents.lock().idle.clear();
+        drop(archive);
+        drop(holder.stdin.take());
+        holder.wait()?;
+
+        let reopened = FileArchive::open(&path)?;
+        let left = reopened.current().slot.extents.clone();
+        assert_eq!(left.len(), 1);
+        assert_eq!(
+            reopened.get("index", loose.blake3_hash())?.as_deref(),
+            Some(loose.as_ref()),
+            "read from the extent it was left in"
+        );
+        reopened.append("index", &[block("next")])?;
+        assert!(
+            !reopened.current().slot.extents.contains(&left[0]),
+            "folded in"
+        );
+        assert!(
+            reopened
+                .current()
+                .place("index", loose.blake3_hash())?
+                .is_some()
+        );
+        Ok(())
+    }
 
     fn subject() -> Subject {
         let did: Did = "did:test:file-archive".parse().expect("a test DID");
@@ -1975,17 +2515,17 @@ mod tests {
         let path = directory.path().join("archive");
         let first = block("first");
         let second = block("second");
-        let boundary = {
+        let (boundary, sequence) = {
             let archive = FileArchive::open(&path)?;
             archive.append("index", std::slice::from_ref(&first))?;
             let boundary = std::fs::metadata(&path)?.len();
             archive.append("index", std::slice::from_ref(&second))?;
-            boundary
+            (boundary, archive.current().slot.sequence)
         };
-        // The second append is sequence 2, which writes the first slot:
-        // flip a byte inside it.
+        // The second append's sequence picks the slot it wrote: flip a byte
+        // inside it.
         let mut bytes = std::fs::read(&path)?;
-        let newest = MAGIC.len();
+        let newest = MAGIC.len() + (sequence % 2) as usize * SLOT as usize;
         bytes[newest + 20] ^= 0xFF;
         std::fs::write(&path, &bytes)?;
 
@@ -2611,7 +3151,7 @@ mod breakdown {
                         entries.push((index::token_key(crate::hash::hash(token)), id));
                     }
                 }
-                Kind::Pages => {}
+                Kind::Pages | Kind::Extent => {}
             }
             at = end;
         }

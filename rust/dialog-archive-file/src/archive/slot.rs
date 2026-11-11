@@ -21,7 +21,10 @@
 //! written in (u64 each), the counts (u64 each), the catalogs (a count,
 //! then each name as a length byte and its bytes), the root (its length,
 //! u32, then its bytes), then the pages free to write over and the pages
-//! freed since the last sync point (each a count, then u32 each).
+//! freed since the last sync point (each a count, then u32 each), then the
+//! extents writers hold, the extents free to claim again and the extents
+//! freed since the last sync point (each a count, then each record's
+//! offset as u64).
 
 use std::fs::File;
 use std::io;
@@ -107,6 +110,13 @@ pub(crate) struct Slot {
     pub reusable: Vec<u32>,
     /// Index pages freed since the last sync point: free once the next is.
     pub pending: Vec<u32>,
+    /// The extents writers append to, not yet integrated, by where their
+    /// records start.
+    pub extents: Vec<u64>,
+    /// Extents integrated before a sync point: free to claim again.
+    pub extents_free: Vec<u64>,
+    /// Extents integrated since the last sync point: free once the next is.
+    pub extents_pending: Vec<u64>,
 }
 
 impl Default for Slot {
@@ -121,6 +131,9 @@ impl Default for Slot {
             root: tree::Node::default(),
             reusable: Vec::new(),
             pending: Vec::new(),
+            extents: Vec::new(),
+            extents_free: Vec::new(),
+            extents_pending: Vec::new(),
         }
     }
 }
@@ -149,6 +162,12 @@ impl Slot {
             put_varint(&mut body, pages.len() as u64);
             for page in pages {
                 body.extend_from_slice(&page.to_le_bytes());
+            }
+        }
+        for extents in [&self.extents, &self.extents_free, &self.extents_pending] {
+            put_varint(&mut body, extents.len() as u64);
+            for extent in extents {
+                body.extend_from_slice(&extent.to_le_bytes());
             }
         }
         let mut out = Vec::with_capacity(8 + body.len());
@@ -197,6 +216,13 @@ impl Slot {
             }
         }
         let [reusable, pending] = lists;
+        let mut extent_lists = [Vec::new(), Vec::new(), Vec::new()];
+        for list in &mut extent_lists {
+            for _ in 0..reader.varint().ok()? {
+                list.push(u64_of(&mut reader)?);
+            }
+        }
+        let [extents, extents_free, extents_pending] = extent_lists;
         Some(Self {
             sequence,
             end,
@@ -207,6 +233,9 @@ impl Slot {
             root,
             reusable,
             pending,
+            extents,
+            extents_free,
+            extents_pending,
         })
     }
 
@@ -284,6 +313,9 @@ mod tests {
             catalogs: vec!["index".into()],
             reusable: vec![3, 4],
             pending: vec![5],
+            extents: vec![DATA + 64, DATA + 4160],
+            extents_free: vec![DATA + 8256],
+            extents_pending: vec![],
             boot: 9,
             durable: 1,
             ..Slot::default()
