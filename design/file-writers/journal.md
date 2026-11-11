@@ -597,3 +597,31 @@ one. The test writes values that differ.
 the commit is applied again as computed (the claim above); more than one
 process opening while the turn is held finds one extent to take, and the
 next waits for the turn once.
+
+## 2026-11-11, Building: transactions that run again, and an extent per process
+
+Irakli, on the review of the suite: a transaction that loses its race
+should run again, not reapply what it computed, through a new API, with
+the old one deprecated and failing as it did; and an extent should be
+left per process, not one, taken back as the process closes.
+
+- `Branch::transact(|transaction| async { .. })` builds the transaction
+  in a closure, called once per try on the head as it is then
+  (`it_builds_a_transaction_again_over_the_head_that_won`: a second build
+  reads what the winner wrote). `.commit().publish().perform(..)` is
+  deprecated and fails with `VersionMismatch` on a lost race again
+  (`it_refuses_a_one_shot_transaction_that_lost_its_race`). Code outside
+  tests moved to `transact`, except the perf, soak and baseline harnesses,
+  which keep measuring the one-shot commit the gates were recorded with:
+  moving them is the maintainer's call.
+- An open that finds the turn free leaves an extent no process owns; its
+  close retires one. Four processes arriving together while the turn is
+  held all write without waiting
+  (`processes_arriving_together_while_the_turn_is_held_do_not_wait`), and
+  ten opens and closes leave no more than were there
+  (`extents_left_for_others_do_not_pile_up`). An extent left before
+  blocks were appended stays mid-file when the last process closes,
+  free, and is the next claimed: the file does not grow open after open
+  (`it_cuts_free_extents_off_the_end_at_the_last_close`). Claims no
+  longer write an extent's bytes, so an unused one is a hole.
+  `Options::leave_extent` turns it off for a process that only reads.

@@ -116,37 +116,42 @@ read. Read in place, the single-file archive's cold reads match the `fs`
 archive's, where rebuilding made them about 2× slower, and its cached nodes
 take about a third of the memory of cached blocks.
 
-### A commit that loses its branch's race to another writer applies itself again over the winner
+### A transaction that loses its branch's race runs again over the head that won
 
 [#733](https://github.com/dialog-db/dialog-db/pull/733),
 [design](./design/file-writers.md)
 
-A branch commit publishes its new head compare-and-swapped against the
-head it built on. When another writer moved the head first, the commit no
-longer fails: it applies the same instructions again over the head that
-won, minted afresh against it (the rules it triggers run again there), and
-publishes that, up to 64 times. A merging commit (`.merge()`) still merges
-with the winner instead.
+`Branch::transact(|transaction| async { ... })` takes the code that builds
+a transaction instead of the transaction. Each try hands it a fresh
+transaction on the branch's head as it is then, commits what it returns,
+and publishes that compare-and-swapped against the head it read. When
+another writer moved the head first, the head that won is read and the
+code runs again: its queries read over the winner, so a write computed
+from a read is computed again, as in a software transactional memory. It
+tries as many times as a commit does (64) before returning
+`VersionMismatch`.
 
 What this changes for you:
 
-- `branch.transaction()...commit().publish().perform(...)` succeeds where
-  it returned `CommitError::Publish(PublishError::VersionMismatch)` after
-  a concurrent commit, landing on top of it; the error is returned only
-  once the retries run out. The repository's own commits (delegations,
-  migrations) do the same.
-- A `TransactionBatch` its caller staged (`.commit().perform(...)`, then
+- New: `Branch::transact(build).perform(&env)`, with `allow_empty()` and
+  `canonicalize()`; `build` returns `Result<Transaction, E>` where
+  `E: From<CommitError>`, and an error from it ends the transaction with
+  nothing written.
+- Deprecated: `branch.transaction()...commit().publish().perform(&env)`.
+  It keeps failing with `CommitError::Publish(PublishError::VersionMismatch)`
+  on a lost race, as it did. Move to `Branch::transact`, which builds the
+  same transaction inside the closure.
+- `Branch::induce` runs its rules again over the head that won.
+- A `TransactionBatch` its caller staged (`.commit().perform(..)`, then
   `.publish()`) is still refused on a lost race: its caller read what it
-  staged on, and runs it again.
-- A write computed outside the rules from an earlier read (read a value,
-  assert one derived from it) is applied again as it was computed; express
-  it as a rule, or read and commit again on the caller's side, to have it
-  computed over the head that won.
+  staged on. The repository's own commits (delegations, migrations) apply
+  their instructions again over the winner, as before.
 - `dialog_corpus::Instruction` is `Clone`.
 
-Why: processes writing one branch concurrently should not have to catch
-and retry every commit themselves; the commit already holds everything it
-needs to try again over the newer head.
+Why: processes writing one branch concurrently should not each catch and
+retry every commit; and retrying the instructions a transaction computed
+reapplies writes derived from reads of a head that lost, where running the
+transaction again computes them over the head that won.
 
 ### A space can keep its memory cells in its file, branch heads included
 
@@ -190,11 +195,13 @@ extent of its own, space it claimed in an earlier turn, and they read back
 at once, in its process and in others. The next writer to get the turn,
 usually the same one after its commit, turns those blocks into frames and
 tokens, and the extent is freed once a sync point makes that durable. A
-process that holds the turn keeps an extent ready for itself and leaves
-one no process owns; a process with none takes that one, or one whose
-writer died, so a process that has never held the turn writes without
-waiting for it too. A writer waits for the turn only to claim an extent
-when there is none to take, or for a catalog the file has not numbered.
+process that holds the turn keeps an extent ready for itself; a process
+that opens the file with the turn free leaves one no process owns, and
+takes one back as it closes, so there is one for each process that has the
+file open. A process with none takes one of those, or one whose writer
+died, so a process that has never held the turn writes without waiting for
+it too. A writer waits for the turn only to claim an extent when there is
+none to take, or for a catalog the file has not numbered.
 
 What this changes for you:
 
@@ -205,9 +212,16 @@ What this changes for you:
   whole file, on every platform.
 - `Options::extent` sets how many bytes of blocks an extent holds (1 MiB
   by default). Each process that writes keeps one extent claimed while it
-  has the file open, and one more is kept for a process that has none;
-  the last process to close the file retires them and cuts free extents
-  that end the file off it.
+  has the file open, and each process that has it open leaves one for
+  another; the last process to close the file retires them and cuts free
+  extents that end the file off it. One left before blocks were appended
+  stays free mid-file and is the next one claimed.
+- Claiming an extent writes its header and grows the file, without
+  writing the extent's bytes: an unused extent is a hole on file systems
+  that keep sparse files.
+- `Options::leave_extent` (on by default) is whether opening leaves an
+  extent for another process; a process that only reads can turn it off
+  and leave the file's length alone.
 - Opening the file no longer waits for another process's turn: the slot
   it opens from was written in this boot, so there is nothing to repair.
   After a reboot, or for a new file, opening still takes the turn.
