@@ -450,3 +450,15 @@ cells as one more kind of entry.
 
 **Decided.** Cells are entries in the file's block index (name hash to slot
 offset); creating or deleting one is an index change integration makes.
+
+**Asked.** Irakli: go further than swapping roots, and discard or reuse any
+node pruned from the index trees.
+
+**Learned.** Format 10 already does this for index pages: any page a write
+replaces is reused after the next durable sync point. In this design it now
+extends to data pages, an extent's pages returning to the free list. The
+search tree's own superseded nodes are not derived like index pages: they
+are the space's history, kept by design; reusing them would be garbage
+collection of history, a topic of its own.
+
+**Decided.** Nothing new: noted so it is not proposed again as new.

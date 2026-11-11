@@ -97,4 +97,7 @@
 | SQLite readers find a page in the WAL through a hash table from page to newest frame, kept in `-shm` and updated as frames are appended | fact | [walformat.html](https://www.sqlite.org/walformat.html) | holds |
 | how many cells a space has cannot be measured: as many as the branches its users create, one or two in every run so far, with no bound | opinion | Irakli, 2026-11-11 | - |
 | the file's block index already scales to millions of entries and holds several kinds of them, so cells can be one more kind | fact | research/single-file-format, format 10: about 17 million entries at MusicBrainz, keyed by hash, holding blocks, tokens and lineages | holds |
+| reuse not only the roots but any node pruned from the index trees | opinion | Irakli, 2026-11-11 | - |
+| format 10 already reuses any index page a write replaces, after the next durable sync point; pages carry the append that wrote them and a checksum, and a reader that finds one written over looks again from a newer slot | fact | research/single-file-format/journal.md, 2026-11-08, "format 10 measured": MusicBrainz's index 1,826 MiB to 68 MiB, 17,193 live pages and 202 free | holds |
+| the search tree's superseded nodes are not reusable like index pages: they are the space's older revisions, which history, sync and differences read | fact | research/single-file-format/design.md, "Reclaiming space": nothing is reclaimed, history is the point | holds |
 
