@@ -40,8 +40,8 @@ pub(crate) enum Kind {
     /// Space claimed by one writer, which appends frames to it without the
     /// writer's turn (see the archive's `extent` module).
     Extent,
-    /// A memory cell, written over in place (see the archive's `cells`
-    /// module).
+    /// A memory cell's value: each update appends one, and the cells'
+    /// index names the newest (see the archive's `cells` module).
     Cell,
 }
 

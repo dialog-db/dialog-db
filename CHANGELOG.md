@@ -279,10 +279,11 @@ What this changes for you:
   FileSystem, FileSystem, FileSystem>` is a space whose blocks live in
   `archive.dialog` in the space's directory. The tree, queries and sync
   work through it unchanged.
-- Any number of processes can open one file. Writers take turns on an
-  exclusive lock on it and read what the others appended first; readers
-  take no lock. A file this process already has open is shared, not
-  opened twice.
+- Any number of processes can open one file. Writers take turns on a
+  lock on one byte of it, and a writer that finds the turn taken writes
+  into an extent of its own instead (see the entry on writers above);
+  readers take no lock. A file this process already has open is shared,
+  not opened twice.
 - The file syncs itself every 64 appends or 2 seconds, and on
   `FileArchive::sync`. A power loss loses at most the appends since, and
   never leaves the file damaged: opening goes back to the newest state
