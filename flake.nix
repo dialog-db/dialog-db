@@ -87,6 +87,7 @@
           wasm-bindgen-cli
           wbg-pool
           wasmCcEnv
+          testProfile
           ;
 
         developmentBuildInputs =
@@ -135,14 +136,17 @@
         menuHelpers = (
           import ./nix/menu.nix {
             inherit pkgs;
+            # The cross-target tests build their wasm side with cargo when
+            # they run, and build it as the archives are built.
+            testEnv = testProfile;
           }
         );
 
         inherit (menuHelpers) makeMenu makeDevShellHook menuTestCommand;
 
         # What each test configuration builds, as arguments to
-        # `cargo nextest`. The `test:*` commands run them and the `tests-*`
-        # packages archive them, so the two cannot drift apart.
+        # `cargo nextest archive` (the `tests-*` packages, which the
+        # `test:*` commands build and run).
         #
         # wbg-pool is a native host binary and dialog-baseline is a
         # native-only dev measurement crate (its examples pull native-only
@@ -354,27 +358,27 @@
 
           "test:native:debug" = menuTestCommand {
             description = "Unit and integration tests (${system}, debug)";
-            arguments = testArguments.native-debug;
+            package = "tests-native-debug";
           };
 
           "test:native:release" = menuTestCommand {
             description = "Unit and integration tests (${system}, release)";
-            arguments = testArguments.native-release;
+            package = "tests-native-release";
           };
 
           "test:web:debug" = menuTestCommand {
             description = "Unit and integration tests (wasm32-unknown-unknown, debug)";
-            arguments = testArguments.web-debug;
+            package = "tests-web-debug";
           };
 
           "test:web:release" = menuTestCommand {
             description = "Unit and integration tests (wasm32-unknown-unknown, release)";
-            arguments = testArguments.web-release;
+            package = "tests-web-release";
           };
 
           "test:cross:integration" = menuTestCommand {
             description = "Cross-target integration tests (${system} + wasm32-unknown-unknown, debug)";
-            arguments = testArguments.cross-integration;
+            package = "tests-cross-integration";
           };
 
         };

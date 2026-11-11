@@ -273,6 +273,29 @@ let
       // attributes
     );
 
+  # How the test archives are built, where it differs from the workspace's
+  # profiles. Each setting costs build time and changes no test's result:
+  #
+  # - No incremental state: a sandbox build has none to reuse.
+  # - No debug info in debug builds. Every test binary links the whole
+  #   dependency graph, and with debug info the target directory of one
+  #   debug configuration is over 27GB against 2.7GB without, and its
+  #   archive 2.3GB. A panic still names its file and line.
+  # - Release builds without link-time optimization, in 16 codegen units.
+  #   The release profile (thin LTO, one unit) optimizes the whole graph
+  #   again for each of the 65 test binaries. What the release
+  #   configurations are for, the tests under opt-level 3 with debug
+  #   assertions and overflow checks off, is unchanged.
+  #
+  # The cross-target tests build their wasm side with cargo when they run
+  # (see the `test:*` commands in nix/menu.nix), under the same settings.
+  testProfile = {
+    CARGO_INCREMENTAL = "0";
+    CARGO_PROFILE_DEV_DEBUG = "0";
+    CARGO_PROFILE_RELEASE_LTO = "off";
+    CARGO_PROFILE_RELEASE_CODEGEN_UNITS = "16";
+  };
+
   # Build cargo-nextest test archive
   buildTestArchive =
     {
@@ -283,21 +306,47 @@ let
     let
       isWasm = target == "wasm32-unknown-unknown";
 
-      targetAttributes = if isWasm then wasmAttributes else commonAttributes;
+      targetAttributes =
+        (if isWasm then wasmAttributes else commonAttributes)
+        // testProfile
+        // {
+          nativeBuildInputs = nativeBuildInputs ++ [ pkgs.cargo-nextest ];
+        };
 
-      targetArtifacts = if isWasm then wasmArtifacts else nativeArtifacts;
+      archive = file: ''
+        cargo nextest archive \
+          ${args} \
+          --archive-file ${file}
+      '';
+
+      # The dependencies as this archive builds them: the same command,
+      # so the same profile, features, target and dev-dependencies, run
+      # over the stubs crane puts in place of the workspace's sources.
+      # The archive below then compiles the workspace's crates only.
+      #
+      # The shared dependency builds (`nativeArtifacts`, `wasmArtifacts`)
+      # do not serve here. They build the release profile without the
+      # test features or the dev-dependencies, which no archive asks for,
+      # so each archive rebuilt every dependency on top of them.
+      #
+      # This derivation depends on the manifests and the lock file, not
+      # on the sources, so the binary cache serves it to every pull
+      # request that leaves those alone.
+      dependencies = craneLib.buildDepsOnly (
+        targetAttributes
+        // {
+          pname = "tests-${name}";
+          buildPhaseCargoCommand = archive "$TMPDIR/tests-${name}-deps.tar.zst";
+        }
+      );
     in
     craneLib.mkCargoDerivation (
       targetAttributes
       // {
         pname = "tests-${name}";
-        cargoArtifacts = targetArtifacts;
+        cargoArtifacts = dependencies;
 
-        buildPhaseCargoCommand = ''
-          cargo nextest archive \
-            ${args} \
-            --archive-file ./tests-${name}.tar.zst
-        '';
+        buildPhaseCargoCommand = archive "./tests-${name}.tar.zst";
 
         installPhaseCommand = ''
           mkdir -p $out
@@ -305,7 +354,6 @@ let
         '';
 
         doInstallCargoArtifacts = false;
-        nativeBuildInputs = (targetAttributes.nativeBuildInputs or [ ]) ++ [ pkgs.cargo-nextest ];
       }
     );
 
@@ -389,5 +437,6 @@ in
     wasm-bindgen-cli
     wbg-pool
     wasmCcEnv
+    testProfile
     ;
 }

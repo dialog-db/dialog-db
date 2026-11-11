@@ -308,86 +308,25 @@ jobs:
           # Only main writes the cache: an upload must not fail a PR's
           # checks, and an unmerged branch must not write what main reads.
           skipPush: ${{ github.ref != 'refs/heads/main' }}
-      # TMPDIR, cargo's home and its target directory live on the large
-      # /nix volume, not the root filesystem. nothing-but-nix leaves the
-      # root filesystem only root-safe-haven (16GB) of free space, which
-      # the build and test artifacts (test binaries, the shared wasm
-      # cache, browser profiles) can outgrow; the /nix volume has ~90GB of
-      # headroom. nothing-but-nix also keeps purging the runner in the
+      # TMPDIR and cargo's home live on the large /nix volume, not the
+      # root filesystem. nothing-but-nix leaves the root filesystem only
+      # root-safe-haven (16GB) of free space, which the test artifacts
+      # (test binaries, the shared wasm cache, browser profiles) can
+      # outgrow; the /nix volume has ~90GB of headroom.
+      #
+      # The archives are built in the sandbox and need no cargo home. The
+      # cross-target tests do: each builds its wasm side with cargo when
+      # it runs. nothing-but-nix keeps purging the runner in the
       # background, and the last thing it deletes is $HOME/.cargo, cargo's
       # default home (#638).
-      - name: 'Make room for the build'
+      - name: 'Run test configuration'
         shell: bash
         run: |
           sudo mkdir -p /nix/tmp /nix/cargo
           sudo chmod 1777 /nix/tmp
           sudo chown "$(id -u):$(id -g)" /nix/cargo
-      # The configurations build with cargo in the dev shell, and what
-      # cargo built of the dependencies is kept from run to run: about
-      # 1,000 crates, several minutes of every build, and as many
-      # downloads from crates.io, which rate-limits CI runners. The
-      # workspace's own crates are the larger part of a build and are
-      # rebuilt on every run; see the prune step below.
-      #
-      # The key names the exact dependency set and toolchain. main
-      # restores only that, so what it saves holds nothing stale. Any
-      # other ref also takes the newest cache of its configuration: a
-      # pull request that changes Cargo.lock rebuilds the crates that
-      # changed, not all of them.
-      - name: 'Restore the dependencies'
-        id: dependencies
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            /nix/cargo/home/registry/index
-            /nix/cargo/home/registry/cache
-            /nix/cargo/home/git/db
-            /nix/cargo/target
-          key: cargo-v1-${{ matrix.configuration }}-${{ hashFiles('Cargo.lock', 'flake.lock', 'rust-toolchain.toml') }}
-          restore-keys: ${{ github.ref != 'refs/heads/main' && format('cargo-v1-{0}-', matrix.configuration) || '' }}
-      # The profiles here differ from a developer's build in what costs
-      # time and changes no test's result:
-      #
-      # - No incremental state: nothing reuses it, since a checkout gives
-      #   every source file a new modification time.
-      # - No debug info in debug builds. Every test binary links the whole
-      #   dependency graph, and with debug info the target directory of
-      #   one debug configuration is over 27GB against 2.7GB without. A
-      #   panic still names its file and line.
-      # - Release builds without link-time optimization, in 16 codegen
-      #   units. The release profile (thin LTO, one unit) optimizes the
-      #   whole graph again for each of the 65 test binaries. What the
-      #   release configurations are for, the tests under opt-level 3
-      #   with debug assertions and overflow checks off, is unchanged.
-      - name: 'Run test configuration'
-        shell: bash
-        run: |
           nix develop \
             --accept-flake-config \
             --set-env-var TMPDIR /nix/tmp \
-            --set-env-var CARGO_HOME /nix/cargo/home \
-            --set-env-var CARGO_TARGET_DIR /nix/cargo/target \
-            --set-env-var CARGO_INCREMENTAL 0 \
-            --set-env-var CARGO_PROFILE_DEV_DEBUG 0 \
-            --set-env-var CARGO_PROFILE_RELEASE_LTO off \
-            --set-env-var CARGO_PROFILE_RELEASE_CODEGEN_UNITS 16 \
+            --set-env-var CARGO_HOME /nix/cargo \
             --command ${{ matrix.configuration }}
-      # Saved only when this exact key was not there to restore, so a
-      # dependency set is saved once: by main when a merge changes it, or
-      # by the pull request that changes it, whose later pushes then find
-      # it. The workspace's own artifacts are cut out first.
-      - name: 'Prune what the next run cannot use'
-        if: steps.dependencies.outputs.cache-hit != 'true'
-        shell: bash
-        run: |
-          scripts/ci/prune-cargo-target.sh /nix/cargo/target
-      - name: 'Save the dependencies'
-        if: steps.dependencies.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: |
-            /nix/cargo/home/registry/index
-            /nix/cargo/home/registry/cache
-            /nix/cargo/home/git/db
-            /nix/cargo/target
-          key: ${{ steps.dependencies.outputs.cache-primary-key }}

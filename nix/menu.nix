@@ -1,6 +1,10 @@
 # This module contains helpers for assembling and printing
 # the Dialog Shell menu.
-{ pkgs }:
+{
+  pkgs,
+  # Environment for the `test:*` commands, on top of the browser's.
+  testEnv ? { },
+}:
 let
   menuGraphic = ''
                                     
@@ -157,23 +161,22 @@ let
     '';
   };
 
-  # Builds and runs a test configuration with cargo, in the target
-  # directory cargo is pointed at. Further arguments go to nextest, so
-  # `test:native:debug -E 'test(it_merges)'` runs a part of it.
-  #
-  # The configurations used to run from a nextest archive that
-  # `nix build` made in the sandbox. A sandbox build starts from nothing
-  # every time, and the binary cache did not keep archives of that size
-  # for long, so CI spent 14 to 50 minutes of every job building before
-  # the first test ran. Cargo keeps what it built: a developer's second
-  # run rebuilds what changed, and CI keeps the dependencies across runs
-  # (see the Tests job in .github/workflows/test.yml). The archives are
-  # still packages (`nix build .#tests-native-debug`) for when a build
-  # from nothing but the committed sources is wanted.
-  makeMenuTestCommand = arguments: ''
+  # Builds a test configuration's archive in the sandbox and runs it.
+  # Further arguments go to nextest, so
+  # `test:native:debug -E 'test(it_merges)'` runs a part of it. The build
+  # log is printed (`-L`): without it a compile error shows as the last
+  # few lines of a failed derivation.
+  makeMenuTestCommand = package: ''
     eval "$(${ensureBrowser}/bin/ensure-browser)"
 
-    cargo nextest run ${arguments} "$@"
+    nix build -L .#${package}
+
+    TESTS_PATH=$(nix eval .#${package}.outPath --raw)
+
+    cargo nextest run \
+      --workspace-remap ./ \
+      --archive-file "$TESTS_PATH/${package}.tar.zst" \
+      "$@"
   '';
 
   menuTestEnv =
@@ -184,11 +187,11 @@ let
     };
 
   menuTestCommand =
-    { description, arguments }:
+    { description, package }:
     {
       inherit description;
-      command = makeMenuTestCommand arguments;
-      env = menuTestEnv;
+      command = makeMenuTestCommand package;
+      env = menuTestEnv // testEnv;
     };
 in
 {
