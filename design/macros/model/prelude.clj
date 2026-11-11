@@ -22,9 +22,13 @@
 (syntax (query ?head ... (when ?premise ...) (unless ?absent ...))
   (rule (report ?head) ... (when ?premise ...) (unless ?absent ...)))
 
-; A concept is syntax whose template is one read.
+; A concept is syntax for what its body says. Its variables tie the
+; concept's parameters to the body's fields; the names need not agree.
 (syntax (concept (?name ?this ...?fields) ?body ...?about)
   (syntax (?name ?this ...?fields) ?body ...?about))
+; A body of several forms stands together where the concept is written.
+(syntax (concept (?name ?this ...?fields) ?first ?second ?more ... ...?about)
+  (syntax (?name ?this ...?fields) (all ?first ?second ?more ...) ...?about))
 
 ; 3. Commands. An application around an application, whose head names
 ;    nothing, is a command. Its rows live in a domain of its own.

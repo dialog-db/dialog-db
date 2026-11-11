@@ -126,3 +126,60 @@ r.submit('''
 ''')
 for row in r.run():
     print('  ', row)
+
+def scene(title, setup, *documents):
+    print('--', title)
+    r = model.Replica()
+    r.submit(open('prelude.clj').read(), quiet=True)
+    try:
+        r.submit(setup)
+        r.run(); r.commands = []
+        for text in documents:
+            r.trace = []; r.inductive = [x for x in r.inductive if not any(h[1] == ('sym', 'report') for h in model.clauses(x)[0])]
+            r.submit(text)
+            for form, kernel in r.trace:
+                print(model.pretty(kernel))
+            for row in r.run():
+                print('  ', row)
+            r.commands = []
+    except Exception as error:
+        print('   refused:', error)
+
+scene('a parameter named differently from the field it reads',
+      '''
+(concept (task ?t title: ?x) (xyz.todo ?t text: (:last (:text ?x))))
+(assert! (task task:1 title: "Buy milk"))
+''',
+      '(query (task ?t title: ?what))')
+
+scene('a concept over two domains: read, written, and absent as a whole',
+      '''
+(concept (author ?p name: ?n email: ?e)
+  (io.person ?p name: (:last (:text ?n)))
+  (io.contact ?p email: (:last (:text ?e))))
+(assert! (author person:ada name: "Ada" email: "ada@example.com"))
+(assert! (io.person person:bob name: "Bob"))
+''',
+      '(query (author ?p name: ?n email: ?e))',
+      '(query (io.person ?p name: ?n) (when (io.person ?p name: ?n)) (unless (author ?p)))')
+
+scene('a concept with a check: it filters a read and guards a write',
+      '''
+(concept (cheap ?i price: ?n)
+  (shop.item ?i price: (:last (:natural ?n)))
+  (< ?n : 100))
+(assert! (shop.item item:tea price: 5))
+(assert! (shop.item item:car price: 9000))
+(assert! (cheap item:pen price: 2))
+(assert! (cheap item:jet price: 70000))
+''',
+      '(query (cheap ?i price: ?n))',
+      '(query (shop.item ?i price: ?n))')
+
+scene('a concept over two entities, tested for absence',
+      '''
+(concept (membership ?m person: ?p team: ?t)
+  (org.member ?m person: ?p)
+  (org.team ?t lead: ?p))
+''',
+      '(query (org.member ?m person: ?p) (when (org.member ?m person: ?p)) (unless (membership ?m person: ?p)))')

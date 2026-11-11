@@ -384,6 +384,8 @@ def apply_formula(form, env, want_is=False):
     if name == 'like':
         pattern = re.escape(value(labels[''], env)[1]).replace('%', '.*')
         return done(bare[0]) if re.fullmatch(pattern, value(bare[0], env)[1], re.S) else []
+    if name == '<':
+        return done(bare[0]) if int(value(bare[0], env)[1]) < int(value(labels[''], env)[1]) else []
     if name == '+':
         return done(('num', str(int(value(bare[0], env)[1]) + int(value(labels[''], env)[1]))))
     raise ValueError(f'no formula {show(form[1])}')
@@ -423,7 +425,7 @@ def read_relation(form, env, facts):
     application names."""
     domain = form[1][1]
     bare, labelled, _ = split(form[2])
-    attributes = [(domain + '/' + label, term) for label, term in labelled]
+    attributes = [(label if '/' in label else domain + '/' + label, term) for label, term in labelled]
     if not attributes:
         raise ValueError(f'{show(form)} names no field')
     entities = {e for (e, a) in facts if a == attributes[0][0]}
@@ -518,13 +520,38 @@ def ground(application, env):
         val = value(term, env)
         if any(not TYPES[c](val) for c in checks):
             raise ValueError(f'{show(val)} is not {checks} in {show(application)}')
-        out.append(((entity, domain + '/' + label), val))
+        out.append(((entity, label if '/' in label else domain + '/' + label), val))
     return out
 
 
 # ------------------------------------------------------------ the walker
 HEAD_WORDS = {('sym', 'assert!'), ('sym', 'retract!'), ('sym', 'assert'), ('sym', 'report')}
 DIRECTIVES = {('sym', 'expand'), ('sym', 'syntax'), ('sym', 'warning')}
+ALL = ('sym', 'all')
+
+
+def members(form):
+    """The forms a form stands for: itself, or what (all ...) holds."""
+    if form[0] == 'app' and form[1] == ALL:
+        return [m for p in form[2] for m in members(p[1])]
+    return [form]
+
+
+def together(forms, written):
+    """Several reads of one entity as one read, so that their absence is
+    the absence of all of them at once."""
+    if len(forms) == 1:
+        return forms[0]
+    entities = {split(f[2])[0][0] for f in forms if is_relation(f)}
+    if not all(is_relation(f) for f in forms) or len(entities) != 1:
+        raise ValueError(f'the absence of {show(written)} needs a rule: it is more than a read of one entity')
+    domain = forms[0][1][1]
+    parts = [('b', entities.pop())]
+    for f in forms:
+        for label, term in split(f[2])[1]:
+            whole = label if '/' in label or f[1][1] == domain else f[1][1] + '/' + label
+            parts.append(('l', whole, term))
+    return ('app', forms[0][1], tuple(parts))
 
 
 class Replica:
@@ -569,9 +596,12 @@ class Replica:
         while not (is_relation(form) or is_formula(form)):
             if form[0] == 'app' and form[1] in DIRECTIVES:
                 return form
+            if form[0] == 'app' and form[1] == ALL:
+                return ('app', ALL, tuple(('b', self.application(p[1], position)) for p in form[2]))
             if position == 'head' and form[0] == 'app' and form[1] in HEAD_WORDS:
                 inner = self.application(form[2][0][1], 'head')
-                return ('app', form[1], (('b', inner),))
+                each = [('b', ('app', form[1], (('b', m),))) for m in members(inner)]
+                return each[0][1] if len(each) == 1 else ('app', ALL, tuple(each))
             form = self.ask(form, position)
         return form
 
@@ -584,17 +614,30 @@ class Replica:
                 form = ('app', ('sym', 'rule'), (('b', head),) + form[2][1:])
             else:
                 form = self.ask(form, 'head')
-        parts = []
+        said, heads, when, unless = [], [], [], []
         for p in form[2]:
             if p[0] == 'l':
-                parts.append(p)
+                said.append(p)
                 continue
             item = p[1]
-            if item[0] == 'app' and item[1] in (('sym', 'when'), ('sym', 'unless')):
-                inner = tuple(('b', self.application(q[1], 'premise')) for q in item[2])
-                parts.append(('b', ('app', item[1], inner)))
+            if item[0] == 'app' and item[1] == ('sym', 'when'):
+                for q in item[2]:
+                    when += members(self.application(q[1], 'premise'))
+            elif item[0] == 'app' and item[1] == ('sym', 'unless'):
+                for q in item[2]:
+                    unless.append(together(members(self.application(q[1], 'premise')), q[1]))
             else:
-                parts.append(('b', self.application(item, 'head')))
+                for head in members(self.application(item, 'head')):
+                    inner = head[2][0][1] if head[1] in HEAD_WORDS else None
+                    if inner is not None and is_formula(inner):
+                        when.append(inner)      # a check on what is written guards the write
+                    else:
+                        heads.append(head)
+        parts = said + [('b', h) for h in heads]
+        if when:
+            parts.append(('b', ('app', ('sym', 'when'), tuple(('b', q) for q in when))))
+        if unless:
+            parts.append(('b', ('app', ('sym', 'unless'), tuple(('b', q) for q in unless))))
         return ('app', form[1], tuple(parts))
 
     def install(self, rule):
