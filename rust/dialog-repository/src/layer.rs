@@ -38,6 +38,16 @@ use std::str;
 use crate::placement::ScopeMap;
 use crate::stack::{Guide, GuidedLayer};
 
+/// The order of the rows of a read: the order of a tree's keys, or its
+/// reverse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Order {
+    /// The least sort key first, as a forward scan reads.
+    Ascending,
+    /// The greatest sort key first, as a reverse scan reads.
+    Descending,
+}
+
 /// Merge sorted fact streams into one stream whose order matches
 /// what a single physical probabilistic search tree containing every input would
 /// produce, deduplicating identical claims that appear in more than one
@@ -93,10 +103,19 @@ use crate::stack::{Guide, GuidedLayer};
 /// formats. Each input stays grouped by `(the, of)` whatever its format, so
 /// runs still merge whole; only the order of values within a run may differ
 /// from a single tree's.
+///
+/// # Order
+///
+/// Every input runs in `order`. Under [`Order::Descending`] each input runs
+/// from its greatest sort key down, as a reverse scan reads, and the merge
+/// takes the greatest head first. It dedupes within each `(the, of)` run as
+/// the ascending merge does, and on a tie it takes the head of the first
+/// stream, so the precedence of the streams is the same in each order.
 pub(crate) fn merge_grouped<'a>(
     streams: Vec<FactStream<'a>>,
     manifest: Manifest,
     keys: MergeKeys,
+    order: Order,
 ) -> FactStream<'a> {
     if streams.is_empty() {
         return Box::pin(stream::empty());
@@ -143,7 +162,10 @@ pub(crate) fn merge_grouped<'a>(
                     let beats = match min_idx {
                         Some(min) => {
                             let (min_key, _) = heads[min].as_ref().expect("min slot filled");
-                            key < min_key
+                            match order {
+                                Order::Ascending => key < min_key,
+                                Order::Descending => key > min_key,
+                            }
                         }
                         None => true,
                     };
@@ -351,7 +373,12 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_yields_empty_stream_when_no_inputs() -> anyhow::Result<()> {
-        let merged = merge_grouped(vec![], Manifest::default(), MergeKeys::Stored);
+        let merged = merge_grouped(
+            vec![],
+            Manifest::default(),
+            MergeKeys::Stored,
+            Order::Ascending,
+        );
         let items = collect(merged).await?;
         assert!(items.is_empty());
         Ok(())
@@ -367,6 +394,7 @@ mod tests {
             vec![stream_of(vec![a.clone(), a.clone()])],
             Manifest::default(),
             MergeKeys::Stored,
+            Order::Ascending,
         );
         let items = collect(merged).await?;
         assert_eq!(items.len(), 2);
@@ -382,6 +410,7 @@ mod tests {
             vec![stream_of(vec![a.clone()]), stream_of(vec![a.clone()])],
             Manifest::default(),
             MergeKeys::Stored,
+            Order::Ascending,
         );
         let items = collect(merged).await?;
         assert_eq!(items.len(), 1);
@@ -487,14 +516,26 @@ mod tests {
             ]
         };
 
-        let merged = collect(merge_grouped(scans(), small.clone(), MergeKeys::Fields)).await?;
+        let merged = collect(merge_grouped(
+            scans(),
+            small.clone(),
+            MergeKeys::Fields,
+            Order::Ascending,
+        ))
+        .await?;
         assert_eq!(
             merged,
             vec![shared.clone(), other.clone()],
             "the shared fact comes out once"
         );
 
-        let stored = collect(merge_grouped(scans(), small.clone(), MergeKeys::Stored)).await?;
+        let stored = collect(merge_grouped(
+            scans(),
+            small.clone(),
+            MergeKeys::Stored,
+            Order::Ascending,
+        ))
+        .await?;
         assert_eq!(
             stored.len(),
             3,

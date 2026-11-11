@@ -234,6 +234,33 @@ impl Select<'_> {
         )))
     }
 
+    /// [`execute_boxed`](Self::execute_boxed) in reverse: the same rows,
+    /// the greatest key first (see
+    /// [`CorpusExt::scan_reverse`](dialog_corpus::tree::CorpusExt::scan_reverse)).
+    pub(crate) async fn execute_reverse_boxed<'s, S>(
+        self,
+        store: S,
+    ) -> Result<FactStream<'s>, DialogSearchTreeError>
+    where
+        S: Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + Provider<BlobLoad>
+            + Holds
+            + ConditionalSend
+            + ConditionalSync
+            + Clone
+            + 's,
+    {
+        let tree = self.probed_tree(&store).await?;
+        Ok(Box::pin(tree.scan_reverse(
+            store,
+            self.view.spill_cache(),
+            self.selector,
+        )))
+    }
+
     /// Estimate this selector's range size, picking a store the same way
     /// [`perform`](Self::perform) does. See [`estimate`](Self::estimate).
     pub async fn estimate_perform<Env>(self, env: &Env) -> Result<Option<u64>, DialogCorpusError>

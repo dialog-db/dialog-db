@@ -40,7 +40,7 @@ use tokio::sync::OnceCell;
 
 use crate::CommitError;
 use crate::REGISTRY;
-use crate::layer::{Hidden, MergeKeys, filter_hidden, guide_rows, merge_grouped};
+use crate::layer::{Hidden, MergeKeys, Order, filter_hidden, guide_rows, merge_grouped};
 use crate::placement::{Placements, ScopeMap};
 use crate::repository::archive::TreeEnv;
 use crate::repository::branch::select::line_manifest;
@@ -1068,6 +1068,18 @@ pub(crate) async fn select_from_source<'a>(
     Ok(select.execute_boxed(reads).await?)
 }
 
+/// [`select_from_source`] in reverse: the rows of the line that `input`
+/// selects, the greatest key first, read through the same store.
+pub(crate) async fn select_reverse_from_source<'a>(
+    source: &Source,
+    env: &'a Erased,
+    input: Selector<Constrained>,
+) -> Result<FactStream<'a>, DialogCorpusError> {
+    let select = crate::Select::from_view(source.as_view(), input);
+    let reads: &dyn TreeEnv = env;
+    Ok(select.execute_reverse_boxed(reads).await?)
+}
+
 #[dialog_capability::provider]
 // Deliberately implemented for the *same* lifetime on both sides
 // (`QueryEnv<'a>: Provider<Select<'a>>`), never a decoupled pair
@@ -1090,6 +1102,29 @@ impl<'a> Provider<Select<'a>> for QueryEnv<'a> {
         if input.attribute() == Some(&*QUARANTINED) {
             return Box::pin(self.select_quarantined(input)).await;
         }
+        self.select_in(input, Order::Ascending).await
+    }
+}
+
+impl<'a> QueryEnv<'a> {
+    /// The rows of every source of this environment that `input` selects,
+    /// guided, filtered, and merged, in `order`. A read of
+    /// [`Order::Descending`] takes the same rows as a read of
+    /// [`Order::Ascending`], in the opposite order: each line scans in
+    /// reverse, each set of rows held in memory runs from its last row, and
+    /// the merge takes the greatest row first.
+    pub(crate) async fn select_in(
+        &self,
+        input: Selector<Constrained>,
+        order: Order,
+    ) -> Result<FactStream<'a>, DialogCorpusError> {
+        // Rows held in memory, sorted by sort key, run in `order`.
+        let ordered = |mut rows: Vec<Fact>| {
+            if order == Order::Descending {
+                rows.reverse();
+            }
+            rows
+        };
         let format = self.format().await?;
         let manifest = format.manifest.clone();
         // Placement resolves inside the read: an attribute that no layer of
@@ -1142,7 +1177,12 @@ impl<'a> Provider<Select<'a>> for QueryEnv<'a> {
         // the rows of the attributes placed on its scopes.
         let guided = self.guided().await?;
         for (index, (source, line)) in self.sources.iter().zip(&format.lines).enumerate() {
-            let mut raw = select_from_source(source, self.env, input.clone()).await?;
+            let mut raw = match order {
+                Order::Ascending => select_from_source(source, self.env, input.clone()).await?,
+                Order::Descending => {
+                    select_reverse_from_source(source, self.env, input.clone()).await?
+                }
+            };
             if let Some((guide, scopes)) = &guided
                 && let Some(layer) = guide.lines.get(index)
             {
@@ -1209,7 +1249,8 @@ impl<'a> Provider<Select<'a>> for QueryEnv<'a> {
             }
             let session = *session.get_or_insert_with(newest);
             let rows: FactStream<'a> = Box::pin(stream::iter(
-                rows.into_iter()
+                ordered(rows)
+                    .into_iter()
                     .map(move |fact| Ok(FactView::pending(fact, session))),
             ));
             sessions.push(filter_hidden(
@@ -1234,7 +1275,8 @@ impl<'a> Provider<Select<'a>> for QueryEnv<'a> {
             }
             let session = *session.get_or_insert_with(newest);
             let rows: FactStream<'a> = Box::pin(stream::iter(
-                rows.into_iter()
+                ordered(rows)
+                    .into_iter()
                     .map(move |fact| Ok(FactView::pending(fact, session))),
             ));
             sessions.push(filter_hidden(rows, format.staged.clone(), manifest.clone()));
@@ -1252,7 +1294,7 @@ impl<'a> Provider<Select<'a>> for QueryEnv<'a> {
         let overlay = self.overlay.select_within(&window, &manifest);
         if !overlay.is_empty() {
             changes.push(Box::pin(stream::iter(
-                overlay.into_iter().map(|fact| Ok(fact.into())),
+                ordered(overlay).into_iter().map(|fact| Ok(fact.into())),
             )));
         }
 
@@ -1276,7 +1318,8 @@ impl<'a> Provider<Select<'a>> for QueryEnv<'a> {
                 .collect();
             let pending = pending();
             let rows: FactStream<'a> = Box::pin(stream::iter(
-                rows.into_iter()
+                ordered(rows)
+                    .into_iter()
                     .map(move |fact| Ok(FactView::pending(fact, pending))),
             ));
             if held.is_empty() {
@@ -1303,7 +1346,7 @@ impl<'a> Provider<Select<'a>> for QueryEnv<'a> {
                     .chain(changes)
                     .collect()
             };
-        let merged = merge_grouped(streams, manifest, format.keys);
+        let merged = merge_grouped(streams, manifest, format.keys, order);
         Ok(match &self.demand {
             Some(demand) => demand.counting(merged),
             None => merged,

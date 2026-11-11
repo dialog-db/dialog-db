@@ -60,8 +60,9 @@ pub use placement::{
 
 pub mod stack;
 pub use stack::{
-    AsLayer, Audience, Divergence, Head, Layer, OpenStack, Stack, StackCommit, StackEnv,
-    StackError, StackPublish, StackQuery, StackSelect, StackSubscription, StackTransaction,
+    AsLayer, Audience, CollectionKeys, Divergence, Head, Layer, OpenStack, Stack, StackCommit,
+    StackEnv, StackError, StackKeys, StackPublish, StackQuery, StackSelect, StackSubscription,
+    StackTransaction,
 };
 
 pub use dialog_corpus::{Exporter, Importer};
