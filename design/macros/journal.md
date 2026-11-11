@@ -127,3 +127,16 @@ Not examined yet. They are columns, not recommendations.
 **Decided.** A form is a record, and `entity/derive` takes one. By the maintainer. The two-cell formula stays as a stand-in, marked so, since replacing it needs a record layout and that is #748's to decide.
 
 **Backtracked.** Not a phase, a build: `entity/derive` was built before what it takes was asked.
+
+## 2026-11-11, Designing: which record
+
+**Asked.** How a record is written in the notation. Irakli: he imagined records like Clojure maps, with any value as a key, since anything has a merkle reference; conduct does something like it.
+
+**Learned.**
+
+- conduct has three compound values, not one: a record keyed by declared attributes, a dictionary keyed by keywords, and `conduct.map`, a library hash map keyed by any value and canonical so its hash agrees with `=`. The any-key one is the map.
+- dialog's `Type::map` already gives a map of any keys an identity: key and value references, ordered by key.
+- #748's record is conduct's record: attribute keys, typed on read. It also lets a field hold several values, which a Clojure map does not.
+- `:id` needs only attribute keys. A form needs positions and plain names as keys, which are not attributes.
+
+**Decided.** Not decided: one compound value or two. Written out in [design-forms.md](design-forms.md), "A record with any value as its key".

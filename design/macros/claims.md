@@ -33,6 +33,9 @@
 | two claims one round wrote to a `last` field elect by the hash of the value, whatever order they were written in | fact | CHANGELOG, #752; `it_elects_one_of_two_writes_of_one_round_whatever_their_order` | holds |
 | a record is taken apart by a formula today | fact | `dialog/revision`, `rust/dialog-query/src/formula/revision.rs` | holds, for one record type with fixed fields |
 | a form is a record as #748 has it, and `entity/derive` takes a record | opinion | Irakli, 2026-11-11 | decides |
+| a record's key may be any value, as a Clojure map's | opinion | Irakli, 2026-11-11 | conflicts with #748, where a field is named by an attribute and may hold several values; not reconciled |
+| conduct's records take any value as a key | hypothesis | `notes/language.md` and `DECISIONS.md` in Gozala/conduct | refuted for its record and dictionary; holds for `conduct.map` |
+| a map of any keys has an identity in dialog today | fact | `Type::map`, `rust/merkle-reference/src/lib.rs` | holds |
 | a rule can build a record from what it has bound | hypothesis | H5 of [design-forms.md](design-forms.md): confirmed by a record premise planned as a concept query is, running both ways | open; #748 speaks only of reading one |
 | a premise may take parameters that differ by application | fact | `ConceptQuery::schema`, `rust/dialog-query/src/concept/query.rs` | holds |
 | the two-cell `entity/derive` names the entities a record will | hypothesis | refuted by its own definition: a chain of pairs under a seed is not a record's canonical form | refuted; it is a stand-in |

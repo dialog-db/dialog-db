@@ -101,18 +101,41 @@ The record's attributes carry the domain, so there is no seed, and the order of 
 
 A form's parts fit pairs better than first drawn above. An application's head is the domain its labels are short for: `(xyz.todo ?t text: ?x)` already means `xyz.todo/text`. So a form needs no head field; its head is the namespace of its attributes. A run such as the premises of `when` is one field with several values, and the order they were written in is the source map's to keep, as was agreed for printing.
 
+## A record with any value as its key
+
+Irakli, 2026-11-11: a record is like a Clojure map, and its key may be any value, since anything has a merkle reference. He recalled conduct doing so. Checked:
+
+| | keys | values a key | where |
+|---|---|---|---|
+| conduct, record | attributes a type declares; an undeclared key is an error | one | `{name: "Ada"}`, `notes/language.md` |
+| conduct, dictionary | keywords | one | `{:class "todo"}` |
+| conduct, `conduct.map` | any value | one | `lib/map.cdt`; canonical, so its content hash agrees with `=` (`DECISIONS.md`, "Equal maps are the same value") |
+| dialog, `Type::map` | any reference | one | `rust/merkle-reference/src/lib.rs`: key and value references, ordered by key |
+| #748, record | attributes, which bring a type and a pick | several | decided there |
+| as stated today | any value | not said | |
+
+So the identity of a map with any key is already defined in dialog, and conduct has such a map. But conduct keeps it apart from its record, whose keys are attributes, and #748's record is conduct's record. "A record with any value as its key" names the map with the record's word.
+
+What each use here needs:
+
+- **An entity derived from a row**, `:id`: keys that are attributes. #748's record does.
+- **A form:** its bare parts in order, so keys that are positions, and labels that belong to no domain where the head is a concept, so keys that are plain names. Neither is an attribute. A map does; #748's record does not, unless H6 holds.
+
+Not decided: whether dialog has one compound value, a map of which #748's record is the case where every key is an attribute, or two, as conduct has. One value is less to build and one layout. It reopens two things #748 has decided: a field is named by an attribute, and a field may hold several values.
+
 ## Hypotheses, after the decision
 
 | hypothesis | confirmed by | refuted by |
 |---|---|---|
 | **H5.** One premise does both: it relates a record to its fields, building the record where the fields are bound and binding the fields where the record is. | The planner already takes a premise whose parameters differ by application: a concept query builds its schema from its own terms (`ConceptQuery::schema`). A record premise planned the same way runs `:id` one way and `expand` the other. | Building and taking apart need different costs or different requirements that one schema cannot say. Then they are two premises, as `syntax` and `expand` are two words. |
-| **H6.** A form is a record whose attributes are its head and labels, with the one bare part of a read as its entity. | `prelude.clj` and `examples/todo.clj` written out as such records, with nothing left over. | A form with two bare parts that are not a run: `(syntax pattern template)` is one, and `(+ ?a : ?b)` is not, since `:` is a label. |
+| **H6.** Needed only if a record's keys stay attributes. A form is a record whose attributes are its head and labels, with the one bare part of a read as its entity. | `prelude.clj` and `examples/todo.clj` written out as such records, with nothing left over. | A form with two bare parts that are not a run: `(syntax pattern template)` is one, and `(+ ?a : ?b)` is not, since `:` is a label. |
 | **H1**, narrowed. Every atom is a value. | Text, numbers, entities and keywords are. | A variable, `_` and `...` are not values today. They need one, or a form is not a #748 record without a change to what a value is. |
 
 H2 is now a requirement in the table above, not a hypothesis. H3 and H4 stand.
 
 ## Next
 
+0. One compound value or two: the map and #748's record.
 1. How a rule builds a record: the premise of H5, and how it is written.
 2. What a variable is as a value (H1).
 3. H3, measured, as a research topic.
