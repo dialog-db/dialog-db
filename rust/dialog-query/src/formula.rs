@@ -27,6 +27,8 @@ pub use query::*;
 
 /// Type conversion formulas (to_string, parse_number)
 pub mod conversions;
+/// Deriving an entity from values
+pub mod entity;
 /// Boolean logic formulas (and, or, not)
 pub mod logic;
 /// Mathematical operation formulas (sum, difference, product, quotient, modulo)
@@ -45,6 +47,7 @@ pub mod revision;
 
 pub use attribute::AttributeParts as AttributePartsFormula;
 pub use conversions::{ParseFloat, ParseSignedInteger, ParseUnsignedInteger, ToString};
+pub use entity::Derive as DeriveEntity;
 pub use key::{KeyPart as KeyPartFormula, SeparatorPart as SeparatorPartFormula};
 pub use logic::{And, Not, Or};
 pub use math::{Difference, Floor, Modulo, Product, Quotient, Round, Sum, Truncate};

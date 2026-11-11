@@ -14,6 +14,33 @@ says how to cut a release.
 
 ## Unreleased
 
+### A rule can name an entity it did not read
+
+[#773](https://github.com/dialog-db/dialog-db/pull/773), argued in
+[design/macros/poc.md](./design/macros/poc.md).
+
+A rule that concludes a fact of an entity its premises did not bind, the
+row of a command it issues or a record it creates, had no way to name
+that entity. The formula `entity/derive` makes one from two values: `id:`
+followed by the base58 of the two values' references, as a list under the
+type `id:`. Equal values name one entity on every replica. Deriving again
+from the result takes in one more value, and the order values are taken
+in is part of the name.
+
+What this changes for you:
+
+- `entity/derive` is a formula: `{ "assert": "entity/derive", "where":
+  { "of": …, "with": …, "is": … } }`. In Rust it is
+  `dialog_query::formula::entity::Derive`, and
+  `dialog_query::formula::entity::derive` is the same function for a
+  caller that has both values.
+- A derived entity has the scheme `id:`. Nothing reserves the scheme: an
+  entity written `id:…` by hand is an entity like any other.
+
+Why: a command a rule issues is a fact of a new entity, and that entity
+has to be the same wherever the rule fires on the same bindings. Nothing
+but the bindings can name it.
+
 ### The corpus crate is `dialog-corpus`, and it asks its environment for everything it reads
 
 [#768](https://github.com/dialog-db/dialog-db/pull/768), decided in
@@ -2347,6 +2374,11 @@ thread multiplies whatever it holds by the size of the thread pool.
 
 ### Compatibility and migration
 
+- Nothing stored or synced changes shape for `entity/derive`, and nothing
+  is rewritten on upgrade. A rule that applies it is stored as any rule
+  is, and a release without the formula cannot read that rule's body, as
+  it cannot read any formula it does not know. Nothing for an embedder to
+  run.
 - Nothing stored or synced changes for the file store's lock; only the
   lock files beside its cells do. A lock file the previous release left
   behind holds a bare PID, which this release reads as a holder: one

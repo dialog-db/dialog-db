@@ -10,6 +10,8 @@
 //! | `(assert A)` with no premise | a [`ConceptStatement`], dispatched: it holds one round |
 //! | a bare head with premises | a [`DeductiveRule`] |
 //! | `(assert! A)`, `(retract! A)` with premises | an [`InductiveRule`] |
+//! | `(assert A)` with premises | an [`InductiveRule`] over a concept marked to hold one round |
+//! | `(:id domain label: term …)` | the entity `entity/derive` makes of the domain, the labels and each value in turn |
 //! | `(report A)` with one read as its premise | a [`ConceptQuery`] |
 //! | `(report A)` with any other premises | a [`DeductiveRule`] deriving the report, and a [`ConceptQuery`] of it |
 //!
@@ -21,6 +23,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use dialog_corpus::{Entity, Value};
 use dialog_query::concept::descriptor::ConceptStatement;
+use dialog_query::formula::entity::derive;
 use dialog_query::{
     Any, AttributeDescriptor, ConceptConclusion, ConceptQuery, DeductiveRule, InductiveRule,
     Term as Variable,
@@ -44,6 +47,9 @@ pub enum Step {
     Deduce(Box<DeductiveRule>),
     /// A rule to install, writing when its premises come to hold.
     Induce(Box<InductiveRule>),
+    /// A concept whose facts hold one round: what a rule issues as a
+    /// command. The branch is told so beside the rule that issues it.
+    Transient(Entity),
     /// A query to run.
     Query(Box<Query>),
 }
@@ -124,40 +130,40 @@ pub fn compile(form: &Form) -> Result<Vec<Step>, Error> {
     if rule.heads.is_empty() {
         return Err(Error::Refused(format!("{form} has no head")));
     }
-    // A concept of several reads stands as several heads. Where the
-    // author named fields of only some, the others say nothing.
-    let bound = bound(&rule);
-    let heads: Vec<&Head> = rule
-        .heads
-        .iter()
-        .filter(|head| !kept(head.read(), &bound).is_empty())
-        .collect();
-    if heads.is_empty() {
-        return Err(Error::Refused(format!("{form} concludes no field")));
-    }
     if rule.when.is_empty() {
         if !rule.unless.is_empty() {
             return Err(Error::Refused(format!(
                 "{form} says what must not hold and nothing that must"
             )));
         }
-        return heads.into_iter().map(ground).collect();
+        return rule.heads.iter().map(ground).collect();
     }
-    heads
-        .into_iter()
-        .enumerate()
-        .map(|(at, head)| match head {
-            Head::Derive(read) => deduce(&rule, read),
-            Head::Assert(read) => induce(&rule, read, "assert!"),
-            Head::Retract(read) => induce(&rule, read, "retract!"),
-            Head::Report(read) => report(&rule, read, &format!("{form} {at}")),
-            Head::Hold(read) => Err(Error::Unsupported(format!(
-                "a rule that issues a command: the row of {} needs an entity made from \
-                 its fields, and Dialog-DB has no formula that makes one",
-                read.domain
-            ))),
-        })
-        .collect()
+    let bound = bound(&rule);
+    let mut steps = Vec::new();
+    for (at, head) in rule.heads.iter().enumerate() {
+        match head {
+            Head::Derive(read) => steps.push(deduce(&rule, read)?),
+            Head::Assert(read) => {
+                steps.push(Step::Induce(Box::new(induce(&rule, read, "assert!")?)));
+            }
+            Head::Retract(read) => {
+                steps.push(Step::Induce(Box::new(induce(&rule, read, "retract!")?)));
+            }
+            Head::Hold(read) => {
+                let issuing = induce(&rule, read, "assert!")?;
+                steps.push(Step::Transient(issuing.conclusion().this()));
+                steps.push(Step::Induce(Box::new(issuing)));
+            }
+            // A concept of several reads is reported as several heads.
+            // A read the query named no field of says nothing.
+            Head::Report(read) if kept(read, &bound).is_empty() => {}
+            Head::Report(read) => steps.push(report(&rule, read, &format!("{form} {at}"))?),
+        }
+    }
+    if steps.is_empty() {
+        return Err(Error::Refused(format!("{form} reports no field")));
+    }
+    Ok(steps)
 }
 
 fn refused(what: &str, error: impl std::fmt::Display) -> Error {
@@ -196,36 +202,49 @@ fn number(text: &str, kind: Option<&str>) -> Result<Json, Error> {
     }
 }
 
-/// The entity `(:id domain label: term …)` names when every part of it
-/// is a constant: the hash of what it says.
-fn id(formula: &Formula) -> Result<Option<String>, Error> {
-    let mut said = Vec::new();
-    for term in formula.subject.iter() {
-        match ground(term) {
-            Some(text) => said.push(text),
-            None => return Ok(None),
-        }
+/// What `(:id domain label: term …)` is derived from before any of its
+/// values, and the values in the order they are taken: the domain and
+/// the labels make the seed, and the labels are sorted, so the entity
+/// does not depend on the order the parts were written in.
+fn seed(formula: &Formula) -> Result<(Entity, Vec<&Term>), Error> {
+    let Some(Term::Symbol(domain)) = &formula.subject else {
+        return Err(Error::Refused(
+            "(:id …) needs the domain its entity is for".into(),
+        ));
+    };
+    let mut parts: Vec<(&str, &Term)> = formula
+        .labelled
+        .iter()
+        .map(|(label, term)| (label.as_str(), term))
+        .collect();
+    parts.sort_by_key(|(label, _)| *label);
+    if parts.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+        return Err(Error::Refused(format!(
+            "(:id {domain} …) names a label twice"
+        )));
     }
-    let mut labelled = BTreeSet::new();
-    for (label, term) in &formula.labelled {
-        match ground(term) {
-            Some(text) => labelled.insert(format!("{label}: {text}")),
-            None => return Ok(None),
-        };
-    }
-    said.extend(labelled);
-    return Ok(Some(format!(
-        "id:{}",
-        blake3::hash(said.join(" ").as_bytes()).to_hex()
-    )));
+    let labels: Vec<&str> = parts.iter().map(|(label, _)| *label).collect();
+    let seed = derive(
+        &Value::String(domain.clone()),
+        &Value::String(labels.join(" ")),
+    );
+    Ok((seed, parts.into_iter().map(|(_, term)| term).collect()))
+}
 
-    fn ground(term: &Term) -> Option<String> {
-        match term {
-            Term::Text(text) => Some(Form::Text(text.clone()).to_string()),
-            Term::Number(text) | Term::Entity(text) | Term::Symbol(text) => Some(text.clone()),
-            Term::Variable(_) | Term::Blank | Term::Formula(_) => None,
-        }
+/// The entity `(:id domain label: term …)` names when every part of it
+/// is a constant: what `entity/derive` makes of the seed and each value
+/// in turn, worked out here. `None` when a rule has to bind a part.
+fn id(formula: &Formula) -> Result<Option<Entity>, Error> {
+    let (mut entity, terms) = seed(formula)?;
+    for term in terms {
+        let Some(value) = constant(term, None)? else {
+            return Ok(None);
+        };
+        let value: Value =
+            serde_json::from_value(value).map_err(|error| refused("the value", error))?;
+        entity = derive(&Value::Entity(entity), &value);
     }
+    Ok(Some(entity))
 }
 
 /// A constant as Dialog-DB reads it. `None` for what is not a constant.
@@ -242,7 +261,7 @@ fn constant(term: &Term, kind: Option<&str>) -> Result<Option<Json>, Error> {
             )));
         }
         Term::Formula(formula) if formula.name == "id" => match id(formula)? {
-            Some(uri) => json!({ "entity:": uri }),
+            Some(entity) => json!({ "entity:": entity.to_string() }),
             None => return Ok(None),
         },
         Term::Variable(_) | Term::Blank | Term::Formula(_) => return Ok(None),
@@ -278,7 +297,8 @@ fn statement(read: &Read) -> Result<ConceptStatement, Error> {
         }
     };
     let mut with = Vec::new();
-    for field in kept(read, &BTreeSet::new()) {
+    whole(read, &BTreeSet::new())?;
+    for field in &read.fields {
         let value = constant(&field.term, field.kind.as_deref())?.ok_or_else(|| {
             Error::Refused(format!(
                 "a write with no premise needs a value for {}",
@@ -317,9 +337,32 @@ fn ground(head: &Head) -> Result<Step, Error> {
     }
 }
 
-/// The fields of a head that say something. A field an expansion added
-/// and no premise binds is one the author left out: a write through a
-/// concept writes the fields named, and a report shows them.
+/// A write says every field of what it writes. A field an expansion
+/// added and no premise binds is one the author left out, and a concept
+/// written in part is not the concept: a read through it would not find
+/// what was written.
+fn whole(read: &Read, bound: &BTreeSet<String>) -> Result<(), Error> {
+    let named = kept(read, bound);
+    let left_out: Vec<&str> = read
+        .fields
+        .iter()
+        .filter(|field| !named.contains(field))
+        .map(|field| field.attribute.as_str())
+        .collect();
+    if left_out.is_empty() {
+        Ok(())
+    } else {
+        Err(Error::Refused(format!(
+            "a write says every field, and this one leaves out {}: write the relation \
+             itself to write part of it",
+            left_out.join(", ")
+        )))
+    }
+}
+
+/// The fields of a head the author named. A field an expansion added
+/// and no premise binds is one the author left out, which a report does
+/// not show.
 fn kept<'a>(read: &'a Read, bound: &BTreeSet<String>) -> Vec<&'a Field> {
     read.fields
         .iter()
@@ -433,9 +476,19 @@ impl Scope {
             return Ok(constant);
         }
         match term {
-            // A variable only what must not hold names is anything at
-            // all there. Dialog-DB wants it blank, which cannot say that
-            // two of them are the same.
+            // What must not hold binds nothing: Dialog-DB wants every
+            // variable in it bound by what must hold, or blank.
+            Term::Variable(name)
+                if self.negated && !self.bound.contains(name) && !name.contains('.') =>
+            {
+                Err(Error::Refused(format!(
+                    "?{name} is in `unless` and nothing in `when` binds it: write `_` for \
+                     anything at all"
+                )))
+            }
+            // A field the author left out of a concept is anything at
+            // all, so it is blank, which cannot say that two of them are
+            // the same.
             Term::Variable(name) if self.negated && !self.bound.contains(name) => {
                 if self.absent.insert(name.clone()) {
                     Ok(json!({ "?": {} }))
@@ -448,18 +501,7 @@ impl Scope {
             }
             Term::Variable(name) => Ok(variable(&self.name(name))),
             Term::Blank => Ok(json!({ "?": {} })),
-            Term::Formula(formula) if formula.name == "id" => Err(Error::Unsupported(format!(
-                "an entity made from what a rule binds, (:id {} …): Dialog-DB has no formula \
-                 that makes one",
-                formula
-                    .subject
-                    .as_ref()
-                    .and_then(|term| match term {
-                        Term::Symbol(name) => Some(name.as_str()),
-                        _ => None,
-                    })
-                    .unwrap_or("…")
-            ))),
+            Term::Formula(formula) if formula.name == "id" => self.id(formula, None),
             Term::Formula(formula) => {
                 if self.negated {
                     return Err(Error::Unsupported(format!(
@@ -485,6 +527,33 @@ impl Scope {
             }
             _ => Err(Error::Refused("not a term".into())),
         }
+    }
+
+    /// `(:id domain label: term …)` where a rule binds a part of it: a
+    /// chain of `entity/derive`, from the seed through each value. The
+    /// last link binds `result`, or a variable of its own.
+    fn id(&mut self, formula: &Formula, result: Option<&str>) -> Result<Json, Error> {
+        if self.negated {
+            return Err(Error::Unsupported(
+                "(:id …) inside what must not hold: Dialog-DB negates one proposition".into(),
+            ));
+        }
+        let (seed, terms) = seed(formula)?;
+        let mut entity = json!({ "entity:": seed.to_string() });
+        let last = terms.len().saturating_sub(1);
+        for (at, term) in terms.into_iter().enumerate() {
+            let with = self.term(term, None)?;
+            let is = match result {
+                Some(name) if at == last => variable(name),
+                _ => variable(&self.fresh()),
+            };
+            self.when.push(json!({
+                "assert": "entity/derive",
+                "where": { "of": entity, "with": with, "is": is.clone() }
+            }));
+            entity = is;
+        }
+        Ok(entity)
     }
 
     fn read(&mut self, read: &Read) -> Result<Json, Error> {
@@ -576,6 +645,11 @@ impl Scope {
                     read.domain
                 )));
             }
+            Term::Formula(formula)
+                if formula.name == "id" && constant(&read.entity, None)?.is_none() =>
+            {
+                self.id(formula, Some("this"))?;
+            }
             other => {
                 let entity = self.term(other, None)?;
                 self.when.push(tie("this", entity));
@@ -642,8 +716,8 @@ impl Scope {
 
 /// A Dialog-DB rule concluding `read` when the premises of `rule` hold.
 fn concluding(rule: &Rule, read: &Read, head: &str) -> Result<Json, Error> {
-    let bound = bound(rule);
-    let fields = kept(read, &bound);
+    whole(read, &bound(rule))?;
+    let fields: Vec<&Field> = read.fields.iter().collect();
     let mut scope = Scope::default();
     scope.adopt(read, &fields);
     scope.body(rule)?;
@@ -657,9 +731,8 @@ fn deduce(rule: &Rule, read: &Read) -> Result<Step, Error> {
         .map_err(|error| refused("the rule", error))
 }
 
-fn induce(rule: &Rule, read: &Read, head: &str) -> Result<Step, Error> {
+fn induce(rule: &Rule, read: &Read, head: &str) -> Result<InductiveRule, Error> {
     serde_json::from_value(concluding(rule, read, head)?)
-        .map(|rule| Step::Induce(Box::new(rule)))
         .map_err(|error| refused("the rule", error))
 }
 
@@ -840,12 +913,6 @@ mod tests {
     fn it_says_what_dialog_has_no_counterpart_for() {
         assert!(matches!(
             steps(
-                "(rule (assert (command.go.x (:id command.go.x of: ?c) of: ?c)) (when (xyz.counter ?c count: ?n)))"
-            ),
-            Err(Error::Unsupported(_))
-        ));
-        assert!(matches!(
-            steps(
                 "(rule (report (xyz.a ?a n: ?n)) (when (xyz.a ?a n: ?n)) (unless (xyz.b ?a n: (+ ?n : 1))))"
             ),
             Err(Error::Unsupported(_))
@@ -854,6 +921,72 @@ mod tests {
             steps("(rule (report (xyz.a ?a n: ?n)) (when (xyz.a ?a n: ?n) (:like ?n : \"x\")))"),
             Err(Error::Unsupported(_))
         ));
+    }
+
+    #[test]
+    fn it_compiles_a_command_a_rule_issues_to_a_rule_over_a_transient_concept() {
+        let steps = steps(
+            "(rule (assert (command.go.x (:id command.go.x of: ?c) of: ?c))
+               (when (xyz.counter ?c count: ?n)))",
+        )
+        .unwrap();
+        let [Step::Transient(concept), Step::Induce(rule)] = steps.as_slice() else {
+            panic!("a transient concept and the rule that concludes it");
+        };
+        assert_eq!(*concept, rule.conclusion().this());
+    }
+
+    #[test]
+    fn it_names_one_entity_whatever_order_the_parts_of_an_id_are_in() {
+        let entity = |text: &str| match steps(text).unwrap().as_slice() {
+            [Step::Assert(statement)] => statement.this.clone(),
+            _ => panic!("one assertion"),
+        };
+        let one = entity(r#"(rule (assert! (xyz.n (:id xyz.n a: 1 b: "x") a: 1)))"#);
+        assert!(one.as_str().starts_with("id:"));
+        assert_eq!(
+            one,
+            entity(r#"(rule (assert! (xyz.n (:id xyz.n b: "x" a: 1) a: 1)))"#)
+        );
+        assert_ne!(
+            one,
+            entity(r#"(rule (assert! (xyz.n (:id xyz.n a: 1 b: "y") a: 1)))"#)
+        );
+        assert_ne!(
+            one,
+            entity(r#"(rule (assert! (xyz.m (:id xyz.m a: 1 b: "x") a: 1)))"#)
+        );
+    }
+
+    #[test]
+    fn it_refuses_a_write_that_leaves_a_field_out() {
+        // `?l.1` is how a field an expansion added and nothing binds reads.
+        assert!(matches!(
+            steps(
+                "(rule (assert! (xyz.todo ?t list: ?l.1 state: :done)) (when (xyz.go ?t on: :yes)))"
+            ),
+            Err(Error::Refused(_))
+        ));
+        assert!(matches!(
+            steps("(rule (assert! (xyz.todo todo:1 list: ?l.1 state: :done)))"),
+            Err(Error::Refused(_))
+        ));
+    }
+
+    #[test]
+    fn it_refuses_a_variable_only_unless_names() {
+        assert!(matches!(
+            steps(
+                "(rule (report (xyz.a ?a n: ?n)) (when (xyz.a ?a n: ?n)) (unless (xyz.b ?a n: ?m)))"
+            ),
+            Err(Error::Refused(_))
+        ));
+        assert!(
+            steps(
+                "(rule (report (xyz.a ?a n: ?n)) (when (xyz.a ?a n: ?n)) (unless (xyz.b ?a n: _)))"
+            )
+            .is_ok()
+        );
     }
 
     #[test]

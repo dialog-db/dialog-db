@@ -4,8 +4,8 @@
 
 |  | Understanding | Activity |
 |---|---|---|
-| **Status** | The kernel is small and the core forms are 65 lines over it. They run on a real branch through `rust/dialog-notation`, which compiles the kernel to descriptors Dialog-DB has ([poc.md](poc.md)). Syntax is held by the crate, not stored. | **Designing.** Direction decided by the maintainer. The kernel is built as a proof of concept; storing syntax is not. |
-| **Agenda** | Whether a form can be a value a premise takes apart, so syntax is stored. Whether `report` takes a template. Whether a write through a concept may leave fields out. What a read with no pick reads. What makes an entity from a rule's bindings. What expansion costs. | Decide the open findings of [kernel.md](kernel.md) and [poc.md](poc.md), then design forms as values. |
+| **Status** | The kernel and the 65 lines of core forms run on a real branch through `rust/dialog-notation` ([poc.md](poc.md)), commands issued by rules included. Syntax is held by the crate, not stored. Five approaches to storing it are laid out ([design-forms.md](design-forms.md)); one is ruled out by full inlining. | **Designing.** Direction decided by the maintainer. The kernel is built as a proof of concept. What a form is to dialog is being decided. |
+| **Agenda** | Whether forms are a use case #748 carries (H1, H2). Whether dialog can be asked for an expansion a form at a time (H3, measurable now). Whether a variable and `_` are values. What a read with no pick reads. What expansion costs. | Decide whether forms ride on #748. Measure H3 as a research topic. Then build `expand` and `syntax` as premises. |
 
 ## Candidate problems
 
@@ -94,3 +94,21 @@ Not examined yet. They are columns, not recommendations.
 - Two commands in one document share a round. Where both write one `last` field, the cell holds both claims.
 
 **Decided.** Nothing new. The proof of concept is evidence for the kernel table, not a decision about it. Open for the maintainer: whether `report` takes a template; whether a write through a concept may leave fields out; what a read with no pick reads.
+
+## 2026-11-11, Designing: what a form is to dialog
+
+**Asked.** Irakli answered the proof of concept's findings: a formula should derive an entity, so a rule can issue a command; a variable in `unless` is one `when` binds; a query reports the relations queried; a write through a concept is not partial; and two writes of one round to a `last` field are decided as concurrent candidates are. He agreed the next step is forms as values.
+
+**Learned.**
+
+- `entity/derive` has two cells, so `(:id …)` is a chain a value long. A rule issues a command, and another reads it the round after.
+- A negation requires every variable bound, a blank excepted (`negation.rs`). So a field left out of a concept under `unless` is blank, and a variable the author wrote there is refused.
+- The election between two claims of one round is by the hash of the value (#752), and the test finds the same winner in either order.
+- #748 is deciding what a record is: an atomic value of attribute and value pairs, nested, destructured in a query. A form is a candidate for exactly that, and #748 leaves open the three things a form needs: destructuring by pattern, binding what a pattern did not name, and building a record in a head.
+- A revision is already one record a formula takes apart (`formula/revision.rs`), and a formula may keep its outputs by input (`#[formula(cached)]`).
+
+**Decided.**
+
+- A query reports relations. A write says every field. Both by the maintainer.
+- `(:id domain label: term …)` is the domain and the sorted labels as a seed, then each value in turn. On an opinion of the agent's, open to change: the scheme `id:`, and that order of labels does not matter.
+- Not decided: what a form is to dialog. [design-forms.md](design-forms.md) has the approaches and four hypotheses. It rests on an open question: whether forms are a use case #748 carries.

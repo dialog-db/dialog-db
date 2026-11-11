@@ -72,3 +72,6 @@ While `#[derive(Formula)]` can define new formula types, they must be registered
 
 **Conversions** (`dialog_query::formula::conversions`):
 - `ToString` ("text/from"), `ParseUnsignedInteger` ("unsigned-integer/parse"), `ParseSignedInteger` ("signed-integer/parse"), `ParseFloat` ("float/parse")
+
+**Entities** (`dialog_query::formula::entity`):
+- `Derive` ("entity/derive"): the entity two values name. A rule that concludes a fact of an entity it did not read derives it, and derives again from the result to take in one more value.

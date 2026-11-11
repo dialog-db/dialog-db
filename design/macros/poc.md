@@ -21,6 +21,8 @@ text ──read──▶ forms ──expand──▶ kernel rules ──compile�
 | `(report A)`, one read as its premise | a `ConceptQuery` |
 | `(report A)`, any other premises | a `DeductiveRule` laid over the branch for the query, and a `ConceptQuery` of what it derives |
 | `(xyz.todo ?t text: (:last (:text ?x)))` | a concept of one attribute, `{the: xyz.todo/text, as: text:, pick: last:}` |
+| `(assert A)`, with premises | an `InductiveRule` over a concept marked `Transient` |
+| `(:id domain label: term …)` | a chain of `entity/derive`, from the domain and the sorted labels through each value |
 | `(+ ?a : ?b)` where a term stands | a `math/sum` premise and a variable for its value |
 | `(< ?a : ?b)`, `(:value ?a is: ?b)`, `(:text ?x)` | the `<`, `==` and `type` constraints |
 
@@ -37,15 +39,34 @@ text ──read──▶ forms ──expand──▶ kernel rules ──compile�
 - A concept of two reads over two domains, and `unless` over it.
 - A derived relation, a relation derived from itself, and a query of several premises whose rows keep their values together.
 - One rule with an `assert!` head and a `retract!` head.
+- A rule that issues a command another rule reads in the round after: archiving a list completes what is on it.
+- An entity made from what a rule binds. A rule and a top-level write that say the same thing name one entity.
+- Two commands in one document that write one `last` field. The cell holds both claims and elects one by the hash of the value, the same in either order.
 
 ## What Dialog-DB cannot run yet
 
 Each of these comes back as `Unsupported`, with the reason. None is approximated.
 
-- **A rule that issues a command.** The command's row needs an entity made from its fields, `(:id domain …)`. Dialog-DB has no formula that makes an entity. At the top level every part is a constant, so the walker hashes it.
 - **A formula inside `unless`.** Lifted out it would have to hold, which changes what the rule says.
 - **The absence of a concept that spans entities.** `unless` negates one proposition, and one proposition reads one entity.
-- **A variable used twice inside `unless` and nowhere else.** Dialog-DB wants such a variable blank, and two blanks are not the same value.
+- **A field left out of a concept twice inside `unless`.** Such a field is blank, and two blanks are not the same value.
+
+What is refused, as not allowed:
+
+- **A write that leaves a field out.** A concept written in part is not the concept: a read through it would not find what was written. A rule that changes one field writes the relation, `(assert! (xyz.todo ?t state: (:last (:entity :done))))`.
+- **A variable in `unless` that nothing in `when` binds.** A negation binds nothing (`rust/dialog-query/src/negation.rs`); `_` says anything at all.
+
+## What dialog gained
+
+`entity/derive` (`rust/dialog-query/src/formula/entity.rs`): the entity two values name, `id:` and the base58 of their references as a list under the type `id:`. It has two cells and an output, as every formula has fixed cells, so `(:id domain a: ?x b: ?y)` is a chain:
+
+```
+seed = derive("domain", "a b")        worked out when compiling
+?e1  = derive(seed, ?x)               one premise a value, labels sorted
+this = derive(?e1, ?y)
+```
+
+Where every value is a constant the chain is worked out when compiling, by the same function.
 
 What the crate does in place of Dialog-DB, and should not in the end:
 
@@ -56,11 +77,11 @@ What the crate does in place of Dialog-DB, and should not in the end:
 
 ## What it showed
 
-1. **A report comes back in relations, not as written.** `(query (todo ?t text: ?x))` reports `(xyz.todo todo:1 text: "Buy milk")`, because the prelude's `(report ?head)` expands the head as it would a write. For a concept of two reads the report is rows of two relations. A report that reads as the query was written needs `report` to take a template, not walked into, as `syntax` does. Not decided.
-2. **A write through a concept writes the fields named.** `(assert! (todo ?t state: :done))` writes one fact. Dialog-DB's own concept builder refuses a write that leaves a field out, and tonk allows it. A read through the same concept still requires every field.
+1. **A query reports the relations queried.** `(query (todo ?t text: ?x))` reports `(xyz.todo todo:1 text: "Buy milk")`. Decided 2026-11-11. A row holds the fields the query named; for a concept of two reads it is a row a relation.
+2. **A write says every field.** Decided 2026-11-11: no partial write through a concept.
 3. **The pick is part of what is read.** `(xyz.counter ?c count: ?n)` reads every count ever written and `count: (:last ?n)` the current one. With no pick written the crate reads all, since a relation is a set. A concept hides this; a bare read does not.
 4. **A command is its content.** Its entity is the hash of what it says, so issuing the same command twice in one document issues it once.
-5. **Negation is narrower than the notation.** Three of the four refusals above are about `unless`.
-6. **A document is one round, not a sequence.** `(add (todo todo:2 …))` and `(complete (todo todo:2))` in one document both fire against the same view, in either order. The state then holds `:open` and `:done` as two claims, and `(:last …)` elects one. Written in two documents, the second follows the first. `examples/todo.clj` and `examples/done.clj` are split for this reason.
+5. **Negation is narrower than the notation.** Every "cannot run yet" above is about `unless`.
+6. **A document is one round, not a sequence.** `(add (todo todo:2 …))` and `(complete (todo todo:2))` in one document both fire against the same view, in either order. The state then holds `:open` and `:done` as two claims, and `(:last …)` elects one as it does between any concurrent claims (#752). Written in two documents, the second follows the first. `examples/todo.clj` and `examples/done.clj` are split for this reason.
 
 Not measured: what expansion and a per-query rule cost. The claim that this is as fast as today is still open.

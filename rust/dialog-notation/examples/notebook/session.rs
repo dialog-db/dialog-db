@@ -7,7 +7,7 @@ use dialog_peer::helpers::{test_repo, test_session_with_peer};
 use dialog_peer::{Peer, Session};
 use dialog_query::ConceptConclusion;
 use dialog_query::query::Output as _;
-use dialog_repository::Branch;
+use dialog_repository::{Branch, Transient};
 use dialog_storage::provider::storage::VolatileSpace;
 
 /// A branch and the syntax submitted to it so far.
@@ -46,6 +46,7 @@ impl Notebook {
                     Step::Issue(statement) => transaction.dispatch(statement),
                     Step::Deduce(rule) => transaction.assert(*rule),
                     Step::Induce(rule) => transaction.assert(*rule),
+                    Step::Transient(concept) => transaction.assert(Transient(concept)),
                     Step::Query(query) => {
                         queries.push(query);
                         transaction

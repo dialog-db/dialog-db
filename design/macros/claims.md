@@ -27,7 +27,13 @@
 | a query can run at one revision | fact | `Snapshot`, `rust/dialog-repository/src/repository/snapshot.rs` | holds |
 | the core forms expand and run as written | fact | `design/macros/model`; `rust/dialog-notation/tests/notation.rs` on a real branch | holds, except a rule that issues a command |
 | the kernel compiles to descriptors Dialog-DB already has | fact | `rust/dialog-notation/src/compile.rs`, [poc.md](poc.md) | holds for reads, writes, the three rule kinds and queries; four refusals listed |
-| a rule about syntax can be a stored rule Dialog-DB evaluates | hypothesis | confirmed by `expand` as a premise over a stored form, with the walker asking the branch; refuted if a form cannot be a value a premise takes apart | open; the crate holds syntax in memory |
+| a rule about syntax can be a stored rule Dialog-DB evaluates | hypothesis | H1 to H3 of [design-forms.md](design-forms.md) | open; the crate holds syntax in memory |
+| a rule can name an entity it did not read | fact | `entity/derive`, `rust/dialog-query/src/formula/entity.rs`; `it_lets_a_rule_issue_a_command_another_rule_reads` | holds |
+| a negation requires every variable in it bound, a blank excepted | fact | `Negation::schema`, `rust/dialog-query/src/negation.rs` | holds |
+| two claims one round wrote to a `last` field elect by the hash of the value, whatever order they were written in | fact | CHANGELOG, #752; `it_elects_one_of_two_writes_of_one_round_whatever_their_order` | holds |
+| a record is taken apart by a formula today | fact | `dialog/revision`, `rust/dialog-query/src/formula/revision.rs` | holds, for one record type with fixed fields |
+| forms are a use case the record values topic carries | hypothesis | confirmed if #748's destructuring binds a rest and a rule head can build a record; refuted if it names fields by attribute only | open; #748 has built nothing |
+| a query reports the relations queried, and a write says every field | opinion | Irakli, 2026-11-11 | decides |
 | a rule and the command it reads can share a document | fact | `it_fires_a_rule_in_the_document_that_installs_it` | holds |
 | what runs after expansion costs what it costs today | hypothesis | a perf scenario over a document expanded cold and warm, with its bar set first | open; cold expansion is not measured |
 | nothing in dialog may depend on conduct or on a wasm runtime | opinion | Irakli, 2026-11-10 | decides |

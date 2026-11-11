@@ -31,7 +31,9 @@ const TODO: &str = r#"
       (when (add (todo ?t list: ?l text: ?x)))
       description: "Adding a to-do opens it")
 
-    (rule (assert! (todo ?t state: :done))
+    ; A write says every field, so one that changes the state alone
+    ; writes the relation, not the concept.
+    (rule (assert! (xyz.todo ?t state: (:last (:entity :done))))
       (when (complete (todo ?t))))
 "#;
 
@@ -296,21 +298,127 @@ async fn it_fires_a_rule_in_the_document_that_installs_it() -> Result<()> {
     Ok(())
 }
 
-/// What the notation allows and Dialog-DB cannot yet run is said, not
-/// approximated.
+/// A rule issues a command, which another rule reads in the round
+/// after: archiving a list completes what is on it.
 #[dialog_common::test]
-async fn it_says_what_is_not_supported_yet() -> Result<()> {
+async fn it_lets_a_rule_issue_a_command_another_rule_reads() -> Result<()> {
+    let mut notebook = Notebook::open().await?;
+    let (_, diagnostics) = notebook
+        .submit(&format!(
+            "{TODO}
+             (rule (complete (todo ?t))
+               (when (archive (xyz.list ?l))
+                     (todo ?t list: ?l)))"
+        ))
+        .await?;
+    assert!(diagnostics.is_empty());
+    notebook
+        .submit(
+            r#"(add (todo todo:1 list: list:home text: "Buy milk"))
+               (add (todo todo:2 list: list:home text: "Call mum"))
+               (add (todo todo:3 list: list:work text: "Ship it"))"#,
+        )
+        .await?;
+
+    notebook.submit("(archive (xyz.list list:home))").await?;
+    assert_eq!(
+        report(&mut notebook, "(query (todo ?t text: ?x state: :open))").await?,
+        vec![r#"(xyz.todo todo:3 text: "Ship it" state: :open)"#]
+    );
+    // Neither command is on the branch.
+    assert!(
+        report(&mut notebook, "(query (command.complete.todo ?c of: ?t))")
+            .await?
+            .is_empty()
+    );
+    Ok(())
+}
+
+/// An entity made from what a rule binds is the entity the same values
+/// make anywhere: a rule and a write at the top level name one note.
+#[dialog_common::test]
+async fn it_derives_one_entity_from_the_same_values() -> Result<()> {
+    let mut notebook = Notebook::open().await?;
+    notebook
+        .submit(
+            r#"(rule (assert! (xyz.note (:id xyz.note text: ?x) text: (:text ?x)))
+                 (when (jot (xyz.note text: ?x))))"#,
+        )
+        .await?;
+    notebook.submit(r#"(jot (xyz.note text: "hi"))"#).await?;
+    notebook
+        .submit(r#"(assert! (xyz.note (:id xyz.note text: "hi") text: (:text "hi")))"#)
+        .await?;
+    notebook.submit(r#"(jot (xyz.note text: "ho"))"#).await?;
+
+    let notes = report(&mut notebook, "(query (xyz.note ?n text: ?x))").await?;
+    assert_eq!(notes.len(), 2, "{notes:?}");
+    assert!(notes.iter().all(|note| note.starts_with("(xyz.note id:")));
+    Ok(())
+}
+
+/// Two commands in one document share a round, so what they write to
+/// one `last` field is concurrent. The field elects one, and which one
+/// does not depend on the order the commands were written in.
+#[dialog_common::test]
+async fn it_elects_one_of_two_writes_of_one_round_whatever_their_order() -> Result<()> {
+    let add = r#"(add (todo todo:1 list: list:home text: "Buy milk"))"#;
+    let complete = "(complete (todo todo:1))";
+    let mut elected = Vec::new();
+    for document in [[add, complete], [complete, add]] {
+        let mut notebook = Notebook::open().await?;
+        notebook.submit(TODO).await?;
+        notebook.submit(&document.join("\n")).await?;
+        assert_eq!(
+            report(&mut notebook, "(query (xyz.todo ?t state: ?s))").await?,
+            vec![
+                "(xyz.todo todo:1 state: :done)",
+                "(xyz.todo todo:1 state: :open)",
+            ],
+            "both writes are in the cell"
+        );
+        let last = report(&mut notebook, "(query (xyz.todo ?t state: (:last ?s)))").await?;
+        assert_eq!(last.len(), 1, "one of them is elected: {last:?}");
+        elected.push(last);
+    }
+    assert_eq!(elected[0], elected[1]);
+    Ok(())
+}
+
+/// What is not allowed is refused, and what Dialog-DB cannot yet run is
+/// said, not approximated.
+#[dialog_common::test]
+async fn it_refuses_and_says_what_is_not_supported() -> Result<()> {
     let mut notebook = Notebook::open().await?;
     notebook.submit(TODO).await?;
-    let issued_by_a_rule = notebook
+    let why = |result: Result<(Vec<String>, Vec<dialog_notation::Diagnostic>)>| {
+        result.map_err(|error| error.downcast::<Error>())
+    };
+
+    // A write through a concept says every field.
+    let partial = notebook
+        .submit("(rule (assert! (todo ?t state: :done)) (when (finish (todo ?t))))")
+        .await;
+    assert!(matches!(why(partial), Err(Ok(Error::Refused(_)))));
+
+    // A variable in `unless` is one `when` binds.
+    let unbound = notebook
         .submit(
-            "(rule (complete (todo ?t))
-               (when (archive (xyz.list ?l)) (todo ?t list: ?l)))",
+            "(query (xyz.todo ?t text: ?x)
+               (when (xyz.todo ?t text: ?x))
+               (unless (xyz.todo ?t list: ?l)))",
         )
         .await;
-    assert!(matches!(
-        issued_by_a_rule.map_err(|error| error.downcast::<Error>()),
-        Err(Ok(Error::Unsupported(_)))
-    ));
+    assert!(matches!(why(unbound), Err(Ok(Error::Refused(_)))));
+
+    // A formula inside `unless` has nowhere to go.
+    let formula = notebook
+        .submit(
+            "(query (xyz.counter ?c count: ?n)
+               (when (xyz.counter ?c count: ?n))
+               (unless (xyz.counter ?c count: (+ ?n : 1))))",
+        )
+        .await;
+    assert!(matches!(why(formula), Err(Ok(Error::Unsupported(_)))));
     Ok(())
 }

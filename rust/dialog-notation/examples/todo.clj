@@ -12,8 +12,16 @@
   (when (add (todo ?t list: ?l text: ?x)))
   description: "Adding a to-do opens it")
 
-(rule (assert! (todo ?t state: :done))
+; A write says every field, so one that changes the state alone writes
+; the relation, not the concept.
+(rule (assert! (xyz.todo ?t state: (:last (:entity :done))))
   (when (complete (todo ?t))))
+
+; A rule may issue a command, which is read in the round after.
+(rule (complete (todo ?t))
+  (when (archive (xyz.list ?l))
+        (todo ?t list: ?l))
+  description: "Archiving a list completes what is on it")
 
 ; What is left to do, derived and never stored.
 (rule (xyz.pending ?t text: ?x)
