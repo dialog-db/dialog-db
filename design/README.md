@@ -64,3 +64,6 @@ Backtracking moves a topic to an earlier phase and says so in its journal.
   **Building.** The tree talks in nodes through capabilities it performs on
   the environment; caching, decoding and storage form belong to providers.
   The [plan](tree-node-reads/plan.md) is for whoever builds it.
+- [A rule concludes one concept](rule-heads.md): **Describing.** A rule has
+  one head, and a head of several kinds or several entities is written as
+  several rules. Not picked up.
