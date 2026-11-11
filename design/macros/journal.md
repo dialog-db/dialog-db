@@ -4,8 +4,8 @@
 
 |  | Understanding | Activity |
 |---|---|---|
-| **Status** | The kernel and the 65 lines of core forms run on a real branch through `rust/dialog-notation` ([poc.md](poc.md)), commands issued by rules included. Syntax is held by the crate, not stored. Five approaches to storing it are laid out ([design-forms.md](design-forms.md)); one is ruled out by full inlining. | **Designing.** Direction decided by the maintainer. The kernel is built as a proof of concept. What a form is to dialog is being decided. |
-| **Agenda** | Whether forms are a use case #748 carries (H1, H2). Whether dialog can be asked for an expansion a form at a time (H3, measurable now). Whether a variable and `_` are values. What a read with no pick reads. What expansion costs. | Decide whether forms ride on #748. Measure H3 as a research topic. Then build `expand` and `syntax` as premises. |
+| **Status** | The kernel and the 65 lines of core forms run on a real branch through `rust/dialog-notation` ([poc.md](poc.md)). Syntax is held by the crate, not stored. A form is a record, and `entity/derive` takes one ([design-forms.md](design-forms.md)); the two-cell formula in the tree is a stand-in. | **Designing.** Direction decided by the maintainer. The kernel is built as a proof of concept. What a form is to dialog is decided; how a rule builds and takes apart a record is not. |
+| **Agenda** | How a rule builds a record, and whether one premise both builds and takes apart (H5). What a variable is as a value (H1). Whether dialog can be asked for an expansion a form at a time (H3, measurable now). What a read with no pick reads. | Design the record premise, with #748. Then `:id` over a record, then `expand` and `syntax`. Measure H3 as a research topic. |
 
 ## Candidate problems
 
@@ -112,3 +112,18 @@ Not examined yet. They are columns, not recommendations.
 - A query reports relations. A write says every field. Both by the maintainer.
 - `(:id domain label: term …)` is the domain and the sorted labels as a seed, then each value in turn. On an opinion of the agent's, open to change: the scheme `id:`, and that order of labels does not matter.
 - Not decided: what a form is to dialog. [design-forms.md](design-forms.md) has the approaches and four hypotheses. It rests on an open question: whether forms are a use case #748 carries.
+
+## 2026-11-11, Designing: a form is a record
+
+**Asked.** Whether forms are a use case the record values topic (#748) carries. Irakli: he imagined records here, and imagined `entity/derive` taking a record as well.
+
+**Learned.**
+
+- With a record as its input, `(:id …)` has no open labels of its own. `expand`, `syntax` and `:id` were three premises of a new kind; they are one thing, a record and its fields.
+- A command's row is then the record of its fields made into an entity: the attributes carry the domain, so the seed the chain needed goes.
+- The two-cell `entity/derive` built this morning is the wrong shape. It is a chain because a rule cannot build a record, which is the thing to build.
+- #748 decides how a bound record is read. It says nothing of a rule making one, of binding what a pattern did not name, or of a variable as a value.
+
+**Decided.** A form is a record, and `entity/derive` takes one. By the maintainer. The two-cell formula stays as a stand-in, marked so, since replacing it needs a record layout and that is #748's to decide.
+
+**Backtracked.** Not a phase, a build: `entity/derive` was built before what it takes was asked.

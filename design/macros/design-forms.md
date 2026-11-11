@@ -4,7 +4,7 @@
 
 **For:** the direction, macros as rules. The [proof of concept](poc.md) runs the kernel on dialog, and holds the rules about syntax in memory and matches patterns itself. Nothing about syntax is stored, named by hash, or synced.
 
-Not decided. This is the first sitting: the approaches, what separates them, and what would settle the open cells.
+**Decided 2026-11-11, by the maintainer: a form is a record (C).** `entity/derive` takes a record too. The matrix below is how the approaches compared; what follows it is what the decision asks of records.
 
 ## What a rule about syntax needs
 
@@ -58,10 +58,63 @@ Each is the agent's, to be decided on what it shows.
 
 H3 does not depend on what a form is. It can be measured now, with rules over plain facts, and it decides whether B and C need D's index.
 
-## Where this leaves the decision
+## Decided: a form is a record
 
-- A is out by a decision already made, unless full inlining is reopened.
-- D gives up the direction. Its index may still be what makes B or C fast.
-- B can be built today and is a second layout. C is one layout and waits on #748, where nothing is built and the three things forms need are open.
+A is out by full inlining. D gives up the direction, though its index may yet be what makes expansion fast (H3). B would have been a second layout beside #748's. A form is a record as #748 has it, and so is what an entity is derived from.
 
-So the question is not which encoding. It is whether forms are a use case #748 has to carry: patterns, a rest, and building a record in a head. If they are, they belong in that topic's requirements before its surface is decided. If they are not, B is the honest choice and the second layout is its cost.
+That puts one thing under three that looked separate:
+
+```
+                 ┌── take apart ──▶ (expand pattern)
+   a record ─────┼── build ───────▶ (syntax template)
+                 └── build ───────▶ (:id …) = entity/derive of a record
+```
+
+Finding 3 of [kernel.md](kernel.md) said `expand`, `syntax` and `:id` each take whatever labels they are given, so each needed a premise of a new kind. With records there is one: a record and its fields.
+
+## `entity/derive` takes a record
+
+```
+today     seed = derive("command.add.todo", "list of text")     two cells, so a chain:
+          ?e1  = derive(seed, ?l)                               the labels in a seed,
+          ?e2  = derive(?e1, ?t)                                a link a value
+          this = derive(?e2, ?x)
+
+decided   this = derive({ command.add.todo/of: ?t               one cell: the record
+                          command.add.todo/list: ?l             of what the entity is
+                          command.add.todo/text: ?x })          derived from
+```
+
+The record's attributes carry the domain, so there is no seed, and the order of fields is the record's own. The chain in `rust/dialog-query/src/formula/entity.rs` is a stand-in: it exists because a rule cannot build a record. It goes when one can, and the entities it names will not be the entities a record names.
+
+## What this asks of records
+
+#748 has decided what a record is and that a bound one is destructured. A rule about syntax, and a rule that derives an entity, need more:
+
+| need | for | in #748 |
+|---|---|---|
+| build a record from what a rule has bound | `:id`, `syntax` | not there: it speaks of reading records, not of a rule making one |
+| take a bound record apart by pattern | `expand` | decided; the surface is open |
+| bind the pairs a pattern did not name, as a record | `...?rest` | not there |
+| several values under one field, in no order | the premises of `when`, the heads of a rule | decided |
+| a value for what is not one: a variable, `_` | a form holding `?x` as data | not there |
+
+A form's parts fit pairs better than first drawn above. An application's head is the domain its labels are short for: `(xyz.todo ?t text: ?x)` already means `xyz.todo/text`. So a form needs no head field; its head is the namespace of its attributes. A run such as the premises of `when` is one field with several values, and the order they were written in is the source map's to keep, as was agreed for printing.
+
+## Hypotheses, after the decision
+
+| hypothesis | confirmed by | refuted by |
+|---|---|---|
+| **H5.** One premise does both: it relates a record to its fields, building the record where the fields are bound and binding the fields where the record is. | The planner already takes a premise whose parameters differ by application: a concept query builds its schema from its own terms (`ConceptQuery::schema`). A record premise planned the same way runs `:id` one way and `expand` the other. | Building and taking apart need different costs or different requirements that one schema cannot say. Then they are two premises, as `syntax` and `expand` are two words. |
+| **H6.** A form is a record whose attributes are its head and labels, with the one bare part of a read as its entity. | `prelude.clj` and `examples/todo.clj` written out as such records, with nothing left over. | A form with two bare parts that are not a run: `(syntax pattern template)` is one, and `(+ ?a : ?b)` is not, since `:` is a label. |
+| **H1**, narrowed. Every atom is a value. | Text, numbers, entities and keywords are. | A variable, `_` and `...` are not values today. They need one, or a form is not a #748 record without a change to what a value is. |
+
+H2 is now a requirement in the table above, not a hypothesis. H3 and H4 stand.
+
+## Next
+
+1. How a rule builds a record: the premise of H5, and how it is written.
+2. What a variable is as a value (H1).
+3. H3, measured, as a research topic.
+
+The first is #748's missing half, and it unblocks `:id` before it unblocks syntax.

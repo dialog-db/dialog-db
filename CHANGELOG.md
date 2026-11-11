@@ -41,6 +41,10 @@ Why: a command a rule issues is a fact of a new entity, and that entity
 has to be the same wherever the rule fires on the same bindings. Nothing
 but the bindings can name it.
 
+Its two cells are a stand-in, and this entry is not to be released as it
+reads: the formula is to take one record once a rule can build one, and
+the entities it names will change with it.
+
 ### The corpus crate is `dialog-corpus`, and it asks its environment for everything it reads
 
 [#768](https://github.com/dialog-db/dialog-db/pull/768), decided in

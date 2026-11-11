@@ -32,7 +32,10 @@
 | a negation requires every variable in it bound, a blank excepted | fact | `Negation::schema`, `rust/dialog-query/src/negation.rs` | holds |
 | two claims one round wrote to a `last` field elect by the hash of the value, whatever order they were written in | fact | CHANGELOG, #752; `it_elects_one_of_two_writes_of_one_round_whatever_their_order` | holds |
 | a record is taken apart by a formula today | fact | `dialog/revision`, `rust/dialog-query/src/formula/revision.rs` | holds, for one record type with fixed fields |
-| forms are a use case the record values topic carries | hypothesis | confirmed if #748's destructuring binds a rest and a rule head can build a record; refuted if it names fields by attribute only | open; #748 has built nothing |
+| a form is a record as #748 has it, and `entity/derive` takes a record | opinion | Irakli, 2026-11-11 | decides |
+| a rule can build a record from what it has bound | hypothesis | H5 of [design-forms.md](design-forms.md): confirmed by a record premise planned as a concept query is, running both ways | open; #748 speaks only of reading one |
+| a premise may take parameters that differ by application | fact | `ConceptQuery::schema`, `rust/dialog-query/src/concept/query.rs` | holds |
+| the two-cell `entity/derive` names the entities a record will | hypothesis | refuted by its own definition: a chain of pairs under a seed is not a record's canonical form | refuted; it is a stand-in |
 | a query reports the relations queried, and a write says every field | opinion | Irakli, 2026-11-11 | decides |
 | a rule and the command it reads can share a document | fact | `it_fires_a_rule_in_the_document_that_installs_it` | holds |
 | what runs after expansion costs what it costs today | hypothesis | a perf scenario over a document expanded cold and warm, with its bar set first | open; cold expansion is not measured |

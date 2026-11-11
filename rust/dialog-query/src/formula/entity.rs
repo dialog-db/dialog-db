@@ -4,6 +4,12 @@
 //! that entity: the row of a command it issues, a record it creates. The
 //! name has to be the same wherever and whenever the rule fires on the
 //! same bindings, so it is derived from them and nothing else.
+//!
+//! The two cells here are a stand-in. The formula is to take one record,
+//! the record of what the entity is derived from, once a rule can build
+//! a record (`design/macros/design-forms.md`). Until then a caller with
+//! more than two values derives again from the result, and the entities
+//! so named are not the ones a record will name.
 
 use merkle_reference::{Reference, Type};
 

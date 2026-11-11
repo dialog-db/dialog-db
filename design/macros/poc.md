@@ -68,6 +68,8 @@ this = derive(?e1, ?y)
 
 Where every value is a constant the chain is worked out when compiling, by the same function.
 
+This is a stand-in. Decided the same day: `entity/derive` takes one record, the record of what the entity is derived from ([design-forms.md](design-forms.md)). The chain exists because a rule cannot build a record yet.
+
 What the crate does in place of Dialog-DB, and should not in the end:
 
 - **Syntax is not stored.** The walker holds the rules about syntax in memory and matches patterns itself. Dialog-DB has no value a form can be and no premise that takes one apart, so `expand` and `syntax` cannot be premises and heads of stored rules. This is the part of "macros as rules" that is not shown.
