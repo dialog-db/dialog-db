@@ -28,7 +28,7 @@ use dialog_search_tree::Cache;
 use crate::{Index, Revision};
 
 #[cfg(test)]
-use crate::repository::source::SourceRef;
+use crate::repository::source::Live;
 #[cfg(test)]
 use dialog_corpus::history::context_of;
 
@@ -332,7 +332,7 @@ pub(crate) fn held<'a>(head: &Revision, context: &'a Context) -> Option<Held<'a>
 /// itself no longer carries.
 #[cfg(test)]
 pub(crate) async fn head_context<'a, Env>(
-    source: impl Into<SourceRef<'a>>,
+    line: impl Into<Live<'a>>,
     env: &Env,
 ) -> Result<Arc<Context>, DialogCorpusError>
 where
@@ -346,9 +346,10 @@ where
         + Holds
         + ConditionalSync,
 {
-    let source = source.into();
+    let source = line.into().pin();
     let head = source
         .revision()
+        .cloned()
         .ok_or_else(|| DialogCorpusError::InvalidKey("the line has no head".into()))?;
     full_context(
         &head,
@@ -368,7 +369,7 @@ where
 /// context, for tests that compare regions across heads.
 #[cfg(test)]
 pub(crate) async fn region_agrees<'a, Env>(
-    source: impl Into<SourceRef<'a>>,
+    line: impl Into<Live<'a>>,
     env: &Env,
     what: &str,
 ) -> Result<(Context, Context), DialogCorpusError>
@@ -383,9 +384,10 @@ where
         + Holds
         + ConditionalSync,
 {
-    let source = source.into();
+    let source = line.into().pin();
     let head = source
         .revision()
+        .cloned()
         .ok_or_else(|| DialogCorpusError::InvalidKey("the line has no head".into()))?;
     assert!(
         head.region && head.context.is_none(),
