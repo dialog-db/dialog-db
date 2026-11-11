@@ -350,3 +350,23 @@ for that cell.
 
 **Decided.** Capacity is the content's size at creation plus 20%. Open:
 which of the two an update past it does.
+
+## 2026-11-11, Designing: spills, and integration without corruption
+
+**Asked.** Unpublished, or spill? Irakli: he agrees with spilling, but has
+to be sure integration handles spills without corruption, and does not see
+how it does.
+
+**Learned.** Integration never writes where a spill depends on: it indexes
+records already in place and never touches a slot. What keeps a spill
+whole is the order (block, then slot), the value's hash in the slot,
+checked against the block, the alternating halves, and an integrator that
+reads an extent only up to its writer's published end. A crash or a race
+yields the previous value or the new one, whole. The one thing to keep for
+later: whatever reclaims space in extents must keep every block a slot
+names.
+
+**Decided.** An update that outgrows a cell's capacity spills, on Irakli's
+condition; the argument is written in
+[design-branch-heads.md](design-branch-heads.md), "Spills and integration",
+and its two hypotheses have tests named in the ledger.

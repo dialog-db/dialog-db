@@ -23,8 +23,34 @@ integration indexes them.
 | durability of what a head builds on | `fdatasync` of the one file covers every earlier append | 🟢 the same: making a head durable makes everything appended before it durable, another writer's commit included | 🔴 the head's file and every block file it names are synced apart |
 | a space at rest is one file | 🟢 | 🟢 | 🔴 a file per branch |
 | how many cells | no limit | 🟢 no fixed limit: the index names any number of slots, and grows when cells are created | no limit |
-| what a slot holds | no slot: the head record holds the whole value | the value inline, in a slot whose capacity is the value's size at creation plus 20% (Irakli). The slot carries the value's hash, which is the cell's edition, so a compare-and-swap compares the slot without reading the value. Cells do not accrete: an update writes over the slot and keeps no history. ? an update that outgrows the capacity: either the slot is marked unpublished and readers find the cell's value in the extents until integration gives it a larger slot (an index change), or the slot spills, holding a reference to a block with the value, so readers' cached offsets stay valid and the index does not change | the cell's file holds the whole value |
+| what a slot holds | no slot: the head record holds the whole value | the value inline, in a slot whose capacity is the value's size at creation plus 20% (Irakli). The slot carries the value's hash, which is the cell's edition, so a compare-and-swap compares the slot without reading the value. Cells do not accrete: an update writes over the slot and keeps no history. An update that outgrows the capacity spills: the value is written as a block in the updating writer's extent, and the slot holds its hash, offset and length, so readers' cached offsets stay valid and the index does not change (see "Spills and integration" below) | the cell's file holds the whole value |
 | what integration does to cells | indexes the head records | adds cells created since to the index, and removes deleted ones; never touches an existing slot | nothing |
+
+## Spills and integration
+
+Integration only indexes records already in the file: it never moves,
+copies or writes over a record, and never touches a cell's slot. A spilled
+value is a block in the updating writer's extent, and its slot names it by
+offset, so integration has nothing to do with it beyond indexing it like
+any block. What keeps a spill whole:
+
+1. **Order.** The block is appended first, then the slot's half is written.
+   A crash between them leaves the slot naming the previous value; the new
+   block is never referenced.
+2. **The hash.** The slot carries the value's hash. A reader checks the
+   block against it, so a slot that reached the disk without its block
+   (pages written back out of order) fails the check, and the reader takes
+   the slot's other half, the previous value, which this update did not
+   write over: the halves alternate.
+3. **Published ends.** An integrator reads a writer's extent only up to the
+   end that writer has published, after the records before it are whole.
+4. **Two checks for a reader.** A reader takes the newer of the slot's
+   halves, each with its own checksum, then checks the block against the
+   hash; anything torn fails one of them, and it takes the other half.
+
+Nothing in this design reclaims space in extents; only freed index pages
+are reused, as today. Anything that later does (a compaction, as SQLite's
+`VACUUM`) has to keep every block a slot names.
 
 ## When the head moved
 
