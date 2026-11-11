@@ -625,3 +625,53 @@ left per process, not one, taken back as the process closes.
   (`it_cuts_free_extents_off_the_end_at_the_last_close`). Claims no
   longer write an extent's bytes, so an unused one is a hole.
   `Options::leave_extent` turns it off for a process that only reads.
+
+## 2026-11-11, Verifying: power losses, played
+
+`src/file/disk.rs` notes every write, change of length and sync the
+archive makes to a watched file, and builds what a disk could hold had
+the power gone after any of them: what the last sync made durable, then
+each later operation dropped, kept, or (a write) kept in some of its
+512-byte sectors, in any combination, which stands for the disk writing
+them out of order too. `src/archive/power.rs` runs a workload on a
+watched file (appends in the turn and into extents while another process
+holds it, folds, a cell updated each round naming that round's blocks
+and spilling every other round, a sync point every other round), then
+opens 30 images for every point in what it wrote, as after a reboot.
+Breaking recovery's check of what was written since the durable slot
+makes it fail (blocks read back as other bytes); at three images a point
+it did not, so it takes 30.
+
+**Found and fixed.** A file whose making a power loss cut short did not
+open ("not a dialog archive file", "no whole durable slot"). Opening
+makes it again when it is no longer than its header and slots, and its
+first bytes are unwritten, or this format's with no durable slot; any
+other file is still refused.
+
+**Holds.** The file opens, every block appended before the last sync
+point reads back, no block reads back as other bytes: about 15,000
+images over five seeds.
+
+**Does not hold, open.** A cell is written in place without the turn or
+a sync, so after a power loss:
+
+- it can name blocks the file lost (190 of 378 images): its write reached
+  the disk, the blocks' bytes did not, or did but the state recovery
+  returns to (the durable slot) predates them. A sync before the cell's
+  write is not enough, as two appends after it overwrite both rolling
+  slots and recovery falls back to the durable one;
+- it can hold a value older than the last sync point (1 image): the
+  write to its stale half lost, the write over its synced half torn.
+
+Both are pinned by `every_power_loss_leaves_a_cell_with_what_it_names`,
+ignored until decided. Main has the first on `fs` too: block files and
+the head's file are written without a sync. The candidates: a sync point
+before every cell write (two syncs a commit, and the turn, which cell
+writes were not to take); each half naming the slot sequence it needs,
+recovery passing over a half the recovered state does not reach, with a
+lock of its own for advancing the durable slot so cell writers do not
+take the turn; or a sync after each cell write for the second alone.
+
+**Windows and macOS** run in `.github/workflows/file-archive-platforms.yml`
+on pushes to the crate. A file's identity on Windows is its volume and
+file index (two names of one file canonicalize to two paths).

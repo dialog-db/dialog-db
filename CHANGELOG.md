@@ -228,6 +228,13 @@ What this changes for you:
 - A file reached by two names in one process (a hard link, a symbolic
   link) is one handle, as a path reached two ways already was: two would
   both hold the writer's turn.
+- A file whose making a power loss cut short opens, made again: one no
+  longer than its header, whose first bytes were never written or are the
+  format's with no durable slot. Any other file that is not an archive is
+  still refused.
+- After a power loss a cell (a branch head among them) can name blocks
+  the file lost, or hold a value older than the last sync point, as a
+  head on `fs` can name blocks it lost; this is open.
 - The file's format is version 12: a file written by an earlier build of
   `dialog-archive-file` does not open.
 

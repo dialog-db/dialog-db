@@ -29,6 +29,8 @@ mod extent;
 mod index;
 #[cfg(test)]
 mod model;
+#[cfg(test)]
+mod power;
 mod served;
 mod slot;
 mod tree;
@@ -44,37 +46,39 @@ use tree::{Child, Nodes, PAGE, Pages, check, is_stale};
 static OPEN: LazyLock<Mutex<HashMap<FileId, Weak<Inner>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// Which file a path names, whatever name it is reached by. On Unix, its
-/// device and inode: a file reached by two names (a hard link, a symbolic
-/// link) is one file, and must be one handle in a process, as the locks
-/// (see the `locks` module) belong to the process: two handles would both
-/// hold the writer's turn, and closing either would let go of every lock
-/// the process holds on the file. Elsewhere, its canonical path.
+/// Which file a path names, whatever name it is reached by (see
+/// `file::identity`): a file reached by two names (a hard link, a symbolic
+/// link) is one file, and must be one handle in a process. On Unix the
+/// locks (see the `locks` module) belong to the process: two handles
+/// would both hold the writer's turn, and closing either would let go of
+/// every lock the process holds on the file.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct FileId(#[cfg(unix)] (u64, u64), #[cfg(not(unix))] PathBuf);
+struct FileId((u64, u64));
 
 impl FileId {
     /// The file at `path`, if there is one.
     fn at(path: &Path) -> io::Result<Option<Self>> {
-        match std::fs::metadata(path) {
-            Ok(metadata) => Ok(Some(Self::of(path, &metadata)?)),
+        // On Unix from its metadata, as opening and closing a descriptor of
+        // a file this process holds locks on would let go of them; on
+        // Windows a lock belongs to its handle, so one opened to ask is
+        // closed again harmlessly.
+        #[cfg(unix)]
+        let found = std::fs::metadata(path).map(|metadata| {
+            use std::os::unix::fs::MetadataExt;
+            (metadata.dev(), metadata.ino())
+        });
+        #[cfg(windows)]
+        let found = File::open(path).and_then(|file| crate::file::identity(&file));
+        match found {
+            Ok(id) => Ok(Some(Self(id))),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(error),
         }
     }
 
-    fn of(path: &Path, metadata: &std::fs::Metadata) -> io::Result<Self> {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            let _ = path;
-            Ok(Self((metadata.dev(), metadata.ino())))
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = metadata;
-            Ok(Self(std::fs::canonicalize(path)?))
-        }
+    /// The file `file` is.
+    fn of(file: &File) -> io::Result<Self> {
+        crate::file::identity(file).map(Self)
     }
 }
 
@@ -591,9 +595,30 @@ fn newest(file: &File, locked: bool) -> io::Result<Slot> {
         }
     };
     if locked && len > slot.end {
-        file.set_len(slot.end)?;
+        crate::file::set_len(file, slot.end)?;
     }
     Ok(slot)
+}
+
+/// Whether the file is one whose making a power loss cut short: no longer
+/// than the space its header and slots take, and its first bytes never
+/// written, or this format's with no durable slot. Nothing could have
+/// been appended to it, so it is made again; any other file that is not an
+/// archive is refused, not written over.
+fn never_made(file: &File, len: u64) -> io::Result<bool> {
+    if len > DATA {
+        return Ok(false);
+    }
+    let mut magic = [0u8; 8];
+    let start = &mut magic[..len.min(MAGIC.len() as u64) as usize];
+    read_at(file, 0, start)?;
+    // Writes not yet synced reach the disk in any order: the slots may
+    // have where the format's bytes have not.
+    if start.iter().all(|byte| *byte == 0) {
+        return Ok(true);
+    }
+    Ok(start == &MAGIC[..start.len()]
+        && (start.len() < MAGIC.len() || Slot::read_durable(file)?.is_none()))
 }
 
 /// The newest slot, when it was written in this boot: taken as it is, with
@@ -646,16 +671,17 @@ fn recover(file: &File) -> io::Result<Slot> {
         },
     };
     let len = file.metadata()?.len();
-    if len == 0 {
+    if len == 0 || never_made(file, len)? {
+        crate::file::set_len(file, 0)?;
         write_at(file, 0, MAGIC)?;
-        file.set_len(DATA)?;
+        crate::file::set_len(file, DATA)?;
         let slot = Slot {
             boot: boot(),
             ..Slot::default()
         };
         slot.write(file)?;
         slot.write_durable(file)?;
-        file.sync_data()?;
+        crate::file::sync(file)?;
         return Ok(slot);
     }
     let mut magic = [0u8; 8];
@@ -693,13 +719,13 @@ fn recover(file: &File) -> io::Result<Slot> {
                 write_at(file, MAGIC.len() as u64 + at * SLOT, &[0; 8])?;
             }
             durable.write(file)?;
-            file.set_len(durable.end)?;
-            file.sync_data()?;
+            crate::file::set_len(file, durable.end)?;
+            crate::file::sync(file)?;
             durable
         }
     };
     if len > slot.end {
-        file.set_len(slot.end)?;
+        crate::file::set_len(file, slot.end)?;
     }
     Ok(slot)
 }
@@ -974,12 +1000,7 @@ impl FileArchive {
             return Ok(Self { inner });
         }
         let opened = Self::open_unshared(&path, options)?;
-        let metadata = opened
-            .inner
-            .file
-            .metadata()
-            .map_err(|error| storage_error(&path, error))?;
-        let id = FileId::of(&path, &metadata).map_err(|error| storage_error(&path, error))?;
+        let id = FileId::of(&opened.inner.file).map_err(|error| storage_error(&path, error))?;
         if let Some(inner) = open.get(&id).and_then(Weak::upgrade) {
             // Another name for an open file came to name it between the
             // look and the open. The new descriptor is never closed, so
@@ -1430,7 +1451,7 @@ impl FileArchive {
             .ok_or_else(|| invalid("an append prepared in its turn did not lay out"))?;
         self.commit(laid).inspect_err(|_| {
             // Drop what of the append reached the file: no slot names it.
-            let _ = self.inner.file.set_len(snapshot.slot.end);
+            let _ = crate::file::set_len(&self.inner.file, snapshot.slot.end);
             self.inner
                 .known
                 .store(self.current().slot.end, Ordering::Release);
@@ -1675,7 +1696,7 @@ impl FileArchive {
                 let (bytes, whole) =
                     extent::record(record, self.inner.options.extent, slot.sequence)?;
                 write_at(file, record, &bytes)?;
-                file.set_len(record + whole)?;
+                crate::file::set_len(file, record + whole)?;
                 slot.end += whole;
                 (record, false)
             }
@@ -1692,7 +1713,7 @@ impl FileArchive {
             snapshot_after_claim(self, file, slot, reused, record)
         });
         if owned.is_err() {
-            let _ = file.set_len(snapshot.slot.end);
+            let _ = crate::file::set_len(file, snapshot.slot.end);
             let _ = locks::unlock(file, locks::owner(record));
             self.inner.extents.lock().busy.remove(&record);
         }
@@ -2243,13 +2264,13 @@ impl FileArchive {
     fn sync_point(&self, slot: Slot) -> io::Result<Slot> {
         let file = &self.inner.file;
         let started = Instant::now();
-        file.sync_data()?;
+        crate::file::sync(file)?;
         let mut durable = slot;
         durable.reusable.append(&mut durable.pending);
         durable.extents_free.append(&mut durable.extents_pending);
         durable.durable = durable.sequence;
         durable.write_durable(file)?;
-        file.sync_data()?;
+        crate::file::sync(file)?;
         let mut next = durable;
         next.sequence += 1;
         next.write(file)?;
@@ -2555,7 +2576,7 @@ impl FileArchive {
         slot.end = cut;
         slot.boot = boot();
         slot.write(file)?;
-        file.set_len(cut)?;
+        crate::file::set_len(file, cut)?;
         let slot = self.sync_point(slot)?;
         self.inner.known.store(slot.end, Ordering::Release);
         self.publish(snapshot_of(file, slot, &self.current())?);

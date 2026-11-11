@@ -187,8 +187,54 @@ pub(crate) fn read_at(file: &File, offset: u64, buffer: &mut [u8]) -> io::Result
     }
 }
 
+/// Which file `file` is, whatever name it was opened by: its device and
+/// inode on Unix, its volume and file index on Windows.
+pub(crate) fn identity(file: &File) -> io::Result<(u64, u64)> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = file.metadata()?;
+        Ok((metadata.dev(), metadata.ino()))
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Foundation::HANDLE;
+        use windows_sys::Win32::Storage::FileSystem::{
+            BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+        };
+        // SAFETY: a zeroed BY_HANDLE_FILE_INFORMATION is a valid value of
+        // the C struct, which the call fills.
+        let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+        // SAFETY: the handle is the file's, open while `file` is borrowed,
+        // and `info` outlives the call.
+        let done = unsafe { GetFileInformationByHandle(file.as_raw_handle() as HANDLE, &mut info) };
+        if done == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let index = (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow);
+        Ok((u64::from(info.dwVolumeSerialNumber), index))
+    }
+}
+
+/// Sets the file's length: what the archive cuts or grows it by.
+pub(crate) fn set_len(file: &File, len: u64) -> io::Result<()> {
+    #[cfg(test)]
+    disk::note(file, || disk::Op::Len(len));
+    file.set_len(len)
+}
+
+/// Makes what was written to the file durable.
+pub(crate) fn sync(file: &File) -> io::Result<()> {
+    #[cfg(test)]
+    disk::note(file, || disk::Op::Flush);
+    file.sync_data()
+}
+
 /// Writes all of `bytes` at `offset`, without moving any shared cursor.
 pub(crate) fn write_at(file: &File, offset: u64, bytes: &[u8]) -> io::Result<()> {
+    #[cfg(test)]
+    disk::note(file, || disk::Op::Write(offset, bytes.to_vec()));
     #[cfg(unix)]
     {
         std::os::unix::fs::FileExt::write_all_at(file, bytes, offset)
@@ -206,6 +252,9 @@ pub(crate) fn write_at(file: &File, offset: u64, bytes: &[u8]) -> io::Result<()>
         Ok(())
     }
 }
+
+#[cfg(test)]
+pub(crate) mod disk;
 
 #[cfg(test)]
 mod tests {

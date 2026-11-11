@@ -444,7 +444,7 @@ impl FileArchive {
             tokens: Vec::new(),
         })
         .inspect_err(|_| {
-            let _ = self.inner.file.set_len(snapshot.slot.end);
+            let _ = crate::file::set_len(&self.inner.file, snapshot.slot.end);
         })?;
         Ok(true)
     }

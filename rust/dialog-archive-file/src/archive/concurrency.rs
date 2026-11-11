@@ -80,7 +80,7 @@ fn names(prefix: &str, count: usize) -> Vec<String> {
 
 /// A child run of this binary in a role: its input, and the lines it
 /// prints, read on a thread of their own so a wait on them can end.
-struct Process {
+pub(super) struct Process {
     child: Child,
     lines: mpsc::Receiver<String>,
     input: Option<ChildStdin>,
@@ -188,7 +188,7 @@ impl Process {
 
     /// Closes the child's input, which ends a child that waits on it, and
     /// waits for it to exit well.
-    fn finish(mut self) -> anyhow::Result<()> {
+    pub(super) fn finish(mut self) -> anyhow::Result<()> {
         drop(self.input.take());
         let status = self.child.wait()?;
         anyhow::ensure!(status.success(), "the child failed: {status}");
@@ -214,7 +214,7 @@ fn go(processes: &mut [Process]) -> anyhow::Result<()> {
 
 /// A process holding `byte` of the file at `path`, shared or exclusive,
 /// until it is finished.
-fn hold(path: &Path, byte: u64, exclusive: bool) -> anyhow::Result<Process> {
+pub(super) fn hold(path: &Path, byte: u64, exclusive: bool) -> anyhow::Result<Process> {
     Process::ready(&[
         "hold",
         &path.to_string_lossy(),

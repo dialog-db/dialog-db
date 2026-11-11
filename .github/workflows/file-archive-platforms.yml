@@ -1,0 +1,38 @@
+name: 'File archive on Windows and macOS'
+
+# Runs dialog-archive-file's tests, the concurrency and power-loss suites
+# among them, on the platforms the Test workflow does not: Windows, where
+# the file's locks are LockFileEx and a mapped file cannot be cut, and
+# macOS. It does not gate and leaves the Test workflow as it is.
+# On push, not pull_request, as the file-archive bench is.
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/file-archive-platforms.yml'
+      - 'rust/dialog-archive-file/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: 'dialog-archive-file on ${{ matrix.os }}'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ['windows-latest', 'macos-latest']
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        shell: bash
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Test
+        shell: bash
+        run: cargo test -p dialog-archive-file --all-targets -- --test-threads=4
