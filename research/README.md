@@ -51,8 +51,11 @@ runs, in the journal's "Where things stand"; they change together.
   returns it and a subscription follows changes anywhere in it.
 - [Record values](record-values.md): **Exploring**, on
   [dialog-db/dialog-db#748](https://github.com/dialog-db/dialog-db/pull/748).
-  `Value::Record` as a typed, canonical value whose fields can be
-  destructured in queries, sharing the replica's tokens with its claims.
+  `Value::Record` as a canonical value of attribute and value pairs that
+  queries destructure, sharing the replica's tokens with its claims. A
+  spike: canonical, one field read in half the time of decoding dag-cbor,
+  a revision record split in the file at 0.40 of dag-cbor, and 1.25 to 1.89
+  of it on the wire uncompressed.
 - [Single-file format](single-file-format.md): **Building**, on
   [dialog-db/dialog-db#733](https://github.com/dialog-db/dialog-db/pull/733).
   A replica's blocks in one append-only file, every token stored once.

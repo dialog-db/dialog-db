@@ -2,7 +2,10 @@
 
 Status: Exploring. See the [research index](README.md) for what the
 statuses mean, and the [journal](record-values/journal.md) for where the
-research stands and how each decision below was reached.
+research stands and how each decision below was reached. The
+[proposed design](record-values/design.md) answers each open question
+below; the [first spike's results](record-values/results/2026-11-11-spike.md)
+are the numbers it cites.
 
 ## Question
 
