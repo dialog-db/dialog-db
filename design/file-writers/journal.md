@@ -4,7 +4,7 @@
 
 |  | Understanding | Activity |
 |---|---|---|
-| **Status** | Direction chosen: one file, an extent per writer, native only (the web keeps IndexedDB). Writers never wait on one another's writes; claiming an extent takes a short lock once per extent filled. Two coordination points: integration, by the committer after its commit, and branch updates, under a byte-range lock per cell. Cells are slots at offsets an index names, of a capacity set at creation, written over in place; a moved head always means a replay. | Building, in the order in the top story. |
+| **Status** | Direction chosen: one file, an extent per writer, native only (the web keeps IndexedDB). Writers never wait on one another's writes; claiming an extent takes a short lock once per extent filled. Two coordination points: integration, by the committer after its commit, and branch updates, under a byte-range lock per cell. Cells are slots at offsets an index names, of a capacity set at creation, written over in place; a moved head always means a replay. | Building: all five stages built and pushed; the departures are in the last entry. |
 | **Agenda** | Evaluating the page size, the chunk the file grows by and the run a writer claims. Applying a commit with updated versions over a moved head, keeping its instructions until it publishes. How extents are claimed and recorded; the cell index and its two tables; what integration does to extents and per-commit node records; a cell's default capacity. Replay avoidance is its own topic. | The next implementation decision: claiming extents. |
 
 ## 2026-11-10, Describing: the topic opens
@@ -471,3 +471,48 @@ collection of history, a topic of its own.
 integration, cells, retry, the last close. The page size, the chunk the
 file grows by and the run a writer claims start at fixed defaults, to be
 tuned by measurement.
+
+## 2026-11-11, Building: the five stages built
+
+**Built.** On the single-file branch, each stage tested, pushed and run
+on CI against main:
+
+0. Main merged (#768), `5d8c8d9b`.
+1. and 2. Extents and integration, `833cfcf9`: a writer tries the turn
+   without waiting; without it, it writes whole blocks into an extent of
+   its process's, readable at once in every process; the next writer
+   with the turn folds them into frames and retires the extent, which a
+   sync point frees for the next claim. The turn is a lock on one byte.
+   Format 11.
+3. Cells, `61302917`: `FileArchive` provides `Resolve`, `Publish`,
+   `Retract` and `List`; a cell is a record of two halves in a cells index
+   of its own, updated under a lock on that cell alone, spilling to a
+   block past its capacity. A repository keeps its branch heads in the
+   file (`it_keeps_branch_heads_in_the_file`).
+4. Retry, `9a19ebf1`: a plain branch commit that loses its race applies
+   its instructions again over the winner, up to 64 times.
+5. The last close, `afc44b0a`: the last process to close retires its
+   extents and cuts free extents that end the file.
+
+CI (run 13, against main): nothing slower; warm commands off the disk
+1.10× to 0.99×.
+
+**Where the build departs from the design, and why.**
+
+- Readers check a block in an extent by its hash, not by a shared lock
+  on the extent: as safe (a reused extent's bytes fail the hash, and the
+  reader finds the block in the index), with no lock call per read.
+- A process keeps one extent claimed while it writes, claimed in a turn
+  it holds anyway: without it, the first write that found the turn taken
+  waited to claim one, which a test showed.
+- Creating a cell takes the turn; updates never do.
+- Integration runs in the commit when the turn is free, not as a task of
+  its own; compact output is appended at the end, and freed extents are
+  reused by the next claims, not by frames.
+- The last close cuts only free extents at the end of the file: a freed
+  extent mostly sits mid-file, where reuse, not truncation, reclaims it.
+
+**Open.** A repository test of two processes on two branches; integration
+off the commit; a contact write that reads before it writes
+(`remove_name`) is replayed as computed, by the registry's own retry as
+before and by the commit's now.
