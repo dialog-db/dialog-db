@@ -51,6 +51,8 @@
 | a branch keeps a form as a record under its `form:` entity | fact | `it_keeps_a_form_on_a_branch_under_the_entity_that_names_it` | holds |
 | every application has at most one part without a label | hypothesis | `examples/shapes.rs` over the prelude and the examples | refuted: 38 of 151 as written have several; holds for calls |
 | the part with no label is `of:`, and `:` is the label of no name | opinion | Irakli, 2026-11-11; `research/notation/design.md` in #728 | decides; the prelude's command row breaks it |
+| a record is an atomic composite value: updated whole, made of other values | opinion | Irakli, 2026-11-11 | decides; a map, a list and a tuple are each one |
+| parsing transforms notation into a syntax tree, which is kept in maps, lists and tuples as each fits | opinion | Irakli, 2026-11-11 | decides; the crate keeps parsed notation as data directly, which is not this |
 | a rule can build a record from what it has bound | hypothesis | H5 of [design-forms.md](design-forms.md): confirmed by a record premise planned as a concept query is, running both ways | open; #748 speaks only of reading one |
 | a premise may take parameters that differ by application | fact | `ConceptQuery::schema`, `rust/dialog-query/src/concept/query.rs` | holds |
 | the two-cell `entity/derive` names the entities a record will | hypothesis | refuted by its own definition: a chain of pairs under a seed is not a record's canonical form | refuted; it is a stand-in |

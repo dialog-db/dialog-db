@@ -206,3 +206,15 @@ Not examined yet. They are columns, not recommendations.
 - Without the empty label a formula's second operand has no spelling: `(+ ?a : ?b)`, `(< ?p : 10)`, and `:command` six times in the prelude.
 
 **Decided.** Not decided. The agent built the tuple and the map as data on a parked question and one unanswered, and three choices in it are now overturned. No more is built until the center is settled: whether forms are atoms and lists only, how a formula's second operand is written, and whether sugar for a map sorts.
+
+## 2026-11-11, Designing: three things, not two
+
+**Asked.** Whether forms are atoms and lists only. Irakli: no, that mixes things up. The parser reads `{foo bar}` as `(map (foo bar))`: going from parsed notation to the syntax tree is a transformation. It does not say the syntax tree is stored as lists. In the data model the syntax uses a map where a map makes sense, and a list or a tuple where those do. And "record" as a value type misled: it meant an atomic composite value, atomic in that it is updated whole, composite in that it is made of other values.
+
+**Learned.**
+
+- There are three things: the notation as parsed, the syntax tree the parser makes of it, and the data the tree is kept in. The agent had the first stored directly as the third.
+- `(map (foo bar))` names a node of the syntax tree, a map written out. It is not a map, since `foo` and `bar` may be anything a rule has yet to bind.
+- A record is any composite value kept whole: a map, a list, a tuple. #748's pairs keyed by attributes are one kind of it.
+
+**Decided.** By the maintainer: a record is an atomic composite value; the parser transforms notation into a syntax tree; the tree is kept in maps, lists and tuples as each fits. Not decided: what the nodes of the tree are and which of the three each is kept as.
