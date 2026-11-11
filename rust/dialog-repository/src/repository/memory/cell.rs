@@ -303,9 +303,17 @@ where
     /// successful publish through it advances this cell (and every clone), so
     /// there is nothing to copy back. See `Branch::pull`.
     pub fn checkpoint(&self) -> Checkpoint<T, Codec> {
+        self.checkpoint_at(self.cache.version())
+    }
+
+    /// A [`Checkpoint`] at `expected`, a version this cell was read at
+    /// earlier (see [`edition`](Self::edition)): for a writer that read
+    /// the cell when it began and publishes against what it read, not
+    /// against whatever the cell holds when it is ready to publish.
+    pub(crate) fn checkpoint_at(&self, expected: Option<Version>) -> Checkpoint<T, Codec> {
         Checkpoint {
             cell: self.clone(),
-            expected: self.cache.version(),
+            expected,
         }
     }
 

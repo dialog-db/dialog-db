@@ -35,7 +35,6 @@ use futures_util::{Stream, StreamExt as _};
 
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_corpus::tree::selector_range;
-use dialog_effects::archive::prelude::ArchiveScope;
 use dialog_search_tree::{DialogSearchTreeError, Traversable as _};
 
 use crate::repository::archive::TreeEnv;
@@ -196,16 +195,17 @@ async fn warm_source(
     selector: &Selector<Constrained>,
     likelihood: Likelihood,
 ) -> Result<(), DialogSearchTreeError> {
-    let Some(root) = source.as_ref().root() else {
+    let view = source.as_view();
+    let Some(root) = view.root() else {
         return Ok(());
     };
     // Warming exists to fetch ahead of demand. With nowhere to fetch
     // from, every block is local already and a demand read finds it; a
     // walk here would only re-read, and re-hash, what is already there.
-    if !routes.fetches(source.as_ref().subject().did()) {
+    if !routes.fetches(view.subject().did()) {
         return Ok(());
     }
-    let catalog = ArchiveScope::new(source.as_ref().subject()).index();
+    let catalog = view.catalog();
     let storage: &dyn TreeEnv = env;
     // Every load the walk performs is ranked at the hint's likelihood.
     let tree = Index::at(catalog, NodeHash::from(root)).ranked(likelihood.into());
@@ -248,6 +248,7 @@ mod tests {
         State, Value,
     };
     use dialog_effects::archive::Get;
+    use dialog_effects::archive::prelude::ArchiveScope;
     use dialog_query::query::Output as _;
     use dialog_search_tree::helpers::Blocks;
     use dialog_storage::DialogStorageError;
