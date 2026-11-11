@@ -787,6 +787,41 @@ fn a_block_only_another_process_holds_loose_is_written_again() -> anyhow::Result
     all_read_back(&archive, &["shared-0".into()])
 }
 
+/// A sync point falling due as a writer writes without the turn, because
+/// another process holds it, is made without waiting for the turn either:
+/// what it frees is taken up by the next commit in the turn.
+#[test]
+fn a_sync_point_due_while_another_holds_the_turn_does_not_wait() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let path = archive_in(&directory);
+    let archive = FileArchive::open(&path)?;
+    archive.append("index", &[block("first")])?;
+    let holder = hold(&path, locks::TURN, true)?;
+    *archive.inner.synced.lock() = std::time::Instant::now() - std::time::Duration::from_secs(60);
+    archive.inner.sync_due.store(true, Ordering::Relaxed);
+    let (done, _) = within(PROMPTLY, {
+        let archive = archive.clone();
+        move || archive.append("index", &[block("while held")])
+    });
+    done.expect("the append and its sync point did not wait for the turn")?;
+    let durable = super::slot::Slot::read_durable(&archive.inner.file)?.expect("a durable slot");
+    assert!(
+        durable.sequence > 0 && durable.sequence <= archive.current().slot.sequence,
+        "the sync point was made"
+    );
+    holder.finish()?;
+    archive.append("index", &[block("after")])?;
+    assert_eq!(
+        archive.current().slot.durable,
+        durable.sequence,
+        "the next commit took it up"
+    );
+    all_read_back(
+        &archive,
+        &["first".into(), "while held".into(), "after".into()],
+    )
+}
+
 /// A writer that died with blocks in an extent leaves them readable, and
 /// the next writer to take the turn folds them in, filing each once.
 #[test]

@@ -820,3 +820,13 @@ millisecond. Fifteen runs of fifteen pass.
 **Open.** A background thread for sync points would take them out of the
 writer's call. C (heads written without the turn) would take the 1.3 to
 2 ms p90 wait away; whether that is worth its cost is the question.
+
+**A sync point never waits for the turn.** The first Windows run with the
+change above hung. A writer that wrote into its extent because another
+process held the turn then made a sync point that fell due (two seconds
+had passed, which Windows' slower runners reach and the quick Linux runs
+do not), and its last step waited for the turn the other process held. A
+sync point now only tries the turn; when another holds it, the next commit
+in the turn reads the durable slot and takes up what it freed.
+`a_sync_point_due_while_another_holds_the_turn_does_not_wait` pins it,
+and fails after 20 s with the wait put back.

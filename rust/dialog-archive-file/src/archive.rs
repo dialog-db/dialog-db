@@ -678,6 +678,37 @@ fn in_use(file: &File) -> io::Result<Option<Slot>> {
         .find(|slot| slot.end <= len && slot.sequence >= durable.sequence))
 }
 
+/// Tells `slot` (the next rolling slot, being written in the turn) what a
+/// durable slot newer than the one it knows made free: the index pages and
+/// extents still waiting in it that the durable slot frees. A sync point
+/// made without the turn (see [`FileArchive::sync_now`]) leaves this to the
+/// next writer in the turn when it could not take the turn itself. Whether
+/// `slot` changed.
+fn take_up_durable(file: &File, slot: &mut Slot) -> io::Result<bool> {
+    let Some(durable) = Slot::read_durable(file)? else {
+        return Ok(false);
+    };
+    if durable.sequence <= slot.durable || durable.sequence > slot.sequence {
+        return Ok(false);
+    }
+    let pages: HashSet<u32> = durable.reusable.iter().copied().collect();
+    let (freed, still): (Vec<u32>, Vec<u32>) = slot
+        .pending
+        .drain(..)
+        .partition(|page| pages.contains(page));
+    slot.pending = still;
+    slot.reusable.extend(freed);
+    let extents: HashSet<u64> = durable.extents_free.iter().copied().collect();
+    let (freed, still): (Vec<u64>, Vec<u64>) = slot
+        .extents_pending
+        .drain(..)
+        .partition(|record| extents.contains(record));
+    slot.extents_pending = still;
+    slot.extents_free.extend(freed);
+    slot.durable = durable.sequence;
+    Ok(true)
+}
+
 /// The sync byte (see the `locks` module), held while a process makes a
 /// sync point. Let go when dropped.
 struct SyncPoint<'a>(&'a File);
@@ -1319,13 +1350,13 @@ impl FileArchive {
         Ok(())
     }
 
-    /// A sync point made without holding the writer's turn but for its
-    /// last step: under the sync byte (see the `locks` module), the newest
-    /// slot is read, the file synced, the durable slot written as that slot
-    /// and synced; then, briefly in the turn, the newest rolling slot is
-    /// told which pages and extents that made free (those still waiting
-    /// that the durable slot freed). Appends go on meanwhile, so the turn is
-    /// never held for a sync. `always` makes one even if, by the time the
+    /// A sync point made without holding the writer's turn: under the sync
+    /// byte (see the `locks` module), the newest slot is read, the file
+    /// synced, the durable slot written as that slot and synced; then, if
+    /// the turn is free, the newest rolling slot is told which pages and
+    /// extents that made free, or else the next commit in the turn does it
+    /// ([`take_up_durable`]). Appends go on meanwhile, so the turn is never
+    /// held for a sync, and a sync point never waits for it. `always` makes one even if, by the time the
     /// sync byte is had, another process made one and none is due.
     fn sync_now(&self, always: bool) -> io::Result<()> {
         let file = &self.inner.file;
@@ -1343,29 +1374,19 @@ impl FileArchive {
         durable.durable = durable.sequence;
         durable.write_durable(file)?;
         crate::file::sync(file)?;
-        let turn = self.turn()?;
-        let newest = self.newest_in_turn(&turn)?;
-        let mut slot = newest.slot.clone();
-        let pages: HashSet<u32> = target.pending.iter().copied().collect();
-        let (freed, still): (Vec<u32>, Vec<u32>) = slot
-            .pending
-            .drain(..)
-            .partition(|page| pages.contains(page));
-        slot.pending = still;
-        slot.reusable.extend(freed);
-        let extents: HashSet<u64> = target.extents_pending.iter().copied().collect();
-        let (freed, still): (Vec<u64>, Vec<u64>) = slot
-            .extents_pending
-            .drain(..)
-            .partition(|record| extents.contains(record));
-        slot.extents_pending = still;
-        slot.extents_free.extend(freed);
-        slot.durable = target.sequence;
-        slot.sequence += 1;
-        slot.boot = boot();
-        slot.write(file)?;
-        self.publish(snapshot(file, slot, Some(&self.current()))?);
-        drop(turn);
+        // Tried, never waited for: a writer that wrote without the turn
+        // must not then wait for it. When another holds it, the next
+        // commit in the turn takes up what the durable slot freed.
+        if let Some(turn) = self.try_turn()? {
+            let newest = self.newest_in_turn(&turn)?;
+            let mut slot = newest.slot.clone();
+            if take_up_durable(file, &mut slot)? {
+                slot.sequence += 1;
+                slot.boot = boot();
+                slot.write(file)?;
+                self.publish(snapshot(file, slot, Some(&self.current()))?);
+            }
+        }
         *self.inner.synced.lock() = Instant::now();
         Timings::add(&self.inner.timings.sync, started);
         self.inner.timings.syncs.fetch_add(1, Ordering::Relaxed);
@@ -2602,6 +2623,7 @@ impl FileArchive {
         }
         let mut slot = laid.slot;
         slot.boot = boot();
+        take_up_durable(file, &mut slot)?;
         slot.write(file)?;
         Timings::add(&self.inner.timings.write, started);
         if self.sync_is_due(&slot) {
