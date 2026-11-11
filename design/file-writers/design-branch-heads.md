@@ -63,3 +63,20 @@ the mint consumes, so after a failed publish there is nothing left to
 apply, and the commit has to keep them until it publishes. Skipping the
 replay when nothing it read changed is a topic of its own:
 [replay-avoidance](../replay-avoidance.md).
+
+## The cell index
+
+How many cells a space has cannot be known: it is as many as the branches
+its users create, one or two in every run measured, but without a bound
+(Irakli). So the index has to cost the same at one cell and at millions.
+A flat array written as two copies in turn rewrites itself whole on every
+create, which does not.
+
+The file already has an index built for that: its block index, a paged tree
+in the file keyed by hash, with pages reused after a sync point and its root
+published through two rolling slots and a durable one (format 10). It holds
+blocks, tokens and lineages; a cell is a fourth kind of entry, the hash of
+its name mapped to its slot's offset. Creating or deleting a cell is an
+insert or a removal, made by integration under the turn as every index
+change is. A reader looks a cell up once by the same path and keeps its
+offset; a cell created since the last integration is found in the extents.

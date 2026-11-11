@@ -439,3 +439,14 @@ here a record per commit of hashes and offsets.
 [design-integration.md](design-integration.md). Readers find blocks not yet
 integrated through per-commit records. Open, to evaluate: page size, chunk
 and claimed run.
+
+**Asked.** Measure how many cells a space has? Irakli: it cannot be
+measured; it depends on how many branches users create, one or two in our
+runs, but it could be far more, so no number can be settled on.
+
+**Learned.** Then the index has to cost the same at one cell and at
+millions, and the file already has one that does: the block index, with
+cells as one more kind of entry.
+
+**Decided.** Cells are entries in the file's block index (name hash to slot
+offset); creating or deleting one is an index change integration makes.
