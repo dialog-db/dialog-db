@@ -196,13 +196,50 @@ let
 
   # The wasm test runner. A native workspace binary that nextest invokes once
   # per test via the wasm32 target runner; it keeps one headless Chrome alive
-  # and hands each test a fresh origin. Built from the workspace source so it
-  # tracks the same wasm-bindgen pin as the crates under test.
-  wbg-pool = buildCrate {
+  # and hands each test a fresh origin. Built from the workspace manifests so
+  # it tracks the same wasm-bindgen pin as the crates under test.
+  #
+  # It is in the dev shell, so every CI job waits for it. Built from the
+  # workspace source it was rebuilt, with the dependencies of the whole
+  # workspace under it, whenever any crate changed: several minutes at the
+  # start of every job. Its source here is its own crate and the manifests
+  # of the others (their sources are the stubs crane builds dependencies
+  # against), so it is rebuilt when it, a manifest or the lock file changes
+  # and is otherwise fetched from the binary cache.
+  wbgPoolAttributes = commonAttributes // {
     pname = "wbg-pool";
+    version = "0.1.0";
     cargoExtraArgs = "--locked -p wbg-pool";
-    doCheck = false;
+    # Named here because the source below is a derivation: read from it,
+    # the lock file would have to be built before the flake evaluates.
+    cargoVendorDir = craneLib.vendorCargoDeps { src = rustSource; };
   };
+
+  wbgPoolSource = craneLib.mkDummySrc {
+    src = rustSource;
+    extraDummyScript = ''
+      rm -rf $out/rust/wbg-pool
+      cp -r ${
+        filter {
+          root = workspaceRoot + "/rust/wbg-pool";
+          exclude = [ "fixtures" ];
+        }
+      } $out/rust/wbg-pool
+    '';
+  };
+
+  wbg-pool = craneLib.buildPackage (
+    wbgPoolAttributes
+    // {
+      src = wbgPoolSource;
+      cargoArtifacts = craneLib.buildDepsOnly (
+        wbgPoolAttributes
+        // {
+          pname = "wbg-pool-deps";
+        }
+      );
+    }
+  );
 
   buildWasmCrate =
     attributes:
