@@ -98,9 +98,24 @@ impl Process {
             .env(ROLE, role.join(&SEPARATOR.to_string()))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .spawn()?;
         let out = BufReader::new(child.stdout.take().expect("piped"));
+        let err = BufReader::new(child.stderr.take().expect("piped"));
         let (send, lines) = mpsc::channel();
+        // What it says on its error output comes too, marked, so a child
+        // that fails says why in the parent's failure.
+        let errors = send.clone();
+        std::thread::spawn(move || {
+            for line in err.lines() {
+                let Ok(line) = line else {
+                    break;
+                };
+                if errors.send(format!("stderr: {line}")).is_err() {
+                    break;
+                }
+            }
+        });
         std::thread::spawn(move || {
             for line in out.lines() {
                 let Ok(line) = line else {

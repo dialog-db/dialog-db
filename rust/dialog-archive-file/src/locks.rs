@@ -25,6 +25,10 @@ pub(crate) const TURN: u64 = BASE;
 /// that takes it exclusive is the last.
 pub(crate) const PRESENT: u64 = BASE - 1;
 
+/// The byte a process holds exclusive while it opens the file: one that
+/// repairs it holds it throughout, so no other opens from what it repairs.
+pub(crate) const RECOVERY: u64 = BASE - 2;
+
 /// The byte an extent's owner holds while the extent is its own, by the
 /// extent's record offset.
 pub(crate) fn owner(extent: u64) -> u64 {

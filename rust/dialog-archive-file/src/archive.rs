@@ -600,7 +600,10 @@ fn newest(file: &File, locked: bool) -> io::Result<Slot> {
         }
     };
     if locked && len > slot.end {
-        crate::file::set_len(file, slot.end)?;
+        // Best kept short, not needed: the next append writes from the
+        // slot's end. Windows refuses to cut a file another process has
+        // mapped, and the tail is left then.
+        let _ = crate::file::set_len(file, slot.end);
     }
     Ok(slot)
 }
@@ -626,12 +629,16 @@ fn never_made(file: &File, len: u64) -> io::Result<bool> {
         && (start.len() < MAGIC.len() || Slot::read_durable(file)?.is_none()))
 }
 
-/// The newest slot, when it was written in this boot: taken as it is, with
-/// nothing to check, so without the writer's turn, as a reader following
-/// the file's growth takes one; a tail past it is dropped by the next
-/// writer in the turn. `None` when the file needs [`recover`]'s turn: it
-/// is new, or its newest slot is from another boot.
-fn written_this_boot(file: &File) -> io::Result<Option<Slot>> {
+/// The newest whole slot, when another process holds the writer's turn:
+/// taken as it is, with nothing to check. The file is in use in this boot,
+/// so it has been recovered since it was last left, by a power loss or
+/// not: the first process to open it after found the turn free and
+/// repaired it, holding the recovery byte this one holds now, so this one
+/// never reads what is being repaired. A tail past the slot is dropped by
+/// the next writer in the turn. `None` when the file is not one to take a
+/// slot from as it is (new, or with no durable slot): then the turn is
+/// waited for.
+fn in_use(file: &File) -> io::Result<Option<Slot>> {
     let len = file.metadata()?.len();
     let mut magic = [0u8; 8];
     if len < DATA || {
@@ -643,20 +650,35 @@ fn written_this_boot(file: &File) -> io::Result<Option<Slot>> {
     let Some(durable) = Slot::read_durable(file)? else {
         return Ok(None);
     };
-    let this_boot = boot();
     // As in `newest`: the slots, then the length.
     let slots = Slot::read(file)?;
     let len = file.metadata()?.len();
     Ok(slots
         .into_iter()
-        .find(|slot| slot.end <= len && slot.sequence >= durable.sequence)
-        .filter(|slot| this_boot != 0 && slot.boot == this_boot))
+        .find(|slot| slot.end <= len && slot.sequence >= durable.sequence))
+}
+
+/// The recovery byte (see the `locks` module), held while a process opens
+/// the file. Let go when dropped.
+struct Opening<'a>(&'a File);
+
+impl<'a> Opening<'a> {
+    fn take(file: &'a File) -> io::Result<Self> {
+        locks::lock(file, locks::RECOVERY, true, true)?;
+        Ok(Self(file))
+    }
+}
+
+impl Drop for Opening<'_> {
+    fn drop(&mut self) {
+        let _ = locks::unlock(self.0, locks::RECOVERY);
+    }
 }
 
 /// Opens the file's state, creating it when it is empty. Holds the file's
 /// lock, so it never reads, or drops, an append under way. When another
-/// process holds it, a slot written in this boot is taken without it: a
-/// process opening the file does not wait on a writer's turn.
+/// process holds it, the newest slot is taken without it (see [`in_use`]):
+/// a process opening the file does not wait on a writer's turn.
 ///
 /// A rolling slot written in this boot is taken as it is: a process that
 /// died left what it wrote with the operating system, in order. One
@@ -668,9 +690,10 @@ fn written_this_boot(file: &File) -> io::Result<Option<Slot>> {
 /// taken; if none does, the file goes back to the durable slot, which
 /// nothing since was allowed to write over.
 fn recover(file: &File) -> io::Result<Slot> {
+    let _opening = Opening::take(file)?;
     let _exclusive = match Exclusive::try_take(file)? {
         Some(exclusive) => exclusive,
-        None => match written_this_boot(file)? {
+        None => match in_use(file)? {
             Some(slot) => return Ok(slot),
             None => Exclusive::take(file)?,
         },
@@ -2610,6 +2633,13 @@ impl FileArchive {
         slot.end = cut;
         slot.boot = boot();
         slot.write(file)?;
+        // A mapping past the cut is let go first, and one only as long as
+        // what is kept is made: Windows refuses to cut a file under a view
+        // that reaches past the cut.
+        drop((snapshot, bytes));
+        self.inner
+            .current
+            .store(Arc::new(self::snapshot(file, slot.clone(), None)?));
         crate::file::set_len(file, cut)?;
         let slot = self.sync_point(slot)?;
         self.inner.known.store(slot.end, Ordering::Release);

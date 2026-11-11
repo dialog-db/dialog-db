@@ -716,3 +716,24 @@ and the unlock that followed let it go under that thread, so another
 process wrote at once. Block appends had it too, unseen, since no test
 mixed threads and processes appending. The lock is now let go first;
 15 runs of 15 count to 180.
+
+## 2026-11-11, Windows and macOS: the first runs
+
+The first run of `file-archive-platforms.yml` failed on both.
+
+- **Opens waited for the turn** (macOS 6 tests, Windows 6): opening
+  trusted the newest slot without the turn only when it was written in
+  this boot, known from Linux's `boot_id` alone. The rule now needs no
+  boot id: when another process holds the turn, the file is in use in this
+  boot, so it was recovered since it was last left, by the first process
+  to open it after, which found the turn free. Every open takes a recovery
+  byte for its duration, and a repair holds it throughout, so an open never
+  reads what is being repaired. All tests pass here with the boot id
+  forced unknown.
+- **The last close did not cut the file on Windows** (2 tests): Windows
+  refuses to cut a file under a view past the cut. The closing process now
+  maps only what it keeps before cutting. Dropping a torn tail in the turn
+  is best effort: the next append writes from the slot's end anyway.
+- **Children failed within 20 ms on Windows** (3 tests), saying why only on
+  their error output, which the harness did not read. It does now; the next
+  run says.
