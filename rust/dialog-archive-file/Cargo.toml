@@ -12,6 +12,11 @@ publish = false
 # every dependency is target-gated so the workspace's wasm dependency set is
 # unaffected.
 
+[features]
+# Traces what the archive does to its files (`trace` module), for replaying
+# the file format's pattern elsewhere; Unix only.
+trace = []
+
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 async-trait = { workspace = true }
 crc32fast = { workspace = true }

@@ -163,6 +163,8 @@ pub(crate) fn record_in(bytes: &[u8], at: usize) -> Option<(Kind, usize, usize)>
 
 /// Fills `buffer` from `offset`, without moving any shared cursor.
 pub(crate) fn read_at(file: &File, offset: u64, buffer: &mut [u8]) -> io::Result<()> {
+    #[cfg(all(feature = "trace", unix))]
+    crate::trace::read(file, offset, buffer.len());
     #[cfg(unix)]
     {
         std::os::unix::fs::FileExt::read_exact_at(file, buffer, offset)
@@ -219,6 +221,8 @@ pub(crate) fn identity(file: &File) -> io::Result<(u64, u64)> {
 pub(crate) fn set_len(file: &File, len: u64) -> io::Result<()> {
     #[cfg(test)]
     disk::note(file, || disk::Op::Len(len));
+    #[cfg(all(feature = "trace", unix))]
+    crate::trace::len(file, len);
     file.set_len(len)
 }
 
@@ -243,6 +247,8 @@ pub(crate) fn grow(file: &File, len: u64) -> io::Result<()> {
 pub(crate) fn sync(file: &File) -> io::Result<()> {
     #[cfg(test)]
     disk::note(file, || disk::Op::Flush);
+    #[cfg(all(feature = "trace", unix))]
+    crate::trace::sync(file);
     file.sync_data()
 }
 
@@ -250,6 +256,8 @@ pub(crate) fn sync(file: &File) -> io::Result<()> {
 pub(crate) fn write_at(file: &File, offset: u64, bytes: &[u8]) -> io::Result<()> {
     #[cfg(test)]
     disk::note(file, || disk::Op::Write(offset, bytes.to_vec()));
+    #[cfg(all(feature = "trace", unix))]
+    crate::trace::write(file, offset, bytes);
     #[cfg(unix)]
     {
         std::os::unix::fs::FileExt::write_all_at(file, bytes, offset)

@@ -36,6 +36,8 @@ mod node;
 mod resource;
 mod rows;
 mod tokens;
+#[cfg(all(feature = "trace", unix))]
+pub mod trace;
 
 pub use archive::{CHAIN, FileArchive, Options, Stats};
 pub use resource::{FILE_NAME, OpenError, file_at};

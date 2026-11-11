@@ -45,12 +45,17 @@ pub(crate) fn owner(extent: u64) -> u64 {
 pub(crate) fn lock(file: &File, byte: u64, exclusive: bool, wait: bool) -> io::Result<bool> {
     #[cfg(unix)]
     {
-        unix::set(
+        let taken = unix::set(
             file,
             byte,
             if exclusive { Kind::Write } else { Kind::Read },
             wait,
-        )
+        );
+        #[cfg(all(feature = "trace", unix))]
+        if let Ok(taken) = &taken {
+            crate::trace::lock(file, byte, exclusive, wait, *taken);
+        }
+        taken
     }
     #[cfg(windows)]
     {
@@ -62,6 +67,8 @@ pub(crate) fn lock(file: &File, byte: u64, exclusive: bool, wait: bool) -> io::R
 pub(crate) fn unlock(file: &File, byte: u64) -> io::Result<()> {
     #[cfg(unix)]
     {
+        #[cfg(feature = "trace")]
+        crate::trace::unlock(file, byte);
         unix::set(file, byte, Kind::Unlock, true).map(|_| ())
     }
     #[cfg(windows)]

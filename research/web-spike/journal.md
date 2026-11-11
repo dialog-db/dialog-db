@@ -10,7 +10,7 @@ harness: [README.md](README.md). Raw numbers: `results/`, rendered with
 
 ## Where things stand
 
-**Status: Exploring** (a spike, two rounds; nothing here is built into the archive).
+**Status: Exploring** (a spike, three rounds; nothing here is built into the archive).
 
 - **One browser.** Headless Chromium 153.0.8010.12 on a 4-CPU Linux VM
   (Xeon 2.10 GHz, 16 GiB, ext4 on a virtio disk with online discard).
@@ -65,6 +65,27 @@ workload, goal "space savings without becoming slow":
   failovers with no acknowledged write lost, no request answered twice
   and no error; tabs saw 81–151 ms of outage, 60–110 ms of it the new
   owner rebuilding its index from the file.
+
+Round three (below), go/no-go on the native file format's own trace
+(one member of a tonk-shaped team: views, subscriptions, the week's
+commits, pulls and pushes), each design against today's IndexedDB store
+(A) in the same sitting; kill if over 0.8x on disk or over 1.1x on
+commit, cold read or poll, p50 or p95, at one tab or three:
+
+- **C, OPFS in every tab's worker (`readwrite-unsafe`, Web Locks): keep.**
+  The only survivor, every round: 0.10–0.13x A's bytes, commits
+  0.12–0.17x, cold reads 0.71–0.96x at p50, polls 0.15–0.24x. Chromium
+  only. Web Locks are most of its commit (13.9 a commit, 0.13 ms each);
+  without its page cache it fails.
+- **B, the file as IndexedDB slices keyed by position: discard.** Cold
+  reads 3.5–5.3x A at every slice size (each miss an awaited request), and
+  5–23 MiB on disk while LevelDB keeps rewritten slices.
+- **D, an owner worker: discard as the design**; it is level with A on
+  reads (a message per block operation) at a tenth of the bytes and half
+  the commit time, which makes it the fallback where `readwrite-unsafe` is
+  missing (Firefox, Safari).
+- **No store makes a whole commit 5 ms**: natively a commit is 16.8 ms
+  p50, nearly all dialog's own work; C's storage work is 1.7–2.6 ms.
 
 ## 2026-11-11, the setup and what a Playwright benchmark gets wrong
 
@@ -982,3 +1003,294 @@ whether a compact format stays fast in IndexedDB records.
 - The real format: an emulated payload, its read indirection and CPU not
   modelled; and no Wasm.
 - Four CPUs: three tabs, a shared worker and an owner oversubscribe them.
+
+## 2026-11-11, round three: is there any hope, on the file format's own pattern?
+
+**Question.** Round two emulated a compact format by shrinking blocks to a
+set fraction. Does the real file format, as the native archive reads and
+writes it on a tonk-shaped workload, survive against today's store in
+the browser? The user's framing: the worker setups have to be compared
+with what dialog runs today, and a design with no hope is discarded.
+
+**Designs**, each fed the same trace (below), in one sitting, a fresh
+profile per run, variants interleaved:
+
+- **A, baseline:** dialog's IndexedDB store as today (round two's
+  `IdbArchive`): a record per block keyed by base58 hash, gets awaited one
+  by one, imports awaiting each put, Chromium's default durability.
+- **B, the file as IndexedDB slices:** the file's bytes as records of a
+  fixed slice size, keyed by the slice's start, so a range of the file is
+  one `getAll` over a key range. Writes go to cached slices; each
+  operation's dirty slices are put in one read-write transaction,
+  `strict` when the native archive synced in that operation, `relaxed`
+  otherwise. IndexedDB orders number keys numerically, so a position needs
+  no lexicographic encoding as a number key; it would as a string or
+  binary key.
+- **C, OPFS in every tab's own worker:** each tab's dedicated worker holds
+  the file `readwrite-unsafe`, the native lock bytes (turn, sync,
+  presence, recovery, extent owners) taken as Web Locks of those names;
+  writes go to the handle, a native sync is `flush()`. Chromium only:
+  `readwrite-unsafe` ships in Chrome and Edge 121+ and not in Firefox or
+  Safari ([web-opfs.md](../single-file-format/web-opfs.md)), where tabs
+  would have to hand the exclusive handle over per turn or use an owner.
+  Round one measured this design on a toy log: an owner committed
+  1.7–3.6x faster, `readwrite-unsafe` readers read 12–29x faster.
+- **D, reference:** round two's owner: one worker in another tab holds
+  the file exclusively and runs the archive; the tab sends it each block
+  read, block write and cell operation as a message.
+
+B, C and D keep the same page cache in the worker that holds the bytes
+(a port cannot map the file), so they differ only in the medium behind a
+miss. Cold reads drop it first.
+
+**The trace.** The native `dialog-archive-file`, built with a new `trace`
+feature, runs `tonk_bench` on the synthetic `tonk-1x-steady` dataset with
+blocks and cells in the file (`file-cells` store), and records member 1's
+file: every page of the mapping each operation reads (the mapping is
+protected at each operation's start and each page caught once with
+`SIGSEGV`, so the order of first touches is kept), every positioned read,
+write, length change, sync and lock, and the same operations as blocks
+and cells (block reads by hash, blocks written with their bytes, cells
+resolved and published) for A. Member 1 is the tab: it joins by pulling
+the space, reads the views cold and warm, keeps three subscribed, then
+through the week commits its commands, pulls, pushes and polls, then
+runs the steady commands. The trace is replayed, not the format: what it
+cannot carry is the format's CPU, which a Wasm port adds on top (natively
+about 600 µs to write a frame, 5 to 27 µs to decode a node's rows), and
+any read the port could batch that the native code makes one after
+another (a run of adjacent pages is one read; a jump is the next,
+dependent read).
+
+**Kill criteria**, written before measuring. On the trace, against A in
+the same sitting, a design survives only if it is:
+
+1. **smaller on disk**: at most 0.8x A's bytes after closing; and
+2. **not slower**: commit, cold read and warm read, p50 and p95 each, at
+   most 1.1x A's;
+
+at one tab and at three. Whether a commit fits the 5 ms budget is
+reported but kills nothing: A itself does not fit it (round two: 13–14 ms
+a commit). The cheapest variant of each design is measured first, and a
+design that clearly fails is dropped without building the rest
+(awaited reads before the `Atomics` bridge, one slice size before the
+sweep). The entry ends with a verdict per design.
+
+**A correction to the bars, made after a smoke run and before the sitting
+they judge.** In the trace a warm view read touches no storage at all:
+dialog's node cache answers it in every design (the 41 warm reads hold
+no event). The warm-read criterion would compare nothing, so the polls of
+the three subscribed views take its place: they read storage (109 runs of
+pages and 8 block reads each, on average) and write what they fetch.
+Reader tabs (the three-tab runs) replay the cold view reads and the polls
+over and over while the writer tab runs the week. The smoke run also
+showed what a whole commit costs natively, untraced, on this VM: 16.8 ms
+p50 (12.3 ms in the steady phase), almost all of it dialog's own work,
+which no store changes.
+
+**Method.** `tonk_bench` with the `trace` feature on `tonk-1x-steady`
+(synthetic, generated from the tonk-team schema; sha256 `ce012eb67af6c628…`;
+not committed), store `file-cells`, `DIALOG_TRACE` on member 1: a trace of
+236 operations over member 1's two archive files (its profile's and the
+space's), 25,146 pages caught, 197.7 MiB (most of it the blocks' bytes, for
+A; not committed). `round3.js` replays it in headless Chromium 153 on this
+4-CPU VM: one sitting of three rounds of A, B (16 KiB slices), C, D at one
+tab and at three, B at 64 KiB slices and C without a page cache
+(`results/2026-11-11T1555-chromium-153-round3.json`), and a second sitting
+of three rounds of A and D with the owner's cache kept warm across tabs
+(`…T1600…`). A fresh profile per run; B, C and D rebuild both files byte
+for byte (checked against the native files in every run). Page caches of
+64 MiB, which hold both files (6.2 MiB). Cold reads drop the replaying
+worker's cache (the owner's, for D, unless it is kept), since a new tab's
+worker starts with nothing; A keeps what IndexedDB caches in the browser
+process, as a new tab would. Three tabs: one tab replays the trace, two
+replay the cold view reads and the polls over and over through the week.
+Durability as natively: B commits each operation's slices `relaxed`, and
+`strict` where the native archive synced (in 12 of the 55 commits, and
+46 times over the 25 pulls); C calls `flush()` where it synced; A uses Chromium's
+default.
+
+**What the trace says about the pattern** (per operation, means):
+
+| operation | n | native ms p50 | file reads | KiB read | KiB written | locks | block gets | KiB put as blocks |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|
+| commit (`command`) | 55 | 22.7 (traced) | 194 | 2,429 | 67.7 | 13.9 | 5.8 | 598 |
+| cold view read | 9 | 2.5 | 56 | 1,839 | 106 | 15.7 | 11.0 | 229 |
+| warm view read | 41 | 0.5 | 0 | 0 | 0 | 0 | 0 | 0 |
+| poll | 75 | 28.6 | 109 | 1,682 | 45.8 | 12.1 | 8.1 | 221 |
+| pull | 25 | 55.9 | 500 | 19,415 | 657 | 169 | 107 | 4,931 |
+| push | 25 | 15.2 | 38 | 837 | 35.1 | 4.1 | 0.3 | 0 |
+
+- A commit writes 598 KiB as whole blocks and 68 KiB into the file: the
+  file's frames are about 9x smaller per write, before any compaction.
+- A commit touches 2.4 MiB of the file's pages (rules over the space),
+  so a port without a page cache reads that much per commit; with one,
+  almost all of it hits.
+- Natively, untraced, a whole commit is 16.8 ms p50 (12.3 ms in the
+  steady phase): dialog's work, which no store removes.
+
+**Results**, ms, p50 / p95, the range over three rounds:
+
+| design | commit | cold read | poll | pull | on disk, MiB (after idle) |
+|---|---|---|---|---|---|
+| **A**, today | 12.0–13.6 / 27–43 | 1.5–2.1 / 58–102 | 4.1–4.8 / 19–24 | 116–126 / 158–190 | 48–62 (43.7) |
+| B, 16 KiB slices | 2.7–3.1 / 7.4–9.8 | **6.6–9.5** / 22–32 | 1.9–2.3 / 6.8–7.3 | 25–27 / 32–40 | 7.5–15.8 |
+| B, 64 KiB slices | 2.6–3.0 / 8.6–9.7 | **5.9–8.1** / 21–24 | 2.1 / 6.9–7.4 | 25–26 / 30–40 | 23.0 |
+| **C**, OPFS per tab | 1.7–1.9 / 4.9–5.9 | 1.6–1.8 / 19–25 | 0.9–1.1 / 5.7–6.3 | 23–25 / 33–34 | 6.2 |
+| C, no page cache | 6.8–7.4 / 35–43 | 2.1–2.4 / 42–50 | 3.6–4.7 / 19–47 | 97–103 / 132–139 | 6.2 |
+| D, owner, cold owner | 6.2–7.4 / 22–25 | 2.1–3.0 / 60–85 | 4.4–5.1 / 23–27 | 100–103 / 127–162 | 6.2 |
+| D, owner kept warm | 5.7–6.6 / 18–23 | 1.2–1.8 / 71–78 | 4.6–4.9 / 22–26 | 98–106 / 132–149 | 6.2 |
+
+Three tabs (the writer tab, and the two reader tabs' cold reads and polls):
+
+| design | commit | cold read | poll | readers' cold read | readers' poll |
+|---|---|---|---|---|---|
+| **A** | 14.5–16.2 / 46–58 | 1.4–1.9 / 55–68 | 5.5–7.9 / 33–48 | 2.1–2.5 / 124–145 | 5.3–5.9 / 43–52 |
+| B, 16 KiB | 4.4–5.7 / 12–13 | **7.3–10.1** / 20–24 | 3.4–3.5 / 11–12 | **11.3–12.2** / 22–24 | 0.9–1.0 / 4.1–4.3 |
+| **C** | 2.0–2.6 / 5.4–9.3 | 1.4–1.6 / 19–26 | 1.1–1.2 / 7.6–8.7 | 0.56–0.58 / 1.4–1.5 | 0.06 / 0.28 |
+| D, cold owner | 8.3–9.4 / 24–32 | 2.3–4.2 / 62–97 | 5.3–6.2 / 28–30 | 1.9–2.2 / 67–76 | 4.6–4.9 / 26–27 |
+| D, kept warm | 8.0–8.6 / 25–31 | 1.3–1.9 / 59–79 | 5.5–6.0 / 26–30 | 1.5–1.7 / 68–78 | 4.5–4.9 / 26 |
+
+Against A in the same round and at the same tabs (`node round3-report.js`):
+
+| design | disk | commit p50 / p95 | cold read p50 / p95 | poll p50 / p95 | rounds survived |
+|---|---|---|---|---|---|
+| B, 16 KiB, 1 tab | 0.12–0.33 | 0.21–0.24 / 0.17–0.27 | **3.6–4.8** / 0.36–0.52 | 0.43–0.56 / 0.28–0.38 | 0 of 3 |
+| B, 16 KiB, 3 tabs | 0.08–0.11 | 0.27–0.37 / 0.24–0.28 | **3.9–5.3** / 0.32–0.40 | 0.43–0.58 / 0.22–0.33 | 0 of 3 |
+| B, 64 KiB, 1 tab | 0.37–0.48 | 0.19–0.23 / 0.22–0.26 | **3.5–3.8** / 0.34–0.40 | 0.45–0.50 / 0.29–0.38 | 0 of 3 |
+| **C, 1 tab** | 0.10–0.13 | 0.13–0.15 / 0.14–0.15 | 0.76–0.96 / 0.29–0.42 | 0.22–0.24 / 0.26–0.29 | **3 of 3** |
+| **C, 3 tabs** | 0.10–0.13 | 0.12–0.17 / 0.10–0.20 | 0.71–0.84 / 0.29–0.42 | 0.15–0.20 / 0.18–0.22 | **3 of 3** |
+| C, no cache | 0.10–0.13 | 0.50–0.57 / 0.91–1.30 | 0.97–1.38 / 0.70–0.83 | 0.81–1.11 / 0.81–2.42 | 1 of 3 |
+| D, cold owner, 1 tab | 0.10–0.13 | 0.46–0.57 / 0.51–0.74 | **1.16–1.75** / 1.00–1.40 | 0.92–1.25 / 1.05–1.38 | 0 of 3 |
+| D, cold owner, 3 tabs | 0.10–0.13 | 0.53–0.58 / 0.46–0.69 | **1.24–2.41** / 0.97–1.62 | 0.66–0.97 / 0.63–0.77 | 0 of 3 |
+| D, kept warm, 1 tab | 0.12–0.14 | 0.47–0.52 / 0.58–0.71 | 0.68–1.17 / 0.76–1.22 | **1.02–1.16 / 1.09–1.24** | 0 of 3 |
+| D, kept warm, 3 tabs | 0.11–0.13 | 0.53–0.56 / 0.48–0.68 | 1.00–1.06 / 1.06–1.42 | 0.81–1.05 / 0.80–0.85 | 1 of 3 |
+
+![round three, one tab](results/2026-11-11-round3.png)
+
+```mermaid
+xychart-beta
+  title "Commit p50, ms, one tab (trace tonk-1x-steady)"
+  x-axis ["A today", "B 16K", "B 64K", "C OPFS", "C no cache", "D owner", "D warm"]
+  y-axis "ms" 0 --> 14
+  bar [12.7, 2.81, 2.75, 1.79, 7.25, 6.85, 6.29]
+```
+
+```mermaid
+xychart-beta
+  title "Cold view read p50, ms, one tab"
+  x-axis ["A today", "B 16K", "B 64K", "C OPFS", "C no cache", "D owner", "D warm"]
+  y-axis "ms" 0 --> 9
+  bar [1.83, 8.25, 6.56, 1.61, 2.10, 2.72, 1.35]
+```
+
+```mermaid
+xychart-beta
+  title "On disk after closing, MiB, one tab"
+  x-axis ["A today", "B 16K", "B 64K", "C OPFS", "C no cache", "D owner", "D warm"]
+  y-axis "MiB" 0 --> 55
+  bar [51.1, 15.8, 23.0, 6.2, 6.2, 6.2, 6.2]
+```
+
+(Medians over the rounds; the tables above hold the ranges.)
+
+**What the numbers say.**
+
+- **Every file design is 0.08–0.48x of A on disk.** A holds the blocks
+  whole: 48–62 MiB after closing, 43.7 after LevelDB compacts. The file is
+  6.2 MiB in OPFS whatever reads it. B in IndexedDB is 5.1–23 MiB: every
+  operation rewrites the slices holding the slots and reused index pages,
+  and LevelDB keeps the old versions until it compacts, which it did not
+  do in 20 s idle; bigger slices are worse (64 KiB: 23 MiB).
+- **B loses every cold read**, 3.5–5.3x A at p50, at both slice sizes and
+  at three tabs. A cold view read is 56 runs of pages, most of them a miss
+  in a new tab's cache; each miss is an IndexedDB request awaited, and the
+  native code makes them one after another. A reads 11 whole blocks for
+  the same view. 64 KiB slices take 93 fetches where 16 KiB take 170, and
+  still lose (3.5–3.8x).
+- **C wins everything it is measured on**: commits 0.12–0.17x of A,
+  cold reads 0.71–0.96x at p50 (its thinnest margin, nine samples a run)
+  and 0.29–0.42x at p95, polls 0.15–0.24x, at one tab and at three, where
+  reader tabs read 4x and polls 90x faster than A's readers.
+- **C needs its page cache.** Without it each commit reads 2.4 MiB from
+  the handle (33,135 reads where the cache took 673) and C fails polls and
+  commit p95.
+- **Web Locks are most of C's commit.** C took 6,234 Web Locks in a
+  replay, 0.13 ms each on average (814 ms of a 1 s replay): 13.9 a
+  commit on average, about 1.8 ms, the size of its whole 1.7–1.9 ms p50. Natively the archive takes its turn twice
+  in a row and an extent owner's byte per append; a port that counts the
+  locks it already holds in the worker, and takes one Web Lock per turn,
+  would take most of that away (inferred: not built).
+- **D is A's speed on reads with a tenth of the bytes.** Every block
+  read, block write and cell operation is a message to the owner, about
+  as dear as an IndexedDB request: cold reads 1.16–2.41x A with a new
+  owner and 0.68–1.17x with its cache warm, polls 0.92–1.25x. Commits are
+  about half of A's, 5.7–9.4 ms.
+- **No design makes a whole commit fit 5 ms**, and the store is no longer
+  why. Replayed, C's storage work for a commit is 1.7–2.6 ms p50 (most of
+  it locks), B's 2.7–5.7, A's 12–16. Natively the whole commit is 16.8 ms
+  p50 untraced, almost all of it dialog's own work; in Wasm it will be at
+  least that (inferred), on top of the storage work. The budget is a
+  question for dialog's commit path, not for the store.
+- **The Atomics bridge was not built.** B fails on cold reads because a
+  miss is an IndexedDB request; making the request look synchronous through
+  a second worker adds a hop to the same request, so it cannot be faster
+  than awaiting it. The slice-size sweep stopped at 16 and 64 KiB for the
+  same reason: 4 KiB would take more misses, not fewer.
+
+**Measured and inferred.** Measured: every latency and size in the
+tables; the files rebuilt byte for byte in every B, C and D run; the
+pattern per operation. Inferred: what a Wasm port adds (the format's CPU
+is not in a replay); that per-worker lock counting would remove most of
+C's Web Lock cost; that LevelDB would compact B down given longer; that a
+new tab's worker cache starts empty while IndexedDB's browser-side cache
+does not (how each design's cold read is set up).
+
+**What this cannot tell.**
+
+- Firefox and Safari: C needs `readwrite-unsafe`, which they do not ship.
+  There, every tab's worker would have to hand the exclusive handle over
+  per turn (round one: a handle opened and closed costs 0.7–0.9 ms) or
+  use an owner, which is D.
+- One machine, one dataset at 1x (6.2 MiB of file): a larger space would
+  outgrow a 64 MiB cache and make every design's cold reads dearer; the
+  cache budget a tab can afford is not settled here.
+- Concurrent writers on one file: the trace is one process's, so the
+  three-tab runs have one writer and two readers. Round one measured
+  several writers on one file (an owner committing 1.7–3.6x faster than
+  `readwrite-unsafe` writers, on a toy log); with the real format's
+  13.9 Web Locks a commit, contention among writer tabs would cost C more
+  than this shows.
+- Reads the port could issue at once that the native code makes one after
+  another: the replay keeps them in order, which is what costs B its cold
+  reads; a B that prefetched a view's pages in one request might not lose
+  them.
+
+**Verdict.**
+
+- **C, OPFS in every tab's worker: keep.** It is the only design that
+  survives the bars, every round, at one tab and three: a tenth of A's
+  bytes and faster on every measure. Next, in order: (1) one Web Lock per
+  turn, with locks already held counted in the worker, and the commit
+  measured again; (2) the archive's reads over a page cache instead of a
+  mapping (the cache is what makes C fast; its size against a space that
+  outgrows it needs measuring); (3) writer tabs contending on one file
+  with the real format; (4) the fallback for Firefox and Safari, which
+  have no `readwrite-unsafe`: handing the exclusive handle over per turn,
+  measured against D.
+- **B, the file as IndexedDB slices: discard.** It fails cold reads by
+  3.5–5.3x at every slice size and tab count, and it is 0.08–0.48x on
+  disk only because LevelDB has not compacted the slices it rewrites. Its
+  one advantage, that it runs in every browser, is D's too.
+- **D, an owner worker: discard as the design; keep as the fallback
+  question.** It fails reads in every configuration but one round,
+  because a message per block operation costs what an IndexedDB request
+  does. It buys space (0.10–0.14x) and halves commits, so where C cannot
+  run (no `readwrite-unsafe`) it is better than today's store on space
+  and commits and level on reads; whether that is worth its failover
+  machinery is the user's call.
+- **A, today's store** stays the bar: 7–8x the bytes and the slowest
+  commit of all.
+
+**Decision.** Keep C; discard B; D only as the answer for browsers
+without `readwrite-unsafe`. Not decided: whether the whole commit can
+meet 5 ms, which is dialog's commit path, not the store.

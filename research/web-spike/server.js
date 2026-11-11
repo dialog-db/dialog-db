@@ -20,8 +20,15 @@ function start(port = 0) {
       url = url.slice('/plain'.length);
     }
     if (url === '/') url = '/index.html';
-    const file = path.join(ROOT, path.normalize(url));
-    if (!file.startsWith(ROOT) || !fs.existsSync(file)) {
+    // Round three's traces, from the directory SPIKE_TRACES names (they are
+    // made outside the repository).
+    let root = ROOT;
+    if (url.startsWith('/trace/') && process.env.SPIKE_TRACES) {
+      root = path.resolve(process.env.SPIKE_TRACES);
+      url = url.slice('/trace'.length);
+    }
+    const file = path.join(root, path.normalize(url));
+    if (!file.startsWith(root) || !fs.existsSync(file)) {
       res.writeHead(404);
       res.end();
       return;

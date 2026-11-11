@@ -522,12 +522,10 @@ fn snapshot(file: &File, slot: Slot, previous: Option<&Snapshot>) -> io::Result<
     // stale, never trusted; the bytes it copied are plain bytes, whatever
     // they turn out to be. Like any mapped file, changing it from outside
     // dialog is not supported.
-    let map = unsafe { memmap2::MmapOptions::new().len(len).map(file)? };
-    Ok(Snapshot {
-        slot,
-        map: Arc::new(map),
-        pages,
-    })
+    let map = Arc::new(unsafe { memmap2::MmapOptions::new().len(len).map(file)? });
+    #[cfg(all(feature = "trace", unix))]
+    crate::trace::mapped(file, &map);
+    Ok(Snapshot { slot, map, pages })
 }
 
 /// The writer's turn across processes: the turn's byte of the file (see
@@ -1172,6 +1170,8 @@ impl FileArchive {
             .truncate(false)
             .open(&path)
             .map_err(|error| storage_error(&path, error))?;
+        #[cfg(all(feature = "trace", unix))]
+        crate::trace::opened(&file, &path);
         let current = recover(&file)
             .and_then(|slot| snapshot(&file, slot, None))
             .map_err(|error| storage_error(&path, error))?;
@@ -3012,19 +3012,40 @@ impl Provider<Get> for FileArchive {
         &self,
         effect: Capability<Get>,
     ) -> Resume<'_, Result<Option<Vec<u8>>, ArchiveError>> {
-        Resume::now(self.get(effect.catalog(), effect.digest()))
+        let got = self.get(effect.catalog(), effect.digest());
+        #[cfg(all(feature = "trace", unix))]
+        crate::trace::get(
+            &self.inner.file,
+            effect.digest().as_bytes(),
+            matches!(got, Ok(Some(_))),
+        );
+        Resume::now(got)
     }
 }
 
 impl Provider<Put> for FileArchive {
     fn execute(&self, effect: Capability<Put>) -> Resume<'_, Result<(), ArchiveError>> {
         let block = Buffer::from(effect.content().to_vec());
+        #[cfg(all(feature = "trace", unix))]
+        crate::trace::put(
+            &self.inner.file,
+            block.blake3_hash().as_bytes(),
+            block.as_ref(),
+        );
         Resume::now(self.append(effect.catalog(), std::slice::from_ref(&block)))
     }
 }
 
 impl Provider<Import> for FileArchive {
     fn execute(&self, effect: Capability<Import>) -> Resume<'_, Result<(), ArchiveError>> {
+        #[cfg(all(feature = "trace", unix))]
+        for block in effect.blocks() {
+            crate::trace::put(
+                &self.inner.file,
+                block.blake3_hash().as_bytes(),
+                block.as_ref(),
+            );
+        }
         Resume::now(self.append(effect.catalog(), effect.blocks()))
     }
 }

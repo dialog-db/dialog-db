@@ -392,6 +392,11 @@ impl Provider<Resolve> for FileArchive {
         &self,
         effect: Capability<Resolve>,
     ) -> Resume<'_, Result<Option<Edition<Vec<u8>>>, MemoryError>> {
+        #[cfg(all(feature = "trace", unix))]
+        crate::trace::resolve(
+            &self.inner.file,
+            &format!("{}/{}", effect.space(), effect.cell()),
+        );
         Resume::now(
             self.resolve_cell(effect.space(), effect.cell())
                 .map(|content| {
@@ -407,6 +412,12 @@ impl Provider<Resolve> for FileArchive {
 
 impl Provider<Publish> for FileArchive {
     fn execute(&self, effect: Capability<Publish>) -> Resume<'_, Result<Version, MemoryError>> {
+        #[cfg(all(feature = "trace", unix))]
+        crate::trace::publish(
+            &self.inner.file,
+            &format!("{}/{}", effect.space(), effect.cell()),
+            effect.content(),
+        );
         Resume::now(self.publish_cell(
             effect.space(),
             effect.cell(),

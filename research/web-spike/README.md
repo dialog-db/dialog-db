@@ -8,7 +8,10 @@ over as Web Locks. Round two: dialog's IndexedDB store, a paged file in
 IndexedDB and the OPFS file measured against each other on one tonk-shaped
 workload, what synchronous reads are worth to a chain of dependent
 lookups, and dialog in a shared worker served by an owner worker that is
-replaced when its tab goes. The questions, numbers and conclusions are in
+replaced when its tab goes. Round three: a trace of the native file
+archive on a tonk-shaped workload, replayed against dialog's IndexedDB
+store, the file as IndexedDB slices, OPFS in every tab's worker and an
+owner worker, as a go/no-go against today's store. The questions, numbers and conclusions are in
 [journal.md](journal.md); the background is
 [research/single-file-format/web-opfs.md](../single-file-format/web-opfs.md)
 and [design/file-writers.md](../../design/file-writers.md).
@@ -26,6 +29,24 @@ node run.js q6 q7 q8 q9     # round two only, about seven minutes
 node run.js --quick         # few iterations, short runs: a smoke test
 node report.js results/<file>.json   # the tables of a run, as Markdown
 ```
+
+Round three replays a trace the native archive writes (the `trace`
+feature of `dialog-archive-file`, run through `tonk_bench`); make it
+outside the repository, then point `SPIKE_TRACES` at its directory:
+
+```sh
+cargo run --release -p dialog-baseline --example tonk_dataset -- \
+  generate rust/dialog-baseline/fixtures/tonk-team-schema.jsonl 1 tonk-1x.jsonl
+DIALOG_TRACE=traces/tonk-1x.trace cargo run --release -p dialog-baseline \
+  --features trace --example tonk_bench -- tonk-1x.jsonl file-cells scratch
+SPIKE_TRACES=traces node round3.js tonk-1x.trace \
+  scratch/file-cells/member-1/peer/archive.dialog \
+  scratch/file-cells/member-1/space-1/archive.dialog --rounds 3
+node round3-report.js results/<file>-round3.json
+```
+
+The archive files named after the trace are what the native run left;
+every replay of the file checks it rebuilt them byte for byte.
 
 `run.js` starts `server.js` on an ephemeral port of `localhost` (a secure
 context, so OPFS and Web Locks are available), launches Chromium with a
@@ -67,6 +88,10 @@ off-the-record context.
 | `harness/hostworker.js` | a tab's dedicated worker running the workload (question 6) |
 | `harness/dialogsw.js` | the shared worker running the workload (questions 7 and 8), arranging owners and failing over |
 | `harness/owner.js` | the owner worker: takes the owner lock, opens the OPFS file exclusively, recovers it, serves the archive |
+| `round3.js` | round three's driver: replays a trace against every design, interleaved round by round, and measures each profile's bytes |
+| `round3-report.js` | round three's tables, every design against today's store, with the kill criteria applied |
+| `harness/replay.js` | round three: the trace's parser and the replays (today's store from the block events; the file as IndexedDB slices or OPFS behind a page cache, its locks as Web Locks; the owner's messages) |
+| `harness/replayworker.js` | round three's dedicated worker: a tab replaying the trace, a reader tab, or the owner |
 | `results/` | the runs the journal cites |
 
 ## The questions
@@ -94,6 +119,13 @@ off-the-record context.
    blocks and as an emulated compact format's payload (1/3 and 1/20 of the
    bytes), as IndexedDB records, as pages in IndexedDB and in an OPFS
    file; size and latency against today's layout.
+10. Round three (`round3.js`), go/no-go on the file format's own pattern:
+   the native archive's trace of one member of a tonk-shaped team (joining,
+   cold and warm view reads, subscriptions, the week's commits, pulls,
+   pushes and polls, the steady commands) replayed against today's
+   IndexedDB store, the file as IndexedDB slices, OPFS in every tab's
+   worker with Web Locks, and an owner worker; one tab and three; commit,
+   cold read and poll latency and bytes on disk, against today's store.
 
 What a run here cannot tell: Firefox and WebKit were not available, so
 nothing is known from this spike about them; headless Chromium on a Linux

@@ -369,6 +369,27 @@ where
     >,
 {
     fn execute(&self, read: Read<N>) -> Resume<'_, Result<Option<N>, DialogSearchTreeError>> {
+        let answer = self.answer_read::<N>(&read);
+        #[cfg(all(feature = "trace", unix))]
+        crate::trace::get(
+            &self.inner.file,
+            read.name.as_bytes(),
+            matches!(answer, Ok(Some(_))),
+        );
+        Resume::now(answer)
+    }
+}
+
+impl FileArchive {
+    /// A tree's node read: from its rows when the file keeps it as a
+    /// frame, else decoded from its block.
+    fn answer_read<N>(&self, read: &Read<N>) -> Result<Option<N>, DialogSearchTreeError>
+    where
+        N: Node,
+        <N::Value as rkyv::Archive>::Archived: for<'a> CheckBytes<
+            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+        >,
+    {
         let catalog = read.catalog.catalog_name();
         // Rows of another value type than the tree's are read from the
         // block instead, as `PersistentNode::from_rows` declines them.
@@ -376,14 +397,14 @@ where
             .served(catalog, &read.name)
             .and_then(|rows| PersistentNode::<N::Key, N::Value>::from_rows(Arc::new(rows)))
         {
-            return Resume::now(Ok(Some(N::from_persistent(node))));
+            return Ok(Some(N::from_persistent(node)));
         }
-        Resume::now(match self.get(catalog, &read.name) {
+        match self.get(catalog, &read.name) {
             Ok(block) => block
                 .map(|block| decode::<N>(Buffer::from(block), &read.name))
                 .transpose(),
             Err(error) => Err(DialogSearchTreeError::Storage(error.into())),
-        })
+        }
     }
 }
 
@@ -407,6 +428,14 @@ impl<N: Node> Provider<Write<N>> for FileArchive {
             Ok(blocks) => blocks,
             Err(error) => return Resume::now(Err(error)),
         };
+        #[cfg(all(feature = "trace", unix))]
+        for block in &blocks {
+            crate::trace::put(
+                &self.inner.file,
+                block.blake3_hash().as_bytes(),
+                block.as_ref(),
+            );
+        }
         Resume::now(
             self.append(write.catalog.catalog_name(), &blocks)
                 .map_err(|error| DialogSearchTreeError::Storage(error.into())),

@@ -12,6 +12,11 @@ publish = false
 # crate-level cfg in src/lib.rs), and every native-only dependency is
 # target-gated so the workspace's wasm dependency set is unaffected.
 
+[features]
+# Traces one member's archive file in `tonk_bench` (`DIALOG_TRACE`), for
+# replaying the file format's pattern in the browser spike.
+trace = ["dialog-archive-file/trace"]
+
 [dependencies]
 anyhow = { workspace = true }
 base58 = { workspace = true }

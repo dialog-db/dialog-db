@@ -21,6 +21,12 @@
 //! Member 1 keeps the views subscribed and polls them after each of its
 //! pulls, as an open page would.
 //!
+//! With the `trace` feature, `DIALOG_TRACE=path` traces member 1's archive
+//! files (the `file` and `file-cells` stores) into `path`: every page and
+//! byte its operations read and write, and its blocks and cells (see
+//! `dialog_archive_file::trace`), each operation of member 1 named. The
+//! browser spike (`research/web-spike`) replays it.
+//!
 //! It uses only what main and this branch share, so the same file builds
 //! in a worktree of `origin/main` for the baseline (`--cfg dialog_main`
 //! leaves out the stores main does not have).
@@ -98,6 +104,26 @@ mod native {
     #[cfg(not(dialog_main))]
     type File =
         Space<dialog_archive_file::FileArchive, FileSystem, FileSystem, FileSystem, FileSystem>;
+    /// Blocks and memory cells (branch heads among them) in one file.
+    #[cfg(not(dialog_main))]
+    type FileCells = Space<
+        dialog_archive_file::FileArchive,
+        dialog_archive_file::FileArchive,
+        FileSystem,
+        FileSystem,
+        FileSystem,
+    >;
+
+    /// Names an operation of member 1 in the trace, when one is taken.
+    fn begin(_name: &str) {
+        #[cfg(all(feature = "trace", not(dialog_main)))]
+        dialog_archive_file::trace::begin(_name);
+    }
+
+    fn end() {
+        #[cfg(all(feature = "trace", not(dialog_main)))]
+        dialog_archive_file::trace::end();
+    }
 
     pub async fn main() -> anyhow::Result<()> {
         let args: Vec<String> = std::env::args().skip(1).collect();
@@ -113,14 +139,22 @@ mod native {
         }
         std::fs::create_dir_all(&root)?;
         eprintln!("dataset {hash}, store {store}");
+        #[cfg(all(feature = "trace", not(dialog_main)))]
+        if let Ok(out) = std::env::var("DIALOG_TRACE") {
+            dialog_archive_file::trace::start(Path::new(&out), &root.join("member-1"))?;
+        }
         let report = match store.as_str() {
             "fs" => run::<Fs>(&lines, &root, false).await?,
             #[cfg(not(dialog_main))]
             "file" => run::<File>(&lines, &root, true).await?,
             #[cfg(not(dialog_main))]
             "file-blocks" => run::<File>(&lines, &root, false).await?,
+            #[cfg(not(dialog_main))]
+            "file-cells" => run::<FileCells>(&lines, &root, true).await?,
             other => anyhow::bail!("no store {other}"),
         };
+        #[cfg(all(feature = "trace", not(dialog_main)))]
+        dialog_archive_file::trace::finish()?;
         let out = root.join("report.json");
         std::fs::write(
             &out,
@@ -522,7 +556,13 @@ mod native {
             let upstream = origin.branch("main").open().perform(&operator).await?;
             branch.set_upstream(upstream).perform(&operator).await?;
             let started = Instant::now();
+            if n == 0 {
+                begin("pull/join");
+            }
             branch.pull().perform(&operator).await?;
+            if n == 0 {
+                end();
+            }
             report.time("join/pull", started.elapsed());
             members.push(Member {
                 profile,
@@ -541,21 +581,25 @@ mod native {
             let descriptor = &concepts[view];
             reader.profile.caches().release(&server.did());
             let started = Instant::now();
+            begin("query/cold");
             let rows = reader
                 .branch
                 .select(query(descriptor, &[]))
                 .perform(&reader.operator)
                 .try_vec()
                 .await?;
+            end();
             report.time(&format!("query/{view}/cold"), started.elapsed());
             for _ in 0..5 {
                 let started = Instant::now();
+                begin("query/warm");
                 reader
                     .branch
                     .select(query(descriptor, &[]))
                     .perform(&reader.operator)
                     .try_vec()
                     .await?;
+                end();
                 report.time(&format!("query/{view}/warm"), started.elapsed());
             }
             sizes.insert(view, rows.len());
@@ -582,12 +626,14 @@ mod native {
                     reader.profile.caches().release(&server.did());
                 }
                 let started = Instant::now();
+                begin(&format!("query/{temperature}"));
                 let rows = reader
                     .branch
                     .select(query(activity, &[("issue", issue.clone())]))
                     .perform(&reader.operator)
                     .try_vec()
                     .await?;
+                end();
                 report.time(
                     &format!("query/issue-detail/{temperature}"),
                     started.elapsed(),
@@ -601,7 +647,9 @@ mod native {
         for view in ["v2/issue", "v2/activity", "memo/full"] {
             let mut subscription = reader.branch.subscribe(query(&concepts[view], &[]));
             let started = Instant::now();
+            begin("poll/first");
             subscription.poll(&reader.operator).await?;
+            end();
             report.time(&format!("subscription/{view}/first"), started.elapsed());
             subscriptions.push((view, subscription));
         }
@@ -629,11 +677,17 @@ mod native {
                         transaction = transaction.integrate(batch);
                     }
                     let started = Instant::now();
+                    if *author == 1 {
+                        begin("command");
+                    }
                     transaction
                         .commit()
                         .publish()
                         .perform(&member.operator)
                         .await?;
+                    if *author == 1 {
+                        end();
+                    }
                     let took = started.elapsed();
                     report.time(&format!("command/{name}"), took);
                     if caught_up[*author as usize] {
@@ -650,16 +704,30 @@ mod native {
                     round += 1;
                     for (n, member) in members.iter().enumerate() {
                         let started = Instant::now();
+                        if n == 1 {
+                            begin("pull");
+                        }
                         member.branch.pull().perform(&member.operator).await?;
+                        if n == 1 {
+                            end();
+                        }
                         report.time("sync/pull", started.elapsed());
                         caught_up[n] = false;
                         let started = Instant::now();
+                        if n == 1 {
+                            begin("push");
+                        }
                         member.branch.push().perform(&member.operator).await?;
+                        if n == 1 {
+                            end();
+                        }
                         report.time("sync/push", started.elapsed());
                         if n == 1 {
                             for (view, subscription) in subscriptions.iter_mut() {
                                 let started = Instant::now();
+                                begin("poll");
                                 subscription.poll(&member.operator).await?;
+                                end();
                                 report
                                     .time(&format!("subscription/{view}/poll"), started.elapsed());
                             }
@@ -713,7 +781,13 @@ mod native {
             } = line
             {
                 let member = &members[*author as usize];
+                if *author == 1 {
+                    begin("command/steady");
+                }
                 let took = steady_command(member, &profiles, changes, durable).await?;
+                if *author == 1 {
+                    end();
+                }
                 report.time(&format!("steady/{name}"), took);
                 report.time("steady/all", took);
             }
