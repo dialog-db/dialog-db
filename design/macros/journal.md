@@ -218,3 +218,15 @@ Not examined yet. They are columns, not recommendations.
 - A record is any composite value kept whole: a map, a list, a tuple. #748's pairs keyed by attributes are one kind of it.
 
 **Decided.** By the maintainer: a record is an atomic composite value; the parser transforms notation into a syntax tree; the tree is kept in maps, lists and tuples as each fits. Not decided: what the nodes of the tree are and which of the three each is kept as.
+
+## 2026-11-11, Designing: the syntax tree
+
+**Asked.** Whether a node is a head and one argument. Irakli gave the tree for `(todo ?t state: :open)`: a map of type `:application`, with an `operator` and an `operand` of type `:parameters` whose `terms` map `of` to a `:variable` and `state` to a `:constant`. Racket and conduct should have prior art.
+
+**Learned.**
+
+- conduct has three passes, `Sexp`, `Expr` and `Term`, and its call keeps arguments in order with a label each may lack. Racket puts `#%app` and `#%datum` in while expanding and keeps scopes, source location and properties on a syntax object.
+- 20 applications have a variable for a head, so an operator is a node.
+- 38 have several parts without a label. A map of terms has no place for them, and a rule that puts one such part under `of` and several elsewhere gives `(when A)` and `(when A B)` two shapes, which the pattern `(when ?premise ...)` cannot meet as one.
+
+**Decided.** By the maintainer: a node is a map with a `type`; an application has an operator and an operand of parameters. Not decided: where several parts without a label go.

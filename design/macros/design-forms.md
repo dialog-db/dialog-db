@@ -212,6 +212,54 @@ Irakli, 2026-11-11: `(todo ?t state: :open)` is sugar for `(todo {of: ?t state: 
 
 Open: the empty label and how a set is written; whether `[ ]` stays a second way to write a list. No set is built: nothing in the prelude or the examples writes one.
 
+## The syntax tree
+
+Irakli, 2026-11-11: parsing transforms notation into a syntax tree, and the tree is kept in the data model, in maps where they fit and lists and tuples where those do. His example:
+
+```
+(todo ?t state: :open)
+
+{ type: :application
+  operator: 'todo
+  operand: { type: :parameters
+             terms: { of:    { type: :variable name: "?t" }
+                      state: { type: :constant value: :open } } } }
+```
+
+So there are three things, and the proof of concept has kept the first as if it were the third:
+
+```
+ notation ──parse──▶ syntax tree ──expand──▶ kernel rules ──compile──▶ dialog
+ text                nodes, by name          what dialog runs
+                     kept as maps, lists, tuples
+```
+
+Prior art, checked:
+
+- **conduct** has the same three passes: `Sexp` from the reader, each with a `Span`; `Expr`, "expressions that still refer to things by name"; then `Term`, name-free and hashed, where a reference is `Ref(Hash)` (`src/reader.rs`, `src/syntax.rs`, `src/term.rs`). Its call is `App(operator, Vec<Arg>, Span)` with `Arg { label: Option<String>, value }`: arguments in order, the first allowed no label.
+- **Racket** makes the implicit explicit while expanding: a pair whose head is not syntax gets `#%app` put in front, a literal gets `#%datum`, an unbound name `#%top`. A syntax object is a value with its scopes, its source location and properties. A fully expanded program has a small fixed grammar. So `:application` and `:constant` are `#%app` and `#%datum`, and where a node was written and what a name resolved to belong on the node.
+
+Nodes the prelude and the examples need, in the shape of the example:
+
+| node | fields | written |
+|---|---|---|
+| `:application` | `operator`, `operand` | `(todo …)`, `(+ …)`, `(when …)` |
+| `:parameters` | `terms`, a map from label to node | the parts of an application |
+| `:variable` | `name` | `?t` |
+| `:blank` | | `_` |
+| `:constant` | `value` | `"text"`, `42`, `:open`, `todo:1` |
+| `:reference` | `name` | `todo`, `xyz.todo`, `xyz.todo/text`, `+` where one is not an operator |
+| `:map` | `entries`, a list of pairs | `{foo bar}` |
+| `:tuple` | `items` | `[a b]` |
+| `:repeat`, `:rest` | `of`; `name` | `p ...`, `...?fields`, in a pattern |
+
+Two things the example does not yet say, both from the count above:
+
+- **An operator is a node.** 20 of the 151 applications have a variable for a head, `(?name ?this ...?fields)`.
+- **Where several parts without a label go.** 38 of 151 have several, and `terms` is a map. Whatever the answer, it cannot depend on how many there are: the pattern `(when ?premise ...)` has to meet `(when A)` and `(when A B)` as one shape.
+
+Not decided.
+
 ## What to store, and how
 
 Irakli, 2026-11-11: a record is a constrained map, its keys attributes, as an integer is a constrained number. His hope: a label is an attribute by default, of no domain or a fixed one, read `last`, so an attribute is a key like any other, as Clojure's `:name` and `:ns/name` are both keywords. He asked for advice on what to store.
