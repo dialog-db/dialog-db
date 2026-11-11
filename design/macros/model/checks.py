@@ -163,23 +163,26 @@ scene('a concept over two domains: read, written, and absent as a whole',
       '(query (author ?p name: ?n email: ?e))',
       '(query (io.person ?p name: ?n) (when (io.person ?p name: ?n)) (unless (author ?p)))')
 
-scene('a concept with a check: it filters a read and guards a write',
+scene('a concept with a check in it is refused: a check has no inverse',
       '''
 (concept (cheap ?i price: ?n)
   (shop.item ?i price: (:last (:natural ?n)))
   (< ?n : 100))
+''')
+
+scene('the same as a rule that derives a relation, which is read and never written',
+      '''
+(rule (shop.cheap ?i price: ?n)
+  (when (shop.item ?i price: (:last (:natural ?n)))
+        (< ?n : 100)))
 (assert! (shop.item item:tea price: 5))
 (assert! (shop.item item:car price: 9000))
-(assert! (cheap item:pen price: 2))
-(assert! (cheap item:jet price: 70000))
 ''',
-      '(query (cheap ?i price: ?n))',
-      '(query (shop.item ?i price: ?n))')
+      '(query (shop.item ?i price: ?n) (when (shop.item ?i price: ?n) (< ?n : 100)))')
 
-scene('a concept over two entities, tested for absence',
+scene('a concept over two entities is refused',
       '''
 (concept (membership ?m person: ?p team: ?t)
   (org.member ?m person: ?p)
   (org.team ?t lead: ?p))
-''',
-      '(query (org.member ?m person: ?p) (when (org.member ?m person: ?p)) (unless (membership ?m person: ?p)))')
+''')

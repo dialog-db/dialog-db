@@ -627,12 +627,7 @@ class Replica:
                 for q in item[2]:
                     unless.append(together(members(self.application(q[1], 'premise')), q[1]))
             else:
-                for head in members(self.application(item, 'head')):
-                    inner = head[2][0][1] if head[1] in HEAD_WORDS else None
-                    if inner is not None and is_formula(inner):
-                        when.append(inner)      # a check on what is written guards the write
-                    else:
-                        heads.append(head)
+                heads += members(self.application(item, 'head'))
         parts = said + [('b', h) for h in heads]
         if when:
             parts.append(('b', ('app', ('sym', 'when'), tuple(('b', q) for q in when))))
@@ -642,6 +637,16 @@ class Replica:
 
     def install(self, rule):
         heads, when, unless = clauses(rule)
+        # A concept maps facts to itself and back, so what a concept stands
+        # for is reads of one entity and nothing else: a check has no inverse.
+        for head in heads:
+            if head[1] == ('sym', 'syntax') and head[2][0][1][0] == 'app':
+                said = members(head[2][0][1])
+                if all(is_relation(f) or is_formula(f) for f in said) and any(is_relation(f) for f in said):
+                    entities = {split(f[2])[0][0] for f in said if is_relation(f)}
+                    if any(is_formula(f) for f in said) or len(entities) != 1:
+                        raise ValueError('a concept is reads of one entity, so that what is read can be written: '
+                                         + ' '.join(show(f) for f in said))
         writes = [h for h in heads if h[1] in HEAD_WORDS]
         # what a rule says about itself is kept as facts on its entity
         for label, said in about(rule).items():

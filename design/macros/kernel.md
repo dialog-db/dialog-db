@@ -79,23 +79,21 @@ is writing this rule, which says that `(task …)` stands for that read of `xyz.
   (when (expand (task ?t title: ?x))))
 ```
 
-A body may hold several forms. They stand together, as `(all …)`, where the concept is written:
+A concept maps facts to itself and back, so its body holds reads of one entity and nothing else: fields, each with its type and pick, and every variable in the head. A check such as `(< ?n : 100)` has no inverse: `(assert! (cheap d:1 price: 200))` would have no answer. So a body with a check in it, or over more than one entity, is refused where the concept is defined, and what it meant to say is a rule that derives a relation, which is read and never written.
+
+A body may read several domains of that one entity. Its reads stand together, as `(all …)`, where the concept is written:
 
 ```clj
 (concept (author ?p name: ?n email: ?e)
   (io.person ?p name: (:last (:text ?n)))
   (io.contact ?p email: (:last (:text ?e))))
-
-(concept (cheap ?i price: ?n)
-  (shop.item ?i price: (:last (:natural ?n)))
-  (< ?n : 100))
 ```
 
-| Where the concept is written | What its forms become |
+| Where the concept is written | What its reads become |
 |---|---|
 | in a `when` | premises, side by side |
-| in a write or a report | one head each; a formula among them becomes a premise, so it guards the write |
-| in an `unless` | one read, when they are reads of one entity: `(io.person ?p name: … io.contact/email: …)`. Anything else is refused, and needs a rule that derives a relation |
+| in a write or a report | one head each |
+| in an `unless` | one read: `(io.person ?p name: … io.contact/email: …)` |
 
 The last row is there because `unless` negates one proposition: two reads side by side under it would mean neither holds, not that they do not hold together. A read of one entity may span domains, as a concept query does in dialog.
 
@@ -199,11 +197,12 @@ Held, in [model/checks.py](model/checks.py):
 - A misspelled command is issued and comes back with a warning; the right spelling comes back with none.
 - A description on a concept, on a rule and on an attribute is stored as a fact, and a search for a word in them finds the concept by name.
 - A concept's parameter may be named differently from the field it reads.
-- A concept over two domains is read, written through, and tested for absence as a whole. A concept with a check filters a read and guards a write.
+- A concept over two domains is read, written through, and tested for absence as a whole.
+- A concept with a check in its body, or over two entities, is refused where it is defined.
 
 Found:
 
-1. **A read is one entity and several fields, across domains.** `unless` negates one proposition (`negation.rs`), so the reads a concept expands to are joined into one when their absence is asked for. A concept over more than one entity cannot be tested for absence without a rule that derives a relation. An application that leaves a field out still requires it (`concept/query.rs`), which is why the concept's own variable stays in the read.
+1. **A read is one entity and several fields, across domains.** `unless` negates one proposition (`negation.rs`), so the reads a concept expands to are joined into one when their absence is asked for. An application that leaves a field out still requires it (`concept/query.rs`), which is why the concept's own variable stays in the read.
 2. **No macro needed rows assembled into a form.** A pattern and a template carry the per-field information.
 3. **`expand`, `syntax` and `:id` take whatever variables or labels they are given.** A formula in dialog has fixed cells, so these are premises of a new kind, with parameters per application as a concept query has.
 4. **A command about something another command in the same document creates is lost.** `add` and `finish` together leave the to-do open: the to-do lands after the round, and the `finish` is gone by the next. `induce.rs` describes the same rounds.
@@ -214,4 +213,4 @@ Found:
 9. **A command is defined by the rules that read it, so a misspelled one is issued and nothing happens.** That is worth a warning, never a refusal (Irakli, 2026-11-11). Dialog keeps the index the warning rule reads, as `dialog.rule/on` for inductive rules and `dialog.rule/reads` for deductive ones. It already reports without refusing in two places: a rule that closes a cycle through an absence test is quarantined and listed, and a fact outside its placement is a divergence. Diagnostics would be the one relation all three are read from, and what a language server asks for.
 10. **A template that writes syntax with a variable of its own needs an escape**, as Racket's `(... ...)` is for a literal ellipsis: an unbound variable in the outer template is renamed, so it cannot be meant for the inner one. No core form needs it.
 11. **A description follows the entity, so a changed definition starts without one.** A new body is a new rule and a new entity. Whether the description is carried over, or belongs to the name, is not decided.
-12. **A write a concept's check refuses is silent.** `(assert! (cheap item:jet price: 70000))` writes nothing and says nothing. It should come back as a diagnostic.
+12. **Withdrawn.** An earlier draft let a concept's body hold a check, which filtered a read and guarded a write. A concept has to map both ways (Irakli, 2026-11-11), so a check does not belong in one. #728's design still lists comparison among the constraints a concept body may hold.
