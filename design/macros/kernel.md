@@ -127,6 +127,7 @@ python3 -I checks.py
 Held, in [model/checks.py](model/checks.py):
 
 - A later document's `(finish (todo …))` moves one to-do to `:done`.
+- `(increment (xyz.counter ?c))`, declared nowhere and read by one rule, moves a counter from 0 to 1. The command is whatever that rule reads: its name, what it is around, and the fields it passes.
 - `(unless (todo ?t state: :done))` excludes only the finished to-do, because the concept expands to one read.
 - An unknown form is refused. Two concepts under one name are refused, and the error lists both expansions.
 - A write through a concept that leaves a field out is refused, and so is one whose value is the wrong type.
@@ -141,3 +142,4 @@ Found:
 6. **Errors are the wrong ones.** A parameter the concept does not have is reported as an unknown form, and a missing field as `_`. The rules need a way to say why.
 7. **A report's rows are named by the fields**, since the head expands too. Showing them as written needs the call site kept, as the source map would.
 8. **A macro's identity is the `:id` of its pattern and template as written.** Two spellings that differ in a hole's name are two macros.
+9. **A command is defined by the rules that read it, so a misspelled one is issued and nothing happens.** `(incremnet (xyz.counter counter:a))` expands and runs with no complaint. Issuing has to check that some rule reads the command's domain; dialog keeps that index already, as `dialog.rule/on`.

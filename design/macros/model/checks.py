@@ -61,3 +61,29 @@ r.submit('''
 ''')
 for row in r.run():
     print('  ', row)
+
+print('-- a command defined only by the rule that reads it, around a domain')
+r = model.Replica()
+r.submit(open('prelude.clj').read(), quiet=True)
+r.submit('''
+(rule (assert! (xyz.counter ?c count: (+ ?n : 1)))
+  (when (increment (xyz.counter ?c))
+        (xyz.counter ?c count: (:natural ?n))))
+(assert! (xyz.counter counter:a count: 0))
+''')
+r.run(); r.commands = []
+r.submit('''
+(increment (xyz.counter counter:a))
+(query (xyz.counter ?c count: ?n))
+''')
+for form, kernel in r.trace:
+    print(model.pretty(kernel))
+for row in r.run():
+    print('  ', row)
+
+print('-- the same command misspelled: nothing reads it, and nothing says so')
+r.commands = []; r.trace = []
+r.submit('(incremnet (xyz.counter counter:a))')
+print(model.pretty(r.trace[0][1]))
+for row in r.run():
+    print('  ', row)
