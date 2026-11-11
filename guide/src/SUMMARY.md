@@ -7,6 +7,7 @@
 - [The Search Tree](./tree.md)
 - [Nodes](./nodes.md)
 - [Blocks and Storage](./storage.md)
+- [One File per Space](./file.md)
 - [Commits and History](./history.md)
 - [Identity and Capabilities](./identity.md)
 - [Sync](./sync.md)
