@@ -5,7 +5,7 @@
 |  | Understanding | Activity |
 |---|---|---|
 | **Status** | The kernel and the core forms run on a real branch through `rust/dialog-notation` ([poc.md](poc.md)). A form is data: a value dialog has, a list or a map, named by a merkle reference and laid out under a version; `( )` is a tuple, and the syntax reads `of:` as its primary ([design-forms.md](design-forms.md)). Syntax is still held by the crate. The two-cell `entity/derive` is a stand-in. | **Designing.** Direction decided by the maintainer. The kernel and the data under a form are built as a proof of concept. How a rule builds and takes apart a record is not. |
-| **Agenda** | The empty label, and how a set is written. Whether `[ ]` is the same list as `( )`. How a rule builds a record, and whether one premise both builds and takes apart (H5). Whether dialog can be asked for an expansion a form at a time (H3). What a read with no pick reads. | The record premise. Then `entity/derive` over a record, then syntax kept on the branch and the walker asking it. Measure H3 as a research topic. |
+| **Agenda** | Whether a form is atoms and lists only, with map, tuple and set as heads. How a formula's second operand is written once the empty label goes. Whether sugar for a map sorts its entries. How a rule builds a record (H5). Whether dialog can be asked for an expansion a form at a time (H3). | Settle the center before building more. Then the record premise, `entity/derive` over a record, and syntax kept on the branch. |
 
 ## Candidate problems
 
@@ -191,3 +191,18 @@ Not examined yet. They are columns, not recommendations.
 - `of:` as the primary takes the name from every relation. The proof of concept had used it twice, in the command row and in a test's `fam.parent`.
 
 **Decided.** Built on the maintainer's sugar, with the choice of where left to the agent: `( )` is a tuple, a list with its labelled parts a map at the end; the application type and the `form:` type are gone; the syntax reads `of:` as the primary. Not decided: the empty label, how a set is written, and whether `[ ]` is the same list.
+
+## 2026-11-11, Designing: what is at the center
+
+**Asked.** Irakli, after the tuple was built: `{: 1}` is a set and the empty label goes, since it cannot be a symbol. `( )` is a list, as every lisp calls it, and `[ ]` a tuple. What is being looked for is a textual encoding, not a visual representation of forms. Check what WAT and wasm's binary format have for forms; it may suffice. And `{foo bar}` could be sugar for `(map (foo bar))`, `[a b]` for `(tuple (a b))`.
+
+**Learned.**
+
+- WAT's tokens are a keyword, a number, a string, an id and the two parentheses. `[`, `]`, `{` and `}` are not tokens. A named part is a nested list headed by a keyword, `(param $x i32)`. `(@id …)` is an annotation, read as whitespace. So WAT's forms are atoms and lists and nothing else.
+- Wasm's binary format has no encoding for a form in general: each construct has its own bytes. What is general in it is a vector as a count and its members, a name as bytes, and custom sections, where names live apart from the code they name.
+- Sugar over headed lists puts map, tuple and set in the syntax, the plate that moves most, and leaves atoms and lists at the center.
+- It costs a map its order-free name: `(map (a 1) (b 2))` is a list, so the order of its entries is in its name unless whatever writes it sorts.
+- This reverses "a form is a record" of this morning: a form is a list, and a record is something a form may denote.
+- Without the empty label a formula's second operand has no spelling: `(+ ?a : ?b)`, `(< ?p : 10)`, and `:command` six times in the prelude.
+
+**Decided.** Not decided. The agent built the tuple and the map as data on a parked question and one unanswered, and three choices in it are now overturned. No more is built until the center is settled: whether forms are atoms and lists only, how a formula's second operand is written, and whether sugar for a map sorts.
