@@ -1,0 +1,1320 @@
+{
+  "date": "2026-11-11T10:31:03.029Z",
+  "quick": false,
+  "browser": "153.0.8010.12",
+  "env": {
+    "crossOriginIsolated": true,
+    "isSecureContext": true,
+    "userAgent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/153.0.8010.12 Safari/537.36",
+    "hardwareConcurrency": 4,
+    "hasSharedWorker": "function",
+    "hasLocks": "object"
+  },
+  "machine": {
+    "platform": "linux",
+    "release": "6.18.44-fc-v378",
+    "cpus": 4,
+    "cpuModel": "Intel(R) Xeon(R) Processor @ 2.10GHz",
+    "memGiB": 16
+  },
+  "profileDir": "a fresh temporary directory under os.tmpdir()",
+  "q5": {
+    "runs": [
+      {
+        "design": "unsafe",
+        "writers": 1,
+        "sync": false,
+        "kill": null,
+        "elapsedMs": 3001,
+        "committedRecords": 5893,
+        "commitsPerSecond": 1964,
+        "commitLatencyUs": [
+          {
+            "median": 445,
+            "p95": 720
+          }
+        ],
+        "turnWaitUs": [
+          {
+            "median": 125,
+            "p95": 225
+          }
+        ],
+        "readerReads": 53161,
+        "readsPerSecond": 17714,
+        "recordReadUs": {
+          "n": 53161,
+          "min": 5,
+          "median": 20,
+          "p95": 30,
+          "p99": 80,
+          "max": 224090,
+          "mean": 37.5
+        },
+        "slotReadUs": {
+          "n": 53472,
+          "min": 0,
+          "median": 5,
+          "p95": 10,
+          "p99": 40,
+          "max": 20080,
+          "mean": 6.8
+        },
+        "check": {
+          "badCommittedRecords": 0,
+          "readerBad": 0,
+          "readerBadKinds": {},
+          "readerCellTorn": 0,
+          "readerCellBackwards": 0,
+          "readerWalked": 5893,
+          "ackedButLost": [],
+          "writerErrors": 0,
+          "writerFailures": [],
+          "fullExtents": 0,
+          "cellValue": 5893,
+          "cellShortOfRecords": 0,
+          "pastEnd": [
+            "end of file"
+          ],
+          "writerCommitsCounted": 5893
+        },
+        "killed": null,
+        "adopted": [],
+        "owner": null,
+        "fileBytes": 24203264
+      },
+      {
+        "design": "unsafe",
+        "writers": 2,
+        "sync": false,
+        "kill": null,
+        "elapsedMs": 3001,
+        "committedRecords": 6572,
+        "commitsPerSecond": 2190,
+        "commitLatencyUs": [
+          {
+            "median": 795,
+            "p95": 1575
+          },
+          {
+            "median": 805,
+            "p95": 1685
+          }
+        ],
+        "turnWaitUs": [
+          {
+            "median": 265,
+            "p95": 590
+          },
+          {
+            "median": 270,
+            "p95": 570
+          }
+        ],
+        "readerReads": 118146,
+        "readsPerSecond": 39369,
+        "recordReadUs": {
+          "n": 118146,
+          "min": 5,
+          "median": 15,
+          "p95": 20,
+          "p99": 40,
+          "max": 6835,
+          "mean": 15.4
+        },
+        "slotReadUs": {
+          "n": 119888,
+          "min": 0,
+          "median": 5,
+          "p95": 10,
+          "p99": 15,
+          "max": 3210,
+          "mean": 4
+        },
+        "check": {
+          "badCommittedRecords": 0,
+          "readerBad": 0,
+          "readerBadKinds": {},
+          "readerCellTorn": 0,
+          "readerCellBackwards": 0,
+          "readerWalked": 6572,
+          "ackedButLost": [],
+          "writerErrors": 0,
+          "writerFailures": [],
+          "fullExtents": 0,
+          "cellValue": 6572,
+          "cellShortOfRecords": 0,
+          "pastEnd": [
+            "zeros",
+            "end of file"
+          ],
+          "writerCommitsCounted": 6572
+        },
+        "killed": null,
+        "adopted": [],
+        "owner": null,
+        "fileBytes": 147673088
+      },
+      {
+        "design": "unsafe",
+        "writers": 4,
+        "sync": false,
+        "kill": null,
+        "elapsedMs": 3001,
+        "committedRecords": 6177,
+        "commitsPerSecond": 2058,
+        "commitLatencyUs": [
+          {
+            "median": 1675,
+            "p95": 3965
+          },
+          {
+            "median": 1650,
+            "p95": 3910
+          },
+          {
+            "median": 1700,
+            "p95": 4155
+          },
+          {
+            "median": 1685,
+            "p95": 4000
+          }
+        ],
+        "turnWaitUs": [
+          {
+            "median": 725,
+            "p95": 2140
+          },
+          {
+            "median": 725,
+            "p95": 2070
+          },
+          {
+            "median": 715,
+            "p95": 2025
+          },
+          {
+            "median": 710,
+            "p95": 2125
+          }
+        ],
+        "readerReads": 97217,
+        "readsPerSecond": 32395,
+        "recordReadUs": {
+          "n": 97217,
+          "min": 5,
+          "median": 15,
+          "p95": 25,
+          "p99": 85,
+          "max": 8465,
+          "mean": 20.1
+        },
+        "slotReadUs": {
+          "n": 97728,
+          "min": 0,
+          "median": 5,
+          "p95": 10,
+          "p99": 20,
+          "max": 4200,
+          "mean": 4.4
+        },
+        "check": {
+          "badCommittedRecords": 0,
+          "readerBad": 0,
+          "readerBadKinds": {},
+          "readerCellTorn": 0,
+          "readerCellBackwards": 0,
+          "readerWalked": 6177,
+          "ackedButLost": [],
+          "writerErrors": 0,
+          "writerFailures": [],
+          "fullExtents": 0,
+          "cellValue": 6177,
+          "cellShortOfRecords": 0,
+          "pastEnd": [
+            "zeros",
+            "zeros",
+            "zeros",
+            "end of file"
+          ],
+          "writerCommitsCounted": 6177
+        },
+        "killed": null,
+        "adopted": [],
+        "owner": null,
+        "fileBytes": 409059328
+      },
+      {
+        "design": "owner",
+        "writers": 1,
+        "sync": false,
+        "kill": null,
+        "elapsedMs": 3001,
+        "committedRecords": 9823,
+        "commitsPerSecond": 3273,
+        "commitLatencyUs": [
+          {
+            "median": 270,
+            "p95": 500
+          }
+        ],
+        "turnWaitUs": [
+          {}
+        ],
+        "readerReads": 4817,
+        "readsPerSecond": 1605,
+        "recordReadUs": {
+          "n": 4817,
+          "min": 70,
+          "median": 220,
+          "p95": 435,
+          "p99": 585,
+          "max": 6760,
+          "mean": 242.5
+        },
+        "slotReadUs": {
+          "n": 4828,
+          "min": 50,
+          "median": 160,
+          "p95": 355,
+          "p99": 540,
+          "max": 6350,
+          "mean": 184.7
+        },
+        "check": {
+          "badCommittedRecords": 0,
+          "readerBad": 0,
+          "readerBadKinds": {},
+          "readerCellTorn": 0,
+          "readerCellBackwards": 0,
+          "readerWalked": 0,
+          "ackedButLost": [],
+          "writerErrors": 0,
+          "writerFailures": [],
+          "fullExtents": 0,
+          "cellValue": 9823,
+          "cellShortOfRecords": 0,
+          "pastEnd": [
+            "end of file"
+          ],
+          "writerCommitsCounted": 9823
+        },
+        "killed": null,
+        "adopted": [],
+        "owner": {
+          "role": "owner",
+          "commits": 9823,
+          "reads": 4817,
+          "errors": 0,
+          "lastError": null
+        },
+        "fileBytes": 40300544
+      },
+      {
+        "design": "owner",
+        "writers": 2,
+        "sync": false,
+        "kill": null,
+        "elapsedMs": 3001,
+        "committedRecords": 17956,
+        "commitsPerSecond": 5983,
+        "commitLatencyUs": [
+          {
+            "median": 300,
+            "p95": 505
+          },
+          {
+            "median": 300,
+            "p95": 510
+          }
+        ],
+        "turnWaitUs": [
+          {},
+          {}
+        ],
+        "readerReads": 3607,
+        "readsPerSecond": 1202,
+        "recordReadUs": {
+          "n": 3607,
+          "min": 105,
+          "median": 285,
+          "p95": 505,
+          "p99": 885,
+          "max": 8410,
+          "mean": 316.8
+        },
+        "slotReadUs": {
+          "n": 3619,
+          "min": 75,
+          "median": 230,
+          "p95": 435,
+          "p99": 650,
+          "max": 8745,
+          "mean": 259.9
+        },
+        "check": {
+          "badCommittedRecords": 0,
+          "readerBad": 0,
+          "readerBadKinds": {},
+          "readerCellTorn": 0,
+          "readerCellBackwards": 0,
+          "readerWalked": 0,
+          "ackedButLost": [],
+          "writerErrors": 0,
+          "writerFailures": [],
+          "fullExtents": 0,
+          "cellValue": 17956,
+          "cellShortOfRecords": 0,
+          "pastEnd": [
+            "zeros",
+            "end of file"
+          ],
+          "writerCommitsCounted": 17956
+        },
+        "killed": null,
+        "adopted": [],
+        "owner": {
+          "role": "owner",
+          "commits": 17956,
+          "reads": 3607,
+          "errors": 0,
+          "lastError": null
+        },
+        "fileBytes": 170946560
+      },
+      {
+        "design": "owner",
+        "writers": 4,
+        "sync": false,
+        "kill": null,
+        "elapsedMs": 3000,
+        "committedRecords": 26302,
+        "commitsPerSecond": 8767,
+        "commitLatencyUs": [
+          {
+            "median": 370,
+            "p95": 860
+          },
+          {
+            "median": 385,
+            "p95": 900
+          },
+          {
+            "median": 385,
+            "p95": 835
+          },
+          {
+            "median": 385,
+            "p95": 850
+          }
+        ],
+        "turnWaitUs": [
+          {},
+          {},
+          {},
+          {}
+        ],
+        "readerReads": 2518,
+        "readsPerSecond": 839,
+        "recordReadUs": {
+          "n": 2518,
+          "min": 95,
+          "median": 365,
+          "p95": 855,
+          "p99": 1450,
+          "max": 9645,
+          "mean": 434.4
+        },
+        "slotReadUs": {
+          "n": 2530,
+          "min": 55,
+          "median": 305,
+          "p95": 820,
+          "p99": 1625,
+          "max": 6495,
+          "mean": 379.8
+        },
+        "check": {
+          "badCommittedRecords": 0,
+          "readerBad": 0,
+          "readerBadKinds": {},
+          "readerCellTorn": 0,
+          "readerCellBackwards": 0,
+          "readerWalked": 0,
+          "ackedButLost": [],
+          "writerErrors": 0,
+          "writerFailures": [],
+          "fullExtents": 0,
+          "cellValue": 26302,
+          "cellShortOfRecords": 0,
+          "pastEnd": [
+            "zeros",
+            "zeros",
+            "zeros",
+            "end of file"
+          ],
+          "writerCommitsCounted": 26302
+        },
+        "killed": null,
+        "adopted": [],
+        "owner": {
+          "role": "owner",
+          "commits": 26302,
+          "reads": 2518,
+          "errors": 0,
+          "lastError": null
+        },
+        "fileBytes": 429621248
+      },
+      {
+        "design": "unsafe",
+        "writers": 1,
+        "sync": true,
+        "kill": null,
+        "elapsedMs": 3000,
+        "committedRecords": 1063,
+        "commitsPerSecond": 354,
+        "commitLatencyUs": [
+          {
+            "median": 1310,
+            "p95": 8040
+          }
+        ],
+        "turnWaitUs": [
+          {
+            "median": 200,
+            "p95": 430
+          }
+        ],
+        "readerReads": 109415,
+        "readsPerSecond": 36472,
+        "recordReadUs": {
+          "n": 109415,
+          "min": 5,
+          "median": 15,
+          "p95": 20,
+          "p99": 60,
+          "max": 12060,
+          "mean": 17.1
+        },
+        "slotReadUs": {
+          "n": 109680,
+          "min": 0,
+          "median": 5,
+          "p95": 10,
+          "p99": 25,
+          "max": 8055,
+          "mean": 4.6
+        },
+        "check": {
+          "badCommittedRecords": 0,
+          "readerBad": 0,
+          "readerBadKinds": {},
+          "readerCellTorn": 0,
+          "readerCellBackwards": 0,
+          "readerWalked": 1063,
+          "ackedButLost": [],
+          "writerErrors": 0,
+          "writerFailures": [],
+          "fullExtents": 0,
+          "cellValue": 1063,
+          "cellShortOfRecords": 0,
+          "pastEnd": [
+            "end of file"
+          ],
+          "writerCommitsCounted": 1063
+        },
+        "killed": null,
+        "adopted": [],
+        "owner": null,
+        "fileBytes": 4419584
+      },
+      {
+        "design": "unsafe",
+        "writers": 2,
+        "sync": true,
+        "kill": null,
+        "elapsedMs": 3001,
+        "committedRecords": 1030,
+        "commitsPerSecond": 343,
+        "commitLatencyUs": [
+          {
+            "median": 4740,
+            "p95": 12015
+          },
+          {
+            "median": 4940,
+            "p95": 12260
+          }
+        ],
+        "turnWaitUs": [
+          {
+            "median": 270,
+            "p95": 3980
+          },
+          {
+            "median": 295,
+            "p95": 3765
+          }
+        ],
+        "readerReads": 94156,
+        "readsPerSecond": 31375,
+        "recordReadUs": {
+          "n": 94156,
+          "min": 5,
+          "median": 15,
+          "p95": 25,
+          "p99": 70,
+          "max": 13360,
+          "mean": 19.3
+        },
+        "slotReadUs": {
+          "n": 98992,
+          "min": 0,
+          "median": 5,
+          "p95": 10,
+          "p99": 25,
+          "max": 32125,
+          "mean": 5.5
+        },
+        "check": {
+          "badCommittedRecords": 0,
+          "readerBad": 0,
+          "readerBadKinds": {},
+          "readerCellTorn": 0,
+          "readerCellBackwards": 0,
+          "readerWalked": 1030,
+          "ackedButLost": [],
+          "writerErrors": 0,
+          "writerFailures": [],
+          "fullExtents": 0,
+          "cellValue": 1030,
+          "cellShortOfRecords": 0,
+          "pastEnd": [
+            "zeros",
+            "end of file"
+          ],
+          "writerCommitsCounted": 1030
+        },
+        "killed": null,
+        "adopted": [],
+        "owner": null,
+        "fileBytes": 136380416
+      },
+      {
+        "design": "unsafe",
+        "writers": 4,
+        "sync": true,
+        "kill": null,
+        "elapsedMs": 3000,
+        "committedRecords": 2382,
+        "commitsPerSecond": 794,
+        "commitLatencyUs": [
+          {
+            "median": 3685,
+            "p95": 11435
+          },
+          {
+            "median": 3670,
+            "p95": 11170
+          },
+          {
+            "median": 3945,
+            "p95": 11325
+          },
+          {
+            "median": 3790,
+            "p95": 11405
+          }
+        ],
+        "turnWaitUs": [
+          {
+            "median": 1655,
+            "p95": 7870
+          },
+          {
+            "median": 1645,
+            "p95": 8480
+          },
+          {
+            "median": 1600,
+            "p95": 7335
+          },
+          {
+            "median": 1610,
+            "p95": 7260
+          }
+        ],
+        "readerReads": 84644,
+        "readsPerSecond": 28215,
+        "recordReadUs": {
+          "n": 84644,
+          "min": 5,
+          "median": 15,
+          "p95": 40,
+          "p99": 160,
+          "max": 4425,
+          "mean": 20.6
+        },
+        "slotReadUs": {
+          "n": 84992,
+          "min": 0,
+          "median": 5,
+          "p95": 10,
+          "p99": 65,
+          "max": 5135,
+          "mean": 6.4
+        },
+        "check": {
+          "badCommittedRecords": 0,
+          "readerBad": 0,
+          "readerBadKinds": {},
+          "readerCellTorn": 0,
+          "readerCellBackwards": 0,
+          "readerWalked": 2382,
+          "ackedButLost": [],
+          "writerErrors": 0,
+          "writerFailures": [],
+          "fullExtents": 0,
+          "cellValue": 2382,
+          "cellShortOfRecords": 0,
+          "pastEnd": [
+            "zeros",
+            "zeros",
+            "zeros",
+            "end of file"
+          ],
+          "writerCommitsCounted": 2382
+        },
+        "killed": null,
+        "adopted": [],
+        "owner": null,
+        "fileBytes": 405127168
+      },
+      {
+        "design": "owner",
+        "writers": 1,
+        "sync": true,
+        "kill": null,
+        "elapsedMs": 3000,
+        "committedRecords": 877,
+        "commitsPerSecond": 292,
+        "commitLatencyUs": [
+          {
+            "median": 2225,
+            "p95": 8020
+          }
+        ],
+        "turnWaitUs": [
+          {}
+        ],
+        "readerReads": 381,
+        "readsPerSecond": 127,
+        "recordReadUs": {
+          "n": 381,
+          "min": 125,
+          "median": 1255,
+          "p95": 8075,
+          "p99": 11285,
+          "max": 22420,
+          "mean": 2999.7
+        },
+        "slotReadUs": {
+          "n": 404,
+          "min": 45,
+          "median": 775,
+          "p95": 7965,
+          "p99": 8050,
+          "max": 19850,
+          "mean": 1955.2
+        },
+        "check": {
+          "badCommittedRecords": 0,
+          "readerBad": 0,
+          "readerBadKinds": {},
+          "readerCellTorn": 0,
+          "readerCellBackwards": 0,
+          "readerWalked": 0,
+          "ackedButLost": [],
+          "writerErrors": 0,
+          "writerFailures": [],
+          "fullExtents": 0,
+          "cellValue": 877,
+          "cellShortOfRecords": 0,
+          "pastEnd": [
+            "end of file"
+          ],
+          "writerCommitsCounted": 877
+        },
+        "killed": null,
+        "adopted": [],
+        "owner": {
+          "role": "owner",
+          "commits": 877,
+          "reads": 381,
+          "errors": 0,
+          "lastError": null
+        },
+        "fileBytes": 3657728
+      },
+      {
+        "design": "owner",
+        "writers": 2,
+        "sync": true,
+        "kill": null,
+        "elapsedMs": 3000,
+        "committedRecords": 398,
+        "commitsPerSecond": 133,
+        "commitLatencyUs": [
+          {
+            "median": 15965,
+            "p95": 24050
+          },
+          {
+            "median": 15910,
+            "p95": 24075
+          }
+        ],
+        "turnWaitUs": [
+          {},
+          {}
+        ],
+        "readerReads": 102,
+        "readsPerSecond": 34,
+        "recordReadUs": {
+          "n": 102,
+          "min": 165,
+          "median": 8475,
+          "p95": 20040,
+          "p99": 24080,
+          "max": 28710,
+          "mean": 9018
+        },
+        "slotReadUs": {
+          "n": 549,
+          "min": 60,
+          "median": 85,
+          "p95": 12040,
+          "p99": 23955,
+          "max": 24045,
+          "mean": 1881.1
+        },
+        "check": {
+          "badCommittedRecords": 0,
+          "readerBad": 0,
+          "readerBadKinds": {},
+          "readerCellTorn": 0,
+          "readerCellBackwards": 0,
+          "readerWalked": 0,
+          "ackedButLost": [],
+          "writerErrors": 0,
+          "writerFailures": [],
+          "fullExtents": 0,
+          "cellValue": 398,
+          "cellShortOfRecords": 0,
+          "pastEnd": [
+            "zeros",
+            "end of file"
+          ],
+          "writerCommitsCounted": 398
+        },
+        "killed": null,
+        "adopted": [],
+        "owner": {
+          "role": "owner",
+          "commits": 398,
+          "reads": 102,
+          "errors": 0,
+          "lastError": null
+        },
+        "fileBytes": 135102464
+      },
+      {
+        "design": "owner",
+        "writers": 4,
+        "sync": true,
+        "kill": null,
+        "elapsedMs": 3000,
+        "committedRecords": 838,
+        "commitsPerSecond": 279,
+        "commitLatencyUs": [
+          {
+            "median": 11705,
+            "p95": 32115
+          },
+          {
+            "median": 11970,
+            "p95": 32080
+          },
+          {
+            "median": 11760,
+            "p95": 32070
+          },
+          {
+            "median": 10300,
+            "p95": 32070
+          }
+        ],
+        "turnWaitUs": [
+          {},
+          {},
+          {},
+          {}
+        ],
+        "readerReads": 94,
+        "readsPerSecond": 31,
+        "recordReadUs": {
+          "n": 94,
+          "min": 155,
+          "median": 6150,
+          "p95": 27190,
+          "p99": 32140,
+          "max": 32140,
+          "mean": 10561.7
+        },
+        "slotReadUs": {
+          "n": 111,
+          "min": 55,
+          "median": 3315,
+          "p95": 30430,
+          "p99": 32035,
+          "max": 44080,
+          "mean": 9624.1
+        },
+        "check": {
+          "badCommittedRecords": 0,
+          "readerBad": 0,
+          "readerBadKinds": {},
+          "readerCellTorn": 0,
+          "readerCellBackwards": 0,
+          "readerWalked": 0,
+          "ackedButLost": [],
+          "writerErrors": 0,
+          "writerFailures": [],
+          "fullExtents": 0,
+          "cellValue": 838,
+          "cellShortOfRecords": 0,
+          "pastEnd": [
+            "zeros",
+            "zeros",
+            "zeros",
+            "end of file"
+          ],
+          "writerCommitsCounted": 838
+        },
+        "killed": null,
+        "adopted": [],
+        "owner": {
+          "role": "owner",
+          "commits": 838,
+          "reads": 94,
+          "errors": 0,
+          "lastError": null
+        },
+        "fileBytes": 403574784
+      },
+      {
+        "design": "unsafe",
+        "writers": 4,
+        "sync": false,
+        "kill": "close",
+        "elapsedMs": 3000,
+        "committedRecords": 6344,
+        "commitsPerSecond": 2115,
+        "commitLatencyUs": [
+          {
+            "median": 1325,
+            "p95": 5260
+          },
+          {
+            "median": 1310,
+            "p95": 5345
+          },
+          {
+            "median": 1310,
+            "p95": 5165
+          },
+          {
+            "median": 1280,
+            "p95": 3990
+          }
+        ],
+        "turnWaitUs": [
+          {
+            "median": 585,
+            "p95": 3040
+          },
+          {
+            "median": 565,
+            "p95": 3070
+          },
+          {
+            "median": 535,
+            "p95": 3280
+          },
+          {
+            "median": 600,
+            "p95": 2250
+          }
+        ],
+        "readerReads": 47896,
+        "readsPerSecond": 15965,
+        "recordReadUs": {
+          "n": 47896,
+          "min": 10,
+          "median": 20,
+          "p95": 50,
+          "p99": 340,
+          "max": 29370,
+          "mean": 33.1
+        },
+        "slotReadUs": {
+          "n": 48128,
+          "min": 0,
+          "median": 5,
+          "p95": 10,
+          "p99": 90,
+          "max": 16070,
+          "mean": 8.4
+        },
+        "check": {
+          "badCommittedRecords": 0,
+          "readerBad": 0,
+          "readerBadKinds": {},
+          "readerCellTorn": 0,
+          "readerCellBackwards": 0,
+          "readerWalked": 6344,
+          "ackedButLost": [],
+          "writerErrors": 0,
+          "writerFailures": [],
+          "fullExtents": 0,
+          "cellValue": 6344,
+          "cellShortOfRecords": 0,
+          "pastEnd": [
+            "zeros",
+            "zeros",
+            "zeros",
+            "end of file"
+          ],
+          "writerCommitsCounted": 5592
+        },
+        "killed": {
+          "at": 1501,
+          "progressBefore": {
+            "0": 724,
+            "1": 708,
+            "2": 714,
+            "3": 715
+          }
+        },
+        "adopted": [
+          {
+            "e": 3,
+            "adoptedAt": 752
+          }
+        ],
+        "owner": null,
+        "fileBytes": 408752128
+      },
+      {
+        "design": "unsafe",
+        "writers": 4,
+        "sync": false,
+        "kill": "crash",
+        "elapsedMs": 3001,
+        "committedRecords": 5352,
+        "commitsPerSecond": 1783,
+        "commitLatencyUs": [
+          {
+            "median": 1605,
+            "p95": 5380
+          },
+          {
+            "median": 1585,
+            "p95": 5355
+          },
+          {
+            "median": 1585,
+            "p95": 5395
+          },
+          {
+            "median": 1835,
+            "p95": 6000
+          }
+        ],
+        "turnWaitUs": [
+          {
+            "median": 685,
+            "p95": 3585
+          },
+          {
+            "median": 715,
+            "p95": 3580
+          },
+          {
+            "median": 695,
+            "p95": 3575
+          },
+          {
+            "median": 785,
+            "p95": 3815
+          }
+        ],
+        "readerReads": 56676,
+        "readsPerSecond": 18886,
+        "recordReadUs": {
+          "n": 56676,
+          "min": 10,
+          "median": 20,
+          "p95": 45,
+          "p99": 230,
+          "max": 20085,
+          "mean": 30.4
+        },
+        "slotReadUs": {
+          "n": 57152,
+          "min": 0,
+          "median": 5,
+          "p95": 10,
+          "p99": 70,
+          "max": 16070,
+          "mean": 7.9
+        },
+        "check": {
+          "badCommittedRecords": 0,
+          "readerBad": 0,
+          "readerBadKinds": {},
+          "readerCellTorn": 0,
+          "readerCellBackwards": 0,
+          "readerWalked": 5352,
+          "ackedButLost": [],
+          "writerErrors": 0,
+          "writerFailures": [],
+          "fullExtents": 0,
+          "cellValue": 5352,
+          "cellShortOfRecords": 0,
+          "pastEnd": [
+            "zeros",
+            "zeros",
+            "zeros",
+            "end of file"
+          ],
+          "writerCommitsCounted": 4608
+        },
+        "killed": {
+          "at": 1501,
+          "progressBefore": {
+            "0": 776,
+            "1": 792,
+            "2": 781,
+            "3": 710
+          }
+        },
+        "adopted": [
+          {
+            "e": 3,
+            "adoptedAt": 744
+          }
+        ],
+        "owner": null,
+        "fileBytes": 407584768
+      },
+      {
+        "design": "owner",
+        "writers": 4,
+        "sync": false,
+        "kill": "close",
+        "elapsedMs": 3001,
+        "committedRecords": 17533,
+        "commitsPerSecond": 5842,
+        "commitLatencyUs": [
+          {
+            "median": 470,
+            "p95": 1285
+          },
+          {
+            "median": 490,
+            "p95": 1220
+          },
+          {
+            "median": 570,
+            "p95": 1380
+          },
+          {
+            "median": 885,
+            "p95": 1465
+          }
+        ],
+        "turnWaitUs": [
+          {},
+          {},
+          {},
+          {}
+        ],
+        "readerReads": 1622,
+        "readsPerSecond": 540,
+        "recordReadUs": {
+          "n": 1622,
+          "min": 135,
+          "median": 555,
+          "p95": 1285,
+          "p99": 2435,
+          "max": 9850,
+          "mean": 658.9
+        },
+        "slotReadUs": {
+          "n": 1636,
+          "min": 70,
+          "median": 480,
+          "p95": 1200,
+          "p99": 2775,
+          "max": 11965,
+          "mean": 604.1
+        },
+        "check": {
+          "badCommittedRecords": 0,
+          "readerBad": 0,
+          "readerBadKinds": {},
+          "readerCellTorn": 0,
+          "readerCellBackwards": 0,
+          "readerWalked": 0,
+          "ackedButLost": [],
+          "writerErrors": 0,
+          "writerFailures": [],
+          "fullExtents": 0,
+          "cellValue": 17533,
+          "cellShortOfRecords": 0,
+          "pastEnd": [
+            "zeros",
+            "zeros",
+            "zeros",
+            "end of file"
+          ],
+          "writerCommitsCounted": 15098
+        },
+        "killed": {
+          "at": 1501,
+          "progressBefore": {
+            "0": 2733,
+            "1": 2507,
+            "2": 2179,
+            "3": 2000
+          }
+        },
+        "adopted": [
+          {
+            "e": 2,
+            "adoptedAt": 2435
+          }
+        ],
+        "owner": {
+          "role": "owner",
+          "commits": 17533,
+          "reads": 1622,
+          "errors": 0,
+          "lastError": null
+        },
+        "fileBytes": 419786752
+      },
+      {
+        "design": "owner",
+        "writers": 4,
+        "sync": false,
+        "kill": "crash",
+        "elapsedMs": 3000,
+        "committedRecords": 18574,
+        "commitsPerSecond": 6191,
+        "commitLatencyUs": [
+          {
+            "median": 550,
+            "p95": 1105
+          },
+          {
+            "median": 540,
+            "p95": 1065
+          },
+          {
+            "median": 560,
+            "p95": 1115
+          },
+          {
+            "median": 730,
+            "p95": 1190
+          }
+        ],
+        "turnWaitUs": [
+          {},
+          {},
+          {},
+          {}
+        ],
+        "readerReads": 1706,
+        "readsPerSecond": 569,
+        "recordReadUs": {
+          "n": 1706,
+          "min": 135,
+          "median": 545,
+          "p95": 1085,
+          "p99": 2750,
+          "max": 14330,
+          "mean": 648
+        },
+        "slotReadUs": {
+          "n": 2264,
+          "min": 40,
+          "median": 400,
+          "p95": 905,
+          "p99": 1920,
+          "max": 8065,
+          "mean": 441.7
+        },
+        "check": {
+          "badCommittedRecords": 0,
+          "readerBad": 0,
+          "readerBadKinds": {},
+          "readerCellTorn": 0,
+          "readerCellBackwards": 0,
+          "readerWalked": 0,
+          "ackedButLost": [],
+          "writerErrors": 0,
+          "writerFailures": [],
+          "fullExtents": 0,
+          "cellValue": 18574,
+          "cellShortOfRecords": 0,
+          "pastEnd": [
+            "zeros",
+            "zeros",
+            "zeros",
+            "end of file"
+          ],
+          "writerCommitsCounted": 15337
+        },
+        "killed": {
+          "at": 1503,
+          "progressBefore": {
+            "0": 2787,
+            "1": 2746,
+            "2": 2846,
+            "3": 3229
+          }
+        },
+        "adopted": [
+          {
+            "e": 3,
+            "adoptedAt": 3237
+          }
+        ],
+        "owner": {
+          "role": "owner",
+          "commits": 18574,
+          "reads": 1706,
+          "errors": 0,
+          "lastError": null
+        },
+        "fileBytes": 421490688
+      }
+    ]
+  },
+  "wallSeconds": 64
+}
