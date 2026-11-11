@@ -343,8 +343,6 @@ struct Inner {
     extents: Mutex<Extents>,
     /// The blocks extents hold, as far as this process has read them.
     loose: Mutex<Loose>,
-    /// Each cell's lock in this process, by where its data starts.
-    cell_locks: Mutex<HashMap<u64, Arc<Mutex<()>>>>,
     /// Whether this process left an extent for another as it opened, to
     /// take back as it closes.
     left_extent: std::sync::atomic::AtomicBool,
@@ -545,9 +543,16 @@ impl Drop for Exclusive<'_> {
 }
 
 /// The writer's turn, in this process and across processes.
+///
+/// Fields drop in order: the file's lock is let go before this process's
+/// mutex. The other way round, another thread would take the mutex, then
+/// "take" the file's lock, which a process holding it already gets at once
+/// (POSIX locks belong to the process), and the unlock that follows would
+/// let it go under that thread: another process could take the turn
+/// while it writes.
 struct Turn<'a> {
-    _process: parking_lot::MutexGuard<'a, ()>,
     _file: Exclusive<'a>,
+    _process: parking_lot::MutexGuard<'a, ()>,
 }
 
 /// The extents this process writes: those idle, free for a writer to take,
@@ -1049,7 +1054,6 @@ impl FileArchive {
             synced: Mutex::new(Instant::now()),
             extents: Mutex::new(Extents::default()),
             loose: Mutex::new(Loose::default()),
-            cell_locks: Mutex::new(HashMap::new()),
             left_extent: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             before_publish: Mutex::new(None),
@@ -1473,7 +1477,7 @@ impl FileArchive {
             let hash = block.blake3_hash();
             if seen.insert(hash.clone())
                 && snapshot.place(catalog, hash)?.is_none()
-                && self.loose(&snapshot, catalog, hash)?.is_none()
+                && !self.holds_loose(&snapshot, catalog, catalog_id, hash)?
             {
                 fresh.push(block);
             }
@@ -1517,6 +1521,36 @@ impl FileArchive {
         }
         self.give_back(owned);
         written.map(|()| true)
+    }
+
+    /// Whether one of this process's own extents holds `catalog`'s block
+    /// `hash`. Another process's extent holding it does not count: it is
+    /// folded into the file only when that process commits, so a head this
+    /// process commits naming it could reach the file before it (see the
+    /// `cells` module). This process writes its own copy instead.
+    fn holds_loose(
+        &self,
+        snapshot: &Snapshot,
+        catalog: &str,
+        catalog_id: u16,
+        hash: &Blake3Hash,
+    ) -> io::Result<bool> {
+        if self.loose(snapshot, catalog, hash)?.is_none() {
+            return Ok(false);
+        }
+        let Some(record) = self
+            .inner
+            .loose
+            .lock()
+            .blocks
+            .get(&(catalog_id, hash.clone()))
+            .map(|(record, _)| *record)
+        else {
+            return Ok(false);
+        };
+        let extents = self.inner.extents.lock();
+        Ok(extents.busy.contains(&record)
+            || extents.idle.iter().any(|owned| owned.record == record))
     }
 
     /// An extent of this process's for a writer to append to: an idle one,

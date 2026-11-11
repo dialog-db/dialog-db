@@ -161,11 +161,13 @@ transaction again computes them over the head that won.
 `FileArchive` provides the memory effects (`Resolve`, `Publish`,
 `Retract`, `List`), so a `Space` can name it as its memory as well as its
 archive: `Space<FileArchive, FileArchive, ...>` keeps a space's blocks and
-its cells, branch heads among them, in one file. A cell is a record
-written over in place, in two halves taken in turn; its capacity is its
-first value's size and a fifth, and a value past it spills to a block. An
-update takes a lock on that cell alone, never the writer's turn, so
-writers of two branches never meet; creating a cell takes the turn once.
+its cells, branch heads among them, in one file. A cell is kept as SQLite
+keeps a commit in its write-ahead log: each update appends a record with
+the cell's value, in the writer's turn, after the process's extents are
+folded in, and the cells' own index files the cell at its newest record.
+So a head is never in the file without the blocks it names before it, and
+a power loss can undo the last updates (synced at the next sync point, as
+SQLite's `synchronous=NORMAL`), never leave a head naming what is gone.
 
 What this changes for you:
 
@@ -175,14 +177,17 @@ What this changes for you:
   `Publish` names the same version either way, and publishing the value a
   cell already holds succeeds whatever edition the writer expected, as on
   every memory store.
-- A `Resolve` reads a value the cell held at one moment: never torn, and
-  never older than one a read before it returned, while other processes
-  write it.
+- A cell's update takes the writer's turn, as a SQLite commit takes its
+  write lock: an update waits while another process holds the turn. A
+  `Resolve` takes no lock, and reads the newest update another process
+  made.
+- A value of any size is kept in its record.
 - `List` walks the cells' own index, not the blocks'.
 
 Why: a space that is one file is one thing to copy, back up and keep
 consistent, and a head kept apart from the blocks it names was a second
-thing to keep in step with them.
+thing to keep in step with them. Written in place, a head could reach the
+disk before the blocks it names, which the power-loss tests showed.
 
 ### Writers to one space's file do not wait on one another
 
@@ -232,10 +237,14 @@ What this changes for you:
   longer than its header, whose first bytes were never written or are the
   format's with no durable slot. Any other file that is not an archive is
   still refused.
-- After a power loss a cell (a branch head among them) can name blocks
-  the file lost, or hold a value older than the last sync point, as a
-  head on `fs` can name blocks it lost; this is open.
-- The file's format is version 12: a file written by an earlier build of
+- A writer thread taking the turn just as another thread of its process
+  let it go no longer lets another process take it under it: the file's
+  lock is let go before the process's own. Two writers could append at
+  once before.
+- A block another process holds only in its extent is written again into
+  the writer's own, so a head it commits never names a block another
+  process has not yet folded into the file.
+- The file's format is version 13: a file written by an earlier build of
   `dialog-archive-file` does not open.
 
 Why: many processes work on separate branches of one space at once, and on
@@ -1589,8 +1598,8 @@ has a tree to canonicalize even when the link itself wrote nothing.
 
 #### Compatibility and migration
 
-- A `FileArchive` file is format 12; one written by an earlier build of
-  this branch's `dialog-archive-file` (format 10 or 11) does not open, and is
+- A `FileArchive` file is format 13; one written by an earlier build of
+  this branch's `dialog-archive-file` (format 10, 11 or 12) does not open, and is
   moved again from the replica it came from with `dialog-migrate`. Nothing
   else stored or synced changes: blocks, their hashes and what a replica
   syncs are the same.

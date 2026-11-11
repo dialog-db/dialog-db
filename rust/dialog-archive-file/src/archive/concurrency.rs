@@ -696,6 +696,44 @@ fn another_process_reads_blocks_still_in_an_extent() -> anyhow::Result<()> {
     reader.finish()
 }
 
+/// A block another process holds only in its extent is written again
+/// into this process's own: a head this process commits naming it is
+/// appended after its own extents are folded in, and another's are folded
+/// only when that one commits, so the head could otherwise reach the file
+/// before the block.
+#[test]
+fn a_block_only_another_process_holds_loose_is_written_again() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let path = archive_in(&directory);
+    let archive = FileArchive::open(&path)?;
+    archive.append("index", &[block("first")])?;
+    let holder = hold(&path, locks::TURN, true)?;
+    let mut other = appender(&path, "shared", 1, 1 << 20, false)?;
+    other.go()?;
+    other.expect(DONE)?;
+    archive.refresh()?;
+    let theirs = holding(&archive);
+    assert_eq!(theirs.len(), 1, "the other process holds it loose");
+    archive.append("index", &[block("shared-0")])?;
+    let held = holding(&archive);
+    assert_eq!(held.len(), 2, "and this process wrote its own copy");
+    let ours = archive
+        .inner
+        .extents
+        .lock()
+        .idle
+        .iter()
+        .map(|owned| owned.record)
+        .collect::<Vec<_>>();
+    assert!(
+        held.iter()
+            .any(|record| ours.contains(record) && !theirs.contains(record))
+    );
+    holder.finish()?;
+    other.finish()?;
+    all_read_back(&archive, &["shared-0".into()])
+}
+
 /// A writer that died with blocks in an extent leaves them readable, and
 /// the next writer to take the turn folds them in, filing each once.
 #[test]
@@ -1180,40 +1218,41 @@ fn a_swap_and_a_retraction_racing_land_one() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Updating one cell waits only on writers of that cell: another process
-/// holding its lock holds it up, and not another cell.
+/// A cell is updated in the writer's turn, as SQLite commits under its
+/// write lock: an update waits while another process holds the turn, and
+/// lands once it is let go. A read never waits.
 #[test]
-fn a_cells_lock_holds_up_that_cell_alone() -> anyhow::Result<()> {
+fn a_cell_update_waits_for_the_turn_and_a_read_does_not() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let path = archive_in(&directory);
     let archive = FileArchive::open(&path)?;
-    let a = archive.publish_cell("local", "a", b"a0", None)?;
-    let b = archive.publish_cell("local", "b", b"b0", None)?;
-    let (_, layout) = archive.cell(&super::cells::name("local", "a"))?.expect("a");
-    let holder = hold(&path, locks::owner(layout.data), true)?;
-
-    let (done, _) = within(PROMPTLY, {
+    let first = archive.publish_cell("local", "main", b"first", None)?;
+    let holder = hold(&path, locks::TURN, true)?;
+    let (read, _) = within(PROMPTLY, {
         let archive = archive.clone();
-        move || archive.publish_cell("local", "b", b"b1", Some(&b))
+        move || archive.resolve_cell("local", "main")
     });
-    done.expect("another cell is not held up")?;
+    assert_eq!(
+        read.expect("a read does not wait")?.as_deref(),
+        Some(&b"first"[..])
+    );
     let (done, waiting) = within(A_WHILE, {
         let archive = archive.clone();
-        move || archive.publish_cell("local", "a", b"a1", Some(&a))
+        move || archive.publish_cell("local", "main", b"second", Some(&first))
     });
-    assert!(done.is_none(), "the held cell waits");
+    assert!(done.is_none(), "the update waits for the turn");
     holder.finish()?;
     waiting.recv_timeout(PROMPTLY)??;
     assert_eq!(
-        archive.resolve_cell("local", "a")?.as_deref(),
-        Some(&b"a1"[..])
+        archive.resolve_cell("local", "main")?.as_deref(),
+        Some(&b"second"[..])
     );
     Ok(())
 }
 
-/// A reader reading a cell while another process writes it, past its
-/// capacity (spilling to a block) and back, reads only values that were
-/// written, whole, in the order they were written.
+/// A reader reading a cell while another process writes it, small values
+/// and large in turn, reads only values that were written, whole, in the
+/// order they were written.
 #[test]
 fn a_cell_read_while_written_is_always_a_written_value() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;

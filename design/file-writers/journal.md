@@ -675,3 +675,44 @@ take the turn; or a sync after each cell write for the second alone.
 **Windows and macOS** run in `.github/workflows/file-archive-platforms.yml`
 on pushes to the crate. A file's identity on Windows is its volume and
 file index (two names of one file canonicalize to two paths).
+
+## 2026-11-11, Deciding and building: cells as SQLite keeps a commit
+
+Irakli: copy what SQLite does. What SQLite does in WAL mode: a
+transaction's pages and then its commit frame are appended to one log, a
+recovery keeps the longest valid prefix of it, writers append under one
+write lock, readers look for a newer commit as they start, and with
+`synchronous=NORMAL` the log is synced at checkpoints, not per commit, so
+a power loss can undo the last commits but never leaves a commit without
+its pages.
+
+So a cell is now a record appended per update, in the writer's turn,
+after the process's own extents are folded in, and the cells' index files
+the cell at its newest record; recovery's prefix (the slots, and every
+record since the durable slot whole) keeps a head with what it names or
+drops both. The two halves, capacities, spills and per-cell locks are gone.
+A block another process holds only loose is written again into the
+writer's own extent, as another's extent is folded only when it commits.
+The format is 13.
+
+What it costs is SQLite's: head updates take turns, and wait while
+another process holds the turn (an integration folding a large extent
+holds it longest). `it_commits_to_two_branches_from_two_processes_at_once`
+pins that both branches' commits wait while a third process holds it and
+land when it lets go; `a_cell_update_waits_for_the_turn_and_a_read_does_not`
+pins the same for a cell. The requirement that writers of separate
+branches never wait on one another is relaxed to SQLite's: they take
+turns for one small append each.
+
+**Verified.** The power-loss test now checks cells too and holds over
+3,600 images a seed, five seeds; without the fold before the record, 203
+of 3,600 images have a cell naming blocks the file lost.
+
+**A bug the turn now carries found.** Counting one cell up from three
+processes and three threads lost updates in a third of runs (179, once
+93, of 180). `Turn` dropped this process's mutex before the file's lock:
+another thread took the mutex, "took" the lock the process still held,
+and the unlock that followed let it go under that thread, so another
+process wrote at once. Block appends had it too, unseen, since no test
+mixed threads and processes appending. The lock is now let go first;
+15 runs of 15 count to 180.

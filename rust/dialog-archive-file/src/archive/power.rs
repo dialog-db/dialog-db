@@ -15,15 +15,10 @@
 //! - the cell holds a value it held at that sync point or was given after;
 //! - every block the cell's value names reads back.
 //!
-//! The last two do not hold yet. A cell is written in place, without the
-//! writer's turn and without a sync, so nothing orders its write after the
-//! blocks it names reach a state recovery returns to (the durable slot),
-//! nor its write over one half after the other half reached the disk:
-//! after a power loss a cell can name blocks the file lost, or hold a
-//! value older than the last sync point. They are pinned apart, by an
-//! ignored test, until the protocol orders them
-//! (design/file-writers/journal.md). A failure names the point and the
-//! seed that built its image.
+//! The last two hold because a cell's every value is a record appended in
+//! the writer's turn after what it names, as a commit in SQLite's
+//! write-ahead log follows its pages (see the `cells` module). A failure
+//! names the point and the seed that built its image.
 
 use std::fs::OpenOptions;
 use std::path::Path;
@@ -59,7 +54,7 @@ struct Done {
 }
 
 /// The cell's value for a round: the blocks it names, and, every other
-/// round, enough more to outgrow the cell and spill.
+/// round, a few hundred bytes more, so values of both sizes are written.
 fn head(round: usize, names: &[String]) -> String {
     let mut value = format!("{round}|{}", names.join(","));
     if round % 2 == 1 {
@@ -279,23 +274,12 @@ fn play(keep: fn(&Wrong) -> Option<&str>) -> anyhow::Result<()> {
 }
 
 /// Every power loss the workload can meet leaves a file that opens, keeps
-/// every block synced, and reads no block as other bytes.
+/// every block synced, reads no block as other bytes, and a cell holding a
+/// value it held at the last sync point or was given after, every block of
+/// which is in the file.
 #[test]
 fn every_power_loss_recovers_to_what_was_synced() -> anyhow::Result<()> {
     play(|wrong| match wrong {
-        Wrong::File(wrong) => Some(wrong),
-        Wrong::Cell(_) | Wrong::Names(_) => None,
-    })
-}
-
-/// After every power loss, the cell holds a value it held at the last sync
-/// point or was given after, and every block it names is in the file. Does
-/// not hold yet (the module docs).
-#[test]
-#[ignore = "open: a power loss can leave a cell older than the last sync point, or naming blocks the file lost; see design/file-writers/journal.md"]
-fn every_power_loss_leaves_a_cell_with_what_it_names() -> anyhow::Result<()> {
-    play(|wrong| match wrong {
-        Wrong::Cell(wrong) | Wrong::Names(wrong) => Some(wrong),
-        Wrong::File(_) => None,
+        Wrong::File(wrong) | Wrong::Cell(wrong) | Wrong::Names(wrong) => Some(wrong),
     })
 }

@@ -11,16 +11,14 @@
 //! index's, written over once no root reaches them, so its checksum holds
 //! only until the first is. Each page carries a checksum of its own. An
 //! [extent](Kind::Extent) record is the other: its body is space a writer
-//! fills later, each frame in it a record with a checksum of its own; and a
-//! [cell](Kind::Cell) record's halves are written over, each with a
-//! checksum of its own.
+//! fills later, each frame in it a record with a checksum of its own.
 
 use std::fs::File;
 use std::io;
 
 /// The first bytes of every archive file. The last byte is the format
 /// version.
-pub(crate) const MAGIC: &[u8; 8] = b"DIALOGA\x0c";
+pub(crate) const MAGIC: &[u8; 8] = b"DIALOGA\x0d";
 
 /// The bytes of a record before its body.
 pub(crate) const HEADER: u64 = 1 + 4 + 4;
@@ -51,7 +49,7 @@ impl Kind {
     /// Whether the record's checksum covers its body as it is now: not for
     /// records whose body is written to after the record is.
     fn checked(self) -> bool {
-        !matches!(self, Kind::Pages | Kind::Extent | Kind::Cell)
+        !matches!(self, Kind::Pages | Kind::Extent)
     }
 }
 
@@ -146,9 +144,9 @@ pub(crate) fn read_record(file: &File, offset: u64, len: u64) -> io::Result<Opti
 
 /// The record at `at` in `bytes` (the file, mapped): its kind, where its
 /// body starts and where it ends. `None` when the bytes there are not a
-/// whole, intact record of a known kind; a [pages](Kind::Pages),
-/// [extent](Kind::Extent) or [cell](Kind::Cell) record's checksum is not
-/// checked, as their bodies are written to after them.
+/// whole, intact record of a known kind; a [pages](Kind::Pages) or
+/// [extent](Kind::Extent) record's checksum is not checked, as their
+/// bodies are written to after them.
 pub(crate) fn record_in(bytes: &[u8], at: usize) -> Option<(Kind, usize, usize)> {
     let header = bytes.get(at..at + HEADER as usize)?;
     let kind = Kind::from_tag(header[0])?;

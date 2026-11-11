@@ -840,10 +840,11 @@ fn hold_turn(path: &Path) -> anyhow::Result<std::fs::File> {
     Ok(file)
 }
 
-/// Two processes commit to two branches of one repository at once, while
-/// a third holds the file's writer's turn throughout: neither waits for
-/// it, or for the other. Every commit of each lands on its own branch, and
-/// the file reopens with all of them.
+/// Two processes commit to two branches of one repository at once. A
+/// head is updated in the file's writer's turn, as SQLite commits under its
+/// write lock, so while a third process holds the turn their commits wait;
+/// once it lets go both go on, taking turns with each other only to append
+/// each head. Every commit of each lands on its own branch.
 ///
 /// Unix only: the turn is held here with a POSIX lock. On Windows the
 /// archive's own tests hold it (`archive::concurrency`, through the
@@ -851,7 +852,7 @@ fn hold_turn(path: &Path) -> anyhow::Result<std::fs::File> {
 /// runs the commits.
 #[cfg(unix)]
 #[tokio::test]
-async fn it_commits_to_two_branches_from_two_processes_without_waiting() -> anyhow::Result<()> {
+async fn it_commits_to_two_branches_from_two_processes_at_once() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let at_text = directory.path().to_string_lossy().into_owned();
     let at = Directory::At(at_text.clone());
@@ -872,18 +873,20 @@ async fn it_commits_to_two_branches_from_two_processes_without_waiting() -> anyh
 
     let turn = hold_turn(&file)?;
     std::fs::write(signals.join("go"), b"")?;
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    let while_held = (
+        signals.join("alpha.done").exists(),
+        signals.join("beta.done").exists(),
+    );
+    drop(turn);
     let finished = (
         signalled(&signals.join("alpha.done")),
         signalled(&signals.join("beta.done")),
     );
-    drop(turn);
     assert!(alpha.wait()?.success());
     assert!(beta.wait()?.success());
-    assert_eq!(
-        finished,
-        (true, true),
-        "both committed while the turn was held"
-    );
+    assert_eq!(while_held, (false, false), "a head waits for the turn");
+    assert_eq!(finished, (true, true), "both commit once it is let go");
 
     for (branch, other) in [("alpha", "beta"), ("beta", "alpha")] {
         let names = names_on(&at, &peer, &name, branch).await?;
