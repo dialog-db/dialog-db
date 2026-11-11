@@ -33,7 +33,6 @@
 //! up front with `Branch::download`.
 
 use super::{Grant, Local, Mode, Peer, PeerSpace};
-use dialog_artifacts::tree::CorpusNode;
 use dialog_capability::access::{
     Access, Authorize, AuthorizeError, Certificate as _, Export, Proof as _, Protocol, Prove,
     Retain, Scope as _, TimeRange,
@@ -41,6 +40,7 @@ use dialog_capability::access::{
 use dialog_capability::{Capability, Command, Did, Fork, Policy as _, Provider, Resume, Subject};
 use dialog_common::time::{self, UNIX_EPOCH};
 use dialog_common::{ConditionalSend, ConditionalSync};
+use dialog_corpus::tree::CorpusNode;
 use dialog_effects::archive::ArchiveError;
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::{Get, Import, Put};
@@ -58,7 +58,7 @@ use dialog_ucan_core::subject::Subject as UcanSubject;
 use ipld_core::cid::Cid;
 use std::collections::{HashMap, HashSet};
 
-use dialog_artifacts::history::Version;
+use dialog_corpus::history::Version;
 
 pub(crate) mod revocation;
 
@@ -1126,7 +1126,7 @@ mod tests {
     /// account's root delegation failed with `Version mismatch` forever.
     #[dialog_common::test]
     async fn it_retains_after_another_handle_moved_the_head() -> Result<()> {
-        use dialog_artifacts::{Changes, Entity, Relation, Update as _, Value};
+        use dialog_corpus::{Changes, Entity, Relation, Update as _, Value};
         use dialog_repository::ACCESS_BRANCH;
 
         let (operator, profile) = operator("retain-stale-head").await;
@@ -1153,7 +1153,7 @@ mod tests {
                 Relation::try_from("test.profile/name".to_string())?,
                 Entity::new()?,
                 Value::String(note.to_string()),
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             );
             elsewhere
                 .transaction()
@@ -1810,7 +1810,7 @@ mod tests {
         let rows: Vec<_> = operator
             .delegations()
             .claims()
-            .select(dialog_artifacts::ArtifactSelector::new().the("dialog.ucan/audience".parse()?))
+            .select(dialog_corpus::Selector::new().the("dialog.ucan/audience".parse()?))
             .perform(operator)
             .await?
             .try_collect()

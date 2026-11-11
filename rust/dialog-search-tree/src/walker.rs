@@ -34,7 +34,7 @@ use crate::{
 /// entry bytes — one allocation and copy per yielded entry. The
 /// [`KeyHandle`] instantiation instead hands out handles into the leaf's
 /// memoized decoded-keys arena, so a warm leaf's entries yield with NO
-/// per-entry copy; consumers that only need the key BYTES (the artifact
+/// per-entry copy; consumers that only need the key BYTES (the fact
 /// scan, which re-splits them itself) read through `as_ref`.
 pub trait ScanKey: Sized + ConditionalSend {
     /// Build a yielded key from plain bytes: a buffered novelty op, or a
@@ -1156,7 +1156,7 @@ mod walker_novelty_tests {
     }
 
     /// Several writes in ONE buffered batch, repeated across batches. The
-    /// artifact layer writes 3+ keys per fact (EAV/AEV/VAE orderings) plus
+    /// fact layer writes 3+ keys per fact (EAV/AEV/VAE orderings) plus
     /// history records, so a commit buffers many keys at once and the next
     /// commit buffers many more over it.
     #[dialog_common::test]
@@ -1175,7 +1175,7 @@ mod walker_novelty_tests {
             let mut expected: std::collections::BTreeMap<[u8; 4], Vec<u8>> = Default::default();
 
             for batch in 0..20u32 {
-                // Scattered keys, like content-hashed artifact keys.
+                // Scattered keys, like content-hashed fact keys.
                 let keys: Vec<u32> = (0..6).map(|_| next() % 100_000).collect();
 
                 let mut buffered = HitchhikerTree::open(&tree).with_op_buf_size(8);

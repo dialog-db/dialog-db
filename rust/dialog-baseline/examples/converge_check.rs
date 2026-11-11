@@ -22,13 +22,13 @@
 //!   --example converge_check -- 10000
 //! ```
 
-use dialog_artifacts::{Datum, Key, State};
 use dialog_baseline::changes_of;
 use dialog_baseline::nodes::walk;
 use dialog_baseline::repo::{DialogRepo, VolatileRepo};
 use dialog_baseline::se::{SeLog, se_instructions};
 use dialog_capability::Provider;
 use dialog_common::{Blake3Hash, ConditionalSync};
+use dialog_corpus::{Datum, Key, State};
 use dialog_effects::archive::Load;
 use dialog_effects::archive::prelude::CatalogScope;
 use dialog_repository::TransactionBatch;

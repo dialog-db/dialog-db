@@ -1,7 +1,7 @@
 //! A tree node as rows over tokens, and the block rows stand for.
 //!
 //! The nodes the file writes as frames are the artifact tree's: keys are
-//! [`dialog_artifacts::Key`]s, split into entity, attribute and value
+//! [`dialog_corpus::Key`]s, split into entity, attribute and value
 //! tokens, and values are [`State<Datum>`]s, each one token. A node of any
 //! other tree, or one whose rows do not realize to its exact block, is not
 //! written as a frame.
@@ -10,11 +10,11 @@ use std::io;
 
 use std::sync::Arc;
 
-use dialog_artifacts::{
+use dialog_common::{Blake3Hash, Buffer};
+use dialog_corpus::{
     ATTRIBUTE_KEY_TAG, ArchivedState, BLOB_KEY_TAG, COVERAGE_KEY_TAG, Datum, ENTITY_KEY_TAG,
     HISTORY_KEY_TAG, Key, State, VALUE_KEY_TAG, split_record_components,
 };
-use dialog_common::{Blake3Hash, Buffer};
 use dialog_search_tree::{
     Entry, Key as TreeKey, Link, MIXED_LAYOUT, Manifest, NodeBody, NoveltyBuffer, NoveltyEntry,
     NoveltyOp, PersistentNode, PersistentNodeBody, PersistentSegment, Scale, Separator, into_owned,
@@ -740,15 +740,15 @@ mod profile {
 pub(crate) mod tests {
     use std::str::FromStr;
 
-    use dialog_artifacts::history::{Edition, Origin, Version};
-    use dialog_artifacts::{
-        Artifact, AttributeKey, BlobKey, Entity, EntityKey, Relation, Value, ValueKey,
-        coverage_key, history_key,
+    use dialog_corpus::history::{Edition, Origin, Version};
+    use dialog_corpus::{
+        AttributeKey, BlobKey, Entity, EntityKey, Fact, Relation, Value, ValueKey, coverage_key,
+        history_key,
     };
 
     use super::*;
 
-    fn facts() -> anyhow::Result<Vec<Artifact>> {
+    fn facts() -> anyhow::Result<Vec<Fact>> {
         let long = "a value long enough to spill out of its key ".repeat(40);
         let values = [
             Value::String("short".into()),
@@ -764,7 +764,7 @@ pub(crate) mod tests {
         ];
         let mut facts = Vec::new();
         for (at, is) in values.into_iter().enumerate() {
-            facts.push(Artifact {
+            facts.push(Fact {
                 the: Relation::from_str(&format!("test/attribute-{}", at % 3))?,
                 of: Entity::from_str(&format!("test:entity-{}", at % 4))?,
                 is,
@@ -825,7 +825,7 @@ pub(crate) mod tests {
             .into_iter()
             .map(|mut fact| {
                 fact.of = Entity::from_str(&format!("test:{name}"))?;
-                Ok(EntityKey::from_artifact(&fact, manifest).0)
+                Ok(EntityKey::from_fact(&fact, manifest).0)
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
         Ok(Buffer::from(segment_block(keys, manifest)?))
@@ -879,18 +879,12 @@ pub(crate) mod tests {
     fn it_realizes_each_layout_from_its_tokens() -> anyhow::Result<()> {
         let manifest = spilling();
         let facts = facts()?;
-        let keys = |key: &dyn Fn(&Artifact) -> Key| facts.iter().map(key).collect::<Vec<_>>();
+        let keys = |key: &dyn Fn(&Fact) -> Key| facts.iter().map(key).collect::<Vec<_>>();
         // The long string spills: its keys carry its hash, not the string.
-        assert!(
-            ValueKey::from_artifact(&facts[1], &manifest)
-                .0
-                .as_ref()
-                .len()
-                < 200
-        );
-        assert_realizes(keys(&|fact| EntityKey::from_artifact(fact, &manifest).0))?;
-        assert_realizes(keys(&|fact| AttributeKey::from_artifact(fact, &manifest).0))?;
-        assert_realizes(keys(&|fact| ValueKey::from_artifact(fact, &manifest).0))?;
+        assert!(ValueKey::from_fact(&facts[1], &manifest).0.as_ref().len() < 200);
+        assert_realizes(keys(&|fact| EntityKey::from_fact(fact, &manifest).0))?;
+        assert_realizes(keys(&|fact| AttributeKey::from_fact(fact, &manifest).0))?;
+        assert_realizes(keys(&|fact| ValueKey::from_fact(fact, &manifest).0))?;
         assert_realizes(keys(&|fact| {
             history_key(&version(3), &fact.of, &fact.the, &fact.is, &manifest)
         }))?;
@@ -906,8 +900,8 @@ pub(crate) mod tests {
         let manifest = spilling();
         let mut keys = Vec::new();
         for fact in facts()? {
-            keys.push(EntityKey::from_artifact(&fact, &manifest).0);
-            keys.push(AttributeKey::from_artifact(&fact, &manifest).0);
+            keys.push(EntityKey::from_fact(&fact, &manifest).0);
+            keys.push(AttributeKey::from_fact(&fact, &manifest).0);
             keys.push(history_key(
                 &version(1),
                 &fact.of,

@@ -20,11 +20,11 @@ pub(crate) mod test {
     use super::*;
     use crate::recall::{BodyMemo, Memo};
     use crate::session::RuleRegistry;
-    use dialog_artifacts::selector::Constrained;
-    use dialog_artifacts::tree::CorpusNode;
-    use dialog_artifacts::{ArtifactSelector, ArtifactStream, DialogArtifactsError, Select};
     use dialog_capability::Provider;
     use dialog_capability::Resume;
+    use dialog_corpus::selector::Constrained;
+    use dialog_corpus::tree::CorpusNode;
+    use dialog_corpus::{DialogCorpusError, FactStream, Select, Selector};
     use dialog_effects::archive::{self, ArchiveError};
     use dialog_effects::blob;
     use dialog_peer::Peer as DialogOperator;
@@ -83,8 +83,8 @@ pub(crate) mod test {
     impl<'a> Provider<Select<'a>> for TestEnv<'a> {
         async fn execute(
             &self,
-            input: ArtifactSelector<Constrained>,
-        ) -> Result<ArtifactStream<'a>, DialogArtifactsError> {
+            input: Selector<Constrained>,
+        ) -> Result<FactStream<'a>, DialogCorpusError> {
             let stream = self
                 .branch
                 .claims()
@@ -103,11 +103,11 @@ pub(crate) mod test {
     }
 
     #[dialog_capability::provider]
-    impl Provider<dialog_artifacts::Estimate> for TestEnv<'_> {
+    impl Provider<dialog_corpus::Estimate> for TestEnv<'_> {
         async fn execute(
             &self,
-            input: ArtifactSelector<Constrained>,
-        ) -> Result<Option<u64>, DialogArtifactsError> {
+            input: Selector<Constrained>,
+        ) -> Result<Option<u64>, DialogCorpusError> {
             self.branch
                 .claims()
                 .select(input)
@@ -119,8 +119,8 @@ pub(crate) mod test {
     // Preload hints have no listener in the test env: refuse them so
     // evaluation stops composing hints after the first.
     #[dialog_capability::provider]
-    impl Provider<dialog_artifacts::Preload> for TestEnv<'_> {
-        async fn execute(&self, _input: dialog_artifacts::PreloadRequest) -> bool {
+    impl Provider<dialog_corpus::Preload> for TestEnv<'_> {
+        async fn execute(&self, _input: dialog_corpus::PreloadRequest) -> bool {
             false
         }
     }

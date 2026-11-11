@@ -38,7 +38,7 @@ use serde_json::{Map, Value as Json};
 use std::error::Error as StdError;
 use std::fmt::{Display, Formatter, Result as FmtResult};
 
-use crate::artifact::{Type as ValueType, Value, decode_value};
+use crate::corpus::{Type as ValueType, Value, decode_value};
 
 use super::{ConceptRef, NameShape, Primitive, Refinement, Type};
 
@@ -524,8 +524,8 @@ mod tests {
     /// byte early.
     #[dialog_common::test]
     async fn it_cannot_write_a_prefix_that_misses_the_name_boundary() {
-        use crate::artifact::{ArtifactSelector, Constrained};
-        use dialog_artifacts::tree::selector_range;
+        use crate::corpus::{Constrained, Selector};
+        use dialog_corpus::tree::selector_range;
         use dialog_search_tree::Manifest;
 
         // What the format produces: a domain, separator included.
@@ -554,7 +554,7 @@ mod tests {
         .expect("a partial prefix is a valid lexical constraint");
 
         let range = |kind: &Type| {
-            let selector: ArtifactSelector<Constrained> = ArtifactSelector::new()
+            let selector: Selector<Constrained> = Selector::new()
                 .the_starting_with(
                     kind.refinement()
                         .and_then(|r| r.prefix.clone())

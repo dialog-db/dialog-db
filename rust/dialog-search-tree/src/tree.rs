@@ -454,7 +454,7 @@ where
     /// [`KeyHandle`](crate::KeyHandle) instead of the typed `Key`: warm
     /// leaves' entries borrow the memoized decoded-keys arena with no
     /// per-entry key copy. For consumers that work directly on the raw key
-    /// bytes (the artifact scan paths).
+    /// bytes (the fact scan paths).
     pub fn stream_range_handles<R, Env>(
         &self,
         range: R,
@@ -911,7 +911,7 @@ mod tests {
     }
 
     /// A key type whose component layout is dispatched by a leading tag byte,
-    /// like the dialog artifact key's EAV/AEV/VAE orderings. Two layouts:
+    /// like the dialog fact key's EAV/AEV/VAE orderings. Two layouts:
     /// tag 0 puts the 2-byte arena field first, tag 1 puts the 1-byte
     /// dictionary field first. Persisting keys of both tags into one tree and
     /// reading them all back proves the tag-dispatched columnar codec.

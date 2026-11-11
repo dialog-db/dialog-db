@@ -3309,7 +3309,7 @@ mod tests {
     /// reports.
     ///
     /// This is what makes buffered trees safe to sync: where an op currently
-    /// sits (still in a buffer, or already flushed into a leaf) is an artifact
+    /// sits (still in a buffer, or already flushed into a leaf) is a fact
     /// of each replica's own write volume, and must not change what the
     /// difference between two replicas *is*.
     #[dialog_common::test]
@@ -5863,7 +5863,7 @@ mod tests {
     async fn it_surfaces_buffered_ops_across_disjoint_scopes() -> Result<()> {
         let storage = CountingBackend::new();
 
-        // Keys tagged by their leading byte, like the artifact key layout.
+        // Keys tagged by their leading byte, like the fact key layout.
         let base_keys: Vec<[u8; 4]> = (0..200u32)
             .map(|i| {
                 let b = i.to_be_bytes();

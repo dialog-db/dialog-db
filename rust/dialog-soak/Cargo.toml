@@ -18,7 +18,7 @@ dialog-common = { workspace = true }
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 anyhow = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
-dialog-artifacts = { workspace = true }
+dialog-corpus = { workspace = true }
 dialog-capability = { workspace = true }
 # The seeded entropy every run draws from (`helpers::entropy`).
 dialog-common = { workspace = true, features = ["helpers"] }

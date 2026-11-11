@@ -11,7 +11,7 @@
 //!   scanned once (the blocks it keeps, plus what it derives from them),
 //!   next to the bytes of the blocks themselves;
 //! - **results**: the heap a materialized result of every fact holds
-//!   (`scan_owned` into a `Vec<Artifact>`), next to how many of its bytes
+//!   (`scan_owned` into a `Vec<Fact>`), next to how many of its bytes
 //!   are distinct entity, attribute and value bytes;
 //! - **token model**: what the same result would hold if each distinct
 //!   entity, attribute and value were one shared token and a row held ids.
@@ -28,10 +28,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
-use dialog_artifacts::tree::{ArtifactTree, ArtifactTreeExt, spill_cache};
-use dialog_artifacts::{Artifact, ArtifactSelector, Datum, Key, State, Value};
 use dialog_baseline::replica::Replica;
 use dialog_common::{Blake3Hash, Buffer};
+use dialog_corpus::tree::{Corpus, CorpusExt, spill_cache};
+use dialog_corpus::{Datum, Fact, Key, Selector, State, Value};
 use dialog_search_tree::{
     NodeBody, PersistentNode,
     helpers::{Holding, test_catalog},
@@ -182,14 +182,14 @@ fn main() -> anyhow::Result<()> {
     runtime.block_on(async {
         // Every fact, through the attribute index: the widest scan a query
         // makes.
-        let every = || ArtifactSelector::new().the_starting_with("");
+        let every = || Selector::new().the_starting_with("");
 
         // Layer 1: the node cache a warm tree holds.
         let before = held();
         let started = Instant::now();
         let mut rows = 0usize;
         {
-            let stream = ArtifactTree::at(catalog.clone(), root.clone()).scan(
+            let stream = Corpus::at(catalog.clone(), root.clone()).scan(
                 reader.clone(),
                 spill_cache(),
                 every(),
@@ -216,7 +216,7 @@ fn main() -> anyhow::Result<()> {
         // Layer 2: a materialized result of every fact.
         let before = held();
         PEAK.store(before, Ordering::Relaxed);
-        let artifacts: Vec<Artifact> = ArtifactTree::at(catalog.clone(), root.clone())
+        let artifacts: Vec<Fact> = Corpus::at(catalog.clone(), root.clone())
             .scan_owned(reader.clone(), spill_cache(), every())
             .try_collect()
             .await?;
@@ -284,7 +284,7 @@ fn main() -> anyhow::Result<()> {
 
         // Where a row's heap goes: take the result apart field by field and
         // see what dropping each frees.
-        let row = std::mem::size_of::<Artifact>();
+        let row = std::mem::size_of::<Fact>();
         let (mut relations, mut entities, mut values, mut causes) =
             (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         let count = artifacts.len();

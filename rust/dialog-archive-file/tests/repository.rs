@@ -7,11 +7,11 @@ use std::path::Path;
 use std::str::FromStr;
 
 use dialog_archive_file::{FILE_NAME, FileArchive, Options};
-use dialog_artifacts::{
-    Artifact, ArtifactSelector, Changes, Entity, Instruction, Pick, Relation, Update as _, Value,
-};
 use dialog_capability::Subject;
 use dialog_common::{Blake3Hash, Buffer};
+use dialog_corpus::{
+    Changes, Entity, Fact, Instruction, Pick, Relation, Selector, Update as _, Value,
+};
 use dialog_effects::storage::{Directory, Location};
 use dialog_peer::helpers::{open_peer, test_owned, unique_name};
 use dialog_repository::RepositoryExt as _;
@@ -22,8 +22,8 @@ use futures_util::TryStreamExt as _;
 /// filesystem.
 type FileArchiveSpace = Space<FileArchive, FileSystem, FileSystem, FileSystem, FileSystem>;
 
-fn fact(entity: &str, name: &str) -> anyhow::Result<Artifact> {
-    Ok(Artifact {
+fn fact(entity: &str, name: &str) -> anyhow::Result<Fact> {
+    Ok(Fact {
         the: Relation::from_str("person/name")?,
         of: Entity::from_str(entity)?,
         is: Value::String(name.to_string()),
@@ -75,9 +75,9 @@ async fn commit_facts(at: &Directory, peer: &str, name: &str) -> anyhow::Result<
             .perform(&operator)
             .await?;
     }
-    let rows: Vec<Artifact> = branch
+    let rows: Vec<Fact> = branch
         .claims()
-        .select(ArtifactSelector::new().the(Relation::from_str("person/name")?))
+        .select(Selector::new().the(Relation::from_str("person/name")?))
         .to_owned()
         .perform(&operator)
         .await?
@@ -93,16 +93,15 @@ async fn it_commits_and_selects_through_a_file_archive() -> anyhow::Result<()> {
     let at = Directory::At(directory.path().to_string_lossy().into_owned());
     let peer = unique_name("peer");
     let name = unique_name("repo");
-    let selector = || -> anyhow::Result<_> {
-        Ok(ArtifactSelector::new().the(Relation::from_str("person/name")?))
-    };
+    let selector =
+        || -> anyhow::Result<_> { Ok(Selector::new().the(Relation::from_str("person/name")?)) };
 
     commit_facts(&at, &peer, &name).await?;
 
     // Everything above is dropped: the repository reopens from disk and its
     // facts read back out of the archive file.
     let (operator, branch) = open!(at, peer, name);
-    let rows: Vec<Artifact> = branch
+    let rows: Vec<Fact> = branch
         .claims()
         .select(selector()?)
         .to_owned()
@@ -281,7 +280,7 @@ async fn it_takes_turns_with_another_process() -> anyhow::Result<()> {
 /// Reads `node` both ways, from its block and as the archive serves it, and
 /// checks every answer the tree reads a node for agrees.
 fn compare(archive: &FileArchive, catalog: &str, hash: &Blake3Hash) -> anyhow::Result<bool> {
-    use dialog_artifacts::{Datum, Key, State};
+    use dialog_corpus::{Datum, Key, State};
     use dialog_search_tree::nodes::Read;
     use dialog_search_tree::{NodeBody, PersistentNode, into_owned};
     type TreeNode = PersistentNode<Key, State<Datum>>;
@@ -495,9 +494,9 @@ async fn it_takes_unchanged_rows_from_the_node_a_commit_supersedes() -> anyhow::
     if cfg!(debug_assertions) {
         assert_eq!(stats.unverified, 0, "every frame rebuilt its block");
     }
-    let rows: Vec<Artifact> = branch
+    let rows: Vec<Fact> = branch
         .claims()
-        .select(ArtifactSelector::new().the(Relation::from_str("person/name")?))
+        .select(Selector::new().the(Relation::from_str("person/name")?))
         .to_owned()
         .perform(&operator)
         .await?
@@ -530,9 +529,9 @@ async fn it_selects_through_nodes_served_in_place() -> anyhow::Result<()> {
     // A second handle on the file shares the space's: its counts are the
     // space's.
     let before = archive.stats().served;
-    let rows: Vec<Artifact> = branch
+    let rows: Vec<Fact> = branch
         .claims()
-        .select(ArtifactSelector::new().the(Relation::from_str("person/name")?))
+        .select(Selector::new().the(Relation::from_str("person/name")?))
         .to_owned()
         .perform(&operator)
         .await?
@@ -557,7 +556,7 @@ async fn it_selects_through_nodes_served_in_place() -> anyhow::Result<()> {
 /// archived again under the older layout's header.
 #[tokio::test]
 async fn it_keeps_a_node_of_another_layout_whole_unverified() -> anyhow::Result<()> {
-    use dialog_artifacts::{Datum, Key, State};
+    use dialog_corpus::{Datum, Key, State};
     use dialog_search_tree::{
         LEGACY_LAYOUT, LegacyManifest, LegacyNodeBody, LegacySegment, NodeBody, PersistentNode,
         PersistentSegment, SegmentView,

@@ -50,8 +50,8 @@ mod native {
     use std::time::{Duration, Instant};
 
     use anyhow::Context as _;
-    use dialog_artifacts::{Changes, Entity, Pick, Relation, Statement, Update, Value};
     use dialog_capability::Subject;
+    use dialog_corpus::{Changes, Entity, Pick, Relation, Statement, Update, Value};
     use dialog_credentials::{Credential, SignerCredential};
     use dialog_effects::credential::prelude::*;
     use dialog_effects::storage::{Directory, Location};

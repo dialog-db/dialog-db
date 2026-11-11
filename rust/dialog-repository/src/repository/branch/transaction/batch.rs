@@ -30,15 +30,13 @@ use crate::{
     Branch, Cell, Checkpoint, CommitError, PublishError, QueryLayer, RemoteSite, Revision,
     SelectQuery, Snapshot, SnapshotClaims, Staged, TransactionQuery, origin_of,
 };
-use dialog_artifacts::history::{CausalityCache, Context, ContextCache, RevisionRecord, Version};
-use dialog_artifacts::tree::CorpusNode;
-use dialog_artifacts::tree::WriteScope;
-use dialog_artifacts::{
-    Artifact, ArtifactSelector, Change, Changes, Entity, Statement, Update as _,
-};
 use dialog_capability::history::Origin;
 use dialog_capability::{Did, Fork, Provider};
 use dialog_common::{ConditionalSync, Holds};
+use dialog_corpus::history::{CausalityCache, Context, ContextCache, RevisionRecord, Version};
+use dialog_corpus::tree::CorpusNode;
+use dialog_corpus::tree::WriteScope;
+use dialog_corpus::{Change, Changes, Entity, Fact, Selector, Statement, Update as _};
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify, OperatorExt as _};
@@ -112,25 +110,25 @@ pub struct TransactionBatch {
     /// retract that only it holds: retracted from it once the publish
     /// lands, so what a transaction read is what its publish leaves.
     overlay: Ephemeral,
-    overlay_retractions: Vec<Artifact>,
+    overlay_retractions: Vec<Fact>,
 }
 
 /// The facts `changes` retracts that `overlay` holds. A transaction's
 /// read hides such a fact, and the commit's retraction of it lands
 /// nothing in the tree, which never held it: the publish retracts it
 /// from the overlay, so the session's row does not come back.
-fn overlay_retractions(changes: &Staged, overlay: &Ephemeral) -> Vec<Artifact> {
+fn overlay_retractions(changes: &Staged, overlay: &Ephemeral) -> Vec<Fact> {
     let mut retracted = Vec::new();
     for (the, of, change) in changes.log() {
         let Change::Retract(value) = change else {
             continue;
         };
-        let selector = ArtifactSelector::new()
+        let selector = Selector::new()
             .the(the.clone())
             .of(of.clone())
             .is(value.clone());
         if !overlay.scan(&selector).is_empty() {
-            retracted.push(Artifact {
+            retracted.push(Fact {
                 the: the.clone(),
                 of: of.clone(),
                 is: value.clone(),
@@ -143,7 +141,7 @@ fn overlay_retractions(changes: &Staged, overlay: &Ephemeral) -> Vec<Artifact> {
 
 /// Retract `facts` from the session overlay, once the publish that
 /// retracted them landed.
-fn retract_from_overlay(overlay: &Ephemeral, facts: Vec<Artifact>) -> Result<(), CommitError> {
+fn retract_from_overlay(overlay: &Ephemeral, facts: Vec<Fact>) -> Result<(), CommitError> {
     if facts.is_empty() {
         return Ok(());
     }
@@ -221,7 +219,7 @@ impl TransactionBatch {
         self.transaction().dispatch(claim)
     }
 
-    /// The staged artifact index, serving the chain tip.
+    /// The staged fact index, serving the chain tip.
     pub fn claims(&self) -> SnapshotClaims<'_> {
         self.snapshot.claims()
     }
@@ -435,8 +433,8 @@ impl TransactionPublish<&Branch> {
             + Provider<nodes::Preload<CorpusNode>>
             + ConditionalSync
             + Provider<BlobLoad>
-            + Provider<dialog_artifacts::Preload>
-            + Provider<dialog_artifacts::Speculation>
+            + Provider<dialog_corpus::Preload>
+            + Provider<dialog_corpus::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + Holds
             + ConditionalSync
@@ -471,8 +469,8 @@ impl TransactionPublish<TransactionBatch> {
             + Provider<nodes::Preload<CorpusNode>>
             + ConditionalSync
             + Provider<BlobLoad>
-            + Provider<dialog_artifacts::Preload>
-            + Provider<dialog_artifacts::Speculation>
+            + Provider<dialog_corpus::Preload>
+            + Provider<dialog_corpus::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + Holds
             + ConditionalSync
@@ -520,8 +518,8 @@ impl TransactionCommit<&Branch> {
             + Provider<nodes::Preload<CorpusNode>>
             + ConditionalSync
             + Provider<BlobLoad>
-            + Provider<dialog_artifacts::Preload>
-            + Provider<dialog_artifacts::Speculation>
+            + Provider<dialog_corpus::Preload>
+            + Provider<dialog_corpus::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + Holds
             + ConditionalSync
@@ -641,8 +639,8 @@ impl TransactionCommit<TransactionBatch> {
             + Provider<nodes::Preload<CorpusNode>>
             + ConditionalSync
             + Provider<BlobLoad>
-            + Provider<dialog_artifacts::Preload>
-            + Provider<dialog_artifacts::Speculation>
+            + Provider<dialog_corpus::Preload>
+            + Provider<dialog_corpus::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + Holds
             + ConditionalSync
@@ -716,10 +714,10 @@ impl TransactionCommit<TransactionBatch> {
 /// anything lands, as deserialization and the rule compiler refuse it.
 fn refuse_nan<'a>(changes: impl Iterator<Item = &'a Change>) -> Result<(), CommitError> {
     for change in changes {
-        if let Change::Assert(dialog_artifacts::Value::Float(float), _) = change
+        if let Change::Assert(dialog_corpus::Value::Float(float), _) = change
             && float.is_nan()
         {
-            return Err(dialog_artifacts::DialogArtifactsError::InvalidValue(
+            return Err(dialog_corpus::DialogCorpusError::InvalidValue(
                 "NaN is not a value".into(),
             )
             .into());
@@ -764,8 +762,8 @@ where
         + Provider<nodes::Preload<CorpusNode>>
         + ConditionalSync
         + Provider<BlobLoad>
-        + Provider<dialog_artifacts::Preload>
-        + Provider<dialog_artifacts::Speculation>
+        + Provider<dialog_corpus::Preload>
+        + Provider<dialog_corpus::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
         + Holds
         + ConditionalSync
@@ -822,7 +820,7 @@ mod tests {
     use crate::helpers::test_repo;
     use crate::{Branch, CommitError, PublishError};
     use anyhow::Result;
-    use dialog_artifacts::history::Edition;
+    use dialog_corpus::history::Edition;
     use dialog_peer::Peer;
     use dialog_peer::helpers::test_session_with_peer;
     use dialog_query::query::Output;
@@ -1356,21 +1354,21 @@ mod tests {
     /// nothing.
     #[dialog_common::test]
     async fn it_folds_history_across_amends() -> Result<()> {
-        use dialog_artifacts::{Changes, Relation, Update as _, Value};
+        use dialog_corpus::{Changes, Relation, Update as _, Value};
 
         let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let the: Relation = "note/body".parse()?;
-        let of = dialog_artifacts::Entity::new()?;
+        let of = dialog_corpus::Entity::new()?;
         let replace = |value: &str| {
             let mut changes = Changes::new();
             changes.associate(
                 the.clone(),
                 of.clone(),
                 Value::String(value.into()),
-                dialog_artifacts::Pick::Last,
+                dialog_corpus::Pick::Last,
             );
             changes
         };

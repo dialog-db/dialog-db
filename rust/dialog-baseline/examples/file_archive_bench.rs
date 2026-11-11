@@ -35,9 +35,9 @@ use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::time::{Duration, Instant};
 
 use dialog_archive_file::{FILE_NAME, FileArchive, Options};
-use dialog_artifacts::{Artifact, ArtifactSelector, Entity, Instruction, Pick, Relation, Value};
 use dialog_baseline::se::{SeLog, se_instructions};
 use dialog_capability::Subject;
+use dialog_corpus::{Entity, Fact, Instruction, Pick, Relation, Selector, Value};
 use dialog_effects::storage::{Directory, Location};
 use dialog_peer::helpers::{Seed, open_peer_as, test_owned};
 use dialog_repository::RepositoryExt as _;
@@ -175,9 +175,9 @@ macro_rules! reads {
         let started = Instant::now();
         let mut facts = 0;
         for attribute in $attributes {
-            let rows: Vec<Artifact> = $branch
+            let rows: Vec<Fact> = $branch
                 .claims()
-                .select(ArtifactSelector::new().the(Relation::from_str(attribute)?))
+                .select(Selector::new().the(Relation::from_str(attribute)?))
                 .to_owned()
                 .perform(&$operator)
                 .await?
@@ -188,9 +188,9 @@ macro_rules! reads {
         let scan = started.elapsed();
         let started = Instant::now();
         for entity in $entities {
-            let rows: Vec<Artifact> = $branch
+            let rows: Vec<Fact> = $branch
                 .claims()
-                .select(ArtifactSelector::new().of(Entity::from_str(entity)?))
+                .select(Selector::new().of(Entity::from_str(entity)?))
                 .to_owned()
                 .perform(&$operator)
                 .await?
@@ -259,8 +259,8 @@ macro_rules! run {
             (run.warm_scan, _, _) = reads!(operator, branch, $attributes, &[] as &[String]);
             run.scan_heap = ALLOCATED.load(Relaxed).saturating_sub(opened);
             if let Some(cache) = dialog_search_tree::NodeCache::<
-                dialog_artifacts::Key,
-                dialog_artifacts::State<dialog_artifacts::Datum>,
+                dialog_corpus::Key,
+                dialog_corpus::State<dialog_corpus::Datum>,
             >::of(&operator, branch.subject().did())
             {
                 run.cached = (cache.len(), cache.bytes() as u64);
@@ -283,7 +283,7 @@ macro_rules! run {
                 let instructions: Vec<Instruction> = (0..5)
                     .map(|field| -> anyhow::Result<Instruction> {
                         Ok(Instruction::Assert(
-                            Artifact {
+                            Fact {
                                 the: Relation::from_str(&format!("bench/small-{field}"))?,
                                 of: Entity::from_str(entity)?,
                                 is: Value::String(format!("edit {n}")),

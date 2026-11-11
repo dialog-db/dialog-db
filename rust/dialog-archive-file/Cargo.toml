@@ -15,7 +15,7 @@ publish = false
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 async-trait = { workspace = true }
 crc32fast = { workspace = true }
-dialog-artifacts = { workspace = true }
+dialog-corpus = { workspace = true }
 dialog-capability = { workspace = true }
 dialog-common = { workspace = true }
 dialog-effects = { workspace = true }

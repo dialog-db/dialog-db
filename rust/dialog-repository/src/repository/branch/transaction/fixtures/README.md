@@ -12,7 +12,7 @@ It was produced by the program below, added as a workspace member
 `rust/capture` of a `main` checkout and run with `cargo run -p capture`.
 
 ```rust
-use dialog_artifacts::{Changes, Instruction, Value};
+use dialog_corpus::{Changes, Instruction, Value};
 use dialog_query::rule::{DeductiveRuleDescriptor, InductiveRule};
 use dialog_query::{AttributeDescriptor, Cardinality, ConceptDescriptor, Statement, Type};
 use serde_json::{Value as Json, json};

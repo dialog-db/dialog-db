@@ -29,8 +29,8 @@ use std::path::{Path, PathBuf};
 
 use base58::{FromBase58 as _, ToBase58 as _};
 use dialog_archive_file::{FILE_NAME, FileArchive};
-use dialog_artifacts::{Datum, HISTORY_KEY_TAG, Key, State};
 use dialog_common::{Blake3Hash, Buffer};
+use dialog_corpus::{Datum, HISTORY_KEY_TAG, Key, State};
 use dialog_search_tree::{NodeBody, NoveltyOp, PersistentNode};
 
 /// A node of the artifact tree.

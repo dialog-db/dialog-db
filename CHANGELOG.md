@@ -14,6 +14,75 @@ says how to cut a release.
 
 ## Unreleased
 
+### The corpus crate is `dialog-corpus`, and it asks its environment for everything it reads
+
+[#768](https://github.com/dialog-db/dialog-db/pull/768), decided in
+[design/tree-node-reads](./design/tree-node-reads.md); the spilled-value
+read is argued in
+[design-spilled-values.md](./design/tree-node-reads/design-spilled-values.md).
+
+The crate that held the data model and its indexes, `dialog-artifacts`, is
+`dialog-corpus`: the corpus is the body of claims a branch holds, in the
+search tree. Its storage side is named after it, and the crate
+no longer depends on a store crate. What it reads beside its nodes, a
+value spilled out of its key, it asks its environment for through
+`blob::Load`, performed in one place and checked against the reference;
+nothing in the crate reads a store by type. The word "artifact" is
+retired: what the model called an artifact is a fact, a claim with its
+cause.
+
+What this changes for you:
+
+- The crate is `dialog-corpus`; paths that began `dialog_artifacts::`
+  begin `dialog_corpus::`. `tree::ArtifactTree` is `tree::Corpus`,
+  `ArtifactTreeExt` is `CorpusExt`, `ArtifactNodeCache` is `CorpusCache`,
+  `BufferedArtifactTree` is `BufferedCorpus`, `ArtifactWriter` is
+  `CorpusWriter` and `DialogArtifactsError` is `DialogCorpusError`.
+- The model side is renamed the same way. `Artifact` is `Fact`,
+  `ArtifactView` is `FactView`, `ArtifactViewStream` is `FactViewStream`,
+  `ArtifactSelector` is `Selector`, `artifact_index_keys` and
+  `artifact_index_keys_with` are `fact_index_keys` and
+  `fact_index_keys_with`, and every `from_artifact`, `to_artifact` and
+  `for_artifact` is `from_fact`, `to_fact` and `for_fact`. The module that
+  held them, `artifacts`, is `model`. In `dialog-query` the re-export
+  module `artifact` is `corpus`, and its aliases `ArtifactsRelation` and
+  `ArtifactTypeError` are `CorpusRelation` and `CorpusTypeError`. `Fact`
+  prints as `Fact` in its `Debug` and `Display` forms.
+- The nightly fuzz soak is `soak:facts`, run by `--test fact_fuzz`, and
+  reads `DIALOG_FACT_FUZZ_SEEDS` and `DIALOG_FACT_FUZZ_OPS` where it read
+  `DIALOG_ARTIFACT_FUZZ_*`.
+- `dialog-corpus` does not depend on `dialog-storage`. `Blake3Hash` is
+  still `[u8; 32]` and is defined in the crate; the `HashType` re-export
+  is gone (it is `dialog_storage::HashType`). `IndexRoot`, a CBOR wrapper
+  nothing used, is removed. `From<DialogStorageError> for
+  DialogCorpusError` is gone: a storage error reaches the corpus as an
+  `ArchiveError`, a `BlobError` or the tree's error, each of which still
+  converts. `DialogSearchTreeError` implements `AuthorizationFailure` and
+  has `rejection()`, so a decision made beneath the tree is read without
+  naming the store's error type.
+- `ArchiveDelta::block` and `ArchiveDelta::flush_blocks` are gone, and
+  `DeltaOverlay` no longer answers `archive::Load`, `archive::Get` or
+  `Holds`: it answers the node layer's `Read`, `Preload` and `Write` for
+  `CorpusNode`, and `blob::Load` for a value the batch staged. A caller
+  that shipped a batch's nodes as blocks takes them with `flush_nodes()`
+  and writes them with `nodes::Write`, as a commit does.
+- `Provider<blob::Load>` is no longer asked of an environment by an
+  operation that never reaches a spilled value: `CorpusExt::select_data`,
+  `format_manifest`, `record` and `estimate`; `BlobIndexExt::get_blob`,
+  `has_blob` and `list_blobs`, and `blob_changes`; a buffered batch's
+  `record` and `seal`; `rekey_tree`; `history::context_in` and
+  `region_entry`; `spilled_refs`; `merge::screen_history`. It stays on
+  `apply`, `select_record`, `scan`, `write_instructions`, the buffered
+  applies, `observe_revisions`, `TreeHistory` and, through
+  `select_record`, `content_size` and `asset_size`. A caller that carried
+  the bound only to satisfy one of the former can drop it.
+
+Why: a crate named for artifacts no longer said what it held, and a crate
+that embodies the model should not depend on a store. #755 made the tree
+ask its environment for nodes; this makes the layer above it ask for
+everything else the same way, so what a store is and where it is stay the
+environment's business.
+
 ### A tree reads a node from its block or from rows a store keeps it in
 
 [#733](https://github.com/dialog-db/dialog-db/pull/733),
@@ -1393,6 +1462,11 @@ has a tree to canonicalize even when the link itself wrote nothing.
 
 #### Compatibility and migration
 
+- Nothing stored or synced changes for the corpus rename: keys, node
+  encodings, spilled-value references, revisions and the wire format are
+  the same bytes, nothing is rewritten on upgrade, and an older release
+  reads everything this one writes. Only Rust names and the crate graph
+  move.
 - Bounding the caches changes nothing stored or synced: caches hold only
   what a replica can read again, nothing is rewritten on upgrade, and
   releases on either side read what the other writes. Nothing for an

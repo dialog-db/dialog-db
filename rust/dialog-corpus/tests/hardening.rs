@@ -1,0 +1,262 @@
+//! Equivalence pins for the read-path optimizations: each test holds an
+//! optimized construction to the semantics of the thing it replaced,
+//! through the public API. These are the tests that would have caught the
+//! silent-divergence failure modes of this campaign's rewrites.
+
+#![cfg(not(target_arch = "wasm32"))]
+
+use std::str::FromStr as _;
+
+use anyhow::Result;
+use dialog_corpus::tree::{Corpus, CorpusExt as _, spill_cache};
+use dialog_corpus::{
+    ArchiveDelta, Cause, Entity, Fact, FactView, Instruction, Relation, Selector, SortKey, Uri,
+    Value, sort_key,
+};
+use dialog_search_tree::{Manifest, helpers::Blocks};
+use futures_util::TryStreamExt as _;
+
+/// The sort key under the format the stores here are created with: a new
+/// store's tree takes [`Manifest::default`].
+fn default_sort_key(fact: &Fact) -> SortKey {
+    sort_key(fact, &Manifest::default())
+}
+
+fn entity(n: u32) -> Entity {
+    Entity::from_str(&format!("entity:hardening-{n:04}")).expect("valid entity")
+}
+
+/// A value population straddling the encoding decisions: inline strings,
+/// strings large enough to spill under the default manifest, numerics,
+/// bytes, booleans, and entity references.
+fn probe_values() -> Vec<Value> {
+    vec![
+        Value::String("inline".into()),
+        Value::String("x".repeat(4096)),
+        Value::UnsignedInt(7),
+        Value::SignedInt(-7),
+        Value::Float(1.5),
+        Value::Boolean(false),
+        Value::Bytes(vec![9; 40]),
+        Value::Entity(entity(999)),
+    ]
+}
+
+/// A scanned row's sort key — derived straight from its stored key bytes —
+/// must equal the sort key computed from the materialized fact's
+/// fields. The query layer's k-way merge orders and dedups by the stored
+/// derivation while the `Changes` overlay uses the field derivation; if
+/// the two ever diverge for any value encoding, merged query results
+/// interleave wrongly.
+#[tokio::test]
+async fn it_derives_sort_keys_identical_to_the_field_path() -> Result<()> {
+    let blocks = Blocks::new();
+    let mut index = Corpus::empty_in(dialog_search_tree::helpers::test_catalog());
+    let mut delta = ArchiveDelta::zero();
+
+    let mut instructions = Vec::new();
+    for (at, value) in probe_values().into_iter().enumerate() {
+        instructions.push(Instruction::Assert(
+            Fact {
+                the: Relation::from_str("hardening/value")?,
+                of: entity(at as u32),
+                is: value,
+                cause: if at % 2 == 0 {
+                    Some(Cause([at as u8 + 1; 32]))
+                } else {
+                    None
+                },
+            },
+            dialog_corpus::Pick::All,
+        ));
+    }
+    index
+        .apply(
+            &blocks,
+            &mut delta,
+            futures_util::stream::iter(instructions),
+        )
+        .await?;
+    delta.flush_into(&blocks);
+
+    let rows: Vec<_> = index
+        .scan(
+            blocks.clone(),
+            spill_cache(),
+            Selector::new().the(Relation::from_str("hardening/value")?),
+        )
+        .try_collect()
+        .await?;
+    assert_eq!(rows.len(), probe_values().len(), "every fact must scan");
+
+    for row in rows {
+        let from_bytes = row.sort_key(&Manifest::default())?;
+        let from_fields = default_sort_key(&row.to_owned()?);
+        assert_eq!(
+            from_bytes,
+            from_fields,
+            "stored-byte and field-derived sort keys diverged for {:?}",
+            row.to_owned()?
+        );
+    }
+    Ok(())
+}
+
+/// The merge dedup fingerprint rests on the sort key identifying the value
+/// exactly: same `(the, of, is)` means same key, and any difference in the
+/// value — including a TYPE difference over identical raw bytes — must
+/// change it.
+#[tokio::test]
+async fn it_separates_sort_keys_by_value_identity() -> Result<()> {
+    let the = Relation::from_str("hardening/value")?;
+    let of = entity(1);
+    let fact = |is: Value| Fact {
+        the: the.clone(),
+        of: of.clone(),
+        is,
+        cause: None,
+    };
+
+    // Same raw payload bytes, different types: must not collide.
+    let lookalikes = [
+        Value::String("5".into()),
+        Value::Bytes(b"5".to_vec()),
+        Value::UnsignedInt(5),
+    ];
+    for (a, left) in lookalikes.iter().enumerate() {
+        for (b, right) in lookalikes.iter().enumerate() {
+            let equal =
+                default_sort_key(&fact(left.clone())) == default_sort_key(&fact(right.clone()));
+            assert_eq!(
+                equal,
+                a == b,
+                "sort key identity must track value identity: {left:?} vs {right:?}"
+            );
+        }
+    }
+
+    // Identical facts agree.
+    assert_eq!(
+        default_sort_key(&fact(Value::String("same".into()))),
+        default_sort_key(&fact(Value::String("same".into()))),
+    );
+    Ok(())
+}
+
+/// The URI parse memo must be invisible: a memo hit returns exactly what a
+/// fresh parse returns, including `url`'s normalizations, and survives the
+/// capacity-clear cycle.
+#[tokio::test]
+async fn it_memoizes_uri_parses_transparently() -> Result<()> {
+    // Normalizing input: `url` appends the trailing slash. The first parse
+    // (miss) and second parse (hit) must agree on the normalized form.
+    let normalizing = "https://example.com";
+    let first = Uri::from_str(normalizing)?;
+    let second = Uri::from_str(normalizing)?;
+    assert_eq!(first, second);
+    assert_eq!(first.to_string(), "https://example.com/");
+    assert_eq!(first.key_bytes()?, second.key_bytes()?);
+
+    // Opaque-path entity forms round-trip verbatim.
+    for uri in [
+        "entity:abcdef",
+        "did:key:z6Mk2WiNvjBbuWZ8jYNmFzh4uFyt8iqwpDND6ymg6KnKzchw",
+        "did:web:example.org",
+    ] {
+        let parsed = Uri::from_str(uri)?;
+        assert_eq!(parsed.to_string(), uri);
+        assert_eq!(Uri::from_str(uri)?, parsed, "hit must equal miss");
+    }
+
+    // Failures stay failures on retry (nothing poisonous is cached).
+    assert!(Uri::from_str("not a uri with spaces").is_err());
+    assert!(Uri::from_str("not a uri with spaces").is_err());
+
+    // Push far past the memo capacity so it clears mid-run, then re-parse
+    // an early URI: the post-clear parse must still agree.
+    let early = Uri::from_str("entity:early")?;
+    for n in 0..5000u32 {
+        let _ = Uri::from_str(&format!("entity:cycle-{n}"))?;
+    }
+    assert_eq!(Uri::from_str("entity:early")?, early);
+    Ok(())
+}
+
+/// Among rows no revision tagged, the cardinality-one election
+/// (`FactView::elect`) prefers the higher cause, symmetrically:
+/// whichever argument order two replicas fold the same rows in, the same
+/// row survives. (Versioned rows are decided by their versions first; the
+/// unit tests beside `elect` pin that tier.) This policy used to be
+/// hardcoded in the query engine's winner loop; it now lives with the
+/// value layer, and this pins its semantics where they are owned.
+#[tokio::test]
+async fn it_elects_the_higher_cause_in_either_order() -> Result<()> {
+    let attr = Relation::from_str("person/name").expect("valid attribute");
+    let of = entity(1);
+
+    let older = Fact {
+        the: attr.clone(),
+        of: of.clone(),
+        is: Value::String("Alice".into()),
+        cause: Some(Cause([1u8; 32])),
+    };
+    let newer = Fact {
+        the: attr,
+        of,
+        is: Value::String("Alicia".into()),
+        cause: Some(Cause([2u8; 32])),
+    };
+
+    let winner = FactView::from(older.clone()).elect(newer.clone().into())?;
+    assert_eq!(winner.cause().cloned(), newer.cause, "higher cause wins");
+    let winner = FactView::from(newer.clone()).elect(older.into())?;
+    assert_eq!(
+        winner.cause().cloned(),
+        newer.cause,
+        "the election is commutative"
+    );
+    Ok(())
+}
+
+/// Equal causes fall to the fact-hash tiebreaker, which must also be
+/// order-insensitive; and a caused row must beat an uncaused one.
+#[tokio::test]
+async fn it_breaks_election_ties_deterministically() -> Result<()> {
+    let attr = Relation::from_str("person/name").expect("valid attribute");
+    let of = entity(2);
+
+    let a = Fact {
+        the: attr.clone(),
+        of: of.clone(),
+        is: Value::String("Alice".into()),
+        cause: Some(Cause([1u8; 32])),
+    };
+    let b = Fact {
+        the: attr.clone(),
+        of: of.clone(),
+        is: Value::String("Alicia".into()),
+        cause: Some(Cause([1u8; 32])),
+    };
+
+    let ab = FactView::from(a.clone()).elect(b.clone().into())?;
+    let ba = FactView::from(b.clone()).elect(a.clone().into())?;
+    assert_eq!(
+        Cause::from(&ab.to_owned()?),
+        Cause::from(&ba.to_owned()?),
+        "the fact-hash tiebreak elects the same row in either order"
+    );
+
+    let uncaused = Fact {
+        the: attr,
+        of,
+        is: Value::String("Anon".into()),
+        cause: None,
+    };
+    let winner = FactView::from(uncaused.clone()).elect(a.clone().into())?;
+    assert_eq!(
+        winner.cause().cloned(),
+        a.cause,
+        "a caused row beats an uncaused one"
+    );
+    Ok(())
+}

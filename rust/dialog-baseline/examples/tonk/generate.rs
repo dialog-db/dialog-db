@@ -11,7 +11,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use dialog_artifacts::Value;
+use dialog_corpus::Value;
 use rand::{Rng as _, SeedableRng as _};
 use rand_chacha::ChaCha8Rng;
 

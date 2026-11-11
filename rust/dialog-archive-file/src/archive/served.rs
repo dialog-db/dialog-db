@@ -12,12 +12,12 @@ use std::any::TypeId;
 use std::ops::Range;
 use std::sync::Arc;
 
-use dialog_artifacts::{
+use dialog_capability::{Provider, Resume};
+use dialog_common::{Blake3Hash, Buffer};
+use dialog_corpus::{
     ATTRIBUTE_KEY_TAG, BLOB_KEY_TAG, COVERAGE_KEY_TAG, Datum, ENTITY_KEY_TAG, HISTORY_KEY_TAG,
     State, VALUE_KEY_TAG,
 };
-use dialog_capability::{Provider, Resume};
-use dialog_common::{Blake3Hash, Buffer};
 use dialog_search_tree::nodes::{Node, Preload, Read, Write, decode};
 use dialog_search_tree::{
     DialogSearchTreeError, KeyParts, Manifest, NodeRows, PersistentNode, RowsKind,

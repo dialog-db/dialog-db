@@ -54,13 +54,13 @@ mod native {
     use std::path::{Path, PathBuf};
     use std::time::SystemTime;
 
-    use dialog_artifacts::history::{Edition, Record};
-    use dialog_artifacts::tree::{ArtifactTree, fetch_spilled};
-    use dialog_artifacts::{State, Value, history_region_range};
     use dialog_baseline::nodes::TreeNode;
     use dialog_baseline::replica::Replica;
     use dialog_capability::{Did, Subject};
     use dialog_common::{Blake3Hash, Buffer};
+    use dialog_corpus::history::{Edition, Record};
+    use dialog_corpus::tree::{Corpus, fetch_spilled};
+    use dialog_corpus::{State, Value, history_region_range};
     use dialog_effects::archive::prelude::ArchiveScope;
     use dialog_query::{DeductiveRule, InductiveRule};
     use dialog_search_tree::NodeBody;
@@ -277,7 +277,7 @@ mod native {
             // The replica answers every catalog's reads, so any will do.
             let did: Did = "did:key:zTonkDataset".parse()?;
             let catalog = ArchiveScope::new(Subject::from(did)).index();
-            let tree = ArtifactTree::at(catalog.clone(), head.clone());
+            let tree = Corpus::at(catalog.clone(), head.clone());
             let (from, to) = history_region_range();
             let stream = tree.stream_range(from..=to, &replica);
             futures_util::pin_mut!(stream);

@@ -14,10 +14,10 @@ use super::adornment::Adornment;
 use super::fixpoint::Continuation;
 use super::plan_cache::PlanCache;
 use crate::DeductiveRule;
-use crate::artifact::{ArtifactsRelation, Entity};
 use crate::attribute::query::AttributeQuery;
 use crate::attribute::{AttributeDescriptor, The};
 use crate::concept::descriptor::{ConceptDescriptor, ConceptFieldDescriptor};
+use crate::corpus::{CorpusRelation, Entity};
 use crate::environment::Environment;
 use crate::parameters::Parameters;
 use crate::planner::Header;
@@ -97,7 +97,7 @@ pub struct Exact {
     /// The covering rule, concluding the selecting concept.
     pub rule: DeductiveRule,
     /// The attributes the rule is the only source of.
-    pub attributes: Vec<ArtifactsRelation>,
+    pub attributes: Vec<CorpusRelation>,
 }
 
 impl ConceptRules {

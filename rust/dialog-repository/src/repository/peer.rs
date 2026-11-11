@@ -36,7 +36,7 @@ use crate::{
     AddAddressError, ConnectError, ConnectedBranch, ConnectedReplica, DiscoverContactError,
     SiteAddress,
 };
-use dialog_artifacts::Entity;
+use dialog_corpus::Entity;
 use dialog_did_web::Discover;
 use dialog_remote_ucan::UcanAddress;
 
@@ -633,8 +633,8 @@ mod tests {
     use crate::helpers::test_repo;
     use crate::schema::{self, DidExt as _};
     use crate::{AddAddressError, Branch, REGISTRY, RepositoryMemoryExt as _, SiteAddress};
-    use dialog_artifacts::Entity;
     use dialog_capability::Subject;
+    use dialog_corpus::Entity;
     use dialog_effects::MethodExt as _;
     use dialog_effects::peer::PeerAddress;
     use dialog_effects::peer::prelude::*;

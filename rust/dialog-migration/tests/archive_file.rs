@@ -7,10 +7,8 @@
 use std::str::FromStr;
 
 use dialog_archive_file::{FILE_NAME, FileArchive};
-use dialog_artifacts::{
-    Artifact, ArtifactSelector, Changes, Entity, Instruction, Pick, Relation, Value,
-};
 use dialog_capability::Subject;
+use dialog_corpus::{Changes, Entity, Fact, Instruction, Pick, Relation, Selector, Value};
 use dialog_effects::storage::{Directory as At, Location};
 use dialog_migration::archive_file::{BlockSource, Directory, transcode_spaces};
 use dialog_peer::helpers::{Seed, open_peer_as, test_owned};
@@ -65,9 +63,9 @@ macro_rules! open {
 
 macro_rules! select_all {
     ($operator:expr, $branch:expr) => {{
-        let mut rows: Vec<Artifact> = $branch
+        let mut rows: Vec<Fact> = $branch
             .claims()
-            .select(ArtifactSelector::new().the(Relation::from_str("person/name")?))
+            .select(Selector::new().the(Relation::from_str("person/name")?))
             .to_owned()
             .perform(&$operator)
             .await?
@@ -93,7 +91,7 @@ async fn it_transcodes_a_replica_the_fs_provider_wrote() -> anyhow::Result<()> {
                 .map(|row| {
                     let entity = format!("did:test:person-{}", (commit * 7 + row) % 60);
                     Ok(Instruction::Assert(
-                        Artifact {
+                        Fact {
                             the: Relation::from_str("person/name")?,
                             of: Entity::from_str(&entity)?,
                             is: Value::String(format!("name {commit}.{row}")),
@@ -178,7 +176,7 @@ async fn it_migrates_a_replica_as_an_application_would() -> anyhow::Result<()> {
             let changes: Changes = (0..10)
                 .map(|row| {
                     Ok(Instruction::Assert(
-                        Artifact {
+                        Fact {
                             the: Relation::from_str("person/name")?,
                             of: Entity::from_str(&format!(
                                 "did:test:person-{}",

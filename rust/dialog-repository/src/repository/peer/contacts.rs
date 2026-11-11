@@ -8,7 +8,7 @@
 //! not yet proven against its caller's grants: what is recorded is what
 //! code holding the environment wrote.
 
-use dialog_artifacts::{Changes, Entity};
+use dialog_corpus::{Changes, Entity};
 use dialog_effects::peer::PeerAddress;
 use dialog_query::{EvaluationError, Output as _, Query, Statement as _, Term};
 

@@ -2,7 +2,7 @@
 
 use std::sync::mpsc::Sender;
 
-use dialog_artifacts::{Datum, DialogArtifactsError, Key, State};
+use dialog_corpus::{Datum, DialogCorpusError, Key, State};
 use dialog_effects::archive::prelude::CatalogScope;
 use dialog_search_tree::{Entry, Key as TreeKey, NodeBody, PersistentNode, into_owned, load_node};
 use dialog_storage::Blake3Hash;
@@ -38,7 +38,7 @@ pub enum TreeNode {
 ///
 /// This worker loads individual tree nodes on-demand as the UI navigates
 /// the probabilistic search tree structure.
-pub struct ArtifactsHierarchy {
+pub struct FactsHierarchy {
     /// The session the tree's blocks load through
     storage: Arc<DiagnoseSession>,
     /// The catalog the tree's nodes live in
@@ -47,7 +47,7 @@ pub struct ArtifactsHierarchy {
     tx: Sender<WorkerMessage>,
 }
 
-impl ArtifactsHierarchy {
+impl FactsHierarchy {
     /// Creates a new hierarchy worker.
     ///
     /// # Arguments
@@ -110,7 +110,7 @@ impl ArtifactsHierarchy {
 
             tx.send(WorkerMessage::Node { hash, node }).unwrap();
 
-            Ok(()) as Result<_, DialogArtifactsError>
+            Ok(()) as Result<_, DialogCorpusError>
         });
     }
 }

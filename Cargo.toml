@@ -17,7 +17,7 @@ strip = "debuginfo"
 [workspace]
 members = [
     "rust/dialog-archive-file",
-    "rust/dialog-artifacts",
+    "rust/dialog-corpus",
     "rust/dialog-baseline",
     "rust/dialog-capability",
     "rust/dialog-credentials",
@@ -213,14 +213,14 @@ zmij = "1"
 
 [workspace.dependencies.dialog-archive-file]
 path = "./rust/dialog-archive-file"
-version = "0.4.0-rc.3"
+version = "0.4.0-rc.7"
 
 [workspace.dependencies.dialog-migration]
 path = "./rust/dialog-migration"
-version = "0.4.0-rc.3"
+version = "0.4.0-rc.7"
 
-[workspace.dependencies.dialog-artifacts]
-path = "./rust/dialog-artifacts"
+[workspace.dependencies.dialog-corpus]
+path = "./rust/dialog-corpus"
 version = "0.4.0-rc.7"
 
 [workspace.dependencies.dialog-capability]

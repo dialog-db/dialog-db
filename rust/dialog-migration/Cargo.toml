@@ -22,7 +22,7 @@ publish = false
 archive-file = [
     "dep:base58",
     "dep:dialog-archive-file",
-    "dep:dialog-artifacts",
+    "dep:dialog-corpus",
     "dep:dialog-common",
     "dep:dialog-search-tree",
 ]
@@ -34,14 +34,14 @@ path = "src/bin/dialog-migrate.rs"
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 base58 = { workspace = true, optional = true }
 dialog-archive-file = { workspace = true, optional = true }
-dialog-artifacts = { workspace = true, optional = true }
+dialog-corpus = { workspace = true, optional = true }
 dialog-common = { workspace = true, optional = true }
 dialog-search-tree = { workspace = true, optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 anyhow = { workspace = true }
 dialog-archive-file = { workspace = true }
-dialog-artifacts = { workspace = true }
+dialog-corpus = { workspace = true }
 dialog-capability = { workspace = true }
 dialog-effects = { workspace = true }
 # The crate itself with every migration, so its tests run whatever features

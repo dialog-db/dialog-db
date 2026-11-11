@@ -72,7 +72,7 @@ pub struct FrameAttribution {
     /// the leaf pacing compares against `max_segment`.
     pub weight: usize,
     /// The entries by key layout (the key type's layout id, a region tag
-    /// for the artifact tree), for telling which region's entries fill the
+    /// for the fact tree), for telling which region's entries fill the
     /// frame.
     pub layouts: BTreeMap<u8, LayoutShare>,
 }

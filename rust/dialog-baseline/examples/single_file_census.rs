@@ -80,12 +80,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
-use dialog_artifacts::history::{Edition, Record};
-use dialog_artifacts::tree::{ArtifactTree, fetch_spilled};
-use dialog_artifacts::{
-    ATTRIBUTE_KEY_TAG, Artifact, BLOB_KEY_TAG, Datum, ENTITY_KEY_TAG, Instruction, Key, Pick,
-    Relation, State, VALUE_KEY_TAG, history_region_range,
-};
 use dialog_baseline::metered::Meter;
 use dialog_baseline::nodes::TreeNode;
 use dialog_baseline::replica::Replica;
@@ -93,6 +87,12 @@ use dialog_baseline::repo::DialogRepo;
 use dialog_baseline::se::{SeLog, se_instructions};
 use dialog_capability::{Did, Subject};
 use dialog_common::{Blake3Hash, Buffer};
+use dialog_corpus::history::{Edition, Record};
+use dialog_corpus::tree::{Corpus, fetch_spilled};
+use dialog_corpus::{
+    ATTRIBUTE_KEY_TAG, BLOB_KEY_TAG, Datum, ENTITY_KEY_TAG, Fact, Instruction, Key, Pick, Relation,
+    State, VALUE_KEY_TAG, history_region_range,
+};
 use dialog_effects::archive::prelude::ArchiveScope;
 use dialog_search_tree::{
     Entry, Key as TreeKey, Link, Manifest, NodeBody, NoveltyBuffer, NoveltyEntry, NoveltyOp,
@@ -1020,7 +1020,7 @@ fn history_counts(
     roots: &[Blake3Hash],
     nodes: &HashMap<Blake3Hash, TreeNode>,
 ) -> anyhow::Result<HashMap<Blake3Hash, usize>> {
-    use dialog_artifacts::HISTORY_KEY_TAG;
+    use dialog_corpus::HISTORY_KEY_TAG;
     let mut counts: HashMap<Blake3Hash, usize> = HashMap::new();
     for root in roots {
         let mut stack = vec![(root.clone(), false)];
@@ -1102,7 +1102,7 @@ fn history(directory: &Path) -> anyhow::Result<Vec<Vec<Instruction>>> {
         // The replica answers every catalog's reads, so any catalog will do.
         let did: Did = "did:key:zSingleFileCensus".parse()?;
         let catalog = ArchiveScope::new(Subject::from(did)).index();
-        let tree = ArtifactTree::at(catalog.clone(), head.clone());
+        let tree = Corpus::at(catalog.clone(), head.clone());
         let (from, to) = history_region_range();
         let stream = tree.stream_range(from..=to, &replica);
         futures_util::pin_mut!(stream);
@@ -1135,7 +1135,7 @@ fn history(directory: &Path) -> anyhow::Result<Vec<Vec<Instruction>>> {
                 }
                 None => claim.the,
             };
-            let artifact = Artifact {
+            let artifact = Fact {
                 the,
                 of: claim.of,
                 is: claim.is,

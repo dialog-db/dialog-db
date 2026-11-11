@@ -14,7 +14,7 @@
 //!
 //! - **SQLite** modeling the dialog information model faithfully: one
 //!   `facts` table whose primary key is the EAV ordering, plus secondary
-//!   AEV and VAE indexes — the exact three orderings `dialog-artifacts`
+//!   AEV and VAE indexes — the exact three orderings `dialog-corpus`
 //!   maintains in its probabilistic search tree.
 //! - **dialog-db** through a repository branch ([`repo::DialogRepo`]):
 //!   `commit` and `select`, over both volatile (in-memory) and native
@@ -43,7 +43,7 @@ use std::str::FromStr;
 
 use anyhow::Result;
 use base58::ToBase58;
-use dialog_artifacts::{Artifact, Changes, Entity, Instruction, Relation, Update as _, Value};
+use dialog_corpus::{Changes, Entity, Fact, Instruction, Relation, Update as _, Value};
 use dialog_peer::{Peer, Session};
 use dialog_storage::NativeTempSpace;
 use dialog_storage::provider::storage::VolatileSpace;
@@ -315,23 +315,23 @@ impl DialogFacts {
     /// Every fact matching `selector`, materialized.
     pub async fn collect(
         &self,
-        selector: dialog_artifacts::ArtifactSelector<dialog_artifacts::selector::Constrained>,
-    ) -> Result<Vec<Artifact>> {
+        selector: dialog_corpus::Selector<dialog_corpus::selector::Constrained>,
+    ) -> Result<Vec<Fact>> {
         with_repo!(self, repo => repo.collect(selector).await)
     }
 }
 
 /// The two facts a row stands for: its entity's name and role.
-pub(crate) fn artifacts_for(row: &FactRow) -> Result<[Artifact; 2]> {
+pub(crate) fn facts_for(row: &FactRow) -> Result<[Fact; 2]> {
     let entity = Entity::from_str(&row.entity)?;
     Ok([
-        Artifact {
+        Fact {
             the: Relation::from_str(NAME_ATTRIBUTE)?,
             of: entity.clone(),
             is: Value::String(row.name.clone()),
             cause: None,
         },
-        Artifact {
+        Fact {
             the: Relation::from_str(ROLE_ATTRIBUTE)?,
             of: entity,
             is: Value::String(row.role.clone()),
@@ -345,8 +345,7 @@ pub(crate) fn instructions_for(rows: &[FactRow]) -> Result<Vec<Instruction>> {
     let mut instructions = Vec::with_capacity(rows.len() * 2);
     for row in rows {
         instructions.extend(
-            artifacts_for(row)?
-                .map(|artifact| Instruction::Assert(artifact, dialog_artifacts::Pick::All)),
+            facts_for(row)?.map(|fact| Instruction::Assert(fact, dialog_corpus::Pick::All)),
         );
     }
     Ok(instructions)

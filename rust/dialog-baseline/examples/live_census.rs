@@ -20,13 +20,13 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use dialog_artifacts::{Datum, Key, State};
 use dialog_baseline::metered::Meter;
 use dialog_baseline::nodes::walk;
 use dialog_baseline::repo::DialogRepo;
 use dialog_baseline::se::SeLog;
 use dialog_capability::Provider;
 use dialog_common::{Blake3Hash, Buffer, ConditionalSync};
+use dialog_corpus::{Datum, Key, State};
 use dialog_effects::archive::Load;
 use dialog_effects::archive::prelude::CatalogScope;
 use dialog_search_tree::{NodeBody, Value as TreeValue, into_owned};

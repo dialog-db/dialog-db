@@ -6,7 +6,7 @@
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
 use crate::InductiveRule;
-use crate::artifact::Type as ValueType;
+use crate::corpus::Type as ValueType;
 use crate::error::TypeError;
 use crate::rule::InductiveRuleDescriptor;
 use crate::type_system::Primitive;

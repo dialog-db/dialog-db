@@ -144,7 +144,7 @@ DIALOG_SOAK_SEED=<seed> cargo run -p dialog-soak --release -- run --scenario joi
 ```
 
 The baselines are recorded from CI's own run, not a developer machine:
-download the `soak-current` artifact the gate uploads and copy its
+download the `soak-current` upload the gate makes and copy its
 reports over `soak/baseline`, the way `perf/baseline` is kept.
 
 ## Reading a report

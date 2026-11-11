@@ -56,7 +56,7 @@ pub(crate) fn sections_of(kind: u8) -> &'static [Section] {
 
 /// How many token slots a key of `form` splits into.
 pub(crate) fn slots_of(form: u8) -> usize {
-    use dialog_artifacts::{
+    use dialog_corpus::{
         ATTRIBUTE_KEY_TAG, COVERAGE_KEY_TAG, ENTITY_KEY_TAG, HISTORY_KEY_TAG, VALUE_KEY_TAG,
     };
     match form {
@@ -564,7 +564,7 @@ mod tests {
 
     #[test]
     fn it_reads_back_rows_written_whole_and_against_a_base() -> io::Result<()> {
-        let form = dialog_artifacts::ENTITY_KEY_TAG as u32;
+        let form = dialog_corpus::ENTITY_KEY_TAG as u32;
         // Ids as a real leaf has them: an entity column that rises, the
         // rest scattered, so the whole rows do not collapse into runs.
         let base = segment(

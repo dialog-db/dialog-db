@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use std::io::{BufRead as _, BufReader, BufWriter, Write as _};
 use std::path::Path;
 
-use dialog_artifacts::Value;
+use dialog_corpus::Value;
 use serde::{Deserialize, Serialize};
 
 /// One line of a dataset.

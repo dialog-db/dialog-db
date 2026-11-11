@@ -68,7 +68,7 @@ impl Version {
     /// deterministic name, not a resolvable key DID. If the convention
     /// ever changes, it changes everywhere at once.
     ///
-    /// Returned as a string: `Entity` lives in `dialog-artifacts`, which
+    /// Returned as a string: `Entity` lives in `dialog-corpus`, which
     /// depends on this crate, so the parse happens there (see
     /// `Version::entity`).
     pub fn entity_did(&self) -> String {
