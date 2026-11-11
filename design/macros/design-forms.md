@@ -253,10 +253,30 @@ Nodes the prelude and the examples need, in the shape of the example:
 | `:tuple` | `items` | `[a b]` |
 | `:repeat`, `:rest` | `of`; `name` | `p ...`, `...?fields`, in a pattern |
 
+**Most of these nodes are in dialog already** (Irakli, the same sitting; checked in `rust/dialog-query/src`):
+
+| the example | dialog-query | written as a map today |
+|---|---|---|
+| `:application`, `operator`, `operand` | `Proposition`: `ConceptQuery { predicate, terms }`, `FormulaQuery`, `Constraint` | `{ "assert": …, "where": … }` |
+| `:parameters`, `terms` | `Parameters`, a map from name to `Term` | the `where` map |
+| `:variable`, `:blank` | `Term::Variable { name }`, with and without a name | `{ "?": { "name": "t" } }`, `{ "?": {} }` |
+| `:constant` | `Term::Constant(Value)` | the value |
+| what must and must not hold | `Premise::Assert`, `Premise::Unless(Negation)` | a rule's `when` and `unless` lists |
+| a rule | `DeductiveRule`, `InductiveRule` | `{ "deduce" or "assert!": …, "when": […], "unless": […] }` |
+
+They are named and versioned already too. A rule's identity is a merkle reference of its canonical spelling, in which variables are renamed by structure and premises sorted (`rule/canonical.rs`), so neither a name nor the order of premises is in it. A stored rule is `{ "format": 3, "rule": … }`, and a reader refuses a format newer than its own (`rule/body.rs`).
+
+So the tree for what dialog runs exists. `kernel.rs` in the proof of concept is a second copy of it. What dialog's forms do not have is what the notation adds before that point:
+
+- an operator by name, `'todo`: dialog's `ConceptQuery` holds the concept itself, inlined;
+- a term that is an application, a map or a tuple: a `Term` is a variable or a constant;
+- a rule of several heads, a head that reports, and `unless` over more than one proposition;
+- `expand`, `syntax`, `p ...` and `...?rest`: the forms a rule about syntax is made of.
+
 Two things the example does not yet say, both from the count above:
 
 - **An operator is a node.** 20 of the 151 applications have a variable for a head, `(?name ?this ...?fields)`.
-- **Where several parts without a label go.** 38 of 151 have several, and `terms` is a map. Whatever the answer, it cannot depend on how many there are: the pattern `(when ?premise ...)` has to meet `(when A)` and `(when A B)` as one shape.
+- **Where several parts without a label go.** 38 of 151 have several, and `terms` is a map. Whatever the answer, it cannot depend on how many there are: the pattern `(when ?premise ...)` has to meet `(when A)` and `(when A B)` as one shape. Dialog's own answer for a rule is a field a run: `when` and `unless` are lists in a map. That covers `rule`, `when` and `unless`. It leaves `query`, `all`, `syntax`, `concept`, and patterns.
 
 Not decided.
 
