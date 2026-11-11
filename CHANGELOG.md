@@ -16,6 +16,7 @@ says how to cut a release.
 
 ### A download can bring along only what the replica holds, and a pull can retry
 
+[#775](https://github.com/dialog-db/dialog-db/pull/775),
 [design/held-across-pull.md](./design/held-across-pull.md).
 
 A pull that adopts an upstream head by root (a fast-forward, a rival
