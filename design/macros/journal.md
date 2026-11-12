@@ -4,8 +4,8 @@
 
 |  | Understanding | Activity |
 |---|---|---|
-| **Status** | The kernel and the core forms run on a real branch through `rust/dialog-notation` ([poc.md](poc.md)); the prelude is rules only. The syntax tree is built, apart from the notation as parsed, and kept as data: maps that say their `type` ([design-forms.md](design-forms.md#the-syntax-tree)). A struct is a value and, with a variable in it, a pattern, which is a topic of its own with an agent on it (#777). Rules of several heads are #776. Expanding and compiling still read the notation as parsed, and `kernel.rs` still copies dialog's forms. | **Designing.** Direction decided by the maintainer. A proof of concept runs. A name resolves to a concept, by the maintainer; the pass that does it is not built. |
-| **Agenda** | What a name with two referents does where an application fits both: elect, as tonk does, or keep both and refuse, as Unison does (H7, H8). Whether a concept's field names belong to the name (H9). How a query reports. Whether dialog can be asked for an expansion a form at a time (H3). What a read with no pick reads. | Next: that answer, then `concept` defines a dialog concept and a name, and an application resolves to it; the expander and the compiler read the tree; dialog's own forms replace `kernel.rs` once a parameter holds a pattern. Not waiting: a helper rule for a negated conjunction. Waiting on patterns (#777): a struct as a term, `entity/derive` over a record, syntax kept on the branch. Waiting on #776: a rule of several heads. |
+| **Status** | The kernel and the core forms run on a real branch through `rust/dialog-notation` ([poc.md](poc.md)); the prelude is rules only. The syntax tree is built, apart from the notation as parsed, and kept as data: maps that say their `type` ([design-forms.md](design-forms.md#the-syntax-tree)). A struct is a value and, with a variable in it, a pattern, which is a topic of its own with an agent on it (#777). Rules of several heads are #776. Expanding and compiling still read the notation as parsed, and `kernel.rs` still copies dialog's forms. | **Designing.** Direction decided by the maintainer. A proof of concept runs. A name resolves to a concept, one referent under `last` and no overloads, by the maintainer; the pass that does it is not built. |
+| **Agenda** | What a name refers to: the concept's entity, as in tonk, or the definition (H9). How a query reports. Whether dialog can be asked for an expansion a form at a time (H3). What a read with no pick reads. | Next: that answer, then `concept` defines a dialog concept and a name under `last`, and an application resolves to it; the expander and the compiler read the tree; dialog's own forms replace `kernel.rs` once a parameter holds a pattern. Not waiting: a helper rule for a negated conjunction. Waiting on patterns (#777, #778): a struct as a term, `entity/derive` over a record, syntax kept on the branch. Waiting on #776: a rule of several heads. |
 
 ## Candidate problems
 
@@ -339,4 +339,16 @@ Not examined yet. They are columns, not recommendations.
 - Adding has costs that can be counted: his one rule is four, a write lands in both domains, and a query reports each todo twice, since a report shows relations.
 
 **Decided.** Not decided: what a conflict does. The agent's reading: replace per name and labels, refuse a conflict with its candidates, and say which by writing the relation. Refusing is the one that can later become either other.
+
+## 2026-11-11, Designing: the last write wins
+
+**Asked.** Whether defining `todo` again replaces or adds. Irakli: a name using last write wins is fine, and overloads need not be supported, since commands more or less offer a solution for that.
+
+**Learned.**
+
+- With one referent a name, H7, H8 and H10 have nothing left to decide. They are closed by the decision, not by evidence.
+- The agent's reading of the remark on commands: a command is defined by the rules that read it, and several rules read one command by different shapes. That is overloading where behaviour differs, without two concepts under one name. Not confirmed with him.
+- What the decision leaves is where field names live. A concept's entity does not say them, and tonk reads a concept back from every `db.concept.with/*` claim on its entity, so two names over the same attributes get each other's field names (H9, read from the code, not run).
+
+**Decided.** By the maintainer: a name has one referent under `last`; no overloads. Not decided: whether the referent is the concept's entity or the definition. The patterns agent, which had stopped for lack of usage credits in its second step, was restarted at his word.
 

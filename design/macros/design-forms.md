@@ -352,12 +352,37 @@ It depends on how the second definition stands to the first, and dialog already 
 
 **H10.** What is named is a name and a set of labels. Kept under `last`, a later definition of it replaces, definitions with other labels stand beside it, and the only way to two referents is two written apart. Confirmed in part: `last` replaces in order and keeps both of one round. Not run across two replicas, and no name is keyed by its labels yet.
 
-Refusing a conflict is the one choice that can become either other later without changing what anything already accepted means. Electing and adding both cannot be taken back.
+**Decided 2026-11-11, by the maintainer: the last write wins, and a name is not overloaded.** A name has one referent, read under `last`, as in tonk. A second `todo` replaces the first whatever its labels. Two written apart elect one, by the hash of the value. Commands already give what overloads would: a command is defined by the rules that read it, and several rules read one command by different shapes.
 
-Open:
+So the first column of the table stands, and H7, H8 and H10 are closed by the decision and not by evidence. What it accepts: two replicas that each define `todo` come to one of them after a sync and nothing says so. A stored rule holds the concept and not the name, so nothing installed moves; only text read afterwards does. A warning where a name has two standing referents costs one read with no pick, and refuses nothing.
 
-- Whether a conflict is refused, elected or read as both.
-- How an entity is written where a name stands, `name#hash` in Unison. An entity alone has no field names (H9). Writing the relation always says which.
+The proof of concept does not do this yet. Its concepts are rules about syntax, so two of one name are told apart by labels or refused as ambiguous, which is the overloading just decided against.
+
+### Open: what a name refers to
+
+Tonk's referent is the concept's entity, and a concept's field names are facts on that entity. A concept's entity does not say its field names, so two names over the same attributes share one:
+
+```
+ (concept (todo ?t title: ?x)  (xyz.todo ?t text: …))  ─┐
+                                                        ├─▶ concept:9f…  with/title ─▶ xyz.todo/text
+ (concept (task ?t name: ?x)   (xyz.todo ?t text: …))  ─┘                with/name  ─▶ xyz.todo/text
+```
+
+Tonk reads a concept back by collecting every `db.concept.with/*` claim on the entity (`rust/tonk-schema/src/concept.rs`), so either name gives a concept with both fields, or none if two names for one attribute are refused. Read from the code, not run (H9).
+
+| | the referent is the concept's entity, as in tonk | the referent is the definition |
+|---|---|---|
+| what `id:todo` points at | `concept:…` | `form:…`, the tree of the `concept` form, kept on the branch as the proof of concept already keeps one |
+| where `title:` is found | on the concept's entity, shared with every other name for it | in the definition |
+| two names over the same attributes | 🔴 one entity with both sets of field names | each name has its own |
+| the concept's entity | the referent | worked out from the definition, as now |
+| what else the definition holds | nothing; a description is a fact beside it | whatever the form says: a description, and a body that is not one attribute a field, such as `list-item` |
+| needs | nothing new | a tree read from the branch when a name is resolved, which is H3's cost |
+
+Not decided.
+
+Also open:
+
 - Which of the proof of concept's concepts are dialog's. `todo` and `author` are: every field is one attribute of the one entity. `list-item` is not: its entity is the value of the attribute it reads. It is a derived concept, a rule that concludes one.
 
 ## What to store, and how
@@ -425,7 +450,7 @@ H2 is now a requirement in the table above, not a hypothesis. H3 and H4 stand.
 
 ## Next
 
-1. What a name with two referents does, above. Then `concept` defines a concept and a name, an application resolves to it, the expander and the compiler read the tree, and `kernel.rs` gives way to dialog's own forms.
+1. What a name refers to, above. Then `concept` defines a concept and a name under `last`, an application resolves to it, the expander and the compiler read the tree, and `kernel.rs` gives way to dialog's own forms.
 2. A struct as a term and `entity/derive` over a record: with [patterns](../patterns/plan.md).
 3. Syntax kept on the branch as trees, and the walker asking the branch.
 4. H3, measured, as a research topic.

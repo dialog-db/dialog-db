@@ -56,17 +56,17 @@
 | a record is an atomic composite value: updated whole, made of other values | opinion | Irakli, 2026-11-11 | decides; a map, a list and a tuple are each one |
 | parsing transforms notation into a syntax tree, which is kept in maps, lists and tuples as each fits | opinion | Irakli, 2026-11-11 | decides; built as `Syntax` over `Data`, which has maps and lists and no tuple yet |
 | a rule about syntax reads any form, and no part has to be labelled to be read | opinion | Irakli, 2026-11-11 | decides; option B is out |
-| a name resolves to a concept's entity, and several concepts may share a name | opinion | Irakli, 2026-11-11 | decides; the proof of concept has a concept as a rule about syntax, which is not this |
+| a name resolves to a concept, has one referent under `last`, and is not overloaded | opinion | Irakli, 2026-11-11 | decides; the proof of concept has a concept as a rule about syntax and overloads by labels, which is not this |
 | a concept's entity is its attributes; its field names are not in it | fact | `ConceptDescriptor::identify`, `rust/dialog-query/src/concept/descriptor.rs`; `notes/notation.md` | holds |
 | tonk keeps one referent a name, and a concept's field names on the concept's entity | fact | `db.name/referent`, cardinality one, `rust/tonk-core/src/meta.rs`; `db.concept.with/<field>`, `rust/tonk-schema/src/concept.rs` | holds at tonk bfb2d72 |
 | Unison keeps a name's two definitions as a conflict, resolves a name by type where exactly one fits, and takes `name#hash` | fact | Unison's language reference: name resolution, type-directed name resolution, identifiers; `docs/codebase-editor-design.markdown` | holds |
 | two concepts of one name are told apart by the labels an application writes | fact | `it_tells_two_concepts_of_one_name_apart_by_the_labels_written` | holds in the proof of concept, by pattern; the same labels over other attributes are refused as ambiguous |
-| one concept per name and signature can be kept as a rule about definitions | hypothesis | H7 of [design-forms.md](design-forms.md): refuted by two replicas defining apart and syncing | open; nothing in dialog refuses a merge |
-| an application that fits two concepts is refused with the candidates, and none is elected | hypothesis | H8 | open; tonk elects by `last` |
-| a concept's field names belong to the name and not to the concept | hypothesis | H9: two definitions that differ only in field names, read back in tonk | open; not run |
+| one concept per name and signature can be kept as a rule about definitions | hypothesis | H7 of [design-forms.md](design-forms.md): refuted by two replicas defining apart and syncing | closed by the decision: the last write wins |
+| an application that fits two concepts is refused with the candidates, and none is elected | hypothesis | H8 | not taken: the maintainer decided on `last` |
+| a concept's field names belong to the name and not to the concept | hypothesis | H9: two names over the same attributes, read back in tonk | open; tonk collects every `db.concept.with/*` claim on the entity (`rust/tonk-schema/src/concept.rs`), read and not run |
 | a name re-pointed and a name claimed twice at once are told apart by what is stored | fact | `it_tells_a_name_that_was_repointed_from_one_claimed_twice` | holds on one replica: `last` replaces in order and keeps both of one round. Not run across two replicas |
 | two top-level writes in one document are in order, and two rules fired in one round are concurrent | fact | the same test, and `it_elects_one_of_two_writes_of_one_round_whatever_their_order` | holds |
-| what is named is a name and a set of labels | hypothesis | H10: a later definition with the same labels replaces, one with other labels stands beside it | open; no name is keyed by labels yet |
+| what is named is a name and a set of labels | hypothesis | H10: a later definition with the same labels replaces, one with other labels stands beside it | not needed: no overloads |
 | the syntax tree of what dialog runs exists in Rust, as maps, named by reference and versioned | fact | `Premise`, `Proposition`, `Parameters`, `Term` in `rust/dialog-query/src`; `rule/canonical.rs`; `FORMAT` in `rule/body.rs` | holds |
 | a rule's identity ignores the order of its premises and the names of its variables | fact | `rust/dialog-query/src/rule/canonical.rs` | holds |
 | tonk parses an application by name and resolves it inline in a later pass | fact | `rust/tonk-analyzer/src/analyzer.rs` in tonk: resolve, then expand | holds |
