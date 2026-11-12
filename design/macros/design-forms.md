@@ -434,7 +434,7 @@ What the notation needs of it, for whoever builds records:
 | the pairs a pattern did not name, bound as a record | `...?rest` |
 | the keys a label writes: an attribute of a domain, and a name of none | `{xyz.todo/text: ?x}`, `{text: ?x}` |
 
-Until then the notation refuses a struct where a term stands, and `entity/derive` stays the two-cell stand-in. H5 below asked whether this is one premise that runs both ways; that it is a pattern in a term is now the maintainer's, and how dialog evaluates one is the patterns topic's to build.
+Built on #778 so far: a struct is a value where a write says one and a pattern in a query of one read (`it_keeps_a_struct_and_takes_it_apart_by_a_pattern`). A struct in a rule is refused, because the proof of concept hands dialog a rule as JSON and a pattern has no written form; `...?rest` in a struct is not read; and `entity/derive` stays the two-cell stand-in. H5 below asked whether this is one premise that runs both ways; that it is a pattern in a term is now the maintainer's, and how dialog evaluates one is the patterns topic's to build.
 
 ## Hypotheses, after the decision
 
@@ -448,7 +448,7 @@ H2 is now a requirement in the table above, not a hypothesis. H3 and H4 stand.
 
 ## Next
 
-1. Take up patterns: the compiler builds dialog's forms in Rust, a struct is a term, `entity/derive` takes a record. A rule that holds a pattern cannot be installed until a stored rule can hold one.
+1. A struct in a rule: the compiler builds dialog's forms in Rust. Then `entity/derive` takes a record. A rule that holds a pattern runs and cannot be installed until a stored rule can hold one.
 2. The expander and the compiler read the tree, an application lowers to a `ConceptQuery` of the definition's concept, and `kernel.rs` gives way to dialog's own forms.
 
 Parked by the maintainer: what decides between two definitions of one signature written apart. `last` elects one.

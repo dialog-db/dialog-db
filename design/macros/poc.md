@@ -44,6 +44,8 @@ text ──read──▶ forms ──expand──▶ kernel rules ──compile�
 - An entity made from what a rule binds. A rule and a top-level write that say the same thing name one entity.
 - Two commands in one document that write one `last` field. The cell holds both claims and elects one by the hash of the value, the same in either order.
 
+- A struct as a field's value, kept and read back, and taken apart by a pattern in a query. This is on the patterns work (#778), merged into this branch.
+
 ## What Dialog-DB cannot run yet
 
 Each of these comes back as `Unsupported`, with the reason. None is approximated.

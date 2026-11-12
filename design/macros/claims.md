@@ -78,6 +78,7 @@
 | a struct with a variable in it is a destructuring pattern, to be had in dialog with records as values | opinion | Irakli, 2026-11-11 | decides; the work is [patterns](../patterns.md), #777 |
 | a parameter holds a pattern, of which a variable and a constant are the leaves | opinion | Irakli, 2026-11-11 | decides; only the new notation needs it, so no stored format or wire change yet |
 | the composite value is `Value::Record` given a structure, dag-cbor under a version byte for now | opinion | Irakli, 2026-11-11, on the agent's advice | decides; the layout to keep is #748's |
+| a struct is a value in a write, and a pattern in a query, from the notation to a branch and back | fact | `it_keeps_a_struct_and_takes_it_apart_by_a_pattern`, on #778 | holds for a query of one read; a struct in a rule is refused by the notation's compiler |
 | a rule can build a record from what it has bound | hypothesis | H5 of [design-forms.md](design-forms.md): confirmed by a record premise planned as a concept query is, running both ways | open; #748 speaks only of reading one |
 | a premise may take parameters that differ by application | fact | `ConceptQuery::schema`, `rust/dialog-query/src/concept/query.rs` | holds |
 | the two-cell `entity/derive` names the entities a record will | hypothesis | refuted by its own definition: a chain of pairs under a seed is not a record's canonical form | refuted; it is a stand-in |

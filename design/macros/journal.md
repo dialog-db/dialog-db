@@ -5,7 +5,7 @@
 |  | Understanding | Activity |
 |---|---|---|
 | **Status** | The kernel and the core forms run on a real branch through `rust/dialog-notation` ([poc.md](poc.md)); the prelude is rules only. The syntax tree is built, apart from the notation as parsed, and kept as data: maps that say their `type` ([design-forms.md](design-forms.md#the-syntax-tree)). A struct is a value and, with a variable in it, a pattern, which is a topic of its own with an agent on it (#777). Rules of several heads are #776. Expanding and compiling still read the notation as parsed, and `kernel.rs` still copies dialog's forms. | **Designing.** Direction decided by the maintainer. A proof of concept runs. A name is kept as a name, what is named and a signature; a definition under it is read `last`; an application resolves by the labels written and a read that fits several is of all. Built and tested, by pattern, in the expander. |
-| **Agenda** | Parked by the maintainer: authority, for two definitions of one signature written apart; `last` elects one until then. How a query reports. Whether dialog can be asked for an expansion a form at a time (H3). What a read with no pick reads. | Next: take up patterns (#778, all four steps committed, its perf gate failing): the compiler builds dialog's forms in Rust, since a pattern has no wire form, and a struct is a term. Then an application lowers to a `ConceptQuery` of the definition's concept. Not waiting: a helper rule for a negated conjunction. Waiting on patterns (#777, #778): a struct as a term, `entity/derive` over a record, syntax kept on the branch. Waiting on #776: a rule of several heads. |
+| **Agenda** | Parked by the maintainer: authority, for two definitions of one signature written apart; `last` elects one until then. How a query reports. Whether dialog can be asked for an expansion a form at a time (H3). What a read with no pick reads. | The notation is on top of patterns (#778, merged in, its perf gate failing): a struct is a value in a write and a pattern in a query of one read. Next: a struct in a rule, which needs the compiler to build dialog's forms in Rust, since a pattern has no wire form; `entity/derive` over a record; then an application lowers to a `ConceptQuery` of the definition's concept. Not waiting: a helper rule for a negated conjunction. Waiting on patterns (#777, #778): a struct as a term, `entity/derive` over a record, syntax kept on the branch. Waiting on #776: a rule of several heads. |
 
 ## Candidate problems
 
@@ -378,4 +378,18 @@ Not examined yet. They are columns, not recommendations.
 - A pattern has no wire form above a leaf. The notation's compiler writes descriptors as JSON and reads them back, so it cannot say a pattern until it builds dialog's forms directly.
 
 **Decided.** By the maintainer: authority is parked. Not decided: whether a stored rule may hold a pattern now, which is a new rule body format.
+
+## 2026-11-11, Designing: on top of patterns
+
+**Asked.** Irakli: the overhead on queries that use no pattern is too much, and that is the patterns work's to fix. The notation can be built on top of patterns meanwhile. And how is the notation evaluated today?
+
+**Learned.**
+
+- It is evaluated by `cargo run -p dialog-notation --example notebook`, over files or standard input, on a repository kept in memory: a document is one transaction, its queries print rows and its warnings print as comments. Nothing else runs it: no session that stays open, no repository on disk, nothing in tonk.
+- Patterns merged into the notation's branch with two conflicts, both lists that each side added to. Every test passed as it was.
+- A struct written as a field's value is a composite kept as a record, and reads back as the struct. With a variable in it, a query of one read takes the kept struct apart by it. The pattern is put into the `ConceptQuery` after dialog has read the rest from JSON, since a pattern has no written form.
+- A blank inside a struct is given a variable of its own, so the row can say what stood there. A pattern that holds a blank cannot be built, and its whole is not under a name the row can ask for.
+- A rule is handed to dialog whole, as JSON, so a struct in a rule is refused as not supported yet. That is the compiler's limit, not dialog's: the same rule built in Rust runs.
+
+**Decided.** By the maintainer: build on patterns now. Built: a struct as a value and as a pattern in a query of one read, `it_keeps_a_struct_and_takes_it_apart_by_a_pattern`.
 
