@@ -37,7 +37,7 @@
 //!     run cold. The yardstick for binding-aware rule-join speculation
 //!     (bead dialog-db-80).
 //! 13. **download** — a second fresh client materializes the entire space
-//!     (`pull().download()`): the eager-replication cost the lazy join
+//!     (`pull(Download::Everything)`): the eager-replication cost the lazy join
 //!     avoids up front but pays incrementally.
 // Measures the one-shot `.commit().publish().perform(..)` the gates were
 // recorded with; moving it to `Branch::transact` is the maintainer's call.
@@ -394,7 +394,10 @@ pub(crate) async fn phases(
     let (client, client_operator) = site.mount("soak-client").await?;
 
     measured("pull", phases, async {
-        client.pull().perform(&client_operator).await?;
+        client
+            .pull(dialog_repository::Download::MinimalRanges)
+            .perform(&client_operator)
+            .await?;
         Ok(())
     })
     .await?;
@@ -503,7 +506,7 @@ pub(crate) async fn phases(
     // the measured window.
     let (concept_client, concept_client_operator) = site.mount("soak-concept").await?;
     concept_client
-        .pull()
+        .pull(dialog_repository::Download::MinimalRanges)
         .perform(&concept_client_operator)
         .await?;
     measured("concept", phases, async {
@@ -531,7 +534,7 @@ pub(crate) async fn phases(
     // round-trip tradeoff the merge-versus-fold decision weighs.
     let (filtered_client, filtered_client_operator) = site.mount("soak-filtered").await?;
     filtered_client
-        .pull()
+        .pull(dialog_repository::Download::MinimalRanges)
         .perform(&filtered_client_operator)
         .await?;
     let closed = (0..scenario.entities)
@@ -562,7 +565,7 @@ pub(crate) async fn phases(
     // subscription parity.
     let (subscribe_client, subscribe_client_operator) = site.mount("soak-subscribe").await?;
     subscribe_client
-        .pull()
+        .pull(dialog_repository::Download::MinimalRanges)
         .perform(&subscribe_client_operator)
         .await?;
     measured("subscribe", phases, async {
@@ -595,7 +598,7 @@ pub(crate) async fn phases(
     // rounds read as overlapped work, not the sum of two sequential runs.
     let (overlap_client, overlap_client_operator) = site.mount("soak-overlap").await?;
     overlap_client
-        .pull()
+        .pull(dialog_repository::Download::MinimalRanges)
         .perform(&overlap_client_operator)
         .await?;
     measured("overlap", phases, async {
@@ -634,7 +637,10 @@ pub(crate) async fn phases(
     // cold. The general rule-join speculation of bead dialog-db-80 is
     // measured against this phase.
     let (rule_client, rule_client_operator) = site.mount("soak-rule").await?;
-    rule_client.pull().perform(&rule_client_operator).await?;
+    rule_client
+        .pull(dialog_repository::Download::MinimalRanges)
+        .perform(&rule_client_operator)
+        .await?;
     let open = (0..scenario.entities)
         .filter(|index| index % 3 == 0)
         .count();
@@ -661,8 +667,7 @@ pub(crate) async fn phases(
     let (downloader, downloader_operator) = site.mount("soak-download").await?;
     measured("download", phases, async {
         downloader
-            .pull()
-            .download()
+            .pull(dialog_repository::Download::Everything)
             .perform(&downloader_operator)
             .await?;
         Ok(())
@@ -691,7 +696,10 @@ pub(crate) async fn phases(
         .perform(&seeded_operator)
         .await?;
     measured("seeded", phases, async {
-        seeded.pull().perform(&seeded_operator).await?;
+        seeded
+            .pull(dialog_repository::Download::MinimalRanges)
+            .perform(&seeded_operator)
+            .await?;
         Ok(())
     })
     .await?;

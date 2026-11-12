@@ -191,7 +191,7 @@ impl Prepared for Pulled {
             // the changed path is read from the archive once, by whichever
             // reads it first, and answered from memory to the rest.
             self.adopter
-                .pull()
+                .pull(dialog_repository::Download::MinimalRanges)
                 .from(&self.upstream)
                 .perform(&self.reader)
                 .await?;

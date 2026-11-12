@@ -14,6 +14,99 @@ says how to cut a release.
 
 ## Unreleased
 
+### A pull says how much it downloads, and can bring along only what the replica holds
+
+[#775](https://github.com/dialog-db/dialog-db/pull/775),
+[design/held-across-pull.md](./design/held-across-pull.md).
+
+A pull that adopts an upstream head by root (a fast-forward, a rival
+merge settled, a reset brought forward) reads none of the head's tree, so
+every leaf the upstream changed is held by reference once the head lands,
+whether the replica held it before or not. A read or a write the replica
+had answered from its own blocks then waits on the peer that holds the
+block, and fails without one: a page rendered from a device's own store
+did not render offline after a sync it had no part in, and an edit that
+had been answered at once took a round trip after every pull. Whether a
+pull did that was decided by a modifier (`pull().download()`) that was
+easy to leave out, and was left out.
+
+How much a pull brings local is now an argument of the pull, with no
+default: `branch.pull(Download::…)`. `Download` is an enum:
+
+- `Download::MinimalRanges`: nothing. The head is adopted by reference,
+  as a bare `pull()` did.
+- `Download::QueriedRanges`: what the replica holds of its head, as the
+  head it would adopt has it. New. `PersistentTree::follow(held, env)`
+  walks the two trees in step and reads a node of the adopted one,
+  fetching what the replica lacks, only where the keys it is routed meet
+  those of a leaf the replica holds.
+- `Download::Operational`: the entity, attribute and value orders and the
+  blob index, as `pull().download().operational()` did.
+- `Download::Ranges(scope)`: the key ranges given, as
+  `pull().download().within(scope)` did.
+- `Download::Everything`: as `pull().download()` did.
+
+Whatever it names is fetched before the head moves, by `perform` and by
+`prepare` alike, and a download that fails leaves the head where it was.
+
+A pull can also be made again when a commit overtakes it.
+`Pull::retry(Limit)` makes a pull that lost its publish merge onto the
+head the commit left and publish that, `Limit::Times(n)` more times or
+`Limit::Unlimited`.
+
+What this changes for you:
+
+- `Branch::pull` takes a `Download`. Write `pull(Download::MinimalRanges)`
+  where you wrote `pull()`, to keep what it did.
+- `Pull::download`, `PullDownload` and its `within` and `operational` are
+  gone: the extent is the pull's argument. `PreparedPull` is already
+  downloaded when `prepare` hands it back, so a caller that ran a
+  download between `prepare` and `commit` drops it.
+- `Branch::download` takes a `Download` too, and its command struct is
+  `DownloadBranch` (it was `Download`, the name the enum now has).
+  `download().operational()` is `download(Download::Operational)`,
+  `download().within(scope)` is `download(Download::Ranges(scope))`, a
+  bare `download()` is `download(Download::Everything)`, and `.of(revision)`
+  is unchanged.
+- `Branch::replicate` takes a `Download`, which every pull it makes uses.
+- `Pull::perform` and `Pull::prepare` are bounded by `PullEnv`, which is
+  `ResolveEnv` and `Provider<Fork<RemoteSite, blob::Read>>`: a download
+  that brings blobs along reads them from the upstream's site. Every
+  environment that could run a pull download satisfies it.
+- With `Download::QueriedRanges`, every key a replica reads or writes
+  from its own blocks before a pull it reads or writes from them after
+  it. A replica that holds every leaf of its head ends holding every leaf
+  of the head it adopts. A range it never read stays by reference however
+  much of it changed, and a replica with no head, or one that holds none
+  of its head's leaves, fetches nothing.
+- `Download::QueriedRanges` brings tree nodes, not what they point at: a
+  spilled value or a blob that a changed leaf newly references is fetched
+  when it is read.
+- A replica's first write to a key it only read still fetches the leaves
+  of the orders it never read that key through. A write reads the leaves
+  it writes to, in the entity and attribute orders and in history.
+- The head stays where it was while a download runs, and reads and
+  commits go on against it. A commit that lands meanwhile makes the pull
+  lose its publish, as before. `Pull::retry` makes it again; without it
+  the pull fails with `PublishError::VersionMismatch`, the head where the
+  commit put it.
+- A `Download::QueriedRanges` that cannot fetch a node fails with
+  `DownloadError::Tree`, a new variant.
+- New: `PersistentTree::follow` in `dialog-search-tree`; `Download`,
+  `DownloadBranch`, `PullEnv`, `Pull::retry`, `Limit` and
+  `DownloadError::Tree` in `dialog-repository`.
+
+Why: a partial replica's promise is that what it read it can read again
+without the network. Adopting by root keeps the cost of a pull independent
+of what the upstream changed, and breaks that promise each time the
+upstream changes something the replica read. Bounding the fetch by what
+the replica holds keeps both. Which of the two a branch wants is not
+something a library can guess, and a modifier that is easy to miss made
+the cheap answer the one a caller got by not deciding: an argument makes
+every pull say. A pull is retried by the pull because a replica that keeps
+writing while it syncs would otherwise have every caller write the same
+loop.
+
 ### `wbg-pool` gives every test's tab focus
 
 [#774](https://github.com/dialog-db/dialog-db/pull/774).
@@ -1741,6 +1834,10 @@ has a tree to canonicalize even when the link itself wrote nothing.
   the same bytes, nothing is rewritten on upgrade, and an older release
   reads everything this one writes. Only Rust names and the crate graph
   move.
+- `Download::QueriedRanges` changes nothing stored or synced: the blocks
+  it fetches are blocks the replica would have fetched at its next read
+  of them, nothing is rewritten on upgrade, and releases on either side
+  read what the other writes. Nothing for an embedder to run.
 - Bounding the caches changes nothing stored or synced: caches hold only
   what a replica can read again, nothing is rewritten on upgrade, and
   releases on either side read what the other writes. Nothing for an

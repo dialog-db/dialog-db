@@ -559,7 +559,10 @@ mod native {
             if n == 0 {
                 begin("pull/join");
             }
-            branch.pull().perform(&operator).await?;
+            branch
+                .pull(dialog_repository::Download::MinimalRanges)
+                .perform(&operator)
+                .await?;
             if n == 0 {
                 end();
             }
@@ -707,7 +710,11 @@ mod native {
                         if n == 1 {
                             begin("pull");
                         }
-                        member.branch.pull().perform(&member.operator).await?;
+                        member
+                            .branch
+                            .pull(dialog_repository::Download::MinimalRanges)
+                            .perform(&member.operator)
+                            .await?;
                         if n == 1 {
                             end();
                         }
@@ -742,7 +749,11 @@ mod native {
         // Every replica has what every other pushed: one more pull each,
         // then the views agree everywhere.
         for member in &members {
-            member.branch.pull().perform(&member.operator).await?;
+            member
+                .branch
+                .pull(dialog_repository::Download::MinimalRanges)
+                .perform(&member.operator)
+                .await?;
         }
         let expected = members[0]
             .branch

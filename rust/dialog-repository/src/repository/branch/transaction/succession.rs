@@ -803,7 +803,10 @@ mod tests {
             .publish()
             .perform(&operator)
             .await?;
-        b.pull().from(&a).perform(&operator).await?;
+        b.pull(crate::Download::MinimalRanges)
+            .from(&a)
+            .perform(&operator)
+            .await?;
         assert_eq!(stored(&b, &operator, &alice).await?, vec![100]);
 
         a.transaction()
@@ -823,8 +826,16 @@ mod tests {
 
         let mut quiesced = false;
         for _ in 0..4 {
-            let pulled_a = a.pull().from(&b).perform(&operator).await?;
-            let pulled_b = b.pull().from(&a).perform(&operator).await?;
+            let pulled_a = a
+                .pull(crate::Download::MinimalRanges)
+                .from(&b)
+                .perform(&operator)
+                .await?;
+            let pulled_b = b
+                .pull(crate::Download::MinimalRanges)
+                .from(&a)
+                .perform(&operator)
+                .await?;
             if pulled_a.is_none() && pulled_b.is_none() {
                 quiesced = true;
                 break;

@@ -138,7 +138,10 @@ async fn it_pushes_and_pulls_via_fs_remote() -> Result<()> {
     assert!(push.is_some(), "fs push should succeed");
 
     // Pull right after push finds no new changes.
-    let pull = branch.pull().perform(&operator).await?;
+    let pull = branch
+        .pull(dialog_repository::Download::MinimalRanges)
+        .perform(&operator)
+        .await?;
     assert!(pull.is_none(), "pull after push should return None");
 
     let results: Vec<_> = branch
@@ -212,7 +215,10 @@ async fn it_shares_an_fs_remote_between_two_repos() -> Result<()> {
         .perform(&operator)
         .await?;
 
-    let pull = bob_branch.pull().perform(&operator).await?;
+    let pull = bob_branch
+        .pull(dialog_repository::Download::MinimalRanges)
+        .perform(&operator)
+        .await?;
     assert!(pull.is_some(), "Bob's pull should find Alice's data");
 
     let results: Vec<_> = bob_branch

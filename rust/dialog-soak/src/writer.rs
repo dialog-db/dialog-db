@@ -70,7 +70,10 @@ pub(crate) async fn phases(
 ) -> Result<()> {
     let (client, operator) = site.mount("soak-writer").await?;
     let operator = &operator;
-    client.pull().perform(operator).await?;
+    client
+        .pull(dialog_repository::Download::MinimalRanges)
+        .perform(operator)
+        .await?;
     // New entities start past the seeded range.
     let mut next = scenario.entities;
 
