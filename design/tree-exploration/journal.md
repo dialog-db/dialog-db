@@ -1,11 +1,11 @@
-# A page cannot show a node's children with their details: journal
+# A consumer that can only query cannot draw a branch's search tree: journal
 
 ## Reflective inquiry
 
 |  | Understanding | Activity |
 |---|---|---|
-| **Status** | *What do we know?* What the tonk inspector shows and where its data comes from. What the resolvers and formulas yield, and what held when a page's needs were tried against them. That only `this` reaches a rule's body. What tonk's reader does that a query did not (five things). What goes wrong with that reader, in the maintainer's words: it was put together in haste and is hard to detangle from the embedder; and what it is woven into (four places, in the third entry). | *Where are we at?* Delimiting. A problem statement is drafted in the top story from the maintainer's two answers and awaits a yes or a correction. |
-| **Agenda** | *What do we need to know?* Whether the draft statement is right. Whether local-or-remote belongs in it. Who else than the inspector asks (asked twice, not answered; the draft names a command line and an agent on the agent's assumption). Open hypotheses in the ledger: a record value reaching a page whole; why a supplied value cannot be pushed into a body. | *Where are we going?* Direction once the statement is accepted: use cases, then approaches as columns, the two parked opinions among them. |
+| **Status** | *What do we know?* The problem, accepted: a consumer that can only query cannot draw a branch's tree, so the one embedder that shows it reads blocks through its own machinery. What it must be able to read, in a bounded number of reads: a node's children with their details, whether each is held, an entry's key in parts with its blob record. That the maintainer wants tree reads to stay permanent, and that the module's own argument says what permanent is for: no invalidation, because a row is never wrong. That a tree read today already yields nothing for a block that is neither held nor reachable. | *Where are we at?* Directing. The statement is accepted. One word in the constraint, "idempotent", is being pinned down before it becomes a criterion. |
+| **Agenda** | *What do we need to know?* Which property the maintainer needs kept: the same query always yields the same rows, or a row once yielded is never wrong (asked, not answered). If the second: whether "held" can be told by a row's presence under a read that does not fetch, which asserts nothing that later turns false; and what tells a subscriber to look again when a block arrives. Open hypotheses in the ledger. | *Where are we going?* Use cases, then the strategy matrix: the status quo, the resolvers as on the draft branch, the maintainer's low-level primitives, the agent's whole-span records, and whatever the contrast gives birth to. |
 
 ## 2026-11-12, Describing: what was tried and what was seen
 
@@ -95,3 +95,50 @@ node's children was measured on the draft branch and is what a page
 cannot afford on a tree held partly on a remote.
 
 **Decided.** Not decided: the draft awaits the maintainer.
+
+## 2026-11-12, Delimiting to Directing: the statement is accepted, and a constraint surfaces
+
+**Asked.** Is the draft the problem, and what in it is wrong or missing?
+The maintainer: yes to "a number of reads that does not grow with the
+tree"; yes to consumers beyond the inspector, "any embedding should be
+able to inspect the tree where now it's done through custom machinery";
+the two things left out are needed. On the first of them: "I'm not sure
+there is a clean way to accomplish this without undermining the
+resolver's idempotence claim, because the same query may return a
+different result depending on whether the node has been downloaded or
+not. If you can help me find a way to do it without undermining a
+property I'd be delighted. Otherwise I may have to let this property
+go."
+
+**Learned.** *What does that word mean?* Two different properties are
+going by one name:
+
+- **Same rows.** The same tree query yields the same rows whenever it is
+  asked.
+- **Permanent rows.** A row, once yielded, is never wrong.
+
+The module that makes the claim argues only the second, and says what it
+is for (`rust/dialog-corpus/src/inspect.rs`, "Why this is sound under
+differential subscriptions"): rows derived through a `Load` "can become
+unnecessary, never wrong, so no invalidation machinery is required for
+them". It names a locality probe as the thing that would break it.
+
+The first property does not hold today. A resolver whose block is
+neither held nor reachable yields no rows (`let Some(block) = loaded
+else { continue }` in `rust/dialog-query/src/resolver.rs`); asked again
+once the block can be had, it yields them. Nothing false was said in
+between, which is the second property holding while the first does not.
+
+That suggests where a way through might be, entered in the ledger as a
+hypothesis and not examined yet: "this block is not held" is a claim
+that turns false when the block arrives, and is what breaks permanence;
+"here are this block's rows", yielded by a read that does not fetch
+(`Load::locally` exists), is permanent, and a consumer that sees no rows
+for a child its parent names has learned the child is not held without
+the engine having said so. What that leaves unanswered is how a
+subscriber is told to look again when a block arrives, which is news of
+more rows, not a withdrawal of any.
+
+**Decided.** The problem statement is accepted as it now reads in the
+top story. Phase moves to Directing. The constraint is not yet a
+criterion: which of the two properties it is has been asked.

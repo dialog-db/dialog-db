@@ -69,7 +69,7 @@ Backtracking moves a topic to an earlier phase and says so in its journal.
   reference, so reads and writes of keys the replica held wait on the
   remote. A download can bring along only what the replica holds, and a
   pull can retry when a commit overtakes it.
-- [A page cannot show a node's children with their details through the tree resolvers](tree-exploration.md):
-  **Delimiting.** A consumer that can only query cannot draw a branch's
-  search tree, so the one embedder that shows it reads blocks itself; the
-  statement is drafted and awaits the maintainer.
+- [A consumer that can only query cannot draw a branch's search tree](tree-exploration.md):
+  **Directing.** The one embedder that shows the tree reads blocks
+  through machinery of its own; the statement is accepted, and whether
+  tree reads can say what a replica holds and stay permanent is open.

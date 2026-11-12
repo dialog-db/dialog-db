@@ -1,4 +1,4 @@
-# A page cannot show a node's children with their details: claims
+# A consumer that can only query cannot draw a branch's search tree: claims
 
 | claim | kind | backing | status |
 |---|---|---|---|
@@ -24,5 +24,11 @@
 | Tonk's side channel is built from dialog's public API: `Load` through the environment and the `inspect_*` functions | fact | the imports of tonk `rust/dialog-reactor/src/formula.rs` | holds |
 | What exists was put together in haste and is hard to detangle from the embedder | opinion | the maintainer, 2026-11-12 | - |
 | Tonk's tree reader is woven into four places: the worker (`resolve_formula`), the query wire format (`Predicate::Formula`, shared with `intent`), the page bundle (`tonk_tree::register` in `tonk-guest`), and display routing (`ROUTING_CONSUMERS` in `tonk-display` names `tonk-tree`) | fact | tonk at `125ab4c`: `rust/dialog-reactor/src/formula.rs`, `rust/tonk-schema/src/query.rs`, `rust/tonk-guest/src/bin/guest.rs`, `rust/tonk-display/src/element.rs` | holds |
-| A command line and an agent are consumers too, not the inspector alone | hypothesis | the agent's assumption in the draft statement; confirmed or struck by the maintainer | open |
+| A command line, an agent and any embedding are consumers too, not the inspector alone | opinion | the maintainer, 2026-11-12: "any embedding should be able to inspect the tree" | - |
+| Knowing whether a block is held without fetching it, and a blob record on its entry's row, are needs, not accidents of how tonk's reader was built | opinion | the maintainer, 2026-11-12 | - |
+| The resolvers' soundness argument claims permanence (a row is never wrong, so nothing needs invalidating), not that a query always yields the same rows; it names a locality probe as what would break it | fact | `rust/dialog-corpus/src/inspect.rs`, "Why this is sound under differential subscriptions" | holds |
+| A tree query does not always yield the same rows today: a block neither held nor reachable yields none, and yields its rows once it can be had | fact | `rust/dialog-query/src/resolver.rs` (`let Some(block) = loaded else { continue }`); not run as a test | holds by reading |
+| A load can be made to read only what the replica holds | fact | `Load::locally` in `rust/dialog-effects/src/archive/load.rs` | holds |
+| Whether a block is held can be told from the presence of its rows under a read that does not fetch, without the engine asserting anything that later turns false | hypothesis | confirmed if a design can state held-ness with no row that a later arrival contradicts; refuted if the consumer needs a row saying "not held" (to join on, to count, to subscribe to) | open |
+| A subscriber over a tree read is not told when a block it lacked arrives | hypothesis | confirmed or refuted by a subscription over a resolver whose block is absent, then made present, with no commit between | open |
 

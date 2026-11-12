@@ -1,10 +1,8 @@
-# A page cannot show a node's children with their details through the tree resolvers
+# A consumer that can only query cannot draw a branch's search tree
 
-Phase: **Delimiting.** See the [design index](README.md) for what the
+Phase: **Directing.** See the [design index](README.md) for what the
 phases mean, and the [journal](tree-exploration/journal.md) for where the
 topic stands.
-
-The title is a symptom and will change when the problem is stated.
 
 ## Description
 
@@ -63,21 +61,23 @@ should offer for exploring a search tree at all.
 
 ## Problem
 
-Draft, written by the agent from the maintainer's two answers of
-2026-11-12, awaiting the maintainer's yes or correction:
+Accepted by the maintainer, 2026-11-12, with the last two needs added at
+their word:
 
 A consumer that can only query (a page component stored as branch data,
-a command line, an agent) cannot draw a branch's search tree. Starting
-from the branch, it cannot read a node's children together with what
-their parent holds about each, nor an entry's key in readable parts, in
-a number of reads that does not grow with the tree. So the one embedder
-that shows the tree reads blocks itself, and that reader is woven into
-its worker, its query wire format, its page bundle and its display
-routing, where it cannot be changed or removed on its own.
+a command line, an agent, any embedding) cannot draw a branch's search
+tree. Starting from the branch, it cannot read a node's children
+together with what their parent holds about each, nor whether each
+child's block is held by the replica without fetching it, nor an entry's
+key in readable parts with the blob record that belongs to it, in a
+number of reads that does not grow with the tree. So the one embedder
+that shows the tree reads blocks itself, through machinery of its own,
+woven into its worker, its query wire format, its page bundle and its
+display routing, where it cannot be changed or removed on its own.
 
-Left out on purpose, to be put back if the maintainer says they belong:
-knowing whether a block is held locally without fetching it, and a blob
-record's fields appearing on its entry's row.
+A constraint the maintainer holds and would give up only if no way is
+found to keep it: what a tree read yields stays permanent (see the
+journal's fourth entry for what that word has to mean).
 
 As the maintainer first gave it:
 
