@@ -17,7 +17,10 @@ The maintainer attributes both to dialog: a query or a transaction reaches
 a tree block the replica does not hold, and waits for that block to be
 replicated before it goes on. For the click, the maintainer says the wait
 is replication done "in order to be able to update the tree where the write
-is supposed to go".
+is supposed to go", and, asked again, says which read is meant: a write
+under a pick such as `last` reads the cell's current value so as to retract
+it and assert the new one, and that read halts or fails when the segment
+holding the current value is not on the replica.
 
 The request arrived as two features. One is a mode in which a query over a
 replica that lacks blocks returns what it can and leaves out what it cannot
@@ -49,11 +52,18 @@ What was checked in the code on 2026-11-12 (dialog `a31b144`, tonk
   with the connection stalled it does not return, since the S3 transport
   sets no timeout. tonk checks `navigator.onLine` before a sync and not
   before a query or a commit.
-- A commit on main does not rewrite the tree where its writes go. Its
-  writes are appended to buffers in the root node. What it reads is one
-  path of the entity index for each instruction, the children of a node
-  whose buffer overflowed, whatever the bodies of the inductive rules it
-  triggers read, and its own bookkeeping records.
+- The read the maintainer names exists and is as described: a write under
+  a pick that elects scans its cell in the entity ordering, and on a
+  replica that holds that leaf by reference the scan fetches it. It is the
+  one read an instruction makes; its writes are appended to buffers in the
+  root node, the attribute and value orderings and history included,
+  unread. A commit also reads the children of a node whose buffer
+  overflowed, whatever the bodies of the inductive rules it triggers read,
+  and its own bookkeeping records.
+- A list reads the attribute ordering and a commit reads the entity
+  ordering, and all three orderings store the same datum for a claim. So a
+  value can be on the screen while the block the commit wants is not on
+  the replica.
 - Between a click in tonk and the page changing there are, in order: a
   mount that can pull, the commit, every command provider the commit
   fired, and a poll of every subscription on the branch, one after

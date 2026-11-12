@@ -5,7 +5,7 @@
 |  | Understanding | Activity |
 |---|---|---|
 | **Status** | *What do we know?* How a replica comes to hold a tree by reference (a lazy pull adopts by root), what a read does on a miss (fetch; fail naming the remote; or not return, there being no timeout), what a commit on main reads (one entity-index path per instruction, overflow cascades, induction, bookkeeping; the other writes are blind appends at the root), and the steps between a click in tonk and the page changing. That a write which did not observe a cell already has a defined meaning (a concurrent peer's), and that a read with holes has none in the engine. That stale and partial are two different states. | *Where are we at?* Diagnosing. The description is written. The cause the request assumes for the click (the commit replicating the tree where the write goes) is an attribution: nine places the time could be are in the ledger, none measured. |
-| **Agenda** | *What do we need to know?* (1) From the maintainer, the next question, asked and not yet answered: when a device holds an older revision completely and a newer one by reference, what should a person looking at the page see, the older answer or the newer one with holes? (2) Where a stalled click's time goes: the result template below. (3) Whether the replica was complete for its reads before the pull that made it partial. (4) How many of tonk's queries and rules read absence (a negation, an aggregate, a pick over a cell, an existence check before a write). | *Where are we going?* Stay in Diagnosing until (2) is filled in; then Delimiting. The measurement is tonk's to run and may become a research topic; link it from the ledger row. For Direction, later: what others do with a tree held by reference (git's partial clone and sparse index; Datomic peers; Zero's `unknown`/`complete` results; certain answers over incomplete databases), to be read, not yet read. |
+| **Agenda** | *What do we need to know?* (1) From the maintainer, the next question, asked and not yet answered: on the clicks that stall, is the person changing something the page was showing, or writing something the page never read (a new entity, a field not on screen)? Still open from the first sitting: when a device holds an older revision completely and a newer one by reference, what should a person looking at the page see, the older answer or the newer one with holes? (2) Where a stalled click's time goes: the result template below. (3) Whether the replica was complete for its reads before the pull that made it partial. (4) Whether a cell reads the same from the attribute ordering as from the entity ordering at every root. (5) How many of tonk's queries and rules read absence (a negation, an aggregate, a pick over a cell, an existence check before a write). | *Where are we going?* Stay in Diagnosing until (2) is filled in; then Delimiting. The measurement is tonk's to run and may become a research topic; link it from the ledger row. For Direction, later: what others do with a tree held by reference (git's partial clone and sparse index; Datomic peers; Zero's `unknown`/`complete` results; certain answers over incomplete databases), to be read, not yet read. |
 
 ### Result template for agenda (2)
 
@@ -87,3 +87,47 @@ whether either remedy is worth building: the result template, and the
 maintainer's answer to the agenda's first question. Three opinions of the
 agent's are in the ledger, marked as such; the second rests on an open
 hypothesis (that the replica was complete for its reads before the pull).
+
+## 2026-11-12, Diagnosing: the read a write under a pick makes
+
+**Asked.** The maintainer said the first sitting misunderstood the
+attribution: a commit that writes a fact under `last` will try to read the
+current value to retract it and assert the new one, and that read will
+halt or fail because the segment where the current value should be is not
+on this replica.
+
+**Learned.**
+
+- The maintainer is right about the read, and the ledger already held it
+  as a fact; the summary given in the conversation ("a commit does not
+  replicate the tree where the write goes") read as a denial of it. What
+  that sentence was about is the size of the read: one cell, in one
+  ordering, not the path of every write. The attribution is now two rows:
+  that the read exists and fetches (a fact), and that it is where the
+  stalled clicks spend their time (still a hypothesis; the other places in
+  the ledger are not ruled out by the read being real).
+- What the scan is for, read from the code: to elect the claim to
+  retract, to learn that claim's value so its keys can be erased in all
+  three orderings, to cite its versions as the new claim's cause, and to
+  write nothing when the cell already reads as the written value. A write
+  without the scan cannot erase the old value, because the keys to erase
+  are made of the value it did not read.
+- The cell is stored three times with the same datum, and a query that
+  lists by attribute reads it from a different ordering than the commit
+  does. So "the person was looking at the value" does not mean the
+  replica holds the leaf the commit scans. That gives the maintainer's
+  account a mechanism for the commonest click, changing something on
+  screen.
+- *Think of a second one.* The request's answer to this read is to write
+  without it and reconcile later. Between that and today there are two
+  others, neither of which changes what a commit means: answer the scan
+  from the attribute ordering when that is the one held; and answer it
+  from what the transaction itself read, since a transaction's queries
+  read the revision its commit builds on. Both are hypotheses with tests
+  in the ledger. The blind write is then what is left for a cell held in
+  neither ordering and not read by the transaction: a new entity, a field
+  never shown, a device that is cold.
+
+**Decided.** Not decided. The agenda's first question changed: which kind
+of cell the stalled clicks write decides whether the two narrower answers
+cover the complaint or the blind write is needed.
