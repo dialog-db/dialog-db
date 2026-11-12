@@ -26,8 +26,16 @@ Why it is that large, from reading the code and not from a measurement:
 
 A `try_stream!` body and an `async fn` are each one value that has room for every local alive across a place it can stop, and for the largest thing it waits on, laid out inside it unless that thing is boxed. So the read is as large as its deepest path, whichever path a given read takes. A point read of a stored attribute takes none of the fixpoint or the reduce, and carries the room for them.
 
+Asked of the linter, `clippy::large_futures` with a threshold of 2 KB over `dialog-query` and `dialog-corpus` (the command and the table are in #781):
+
+- It sees a future where it is awaited, and a stream is polled. In the read it finds one future above 2 KB, of 2,104 bytes. So most of the 16,896 is in what the stream holds across its stops or in the streams inside it.
+- The commit path has futures of 11 to 12 KB of its own, in `dialog-corpus/src/buffered.rs`: `seal`, `settle`, `insert_deferred`, `delete_deferred`.
+
+The brief for whoever picks this up is #781.
+
 Not known:
 
 - Which of the paths is the 17 KB. `-Zprint-type-sizes` says, field by field.
 - What the stream costs to make and to poll apart from being moved.
 - Whether the same holds for an attribute read and a formula, which are streams of their own.
+- Whether the commit path's futures are moved often enough to cost what a scenario counts.
