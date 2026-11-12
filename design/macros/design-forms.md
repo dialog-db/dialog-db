@@ -448,8 +448,10 @@ H2 is now a requirement in the table above, not a hypothesis. H3 and H4 stand.
 
 ## Next
 
-1. What decides between two definitions of one signature written apart: authority, and what authority is read from.
+1. Take up patterns: the compiler builds dialog's forms in Rust, a struct is a term, `entity/derive` takes a record. A rule that holds a pattern cannot be installed until a stored rule can hold one.
 2. The expander and the compiler read the tree, an application lowers to a `ConceptQuery` of the definition's concept, and `kernel.rs` gives way to dialog's own forms.
+
+Parked by the maintainer: what decides between two definitions of one signature written apart. `last` elects one.
 3. A struct as a term and `entity/derive` over a record: with [patterns](../patterns/plan.md).
 4. Syntax kept on the branch as trees, and the walker asking the branch.
 5. H3, measured, as a research topic.

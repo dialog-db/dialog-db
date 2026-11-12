@@ -5,7 +5,7 @@
 |  | Understanding | Activity |
 |---|---|---|
 | **Status** | The kernel and the core forms run on a real branch through `rust/dialog-notation` ([poc.md](poc.md)); the prelude is rules only. The syntax tree is built, apart from the notation as parsed, and kept as data: maps that say their `type` ([design-forms.md](design-forms.md#the-syntax-tree)). A struct is a value and, with a variable in it, a pattern, which is a topic of its own with an agent on it (#777). Rules of several heads are #776. Expanding and compiling still read the notation as parsed, and `kernel.rs` still copies dialog's forms. | **Designing.** Direction decided by the maintainer. A proof of concept runs. A name is kept as a name, what is named and a signature; a definition under it is read `last`; an application resolves by the labels written and a read that fits several is of all. Built and tested, by pattern, in the expander. |
-| **Agenda** | What decides between two definitions of one signature written apart: authority, and what it is read from. How a query reports. Whether dialog can be asked for an expansion a form at a time (H3). What a read with no pick reads. | Next: the expander and the compiler read the tree, an application lowers to a `ConceptQuery` of the definition's concept, and dialog's own forms replace `kernel.rs` once a parameter holds a pattern. Not waiting: a helper rule for a negated conjunction. Waiting on patterns (#777, #778): a struct as a term, `entity/derive` over a record, syntax kept on the branch. Waiting on #776: a rule of several heads. |
+| **Agenda** | Parked by the maintainer: authority, for two definitions of one signature written apart; `last` elects one until then. How a query reports. Whether dialog can be asked for an expansion a form at a time (H3). What a read with no pick reads. | Next: take up patterns (#778, all four steps committed, its perf gate failing): the compiler builds dialog's forms in Rust, since a pattern has no wire form, and a struct is a term. Then an application lowers to a `ConceptQuery` of the definition's concept. Not waiting: a helper rule for a negated conjunction. Waiting on patterns (#777, #778): a struct as a term, `entity/derive` over a record, syntax kept on the branch. Waiting on #776: a rule of several heads. |
 
 ## Candidate problems
 
@@ -366,4 +366,16 @@ Not examined yet. They are columns, not recommendations.
 - On a branch a read by the name alone finds every signature of it, and a corrected definition has replaced the one it corrects.
 
 **Decided.** By the maintainer: a name is a name, what is named, and a signature with parameter names; several definitions may stand; an application resolves by signature, then by authority, and to start with shows all. Built to "shows all". Not decided: what authority is and where it is read from.
+
+## 2026-11-11, Designing: the simple version first
+
+**Asked.** What authority is read from. Irakli: forget authority for now and get the simple version working. What is the status of records, and of things working end to end?
+
+**Learned.**
+
+- Patterns has all four steps of its plan committed on #778: the composite value, the pattern, the planner, inference. Its lints and the replication gate pass. Its perf gate fails: seven scenarios, point reads and rules, cost 8% to 12% more instructions with counters unchanged, against a bar of 3%. A query that holds no pattern pays for patterns.
+- A rule that holds a pattern runs and is refused when installed, as the plan said: format 3 cannot write one. So his own example, a rule that derives an entity from `{title: ?t author: ?a}`, cannot be installed on a branch until a stored rule can hold a pattern. The decision to leave the format alone was right for building patterns and is now what stands between them and a rule that uses one.
+- A pattern has no wire form above a leaf. The notation's compiler writes descriptors as JSON and reads them back, so it cannot say a pattern until it builds dialog's forms directly.
+
+**Decided.** By the maintainer: authority is parked. Not decided: whether a stored rule may hold a pattern now, which is a new rule body format.
 
