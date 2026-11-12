@@ -46,6 +46,7 @@ use crate::concept::descriptor::{ConceptDescriptor, ConceptFieldDescriptor};
 use crate::concept::query::ConceptQuery;
 use crate::error::TypeError;
 use crate::negation::Negation;
+use crate::pattern;
 use crate::premise::Premise;
 use crate::proposition::Proposition;
 use crate::reduce::ReduceSpec;
@@ -178,11 +179,13 @@ pub(crate) fn canonicalize(
         // in the premise as any other does, at its place in the
         // pattern.
         let parameters = premise.parameters();
-        let addressed = parameters.addressed();
-        atoms.push(Atom {
-            shape,
-            slots: slots(addressed.iter().map(|(key, term)| (key, *term)), &locals),
-        });
+        let slots = if parameters.has_shapes() {
+            let addressed = parameters.addressed();
+            slots(addressed.iter().map(|(key, term)| (key, *term)), &locals)
+        } else {
+            slots(parameters.iter(), &locals)
+        };
+        atoms.push(Atom { shape, slots });
     }
     for (field, spec) in reduce {
         let shape = encode(&(
@@ -544,7 +547,7 @@ fn encode_premise(premise: &Premise) -> Option<Vec<u8>> {
         Premise::Assert(proposition) => (0u8, proposition),
         Premise::Unless(negation) => (1u8, &negation.0),
     };
-    if proposition.parameters().has_shapes() {
+    if pattern::holds_shape(proposition) {
         let mut bytes = vec![tag + 2];
         bytes.extend(reference::proposition(proposition)?.as_bytes());
         return Some(bytes);

@@ -28,9 +28,18 @@ pub fn variables(premises: &[Premise]) -> BTreeSet<String> {
         // The variables inside a map, a list or a tuple of terms are
         // the premise's own; the variable standing for the whole is not
         // one anybody wrote.
-        for term in premise.parameters().leaves() {
-            if let Some(name) = term.name() {
-                names.insert(name.to_string());
+        let parameters = premise.parameters();
+        if parameters.has_shapes() {
+            for term in parameters.leaves() {
+                if let Some(name) = term.name() {
+                    names.insert(name.to_string());
+                }
+            }
+        } else {
+            for (_, term) in parameters.iter() {
+                if let Some(name) = term.name() {
+                    names.insert(name.to_string());
+                }
             }
         }
     }

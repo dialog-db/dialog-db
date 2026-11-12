@@ -177,13 +177,13 @@ impl TypeEnv {
             let params = premise.parameters();
 
             for (slot_name, field) in schema.iter() {
-                let Some(param) = params.get(slot_name) else {
+                let Some((param, shape)) = params.slot(slot_name) else {
                     continue;
                 };
                 // A slot holding a map, a list or a tuple of terms is
                 // typed by its shape and its leaves, not as the
                 // variable standing for the whole.
-                if let Some(pattern) = params.shape(slot_name) {
+                if let Some(pattern) = shape {
                     Self::infer_shape(&mut ctx, pattern, field.content_type(), &mut records)?;
                     continue;
                 }
