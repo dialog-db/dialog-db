@@ -2195,3 +2195,152 @@ async fn it_reads_each_holder_of_a_collection_that_another_premise_joins() -> Re
     assert_eq!(held, [1, 2]);
     Ok(())
 }
+
+/// A log with no type can hold an entry of text. A rule reads each message
+/// that the log of channel 0 holds, takes the message as the entity of
+/// another premise, and gives the topic of the channel of the message. An
+/// entry of text holds no message, so it changes no row: the live query polls
+/// without a fault, and holds the rows of a first read.
+#[dialog_common::test]
+async fn it_passes_over_an_entry_that_is_no_entity_where_a_premise_takes_it_as_one() -> Result<()> {
+    let (branch, operator, _) = opened(Keyed::Dictionary, &[3]).await?;
+    let general = channel(0);
+    let of: Entity = general.parse()?;
+    branch
+        .transaction()
+        .assert(
+            dialog_query::the!("chat.channel/topic")
+                .of(of.clone())
+                .is("zero".to_string()),
+        )
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    let head = json!({ "with": { "topic": { "the": "test.active/topic", "as": "text:" } } });
+    let rule: DeductiveRuleDescriptor = serde_json::from_value(json!({
+        "deduce": head,
+        "when": [
+            {
+                "assert": { "with": { "log": {
+                    "the": { "domain": "chat.channel.log", "keyed": "dictionary" },
+                    "pick": "all:",
+                } } },
+                "where": {
+                    "this": { "entity:": general },
+                    "log": { "the": { "?": { "name": "key" } }, "is": { "?": { "name": "member" } } }
+                }
+            },
+            {
+                "assert": { "with": { "channel": { "the": "chat.message/channel", "as": "entity:" } } },
+                "where": { "this": { "?": { "name": "member" } }, "channel": { "?": { "name": "this" } } }
+            },
+            {
+                "assert": { "with": { "topic": { "the": "chat.channel/topic", "as": "text:" } } },
+                "where": { "this": { "?": { "name": "this" } }, "topic": { "?": { "name": "topic" } } }
+            }
+        ]
+    }))?;
+    let rule = rule.compile()?;
+    let mut live = branch
+        .query()
+        .with(rule.clone())
+        .subscribe(each_field(&head)?);
+    assert_eq!(
+        rows_of_both(&branch, &operator, &rule, &head, &mut live).await?,
+        1
+    );
+
+    let text = fact(
+        "chat.channel.log/n00900",
+        &of,
+        Value::String("not an entity".into()),
+    )?;
+    branch
+        .transaction()
+        .assert(text.clone())
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    assert_eq!(
+        rows_of_both(&branch, &operator, &rule, &head, &mut live).await?,
+        1
+    );
+    branch
+        .transaction()
+        .retract(text)
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    assert_eq!(
+        rows_of_both(&branch, &operator, &rule, &head, &mut live).await?,
+        1
+    );
+    Ok(())
+}
+
+/// A collection with no type can hold an entry of any value. A rule gives
+/// each member of the collection of a board unless the member is hidden, and
+/// only the negated premise takes the member as its entity. A negated premise
+/// holds where its fact is absent, so an entry of text or of a number is a
+/// member too. The steps write an entry of an entity, of text, and of a
+/// number, and take back the last two. After each step the live query holds
+/// the rows of a first read.
+#[dialog_common::test]
+async fn it_reads_an_entry_that_is_no_entity_where_only_a_negated_premise_takes_it_as_one()
+-> Result<()> {
+    let (branch, operator, board) = board().await?;
+    let head = json!({ "with": { "member": { "the": "test.kept/member" } } });
+    let rule: DeductiveRuleDescriptor = serde_json::from_value(json!({
+        "deduce": head,
+        "when": [
+            {
+                "assert": { "with": { "scores": {
+                    "the": { "domain": "test.scores", "keyed": "dictionary" },
+                    "pick": "all:",
+                } } },
+                "where": {
+                    "this": { "?": { "name": "this" } },
+                    "scores": { "the": { "?": { "name": "key" } }, "is": { "?": { "name": "member" } } }
+                }
+            }
+        ],
+        "unless": [
+            {
+                "assert": { "with": { "hidden": { "the": "test.msg/hidden", "as": "text:" } } },
+                "where": { "this": { "?": { "name": "member" } }, "hidden": { "?": {} } }
+            }
+        ]
+    }))?;
+    let rule = rule.compile()?;
+    let mut live = branch
+        .query()
+        .with(rule.clone())
+        .subscribe(each_field(&head)?);
+    live.poll(&operator).await?;
+
+    let steps = [
+        (true, "e", Value::Entity("item:1".parse()?)),
+        (true, "t", Value::String("text".into())),
+        (true, "n", Value::UnsignedInt(7)),
+        (false, "t", Value::String("text".into())),
+        (false, "n", Value::UnsignedInt(7)),
+    ];
+    for (exists, key, value) in steps {
+        let entry = fact(&format!("test.scores/{key}"), &board, value)?;
+        let transaction = branch.transaction();
+        let transaction = if exists {
+            transaction.assert(entry)
+        } else {
+            transaction.retract(entry)
+        };
+        transaction.commit().publish().perform(&operator).await?;
+        assert_eq!(
+            rows_of_both(&branch, &operator, &rule, &head, &mut live).await?,
+            1
+        );
+    }
+    Ok(())
+}
