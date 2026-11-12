@@ -15,16 +15,25 @@
 //!   universe ([`Load`](dialog_effects::archive::Load) of a digest
 //!   [`anywhere`] the scope reads). A hash
 //!   resolves to the same bytes forever, so a resolver's rows are a pure
-//!   function of its bound inputs — no fact demand exists to record
+//!   function of the node it is given — no fact demand exists to record
 //!   (see `dialog_corpus::inspect` for the full soundness
 //!   argument); what changes over time is *reachability* — which
 //!   root the branch head names — and the revision-anchored
-//!   subscription (`Demand::head`) tracks exactly that. A content
-//!   address cannot be enumerated, so an unbound resolver is non-viable
-//!   (`estimate() → None`) until a join binds it: the parameter
-//!   machinery it shares with formulas (named [`Cells`] slots,
-//!   [`Requirement::Required`](crate::Requirement) inputs) enforces
-//!   the mode.
+//!   subscription (`Demand::head`) tracks exactly that.
+//!
+//! A resolver given its node reads that one block. A resolver whose node
+//! is open (`of` a blank, or a variable nothing else binds) lists: it
+//! reads the roots the scope's heads name (`dialog.branch/tree`, an
+//! ordinary recorded read) and walks down from them, yielding every
+//! node reached with `of` bound to it. So a resolver is a relation like
+//! any other, one that can be listed as well as looked up, and a rule
+//! over it is an ordinary rule: asked for everything it walks the tree,
+//! and asked for one node by `this` it reads one block, because the
+//! planner hands the bound `this` to the resolver as its `of`. The walk
+//! costs [`RESOLVER_WALK_COST`], so in a join the planner lets any
+//! premise that names the node run first. `tree/value` alone does not
+//! list: a spilled value is not a tree node and is reached only by the
+//! reference an entry carries.
 //!
 //! The admission rule for new resolvers is the address-space rule, not a
 //! case-by-case idempotency argument: a resolver may select only from
@@ -50,7 +59,7 @@
 //!   ⋈ tree/node(of: ?child, …)
 //! ```
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fmt::{self, Display};
 use std::sync::LazyLock;
 
@@ -62,6 +71,7 @@ use dialog_effects::archive::prelude::ArchiveScope;
 use dialog_effects::{archive, blob};
 use serde::{Deserialize, Serialize};
 
+use crate::attribute::AttributeQuery;
 use crate::corpus::Type as ValueType;
 use crate::error::EvaluationError;
 use crate::formula::cell::Cells;
@@ -70,7 +80,7 @@ use crate::selection::{Match, Selection};
 use crate::term::Term;
 use crate::type_system::Type as Kind;
 use crate::types::Any;
-use crate::{Entity, Environment, Parameters, Schema, Scope, Value, try_stream};
+use crate::{Entity, Environment, Parameters, Schema, Scope, Value, the, try_stream};
 
 /// The archive a resolver reads a content address from: the wildcard
 /// subject's, meaning any archive the scope reads.
@@ -115,6 +125,35 @@ fn verified(
 /// plus decode, scheduled after cheap in-memory premises but ahead of
 /// broad scans.
 pub const RESOLVER_COST: usize = 200;
+
+/// Base cost of a resolver step whose node is open: it walks every
+/// node the scope's heads reach, so the planner runs it only when no
+/// other premise can name the node first.
+pub const RESOLVER_WALK_COST: usize = 1_000_000;
+
+/// Variables of the scan that reads the roots an open resolver walks
+/// from. They never leave it: the scan runs over a row of its own.
+const BRANCH: &str = "branch";
+const ROOT: &str = "root";
+const CAUSE: &str = "cause";
+
+/// What a resolver's `of` names in a row.
+enum Reference {
+    /// A block, by its hash.
+    Named(inspect::NodeReference),
+    /// A value that names no block.
+    Malformed,
+    /// Nothing: the term is a blank or a variable the row leaves unbound.
+    Open,
+}
+
+/// The root a row of the roots scan bound, if it names a node.
+fn root_reference(row: &Match) -> Option<inspect::NodeReference> {
+    match row.lookup(&Term::var(ROOT)) {
+        Ok(crate::Binding::Present(Value::Entity(root))) => root.node_hash(),
+        _ => None,
+    }
+}
 
 /// Serde default for omitted parameter slots.
 fn blank() -> Term<Any> {
@@ -396,8 +435,7 @@ static TREE_NODE_CELLS: LazyLock<Cells> = LazyLock::new(|| {
     Cells::define(|builder| {
         builder
             .cell("of", Some(reference_kind()))
-            .the("Node reference: base58 of the node's content hash.")
-            .required();
+            .the("Node reference: base58 of the node's content hash.");
         builder
             .cell("kind", Some(Kind::from(ValueType::String)))
             .the("\"index\" (a table of spans) or \"segment\" (a run of entries).");
@@ -420,8 +458,7 @@ static TREE_SPAN_CELLS: LazyLock<Cells> = LazyLock::new(|| {
     Cells::define(|builder| {
         builder
             .cell("of", Some(reference_kind()))
-            .the("Node reference of the index node.")
-            .required();
+            .the("Node reference of the index node.");
         builder
             .cell("at", Some(Kind::from(ValueType::UnsignedInt)))
             .the("Position among the node's spans.");
@@ -450,8 +487,7 @@ static TREE_KEY_CELLS: LazyLock<Cells> = LazyLock::new(|| {
     Cells::define(|builder| {
         builder
             .cell("of", Some(reference_kind()))
-            .the("Node reference of the segment node.")
-            .required();
+            .the("Node reference of the segment node.");
         builder
             .cell("at", Some(Kind::from(ValueType::UnsignedInt)))
             .the("Position within the segment.");
@@ -471,8 +507,7 @@ static TREE_ENTRY_CELLS: LazyLock<Cells> = LazyLock::new(|| {
     Cells::define(|builder| {
         builder
             .cell("of", Some(reference_kind()))
-            .the("Node reference of the segment node.")
-            .required();
+            .the("Node reference of the segment node.");
         builder
             .cell("at", Some(Kind::from(ValueType::UnsignedInt)))
             .the("Position within the segment.");
@@ -528,8 +563,7 @@ static TREE_BLOB_CELLS: LazyLock<Cells> = LazyLock::new(|| {
     Cells::define(|builder| {
         builder
             .cell("of", Some(reference_kind()))
-            .the("Node reference of the segment node.")
-            .required();
+            .the("Node reference of the segment node.");
         builder
             .cell("at", Some(Kind::from(ValueType::UnsignedInt)))
             .the("Position within the segment.");
@@ -549,8 +583,7 @@ static TREE_MANIFEST_CELLS: LazyLock<Cells> = LazyLock::new(|| {
     Cells::define(|builder| {
         builder
             .cell("of", Some(reference_kind()))
-            .the("Node reference.")
-            .required();
+            .the("Node reference.");
         builder
             .cell("version", Some(Kind::from(ValueType::UnsignedInt)))
             .the("Format version.");
@@ -628,15 +661,17 @@ impl ResolverQuery {
 
     /// Estimate the cost of this resolver given the environment.
     ///
-    /// `None` while the node-reference input is an unbound variable:
-    /// node hashes are not enumerable, and an unbound scan is the one
-    /// shape that would degrade subscriptions — the planner refuses to
-    /// schedule it until a join binds the input. A *blank* `of` (a
-    /// query that never names the input at all) is scheduled but can
-    /// match nothing: every row fails the reference lookup, so such a
-    /// query returns empty rather than erroring.
+    /// One block read when the node is named. When it is open, the
+    /// resolver walks every node the scope's heads reach, at
+    /// [`RESOLVER_WALK_COST`], so the planner schedules it after any
+    /// premise that would name the node. `tree/value` has nothing to
+    /// walk and is `None` until its reference is bound.
     pub fn estimate(&self, env: &Environment) -> Option<usize> {
-        self.of().is_bound(env).then_some(RESOLVER_COST)
+        if self.of().is_bound(env) {
+            Some(RESOLVER_COST)
+        } else {
+            self.lists().then_some(RESOLVER_WALK_COST)
+        }
     }
 
     /// Returns the parameters for this resolver application.
@@ -881,42 +916,48 @@ impl ResolverQuery {
 
     /// Resolve the node-reference input against the row, from a constant
     /// or a bound variable: a `node:` entity (or the `asset:` entity of a
-    /// spilled value), a base58 string, or raw bytes. `None` filters the
-    /// row (unresolvable or malformed references contribute nothing,
-    /// mirroring the forged-record-projects-nothing convention).
-    fn node_reference(&self, base: &Match) -> Option<inspect::NodeReference> {
+    /// spilled value), a base58 string, or raw bytes. A value that names
+    /// no block is [`Malformed`](Reference::Malformed) and filters the row
+    /// (mirroring the forged-record-projects-nothing convention); no
+    /// value at all is [`Open`](Reference::Open).
+    fn node_reference(&self, base: &Match) -> Reference {
         let value = match self.of() {
             Term::Constant(value) => value.clone(),
             term => match base.lookup(term) {
                 Ok(crate::Binding::Present(value)) => value,
-                _ => return None,
+                _ => return Reference::Open,
             },
         };
-        match value {
+        let reference = match value {
             // What the resolvers hand out: `tree/span`'s `node`, and the
             // root `dialog.branch/tree` carries.
             Value::Entity(entity) => entity.node_hash().or_else(|| entity.blob_hash()),
-            Value::String(reference) => {
-                let bytes = reference.from_base58().ok()?;
-                <[u8; 32]>::try_from(bytes).ok()
-            }
+            Value::String(reference) => reference
+                .from_base58()
+                .ok()
+                .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok()),
             // Raw 32-byte references chain too (e.g. straight from a
             // decomposition formula's bytes output).
             Value::Bytes(bytes) => <[u8; 32]>::try_from(bytes).ok(),
             _ => None,
-        }
+        };
+        reference.map_or(Reference::Malformed, Reference::Named)
     }
 
     /// Evaluate this resolver over the incoming selection.
     ///
-    /// Per input row: resolve the node reference, perform the
-    /// idempotent [`Load`](archive::Load) command through the environment
-    /// for a block [`anywhere`] it reads, decode the
-    /// block, and project one output row per result — a segment asked
-    /// for spans, an index asked for keys, an absent block, or a
-    /// resolvable reference whose block is not a tree node at all
-    /// (e.g. a spilled value block joined into `tree/node`) all yield
-    /// zero rows, mirroring the malformed-reference convention above.
+    /// Per input row with `of` given: resolve the node reference, perform
+    /// the idempotent [`Load`](archive::Load) command through the
+    /// environment for a block [`anywhere`] it reads, decode the block,
+    /// and project one output row per result — a segment asked for spans,
+    /// an index asked for keys, an absent block, or a resolvable
+    /// reference whose block is not a tree node at all (e.g. a spilled
+    /// value block joined into `tree/node`) all yield zero rows,
+    /// mirroring the malformed-reference convention above.
+    ///
+    /// Per input row with `of` open: walk down from every root the scope
+    /// reads ([`ROOT`]) and project each node reached, binding `of` to
+    /// it. Nodes come in key order, each once.
     pub fn evaluate<'a, Env, M: Selection + 'a>(
         self,
         env: &'a Env,
@@ -931,170 +972,250 @@ impl ResolverQuery {
                 let mut base = candidate?;
                 // Every row this one extends into shares its bindings.
                 base.share();
-                let Some(reference) = resolver.node_reference(&base) else {
-                    continue;
-                };
-                // A spilled value lives in the blob store, apart from the
-                // tree's nodes, so `tree/value` reads through that lane.
-                let loaded = match &resolver {
-                    ResolverQuery::TreeValue(_) => blob::Load::new(anywhere(), reference)
-                        .perform(env)
-                        .await
-                        .map_err(DialogCorpusError::from)?,
-                    _ => archive::Load::new(anywhere().index(), reference)
-                        .perform(env)
-                        .await
-                        .map_err(DialogCorpusError::from)?,
-                };
-                let Some(block) = loaded else {
-                    continue;
-                };
-                let bytes = verified(&reference, block)?.into_vec();
-                match &resolver {
-                    ResolverQuery::TreeNode(query) => {
-                        let Ok(node) = inspect::inspect_node(bytes) else {
+                match resolver.node_reference(&base) {
+                    Reference::Named(reference) => {
+                        // A spilled value lives in the blob store, apart from the
+                        // tree's nodes, so `tree/value` reads through that lane.
+                        let loaded = match &resolver {
+                            ResolverQuery::TreeValue(_) => blob::Load::new(anywhere(), reference)
+                                .perform(env)
+                                .await
+                                .map_err(DialogCorpusError::from)?,
+                            _ => archive::Load::new(anywhere().index(), reference)
+                                .perform(env)
+                                .await
+                                .map_err(DialogCorpusError::from)?,
+                        };
+                        let Some(block) = loaded else {
                             continue;
                         };
-                        let row = project(&base, &[
-                            (&query.kind, Value::String(node.kind.into())),
-                            (&query.size, Value::UnsignedInt(node.size.into())),
-                            (&query.count, Value::UnsignedInt(node.count.into())),
-                            (&query.scale, Value::UnsignedInt(node.scale.into())),
-                            (&query.novelty, Value::UnsignedInt(node.novelty.into())),
-                        ])?;
-                        if let Some(row) = row {
+                        let bytes = verified(&reference, block)?.into_vec();
+                        for row in resolver.project(&base, bytes)? {
                             yield row;
                         }
                     }
-                    ResolverQuery::TreeSpan(query) => {
-                        let Ok(spans) = inspect::inspect_spans(bytes) else {
+                    Reference::Malformed => continue,
+                    Reference::Open => {
+                        if !resolver.lists() {
                             continue;
-                        };
-                        for span in spans {
-                            let row = project(&base, &[
-                                (&query.at, Value::UnsignedInt(span.at.into())),
-                                (&query.node, Value::Entity(node_entity(&span.node)?)),
-                                (&query.separator, Value::Bytes(span.separator)),
-                                (&query.until, Value::Bytes(span.until)),
-                                (&query.scale, Value::UnsignedInt(span.scale.into())),
-                                (&query.rank, Value::UnsignedInt(span.rank.into())),
-                                (&query.novelty, Value::UnsignedInt(span.novelty.into())),
-                            ])?;
-                            if let Some(row) = row {
+                        }
+                        // The roots are read like any other fact, so the
+                        // read is recorded and a subscription re-runs the
+                        // walk when a head moves.
+                        let roots = Box::pin(
+                            AttributeQuery::new(
+                                Term::from(the!("dialog.branch/tree")),
+                                Term::<Entity>::var(BRANCH),
+                                Term::var(ROOT),
+                                Term::var(CAUSE),
+                                None,
+                            )
+                            .evaluate(env, Match::new().seed()),
+                        );
+                        let mut pending: Vec<inspect::NodeReference> = Vec::new();
+                        for await root in roots {
+                            pending.extend(root_reference(&root?));
+                        }
+                        pending.reverse();
+
+                        let mut seen: HashSet<inspect::NodeReference> = HashSet::new();
+                        while let Some(reference) = pending.pop() {
+                            if !seen.insert(reference) {
+                                continue;
+                            }
+                            let loaded = archive::Load::new(anywhere().index(), reference)
+                                .perform(env)
+                                .await
+                                .map_err(DialogCorpusError::from)?;
+                            let Some(block) = loaded else {
+                                continue;
+                            };
+                            let bytes = verified(&reference, block)?.into_vec();
+                            // An index's children are walked after it, in
+                            // span order: the stack takes them reversed.
+                            if let Ok(spans) = inspect::inspect_spans(bytes.clone()) {
+                                pending.extend(spans.into_iter().rev().map(|span| span.node));
+                            }
+                            let mut named = base.clone();
+                            named.bind(resolver.of(), Value::Entity(node_entity(&reference)?))?;
+                            for row in resolver.project(&named, bytes)? {
                                 yield row;
                             }
-                        }
-                    }
-                    ResolverQuery::TreeKey(query) => {
-                        let Ok(keys) = inspect::inspect_keys(bytes) else {
-                            continue;
-                        };
-                        for (at, entry) in keys.into_iter().enumerate() {
-                            let row = project(&base, &[
-                                (&query.at, Value::UnsignedInt(at as u128)),
-                                (&query.entry, Value::Entity(entry_entity(&entry.key)?)),
-                                (&query.key, Value::Bytes(entry.key)),
-                                (&query.rank, Value::UnsignedInt(entry.rank.into())),
-                            ])?;
-                            if let Some(row) = row {
-                                yield row;
-                            }
-                        }
-                    }
-                    ResolverQuery::TreeEntry(query) => {
-                        let Ok(entries) = inspect::inspect_entries(bytes) else {
-                            continue;
-                        };
-                        for entry in entries {
-                            let spill = entry
-                                .spill
-                                .map(|reference| reference.to_base58())
-                                .unwrap_or_default();
-                            let row = project(&base, &[
-                                (&query.at, Value::UnsignedInt(entry.at.into())),
-                                (&query.entry, Value::Entity(entry_entity(&entry.key)?)),
-                                (&query.key, Value::Bytes(entry.key)),
-                                (&query.state, Value::String(entry.state.into())),
-                                (&query.retraction, Value::Boolean(entry.retraction)),
-                                (&query.origin, Value::Bytes(entry.origin)),
-                                (&query.edition, Value::UnsignedInt(entry.edition.into())),
-                                (&query.cause, Value::UnsignedInt(entry.cause.into())),
-                                (&query.collapsed, Value::UnsignedInt(entry.collapsed.into())),
-                                (
-                                    &query.supersedes,
-                                    Value::UnsignedInt(entry.supersedes.into()),
-                                ),
-                                (&query.spill, Value::String(spill)),
-                            ])?;
-                            if let Some(row) = row {
-                                yield row;
-                            }
-                        }
-                    }
-                    ResolverQuery::TreeValue(query) => {
-                        // The loaded block IS the value: raw bytes, no
-                        // node decode. Type information lives in the
-                        // key the reference came from.
-                        let row = project(&base, &[
-                            (&query.size, Value::UnsignedInt(bytes.len() as u128)),
-                            (&query.bytes, Value::Bytes(bytes)),
-                        ])?;
-                        if let Some(row) = row {
-                            yield row;
-                        }
-                    }
-                    ResolverQuery::TreeBlob(query) => {
-                        let Ok(records) = inspect::inspect_blob_records(bytes) else {
-                            continue;
-                        };
-                        for record in records {
-                            let row = project(&base, &[
-                                (&query.at, Value::UnsignedInt(record.at.into())),
-                                (&query.blob, Value::Bytes(record.blob)),
-                                (&query.version, Value::UnsignedInt(record.version.into())),
-                                (&query.size, Value::UnsignedInt(record.size.into())),
-                            ])?;
-                            if let Some(row) = row {
-                                yield row;
-                            }
-                        }
-                    }
-                    ResolverQuery::TreeManifest(query) => {
-                        let Ok(manifest) = inspect::inspect_manifest(bytes) else {
-                            continue;
-                        };
-                        let row = project(&base, &[
-                            (&query.version, Value::UnsignedInt(manifest.version.into())),
-                            (&query.fanout_n, Value::UnsignedInt(manifest.fanout_n.into())),
-                            (
-                                &query.max_separator,
-                                Value::UnsignedInt(manifest.max_separator.into()),
-                            ),
-                            (&query.inline_n, Value::UnsignedInt(manifest.inline_n.into())),
-                            (
-                                &query.spill_prefix,
-                                Value::UnsignedInt(manifest.spill_prefix.into()),
-                            ),
-                            (
-                                &query.max_segment,
-                                Value::UnsignedInt(manifest.max_segment.into()),
-                            ),
-                            (
-                                &query.frame_ceiling_factor,
-                                Value::UnsignedInt(manifest.frame_ceiling_factor.into()),
-                            ),
-                            (
-                                &query.anchor_selector,
-                                Value::UnsignedInt(manifest.anchor_selector.into()),
-                            ),
-                        ])?;
-                        if let Some(row) = row {
-                            yield row;
                         }
                     }
                 }
             }
         }
+    }
+
+    /// Whether this resolver lists every node when `of` is open. A
+    /// spilled value is not a tree node and is reached only by the
+    /// reference an entry carries, so `tree/value` does not.
+    fn lists(&self) -> bool {
+        !matches!(self, Self::TreeValue(_))
+    }
+
+    /// The rows the block `bytes` projects to under this resolver, each
+    /// extending `base`.
+    fn project(&self, base: &Match, bytes: Vec<u8>) -> Result<Vec<Match>, EvaluationError> {
+        let mut rows = Vec::new();
+        match self {
+            ResolverQuery::TreeNode(query) => {
+                let Ok(node) = inspect::inspect_node(bytes) else {
+                    return Ok(rows);
+                };
+                let row = project(
+                    &base,
+                    &[
+                        (&query.kind, Value::String(node.kind.into())),
+                        (&query.size, Value::UnsignedInt(node.size.into())),
+                        (&query.count, Value::UnsignedInt(node.count.into())),
+                        (&query.scale, Value::UnsignedInt(node.scale.into())),
+                        (&query.novelty, Value::UnsignedInt(node.novelty.into())),
+                    ],
+                )?;
+                rows.extend(row);
+            }
+            ResolverQuery::TreeSpan(query) => {
+                let Ok(spans) = inspect::inspect_spans(bytes) else {
+                    return Ok(rows);
+                };
+                for span in spans {
+                    let row = project(
+                        &base,
+                        &[
+                            (&query.at, Value::UnsignedInt(span.at.into())),
+                            (&query.node, Value::Entity(node_entity(&span.node)?)),
+                            (&query.separator, Value::Bytes(span.separator)),
+                            (&query.until, Value::Bytes(span.until)),
+                            (&query.scale, Value::UnsignedInt(span.scale.into())),
+                            (&query.rank, Value::UnsignedInt(span.rank.into())),
+                            (&query.novelty, Value::UnsignedInt(span.novelty.into())),
+                        ],
+                    )?;
+                    rows.extend(row);
+                }
+            }
+            ResolverQuery::TreeKey(query) => {
+                let Ok(keys) = inspect::inspect_keys(bytes) else {
+                    return Ok(rows);
+                };
+                for (at, entry) in keys.into_iter().enumerate() {
+                    let row = project(
+                        &base,
+                        &[
+                            (&query.at, Value::UnsignedInt(at as u128)),
+                            (&query.entry, Value::Entity(entry_entity(&entry.key)?)),
+                            (&query.key, Value::Bytes(entry.key)),
+                            (&query.rank, Value::UnsignedInt(entry.rank.into())),
+                        ],
+                    )?;
+                    rows.extend(row);
+                }
+            }
+            ResolverQuery::TreeEntry(query) => {
+                let Ok(entries) = inspect::inspect_entries(bytes) else {
+                    return Ok(rows);
+                };
+                for entry in entries {
+                    let spill = entry
+                        .spill
+                        .map(|reference| reference.to_base58())
+                        .unwrap_or_default();
+                    let row = project(
+                        &base,
+                        &[
+                            (&query.at, Value::UnsignedInt(entry.at.into())),
+                            (&query.entry, Value::Entity(entry_entity(&entry.key)?)),
+                            (&query.key, Value::Bytes(entry.key)),
+                            (&query.state, Value::String(entry.state.into())),
+                            (&query.retraction, Value::Boolean(entry.retraction)),
+                            (&query.origin, Value::Bytes(entry.origin)),
+                            (&query.edition, Value::UnsignedInt(entry.edition.into())),
+                            (&query.cause, Value::UnsignedInt(entry.cause.into())),
+                            (&query.collapsed, Value::UnsignedInt(entry.collapsed.into())),
+                            (
+                                &query.supersedes,
+                                Value::UnsignedInt(entry.supersedes.into()),
+                            ),
+                            (&query.spill, Value::String(spill)),
+                        ],
+                    )?;
+                    rows.extend(row);
+                }
+            }
+            ResolverQuery::TreeValue(query) => {
+                // The loaded block IS the value: raw bytes, no
+                // node decode. Type information lives in the
+                // key the reference came from.
+                let row = project(
+                    &base,
+                    &[
+                        (&query.size, Value::UnsignedInt(bytes.len() as u128)),
+                        (&query.bytes, Value::Bytes(bytes)),
+                    ],
+                )?;
+                rows.extend(row);
+            }
+            ResolverQuery::TreeBlob(query) => {
+                let Ok(records) = inspect::inspect_blob_records(bytes) else {
+                    return Ok(rows);
+                };
+                for record in records {
+                    let row = project(
+                        &base,
+                        &[
+                            (&query.at, Value::UnsignedInt(record.at.into())),
+                            (&query.blob, Value::Bytes(record.blob)),
+                            (&query.version, Value::UnsignedInt(record.version.into())),
+                            (&query.size, Value::UnsignedInt(record.size.into())),
+                        ],
+                    )?;
+                    rows.extend(row);
+                }
+            }
+            ResolverQuery::TreeManifest(query) => {
+                let Ok(manifest) = inspect::inspect_manifest(bytes) else {
+                    return Ok(rows);
+                };
+                let row = project(
+                    &base,
+                    &[
+                        (&query.version, Value::UnsignedInt(manifest.version.into())),
+                        (
+                            &query.fanout_n,
+                            Value::UnsignedInt(manifest.fanout_n.into()),
+                        ),
+                        (
+                            &query.max_separator,
+                            Value::UnsignedInt(manifest.max_separator.into()),
+                        ),
+                        (
+                            &query.inline_n,
+                            Value::UnsignedInt(manifest.inline_n.into()),
+                        ),
+                        (
+                            &query.spill_prefix,
+                            Value::UnsignedInt(manifest.spill_prefix.into()),
+                        ),
+                        (
+                            &query.max_segment,
+                            Value::UnsignedInt(manifest.max_segment.into()),
+                        ),
+                        (
+                            &query.frame_ceiling_factor,
+                            Value::UnsignedInt(manifest.frame_ceiling_factor.into()),
+                        ),
+                        (
+                            &query.anchor_selector,
+                            Value::UnsignedInt(manifest.anchor_selector.into()),
+                        ),
+                    ],
+                )?;
+                rows.extend(row);
+            }
+        }
+        Ok(rows)
     }
 }
 

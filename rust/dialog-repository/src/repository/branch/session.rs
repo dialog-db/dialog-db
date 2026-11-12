@@ -4512,16 +4512,57 @@ mod resolver_tests {
         Ok((branch, ToBase58::to_base58(tree_bytes)))
     }
 
-    /// A blank `of` (a query that never names the node reference) is
-    /// scheduled but matches nothing: zero rows, no error. The planner
-    /// only refuses an unbound *variable* input.
+    /// Every node the root reaches, by walking spans one node at a time.
+    async fn reachable(
+        branch: &Branch,
+        operator: &Peer<VolatileSpace, dialog_peer::Session>,
+        root: &str,
+    ) -> anyhow::Result<std::collections::BTreeSet<String>> {
+        let mut all = std::collections::BTreeSet::new();
+        let mut frontier = vec![root.to_string()];
+        while let Some(next) = frontier.pop() {
+            let spans: Vec<ResolverConclusion> = branch
+                .query()
+                .select(tree_span(&next))
+                .perform(operator)
+                .try_vec()
+                .await?;
+            frontier.extend(spans.iter().map(|span| reference(span, "node")));
+            all.insert(next);
+        }
+        Ok(all)
+    }
+
+    /// An open `of` (a blank, or a variable nothing binds) lists every
+    /// node the branch's root reaches, each once, binding `of` to it.
     #[dialog_common::test]
-    async fn it_yields_nothing_for_a_blank_reference() -> anyhow::Result<()> {
+    async fn it_lists_every_node_for_an_open_reference() -> anyhow::Result<()> {
         let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
-        let (branch, _root) = committed_branch(&repo, &operator).await?;
+        let (branch, root) = committed_wide_branch(&repo, &operator, 800).await?;
+        let expected = reachable(&branch, &operator, &root).await?;
+        assert!(expected.len() > 2, "a root and its children: {expected:?}");
 
         let rows: Vec<ResolverConclusion> = branch
+            .query()
+            .select(ResolverQuery::TreeNode(TreeNodeQuery {
+                of: Term::var("of"),
+                kind: Term::var("kind"),
+                size: Term::var("size"),
+                count: Term::var("count"),
+                scale: Term::var("scale"),
+                novelty: Term::var("novelty"),
+            }))
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        let listed: std::collections::BTreeSet<String> =
+            rows.iter().map(|row| reference(row, "of")).collect();
+        assert_eq!(rows.len(), expected.len(), "each node once: {rows:?}");
+        assert_eq!(listed, expected, "exactly the nodes the root reaches");
+        assert_eq!(reference(&rows[0], "of"), root, "the root comes first");
+
+        let blank: Vec<ResolverConclusion> = branch
             .query()
             .select(ResolverQuery::TreeNode(TreeNodeQuery {
                 of: Term::<Value>::blank().into(),
@@ -4534,9 +4575,103 @@ mod resolver_tests {
             .perform(&operator)
             .try_vec()
             .await?;
-        assert!(
-            rows.is_empty(),
-            "a blank reference matches nothing: {rows:?}"
+        assert_eq!(blank.len(), expected.len(), "a blank lists as well");
+        Ok(())
+    }
+
+    /// A plain rule over `tree/node` is a concept of tree nodes: asked
+    /// for all of them it lists every node, and asked for one by `this`
+    /// it reads that node's block and no other.
+    #[dialog_common::test]
+    async fn it_looks_a_node_up_through_a_rule_without_walking() -> anyhow::Result<()> {
+        use crate::helpers::Counting;
+        use dialog_query::concept::query::ConceptQuery;
+        use dialog_query::rule::DeductiveRuleDescriptor;
+        use dialog_query::{ConceptConclusion, Parameters};
+
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let (branch, _) = committed_wide_branch(&repo, &operator, 800).await?;
+
+        let descriptor: DeductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
+            "deduce": { "with": {
+                "kind": { "the": "probe/node-kind", "as": "text:" }
+            }},
+            "when": [
+                {
+                    "assert": "tree/node",
+                    "where": {
+                        "of": { "?": { "name": "this" } },
+                        "kind": { "?": { "name": "kind" } }
+                    }
+                }
+            ]
+        }))?;
+        let rule = descriptor
+            .compile()
+            .expect("a rule over an open node compiles");
+        let conclusion = rule.conclusion().clone();
+        branch
+            .transaction()
+            .assert(&rule)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let revision = branch.revision().expect("branch has a revision");
+        let root = ToBase58::to_base58(&revision.tree.hash()[..]);
+        let expected = reachable(&branch, &operator, &root).await?;
+
+        let select = |this: Term<Entity>| {
+            let mut terms = Parameters::new();
+            terms.insert("this".into(), this.into());
+            terms.insert("kind".into(), Term::var("kind"));
+            ConceptQuery {
+                predicate: conclusion.clone(),
+                terms,
+            }
+        };
+
+        let listing = Counting::new(operator.clone());
+        let all: Vec<ConceptConclusion> = branch
+            .query()
+            .select(select(Term::var("this")))
+            .perform(&listing)
+            .try_vec()
+            .await?;
+        let listed: std::collections::BTreeSet<String> = all
+            .iter()
+            .map(|row| row.entity().node_hash().expect("a node entity").to_base58())
+            .collect();
+        assert_eq!(listed, expected, "asked for all, the rule lists every node");
+
+        let child = expected
+            .iter()
+            .find(|node| **node != root)
+            .expect("the root has children");
+        let child = Entity::from_node(
+            &<[u8; 32]>::try_from(base58::FromBase58::from_base58(child.as_str()).unwrap())
+                .unwrap(),
+        )?;
+        let lookup = Counting::new(operator.clone());
+        let one: Vec<ConceptConclusion> = branch
+            .query()
+            .select(select(Term::from(child.clone())))
+            .perform(&lookup)
+            .try_vec()
+            .await?;
+        assert_eq!(one.len(), 1, "asked for one node, one row: {one:?}");
+        assert_eq!(one[0].entity(), &child);
+        assert_eq!(
+            listing.block_reads(),
+            expected.len() as u64,
+            "listing reads each node's block once"
+        );
+        assert_eq!(
+            lookup.block_reads(),
+            1,
+            "a node named by `this` is read alone: no walk from the root"
         );
         Ok(())
     }
