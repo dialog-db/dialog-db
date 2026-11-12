@@ -4,8 +4,8 @@
 
 |  | Understanding | Activity |
 |---|---|---|
-| **Status** | *What do we know?* The problem, accepted. What the maintainer means by idempotent: a tree read behaves as if the whole tree were local, fetching what it needs, so holding a block or not cannot be observed through it; and a resolver requires its node so that a query cannot download a whole tree by mistake. That the draft branch's listing breaks the second of those. Three ways the maintainer sees to tell what is held, and why each troubles them (fifth entry). That dialog already has one mutable thing reaching tree queries as a tracked fact, the root, and already has a replica as an entity with synthesized facts. | *Where are we at?* Directing. Approaches to "what is held" are being collected, not chosen. |
-| **Agenda** | *What do we need to know?* Whether "what this replica holds" as a tracked fact of the replica, read by a scan and not by a resolver, is what the maintainer meant by capturing partiality (asked). Then whether such a scan can be built: answered per node by a local read, listed by a walk that never fetches, and re-run when a block arrives. Whether eviction exists and what it does to any of this. Open hypotheses in the ledger. | *Where are we going?* Use cases, then the strategy matrix. |
+| **Status** | *What do we know?* The problem, accepted. What idempotent means here. That every branch has an ephemeral line: facts in memory, folded into every read, never committed, each change an instant with a sequence a query pins and a poll reads the delta of. That a poll re-runs only when the head or that line moved. That a fetched block is written back locally in one place. That no effect removes a block. A matrix for "how a query learns whether a block is held" with four columns ([design-held](design-held.md)). | *Where are we at?* Directing, with one implementation decision opened early because the maintainer asked for a concrete proposal on it. Not decided. |
+| **Agenda** | *What do we need to know?* For the proposed column: which lines a hydration writes to, given a line is per branch and an archive per space; whether dialog may assert a reserved fact into a line from the hydration path; whether a "not known" state is acceptable to the maintainer. Still open from before: the strategy matrix itself (how a node's children come back with their details together), which this decision does not touch. | *Where are we going?* The maintainer's reading of the matrix; then use cases and the strategy matrix. |
 
 ## 2026-11-12, Describing: what was tried and what was seen
 
@@ -206,3 +206,46 @@ Nothing in the fourth way has been checked against the code.
 **Decided.** Not decided. The agent's "presence under a local read" from
 the last entry is withdrawn: it has a tree read's rows depend on what is
 held, which is what the maintainer means the resolvers not to do.
+
+## 2026-11-12, Directing: a matrix for what is held
+
+**Asked.** The maintainer: check what needs checking and give a concrete
+proposal. They doubt what is in a block store can be captured exactly,
+and offered more ways: something that changes on every query, or turns
+moved by hand, so the same thing is never asked twice; block creation
+time, to filter out blocks that were not there before; metadata added
+whenever a block arrives. Their uncertainty: asked with an old value,
+"I cannot tell what blocks were there before".
+
+**Learned.** Checked in the code:
+
+- Every branch and snapshot carries an ephemeral line
+  (`rust/dialog-repository/src/repository/ephemeral.rs`): session facts
+  in memory, folded into every read of the line, never committed. Each
+  change mints an instant with a sequence and a chained hash, kept in a
+  ring of 1024, so a reader pinned earlier gets the exact delta since.
+- A subscription's poll returns unchanged unless the head moved or that
+  line's sequence moved (`Subscription::poll`). Nothing in it looks at
+  the archive.
+- A block fetched from a remote is written back to the local archive in
+  one function (`hydrate_through` in
+  `rust/dialog-repository/src/repository/archive/hydrate.rs`).
+- The archive's effects are `Get`, `Put`, `Import` and `Load`; none
+  removes a block.
+
+What the maintainer is reaching for with time, turns and a value that
+changes per query is an input that moves when what is held moves, so the
+read stays a function of its inputs. The ephemeral line's revision is
+such an input and already exists: a query pins it, caches are keyed by
+it, a poll watches it. So nothing about the block store has to be
+captured. What is captured is each answer that was asked for, as a
+fact, and the arrival of a block corrects the fact. That is the fourth
+column of [design-held](design-held.md), and it answers "what was there
+before" without asking the store about the past: the past answer is the
+fact as it stood.
+
+Its cost is a state the others do not have: a node nobody probed has no
+fact.
+
+**Decided.** Not decided. The matrix has three `?` cells in the
+proposed column.
