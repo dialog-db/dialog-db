@@ -470,10 +470,14 @@ impl MergeInput {
     /// yields a row for an entity nothing matched, so it extends the
     /// other inputs' rows rather than intersecting with them.
     fn relation_variable(query: &ConceptQuery) -> Option<String> {
-        query.predicate.attribute_field()?;
+        let (_, field) = query.predicate.attribute_field()?;
         if query.widens() {
             return None;
         }
+        // A read of a keyed collection with its entity free reads its
+        // entries in the order of their keys, and the entities of one key
+        // after another. Its rows do not arrive sorted on the entity.
+        field.the().attribute()?;
         query
             .terms
             .get("this")
