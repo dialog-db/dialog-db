@@ -34,3 +34,33 @@ C, by the builder.
 It is refused, with the reason. `DeductiveRule::storable` and `InductiveRule::storable` return `TypeError::UnstorablePattern`, which names the pattern and says that format 3 of a rule body has no way to write one. Asserting such a rule stages nothing and panics with that reason, because an assertion has no error to return. That is how a rule whose body reads an attribute through a raw scan is refused today, with a reason that now says why.
 
 What it should do is the maintainer's, and is on the [journal](journal.md)'s agenda. A panic is the only refusal the assertion's signature allows. The other places it could be refused are a transaction's commit, which returns a `CommitError`, and a format that writes a pattern, which is the question this topic was told to bring back.
+
+## Laid over a branch for one query
+
+**Decision:** how a rule that holds a pattern is laid over a branch with `Branch::with` and run, when it cannot be stored. Asked by the notation (#773), which compiles a query of several premises to a rule and runs it that way.
+
+Facts:
+
+- The rule has a name. Its identity comes from `pattern_reference`, by parts, and never from the stored spelling. So the name was not what stopped it.
+- An overlay is a batch of facts, `Changes`, the same batch a transaction commits. `QueryLayer::with` asserts a statement into it, and a rule's assertion writes its `dialog.rule/*` index facts and its body as bytes under `dialog.rule/source`.
+- A query finds an overlay's rule by those index facts and then decodes its body from the bytes (`QueryEnv::overlay_rules`, `rust/dialog-repository/src/repository/branch/session.rs`). So a rule laid over a branch went through format 3 without ever being stored, and one that format 3 cannot write panicked in `Statement::assert`.
+- `Statement::assert` is generic over its target and knows nothing of where the batch is going.
+
+| Decision: where an overlay gets the body of a rule it cannot write, for: a rule that holds a pattern run over a branch |
+|---|---|---|---|
+| criterion \ approach | A: a method of its own on the layer, `with_rule` | B: the target of an assertion may hold a thing as it is (`Update::hold`), and a layer's does | C: a body format that writes a pattern |
+| `Branch::with(rule)` works, as it does for a rule of terms | 🔴 no: `with` is generic over a statement and still panics | 🟢 yes, for a rule by itself or inside any statement that passes its target on | 🟢 yes |
+| what is stored | nothing changes | 🟢 nothing changes: a batch that is committed gives the rule back, and the assertion refuses it as before | 🔴 a format, which this topic was told not to add |
+| what the overlay holds | the rule | 🟢 the facts that name the rule, and the rule as it was given under that name | bytes |
+| a cache keyed by the overlay's rule facts | has to learn of the rule | 🟢 sees the rule: its index facts are in the batch, under an entity that is its identity | sees it |
+
+Decided: B, by the builder.
+
+- `Update::hold(entity, body)` asks a target to keep a thing as what `entity` is. The default gives it back. `Changes` keeps the default, so a transaction refuses the rule as it did, by the same panic with the same reason, and stages nothing.
+- A rule the stored format cannot write asks its target to hold it, and asserts its `conclusion`, `derives` and `reads` facts with no `source`.
+- A `QueryLayer` lays statements into a target that holds a deductive rule beside the layer's changes. The layer's overlay line carries the rules it holds (`Ephemeral::keeping`), and a query that finds a rule by its index facts with no `source` beside them takes the rule from the line.
+
+It touches nothing that is stored. A stored body is still the only way a rule reaches a tree, and a rule that holds a pattern still has none.
+
+Left as it was: retracting such a rule, and asserting an inductive rule that holds a pattern, are still refused wherever they are asserted. A layer only asserts, and induction runs at commit.
+
