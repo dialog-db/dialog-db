@@ -31,4 +31,13 @@
 | A load can be made to read only what the replica holds | fact | `Load::locally` in `rust/dialog-effects/src/archive/load.rs` | holds |
 | Whether a block is held can be told from the presence of its rows under a read that does not fetch, without the engine asserting anything that later turns false | hypothesis | confirmed if a design can state held-ness with no row that a later arrival contradicts; refuted if the consumer needs a row saying "not held" (to join on, to count, to subscribe to) | open |
 | A subscriber over a tree read is not told when a block it lacked arrives | hypothesis | confirmed or refuted by a subscription over a resolver whose block is absent, then made present, with no commit between | open |
+| A tree read should behave as if the whole tree were local, so that holding a block or not is unobservable through it | opinion | the maintainer, 2026-11-12 | - |
+| A resolver requires its node so that a query cannot download a whole tree by mistake | fact | the maintainer, 2026-11-12, as the reason it was built so; `ResolverQuery::estimate` on main answers `None` for an unbound node | holds on main |
+| On the draft branch a resolver whose node is open loads every block the root reaches, fetching what is not held | fact | `ResolverQuery::evaluate` on `worker/affectionate-pascal-iey41u` uses `archive::Load` without `locally` in its walk; `it_lists_every_node_for_an_open_reference` | holds; contradicts the row above |
+| The only mutable fact in the tree domain is the current root, and it reaches queries as a tracked fact, not through a load | fact | `rust/dialog-corpus/src/inspect.rs`, "Why this is sound under differential subscriptions" | holds |
+| A replica is an entity whose facts are synthesized when a query runs and never stored | fact | `rust/dialog-repository/src/schema.rs` module doc | holds |
+| Whether a block is held should be told by a resolver that takes a time | opinion | the maintainer, 2026-11-12, offered as the only way they could think of and "not ideal" | - |
+| What a replica holds should be a fact of the replica read by a scan, with the resolvers left as they are | opinion | the agent, 2026-11-12 | - |
+| A scan over what a replica holds can be answered per node by a local read, listed by a walk that never fetches, and re-run when a block arrives | hypothesis | confirmed by building one against `Load::locally` and a subscription test in which a block arrives with no commit; refuted if nothing in dialog signals an arrival | open |
+| Whether a block is held can be told from the presence of its rows under a read that does not fetch | hypothesis | - | withdrawn 2026-11-12: it makes a tree read depend on what is held |
 

@@ -4,8 +4,8 @@
 
 |  | Understanding | Activity |
 |---|---|---|
-| **Status** | *What do we know?* The problem, accepted: a consumer that can only query cannot draw a branch's tree, so the one embedder that shows it reads blocks through its own machinery. What it must be able to read, in a bounded number of reads: a node's children with their details, whether each is held, an entry's key in parts with its blob record. That the maintainer wants tree reads to stay permanent, and that the module's own argument says what permanent is for: no invalidation, because a row is never wrong. That a tree read today already yields nothing for a block that is neither held nor reachable. | *Where are we at?* Directing. The statement is accepted. One word in the constraint, "idempotent", is being pinned down before it becomes a criterion. |
-| **Agenda** | *What do we need to know?* Which property the maintainer needs kept: the same query always yields the same rows, or a row once yielded is never wrong (asked, not answered). If the second: whether "held" can be told by a row's presence under a read that does not fetch, which asserts nothing that later turns false; and what tells a subscriber to look again when a block arrives. Open hypotheses in the ledger. | *Where are we going?* Use cases, then the strategy matrix: the status quo, the resolvers as on the draft branch, the maintainer's low-level primitives, the agent's whole-span records, and whatever the contrast gives birth to. |
+| **Status** | *What do we know?* The problem, accepted. What the maintainer means by idempotent: a tree read behaves as if the whole tree were local, fetching what it needs, so holding a block or not cannot be observed through it; and a resolver requires its node so that a query cannot download a whole tree by mistake. That the draft branch's listing breaks the second of those. Three ways the maintainer sees to tell what is held, and why each troubles them (fifth entry). That dialog already has one mutable thing reaching tree queries as a tracked fact, the root, and already has a replica as an entity with synthesized facts. | *Where are we at?* Directing. Approaches to "what is held" are being collected, not chosen. |
+| **Agenda** | *What do we need to know?* Whether "what this replica holds" as a tracked fact of the replica, read by a scan and not by a resolver, is what the maintainer meant by capturing partiality (asked). Then whether such a scan can be built: answered per node by a local read, listed by a walk that never fetches, and re-run when a block arrives. Whether eviction exists and what it does to any of this. Open hypotheses in the ledger. | *Where are we going?* Use cases, then the strategy matrix. |
 
 ## 2026-11-12, Describing: what was tried and what was seen
 
@@ -142,3 +142,67 @@ more rows, not a withdrawal of any.
 **Decided.** The problem statement is accepted as it now reads in the
 top story. Phase moves to Directing. The constraint is not yet a
 criterion: which of the two properties it is has been asked.
+
+## 2026-11-12, Directing: what "idempotent" means here, and three ways to say what is held
+
+**Asked.** Which property is to be kept: the same rows always, or a row
+once yielded never wrong? The maintainer: permanence "may suffice,
+although that seems far more confusing to me than thinking of
+idempotence", and then what they had actually meant:
+
+- A tree read fetches whatever blocks it needs, "meaning behavior will
+  be unobservable from having those blocks vs not".
+- "The reason we required node as opposed to allowing scan was precisely
+  so that you would not download the whole tree by a mistake."
+
+And three ways they see to tell what is held:
+
+1. Capture partiality in what is queried, so the same revision says it
+   has no node where the replica lacks one, and a command that fetches a
+   block changes that, so asking again answers. "Very complicated and
+   I'm not even sure possible at all."
+2. Pretend the whole tree is local and be deliberate about not asking
+   for what would download. Then nothing can be asked about locality.
+3. A resolver that takes a time, and says whether a block was local at
+   that time; commands update the time and a rule passes it in. "None of
+   this is ideal."
+
+**Learned.** The glossary now has the maintainer's meaning of
+*idempotent*; the agent's split into "same rows" and "permanent rows"
+was the agent's and is dropped as a framing.
+
+*Those two cannot both be true.* On the draft branch a resolver whose
+node is open walks from the root and loads every block, fetching what is
+not held. That is the download by mistake that requiring the node was
+there to prevent. The maintainer asked for listing ("No it should list")
+before saying why the node was required; the two are now both on record
+and one has to give.
+
+Ways 1 and 3 are one idea: make what the answer depends on an input, so
+the read stays a function of its inputs. They differ in the input. Time
+moves when nothing was fetched, and needs commands to move it. What the
+answer depends on is what the replica holds, and dialog already treats
+one such thing this way: the module's argument says the only mutable
+fact in the domain is the current root, "which reaches queries as an
+ordinary tracked fact (`dialog.branch/tree`), never through this
+command". What made way 1 look impossible is putting it in the
+revision, which is shared and synced while holdings differ per replica.
+Dialog has a place for what differs per replica: the `Replica` entity,
+"this device's view of the repository", whose facts are synthesized when
+a query runs and never stored.
+
+That gives a fourth way, entered as an opinion of the agent's and not
+examined: what a replica holds is a fact of the replica, read by a scan,
+which the resolvers' own admission rule already says anything addressed
+by mutable state must be. The resolvers stay as the maintainer means
+them. A rule that asks whether a child is held before asking for its
+details never fetches, and a scan that lists what is held, by walking
+from the root through local reads only, could be the thing that makes a
+rule over a resolver answerable with nothing given, without a resolver
+ever listing.
+
+Nothing in the fourth way has been checked against the code.
+
+**Decided.** Not decided. The agent's "presence under a local read" from
+the last entry is withdrawn: it has a tree read's rows depend on what is
+held, which is what the maintainer means the resolvers not to do.
