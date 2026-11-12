@@ -41,8 +41,8 @@ use dialog_capability::{Fork, Provider};
 use dialog_common::{ConditionalSync, Holds};
 use dialog_corpus::selector::Constrained;
 use dialog_corpus::{
-    Change, Changes, DialogCorpusError, Entity, Fact, Instruction, Relation, Select, Selector,
-    Statement, Value,
+    Change, Changes, DialogCorpusError, Entity, Fact, Instruction, Pick, Relation, Select,
+    Selector, Statement, Value,
 };
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::Identify;
@@ -1128,6 +1128,10 @@ fn bind_seed(
     }
 }
 
+/// What a head writes, as `emit_matches` tells two heads apart: its
+/// subject, then each field's attribute, value and pick.
+type WrittenHead = (Entity, Vec<(Relation, Value, Pick)>);
+
 /// Emit a rule's head for every produced match: transient heads into
 /// `transients`, durable heads (novelty-checked against the frozen
 /// view) into `novelty`.
@@ -1140,6 +1144,7 @@ async fn emit_matches<'a>(
     transients: &mut Changes,
 ) -> Result<(), CommitError> {
     let conclusion = rule.conclusion();
+    let mut heads: Vec<WrittenHead> = Vec::with_capacity(matches.len());
     for matched in matches {
         // The head subject. A rule whose premises leave `this` unbound
         // has no cell to write; skip the binding.
@@ -1148,7 +1153,7 @@ async fn emit_matches<'a>(
             _ => continue,
         };
 
-        let mut head = Changes::new();
+        let mut cells = Vec::new();
         for (name, field) in conclusion.with().iter() {
             let Ok(Binding::Present(value)) = matched.lookup(&Term::<Any>::var(name)) else {
                 // Optional head fields the frame didn't bind emit
@@ -1170,6 +1175,31 @@ async fn emit_matches<'a>(
                     })?
                 }
             };
+            cells.push((attribute, value, field.descriptor().pick().clone()));
+        }
+        heads.push((this, cells));
+    }
+
+    // A seeded rule is evaluated once per stimulus row a premise names,
+    // so an event that carries several of a premise's fields finds the
+    // same binding once per field: each distinct head is written once,
+    // the first time it is found. The heads are compared where they
+    // stand, without a copy, and only when there are two to compare.
+    let mut first = vec![true; heads.len()];
+    if heads.len() > 1 {
+        let mut seen: hashbrown::HashSet<&WrittenHead> =
+            hashbrown::HashSet::with_capacity(heads.len());
+        for (at, head) in heads.iter().enumerate() {
+            first[at] = seen.insert(head);
+        }
+    }
+
+    for ((this, cells), first) in heads.into_iter().zip(first) {
+        if !first {
+            continue;
+        }
+        let mut head = Changes::new();
+        for (attribute, value, pick) in cells {
             match rule.polarity() {
                 // A retracting head dissociates the exact bound
                 // triple, cardinality-independent.
@@ -1185,7 +1215,7 @@ async fn emit_matches<'a>(
                         attribute,
                         this.clone(),
                         value,
-                        field.descriptor().pick().clone(),
+                        pick,
                     );
                 }
             }
@@ -1245,6 +1275,7 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use crate::helpers::test_repo;
+    use crate::repository::source::Live;
     use crate::rules::Transient;
     use crate::{Branch, CommitError, RemoteSite, Revision};
     use anyhow::Result;
@@ -3428,6 +3459,88 @@ mod tests {
             "the key is a position: {key}"
         );
         assert_eq!(value, &Value::Entity(item));
+        Ok(())
+    }
+
+    /// A command naming every field of a premise seeds the rule once per
+    /// field, and each evaluation finds the same binding. Induction writes
+    /// the head once, not once per seed: the head here is a set, which
+    /// keeps every copy written to it.
+    #[dialog_common::test]
+    async fn it_writes_a_head_once_however_many_rows_seed_it() -> Result<()> {
+        use dialog_corpus::Statement;
+
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let rule: InductiveRule = serde_json::from_value(json!({
+            "description": "Record who an assign command names",
+            "assert!": {
+                "with": {
+                    "assignee": { "the": "issue/assignee", "as": "text:", "pick": "all:" }
+                }
+            },
+            "when": [
+                {
+                    "assert": {
+                        "with": {
+                            "issue": { "the": "cmd.assign/issue", "as": "entity:" },
+                            "who": { "the": "cmd.assign/who", "as": "text:" },
+                            "note": { "the": "cmd.assign/note", "as": "text:" }
+                        }
+                    },
+                    "where": {
+                        "issue": { "?": { "name": "this" } },
+                        "who": { "?": { "name": "assignee" } },
+                        "note": { "?": { "name": "note" } }
+                    }
+                }
+            ]
+        }))?;
+        branch
+            .transaction()
+            .assert(rule)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        let command: Entity = "cmd:1".parse()?;
+        let issue: Entity = "issue:1".parse()?;
+        let mut transients = Changes::new();
+        dialog_query::the!("cmd.assign/issue")
+            .of(command.clone())
+            .is(issue.clone())
+            .assert(&mut transients);
+        dialog_query::the!("cmd.assign/who")
+            .of(command.clone())
+            .is("member-0".to_string())
+            .assert(&mut transients);
+        dialog_query::the!("cmd.assign/note")
+            .of(command)
+            .is("from the board".to_string())
+            .assert(&mut transients);
+
+        let mut changes = Changes::new();
+        super::induce(
+            &Live::from(&branch).pin(),
+            &mut changes,
+            transients,
+            &operator,
+        )
+        .await?;
+
+        assert_eq!(
+            asserted(&changes),
+            vec![(
+                "issue/assignee".to_string(),
+                issue,
+                Value::String("member-0".to_string())
+            )],
+            "three seeds of one binding write its head once"
+        );
         Ok(())
     }
 
