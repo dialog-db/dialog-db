@@ -1,0 +1,21 @@
+# A page cannot show a node's children with their details: claims
+
+| claim | kind | backing | status |
+|---|---|---|---|
+| Tonk's `<tonk-tree>` is Rust compiled into the page bundle and reads through three operations the tonk worker answers outside dialog's planner | fact | tonk `rust/tonk-tree/src/model.rs` (`Loader::query`), `rust/tonk-guest/src/bin/guest.rs` (`tonk_tree::register`), `rust/dialog-reactor/src/formula.rs` (`resolve_formula`), at tonk `125ab4c` | holds |
+| The worker's `tree/child` returns one row per child with its position, its separator split into parts, whether its block is local, and the child's own fields when it is | fact | tonk `rust/dialog-reactor/src/formula.rs` (`child_rows`, `read_local`) | holds |
+| Dialog has seven tree resolvers and two key formulas; a resolver yields rows of plain values, one per column | fact | `rust/dialog-query/src/resolver.rs`, `rust/dialog-query/src/formula/key.rs` | holds |
+| A resolver heads a tonk query when its node is a constant | fact | probe against a tonk test site on dialog 0.4.0-rc.7, 2026-11-12: `tree/span`, `tree/key`, `tree/entry`, `tree/manifest` answered | holds |
+| A tonk document does not pass a value from one expression into a resolver in the next | fact | same probe: `tree/span` then `tree/node(of: ?child)` yielded spans and no nodes; tonk `rust/tonk-evaluator/src/evaluate.rs` (`run_query` evaluates each expression alone, then `natural_join`) | holds |
+| A formula cannot head a tonk query | fact | same probe: `text/upper-case:` answered "unknown concept" | holds |
+| A rule whose body needs its node from the caller is refused at install on main | fact | `RequiredBindings { required: {"this"} }` from `DeductiveRuleDescriptor::compile` on main `f65891b`, 2026-11-12 | holds on main; not on the draft branch |
+| Rows derived onto one shared entity collapse: 20 spans gave one row with fields from different spans; with many-valued fields, 400 rows | fact | probe against a tonk test site, 2026-11-12 | holds |
+| A recursive concept is evaluated in full and the caller's bindings joined afterwards | fact | module doc of `rust/dialog-query/src/concept/query/fixpoint.rs`; `notes/goal-directed-fixpoint.md` | holds; not measured here |
+| A concept is read one attribute at a time; a rule's body is run with `this` free or bound, and no other supplied field reaches it | fact | `rust/dialog-query/src/recall.rs` (`Recall::rows_for`); test `it_lists_the_children_of_a_given_node_without_walking` on the draft branch (1 read keyed by the parent, at least one per node keyed by the child) | holds |
+| Every supplied field reaches a rule's body only when one rule alone derives the concept and its body provably yields one row per entity, which a body with a resolver or formula never does | fact | `rust/dialog-query/src/concept/query.rs` (the `rules.exact()` branch), `DeductiveRule::single_valued` in `rust/dialog-query/src/rule/deductive.rs` | holds |
+| A supplied value cannot be pushed into a body in general because it would remove candidates before a single-valued field elects its winner | hypothesis | the agent's reading of the code above; confirmed by a test where an entity has two candidates for a field, the caller asks for the loser, and pushing the value in returns the entity | open |
+| A record value can be yielded by a resolver, carried through a rule as a field's value, and read by a tonk page as an object | hypothesis | confirmed by a resolver test in dialog that yields one and a tonk element test that reads its fields; `Value::Record` exists (`rust/dialog-query/src/formula/revision.rs` reads one) | open |
+| The inspector's whole need is to show; nothing queries a span's or an entry's fields as facts | hypothesis | the maintainer's answer to who explores the tree and what for | open; on the agenda |
+| Lower-level primitives (read a block, then one formula decoding it as an index node and another as a segment node) would be simpler | opinion | the maintainer, 2026-11-12, offered as a suspicion and asked not to bias the thinking | - |
+| A resolver should yield each span whole, as one record value | opinion | the agent, 2026-11-12 | - |
+| The question was the wrong one: ask what the query engine should offer for exploring a search tree, not how to make the resolvers serve the inspector | opinion | the maintainer, 2026-11-12 | - |
