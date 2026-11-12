@@ -97,6 +97,15 @@ impl Parameters {
         })
     }
 
+    /// Returns what the given name is bound to in one lookup: the term a
+    /// premise reads there, and the map, list or tuple pattern it stands
+    /// for when the parameter holds one.
+    pub fn slot(&self, name: &str) -> Option<(&Term<Any>, Option<&Pattern>)> {
+        self.0
+            .get(name)
+            .map(|parameter| (&parameter.term, parameter.shape.as_deref()))
+    }
+
     /// Returns the map, list or tuple pattern the given name is bound
     /// to, when it is bound to one.
     pub fn shape(&self, name: &str) -> Option<&Pattern> {

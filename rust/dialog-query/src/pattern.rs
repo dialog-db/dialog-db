@@ -602,7 +602,7 @@ static WHOLE_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// one of whose parameters is a map, a list or a tuple runs with a
 /// variable there, the whole, and the pattern is applied around it:
 /// [`build`] binds the whole from the pattern where the pattern's
-/// variables are bound before the premise runs, and [`take_apart`]
+/// variables are bound before the premise runs, and `take_apart`
 /// matches what the premise bound the whole to against the pattern
 /// after it.
 #[derive(Debug, Clone, PartialEq)]
@@ -639,6 +639,20 @@ impl Shape {
             Self::whole_of(&pattern)
         };
         Self { whole, pattern }
+    }
+}
+
+/// Whether `proposition` holds a map, a list or a tuple of terms. Only
+/// a concept application and an equality can: every other premise is a
+/// struct of terms. Asked of every premise a rule is spelled from, so
+/// it builds no parameters to answer.
+pub(crate) fn holds_shape(proposition: &Proposition) -> bool {
+    match proposition {
+        Proposition::Concept(query) => query.terms.has_shapes(),
+        Proposition::Constraint(Constraint::Equality(equality)) => {
+            equality.this.is_composite() || equality.is.is_composite()
+        }
+        _ => false,
     }
 }
 
@@ -730,39 +744,26 @@ pub fn build<'a, M: Selection + 'a>(shapes: Arc<[Shape]>, selection: M) -> impl 
     }
 }
 
-/// After a premise ran: match what each whole is bound to against its
-/// pattern, binding the variables inside it, and drop a row that does
-/// not match. A whole bound to nothing (an optional field with no
-/// value) matches no pattern. A whole the premise left unbound leaves
-/// the pattern's variables unbound, as it would a variable in its
-/// place.
-pub fn take_apart<'a, M: Selection + 'a>(
-    shapes: Arc<[Shape]>,
-    selection: M,
-) -> impl Selection + 'a {
-    try_stream! {
-        for await row in selection {
-            let row: Match = row?;
-            let mut matched = row.clone();
-            let mut matches = true;
-            for shape in shapes.iter() {
-                let Some(binding) = row.get(shape.whole.name().unwrap_or_default()) else {
-                    continue;
-                };
-                let Some(value) = binding.as_value() else {
-                    matches = false;
-                    break;
-                };
-                if !shape.pattern.unify(value, &mut matched)? {
-                    matches = false;
-                    break;
-                }
-            }
-            if matches {
-                yield matched;
-            }
+/// After a premise ran: match what each whole in `row` is bound to
+/// against its pattern, binding the variables inside it. `None` for a
+/// row that does not match, which is dropped. A whole bound to nothing
+/// (an optional field with no value) matches no pattern. A whole the
+/// premise left unbound leaves the pattern's variables unbound, as it
+/// would a variable in its place.
+pub(crate) fn take_apart(shapes: &[Shape], row: Match) -> Result<Option<Match>, EvaluationError> {
+    let mut matched = row.clone();
+    for shape in shapes {
+        let Some(binding) = row.get(shape.whole.name().unwrap_or_default()) else {
+            continue;
+        };
+        let Some(value) = binding.as_value() else {
+            return Ok(None);
+        };
+        if !shape.pattern.unify(value, &mut matched)? {
+            return Ok(None);
         }
     }
+    Ok(Some(matched))
 }
 
 #[cfg(test)]

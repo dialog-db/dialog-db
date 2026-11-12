@@ -33,7 +33,6 @@ use crate::{
 };
 use dialog_capability::Provider;
 use dialog_corpus::{Pick, encode_value_owned};
-use futures_util::future::Either;
 use futures_util::{StreamExt, TryStreamExt, stream};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -477,7 +476,9 @@ impl ConceptQuery {
         // this level's, and the compiler unrolled the recursion forty
         // levels deep (a 50 KB type term) in a workload's binary.
         if !self.terms.has_shapes() {
-            return Either::Left(self.conformed().evaluate_erased(Box::pin(selection), env));
+            return self
+                .conformed()
+                .evaluate_erased(Box::pin(selection), env, None);
         }
         // A parameter that is a map, a list or a tuple of terms: the
         // concept is read with a variable standing for the whole value
@@ -487,6 +488,11 @@ impl ConceptQuery {
         // pattern, and a row that does not match is dropped. A rule's
         // body has this done by its plan (see `pattern::lower`); a
         // query run by itself, and a negated premise, come here.
+        //
+        // Both ways leave by the one stream `evaluate_erased` makes: a
+        // stream wrapped around it for the shapes would be a second,
+        // larger type for every query to be moved as, and a query's
+        // stream is moved more than once on its way to being polled.
         let (terms, shapes) = self.terms.lowered();
         let shapes: Arc<[Shape]> = shapes.into();
         let lowered = ConceptQuery {
@@ -495,16 +501,20 @@ impl ConceptQuery {
         };
         let built: Pin<Box<dyn Selection + 'a>> =
             Box::pin(pattern::build(shapes.clone(), selection));
-        Either::Right(pattern::take_apart(
-            shapes,
-            lowered.conformed().evaluate_erased(built, env),
-        ))
+        lowered
+            .conformed()
+            .evaluate_erased(built, env, Some(shapes))
     }
 
+    /// Evaluates the application over terms. Where `shapes` are given,
+    /// each row it yields has what the concept bound each whole to
+    /// taken apart by its pattern, and a row that does not match is
+    /// dropped (see [`pattern::take_apart`]).
     fn evaluate_erased<'a, Env>(
         self,
         selection: Pin<Box<dyn Selection + 'a>>,
         env: &'a Env,
+        shapes: Option<Arc<[Shape]>>,
     ) -> impl Selection + 'a
     where
         Env: crate::Scope<'a>,
@@ -548,7 +558,14 @@ impl ConceptQuery {
                 }
                 rows.sort_by(|a, b| a.0.cmp(&b.0));
                 for (_, row) in rows {
-                    yield row;
+                    match &shapes {
+                        None => yield row,
+                        Some(shapes) => {
+                            if let Some(row) = pattern::take_apart(shapes, row)? {
+                                yield row;
+                            }
+                        }
+                    }
                 }
                 return;
             }
@@ -557,7 +574,15 @@ impl ConceptQuery {
                 Box::pin(stream::iter([Ok(first)]).chain(selection)),
                 env,
             ) {
-                yield row?;
+                let row = row?;
+                match &shapes {
+                    None => yield row,
+                    Some(shapes) => {
+                        if let Some(row) = pattern::take_apart(shapes, row)? {
+                            yield row;
+                        }
+                    }
+                }
             }
         }
     }
