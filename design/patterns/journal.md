@@ -121,6 +121,20 @@ By the builder, in [design-leaf-cost.md](design-leaf-cost.md):
 - `Parameters` is the map of terms it was, with one place beside it for the patterns.
 - A pattern's rest and run are boxed, and a pattern is the size of a term.
 
+The Perf gate on the fix, 1dea656, against the same base sweep, with no regression on any scenario and every counter unchanged:
+
+| scenario | base | 43d49a5 | 1dea656 |
+|---|---|---|---|
+| `commit-derived` | 116,210,026 | 129,087,538 (+11.1%) | 115,992,567 (-0.2%) |
+| `number-point` | 32,398,236 | 35,551,367 (+9.7%) | 32,460,520 (+0.2%) |
+| `read-point` | 21,797,631 | 24,500,838 (+12.4%) | 21,431,199 (-1.7%) |
+| `read-sibling` | 29,249,097 | 31,486,018 (+7.6%) | 28,826,318 (-1.4%) |
+| `rule-point` | 49,128,084 | 54,147,373 (+10.2%) | 48,957,164 (-0.3%) |
+| `rule-recursive` | 779,111,706 | 859,568,403 (+10.3%) | 778,820,825 (0.0%) |
+| `rule-session` | 66,552,691 | 71,723,950 (+7.8%) | 66,642,323 (+0.1%) |
+
+A read that runs fewer instructions than the base is the allocator again, not the fix: the fix removes no work from a read.
+
 Measured here, one sweep of each binary, with the base and 43d49a5 built from the same checkout:
 
 | scenario | base | 43d49a5 | the fix |
