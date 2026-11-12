@@ -137,34 +137,25 @@ Irakli, 2026-11-11: the ideal cannot be decided now, so go with the advice below
  moves least   data types    atom, list, map, application
 ```
 
-Built, in `rust/dialog-notation/src/data.rs`:
+Built, in `rust/dialog-notation/src/data.rs` and `src/syntax.rs`. The first version of this kept the notation as parsed; it keeps the syntax tree now (see [The syntax tree](#the-syntax-tree)).
 
-| written | data | dialog value | referenced under |
-|---|---|---|---|
-| `"text"`, `42`, `-3`, `1.5`, `true` | text, number, truth | as dialog has them | as dialog does |
-| `todo:1`, `:open` | entity | `Value::Entity` | `entity:` |
-| `todo`, `xyz.todo`, `?x`, `_`, `...`, `+` | symbol of no domain | `Value::Symbol`, `/todo` | `symbol:` |
-| `xyz.todo/text` | symbol | `Value::Symbol` | `symbol:` |
-| `[a b]`, `(a b)` | list | none yet | `Type::LIST` |
-| `{k v}`, `{label: v}` | map | none yet | `Type::MAP` |
-| `(head part… label: part…)` | the list `head part… {label: part…}` | none yet | `Type::LIST` |
+| data | dialog value | referenced under |
+|---|---|---|
+| text, number, truth | as dialog has them | as dialog does |
+| entity | `Value::Entity` | `entity:` |
+| symbol, of a domain or of none | `Value::Symbol`: `xyz.todo/text`, `/todo` | `symbol:` |
+| list | none yet | `Type::LIST` |
+| map, from data to data | none yet | `Type::MAP` |
 
-`( )` is a tuple, and a tuple is a list: there is no type for an application (see "Built: a tuple, with `of:` said by the syntax" below).
+- **The data knows no syntax.** `Data` is a value, a list or a map. A node of the tree is a map that says its `type`, and only `syntax.rs` reads it as one.
+- **The name** is the reference of the tree's data, and `form:` with it in base58 is the entity. Two orders of the same labels are one name, and so are `1.5` and `1.50`. The natural 3 and the float 3.0 are one name too, as they are one number to dialog, though they are two byte strings: a name does not follow the layout.
+- **The layout** is `Data::encode`: a version byte, then tags, lengths as bijou64, a map's entries in the order of their keys. `Data::decode` refuses another version by its number, and bytes that are not the one way the data is written. It is version 2, and a stand-in for the composite value [patterns](../patterns.md) builds.
+- A tree is kept on a real branch as a `record:` value under its `form:` entity and read back (`it_keeps_a_form_on_a_branch_under_the_entity_that_names_it`). Every form of the prelude and the examples has a tree that lays out and reads back (`it_keeps_every_form_of_the_prelude_and_the_examples`).
+- The crate hashes no text. The names an expansion gives its own variables, and the relation a query is derived into, come from references.
 
-- **The data knows no syntax.** A variable, `_` and `...` are symbols. The reader's own view still tells them apart, by spelling, and so does a form read back from bytes.
-- **The name** is `Form::reference`, and `form:` with it in base58 is the entity. Two orders of the same labels are one name. So are the natural 3 and the float 3.0, as they are one number to dialog, though they are two byte strings: a name does not follow the layout.
-- **The layout** is `Form::encode`: a version byte, then tags, lengths as bijou64, entries sorted. `Form::decode` refuses another version by its number, and refuses bytes that are not the one way a form is written. It is version 1 and a stand-in for #748's.
-- A form is kept on a real branch as a `record:` value under its `form:` entity and read back (`it_keeps_a_form_on_a_branch_under_the_entity_that_names_it`). Every form of the prelude and the examples lays out and reads back, which is what H1 asked.
-- The crate no longer hashes text anywhere. The names an expansion gives its own variables, and the relation a query is derived into, come from references.
+**The one choice here that is dear to change** is what each thing is referenced under, since every name follows from it. A list and a map are under the types every list and map have. Chosen by the agent, and open until something real is stored.
 
-What this changes in the advice below: a form's parts are a list, so they need no positions and the open point about them is closed. A label and a name are still symbols of no domain.
-
-**The one choice here that is dear to change** is what each thing is referenced under, since every name follows from it. Chosen by the agent, and open until something real is stored:
-
-- A list and a map under the types every list and map have. A type of our own for "a list in a form" would put the syntax into the name.
-- `(f a b)` and `[f a b]` are one list and one name. Asked of the maintainer and not answered.
-
-**A limit.** `Value::Record` is referenced over its bytes today (`RECORD.reference_of`, `rust/dialog-corpus/src/identity.rs`). So a form kept as a record has two names: its own, which holds across layouts, and the record value's, which does not. Whatever points at a form has to point at its `form:` entity. Making a record's own name structural is #748's.
+**A limit.** `Value::Record` is referenced over its bytes today (`RECORD.reference_of`, `rust/dialog-corpus/src/identity.rs`). So a tree kept as a record has two names: its own, which holds across layouts, and the record value's, which does not. Whatever points at a tree has to point at its `form:` entity until a composite value's own name is structural, which is the first step of [patterns](../patterns/plan.md).
 
 ## Tested: what the parts of a form are
 
@@ -190,27 +181,25 @@ Found on the way: where the part with no label may also be written `of:` (#728's
 
 The agent's reading of the count: the tuple, with the labelled parts a map at its end.
 
-## Built: a tuple, with `of:` said by the syntax
+## Built: `of:` is the label of the part with no label
 
 Irakli, 2026-11-11: `(todo ?t state: :open)` is sugar for `(todo {of: ?t state: :open})`, done by the reader or derived by the syntax. The empty label is to be revisited, with whether `{: 1 : 2}` writes a set.
 
 ```
- written                        data, a list
- (todo ?t state: :open)         todo  ?t  {state: :open}
- (todo state: :open of: ?t)     todo  {state: :open  of: ?t}      one list,
- (todo {of: ?t state: :open})   todo  {of: ?t  state: :open}      written two ways
-
- read by the syntax, all three: the primary ?t, and state: :open
+ written                        the tree's parameters
+ (todo ?t state: :open)         items [?t]   terms {state: :open}     one tree,
+ (todo state: :open of: ?t)     items [?t]   terms {state: :open}     written two ways
+ (todo {of: ?t state: :open})   items [{of: ?t state: :open}]         a struct, passed as the primary
 ```
 
-- **The reader cannot do it.** It does not know a call from `when`, and `when`, `unless`, `query` and `rule` each stand with one part without a label in some places and several in others (10 and 7 for `when`). A reader that folded one such part into the record would give those heads two shapes.
-- **So the syntax says it**, in one place: `Form::bare` and `Form::labelled`, which the matcher and the kernel both read a form through. Where no part stands without a label, the part labelled `of:` is the primary.
-- A record written at the end of a tuple is its labelled parts, so the second and third lines above are one form already.
-- `of:` beside a part with no label is the primary twice, and a relation read refuses it. A relation with a field truly named `of` is read by the field's full name.
-- The command row said what a command is about under `of:`, beside the row's own entity. It says `about:` now. The count of `of:` beside a primary went from 3 and 17 to none.
-- Tested on a branch: one concept and one relation read the same through all three, and written through two (`it_reads_a_call_the_same_however_its_primary_is_written`).
+- **The reader cannot do it.** It does not know a call from `when`, and `when`, `unless`, `query` and `rule` each stand with one part without a label in some places and several in others (10 and 7 for `when`). A reader that put one such part under `of` would give those heads two shapes.
+- **So it runs the other way, and where the tree is made.** A part with no label stays an item. Where no part is written without a label, the part labelled `of:` is the first item. One part or several, the shape is one, and nothing has to know the operator.
+- **A struct at the end is a struct.** For an hour it was read as the labelled parts written another way. That and "a struct is a value like 5" cannot both hold: `(expand {note: ?n})` has to pass a struct. The reading is gone (`it_reads_a_struct_as_the_part_it_is`, `it_passes_a_struct_as_a_part`).
+- `of:` beside a part with no label is a label like any other, and a relation read refuses it as the primary twice. A relation with a field truly named `of` is read by the field's full name.
+- The command row said what a command is about under `of:`, beside the row's own entity. It says `about:` now.
+- Tested on a branch: one concept and one relation read the same through both spellings and are written through both, and a struct in the primary's place is refused as not supported yet (`it_reads_a_call_the_same_however_its_primary_is_written`).
 
-Open: the empty label and how a set is written; whether `[ ]` stays a second way to write a list. No set is built: nothing in the prelude or the examples writes one.
+Open: the empty label and how a set is written. No set is built: nothing in the prelude or the examples writes one.
 
 ## The syntax tree
 
@@ -243,15 +232,15 @@ Nodes the prelude and the examples need, in the shape of the example:
 
 | node | fields | written |
 |---|---|---|
-| `:application` | `operator`, `operand` | `(todo …)`, `(+ …)`, `(when …)` |
-| `:parameters` | `terms`, a map from label to node | the parts of an application |
-| `:variable` | `name` | `?t` |
+| `:application` | `operator`, a node; `operand`, a `:parameters` | `(todo …)`, `(+ …)`, `(when …)`, `(?name …)` |
+| `:parameters` | `items`, a list of nodes; `terms`, a map from label to node; `rest`, where one is written | the parts of an application |
+| `:variable` | `name`, text | `?t` |
 | `:blank` | | `_` |
-| `:constant` | `value` | `"text"`, `42`, `:open`, `todo:1` |
-| `:reference` | `name` | `todo`, `xyz.todo`, `xyz.todo/text`, `+` where one is not an operator |
-| `:map` | `entries`, a list of pairs | `{foo bar}` |
-| `:tuple` | `items` | `[a b]` |
-| `:repeat`, `:rest` | `of`; `name` | `p ...`, `...?fields`, in a pattern |
+| `:constant` | `value` | `"text"`, `42`, `true`, `:open`, `todo:1` |
+| `:reference` | `name`, a symbol | `todo`, `xyz.todo`, `xyz.todo/text`, `+` |
+| `:map` | `entries`, a map from node to node | `{foo bar}`, `{label: bar}` |
+| `:tuple` | `items`, a list of nodes | `[a b]` |
+| `:repeat`, `:rest` | `of`, a node; `name`, text | `p ...`, `...?fields`, in a pattern |
 
 **Most of these nodes are in dialog already** (Irakli, the same sitting; checked in `rust/dialog-query/src`):
 
@@ -278,11 +267,55 @@ Two things the example does not yet say, both from the count above:
 - **An operator is a node.** 20 of the 151 applications have a variable for a head, `(?name ?this ...?fields)`.
 - **Where several parts without a label go.** 38 of 151 have several, and `terms` is a map. Whatever the answer, it cannot depend on how many there are: the pattern `(when ?premise ...)` has to meet `(when A)` and `(when A B)` as one shape. Dialog's own answer for a rule is a field a run: `when` and `unless` are lists in a map. That covers `rule`, `when` and `unless`. It leaves `query`, `all`, `syntax`, `concept`, and patterns.
 
-Decided 2026-11-11, by the maintainer: every part has a label but the primary (option B of the journal), or the form with two is not had. The `syntax` of two parts is gone and the prelude is rules. `concept` still has two, its signature and its body, and needs a label for one.
+Decided 2026-11-11, by the maintainer, after a day on option B (every part labelled but the primary): no. A rule about syntax reads any form, and a form that must label its parts to be read is a limit on what syntax can be. So parts with no label stay, in order, and `concept` keeps its signature and its body with no label on either.
 
-Found while testing that a pattern may be any form: `(expand {note: ?n})` reads as `(expand note: ?n)`, because a record at the end of a tuple was made its labelled parts an hour before, for `(todo {of: ?t state: :open})`. So a struct cannot be passed as the one part without a label, which a struct being a value like 5 says it can. The two cannot both hold. With the syntax tree apart from the notation, the parameters of an application are a node of the tree and not a struct someone writes, so the reading to drop is the first. Not decided.
+### Built: `Syntax`
+
+`rust/dialog-notation/src/syntax.rs`. The example above comes out as:
+
+```
+{ type: :application
+  operator: { type: :reference name: todo }
+  operand: { type: :parameters
+             items: [{ type: :variable name: "t" }]
+             terms: { state: { type: :constant value: :open } } } }
+```
+
+It differs from the example in two places, both from the count:
+
+- The operator is a node, since 20 applications have a variable there.
+- The part with no label is the first of `items`, and not `of` among the `terms`. `terms` is a map and has no place for the second and third such part of `(when A B C)`, and `(when A)` cannot have another shape than `(when A B)`. `of:` written out lands in the same place, so the two spellings of a call are one tree and one name.
+
+What the tree forgets of the notation: the order labelled parts were written in, a number's digits, and that `...` came after what it repeats. What it refuses that the reader takes: a label twice, a `...` with nothing before it, a `...?rest` anywhere but among the parts of an application.
+
+Expanding and compiling still read the notation as parsed. They are to read the tree, and that waits on the question below.
+
+### Open: what a name resolves to
+
+Tonk resolves a name to the concept it names, and then expands. Here a concept is not a thing a name points at. `(concept (todo ?t text: ?x) …)` expands to a rule about syntax whose pattern is the signature, `(todo ?t text: ?x)`, and `(todo …)` means something because that pattern meets it.
+
+```
+ tonk     todo ──resolve──▶ the concept ──expand──▶ what dialog runs
+
+ here     (todo ?t text: ?x) ──▶ every rule about syntax whose pattern meets it ──▶ (xyz.todo ?t text: ?x)
+          no step names anything
+```
+
+After expansion nothing is left to resolve: a relation is its domain, a formula is built in, an entity is itself. So resolving can only be about which rules about syntax are in force for a name, and there are two readings:
+
+| | a name is a fact, and patterns meet the resolved thing | a pattern meets a name |
+|---|---|---|
+| what `todo` resolves to | the entity of a definition, `form:…`, through a fact that gives it the name | nothing; `todo` is matched as written |
+| a pattern with a variable or a struct for its operator | has no name; asked of every form, as now | the same |
+| renaming, and two spaces that use one name | the definition does not move; what is stored refers to it by entity | every rule and every use says the name |
+| candidate problem 3, a meaning that moves after it is written | closed for what is stored unexpanded | open for anything stored unexpanded; closed for what was expanded before it was stored |
+| what has to exist first | what a definition is: one rule, or the set of rules that came out of one `concept` | nothing |
+
+Not decided. It decides what the pass between the tree and the expander does, which is why that pass is not built.
 
 ## What to store, and how
+
+Superseded for forms: what is kept is the syntax tree, above, in maps and lists, and not a record of positions. What stands of this advice is that no domain is the special domain, and that a name and a label are symbols of none.
 
 Irakli, 2026-11-11: a record is a constrained map, its keys attributes, as an integer is a constrained number. His hope: a label is an attribute by default, of no domain or a fixed one, read `last`, so an attribute is a key like any other, as Clojure's `:name` and `:ns/name` are both keywords. He asked for advice on what to store.
 
@@ -319,7 +352,7 @@ Open in this:
 
 ## A struct with a variable in it
 
-Decided 2026-11-11, by the maintainer: it is a destructuring pattern, and that dialog has none is a gap to close. It hinges on records as values, which dialog has not had, and closes with them. So it is the record values topic's (#748), which already has destructuring a bound record in scope, and not this one's.
+Decided 2026-11-11, by the maintainer: it is a destructuring pattern, and that dialog has none is a gap to close. It hinges on composite values, which dialog has not had, and closes with them. It is a topic of its own, [patterns](../patterns.md) (#777): a parameter holds a pattern, of which a variable and a constant are the leaves, and the planner and inference look inside one. Its first step is the composite value, `Value::Record` given a structure, laid out as dag-cbor under a version byte until #748 decides the layout to keep.
 
 What the notation needs of it, for whoever builds records:
 
@@ -331,7 +364,7 @@ What the notation needs of it, for whoever builds records:
 | the pairs a pattern did not name, bound as a record | `...?rest` |
 | the keys a label writes: an attribute of a domain, and a name of none | `{xyz.todo/text: ?x}`, `{text: ?x}` |
 
-Until then the notation refuses a struct where a term stands, and `entity/derive` stays the two-cell stand-in. H5 below asked whether this is one premise that runs both ways; that it is a pattern in a term is now the maintainer's, and how dialog evaluates one is #748's to decide.
+Until then the notation refuses a struct where a term stands, and `entity/derive` stays the two-cell stand-in. H5 below asked whether this is one premise that runs both ways; that it is a pattern in a term is now the maintainer's, and how dialog evaluates one is the patterns topic's to build.
 
 ## Hypotheses, after the decision
 
@@ -345,9 +378,7 @@ H2 is now a requirement in the table above, not a hypothesis. H3 and H4 stand.
 
 ## Next
 
-1. How a rule builds a record: the premise of H5. `{…}` is read now and refused where a term stands.
-2. `entity/derive` over a record: the entity is named by the map's reference, so it is one more name that no layout moves.
-3. Syntax kept on the branch as forms, and the walker asking the branch.
+1. What a name resolves to, above. Then the expander and the compiler read the tree, and `kernel.rs` gives way to dialog's own forms.
+2. A struct as a term and `entity/derive` over a record: with [patterns](../patterns/plan.md).
+3. Syntax kept on the branch as trees, and the walker asking the branch.
 4. H3, measured, as a research topic.
-
-The first is #748's missing half, and it unblocks `:id` before it unblocks syntax.

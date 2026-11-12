@@ -4,8 +4,8 @@
 
 |  | Understanding | Activity |
 |---|---|---|
-| **Status** | The kernel and the core forms run on a real branch through `rust/dialog-notation` ([poc.md](poc.md)); the prelude is rules only, 68 lines. The tree of what dialog runs exists in dialog already. A struct is a value and, with a variable in it, a destructuring pattern, which waits on record values (#748). Rules of several heads are their own topic (#776). The crate still keeps parsed notation as data and copies dialog's forms in `kernel.rs`. | **Designing.** Direction decided by the maintainer. A proof of concept runs. The tree between the notation and dialog's forms is not built. |
-| **Agenda** | Which reading of a struct at the end of an application stays. The label for a concept's body. How a query reports: a macro to a rule and an assertion that its deductions be reported. Whether dialog can be asked for an expansion a form at a time (H3). What a read with no pick reads. | Not waiting on records: a syntax tree apart from the parsed notation, resolved then expanded as tonk's analyzer does; dialog's own forms in place of `kernel.rs`; a helper rule for a negated conjunction. Waiting on records (#748): a struct as a term, `entity/derive` over a record, syntax kept on the branch. Waiting on #776: a rule of several heads. |
+| **Status** | The kernel and the core forms run on a real branch through `rust/dialog-notation` ([poc.md](poc.md)); the prelude is rules only. The syntax tree is built, apart from the notation as parsed, and kept as data: maps that say their `type` ([design-forms.md](design-forms.md#the-syntax-tree)). A struct is a value and, with a variable in it, a pattern, which is a topic of its own with an agent on it (#777). Rules of several heads are #776. Expanding and compiling still read the notation as parsed, and `kernel.rs` still copies dialog's forms. | **Designing.** Direction decided by the maintainer. A proof of concept runs. The pass between the tree and the expander is not built, because what it does is not decided. |
+| **Agenda** | What a name resolves to, where a concept is a rule about syntax and not a thing a name points at. How a query reports: a macro to a rule and an assertion that its deductions be reported. Whether dialog can be asked for an expansion a form at a time (H3). What a read with no pick reads. | Next: the answer on names, then the expander and the compiler read the tree, and dialog's own forms replace `kernel.rs` once a parameter holds a pattern. Not waiting: a helper rule for a negated conjunction. Waiting on patterns (#777): a struct as a term, `entity/derive` over a record, syntax kept on the branch. Waiting on #776: a rule of several heads. |
 
 ## Candidate problems
 
@@ -280,3 +280,33 @@ Not examined yet. They are columns, not recommendations.
 **Asked.** How dialog evaluates a struct that holds a variable: a third case of `Term`, or a premise made when lowering. Irakli: it is a destructuring pattern, and a gap in dialog to close. It hinges on record values, which dialog did not have, and closes with them.
 
 **Decided.** By the maintainer: a struct with a variable in it is a destructuring pattern, to be had in dialog with records as values. It is #748's work, not this topic's. What the notation needs of it is listed in [design-forms.md](design-forms.md). This topic refuses a struct as a term until records land.
+
+## 2026-11-11, Designing: a parameter holds a pattern, and a part needs no label
+
+**Asked.** The plan for records and destructuring, since everything ties to them. Irakli, by voice:
+
+- Option B is not what he wants. A rule about syntax that needs a label on every part is inconvenient to write and limits what syntax can be.
+- `Term`, a variable or a constant, becomes the leaf of a pattern: a value pattern, a map pattern, a list pattern, a tuple pattern. It is a requirement. The planner and inference are affected, so it is a large piece of work, for an agent of its own.
+- Only the new notation needs it. The stored rule format and the wire can wait, so long as the query engine and inference take a pattern.
+- The records work is stalled on a binary layout. Use CBOR now, under a version, and change it later. Asked how revision records are laid out, and whether to reuse `Value::Record` or add a variant: he follows the agent's advice.
+- #748's thread is to be left alone. He is the one arguing in it.
+
+**Learned.**
+
+- A revision record is dag-cbor of a serde struct under `Value::Record`: a CBOR map with nothing in front of it. A CBOR map starts at byte `0xa0` or above, so a small version byte in front of a composite value is never how a revision record starts.
+- `Value::Record` is referenced over its bytes. A composite value named by its parts is the first thing the pattern work has to build, since a tree, a derived entity and a pattern's constant all need a name no layout moves.
+
+**Decided.** By the maintainer: parts with no label stay; a parameter holds a pattern; the composite value is `Value::Record` given a structure, dag-cbor under a version byte for now; no stored format or wire change in this step. It is a topic of its own, [patterns](../patterns.md) (#777), with a [plan](../patterns/plan.md) of four steps and an agent building it. #776 is left for his workers. The reading of a struct at the end of an application as its labelled parts goes.
+
+## 2026-11-11, Designing: the tree, built
+
+**Asked.** Nothing of the maintainer. The agent built what was decided and stopped at what was not.
+
+**Learned.**
+
+- The tree is `Syntax` and what it is kept in is `Data`. The reader's `Form` is no longer what is named or stored.
+- **`of:` runs the other way from the example.** The example keeps the part with no label under `of` among the terms. Kept there, `(when A)` and `(when A B)` have two shapes. Kept as an item, with `of:` written out landing in the same place, every application has one shape and nothing has to know the operator. The two spellings of a call are one tree and one name, which the first build of this had as two.
+- A map read back from bytes was taken in the order it was laid out, so bytes with their entries swapped read as a map and wrote back as themselves. The check that there is one way to write a thing passed for them. Found by the test written for it; a map read back is now put in order first.
+- **Resolving has nothing to resolve to.** Tonk resolves a name to a concept and then expands. Here `concept` expands to a rule about syntax whose pattern is the signature, so a name is met by patterns and points at nothing; and after expansion only domains, built-in formulas and entities are left, which need no resolving. So "resolve, then expand" does not carry over as two passes. Either a name is a fact that points at a definition and patterns meet the definition, or patterns meet names and nothing is resolved. The first is what "definitions by hash, names as facts" says; it needs a definition to be a thing, and today it is whichever rules came out of one `concept`.
+
+**Decided.** Not decided: what a name resolves to. The expander and the compiler stay on the notation as parsed until it is, since the answer decides what stands between them and the tree. Built, with tests: `rust/dialog-notation/src/syntax.rs`, `src/data.rs`.

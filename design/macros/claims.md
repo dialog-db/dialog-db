@@ -41,23 +41,29 @@
 | a claim under an attribute of no domain is refused | fact | the same test | holds where the descriptor is read; not checked below the query layer |
 | every key of a form can be an attribute | hypothesis | confirmed by `prelude.clj` written as records under positions and labels of no domain | open; needs one position for the nth part |
 | what is stored is versioned, and named by merkle reference so a layout does not move a name | opinion | Irakli, 2026-11-11 | decides |
-| every form of the prelude and the examples is data: it lays out as bytes and reads back | fact | `it_lays_out_every_form_of_the_prelude_and_the_examples`, `rust/dialog-notation/src/data.rs` | holds; H1 confirmed with variables as symbols |
-| a form's name does not depend on its layout | fact | `Form::reference` is made of its parts' references; `it_names_apart_from_the_layout` | holds for the form's own reference |
+| every form of the prelude and the examples has a syntax tree that is data: it lays out as bytes and reads back | fact | `it_keeps_every_form_of_the_prelude_and_the_examples`, `rust/dialog-notation/src/syntax.rs` | holds; a variable is a node, not a symbol |
+| a tree's name does not depend on its layout, nor on how the form was written | fact | `Data::reference` is made of its parts' references; `it_names_apart_from_the_layout`, `it_names_a_form_by_what_it_says` | holds for the tree's own reference |
 | a record value's name does not depend on its layout | hypothesis | `Value::reference`, `rust/dialog-corpus/src/identity.rs` | refuted today: `RECORD.reference_of(bytes)` |
 | a list and a map are referenced under the generic types, and `( )` is a list | opinion | the agent, 2026-11-11, on Irakli's tuple | open until something real is stored; every name follows from it |
-| `(todo ?t state: :open)` is sugar for `(todo {of: ?t state: :open})` | opinion | Irakli, 2026-11-11 | decides; built as the syntax's reading, `Form::bare` |
+| `(todo ?t state: :open)` is sugar for `(todo {of: ?t state: :open})` | opinion | Irakli, 2026-11-11 | decided, then narrowed: `of:` is the label of the part with no label, and a struct written there is a struct |
+| a struct at the end of an application is its labelled parts | hypothesis | refuted by `(expand {note: ?n})`, which has to pass a struct | refuted; `it_passes_a_struct_as_a_part` |
+| the two spellings of a call are one tree, with no knowledge of the operator | fact | `it_reads_of_as_the_part_with_no_label` | holds, with the part kept as an item and not under `of` |
 | the reader can fold the primary into the record | hypothesis | the count in `examples/shapes.rs` | refuted: four heads stand with one unlabelled part and with several |
 | one call reads the same however its primary is written | fact | `it_reads_a_call_the_same_however_its_primary_is_written` | holds |
-| a branch keeps a form as a record under its `form:` entity | fact | `it_keeps_a_form_on_a_branch_under_the_entity_that_names_it` | holds |
+| a branch keeps a syntax tree as a record under its `form:` entity | fact | `it_keeps_a_form_on_a_branch_under_the_entity_that_names_it` | holds |
 | every application has at most one part without a label | hypothesis | `examples/shapes.rs` over the prelude and the examples | refuted: 38 of 151 as written have several; holds for calls |
 | the part with no label is `of:`, and `:` is the label of no name | opinion | Irakli, 2026-11-11; `research/notation/design.md` in #728 | decides; the prelude's command row breaks it |
 | a record is an atomic composite value: updated whole, made of other values | opinion | Irakli, 2026-11-11 | decides; a map, a list and a tuple are each one |
-| parsing transforms notation into a syntax tree, which is kept in maps, lists and tuples as each fits | opinion | Irakli, 2026-11-11 | decides; the crate keeps parsed notation as data directly, which is not this |
+| parsing transforms notation into a syntax tree, which is kept in maps, lists and tuples as each fits | opinion | Irakli, 2026-11-11 | decides; built as `Syntax` over `Data`, which has maps and lists and no tuple yet |
+| a rule about syntax reads any form, and no part has to be labelled to be read | opinion | Irakli, 2026-11-11 | decides; option B is out |
+| names resolve in a pass before expansion, as in tonk | hypothesis | confirmed by something a name resolves to. Refuted if a name is only ever met by a pattern | open: `concept` expands to a rule about syntax, and after expansion nothing is left to resolve |
 | the syntax tree of what dialog runs exists in Rust, as maps, named by reference and versioned | fact | `Premise`, `Proposition`, `Parameters`, `Term` in `rust/dialog-query/src`; `rule/canonical.rs`; `FORMAT` in `rule/body.rs` | holds |
 | a rule's identity ignores the order of its premises and the names of its variables | fact | `rust/dialog-query/src/rule/canonical.rs` | holds |
 | tonk parses an application by name and resolves it inline in a later pass | fact | `rust/tonk-analyzer/src/analyzer.rs` in tonk: resolve, then expand | holds |
 | dialog lacks negation over several propositions | hypothesis | `unless` is a list of `Negation`; datalog negates atoms and writes a negated conjunction as a helper rule | refuted as a gap: the compiler can write the helper rule |
-| a struct with a variable in it is a destructuring pattern, to be had in dialog with records as values | opinion | Irakli, 2026-11-11 | decides; the work is #748's |
+| a struct with a variable in it is a destructuring pattern, to be had in dialog with records as values | opinion | Irakli, 2026-11-11 | decides; the work is [patterns](../patterns.md), #777 |
+| a parameter holds a pattern, of which a variable and a constant are the leaves | opinion | Irakli, 2026-11-11 | decides; only the new notation needs it, so no stored format or wire change yet |
+| the composite value is `Value::Record` given a structure, dag-cbor under a version byte for now | opinion | Irakli, 2026-11-11, on the agent's advice | decides; the layout to keep is #748's |
 | a rule can build a record from what it has bound | hypothesis | H5 of [design-forms.md](design-forms.md): confirmed by a record premise planned as a concept query is, running both ways | open; #748 speaks only of reading one |
 | a premise may take parameters that differ by application | fact | `ConceptQuery::schema`, `rust/dialog-query/src/concept/query.rs` | holds |
 | the two-cell `entity/derive` names the entities a record will | hypothesis | refuted by its own definition: a chain of pairs under a seed is not a record's canonical form | refuted; it is a stand-in |
