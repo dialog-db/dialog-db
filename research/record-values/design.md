@@ -196,18 +196,20 @@ assumed.
 - A tree whose manifest says `value_encoding = 2` keys a record as its pairs
   (section 1); a tree at 1 keeps keying record bytes escaped, as today. The
   manifest field is critical, as the number band's is.
-- No type tag, no new value type. A pairs record starts with `0x00` (empty)
-  or the first byte of a relation, which is ASCII or a UTF-8 lead byte
-  (`0xC2` to `0xF4`). A dag-cbor map starts with `0xA0` to `0xBF`, an array
-  with `0x80` to `0x9F`: UTF-8 continuation bytes, which no relation starts
-  with. Every record written today is a dag-cbor map (revision records,
-  tonk's bindings and embeds), so the first byte says which layout a
-  record's bytes are in. Old records stay readable as opaque `record:`
-  bytes, forever; a signed revision record is never re-encoded.
-
-**Risk.** A record some other writer stored that is not a dag-cbor map would
-be misread as pairs and fail to decode. A census of stored records (section
-11) checks that none exists.
+- A structured record is a value type of its own (decided; section 13):
+  `Value::Composite`, type byte 22 (the next free one: 10 to 21 are the sized
+  number views, which never key a value), named `composite:`. Today's opaque
+  records keep their variant's tag (`record:`, byte 7, escaped bytes), so
+  their keys and identities do not move, and a signed revision record stays
+  one forever. Nothing has to tell an old record's bytes from a new one's:
+  the type byte does. (This replaces the first-byte rule an earlier version
+  of this section proposed.)
+- An older release refuses a key whose type byte is above `Number` as
+  corrupt (`key/varkey.rs`), so a tree that may hold composites says so in
+  its manifest's critical `value_encoding`, and an older release refuses the
+  tree whole rather than its keys one by one. `ValueDataType::from(u8)`
+  falls back to `Bytes` for a byte it does not know, so a build adding
+  `Composite` maps 22 to it, and nothing older may read one.
 
 ## 6. A table keyed by names known only at run time
 
@@ -274,10 +276,11 @@ stored record is not a dag-cbor map (section 5).
 
 "Record" names a file's records (`kind | length | crc32 | body`), history
 records (`RevisionRecord`, the claim records `split_record_components`
-splits) and `Value::Record`. **Proposal:** keep `record:` for the value,
-since it is the type's name in the notation and in tonk, and call the file's
-units something else (entries) while #733 is still a draft. Renaming the
-history's records is a larger change and not needed for this one.
+splits) and `Value::Record`. **Settled by section 13:** the structured value
+is a composite (`Value::Composite`, `composite:`). "Record" keeps its
+meanings: opaque record values as today, the file's and the history's
+records. This topic keeps "record" in its earlier prose, where it means the
+structured value.
 
 ## 13. Identity
 
@@ -301,20 +304,18 @@ is computed where identity leaves memory or crosses buffers (a rule's
 identity, a signature, a spilled value's name, views from two buffers), and
 `Eq` and `Hash` between canonical bytes in memory stay over the bytes.
 
-**Open: the type a record is referenced under.** `Value::reference` gives
-today's records, opaque dag-cbor, `RECORD.reference_of(bytes)`; a structured
-record under the same type would be `RECORD.map(...)`, both keyed by
-`record:`. Their contents differ in kind but not in what bytes they may hold:
-an opaque record whose bytes are some map's content (a run of 32-byte
-references, which anyone can compute and store) would share that structured
-record's reference. Structured records need a type of their own, or old
-records one; renaming the old type changes the identity of any rule holding
-one as a constant.
+**Decided: the type a structured record is referenced under** (the
+maintainer). A structured record is a new variant, `Value::Composite`, named
+`composite:`, so it is referenced `COMPOSITE.map(...)`. Today's opaque
+records keep their tag, `record:`, and with it their references
+(`RECORD.reference_of(bytes)`), so no stored identity moves; their Rust
+variant may be renamed, since an identity follows the tag, not the name.
+The two types key different hashes, so an opaque record whose bytes are some
+map's content can no longer share a composite's reference.
 
 ## What would settle it, in order
 
-1. The maintainer sets the bars, and names the type structured records are
-   referenced under (section 13).
+1. The maintainer sets the bars.
 2. Interning value payloads apart in #733 (section 4): cheap, useful without
    records, and it measures the sharing the hypothesis rests on.
 3. The segment encoder splitting records (section 2, option d).

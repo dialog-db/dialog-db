@@ -52,14 +52,18 @@ the EAV and AEV keys.
 
 ## What a record is
 
-Decided, each in a journal entry:
+Decided, each in a journal entry. The structured value is named a
+**composite** (`Value::Composite`, `composite:`), a value type of its own;
+"record" below means it, and opaque `record:` values stay as they are.
 
 - **An atomic value.** It is written and replaced whole, and concurrent
   records compete as whole claims, by revision.
 - **A set of attribute and value pairs.** A field may hold several values.
   Pairs are sorted, without duplicates.
-- **No type tag.** Dialog stores no type beyond each value's own type
-  byte: an attribute is a relation read under an optional type and a pick,
+- **No tag naming its kind.** A composite is one value type; nothing in it
+  says which kind of composite it is (tonk's `kind`, the revision record's
+  attribute). Dialog stores no type beyond each value's own type byte: an
+  attribute is a relation read under an optional type and a pick,
   and concepts are read, not written. A record's fields are typed the same
   way, and a record satisfies whichever concepts its fields do. An
   attribute with no `as:` takes any value.
@@ -125,21 +129,10 @@ Decided, each in a journal entry:
   at all (the journal's third entry).
 - **Requiring records to satisfy a concept,** as `conforms` does for an
   entity field.
-- **Telling today's records from the new layout.** With no type tag, a
-  reader still has to know which layout a record's bytes are in: a layout
-  version at the front, as tree nodes have, or a new value type, leaving
-  `record:` to today's bytes. A record keyed as its tails is also a change
-  to how a tree keys a value, which the tree's manifest would name, as it
-  names the number band.
 - **How the file holds a record's parts.** A file row has a fixed shape (a
   key's form, at most four parts, a datum), and a record has any number of
   pairs. A value token made of token names, or a section of rows of its
   own.
-- **The word.** "Record" already names a file's records (`kind | length |
-  crc32 | body`), a history record (`RevisionRecord`, and the claim records
-  `split_record_components` splits) and `Value::Record`. Three meanings
-  in the code this topic changes.
-
 ## What it is measured against
 
 Today's records as they are: dag-cbor, on main's `fs` archive, and as one

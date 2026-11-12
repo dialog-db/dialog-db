@@ -35,6 +35,9 @@ statuses mean.
     by index.
   - A record's identity is its merkle reference: a map from attributes to
     values under its type, built from its parts' references.
+  - A structured record is its own value type, `Value::Composite`
+    (`composite:`, type byte 22); opaque records keep `record:`, byte 7 and
+    their identities.
   - Equality follows tokens as key comparison does, resolving them across
     sources, and the wire carries the canonical form.
   - Repetition is expected mostly across records, and shared through the
@@ -49,7 +52,6 @@ statuses mean.
     over a path, or both;
   - documents that grow (options in the third entry);
   - whether an attribute can require its records to satisfy a concept;
-  - how a reader tells today's dag-cbor records from the new layout.
 - **Proposed, from the single-file archive:** a record has the two forms a
   tree node has in the file, canonical bytes and rows over the file's
   tokens, and is keyed as its tails rather than as one escaped byte string,
@@ -563,6 +565,35 @@ with the reference at a tenth of the cost, and the reference is computed
 where identity leaves memory or crosses buffers. Open: the type structured
 records are referenced under, so they cannot share an opaque record's
 reference.
+
+Commits: this entry.
+
+## 2026-11-12 — A structured record is a composite, a type of its own
+
+**Question.** Under one type, `record:`, an opaque record whose bytes are
+some map's content would share a structured record's reference. Which type
+moves?
+
+**Method.** Discussion. Read the free type bytes (`ValueDataType`) and what
+an older release does with a type byte it does not know (`key/varkey.rs`,
+`ValueDataType::from`).
+
+**Results.**
+
+- The maintainer: a new variant, `Value::Composite`, for structured records.
+  Today's `Value::Record` keeps its tag; renaming its Rust variant moves no
+  identity, since an identity follows the tag.
+- Type bytes 0 to 21 are taken (10 to 21 the sized number views, which never
+  key a value); a composite takes 22. An older release refuses a key whose
+  type byte is above `Number` as corrupt, and `ValueDataType::from(u8)` reads
+  a byte it does not know as `Bytes`.
+
+**Decision.** Decided: structured records are `Value::Composite`, named
+`composite:` (referenced `COMPOSITE.map(...)`, type byte 22); opaque records
+keep `record:`, byte 7 and their identities. This replaces the first-byte rule
+for telling old records from new, and settles the word: "record" keeps its
+meanings, the structured value is a composite. The spike still writes nested
+records under byte 7; the byte does not change any size or time it measured.
 
 Commits: this entry.
 
