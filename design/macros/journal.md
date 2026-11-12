@@ -449,3 +449,22 @@ Not examined yet. They are columns, not recommendations.
 
 **Backtracked.** From Designing to Directing: "macros are rules, compiling is a formula" was a column parked for Direction, and this is that column said in full.
 
+## 2026-11-12, Directing: what a phase that reads the database is
+
+**Asked.** Irakli, on the entry above: formulas could be installable instead of moving the parser; names are facts in a database backed by content-addressed storage and resolving one mutates nothing, so it is a resolver; the analyzer probably is one too, since it looks up references.
+
+**Learned.**
+
+- He is right about the resolver, and "cannot" was too strong. A resolver given the tree's root reads a name as a pure function of its inputs, as the tree resolvers do. The rule is not about mutation. It is about what the engine keeps to know an answer is stale: a scan keeps the range it read, a resolver keeps only the head.
+- So there are three things a phase that reads the database can be, and they differ in when an answer goes stale and in where a form's meaning is kept:
+
+| | reads a name by | stale after | what a form means is in |
+|---|---|---|---|
+| a resolver given the root | walking the tree by hash | every commit | Rust |
+| a native premise that scans (there is none today) | scans that record their ranges | a commit that touches what it read | Rust |
+| rules over native primitives | ordinary premises | a commit that touches what it read | rules, which are data |
+
+- The first two put the analyzer and the expander behind a query, and leave them what they are today: Rust that knows every form. That is candidate problem 2 unsolved, and it is not "macros as rules".
+
+**Decided.** Not decided: which of the three. Installable formulas are a change to the engine of their own, with three things to settle first: what a build does with a rule that names a formula it does not have, what a registry costs where an enum dispatches today, and what keeps one name meaning one function across builds.
+
