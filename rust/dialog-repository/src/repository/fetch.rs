@@ -22,14 +22,20 @@
 //!   [`Speculation`](dialog_corpus::Speculation) command) is what
 //!   lets one evaluation's polling execute another's hints: queries,
 //!   subscriptions, and transaction queries all enqueue and all drive.
+//! - **A hint outlives the driver that took it.** A driver that ends
+//!   with walks unfinished (its evaluation's stream ended or was dropped)
+//!   hands their descriptions back to the queue, so the next driver
+//!   resumes them. What moves back is the selector and its rank, never
+//!   the walk: the queue still holds only descriptions.
 
+use std::mem;
 use std::pin::Pin;
 use std::sync::Arc;
 
 use std::task::{Context, Poll};
 
 use dialog_corpus::selector::Constrained;
-use dialog_corpus::{FetchBudget, Likelihood, PreloadQueue, Selector};
+use dialog_corpus::{FetchBudget, Likelihood, PreloadQueue, PreloadRequest, Selector};
 use futures_util::stream::FuturesUnordered;
 use futures_util::{Stream, StreamExt as _};
 
@@ -47,9 +53,27 @@ type FetchFuture<'a> = Pin<Box<dyn Future<Output = Likelihood> + Send + 'a>>;
 #[cfg(target_arch = "wasm32")]
 type FetchFuture<'a> = Pin<Box<dyn Future<Output = Likelihood> + 'a>>;
 
+/// One taken hint: the walk, and the description it was started from,
+/// kept beside it so a driver that ends before the walk does can hand
+/// the description back to the queue.
+struct Job<'a> {
+    selector: Arc<Selector<Constrained>>,
+    likelihood: Likelihood,
+    walk: FetchFuture<'a>,
+}
+
+impl Future for Job<'_> {
+    type Output = Likelihood;
+
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Likelihood> {
+        self.walk.as_mut().poll(context)
+    }
+}
+
 /// A stream that also drives the env's [`PreloadQueue`]: polling it
 /// executes queued preload hints, borrowing `env` for exactly the
-/// stream's lifetime.
+/// stream's lifetime. Hints it took and did not finish go back to the
+/// queue when it drops (see the [`Drop`] impl).
 ///
 /// Each job replicates its selector against every source in `sources`:
 /// every block the walk touches lands in the node cache the env holds and,
@@ -70,7 +94,7 @@ pub(crate) struct Driven<'a, S> {
     budget: FetchBudget,
     likely_inflight: usize,
     maybe_inflight: usize,
-    inflight: FuturesUnordered<FetchFuture<'a>>,
+    inflight: FuturesUnordered<Job<'a>>,
 }
 
 impl<'a, S> Driven<'a, S>
@@ -121,19 +145,22 @@ where
                 .get_or_insert_with(|| Routes::of(self.env))
                 .clone();
             let env = self.env;
+            let selector = Arc::new(selector);
+            let walked = selector.clone();
             let future = async move {
                 for source in sources {
                     // Warming is advisory: an error ends this source's
                     // walk silently, and the demand read that actually
                     // needs the data owns the failure.
-                    let _ = warm_source(source, &routes, env, &selector, likelihood).await;
+                    let _ = warm_source(source, &routes, env, &walked, likelihood).await;
                 }
                 likelihood
             };
-            #[cfg(not(target_arch = "wasm32"))]
-            self.inflight.push(Box::pin(future) as FetchFuture<'a>);
-            #[cfg(target_arch = "wasm32")]
-            self.inflight.push(Box::pin(future) as FetchFuture<'a>);
+            self.inflight.push(Job {
+                selector,
+                likelihood,
+                walk: Box::pin(future),
+            });
             started = true;
         }
     }
@@ -152,6 +179,54 @@ where
                 Likelihood::Likely => self.likely_inflight -= 1,
                 Likelihood::Maybe => self.maybe_inflight -= 1,
             }
+        }
+    }
+}
+
+/// A driver that ends with walks unfinished hands their hints back to
+/// the queue, so whichever evaluation drives next resumes them:
+/// speculation belongs to whoever is running, not to the evaluation that
+/// happened to pop it. Each goes through [`PreloadQueue::preload`], the
+/// path a [`Preload`](dialog_corpus::Preload) hint takes, so it obeys
+/// what that path does: with a zero budget it is refused (speculation was
+/// turned off, so it is dropped), a selector already pending in its rank
+/// is not enqueued twice, and it queues behind fresher hints, under the
+/// same drop-oldest bound.
+///
+/// A walk that ended, completed or failed, has left `inflight` and is
+/// not handed back: an error ends a walk normally (the `break` in
+/// [`warm_source`]), and the demand read that hits it owns the failure.
+///
+/// Why resuming terminates: a resumed walk restarts from the root, but
+/// every block an earlier attempt fetched was hydrated into the local
+/// archive inside its fetch, so the next attempt reads it locally and
+/// gets further whenever an attempt lasted long enough for one fetch to
+/// land. An attempt shorter than that (its reads were still waiting in
+/// the site's lane behind demand, or were cancelled with it) makes no
+/// progress, but costs no more than the requests the lane had admitted
+/// for it (a read still waiting for a slot leaves for free), and leaves
+/// one queue entry, not a growing pile: the hint is one pending selector
+/// however many drivers hand it back. Its next attempt reaches the same
+/// point no later, so the first driver that lasts one round trip moves it.
+/// So no resumption cap: a cap would drop exactly the hints of a slow
+/// remote, where queries end before walks do.
+///
+/// Concurrent drivers need nothing more than the queue's own lock: a hint
+/// handed back here is popped by another driver's next `start_jobs`.
+impl<S> Drop for Driven<'_, S> {
+    fn drop(&mut self) {
+        for job in mem::take(&mut self.inflight) {
+            let Job {
+                selector,
+                likelihood,
+                walk,
+            } = job;
+            // The walk holds the other reference to the selector.
+            drop(walk);
+            self.queue.preload(PreloadRequest {
+                selector: Arc::unwrap_or_clone(selector),
+                likelihood,
+            });
         }
     }
 }
@@ -244,7 +319,9 @@ mod tests {
     use dialog_effects::archive::ArchiveError;
     use dialog_effects::archive::Load as ArchiveLoad;
     use dialog_peer::helpers::{test_session_with_peer, unique_name};
+    use dialog_peer::{Peer, Session};
     use dialog_query::{AttributeQuery, Term, the};
+    use dialog_storage::provider::storage::VolatileSpace;
 
     use super::*;
     use crate::Download;
@@ -775,18 +852,13 @@ mod tests {
         Ok(())
     }
 
-    /// A replica that adopted a head by reference still warms ahead of
-    /// demand: a walk of a hinted range the replica does not hold fetches
-    /// the whole range, so the range's own read then fetches nothing.
-    ///
-    /// A query drives the walks it takes only while it runs: they are
-    /// dropped with its stream, finished or not, so whether a walk ends
-    /// inside some query depends on how fast the remote answers. This test
-    /// drives the walk itself, with a driver over a stream that never
-    /// yields, until the driver is idle, so it pins what a walk fetches
-    /// rather than how long a query happens to last.
-    #[dialog_common::test]
-    async fn it_fetches_a_hinted_range_a_partial_replica_lacks() -> Result<()> {
+    type Replica = Counting<Peer<VolatileSpace, Session>>;
+
+    /// A replica that adopted, by reference, the head an origin pushed to
+    /// a filesystem remote, so it holds none of the tree: 4 rounds of 40
+    /// entities' `a/name` and `b/name`. Returns the replica's counting env
+    /// and its branch.
+    async fn partial_replica() -> Result<(Replica, crate::Branch)> {
         use crate::SiteAddress;
         use dialog_effects::credential::prelude::*;
         use dialog_effects::storage::{Directory, Location};
@@ -875,25 +947,24 @@ mod tests {
             .perform(&replica_operator)
             .await?;
 
-        let env = Counting::new(replica_operator);
+        Ok((Counting::new(replica_operator), replica))
+    }
+
+    /// Enqueue a `Likely` hint for `attribute` through the env.
+    async fn hint(env: &Replica, attribute: &str) {
         let listening = Provider::<Preload>::execute(
-            &env,
+            env,
             PreloadRequest {
-                selector: selector("b/name"),
+                selector: selector(attribute),
                 likelihood: Likelihood::Likely,
             },
         )
         .await;
         assert!(listening, "the default budget accepts hints");
+    }
 
-        let queue = Provider::<Speculation>::execute(&env, ()).await;
-        let erased: &Erased = &env;
-        let mut driver = Driven::new(
-            stream::pending::<()>(),
-            vec![Source::from(replica.clone())],
-            erased,
-            queue.clone(),
-        );
+    /// Poll `driver` until it is idle: every hint it took walked to the end.
+    async fn drive_to_idle<'a, S: Stream + Unpin + 'a>(driver: &mut Driven<'a, S>) {
         poll_fn(|context| {
             let _ = driver.poll_next_unpin(context);
             if driver.is_idle() {
@@ -903,18 +974,21 @@ mod tests {
             }
         })
         .await;
-        assert_eq!(queue.pending(), 0, "the driver took the hint");
-        assert!(
-            env.count("hydrate::Hydrate") > 0,
-            "the replica held none of the range, so the walk fetched it"
-        );
+    }
 
+    /// Read `attribute` on `replica` and assert it fetched nothing and read
+    /// no block: the walk left the whole range local and in the line's cache.
+    async fn assert_read_is_local(
+        env: &Replica,
+        replica: &crate::Branch,
+        attribute: &str,
+    ) -> Result<()> {
         let hydrations = env.count("hydrate::Hydrate");
         let gets = env.count("archive::Get");
         let rows = replica
             .query()
-            .select(attribute_query("b/name"))
-            .perform(&env)
+            .select(attribute_query(attribute))
+            .perform(env)
             .try_vec()
             .await?;
         assert_eq!(rows.len(), 4 * 40);
@@ -929,5 +1003,89 @@ mod tests {
             "and the walk left every node it fetched in the line's cache"
         );
         Ok(())
+    }
+
+    /// A replica that adopted a head by reference still warms ahead of
+    /// demand: a walk of a hinted range the replica does not hold fetches
+    /// the whole range, so the range's own read then fetches nothing. A
+    /// driver that walked its hints to the end hands nothing back when it
+    /// drops.
+    ///
+    /// This test drives the walk itself, with a driver over a stream that
+    /// never yields, until the driver is idle, so it pins what a walk
+    /// fetches rather than how long a query happens to last.
+    #[dialog_common::test]
+    async fn it_fetches_a_hinted_range_a_partial_replica_lacks() -> Result<()> {
+        let (env, replica) = partial_replica().await?;
+        hint(&env, "b/name").await;
+
+        let queue = Provider::<Speculation>::execute(&env, ()).await;
+        let erased: &Erased = &env;
+        let mut driver = Driven::new(
+            stream::pending::<()>(),
+            vec![Source::from(replica.clone())],
+            erased,
+            queue.clone(),
+        );
+        drive_to_idle(&mut driver).await;
+        assert_eq!(queue.pending(), 0, "the driver took the hint");
+        assert!(
+            env.count("hydrate::Hydrate") > 0,
+            "the replica held none of the range, so the walk fetched it"
+        );
+        drop(driver);
+        assert_eq!(
+            queue.pending(),
+            0,
+            "a walk that ended is not handed back to the queue"
+        );
+
+        assert_read_is_local(&env, &replica, "b/name").await
+    }
+
+    /// A driver dropped while its walk waits on the remote hands the hint
+    /// back to the queue, and the next driver, which never saw it hinted,
+    /// finishes it: the range's own read then fetches nothing. This is the
+    /// query that ends before the walk it took, as on a slow remote.
+    #[dialog_common::test]
+    async fn it_resumes_a_hint_a_dropped_driver_did_not_finish() -> Result<()> {
+        let (env, replica) = partial_replica().await?;
+        hint(&env, "b/name").await;
+
+        let queue = Provider::<Speculation>::execute(&env, ()).await;
+        let erased: &Erased = &env;
+        let sources = vec![Source::from(replica.clone())];
+
+        // One poll: the driver takes the hint and starts the walk, whose
+        // first read is a fetch of the root from the remote.
+        let mut first = Driven::new(
+            stream::pending::<()>(),
+            sources.clone(),
+            erased,
+            queue.clone(),
+        );
+        poll_fn(|context| {
+            let _ = first.poll_next_unpin(context);
+            Poll::Ready(())
+        })
+        .await;
+        assert_eq!(queue.pending(), 0, "the first driver took the hint");
+        assert!(
+            !first.is_idle(),
+            "fixture: the walk must be waiting on the remote when its driver drops"
+        );
+        drop(first);
+        assert_eq!(
+            queue.pending(),
+            1,
+            "the dropped driver handed its unfinished hint back"
+        );
+
+        let mut second = Driven::new(stream::pending::<()>(), sources, erased, queue.clone());
+        drive_to_idle(&mut second).await;
+        drop(second);
+        assert_eq!(queue.pending(), 0, "the second driver finished the walk");
+
+        assert_read_is_local(&env, &replica, "b/name").await
     }
 }
