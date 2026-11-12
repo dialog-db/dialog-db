@@ -273,15 +273,14 @@ impl Demand {
         manifest: &dialog_search_tree::Manifest,
     ) {
         self.keyed_under(manifest);
-        // A tree with a band for each number type scans some selectors without
-        // their bounds, and the cover must hold what the scan reads.
-        let fitted;
-        let selector = if manifest.value_encoding == dialog_corpus::NUMBER_BAND {
-            selector
-        } else {
-            fitted = selector.clone().for_manifest(manifest);
-            &fitted
-        };
+        // The cover must hold what the scan reads, and the scan reads the
+        // selector as a tree of this format can scan it. A tree with a band
+        // for each number type scans some selectors without their bounds. A
+        // tree with one band for every number reads an exact number as the
+        // range of the numbers that its type reads as it, so a read of the
+        // natural 7 reads a stored 7.5 too.
+        let fitted = selector.clone().for_manifest(manifest);
+        let selector = &fitted;
         record_range(&self.facts, selector_range(selector, manifest));
         let metadata = self.metadata.lock().expect("demand metadata lock");
         if selects_head(selector, &metadata) {
