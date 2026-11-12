@@ -1478,3 +1478,82 @@ fn measure_how_long_a_cell_update_waits() -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+/// A handle opened while this process's last handle is closing keeps the
+/// file present: no other process can take the present byte exclusive,
+/// so none takes itself for the last to close and cuts or retires what
+/// this one uses. Today the closing handle lets go of the byte after the
+/// new handle has taken over its state, so another process takes it.
+#[test]
+fn it_keeps_the_file_present_for_a_handle_opened_while_the_last_closes() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let path = archive_in(&directory);
+    let path_text = path.to_string_lossy().into_owned();
+    let archive = FileArchive::open(&path)?;
+    archive.append("index", &[block("first")])?;
+    // The close waits for the turn another process holds, after it found
+    // itself the last handle.
+    let holder = hold(&path, locks::TURN, true)?;
+    let closing = std::thread::spawn(move || drop(archive));
+    std::thread::sleep(A_WHILE);
+    anyhow::ensure!(!closing.is_finished(), "the close waits for the turn");
+    let reopened = FileArchive::open(&path)?;
+    holder.finish()?;
+    closing
+        .join()
+        .map_err(|_| anyhow::anyhow!("the close panicked"))?;
+    let mut other = Process::spawn(&["try", &path_text, &locks::PRESENT.to_string()])?;
+    assert!(
+        !other.won()?,
+        "another process took the present byte exclusive while this one has the file open"
+    );
+    other.finish()?;
+    all_read_back(&reopened, &["first".into()])
+}
+
+/// Processes that end without closing the file (a crash, an exit without
+/// drop) do not make it grow without bound: the empty extents a dead
+/// process left listed are taken again by the next, so their count and
+/// the file's length stay level however many die. Today each open claims
+/// two new extents of 1 MiB whatever is left, so both grow with every
+/// death, and the list heads for the slot's 64 KiB limit.
+#[test]
+fn it_does_not_pile_up_extents_left_by_processes_that_die() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let path = archive_in(&directory);
+    let look = || -> anyhow::Result<(usize, u64)> {
+        let archive = FileArchive::open_with(
+            &path,
+            Options {
+                leave_extent: false,
+                ..Options::default()
+            },
+        )?;
+        let snapshot = archive.current();
+        let empty = snapshot
+            .slot
+            .extents
+            .iter()
+            .filter(|&&record| extent::used(snapshot.bytes(), record) == Some(0))
+            .count();
+        drop(snapshot);
+        // Looked at, not closed: a close would retire them.
+        archive.inner.dies.store(true, Ordering::Relaxed);
+        Ok((empty, std::fs::metadata(&path)?.len()))
+    };
+    let mut seen = Vec::new();
+    for run in 0..12 {
+        let mut dying = appender(&path, &format!("run {run}"), 1, 1 << 20, true)?;
+        dying.go()?;
+        dying.expect(DONE)?;
+        dying.finish()?;
+        seen.push(look()?);
+    }
+    let (first_empty, first_length) = seen[0];
+    let (last_empty, last_length) = seen[seen.len() - 1];
+    assert!(
+        last_empty <= first_empty + 2 && last_length <= first_length + (4 << 20),
+        "(empty extents listed, file length) after each of 12 deaths: {seen:?}"
+    );
+    Ok(())
+}
