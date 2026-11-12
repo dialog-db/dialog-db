@@ -245,3 +245,120 @@ async fn it_migrates_a_replica_as_an_application_would() -> anyhow::Result<()> {
     assert_eq!(select_all!(operator, branch), before);
     Ok(())
 }
+
+/// Writes `bytes` into the space's `fs` archive, in `catalog`, under the
+/// base58 of the hash of `named` (the block's own bytes, unless a test
+/// wants a file whose name does not match what it holds).
+fn put_block(
+    space: &std::path::Path,
+    catalog: &str,
+    named: &[u8],
+    bytes: &[u8],
+) -> anyhow::Result<()> {
+    use base58::ToBase58 as _;
+
+    let directory = space.join("archive").join(catalog);
+    std::fs::create_dir_all(&directory)?;
+    let name = dialog_common::Blake3Hash::hash(named)
+        .as_bytes()
+        .to_base58();
+    std::fs::write(directory.join(name), bytes)?;
+    Ok(())
+}
+
+fn buffer(text: &str) -> dialog_common::Buffer {
+    dialog_common::Buffer::from(text.as_bytes().to_vec())
+}
+
+/// Migrating a space that already has an `archive.dialog` keeps what that
+/// file holds: blocks a file-archive space wrote are not dropped for the
+/// `fs` archive's. Today the transcode writes a new file and renames it
+/// over the existing one, so a block only the existing file held is gone.
+#[test]
+fn it_keeps_what_an_existing_archive_file_holds_when_migrating() -> anyhow::Result<()> {
+    use dialog_migration::archive_file::migrate_space;
+
+    let directory = tempfile::tempdir()?;
+    let space = directory.path().join("repo");
+    let (old, new) = (buffer("only in the fs archive"), buffer("only in the file"));
+    put_block(&space, "index", old.as_ref(), old.as_ref())?;
+    {
+        let archive = FileArchive::open(space.join(FILE_NAME))?;
+        archive.append("index", std::slice::from_ref(&new))?;
+        archive.sync()?;
+    }
+    migrate_space(&space, false)?;
+    let archive = FileArchive::open(space.join(FILE_NAME))?;
+    assert_eq!(
+        archive.get("index", old.blake3_hash())?.as_deref(),
+        Some(old.as_ref()),
+        "the fs archive's block is migrated"
+    );
+    assert_eq!(
+        archive.get("index", new.blake3_hash())?.as_deref(),
+        Some(new.as_ref()),
+        "the block the file already held is still there"
+    );
+    Ok(())
+}
+
+/// A space whose `archive.dialog` holds nothing (opening a path creates
+/// it) but whose `fs` archive holds blocks still needs migrating. Today a
+/// space with any `archive.dialog` counts as migrated, so its blocks are
+/// never moved and a run reports nothing to do.
+#[test]
+fn it_counts_a_space_with_an_empty_archive_file_as_unmigrated() -> anyhow::Result<()> {
+    use dialog_migration::Migrations;
+    use dialog_migration::archive_file::{ArchiveFile, unmigrated};
+
+    let directory = tempfile::tempdir()?;
+    let space = directory.path().join("repo");
+    let block = buffer("a block");
+    put_block(&space, "index", block.as_ref(), block.as_ref())?;
+    drop(FileArchive::open(space.join(FILE_NAME))?);
+    assert_eq!(
+        unmigrated(directory.path())?,
+        vec![space.clone()],
+        "the space is still to migrate"
+    );
+    let plan = Migrations::new()
+        .with(ArchiveFile {
+            remove_source: false,
+        })
+        .plan(directory.path())?;
+    assert_eq!(plan.len(), 1, "{plan:?}");
+    Ok(())
+}
+
+/// A migration that removes the `fs` archive does so only when every file
+/// in it went into the archive file: a block whose bytes no longer match
+/// its name, or a file not named as a block, is reported and kept (or the
+/// run fails). Today they are left out silently and then deleted with the
+/// rest of the `fs` archive.
+#[test]
+fn it_does_not_remove_files_the_migration_left_out() -> anyhow::Result<()> {
+    use dialog_migration::Migrations;
+    use dialog_migration::archive_file::ArchiveFile;
+
+    let directory = tempfile::tempdir()?;
+    let space = directory.path().join("repo");
+    let good = buffer("a good block");
+    put_block(&space, "index", good.as_ref(), good.as_ref())?;
+    let whole = buffer("a block cut short on the disk");
+    put_block(&space, "index", whole.as_ref(), &whole.as_ref()[..10])?;
+    std::fs::write(
+        space.join("archive").join("index").join("stray"),
+        b"not a block",
+    )?;
+
+    let run = Migrations::new()
+        .with(ArchiveFile {
+            remove_source: true,
+        })
+        .run(directory.path());
+    assert!(
+        run.is_err() || space.join("archive").exists(),
+        "the run succeeded ({run:?}) and removed the fs archive, with a corrupt block and a stray file in it"
+    );
+    Ok(())
+}
