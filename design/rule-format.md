@@ -1,6 +1,6 @@
 # A stored rule says less than a rule can
 
-**Phase: Describing.** What follows is the situation, not yet a problem statement.
+**Phase: Diagnosing.** What follows is the situation, not yet a problem statement. The [journal](rule-format/journal.md) proposes one, the [ledger](rule-format/claims.md) says what is known, and [stamping](rule-format/stamping.md) lays out the decision the patterns work waits on.
 
 ## Description
 
@@ -41,6 +41,6 @@ What each of the four would ask of a body, as read so far and not as a plan:
 | rule heads | several heads where there is one, a polarity a head | ? it depends on how one head is spelled among several |
 | macros | a head that is not a concept, and a premise that takes a form apart | ? |
 
-A hypothesis this opens, the agent's, 2026-11-11: **a format that only adds leaves every rule it does not touch where it is.** If a rule that holds no pattern, one head and no syntax keeps its canonical parts, it keeps its entity, and its body can go on being written as format 3. Then each of the four can be added when it is ready, a rule is written in the lowest format that can say it, and nothing is migrated. Confirmed by a test that a rule of terms alone has one entity and one body before and after a pattern can be written. Refuted if the canonical spelling of an old rule has to change to make room, as it might for several heads.
+A hypothesis this opens, the agent's, 2026-11-11: **a format that only adds leaves every rule it does not touch where it is.** If a rule that holds no pattern, one head and no syntax keeps its canonical parts, it keeps its entity, and its body can go on being written as format 3. Then each of the four can be added when it is ready, a rule is written in the lowest format that can say it, and nothing is migrated. Confirmed by a test that a rule of terms alone has one entity and one body before and after a pattern can be written. The first half is run, 2026-11-12: `it_keeps_the_name_and_the_bytes_of_a_rule_format_3_wrote` writes out the entity and the body of two rules of terms and passes on main and, unchanged, on `feat/patterns`, where a pattern can be held and not yet written. Refuted if the canonical spelling of an old rule has to change to make room, as it might for several heads.
 
 A stored format changes here, so whatever is built is a breaking change with a compatibility note (`.claude/rules/versioning-and-changelog.md`).
