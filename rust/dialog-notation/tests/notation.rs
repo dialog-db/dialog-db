@@ -265,6 +265,68 @@ async fn it_asserts_and_retracts_from_one_rule() -> Result<()> {
     Ok(())
 }
 
+/// The same move as two rules of one head, each with the premises
+/// written again. A round reads one state, so both see where the to-do
+/// was. The one difference from a rule of two heads: a to-do on no
+/// list is still put on one, since the write no longer waits on what
+/// only the retraction needs.
+#[dialog_common::test]
+async fn it_asserts_and_retracts_from_two_rules_of_one_head() -> Result<()> {
+    let mut notebook = Notebook::open().await?;
+    notebook
+        .submit(
+            r#"(rule (assert! (xyz.todo ?t list: ?to))
+                 (when (move (xyz.todo ?t list: ?to))))
+               (rule (retract! (xyz.todo ?t list: ?from))
+                 (when (move (xyz.todo ?t list: ?to))
+                       (xyz.todo ?t list: ?from)))
+               (assert! (xyz.todo todo:1 list: list:home))"#,
+        )
+        .await?;
+    notebook
+        .submit("(move (xyz.todo todo:1 list: list:work))")
+        .await?;
+    notebook
+        .submit("(move (xyz.todo todo:2 list: list:work))")
+        .await?;
+    assert_eq!(
+        report(&mut notebook, "(query (xyz.todo ?t list: ?l))").await?,
+        vec![
+            "(xyz.todo todo:1 list: list:work)",
+            "(xyz.todo todo:2 list: list:work)"
+        ]
+    );
+    Ok(())
+}
+
+/// The same move with its condition given a name: one rule issues a
+/// command that carries what the condition bound, and two rules of one
+/// head read it a round later, in the same commit.
+#[dialog_common::test]
+async fn it_asserts_and_retracts_on_a_command_a_rule_issues() -> Result<()> {
+    let mut notebook = Notebook::open().await?;
+    notebook
+        .submit(
+            r#"(rule (moved (xyz.todo ?t list: ?to before: ?from))
+                 (when (move (xyz.todo ?t list: ?to))
+                       (xyz.todo ?t list: ?from)))
+               (rule (assert! (xyz.todo ?t list: ?to))
+                 (when (moved (xyz.todo ?t list: ?to))))
+               (rule (retract! (xyz.todo ?t list: ?from))
+                 (when (moved (xyz.todo ?t before: ?from))))
+               (assert! (xyz.todo todo:1 list: list:home))"#,
+        )
+        .await?;
+    notebook
+        .submit("(move (xyz.todo todo:1 list: list:work))")
+        .await?;
+    assert_eq!(
+        report(&mut notebook, "(query (xyz.todo ?t list: ?l))").await?,
+        vec!["(xyz.todo todo:1 list: list:work)"]
+    );
+    Ok(())
+}
+
 /// A relation derived from itself: two rules of one head, the second
 /// reading what both conclude.
 #[dialog_common::test]
