@@ -438,10 +438,8 @@ impl<'a> Naming<'a> {
     fn name(self) -> Reference {
         match self.composite.as_ref() {
             Composite::Map(_) => {
-                Type::MAP.map(self.names.chunks_exact(2).filter_map(|entry| match entry {
-                    [key, value] => Some((*key, *value)),
-                    _ => None,
-                }))
+                let (entries, _) = self.names.as_chunks::<2>();
+                Type::MAP.map(entries.iter().map(|[key, value]| (*key, *value)))
             }
             Composite::List(_) => Type::LIST.list(self.names),
             Composite::Tuple(_) => TUPLE.list(self.names),
@@ -1167,9 +1165,11 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn it_names_a_deep_record_on_a_small_stack() {
+        use std::thread::Builder;
+
         let value = nested(NAMED_DEPTH * 4);
         let name = value.reference();
-        let named = std::thread::Builder::new()
+        let named = Builder::new()
             .stack_size(256 * 1024)
             .spawn(move || value.reference())
             .expect("a thread")
