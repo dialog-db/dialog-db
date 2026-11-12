@@ -1239,7 +1239,7 @@ fn kib(bytes: u64) -> String {
 /// tokens of nodes kept whole do not count. Then estimates an index kept in
 /// the file as a search tree of its own.
 fn file_archive(source: &Source, directory: &Path) -> anyhow::Result<()> {
-    use dialog_archive_file::FileArchive;
+    use dialog_chronicle::Chronicle;
     const CATALOG: &str = "index";
     std::fs::create_dir_all(directory)?;
     let commits = |blocks: &mut dyn Iterator<Item = &Written>| {
@@ -1260,7 +1260,7 @@ fn file_archive(source: &Source, directory: &Path) -> anyhow::Result<()> {
 
     let everything = directory.join("everything.dialog");
     std::fs::remove_file(&everything).ok();
-    let first = FileArchive::open(&everything)?;
+    let first = Chronicle::open(&everything)?;
     for group in commits(&mut source.blocks.iter()) {
         first.append(CATALOG, &group)?;
     }
@@ -1302,7 +1302,7 @@ fn file_archive(source: &Source, directory: &Path) -> anyhow::Result<()> {
 
     let clean = directory.join("modern.dialog");
     std::fs::remove_file(&clean).ok();
-    let archive = FileArchive::open(&clean)?;
+    let archive = Chronicle::open(&clean)?;
     let kept: Vec<&Written> = source
         .blocks
         .iter()
@@ -1353,7 +1353,7 @@ fn file_archive(source: &Source, directory: &Path) -> anyhow::Result<()> {
 /// reopened by a fresh process, which appends the rest one commit at a time.
 /// The first append builds the writer's token dictionary from the file.
 fn writer_costs(kept: &[&Written], directory: &Path) -> anyhow::Result<()> {
-    use dialog_archive_file::FileArchive;
+    use dialog_chronicle::Chronicle;
     const CATALOG: &str = "index";
     const TAIL: usize = 20;
     let mut commits: Vec<Vec<Buffer>> = Vec::new();
@@ -1372,14 +1372,14 @@ fn writer_costs(kept: &[&Written], directory: &Path) -> anyhow::Result<()> {
     let path = directory.join("writer.dialog");
     std::fs::remove_file(&path).ok();
     {
-        let archive = FileArchive::open(&path)?;
+        let archive = Chronicle::open(&path)?;
         for commit in &commits[..split] {
             archive.append(CATALOG, commit)?;
         }
     }
     // A fresh open: the registry let the handle go when it was dropped.
     let started = Instant::now();
-    let archive = FileArchive::open(&path)?;
+    let archive = Chronicle::open(&path)?;
     let opened = started.elapsed();
     let dictionary = archive.prepare_writer();
     let mut times = Vec::new();

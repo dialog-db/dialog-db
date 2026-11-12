@@ -1069,7 +1069,7 @@ B, C and D keep the same page cache in the worker that holds the bytes
 (a port cannot map the file), so they differ only in the medium behind a
 miss. Cold reads drop it first.
 
-**The trace.** The native `dialog-archive-file`, built with a new `trace`
+**The trace.** The native `dialog-chronicle`, built with a new `trace`
 feature, runs `tonk_bench` on the synthetic `tonk-1x-steady` dataset with
 blocks and cells in the file (`file-cells` store), and records member 1's
 file: every page of the mapping each operation reads (the mapping is
@@ -1403,7 +1403,7 @@ only: with the host (`post`), then, for E, with no host, the service
 worker reading through `getFile()` (`nohost`); A's read-only pass is what
 the no-host reads are compared with. A replacement host replays what the
 native archive reads to open the files it left: a second trace, made with
-a new example (`cargo run -p dialog-archive-file --features trace
+a new example (`cargo run -p dialog-chronicle --features trace
 --example trace_open`) that opens copies of member 1's two files under the
 trace and exits without closing them, as a tab that went would; it reads
 four ranges a file, about 260 KiB, and writes a slot and an extent's

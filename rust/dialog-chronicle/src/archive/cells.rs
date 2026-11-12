@@ -44,7 +44,7 @@ use dialog_effects::memory::{
 };
 
 use super::index::Snapshot;
-use super::{FileArchive, Laid, write_index};
+use super::{Chronicle, Laid, write_index};
 use crate::file::{HEADER, Kind, put_record};
 use crate::rows::invalid;
 use crate::tokens::ALIGN;
@@ -199,7 +199,7 @@ fn holding(content: Option<Vec<u8>>) -> Current {
     }
 }
 
-impl FileArchive {
+impl Chronicle {
     /// This process's extents that hold blocks, as `snapshot` maps them: what
     /// a cell's record it appends now needs whole.
     fn loose_needed(&self, snapshot: &Snapshot) -> Vec<Needed> {
@@ -387,7 +387,7 @@ impl FileArchive {
     }
 }
 
-impl Provider<Resolve> for FileArchive {
+impl Provider<Resolve> for Chronicle {
     fn execute(
         &self,
         effect: Capability<Resolve>,
@@ -410,7 +410,7 @@ impl Provider<Resolve> for FileArchive {
     }
 }
 
-impl Provider<Publish> for FileArchive {
+impl Provider<Publish> for Chronicle {
     fn execute(&self, effect: Capability<Publish>) -> Resume<'_, Result<Version, MemoryError>> {
         #[cfg(all(feature = "trace", unix))]
         crate::trace::publish(
@@ -427,13 +427,13 @@ impl Provider<Publish> for FileArchive {
     }
 }
 
-impl Provider<Retract> for FileArchive {
+impl Provider<Retract> for Chronicle {
     fn execute(&self, effect: Capability<Retract>) -> Resume<'_, Result<(), MemoryError>> {
         Resume::now(self.retract_cell(effect.space(), effect.cell(), effect.when()))
     }
 }
 
-impl Provider<List> for FileArchive {
+impl Provider<List> for Chronicle {
     fn execute(&self, effect: Capability<List>) -> Resume<'_, Result<Vec<String>, MemoryError>> {
         Resume::now(self.list_cells(effect.space()).map_err(storage))
     }
@@ -443,10 +443,10 @@ impl Provider<List> for FileArchive {
 mod tests {
     use super::*;
 
-    fn archive() -> anyhow::Result<(tempfile::TempDir, std::path::PathBuf, FileArchive)> {
+    fn archive() -> anyhow::Result<(tempfile::TempDir, std::path::PathBuf, Chronicle)> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("archive");
-        let archive = FileArchive::open(&path)?;
+        let archive = Chronicle::open(&path)?;
         Ok((directory, path, archive))
     }
 
@@ -474,7 +474,7 @@ mod tests {
         archive.retract_cell("local", "other", &version(b"x"))?;
         assert_eq!(archive.list_cells("local")?, vec!["main"]);
         drop(archive);
-        let reopened = FileArchive::open(&path)?;
+        let reopened = Chronicle::open(&path)?;
         assert_eq!(
             reopened.resolve_cell("local", "main")?.as_deref(),
             Some(&b"second"[..])
@@ -497,7 +497,7 @@ mod tests {
         );
         drop(archive);
         assert_eq!(
-            FileArchive::open(&path)?.resolve_cell("local", "main")?,
+            Chronicle::open(&path)?.resolve_cell("local", "main")?,
             Some(large)
         );
         Ok(())
@@ -540,7 +540,7 @@ mod tests {
     #[test]
     fn it_reads_another_handles_update_at_once() -> anyhow::Result<()> {
         let (_directory, path, archive) = archive()?;
-        let other = FileArchive::open_unshared(&path, super::super::Options::default())?;
+        let other = Chronicle::open_unshared(&path, super::super::Options::default())?;
         let first = archive.publish_cell("local", "main", b"first", None)?;
         assert_eq!(
             other.resolve_cell("local", "main")?.as_deref(),

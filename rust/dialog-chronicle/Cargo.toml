@@ -1,5 +1,5 @@
 [package]
-name = "dialog-archive-file"
+name = "dialog-chronicle"
 description = "A dialog archive kept in one append-only file"
 edition = "2024"
 version.workspace = true

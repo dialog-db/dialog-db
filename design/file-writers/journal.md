@@ -484,7 +484,7 @@ on CI against main:
    with the turn folds them into frames and retires the extent, which a
    sync point frees for the next claim. The turn is a lock on one byte.
    Format 11.
-3. Cells, `61302917`: `FileArchive` provides `Resolve`, `Publish`,
+3. Cells, `61302917`: `Chronicle` provides `Resolve`, `Publish`,
    `Retract` and `List`; a cell is a record of two halves in a cells index
    of its own, updated under a lock on that cell alone, spilling to a
    block past its capacity. A repository keeps its branch heads in the
@@ -520,7 +520,7 @@ before and by the commit's now.
 ## 2026-11-11, Verifying: a test for every case the design handles
 
 Every concurrent case the design says it handles now has a test in
-`rust/dialog-archive-file/src/archive/concurrency.rs` (the archive and its
+`rust/dialog-chronicle/src/archive/concurrency.rs` (the archive and its
 cells), `src/archive/cells.rs` and `tests/repository.rs` (branches), and
 each test was checked against the code broken on purpose: with the
 guarantee it pins removed, it fails. Other processes are the test binary

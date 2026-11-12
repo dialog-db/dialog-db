@@ -444,7 +444,7 @@ pub(crate) fn publish(file: &File, name: &str, content: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::FileArchive;
+    use crate::Chronicle;
     use dialog_common::Buffer;
 
     /// The records of a trace, as (tag, the file's number) pairs, with the
@@ -498,7 +498,7 @@ mod tests {
         let traced = directory.path().join("traced");
         std::fs::create_dir(&traced)?;
         start(&out, &traced)?;
-        let archive = FileArchive::open(traced.join("archive"))?;
+        let archive = Chronicle::open(traced.join("archive"))?;
         let blocks: Vec<Buffer> = (0..64).map(|n| Buffer::from(vec![n as u8; 3000])).collect();
         archive.append("index", &blocks)?;
         archive.sync()?;

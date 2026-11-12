@@ -466,7 +466,7 @@ implements `NodeRows`. An environment that holds a `NodeSource` for a
 subject (`NodeSource::serve`) makes every tree read of that subject ask it
 first. The node is then read in place: keys compare part by part, values
 are read as archives where the store keeps them, and no block is built,
-hashed or validated. `FileArchive` is such a source.
+hashed or validated. `Chronicle` is such a source.
 
 What this changes for you:
 
@@ -530,9 +530,9 @@ transaction again computes them over the head that won.
 [#733](https://github.com/dialog-db/dialog-db/pull/733),
 [design](./design/file-writers.md)
 
-`FileArchive` provides the memory effects (`Resolve`, `Publish`,
+`Chronicle` provides the memory effects (`Resolve`, `Publish`,
 `Retract`, `List`), so a `Space` can name it as its memory as well as its
-archive: `Space<FileArchive, FileArchive, ...>` keeps a space's blocks and
+archive: `Space<Chronicle, Chronicle, ...>` keeps a space's blocks and
 its cells, branch heads among them, in one file. A cell is kept as SQLite
 keeps a commit in its write-ahead log: each update appends a record with
 the cell's value, in the writer's turn, and the cells' own index files the
@@ -544,7 +544,7 @@ naming what is gone.
 
 What this changes for you:
 
-- A `Space` whose memory is a `FileArchive` keeps no `memory` directory:
+- A `Space` whose memory is a `Chronicle` keeps no `memory` directory:
   its cells are in `archive.dialog`.
 - A cell's edition is the BLAKE3 hash of its value, as under `fs`, so a
   `Publish` names the same version either way, and publishing the value a
@@ -570,7 +570,7 @@ disk before the blocks it names, which the power-loss tests showed.
 [#733](https://github.com/dialog-db/dialog-db/pull/733),
 [design](./design/file-writers.md)
 
-A writer to a `FileArchive` tries the file's turn without waiting. With
+A writer to a `Chronicle` tries the file's turn without waiting. With
 it, it appends as before. Without it, it writes its blocks whole into an
 extent of its own, space it claimed in an earlier turn, and they read back
 at once, in its process and in others. The next writer to get the turn,
@@ -621,7 +621,7 @@ What this changes for you:
   the writer's own, so a head it commits never names a block another
   process has not yet folded into the file.
 - The file's format is version 14: a file written by an earlier build of
-  `dialog-archive-file` does not open.
+  `dialog-chronicle` does not open.
 
 Why: many processes work on separate branches of one space at once, and on
 main they never wait on one another to write. A file whose every append
@@ -633,7 +633,7 @@ processes run.
 [#733](https://github.com/dialog-db/dialog-db/pull/733),
 [design](./research/single-file-format/design.md)
 
-The new `dialog-archive-file` crate adds `FileArchive`, an archive
+The new `dialog-chronicle` crate adds `Chronicle`, an archive
 provider that keeps a space's blocks in one append-only file instead of a
 file per block. It answers `archive::Get`, `Put` and `Import` like the
 `fs` provider, and opens from a space's `Location` (`Resource<Location>`),
@@ -647,7 +647,7 @@ A read realizes the block. Native only.
 
 What this changes for you:
 
-- Nothing, unless you choose it: `Space<FileArchive, FileSystem,
+- Nothing, unless you choose it: `Space<Chronicle, FileSystem,
   FileSystem, FileSystem, FileSystem>` is a space whose blocks live in
   `archive.dialog` in the space's directory. The tree, queries and sync
   work through it unchanged.
@@ -657,7 +657,7 @@ What this changes for you:
   readers take no lock. A file this process already has open is shared,
   not opened twice.
 - The file syncs itself every 64 appends or 2 seconds, and on
-  `FileArchive::sync`. A power loss loses at most the appends since, and
+  `Chronicle::sync`. A power loss loses at most the appends since, and
   never leaves the file damaged: opening goes back to the newest state
   that is whole.
 - Opening reads small slots at the head of the file and nothing else.
@@ -671,8 +671,8 @@ What this changes for you:
   `dialog-migrate` binary that runs them. A migration is a `Step` that finds
   its work by looking at the replica, so it is safe to run on every start:
   `Migrations::plan` says what the steps would do, `Migrations::run` does
-  it, and an interrupted run picks up where it stopped. The `archive-file`
-  step (`archive_file::ArchiveFile`) moves every space of a replica the
+  it, and an interrupted run picks up where it stopped. The `chronicle`
+  step (`chronicle::IntoChronicle`) moves every space of a replica the
   `fs` provider wrote into the `archive.dialog` a file-archive space reads,
   writing it under another name and renaming it once complete; with
   `remove_source` it deletes the `fs` archive after. It is a conversion an
@@ -1975,8 +1975,8 @@ has a tree to canonicalize even when the link itself wrote nothing.
 
 #### Compatibility and migration
 
-- A `FileArchive` file is format 14; one written by an earlier build of
-  this branch's `dialog-archive-file` (format 10 to 13) does not open, and is
+- A `Chronicle` file is format 14; one written by an earlier build of
+  this branch's `dialog-chronicle` (format 10 to 13) does not open, and is
   moved again from the replica it came from with `dialog-migrate`. Nothing
   else stored or synced changes: blocks, their hashes and what a replica
   syncs are the same.
@@ -2983,7 +2983,7 @@ thread multiplies whatever it holds by the size of the thread pool.
   be dropped there; upgrade every replica that shares a key.
 - Nothing an existing space holds changes or is read differently for the
   single-file archive: it is a new provider a space opts into. A space
-  opened with `FileArchive` does not read an `fs` archive's directory of
+  opened with `Chronicle` does not read an `fs` archive's directory of
   blocks, and the reverse; moving a space between the two means copying
   its blocks with `Import`. The blocks are the same bytes in both, so an
   older release reads any block this one stores.

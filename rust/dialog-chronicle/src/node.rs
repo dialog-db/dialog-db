@@ -645,7 +645,7 @@ mod profile {
         let Ok(path) = std::env::var("DIALOG_ARCHIVE_PROFILE") else {
             return Ok(());
         };
-        let archive = crate::FileArchive::open(&path)?;
+        let archive = crate::Chronicle::open(&path)?;
         let mut blocks = Vec::new();
         for (catalog, hash) in archive.hashes() {
             blocks.push(Buffer::from(archive.get(&catalog, &hash)?.expect("listed")));
@@ -932,7 +932,7 @@ mod warm_split {
         let Ok(path) = std::env::var("DIALOG_ARCHIVE_PROFILE") else {
             return Ok(());
         };
-        let archive = crate::FileArchive::open(&path)?;
+        let archive = crate::Chronicle::open(&path)?;
         // `DIALOG_ARCHIVE_PROFILE_NODES` takes every so many of a large
         // file's blocks, up to that many.
         let limit = std::env::var("DIALOG_ARCHIVE_PROFILE_NODES")

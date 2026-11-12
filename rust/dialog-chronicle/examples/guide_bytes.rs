@@ -2,7 +2,7 @@
 //! values the guide's chapter "One File per Space" draws.
 //!
 //! ```sh
-//! cargo run -p dialog-archive-file --example guide_bytes
+//! cargo run -p dialog-chronicle --example guide_bytes
 //! ```
 //!
 //! Alice's repository gets four commits: two facts, then *the
@@ -40,8 +40,8 @@ mod walk {
     use std::process::{Command, Stdio};
     use std::str::FromStr;
 
-    use dialog_archive_file::{FILE_NAME, FileArchive};
     use dialog_capability::Subject;
+    use dialog_chronicle::{Chronicle, FILE_NAME};
     use dialog_common::Blake3Hash;
     use dialog_corpus::{Changes, Entity, Fact, Instruction, Pick, Relation, Value};
     use dialog_effects::storage::{Directory, Location};
@@ -51,7 +51,7 @@ mod walk {
 
     /// A space whose blocks and cells, branch heads among them, are in one
     /// file.
-    type FileSpace = Space<FileArchive, FileArchive, FileSystem, FileSystem, FileSystem>;
+    type FileSpace = Space<Chronicle, Chronicle, FileSystem, FileSystem, FileSystem>;
 
     /// The byte of the writer's turn: past any file the archive grows to.
     const TURN: u64 = 1 << 62;
@@ -178,7 +178,7 @@ mod walk {
         walker.walk(&path)?;
 
         println!("\n# a sync point");
-        let archive = FileArchive::open(&path)?;
+        let archive = Chronicle::open(&path)?;
         archive.sync()?;
         walker.walk(&path)?;
 

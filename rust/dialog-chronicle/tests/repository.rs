@@ -1,4 +1,4 @@
-//! A repository whose space keeps its blocks in a [`FileArchive`]: commits
+//! A repository whose space keeps its blocks in a [`Chronicle`]: commits
 //! and queries go through it as they do through any archive.
 
 #![cfg(not(target_arch = "wasm32"))]
@@ -6,8 +6,8 @@
 use std::path::Path;
 use std::str::FromStr;
 
-use dialog_archive_file::{FILE_NAME, FileArchive, Options};
 use dialog_capability::Subject;
+use dialog_chronicle::{Chronicle, FILE_NAME, Options};
 use dialog_common::{Blake3Hash, Buffer};
 use dialog_corpus::{
     Changes, Entity, Fact, Instruction, Pick, Relation, Selector, Update as _, Value,
@@ -20,11 +20,11 @@ use futures_util::TryStreamExt as _;
 
 /// A space that keeps its blocks in one file and everything else on the
 /// filesystem.
-type FileArchiveSpace = Space<FileArchive, FileSystem, FileSystem, FileSystem, FileSystem>;
+type ChronicleSpace = Space<Chronicle, FileSystem, FileSystem, FileSystem, FileSystem>;
 
 /// A space that keeps its blocks and its memory cells (branch heads among
 /// them) in one file.
-type FileSpace = Space<FileArchive, FileArchive, FileSystem, FileSystem, FileSystem>;
+type FileSpace = Space<Chronicle, Chronicle, FileSystem, FileSystem, FileSystem>;
 
 fn fact(entity: &str, name: &str) -> anyhow::Result<Fact> {
     Ok(Fact {
@@ -54,7 +54,7 @@ macro_rules! commit {
 /// an operator allowed to act on it.
 macro_rules! open {
     ($at:expr, $peer:expr, $name:expr) => {
-        open!(FileArchiveSpace, $at, $peer, $name)
+        open!(ChronicleSpace, $at, $peer, $name)
     };
     ($space:ty, $at:expr, $peer:expr, $name:expr) => {
         open!($space, $at, $peer, $name, "main")
@@ -146,7 +146,7 @@ async fn it_commits_and_selects_through_a_file_archive() -> anyhow::Result<()> {
     // The repository's blocks are in its archive file, not in a directory
     // of blocks.
     let space = directory.path().join(&name);
-    let archive = FileArchive::open(space.join(FILE_NAME))?;
+    let archive = Chronicle::open(space.join(FILE_NAME))?;
     assert!(
         !archive.is_empty(),
         "the archive file holds the commits' blocks"
@@ -175,7 +175,7 @@ async fn it_commits_and_selects_through_a_file_archive() -> anyhow::Result<()> {
     // after a reopen, which reads the newest slot and nothing else.
     let copy = directory.path().join("copy.dialog");
     {
-        let target = FileArchive::open_with(
+        let target = Chronicle::open_with(
             &copy,
             Options {
                 chain: 4,
@@ -190,7 +190,7 @@ async fn it_commits_and_selects_through_a_file_archive() -> anyhow::Result<()> {
         }
         assert_eq!(target.stats().frames, stats.frames);
     }
-    let reopened = FileArchive::open(&copy)?;
+    let reopened = Chronicle::open(&copy)?;
     assert_eq!(reopened.len(), hashes.len());
     for (catalog, hash) in &hashes {
         let block = reopened.get(catalog, hash)?.expect("a block it copied");
@@ -206,7 +206,7 @@ const SHARE: &str = "DIALOG_ARCHIVE_FILE_SHARE";
 
 /// Every block of the archive at `source`, in an order every process
 /// agrees on.
-fn sorted_blocks(source: &FileArchive) -> Vec<(String, Blake3Hash)> {
+fn sorted_blocks(source: &Chronicle) -> Vec<(String, Blake3Hash)> {
     let mut hashes = source.hashes();
     hashes.sort_by(|a, b| (&a.0, a.1.as_bytes()).cmp(&(&b.0, b.1.as_bytes())));
     hashes
@@ -216,8 +216,8 @@ fn sorted_blocks(source: &FileArchive) -> Vec<(String, Blake3Hash)> {
 /// one append per block, once `go` exists. Pauses between appends, so two
 /// processes copying at once take turns many times over.
 fn copy_share(source: &Path, target: &Path, share: usize, go: &Path) -> anyhow::Result<()> {
-    let source = FileArchive::open(source)?;
-    let target = FileArchive::open(target)?;
+    let source = Chronicle::open(source)?;
+    let target = Chronicle::open(target)?;
     let blocks = sorted_blocks(&source);
     while !go.exists() {
         std::thread::sleep(std::time::Duration::from_millis(1));
@@ -283,16 +283,16 @@ async fn it_takes_turns_with_another_process() -> anyhow::Result<()> {
         "the other process copied its share"
     );
 
-    let hashes = sorted_blocks(&FileArchive::open(&source)?);
+    let hashes = sorted_blocks(&Chronicle::open(&source)?);
     {
         // This process's handle, open all along, reads the other's blocks.
-        let held = FileArchive::open(&target)?;
+        let held = Chronicle::open(&target)?;
         for (catalog, hash) in &hashes {
             let block = held.get(catalog, hash)?.expect("a block either copied");
             assert_eq!(&Blake3Hash::hash(&block), hash, "{catalog}");
         }
     }
-    let reopened = FileArchive::open(&target)?;
+    let reopened = Chronicle::open(&target)?;
     assert_eq!(reopened.len(), hashes.len());
     assert!(
         reopened.stats().frames > 0,
@@ -307,7 +307,7 @@ async fn it_takes_turns_with_another_process() -> anyhow::Result<()> {
 
 /// Reads `node` both ways, from its block and as the archive serves it, and
 /// checks every answer the tree reads a node for agrees.
-fn compare(archive: &FileArchive, catalog: &str, hash: &Blake3Hash) -> anyhow::Result<bool> {
+fn compare(archive: &Chronicle, catalog: &str, hash: &Blake3Hash) -> anyhow::Result<bool> {
     use dialog_corpus::{Datum, Key, State};
     use dialog_search_tree::nodes::Read;
     use dialog_search_tree::{NodeBody, PersistentNode, into_owned};
@@ -431,7 +431,7 @@ async fn it_serves_every_node_as_its_block_reads() -> anyhow::Result<()> {
     let at = Directory::At(directory.path().to_string_lossy().into_owned());
     let name = unique_name("repo");
     commit_facts(&at, &unique_name("peer"), &name).await?;
-    let archive = FileArchive::open(directory.path().join(&name).join(FILE_NAME))?;
+    let archive = Chronicle::open(directory.path().join(&name).join(FILE_NAME))?;
     let mut served = 0;
     for (catalog, hash) in sorted_blocks(&archive) {
         served += compare(&archive, &catalog, &hash)? as usize;
@@ -448,7 +448,7 @@ fn it_serves_every_node_of_a_file_as_its_block_reads() -> anyhow::Result<()> {
     let Ok(path) = std::env::var("DIALOG_ARCHIVE_SERVED") else {
         return Ok(());
     };
-    let archive = FileArchive::open(path)?;
+    let archive = Chronicle::open(path)?;
     let mut served = 0;
     for (catalog, hash) in sorted_blocks(&archive) {
         served += compare(&archive, &catalog, &hash)? as usize;
@@ -504,7 +504,7 @@ async fn it_takes_unchanged_rows_from_the_node_a_commit_supersedes() -> anyhow::
         commit!(branch, &operator, changes)?;
     }
 
-    let archive = FileArchive::open(directory.path().join(&name).join(FILE_NAME))?;
+    let archive = Chronicle::open(directory.path().join(&name).join(FILE_NAME))?;
     let stats = archive.stats();
     assert!(stats.rows_taken > 0, "rewritten nodes took rows: {stats:?}");
     if cfg!(debug_assertions) {
@@ -541,7 +541,7 @@ async fn it_selects_through_nodes_served_in_place() -> anyhow::Result<()> {
     commit_facts(&at, &peer, &name).await?;
 
     let (operator, branch) = open!(at, peer, name);
-    let archive = FileArchive::open(directory.path().join(&name).join(FILE_NAME))?;
+    let archive = Chronicle::open(directory.path().join(&name).join(FILE_NAME))?;
     // A second handle on the file shares the space's: its counts are the
     // space's.
     let before = archive.stats().served;
@@ -581,7 +581,7 @@ async fn it_keeps_a_node_of_another_layout_whole_unverified() -> anyhow::Result<
     let at = Directory::At(directory.path().to_string_lossy().into_owned());
     let (peer, name) = (unique_name("peer"), unique_name("repo"));
     commit_facts(&at, &peer, &name).await?;
-    let source = FileArchive::open(directory.path().join(&name).join(FILE_NAME))?;
+    let source = Chronicle::open(directory.path().join(&name).join(FILE_NAME))?;
 
     let mut legacy = None;
     for (catalog, hash) in source.hashes() {
@@ -626,7 +626,7 @@ async fn it_keeps_a_node_of_another_layout_whole_unverified() -> anyhow::Result<
     let node = PersistentNode::<Key, State<Datum>>::try_from(bytes.clone())?;
     assert_eq!(node.layout_version(), LEGACY_LAYOUT);
 
-    let target = FileArchive::open_with(
+    let target = Chronicle::open_with(
         directory.path().join("legacy.dialog"),
         Options {
             verify: false,

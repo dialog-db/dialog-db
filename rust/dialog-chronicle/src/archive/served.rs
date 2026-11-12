@@ -31,7 +31,7 @@ use rkyv::{
 use zerocopy::FromBytes as _;
 
 use super::index::{Place, Snapshot};
-use super::{DATUMS_CHECKED, FileArchive};
+use super::{Chronicle, DATUMS_CHECKED};
 use crate::rows::{DATUM, INDEX, NONE, Row, Rows, SLOTS};
 use crate::tokens::{ALIGN, TokenRead as _};
 
@@ -78,7 +78,7 @@ struct Link {
 
 /// A node the archive keeps as a frame, read through the file's mapping.
 pub(crate) struct FileNode {
-    archive: FileArchive,
+    archive: Chronicle,
     map: Arc<Mmap>,
     catalog: String,
     hash: Blake3Hash,
@@ -115,7 +115,7 @@ fn part(snapshot: &Snapshot, id: u32) -> Option<Part> {
 /// An entry or operation row as where its key parts and value are. A
 /// datum is checked as an archive once, the first time a node that holds
 /// it is served.
-fn entry(archive: &FileArchive, snapshot: &Snapshot, row: &Row) -> Option<Entry> {
+fn entry(archive: &Chronicle, snapshot: &Snapshot, row: &Row) -> Option<Entry> {
     let form = row[0] as u8;
     let slot = |at: usize| part(snapshot, row[at]);
     let (form, count, parts) = match form {
@@ -152,7 +152,7 @@ fn entry(archive: &FileArchive, snapshot: &Snapshot, row: &Row) -> Option<Entry>
     })
 }
 
-impl FileArchive {
+impl Chronicle {
     /// The node `hash` names in `catalog`, as the archive serves it to a
     /// tree: read in place. `None` when the archive keeps it whole, or not
     /// at all.
@@ -201,12 +201,7 @@ impl FileArchive {
 }
 
 /// Fills `node` with where each of its rows' parts is.
-fn build(
-    archive: &FileArchive,
-    snapshot: &Snapshot,
-    rows: &Rows,
-    node: &mut FileNode,
-) -> Option<()> {
+fn build(archive: &Chronicle, snapshot: &Snapshot, rows: &Rows, node: &mut FileNode) -> Option<()> {
     if rows.kind != INDEX {
         // A segment's every entry has a value, and `value` hands it out
         // with no way to fail: a frame whose row names none, which only a
@@ -365,7 +360,7 @@ unsafe impl NodeRows for FileNode {
 /// file is mapped, so both are answered at once; nothing here waits. The
 /// archive is this replica's store, so a read it cannot answer is absent
 /// here, and hydrating it from elsewhere is for whoever stands in front.
-impl<N> Provider<Read<N>> for FileArchive
+impl<N> Provider<Read<N>> for Chronicle
 where
     N: Node,
     <N::Value as rkyv::Archive>::Archived: for<'a> CheckBytes<
@@ -384,7 +379,7 @@ where
     }
 }
 
-impl FileArchive {
+impl Chronicle {
     /// A tree's node read: from its rows when the file keeps it as a
     /// frame, else decoded from its block.
     fn answer_read<N>(&self, read: &Read<N>) -> Result<Option<N>, DialogSearchTreeError>
@@ -414,14 +409,14 @@ impl FileArchive {
 
 /// Reads from the file are as cheap as a held node: there is nothing to
 /// make cheaper ahead of time.
-impl<N> Provider<Preload<N>> for FileArchive {
+impl<N> Provider<Preload<N>> for Chronicle {
     fn execute(&self, _: Preload<N>) -> Resume<'_, ()> {
         Resume::now(())
     }
 }
 
 /// A write appends the nodes' blocks, which the archive frames as rows.
-impl<N: Node> Provider<Write<N>> for FileArchive {
+impl<N: Node> Provider<Write<N>> for Chronicle {
     fn execute(&self, write: Write<N>) -> Resume<'_, Result<(), DialogSearchTreeError>> {
         let blocks = match write
             .nodes

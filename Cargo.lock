@@ -1282,35 +1282,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dialog-archive-file"
-version = "0.4.0-rc.7"
-dependencies = [
- "anyhow",
- "arc-swap",
- "async-trait",
- "crc32fast",
- "dialog-capability",
- "dialog-common",
- "dialog-corpus",
- "dialog-effects",
- "dialog-peer",
- "dialog-repository",
- "dialog-search-tree",
- "dialog-storage",
- "futures-util",
- "hashbrown 0.16.1",
- "libc",
- "memmap2",
- "papaya",
- "parking_lot",
- "rkyv",
- "tempfile",
- "tokio",
- "windows-sys 0.61.2",
- "zerocopy",
-]
-
-[[package]]
 name = "dialog-baseline"
 version = "0.4.0-rc.7"
 dependencies = [
@@ -1319,8 +1290,8 @@ dependencies = [
  "base58",
  "blake3",
  "criterion",
- "dialog-archive-file",
  "dialog-capability",
+ "dialog-chronicle",
  "dialog-common",
  "dialog-corpus",
  "dialog-credentials",
@@ -1371,6 +1342,35 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "wasm-bindgen-test",
+]
+
+[[package]]
+name = "dialog-chronicle"
+version = "0.4.0-rc.7"
+dependencies = [
+ "anyhow",
+ "arc-swap",
+ "async-trait",
+ "crc32fast",
+ "dialog-capability",
+ "dialog-common",
+ "dialog-corpus",
+ "dialog-effects",
+ "dialog-peer",
+ "dialog-repository",
+ "dialog-search-tree",
+ "dialog-storage",
+ "futures-util",
+ "hashbrown 0.16.1",
+ "libc",
+ "memmap2",
+ "papaya",
+ "parking_lot",
+ "rkyv",
+ "tempfile",
+ "tokio",
+ "windows-sys 0.61.2",
+ "zerocopy",
 ]
 
 [[package]]
@@ -1618,8 +1618,8 @@ version = "0.4.0-rc.7"
 dependencies = [
  "anyhow",
  "base58",
- "dialog-archive-file",
  "dialog-capability",
+ "dialog-chronicle",
  "dialog-common",
  "dialog-corpus",
  "dialog-effects",

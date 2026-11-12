@@ -1,4 +1,4 @@
-//! [`FileArchive`]: the archive effects over one file.
+//! [`Chronicle`]: the archive effects over one file.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{File, OpenOptions};
@@ -135,7 +135,7 @@ impl std::hash::Hasher for Passed {
     }
 }
 
-/// How a [`FileArchive`] writes its file.
+/// How a [`Chronicle`] writes its file.
 #[derive(Clone, Debug)]
 pub struct Options {
     /// Whether tree nodes are written as frames. Without, every block is
@@ -340,7 +340,7 @@ struct Inner {
     writer: Mutex<()>,
     synced: Mutex<Instant>,
     /// Whether a commit found a sync point due: made after the turn is let
-    /// go (see [`FileArchive::sync_now`]).
+    /// go (see [`Chronicle::sync_now`]).
     sync_due: std::sync::atomic::AtomicBool,
     /// This process's sync points, one at a time: the sync byte belongs to
     /// the process, not the thread.
@@ -374,7 +374,7 @@ struct Inner {
     stop_before_retire: std::sync::atomic::AtomicBool,
 }
 
-/// What a [`FileArchive`] holds, and what holding it costs.
+/// What a [`Chronicle`] holds, and what holding it costs.
 #[derive(Clone, Debug, Default)]
 pub struct Stats {
     /// The file's length.
@@ -452,7 +452,7 @@ pub struct Stats {
 /// and only after a **sync point** has made that safe: the file synced,
 /// the third, durable slot written and synced. A sync point follows an
 /// append every 64 appends, every 2,048 freed pages or every 2 seconds,
-/// and [`FileArchive::sync`] makes one. A power loss loses at most what
+/// and [`Chronicle::sync`] makes one. A power loss loses at most what
 /// came after the last: opening in a later boot checks what was written
 /// since the durable slot and goes back to the newest state that is whole.
 ///
@@ -468,11 +468,11 @@ pub struct Stats {
 /// read that does not find a block reads the slot again if the file grew
 /// ([`refresh`]).
 ///
-/// [`refresh`]: FileArchive::refresh
+/// [`refresh`]: Chronicle::refresh
 ///
 /// Clones share the file.
 #[derive(Clone)]
-pub struct FileArchive {
+pub struct Chronicle {
     inner: Arc<Inner>,
 }
 
@@ -682,7 +682,7 @@ fn in_use(file: &File) -> io::Result<Option<Slot>> {
 /// Tells `slot` (the next rolling slot, being written in the turn) what a
 /// durable slot newer than the one it knows made free: the index pages and
 /// extents still waiting in it that the durable slot frees. A sync point
-/// made without the turn (see [`FileArchive::sync_now`]) leaves this to the
+/// made without the turn (see [`Chronicle::sync_now`]) leaves this to the
 /// next writer in the turn when it could not take the turn itself. Whether
 /// `slot` changed.
 fn take_up_durable(file: &File, slot: &mut Slot) -> io::Result<bool> {
@@ -1122,7 +1122,7 @@ fn find_in(
     found
 }
 
-impl FileArchive {
+impl Chronicle {
     /// Opens the archive at `path`, creating it when there is no file there.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, ArchiveError> {
         Self::open_with(path, Options::default())
@@ -1331,7 +1331,7 @@ impl FileArchive {
     }
 
     /// Makes everything appended so far durable: a sync point (see
-    /// [`FileArchive`]).
+    /// [`Chronicle`]).
     pub fn sync(&self) -> Result<(), ArchiveError> {
         self.sync_now(true)
             .map_err(|error| storage_error(&self.inner.path, error))
@@ -2893,7 +2893,7 @@ fn write_index(
 /// this process holds, and publishes it; an extent claimed again is
 /// emptied.
 fn snapshot_after_claim(
-    archive: &FileArchive,
+    archive: &Chronicle,
     file: &File,
     slot: Slot,
     reused: bool,
@@ -2915,7 +2915,7 @@ fn snapshot_after_claim(
 /// into the file before it goes, waiting for the turn: closing a space
 /// waits for it. What it cannot fold, the next writer to take the turn
 /// does, as the extent's owner is gone.
-impl Drop for FileArchive {
+impl Drop for Chronicle {
     fn drop(&mut self) {
         if Arc::strong_count(&self.inner) != 1 {
             return;
@@ -2945,7 +2945,7 @@ impl Drop for FileArchive {
     }
 }
 
-impl FileArchive {
+impl Chronicle {
     /// Cuts the free extents that end the file off it, in the writer's
     /// turn, once a sync point has made them free: what another process
     /// could still read is past no one's reach, as no other process has
@@ -3038,7 +3038,7 @@ struct Staging<'a> {
 
 // The file answers from its mapping and appends in place: nothing to wait
 // on, so every answer is at hand.
-impl Provider<Get> for FileArchive {
+impl Provider<Get> for Chronicle {
     fn execute(
         &self,
         effect: Capability<Get>,
@@ -3054,7 +3054,7 @@ impl Provider<Get> for FileArchive {
     }
 }
 
-impl Provider<Put> for FileArchive {
+impl Provider<Put> for Chronicle {
     fn execute(&self, effect: Capability<Put>) -> Resume<'_, Result<(), ArchiveError>> {
         let block = Buffer::from(effect.content().to_vec());
         #[cfg(all(feature = "trace", unix))]
@@ -3067,7 +3067,7 @@ impl Provider<Put> for FileArchive {
     }
 }
 
-impl Provider<Import> for FileArchive {
+impl Provider<Import> for Chronicle {
     fn execute(&self, effect: Capability<Import>) -> Resume<'_, Result<(), ArchiveError>> {
         #[cfg(all(feature = "trace", unix))]
         for block in effect.blocks() {
@@ -3096,7 +3096,7 @@ mod tests {
     fn it_appends_without_waiting_while_another_process_holds_the_turn() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("archive");
-        let archive = FileArchive::open(&path)?;
+        let archive = Chronicle::open(&path)?;
         let first = block("first");
         archive.append("index", std::slice::from_ref(&first))?;
         // Holding the turn, the writer kept an extent ready, and left one
@@ -3107,7 +3107,7 @@ mod tests {
         // Another handle on the file with its own snapshot and its own
         // read of the extents, as another process has (the concurrency
         // tests read from one).
-        let other = FileArchive::open_unshared(&path, Options::default())?;
+        let other = Chronicle::open_unshared(&path, Options::default())?;
 
         let mut holder = crate::locks::tests::hold_turn(&path)?;
         let loose = [block("loose one"), block("loose two")];
@@ -3169,7 +3169,7 @@ mod tests {
         // Its close would take this process's locks for its own.
         other.inner.dies.store(true, Ordering::Relaxed);
         drop((archive, other));
-        let reopened = FileArchive::open(&path)?;
+        let reopened = Chronicle::open(&path)?;
         for block in loose.iter().chain([&first, &last]) {
             assert_eq!(
                 reopened.get("index", block.blake3_hash())?.as_deref(),
@@ -3190,7 +3190,7 @@ mod tests {
         let path = directory.path().join("archive");
         let blocks = [block("one"), block("two")];
         let (with_spare, left) = {
-            let archive = FileArchive::open(&path)?;
+            let archive = Chronicle::open(&path)?;
             let left = archive.current().slot.extents.clone();
             assert_eq!(left.len(), 1, "one left as it opened");
             archive.append("index", &blocks)?;
@@ -3203,12 +3203,12 @@ mod tests {
             "the spare is cut at the last close ({closed} against {with_spare})"
         );
         {
-            let reopened = FileArchive::open_with(&path, recovering())?;
+            let reopened = Chronicle::open_with(&path, recovering())?;
             let slot = reopened.current().slot.clone();
             assert!(slot.extents.is_empty());
             assert_eq!(slot.extents_free, vec![left], "the one left is free");
         }
-        let reopened = FileArchive::open(&path)?;
+        let reopened = Chronicle::open(&path)?;
         assert_eq!(
             reopened.current().slot.extents,
             vec![left],
@@ -3235,7 +3235,7 @@ mod tests {
     fn it_reads_and_folds_in_an_extent_its_writer_left() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("archive");
-        let archive = FileArchive::open(&path)?;
+        let archive = Chronicle::open(&path)?;
         archive.append("index", &[block("first")])?;
         let mut holder = crate::locks::tests::hold_turn(&path)?;
         let loose = block("left in an extent");
@@ -3246,7 +3246,7 @@ mod tests {
         drop(holder.stdin.take());
         holder.wait()?;
 
-        let reopened = FileArchive::open(&path)?;
+        let reopened = Chronicle::open(&path)?;
         let snapshot = reopened.current();
         let left: Vec<u64> = snapshot
             .slot
@@ -3351,7 +3351,7 @@ mod tests {
     #[tokio::test]
     async fn it_returns_none_for_missing_content() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
-        let archive = FileArchive::open(directory.path().join("archive"))?;
+        let archive = Chronicle::open(directory.path().join("archive"))?;
         let result = subject()
             .reader()
             .archive()
@@ -3366,7 +3366,7 @@ mod tests {
     #[tokio::test]
     async fn it_stores_and_retrieves_content() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
-        let archive = FileArchive::open(directory.path().join("archive"))?;
+        let archive = Chronicle::open(directory.path().join("archive"))?;
         let content = block("hello world");
         subject()
             .writer()
@@ -3389,7 +3389,7 @@ mod tests {
     #[tokio::test]
     async fn it_keeps_catalogs_apart() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
-        let archive = FileArchive::open(directory.path().join("archive"))?;
+        let archive = Chronicle::open(directory.path().join("archive"))?;
         let content = block("in one catalog");
         subject()
             .writer()
@@ -3412,7 +3412,7 @@ mod tests {
     #[tokio::test]
     async fn it_imports_a_batch() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
-        let archive = FileArchive::open(directory.path().join("archive"))?;
+        let archive = Chronicle::open(directory.path().join("archive"))?;
         let blocks: Vec<Buffer> = (0..32).map(|n| block(&format!("block {n}"))).collect();
         subject()
             .writer()
@@ -3433,7 +3433,7 @@ mod tests {
     async fn it_writes_a_block_it_holds_only_once() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("archive");
-        let archive = FileArchive::open(&path)?;
+        let archive = Chronicle::open(&path)?;
         let content = block("written twice");
         archive.append("index", &[content.clone(), content.clone()])?;
         let size = std::fs::metadata(&path)?.len();
@@ -3449,12 +3449,12 @@ mod tests {
         let path = directory.path().join("archive");
         let blocks: Vec<Buffer> = (0..100).map(|n| block(&format!("block {n}"))).collect();
         {
-            let archive = FileArchive::open(&path)?;
+            let archive = Chronicle::open(&path)?;
             for chunk in blocks.chunks(7) {
                 archive.append("index", chunk)?;
             }
         }
-        let archive = FileArchive::open(&path)?;
+        let archive = Chronicle::open(&path)?;
         assert_eq!(archive.len(), 100);
         for content in &blocks {
             let read = archive.get("index", content.blake3_hash())?;
@@ -3470,7 +3470,7 @@ mod tests {
         let kept: Vec<Buffer> = (0..10).map(|n| block(&format!("kept {n}"))).collect();
         let torn = block("torn");
         let whole = {
-            let archive = FileArchive::open_with(&path, recovering())?;
+            let archive = Chronicle::open_with(&path, recovering())?;
             archive.append("index", &kept)?;
             let whole = std::fs::metadata(&path)?.len();
             archive.append("index", std::slice::from_ref(&torn))?;
@@ -3483,7 +3483,7 @@ mod tests {
         file.set_len(whole + HEADER + 2)?;
         drop(file);
 
-        let archive = FileArchive::open_with(&path, recovering())?;
+        let archive = Chronicle::open_with(&path, recovering())?;
         assert_eq!(archive.len(), 10);
         assert!(archive.get("index", torn.blake3_hash())?.is_none());
         assert_eq!(std::fs::metadata(&path)?.len(), whole);
@@ -3491,7 +3491,7 @@ mod tests {
         // The next append follows the whole records, and reads back.
         archive.append("index", std::slice::from_ref(&torn))?;
         drop(archive);
-        let reopened = FileArchive::open_with(&path, recovering())?;
+        let reopened = Chronicle::open_with(&path, recovering())?;
         assert_eq!(reopened.len(), 11);
         assert_eq!(
             reopened.get("index", torn.blake3_hash())?.as_deref(),
@@ -3509,7 +3509,7 @@ mod tests {
         let first = block("first");
         let second = block("second");
         let (boundary, sequence) = {
-            let archive = FileArchive::open_with(&path, recovering())?;
+            let archive = Chronicle::open_with(&path, recovering())?;
             archive.append("index", std::slice::from_ref(&first))?;
             let boundary = std::fs::metadata(&path)?.len();
             archive.append("index", std::slice::from_ref(&second))?;
@@ -3524,7 +3524,7 @@ mod tests {
         bytes[newest + 20] ^= 0xFF;
         std::fs::write(&path, &bytes)?;
 
-        let archive = FileArchive::open_with(&path, recovering())?;
+        let archive = Chronicle::open_with(&path, recovering())?;
         assert_eq!(archive.len(), 1);
         assert!(archive.get("index", first.blake3_hash())?.is_some());
         assert!(archive.get("index", second.blake3_hash())?.is_none());
@@ -3542,7 +3542,7 @@ mod tests {
         use std::sync::mpsc::channel;
 
         let directory = tempfile::tempdir()?;
-        let archive = FileArchive::open(directory.path().join("archive"))?;
+        let archive = Chronicle::open(directory.path().join("archive"))?;
         let manifest = segment_manifest();
         let (earlier, later) = (
             entity_segment("earlier", &manifest)?,
@@ -3636,7 +3636,7 @@ mod tests {
 
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("archive");
-        let archive = FileArchive::open(&path)?;
+        let archive = Chronicle::open(&path)?;
         archive.append("index", &base)?;
         let prepared = archive
             .prepare(archive.current(), "index", &first)?
@@ -3645,7 +3645,7 @@ mod tests {
         archive.flush(prepared, "index", &first)?;
 
         // The same appends one after another.
-        let control = FileArchive::open(directory.path().join("control"))?;
+        let control = Chronicle::open(directory.path().join("control"))?;
         for batch in [&base[..], &second[..], &first[..]] {
             control.append("index", batch)?;
         }
@@ -3672,7 +3672,7 @@ mod tests {
             }
         }
         drop(archive);
-        let reopened = FileArchive::open(&path)?;
+        let reopened = Chronicle::open(&path)?;
         for content in &every {
             assert_eq!(
                 reopened.get("index", content.blake3_hash())?.as_deref(),
@@ -3698,11 +3698,11 @@ mod tests {
 
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("archive");
-        let archive = FileArchive::open(&path)?;
+        let archive = Chronicle::open(&path)?;
         archive.append("index", &[entity_segment("base", &manifest)?])?;
         // Another writer with an index of its own, as another process has,
         // that keeps every block whole.
-        let other = FileArchive::open_unshared(
+        let other = Chronicle::open_unshared(
             &path,
             Options {
                 frames: false,
@@ -3735,7 +3735,7 @@ mod tests {
         // Its close would take this process's locks for its own.
         other.inner.dies.store(true, Ordering::Relaxed);
         drop((archive, other));
-        let reopened = FileArchive::open(&path)?;
+        let reopened = Chronicle::open(&path)?;
         for content in &first {
             assert_eq!(
                 reopened.get("index", content.blake3_hash())?.as_deref(),
@@ -3747,7 +3747,7 @@ mod tests {
 
     /// Appends `appends` batches of 40 whole blocks to `archive`, named
     /// from `from` on.
-    fn appended(archive: &FileArchive, from: usize, appends: usize) -> anyhow::Result<Vec<Buffer>> {
+    fn appended(archive: &Chronicle, from: usize, appends: usize) -> anyhow::Result<Vec<Buffer>> {
         let blocks: Vec<Buffer> = (from..from + appends * 40)
             .map(|n| block(&format!("paged {n}")))
             .collect();
@@ -3758,7 +3758,7 @@ mod tests {
     }
 
     /// The pages in `archive`'s pages records.
-    fn pages_in_file(archive: &FileArchive) -> usize {
+    fn pages_in_file(archive: &Chronicle) -> usize {
         let snapshot = archive.current();
         let bytes = snapshot.bytes();
         let (mut at, mut pages) = (DATA as usize, 0);
@@ -3779,7 +3779,7 @@ mod tests {
     #[test]
     fn it_writes_index_pages_over_once_a_sync_point_frees_them() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
-        let archive = FileArchive::open(directory.path().join("archive"))?;
+        let archive = Chronicle::open(directory.path().join("archive"))?;
         let blocks = appended(&archive, 0, 1500)?;
         let reused = archive.inner.timings.reused.load(Ordering::Relaxed);
         assert!(reused > 0, "pages were written over");
@@ -3813,7 +3813,7 @@ mod tests {
     #[test]
     fn it_finds_a_page_written_over_stale_and_reads_on() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
-        let archive = FileArchive::open(directory.path().join("archive"))?;
+        let archive = Chronicle::open(directory.path().join("archive"))?;
         let first = appended(&archive, 0, 1500)?;
         let old = archive.current();
         let later = appended(&archive, 60_000, 1500)?;
@@ -3848,7 +3848,7 @@ mod tests {
         use std::sync::atomic::AtomicBool;
 
         let directory = tempfile::tempdir()?;
-        let archive = FileArchive::open(directory.path().join("archive"))?;
+        let archive = Chronicle::open(directory.path().join("archive"))?;
         let held = Arc::new(appended(&archive, 0, 100)?);
         let done = Arc::new(AtomicBool::new(false));
         let readers: Vec<_> = (0..3)
@@ -3885,7 +3885,7 @@ mod tests {
     #[test]
     fn it_makes_a_sync_point() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
-        let archive = FileArchive::open(directory.path().join("archive"))?;
+        let archive = Chronicle::open(directory.path().join("archive"))?;
         appended(&archive, 0, 200)?;
         archive.sync()?;
         let current = archive.current();
@@ -3916,7 +3916,7 @@ mod tests {
     fn it_goes_back_to_what_is_whole_after_a_power_loss() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("archive");
-        let archive = FileArchive::open_with(&path, recovering())?;
+        let archive = Chronicle::open_with(&path, recovering())?;
         let synced = appended(&archive, 0, 20)?;
         archive.sync()?;
         let durable = Slot::read_durable(&archive.inner.file)?.expect("a durable slot");
@@ -3936,7 +3936,7 @@ mod tests {
         drop(file);
         as_if_rebooted(&path)?;
 
-        let reopened = FileArchive::open_with(&path, recovering())?;
+        let reopened = Chronicle::open_with(&path, recovering())?;
         let slot = reopened.current().slot.clone();
         assert!(slot.sequence >= durable.sequence && slot.end < end);
         assert_eq!(
@@ -3973,7 +3973,7 @@ mod tests {
     fn it_goes_back_to_the_durable_slot_when_a_page_did_not_reach_the_disk() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("archive");
-        let archive = FileArchive::open_with(&path, recovering())?;
+        let archive = Chronicle::open_with(&path, recovering())?;
         let synced = appended(&archive, 0, 1500)?;
         archive.sync()?;
         let durable = Slot::read_durable(&archive.inner.file)?.expect("a durable slot");
@@ -3997,7 +3997,7 @@ mod tests {
         drop(file);
         as_if_rebooted(&path)?;
 
-        let reopened = FileArchive::open_with(&path, recovering())?;
+        let reopened = Chronicle::open_with(&path, recovering())?;
         assert_eq!(reopened.current().slot.sequence, durable.sequence);
         assert_eq!(reopened.current().slot.end, durable.end);
         for block in &synced {
@@ -4018,7 +4018,7 @@ mod tests {
         use std::sync::atomic::AtomicBool;
 
         let directory = tempfile::tempdir()?;
-        let archive = FileArchive::open(directory.path().join("archive"))?;
+        let archive = Chronicle::open(directory.path().join("archive"))?;
         let manifest = segment_manifest();
         let done = Arc::new(AtomicBool::new(false));
         let readers: Vec<_> = (0..3)
@@ -4070,7 +4070,7 @@ mod tests {
     #[test]
     fn it_answers_a_miss_while_an_append_holds_the_turn() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
-        let archive = FileArchive::open(directory.path().join("archive"))?;
+        let archive = Chronicle::open(directory.path().join("archive"))?;
         archive.append("index", &[block("held")])?;
         let turn = archive.inner.writer.lock();
         let (answer, answered) = std::sync::mpsc::channel();
@@ -4097,7 +4097,7 @@ mod tests {
         let path = directory.path().join("archive");
         std::fs::write(&path, b"something else entirely")?;
         assert!(matches!(
-            FileArchive::open(&path),
+            Chronicle::open(&path),
             Err(ArchiveError::Storage(_))
         ));
         Ok(())
@@ -4123,7 +4123,7 @@ mod breakdown {
         let Ok(path) = std::env::var("DIALOG_ARCHIVE_INDEX") else {
             return Ok(());
         };
-        let archive = FileArchive::open(&path)?;
+        let archive = Chronicle::open(&path)?;
         let snapshot = archive.current();
         let bytes = snapshot.bytes();
         let started = Instant::now();
@@ -4191,7 +4191,7 @@ mod breakdown {
         ) else {
             return Ok(());
         };
-        let archive = FileArchive::open(&path)?;
+        let archive = Chronicle::open(&path)?;
         let snapshot = archive.current();
         let mut start = None;
         for (catalog, hash) in archive.hashes() {
@@ -4289,7 +4289,7 @@ mod breakdown {
         let Ok(path) = std::env::var("DIALOG_ARCHIVE_INDEX") else {
             return Ok(());
         };
-        let archive = FileArchive::open(&path)?;
+        let archive = Chronicle::open(&path)?;
         let snapshot = archive.current();
         let file = &archive.inner.file;
         let mib = |bytes: u64| format!("{:.2} MiB", bytes as f64 / 1048576.0);

@@ -29,7 +29,7 @@ use std::time::Duration;
 use dialog_common::{Blake3Hash, Buffer, ConditionalSend};
 use dialog_effects::memory::{MemoryError, Version};
 
-use super::{FileArchive, Options, extent};
+use super::{Chronicle, Options, extent};
 use crate::locks;
 
 /// The role a child run of this binary plays, its arguments joined by
@@ -277,7 +277,7 @@ fn within<T: ConditionalSend + 'static>(
 
 /// Every block named in `names` reads back from `archive` as itself, and
 /// the index files none of them twice.
-fn all_read_back(archive: &FileArchive, names: &[String]) -> anyhow::Result<()> {
+fn all_read_back(archive: &Chronicle, names: &[String]) -> anyhow::Result<()> {
     let mut filed: HashMap<Blake3Hash, usize> = HashMap::new();
     for (_, hash, _) in archive.current().blocks()? {
         *filed.entry(hash).or_default() += 1;
@@ -297,7 +297,7 @@ fn all_read_back(archive: &FileArchive, names: &[String]) -> anyhow::Result<()> 
 }
 
 /// The extents the newest slot lists that hold blocks.
-fn holding(archive: &FileArchive) -> Vec<u64> {
+fn holding(archive: &Chronicle) -> Vec<u64> {
     let snapshot = archive.current();
     snapshot
         .slot
@@ -320,7 +320,7 @@ fn count_of(value: &[u8]) -> anyhow::Result<u64> {
 
 /// Counts the cell up `times`, each a compare-and-swap retried until it
 /// lands.
-fn count_up(archive: &FileArchive, cell: &str, who: &str, times: usize) -> anyhow::Result<()> {
+fn count_up(archive: &Chronicle, cell: &str, who: &str, times: usize) -> anyhow::Result<()> {
     for _ in 0..times {
         loop {
             let current = archive.resolve_cell("local", cell)?;
@@ -388,7 +388,7 @@ fn child() -> anyhow::Result<()> {
         }
         // append <path> <prefix> <count> <extent> <close|die>
         "append" => {
-            let archive = FileArchive::open_with(args[1], small(args[4].parse()?))?;
+            let archive = Chronicle::open_with(args[1], small(args[4].parse()?))?;
             say(READY);
             go()?;
             for name in names(args[2], args[3].parse()?) {
@@ -403,7 +403,7 @@ fn child() -> anyhow::Result<()> {
         }
         // open <path>: holds the file open until the input closes.
         "open" => {
-            let archive = FileArchive::open(args[1])?;
+            let archive = Chronicle::open(args[1])?;
             say(READY);
             let mut rest = Vec::new();
             std::io::stdin().read_to_end(&mut rest)?;
@@ -412,7 +412,7 @@ fn child() -> anyhow::Result<()> {
         // commits <path> <cell> <times>: each time 20 blocks of 4 KiB, then
         // the cell; says how long publishing the cell took, in microseconds.
         "commits" => {
-            let archive = FileArchive::open(args[1])?;
+            let archive = Chronicle::open(args[1])?;
             say(READY);
             go()?;
             let mut took = Vec::new();
@@ -449,7 +449,7 @@ fn child() -> anyhow::Result<()> {
         }
         // count <path> <cell> <times>
         "count" => {
-            let archive = FileArchive::open(args[1])?;
+            let archive = Chronicle::open(args[1])?;
             say(READY);
             go()?;
             let who = format!("process {}", std::process::id());
@@ -458,7 +458,7 @@ fn child() -> anyhow::Result<()> {
         }
         // create <path> <cell> <value>
         "create" => {
-            let archive = FileArchive::open(args[1])?;
+            let archive = Chronicle::open(args[1])?;
             say(READY);
             go()?;
             race(archive.publish_cell("local", args[2], args[3].as_bytes(), None))?;
@@ -466,7 +466,7 @@ fn child() -> anyhow::Result<()> {
         }
         // swap <path> <cell> <expected> <value>
         "swap" => {
-            let archive = FileArchive::open(args[1])?;
+            let archive = Chronicle::open(args[1])?;
             say(READY);
             go()?;
             let when = version(args[3].as_bytes());
@@ -475,7 +475,7 @@ fn child() -> anyhow::Result<()> {
         }
         // retract <path> <cell> <expected>
         "retract" => {
-            let archive = FileArchive::open(args[1])?;
+            let archive = Chronicle::open(args[1])?;
             say(READY);
             go()?;
             let when = version(args[3].as_bytes());
@@ -500,7 +500,7 @@ fn child() -> anyhow::Result<()> {
         // read <path>: then, for each line of names separated by the
         // separator, reads them all back and says so.
         "read" => {
-            let archive = FileArchive::open(args[1])?;
+            let archive = Chronicle::open(args[1])?;
             say(READY);
             for line in std::io::stdin().lines() {
                 let names: Vec<String> = line?.split(SEPARATOR).map(String::from).collect();
@@ -510,7 +510,7 @@ fn child() -> anyhow::Result<()> {
         }
         // write <path> <cell> <values...>: publishes each over the last.
         "write" => {
-            let archive = FileArchive::open(args[1])?;
+            let archive = Chronicle::open(args[1])?;
             say(READY);
             go()?;
             for value in &args[3..] {
@@ -531,7 +531,7 @@ fn child() -> anyhow::Result<()> {
 #[test]
 fn a_lone_writer_writes_nothing_into_extents() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
-    let archive = FileArchive::open(archive_in(&directory))?;
+    let archive = Chronicle::open(archive_in(&directory))?;
     let names = names("alone", 50);
     for name in &names {
         archive.append("index", &[block(name)])?;
@@ -556,7 +556,7 @@ fn a_lone_writer_writes_nothing_into_extents() -> anyhow::Result<()> {
 fn processes_append_to_one_file_at_once() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let path = archive_in(&directory);
-    FileArchive::open(&path)?.append("index", &[block("first")])?;
+    Chronicle::open(&path)?.append("index", &[block("first")])?;
     let mut writers = (0..4)
         .map(|writer| appender(&path, &format!("writer {writer}"), 40, 4096, false))
         .collect::<anyhow::Result<Vec<_>>>()?;
@@ -569,10 +569,10 @@ fn processes_append_to_one_file_at_once() -> anyhow::Result<()> {
         .flat_map(|writer| names(&format!("writer {writer}"), 40))
         .collect();
     all.push("first".into());
-    let archive = FileArchive::open(&path)?;
+    let archive = Chronicle::open(&path)?;
     all_read_back(&archive, &all)?;
     drop(archive);
-    all_read_back(&FileArchive::open(&path)?, &all)
+    all_read_back(&Chronicle::open(&path)?, &all)
 }
 
 /// Threads of one process appending at once all get through: the ones
@@ -582,7 +582,7 @@ fn processes_append_to_one_file_at_once() -> anyhow::Result<()> {
 fn threads_append_to_one_file_at_once() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let path = archive_in(&directory);
-    let archive = FileArchive::open_with(&path, small(4096))?;
+    let archive = Chronicle::open_with(&path, small(4096))?;
     archive.append("index", &[block("first")])?;
     let threads: Vec<_> = (0..8)
         .map(|thread| {
@@ -603,7 +603,7 @@ fn threads_append_to_one_file_at_once() -> anyhow::Result<()> {
         .collect();
     all_read_back(&archive, &all)?;
     drop(archive);
-    all_read_back(&FileArchive::open(&path)?, &all)
+    all_read_back(&Chronicle::open(&path)?, &all)
 }
 
 /// A file reached by two names in one process (a hard link here) is one
@@ -614,10 +614,10 @@ fn threads_append_to_one_file_at_once() -> anyhow::Result<()> {
 fn a_file_reached_by_two_names_is_one_handle() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let path = archive_in(&directory);
-    let archive = FileArchive::open(&path)?;
+    let archive = Chronicle::open(&path)?;
     let other = path.with_extension("other");
     std::fs::hard_link(&path, &other)?;
-    let again = FileArchive::open(&other)?;
+    let again = Chronicle::open(&other)?;
     assert!(std::sync::Arc::ptr_eq(&archive.inner, &again.inner));
     drop(again);
     // Still open here: another process does not find itself the last.
@@ -638,7 +638,7 @@ fn a_file_reached_by_two_names_is_one_handle() -> anyhow::Result<()> {
 fn a_process_that_never_held_the_turn_writes_without_waiting() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let path = archive_in(&directory);
-    let archive = FileArchive::open(&path)?;
+    let archive = Chronicle::open(&path)?;
     archive.append("index", &[block("first")])?;
     let holder = hold(&path, locks::TURN, true)?;
     let mut writer = appender(&path, "fresh", 5, 1 << 20, false)?;
@@ -664,7 +664,7 @@ fn a_process_that_never_held_the_turn_writes_without_waiting() -> anyhow::Result
 fn processes_arriving_together_while_the_turn_is_held_do_not_wait() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let path = archive_in(&directory);
-    let archive = FileArchive::open(&path)?;
+    let archive = Chronicle::open(&path)?;
     archive.append("index", &[block("first")])?;
     let path_text = path.to_string_lossy().into_owned();
     let open = (0..3)
@@ -699,10 +699,10 @@ fn processes_arriving_together_while_the_turn_is_held_do_not_wait() -> anyhow::R
 fn extents_left_for_others_do_not_pile_up() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let path = archive_in(&directory);
-    let archive = FileArchive::open(&path)?;
+    let archive = Chronicle::open(&path)?;
     archive.append("index", &[block("first")])?;
     let path_text = path.to_string_lossy().into_owned();
-    let empty = |archive: &FileArchive| -> anyhow::Result<usize> {
+    let empty = |archive: &Chronicle| -> anyhow::Result<usize> {
         archive.refresh()?;
         let snapshot = archive.current();
         Ok(snapshot
@@ -734,7 +734,7 @@ fn extents_left_for_others_do_not_pile_up() -> anyhow::Result<()> {
 fn another_process_reads_blocks_still_in_an_extent() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let path = archive_in(&directory);
-    let archive = FileArchive::open(&path)?;
+    let archive = Chronicle::open(&path)?;
     archive.append("index", &[block("first")])?;
     let holder = hold(&path, locks::TURN, true)?;
     let loose = names("loose", 5);
@@ -766,7 +766,7 @@ fn another_process_reads_blocks_still_in_an_extent() -> anyhow::Result<()> {
 fn a_block_only_another_process_holds_loose_is_written_again() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let path = archive_in(&directory);
-    let archive = FileArchive::open(&path)?;
+    let archive = Chronicle::open(&path)?;
     archive.append("index", &[block("first")])?;
     let holder = hold(&path, locks::TURN, true)?;
     let mut other = appender(&path, "shared", 1, 1 << 20, false)?;
@@ -802,7 +802,7 @@ fn a_block_only_another_process_holds_loose_is_written_again() -> anyhow::Result
 fn a_sync_point_due_while_another_holds_the_turn_does_not_wait() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let path = archive_in(&directory);
-    let archive = FileArchive::open(&path)?;
+    let archive = Chronicle::open(&path)?;
     archive.append("index", &[block("first")])?;
     let holder = hold(&path, locks::TURN, true)?;
     *archive.inner.synced.lock() = std::time::Instant::now() - std::time::Duration::from_secs(60);
@@ -836,7 +836,7 @@ fn a_sync_point_due_while_another_holds_the_turn_does_not_wait() -> anyhow::Resu
 fn a_dead_writers_extent_is_folded_in_by_the_next() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let path = archive_in(&directory);
-    let archive = FileArchive::open(&path)?;
+    let archive = Chronicle::open(&path)?;
     archive.append("index", &[block("first")])?;
     let holder = hold(&path, locks::TURN, true)?;
     let mut dying = appender(&path, "dying", 5, 1 << 20, true)?;
@@ -860,7 +860,7 @@ fn a_dead_writers_extent_is_folded_in_by_the_next() -> anyhow::Result<()> {
     }
     all_read_back(&archive, &dead)?;
     drop(archive);
-    all_read_back(&FileArchive::open(&path)?, &dead)
+    all_read_back(&Chronicle::open(&path)?, &dead)
 }
 
 /// A process that takes a dead writer's extent for its own writes still
@@ -874,7 +874,7 @@ fn a_dead_writers_extent_taken_over_keeps_its_blocks() -> anyhow::Result<()> {
     // its turn.
     let mut setup = appender(&path, "setup", 1, 1 << 20, false)?;
     // This process is open throughout, so no close is the last.
-    let archive = FileArchive::open(&path)?;
+    let archive = Chronicle::open(&path)?;
     setup.go()?;
     setup.expect(DONE)?;
     setup.finish()?;
@@ -916,7 +916,7 @@ fn a_dead_writers_extent_taken_over_keeps_its_blocks() -> anyhow::Result<()> {
 fn an_extent_retired_under_a_stale_snapshot_is_not_taken() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let path = archive_in(&directory);
-    let archive = FileArchive::open(&path)?;
+    let archive = Chronicle::open(&path)?;
     // Another process leaves an extent to take; a third takes it with the
     // turn held, and dies with blocks in it.
     let mut setup = appender(&path, "setup", 1, 1 << 20, false)?;
@@ -966,7 +966,7 @@ fn an_extent_retired_under_a_stale_snapshot_is_not_taken() -> anyhow::Result<()>
 fn a_crash_between_folding_and_retiring_is_finished_by_the_next() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let path = archive_in(&directory);
-    let archive = FileArchive::open(&path)?;
+    let archive = Chronicle::open(&path)?;
     archive.append("index", &[block("first")])?;
     let holder = hold(&path, locks::TURN, true)?;
     let loose = names("loose", 5);
@@ -987,14 +987,14 @@ fn a_crash_between_folding_and_retiring_is_finished_by_the_next() -> anyhow::Res
     archive.inner.dies.store(true, Ordering::Relaxed);
     drop(archive);
 
-    let archive = FileArchive::open(&path)?;
+    let archive = Chronicle::open(&path)?;
     assert_eq!(holding(&archive), listed, "the extent is still listed");
     all_read_back(&archive, &loose)?;
     archive.append("index", &[block("after")])?;
     assert!(holding(&archive).is_empty(), "retired by the next");
     all_read_back(&archive, &loose)?;
     drop(archive);
-    all_read_back(&FileArchive::open(&path)?, &loose)
+    all_read_back(&Chronicle::open(&path)?, &loose)
 }
 
 /// An extent integrated is claimed again only after a sync point, and a
@@ -1006,7 +1006,7 @@ fn an_extent_is_reused_only_after_a_sync_point_and_stale_readers_stay_right() ->
 {
     let directory = tempfile::tempdir()?;
     let path = archive_in(&directory);
-    let archive = FileArchive::open(&path)?;
+    let archive = Chronicle::open(&path)?;
     archive.append("index", &[block("first")])?;
     let mut reader = Process::ready(&["read", &path.to_string_lossy()])?;
 
@@ -1064,7 +1064,7 @@ fn an_extent_is_reused_only_after_a_sync_point_and_stale_readers_stay_right() ->
 fn a_torn_frame_in_an_extent_ends_what_is_read_of_it() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let path = archive_in(&directory);
-    let archive = FileArchive::open(&path)?;
+    let archive = Chronicle::open(&path)?;
     archive.append("index", &[block("first")])?;
     let holder = hold(&path, locks::TURN, true)?;
     let kept = names("kept", 3);
@@ -1093,7 +1093,7 @@ fn a_torn_frame_in_an_extent_ends_what_is_read_of_it() -> anyhow::Result<()> {
     crate::file::read_at(&file, last + 8, &mut arrived)?;
     crate::file::write_at(&file, last + 8, &[0xEE; 4])?;
 
-    let archive = FileArchive::open(&path)?;
+    let archive = Chronicle::open(&path)?;
     all_read_back(&archive, &kept)?;
     assert_eq!(archive.get("index", block("torn").blake3_hash())?, None);
     // They arrive: the frame is read now.
@@ -1104,7 +1104,7 @@ fn a_torn_frame_in_an_extent_ends_what_is_read_of_it() -> anyhow::Result<()> {
     drop(file);
     archive.inner.dies.store(true, Ordering::Relaxed);
     drop(archive);
-    let archive = FileArchive::open(&path)?;
+    let archive = Chronicle::open(&path)?;
     all_read_back(&archive, &kept)?;
     assert_eq!(archive.get("index", block("torn").blake3_hash())?, None);
     archive.append("index", &[block("next")])?;
@@ -1120,7 +1120,7 @@ fn a_torn_frame_in_an_extent_ends_what_is_read_of_it() -> anyhow::Result<()> {
 fn a_new_catalog_waits_for_the_turn() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let path = archive_in(&directory);
-    let archive = FileArchive::open(&path)?;
+    let archive = Chronicle::open(&path)?;
     archive.append("index", &[block("first")])?;
     let holder = hold(&path, locks::TURN, true)?;
     let (done, waiting) = within(A_WHILE, {
@@ -1145,7 +1145,7 @@ fn a_new_catalog_waits_for_the_turn() -> anyhow::Result<()> {
 fn a_full_extent_waits_for_the_turn_to_claim_another() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let path = archive_in(&directory);
-    let archive = FileArchive::open_with(&path, small(512))?;
+    let archive = Chronicle::open_with(&path, small(512))?;
     archive.append("index", &[block("first")])?;
     let holder = hold(&path, locks::TURN, true)?;
     let many = names(&"x".repeat(100), 12);
@@ -1175,7 +1175,7 @@ fn only_the_last_process_to_close_cuts_the_file() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let path = archive_in(&directory);
     let present = {
-        let archive = FileArchive::open(&path)?;
+        let archive = Chronicle::open(&path)?;
         archive.append("index", &[block("first")])?;
         let present = hold(&path, locks::PRESENT, false)?;
         let open = std::fs::metadata(&path)?.len();
@@ -1189,12 +1189,12 @@ fn only_the_last_process_to_close_cuts_the_file() -> anyhow::Result<()> {
     };
     present.finish()?;
     let before = std::fs::metadata(&path)?.len();
-    drop(FileArchive::open(&path)?);
+    drop(Chronicle::open(&path)?);
     assert!(
         std::fs::metadata(&path)?.len() < before,
         "the last close cuts it"
     );
-    let reopened = FileArchive::open_with(
+    let reopened = Chronicle::open_with(
         &path,
         Options {
             leave_extent: false,
@@ -1214,7 +1214,7 @@ fn only_the_last_process_to_close_cuts_the_file() -> anyhow::Result<()> {
 fn one_of_many_creating_a_cell_wins() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let path = archive_in(&directory);
-    FileArchive::open(&path)?.append("index", &[block("first")])?;
+    Chronicle::open(&path)?.append("index", &[block("first")])?;
     let mut creators = (0..4)
         .map(|creator| {
             Process::ready(&[
@@ -1234,7 +1234,7 @@ fn one_of_many_creating_a_cell_wins() -> anyhow::Result<()> {
     }
     drop(creators);
     assert_eq!(won.len(), 1, "exactly one creates it: {won:?}");
-    let archive = FileArchive::open(&path)?;
+    let archive = Chronicle::open(&path)?;
     assert_eq!(
         archive.resolve_cell("local", "main")?.as_deref(),
         Some(format!("creator {}", won[0]).as_bytes())
@@ -1248,7 +1248,7 @@ fn one_of_many_creating_a_cell_wins() -> anyhow::Result<()> {
 fn counting_one_cell_up_from_many_writers_loses_no_update() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let path = archive_in(&directory);
-    let archive = FileArchive::open(&path)?;
+    let archive = Chronicle::open(&path)?;
     archive.publish_cell("local", "count", b"0 start", None)?;
     let mut counters = (0..3)
         .map(|_| Process::ready(&["count", &path.to_string_lossy(), "count", "30"]))
@@ -1284,7 +1284,7 @@ fn counting_one_cell_up_from_many_writers_loses_no_update() -> anyhow::Result<()
 fn a_swap_and_a_retraction_racing_land_one() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let path = archive_in(&directory);
-    let archive = FileArchive::open(&path)?;
+    let archive = Chronicle::open(&path)?;
     let path = path.to_string_lossy();
     for round in 0..8 {
         let base = format!("base {round}");
@@ -1321,7 +1321,7 @@ fn a_swap_and_a_retraction_racing_land_one() -> anyhow::Result<()> {
 fn a_cell_update_waits_for_the_turn_and_a_read_does_not() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let path = archive_in(&directory);
-    let archive = FileArchive::open(&path)?;
+    let archive = Chronicle::open(&path)?;
     let first = archive.publish_cell("local", "main", b"first", None)?;
     let holder = hold(&path, locks::TURN, true)?;
     let (read, _) = within(PROMPTLY, {
@@ -1353,7 +1353,7 @@ fn a_cell_update_waits_for_the_turn_and_a_read_does_not() -> anyhow::Result<()> 
 fn a_cell_read_while_written_is_always_a_written_value() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let path = archive_in(&directory);
-    let archive = FileArchive::open(&path)?;
+    let archive = Chronicle::open(&path)?;
     archive.publish_cell("local", "main", b"0000", None)?;
     let values: Vec<String> = (1..=200)
         .map(|n| {
@@ -1398,7 +1398,7 @@ fn a_cell_read_while_written_is_always_a_written_value() -> anyhow::Result<()> {
 fn cells_created_at_once_are_all_listed() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let path = archive_in(&directory);
-    FileArchive::open(&path)?.append("index", &[block("first")])?;
+    Chronicle::open(&path)?.append("index", &[block("first")])?;
     let mut creators = (0..4)
         .map(|creator| {
             Process::ready(&[
@@ -1415,7 +1415,7 @@ fn cells_created_at_once_are_all_listed() -> anyhow::Result<()> {
         creator.finish()?;
     }
     assert_eq!(
-        FileArchive::open(&path)?.list_cells("local")?,
+        Chronicle::open(&path)?.list_cells("local")?,
         (0..4).map(|n| format!("cell {n}")).collect::<Vec<_>>()
     );
     Ok(())
@@ -1426,7 +1426,7 @@ fn cells_created_at_once_are_all_listed() -> anyhow::Result<()> {
 #[test]
 fn a_stale_retraction_is_refused() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
-    let archive = FileArchive::open(archive_in(&directory))?;
+    let archive = Chronicle::open(archive_in(&directory))?;
     let first = archive.publish_cell("local", "main", b"first", None)?;
     let second = archive.publish_cell("local", "main", b"second", Some(&first))?;
     assert!(matches!(
@@ -1451,7 +1451,7 @@ fn measure_how_long_a_cell_update_waits() -> anyhow::Result<()> {
     for processes in [1, 4] {
         let directory = tempfile::tempdir()?;
         let path = archive_in(&directory);
-        FileArchive::open(&path)?.append("index", &[block("first")])?;
+        Chronicle::open(&path)?.append("index", &[block("first")])?;
         let path_text = path.to_string_lossy().into_owned();
         let mut writers = (0..processes)
             .map(|n| Process::ready(&["commits", &path_text, &format!("branch {n}"), "200"]))

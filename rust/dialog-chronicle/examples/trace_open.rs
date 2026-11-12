@@ -4,7 +4,7 @@
 //! recover it.
 //!
 //! ```sh
-//! cargo run -p dialog-archive-file --features trace --example trace_open -- \
+//! cargo run -p dialog-chronicle --features trace --example trace_open -- \
 //!   <out.trace> <directory> <file>...
 //! ```
 //!
@@ -16,7 +16,7 @@
 
 #[cfg(unix)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    use dialog_archive_file::{FileArchive, trace};
+    use dialog_chronicle::{Chronicle, trace};
     use std::path::Path;
 
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -27,7 +27,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     trace::begin("open");
     let mut archives = Vec::new();
     for file in files {
-        archives.push(FileArchive::open(file)?);
+        archives.push(Chronicle::open(file)?);
     }
     trace::end();
     trace::finish()?;

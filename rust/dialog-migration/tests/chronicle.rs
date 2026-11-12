@@ -9,24 +9,26 @@
 
 use std::str::FromStr;
 
-use dialog_archive_file::{FILE_NAME, FileArchive};
 use dialog_capability::Subject;
+use dialog_chronicle::{Chronicle, FILE_NAME};
 use dialog_corpus::{Changes, Entity, Fact, Instruction, Pick, Relation, Selector, Value};
 use dialog_effects::storage::{Directory as At, Location};
-use dialog_migration::archive_file::{BlockSource, Directory, transcode_spaces};
+use dialog_migration::chronicle::{BlockSource, Directory, transcode_spaces};
 use dialog_peer::helpers::{Seed, open_peer_as, test_owned};
 use dialog_repository::RepositoryExt as _;
 use dialog_storage::provider::storage::NativeSpace;
 use dialog_storage::provider::{FileSystem, Space, Storage};
 use futures_util::TryStreamExt as _;
 
-type FileArchiveSpace = Space<FileArchive, FileSystem, FileSystem, FileSystem, FileSystem>;
+type ChronicleSpace = Space<Chronicle, FileSystem, FileSystem, FileSystem, FileSystem>;
 
 /// Opens the `main` branch of repository `name` in a space of `$space`
-/// under `at`, with the same keys every time.
+/// under `at`, with the keys `$seed` makes, the same every time. Each test
+/// has a seed of its own: two that share one share the peer's identity,
+/// and the tests of this binary run at once.
 macro_rules! open {
-    ($space:ty, $at:expr, $create:expr) => {{
-        let seed = Seed::new(733);
+    ($space:ty, $at:expr, $create:expr, $seed:expr) => {{
+        let seed = Seed::new($seed);
         let storage = test_owned(Storage::<$space>::new()).await;
         let profile = open_peer_as(
             storage,
@@ -88,7 +90,7 @@ async fn it_transcodes_a_replica_the_fs_provider_wrote() -> anyhow::Result<()> {
     // earlier ones wrote, so nodes have versions to be written against.
     let before = {
         let _entropy = Seed::new(733).entropy();
-        let (operator, branch) = open!(NativeSpace, at, true);
+        let (operator, branch) = open!(NativeSpace, at, true, 733);
         for commit in 0..20 {
             let changes: Changes = (0..10)
                 .map(|row| {
@@ -134,7 +136,7 @@ async fn it_transcodes_a_replica_the_fs_provider_wrote() -> anyhow::Result<()> {
     assert!(catalog.frames > 0, "{report:?}");
     assert!(catalog.corrupt.is_empty());
     let source = Directory::space(&space);
-    let archive = FileArchive::open(space.join(FILE_NAME))?;
+    let archive = Chronicle::open(space.join(FILE_NAME))?;
 
     // Every block reads back as the bytes the replica held.
     let mut blocks = 0;
@@ -155,7 +157,7 @@ async fn it_transcodes_a_replica_the_fs_provider_wrote() -> anyhow::Result<()> {
     drop(archive);
 
     // The repository, opened over the file, reads what it committed.
-    let (operator, branch) = open!(FileArchiveSpace, at, false);
+    let (operator, branch) = open!(ChronicleSpace, at, false, 733);
     let after = select_all!(operator, branch);
     assert_eq!(after, before);
     Ok(())
@@ -168,13 +170,13 @@ async fn it_transcodes_a_replica_the_fs_provider_wrote() -> anyhow::Result<()> {
 #[tokio::test]
 async fn it_migrates_a_replica_as_an_application_would() -> anyhow::Result<()> {
     use dialog_migration::Migrations;
-    use dialog_migration::archive_file::{ArchiveFile, MIGRATING};
+    use dialog_migration::chronicle::{IntoChronicle, MIGRATING};
 
     let directory = tempfile::tempdir()?;
     let at = At::At(directory.path().to_string_lossy().into_owned());
     let before = {
         let _entropy = Seed::new(733).entropy();
-        let (operator, branch) = open!(NativeSpace, at, true);
+        let (operator, branch) = open!(NativeSpace, at, true, 734);
         for commit in 0..8 {
             let changes: Changes = (0..10)
                 .map(|row| {
@@ -204,7 +206,7 @@ async fn it_migrates_a_replica_as_an_application_would() -> anyhow::Result<()> {
     };
 
     let repo = directory.path().join("repo");
-    let migrations = Migrations::new().with(ArchiveFile {
+    let migrations = Migrations::new().with(IntoChronicle {
         remove_source: true,
     });
 
@@ -216,7 +218,7 @@ async fn it_migrates_a_replica_as_an_application_would() -> anyhow::Result<()> {
     // A run interrupted mid-way: part of the repository's blocks are in
     // the file being written, none has its final name yet.
     {
-        let partial = FileArchive::open(repo.join(MIGRATING))?;
+        let partial = Chronicle::open(repo.join(MIGRATING))?;
         let source = Directory::space(&repo);
         let hashes = source.hashes("index")?;
         for hash in hashes.iter().take(hashes.len() / 2) {
@@ -239,7 +241,7 @@ async fn it_migrates_a_replica_as_an_application_would() -> anyhow::Result<()> {
     assert!(migrations.plan(directory.path())?.is_empty());
     assert!(migrations.run(directory.path())?.is_empty());
 
-    let (operator, branch) = open!(FileArchiveSpace, at, false);
+    let (operator, branch) = open!(ChronicleSpace, at, false, 734);
     assert_eq!(select_all!(operator, branch), before);
     Ok(())
 }

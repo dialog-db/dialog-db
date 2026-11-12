@@ -1,4 +1,4 @@
-//! Opening a [`FileArchive`] as the archive of a space.
+//! Opening a [`Chronicle`] as the archive of a space.
 
 use std::fmt;
 use std::path::PathBuf;
@@ -9,12 +9,12 @@ use dialog_effects::storage::Location;
 use dialog_storage::provider::FileSystemHandle;
 use dialog_storage::resource::Resource;
 
-use crate::FileArchive;
+use crate::Chronicle;
 
 /// The name of the archive file in a space's directory.
 pub const FILE_NAME: &str = "archive.dialog";
 
-/// Why a [`FileArchive`] could not be opened from a [`Location`].
+/// Why a [`Chronicle`] could not be opened from a [`Location`].
 #[derive(Debug)]
 pub enum OpenError {
     /// There is no archive file at the location, and the open was not
@@ -54,9 +54,9 @@ pub fn file_at(location: &Location) -> Result<PathBuf, OpenError> {
 
 /// A space's archive, opened from its location: the space's directory holds
 /// one archive file instead of a directory of blocks, so a `Space` can keep
-/// its blocks in a [`FileArchive`] and everything else where it was.
+/// its blocks in a [`Chronicle`] and everything else where it was.
 #[async_trait]
-impl Resource<Location> for FileArchive {
+impl Resource<Location> for Chronicle {
     type Error = OpenError;
 
     async fn open(location: &Location) -> Result<Self, OpenError> {
@@ -65,7 +65,7 @@ impl Resource<Location> for FileArchive {
             std::fs::create_dir_all(directory)
                 .map_err(|error| OpenError::Storage(format!("{}: {error}", directory.display())))?;
         }
-        Ok(FileArchive::open(&path)?)
+        Ok(Chronicle::open(&path)?)
     }
 
     fn is_not_found(error: &OpenError) -> bool {
@@ -77,6 +77,6 @@ impl Resource<Location> for FileArchive {
         if !path.exists() {
             return Err(OpenError::NotFound(path));
         }
-        Ok(FileArchive::open(&path)?)
+        Ok(Chronicle::open(&path)?)
     }
 }

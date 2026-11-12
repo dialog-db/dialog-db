@@ -6,7 +6,7 @@
 
 //! A dialog archive kept in one append-only file.
 //!
-//! [`FileArchive`] answers the archive effects (`Get`, `Put`, `Import`) the
+//! [`Chronicle`] answers the archive effects (`Get`, `Put`, `Import`) the
 //! way the `fs` provider does, from one file instead of a file per block.
 //! The tree, queries and sync read and write it as they do any archive.
 //!
@@ -17,10 +17,10 @@
 //! straight from its rows, without realizing a block, is the step after.
 //!
 //! ```no_run
-//! # use dialog_archive_file::FileArchive;
+//! # use dialog_chronicle::Chronicle;
 //! # use dialog_common::Buffer;
 //! # fn main() -> Result<(), dialog_effects::archive::ArchiveError> {
-//! let archive = FileArchive::open("replica.dialog")?;
+//! let archive = Chronicle::open("replica.dialog")?;
 //! let block = Buffer::from(b"a block".to_vec());
 //! archive.append("index", std::slice::from_ref(&block))?;
 //! assert!(archive.get("index", block.blake3_hash())?.is_some());
@@ -39,5 +39,5 @@ mod tokens;
 #[cfg(all(feature = "trace", unix))]
 pub mod trace;
 
-pub use archive::{CHAIN, FileArchive, Options, Stats};
+pub use archive::{CHAIN, Chronicle, Options, Stats};
 pub use resource::{FILE_NAME, OpenError, file_at};

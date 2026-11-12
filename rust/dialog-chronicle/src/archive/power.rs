@@ -28,7 +28,7 @@ use dialog_effects::memory::Version;
 
 use super::concurrency::hold;
 use super::slot::{Slot, boot};
-use super::{FileArchive, Options};
+use super::{Chronicle, Options};
 use crate::file::disk::{self, Draw};
 use crate::locks;
 
@@ -73,7 +73,7 @@ fn named(value: &str) -> Vec<String> {
 }
 
 fn workload(path: &Path, watch: &disk::Watch) -> anyhow::Result<Done> {
-    let archive = FileArchive::open_with(
+    let archive = Chronicle::open_with(
         path,
         Options {
             extent: 4096,
@@ -147,7 +147,7 @@ enum Wrong {
 fn check(image: &[u8], at: usize, done: &Done, path: &Path) -> anyhow::Result<Vec<Wrong>> {
     std::fs::write(path, image)?;
     as_if_rebooted(path)?;
-    let archive = match FileArchive::open_with(
+    let archive = match Chronicle::open_with(
         path,
         Options {
             leave_extent: false,

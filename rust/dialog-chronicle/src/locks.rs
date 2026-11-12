@@ -7,7 +7,7 @@
 //! On Unix these are POSIX record locks (`fcntl`), which belong to the
 //! process, not the handle: two threads of one process never exclude each
 //! other with them, and closing any handle of the file releases them. The
-//! archive opens a file once per process and shares it (`FileArchive`'s
+//! archive opens a file once per process and shares it (`Chronicle`'s
 //! table of open files), closes it only when the last handle goes, and
 //! keeps threads apart with its own mutexes, so both hold. On Windows they
 //! are `LockFileEx` locks, which belong to the handle.

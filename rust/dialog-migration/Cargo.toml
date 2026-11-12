@@ -10,7 +10,7 @@ publish = false
 # One crate for migrations, each behind a feature of its own, so a migration
 # is installed only by those who need to run it:
 #
-#   cargo install --path rust/dialog-migration --features archive-file
+#   cargo install --path rust/dialog-migration --features chronicle
 #
 # Native-only: migrations read and write replicas on disk. The library
 # compiles to nothing on wasm32 (see src/lib.rs), and every dependency is
@@ -18,10 +18,10 @@ publish = false
 
 [features]
 # Moves a replica the `fs` provider wrote (a file per block) into the
-# single-file archive (`dialog-archive-file`).
-archive-file = [
+# single-file archive (`dialog-chronicle`).
+chronicle = [
     "dep:base58",
-    "dep:dialog-archive-file",
+    "dep:dialog-chronicle",
     "dep:dialog-corpus",
     "dep:dialog-common",
     "dep:dialog-search-tree",
@@ -33,20 +33,20 @@ path = "src/bin/dialog-migrate.rs"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 base58 = { workspace = true, optional = true }
-dialog-archive-file = { workspace = true, optional = true }
+dialog-chronicle = { workspace = true, optional = true }
 dialog-corpus = { workspace = true, optional = true }
 dialog-common = { workspace = true, optional = true }
 dialog-search-tree = { workspace = true, optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 anyhow = { workspace = true }
-dialog-archive-file = { workspace = true }
+dialog-chronicle = { workspace = true }
 dialog-corpus = { workspace = true }
 dialog-capability = { workspace = true }
 dialog-effects = { workspace = true }
 # The crate itself with every migration, so its tests run whatever features
 # the test run picks.
-dialog-migration = { workspace = true, features = ["archive-file"] }
+dialog-migration = { workspace = true, features = ["chronicle"] }
 dialog-peer = { workspace = true, features = ["helpers"] }
 dialog-repository = { workspace = true }
 dialog-storage = { workspace = true }

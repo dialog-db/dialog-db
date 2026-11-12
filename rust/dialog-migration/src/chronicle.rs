@@ -1,4 +1,4 @@
-//! The `archive-file` migration: a block store into a [`FileArchive`].
+//! The `chronicle` migration: a block store into a [`Chronicle`].
 //!
 //! A replica kept a block per file (the `fs` provider's archive, or a
 //! directory of blocks fetched from a remote) moves into the single file
@@ -28,7 +28,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use base58::{FromBase58 as _, ToBase58 as _};
-use dialog_archive_file::{FILE_NAME, FileArchive};
+use dialog_chronicle::{Chronicle, FILE_NAME};
 use dialog_common::{Blake3Hash, Buffer};
 use dialog_corpus::{Datum, HISTORY_KEY_TAG, Key, State};
 use dialog_search_tree::{NodeBody, NoveltyOp, PersistentNode};
@@ -210,7 +210,7 @@ struct Shape {
 
 /// Transcodes every block of `source` into `target`, as [`Transcode`] says
 /// by default. See the [module](self).
-pub fn transcode(source: &impl BlockSource, target: &FileArchive) -> io::Result<Report> {
+pub fn transcode(source: &impl BlockSource, target: &Chronicle) -> io::Result<Report> {
     Transcode::default().run(source, target)
 }
 
@@ -278,7 +278,7 @@ pub fn migrate_space(space: impl AsRef<Path>, remove_source: bool) -> io::Result
     let migrating = space.join(MIGRATING);
     let report = {
         let archive =
-            FileArchive::open(&migrating).map_err(|error| io::Error::other(error.to_string()))?;
+            Chronicle::open(&migrating).map_err(|error| io::Error::other(error.to_string()))?;
         let report = transcode(&Directory::space(space), &archive)?;
         archive
             .sync()
@@ -304,22 +304,22 @@ pub fn transcode_spaces(root: impl AsRef<Path>) -> io::Result<Vec<(PathBuf, Repo
     Ok(reports)
 }
 
-/// The `archive-file` step: every space of a replica, moved into the
+/// The `chronicle` step: every space of a replica, moved into the
 /// single-file archive (see [`migrate_space`]).
 ///
 /// It is a conversion, not an upgrade: a replica on the `fs` provider is
 /// not out of date, and a space reads the file only when it is opened as a
 /// file-archive space. An application that switches its spaces to
-/// [`FileArchive`] runs this step before it opens them.
+/// [`Chronicle`] runs this step before it opens them.
 #[derive(Clone, Debug, Default)]
-pub struct ArchiveFile {
+pub struct IntoChronicle {
     /// Delete each space's `fs` archive once its file is in place.
     pub remove_source: bool,
 }
 
-impl crate::Step for ArchiveFile {
+impl crate::Step for IntoChronicle {
     fn id(&self) -> &'static str {
-        "archive-file"
+        "chronicle"
     }
 
     fn summary(&self) -> &'static str {
@@ -365,7 +365,7 @@ impl crate::Step for ArchiveFile {
 
 impl Transcode {
     /// Transcodes every block of `source` into `target`.
-    pub fn run(&self, source: &impl BlockSource, target: &FileArchive) -> io::Result<Report> {
+    pub fn run(&self, source: &impl BlockSource, target: &Chronicle) -> io::Result<Report> {
         let mut report = Report::default();
         for catalog in source.catalogs()? {
             report
@@ -378,7 +378,7 @@ impl Transcode {
     fn catalog(
         &self,
         source: &impl BlockSource,
-        target: &FileArchive,
+        target: &Chronicle,
         catalog: &str,
     ) -> io::Result<CatalogReport> {
         let mut report = CatalogReport {
@@ -496,7 +496,7 @@ impl Batch {
         }
     }
 
-    fn add(&mut self, target: &FileArchive, catalog: &str, block: Buffer) -> io::Result<()> {
+    fn add(&mut self, target: &Chronicle, catalog: &str, block: Buffer) -> io::Result<()> {
         self.bytes += block.as_ref().len();
         self.blocks.push(block);
         if self.bytes >= self.limit {
@@ -505,7 +505,7 @@ impl Batch {
         Ok(())
     }
 
-    fn flush(&mut self, target: &FileArchive, catalog: &str) -> io::Result<()> {
+    fn flush(&mut self, target: &Chronicle, catalog: &str) -> io::Result<()> {
         if self.blocks.is_empty() {
             return Ok(());
         }

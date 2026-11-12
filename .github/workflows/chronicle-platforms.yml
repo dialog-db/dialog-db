@@ -1,16 +1,17 @@
-name: 'File archive on Windows and macOS'
+name: 'Chronicle on Windows and macOS'
 
-# Runs dialog-archive-file's tests, the concurrency and power-loss suites
+# Runs dialog-chronicle's tests, the concurrency and power-loss suites
 # among them, on the platforms the Test workflow does not: Windows, where
 # the file's locks are LockFileEx and a mapped file cannot be cut, and
 # macOS. It does not gate and leaves the Test workflow as it is.
-# On push, not pull_request, as the file-archive bench is.
+# On push, not pull_request: a pull request's path filter matches its whole
+# diff, so every push to the branch would start (and cancel) a run.
 on:
   workflow_dispatch:
   push:
     paths:
-      - '.github/workflows/file-archive-platforms.yml'
-      - 'rust/dialog-archive-file/**'
+      - '.github/workflows/chronicle-platforms.yml'
+      - 'rust/dialog-chronicle/**'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -21,7 +22,7 @@ permissions:
 
 jobs:
   test:
-    name: 'dialog-archive-file on ${{ matrix.os }}'
+    name: 'dialog-chronicle on ${{ matrix.os }}'
     strategy:
       fail-fast: false
       matrix:
@@ -35,4 +36,4 @@ jobs:
         run: rustup show active-toolchain || rustup toolchain install
       - name: Test
         shell: bash
-        run: cargo test -p dialog-archive-file --all-targets -- --test-threads=4
+        run: cargo test -p dialog-chronicle --all-targets -- --test-threads=4
