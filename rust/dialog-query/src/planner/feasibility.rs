@@ -314,6 +314,73 @@ mod tests {
         }
     }
 
+    /// A slot that holds a map of terms is judged by the variables
+    /// inside it. An equality between a variable and such a map is
+    /// feasible once every variable inside the map is bound, and then
+    /// binds the variable; or once the variable is bound, and then
+    /// binds what inside the map is not. With neither it names what it
+    /// still needs, and a variable inside the map that is bound already
+    /// is not among them.
+    #[dialog_common::test]
+    fn a_pattern_is_feasible_by_the_variables_inside_it() {
+        let pattern = Pattern::map([
+            (
+                "title".to_string(),
+                Pattern::from(Term::<Any>::var("title")),
+            ),
+            ("body".to_string(), Pattern::from(Term::<Any>::var("body"))),
+        ])
+        .expect("a pattern");
+        let premise = pattern.is(Term::<Any>::var("card"));
+
+        match premise.feasible(&scope(&["title"])) {
+            Err(Infeasible::NeedsAll(needs)) => {
+                assert!(needs.contains("body"));
+                assert!(needs.contains("card"));
+                assert!(!needs.contains("title"), "the title is bound");
+            }
+            other => panic!("expected NeedsAll, got {other:?}"),
+        }
+
+        let binds = premise
+            .feasible(&scope(&["title", "body"]))
+            .expect("the map is a value");
+        let bound: BTreeSet<&str> = binds.iter().collect();
+        assert_eq!(bound, BTreeSet::from(["card"]));
+
+        let binds = premise
+            .feasible(&scope(&["card", "title"]))
+            .expect("the value is bound");
+        let bound: BTreeSet<&str> = binds.iter().collect();
+        assert_eq!(bound, BTreeSet::from(["body"]), "what is not bound yet");
+    }
+
+    /// A negated premise binds nothing and needs every variable inside
+    /// its pattern bound. A blank inside it is not a variable to bind.
+    #[dialog_common::test]
+    fn a_negated_pattern_requires_its_variables_and_not_its_blanks() {
+        let Pattern::Map(named) = Pattern::map([(
+            "title".to_string(),
+            Pattern::from(Term::<Any>::var("title")),
+        )])
+        .expect("a pattern") else {
+            panic!("a map pattern");
+        };
+        let premise = !Pattern::Map(named.with_rest(Term::blank())).is(Term::<Any>::var("card"));
+
+        match premise.feasible(&scope(&["card"])) {
+            Err(Infeasible::NeedsAll(needs)) => {
+                assert_eq!(needs.len(), 1);
+                assert!(needs.contains("title"));
+            }
+            other => panic!("expected NeedsAll, got {other:?}"),
+        }
+        let binds = premise
+            .feasible(&scope(&["card", "title"]))
+            .expect("everything named is bound");
+        assert_eq!(binds.iter().count(), 0, "negation binds nothing");
+    }
+
     fn attribute_for(the: Relation, value: &str) -> Premise {
         Premise::Assert(Proposition::Attribute(Box::new(AttributeQuery::new(
             Term::from(the),

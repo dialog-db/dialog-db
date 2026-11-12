@@ -19,7 +19,8 @@ says how to cut a release.
 [#778](https://github.com/dialog-db/dialog-db/pull/778),
 [design/patterns.md](./design/patterns.md),
 [design/patterns/design-parameters.md](./design/patterns/design-parameters.md),
-[design/patterns/design-pattern-meaning.md](./design/patterns/design-pattern-meaning.md)
+[design/patterns/design-pattern-meaning.md](./design/patterns/design-pattern-meaning.md),
+[design/patterns/design-feasibility.md](./design/patterns/design-feasibility.md)
 
 A premise was applied to parameters that each held one variable or one
 constant, so a rule could not say a value by its shape. A parameter now
@@ -64,6 +65,13 @@ What this changes for you:
   `try_encode` returns `None`, and asserting the rule into a
   transaction panics with that reason, as asserting a rule whose body
   reads an attribute through a raw scan already did.
+- A premise is feasible by the variables inside its patterns: a
+  parameter that holds a map, a list or a tuple is bound when every
+  variable inside it is, and a premise that binds it binds each of them.
+  A rule whose pattern can never be bound fails to compile with
+  `TypeError::RequiredBindings`, which names the variables inside the
+  pattern that nothing binds. A negated premise may hold a pattern, and
+  a blank inside it stands for any value.
 - Matching a pattern against a record under a version this release
   does not read is `EvaluationError::RecordVersion`, not a dropped row.
 - A rule's identity names a record constant that holds a composite by

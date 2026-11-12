@@ -2,8 +2,8 @@
 
 |  | Understanding | Activity |
 |---|---|---|
-| **Status** | Dialog has a value made of values, kept as a record under a version byte and named by its parts. A parameter holds a pattern: a term, or a map, a list or a tuple of terms. A concept premise that holds one is planned as the concept over the whole value and an equality between the whole and the pattern, and the equality runs both ways ([design-parameters.md](design-parameters.md)). A rule that holds one has an identity, runs, and cannot be stored ([design-rule-identity.md](design-rule-identity.md)). | **Building.** Steps 1 and 2 of [the plan](plan.md) are built and tested. Step 2 took the planner's reading of a pattern with it. Steps 3 and 4 are not landed. |
-| **Agenda** | For the maintainer: what installing a rule that holds a pattern should do; today it is refused by a panic that says why, since an assertion returns nothing. Whether a pattern with no rest is the map of exactly its entries, as built. Whether a composite keeps a number under the narrowest type that holds it, as built. Whether a tuple's name is its own type, `tuple:`, as built. Whether any embedder has stored a record that starts with `0x01` to `0x17`. Then: how a pattern is typed. | Step 3: the tests in either order of premises and the refusal that names the variable. Then step 4. |
+| **Status** | Dialog has a value made of values, kept as a record under a version byte and named by its parts. A parameter holds a pattern: a term, or a map, a list or a tuple of terms. A concept premise that holds one is planned as the concept over the whole value and an equality between the whole and the pattern, and the equality runs both ways ([design-parameters.md](design-parameters.md)). A rule that holds one has an identity, runs, and cannot be stored ([design-rule-identity.md](design-rule-identity.md)). | **Building.** Steps 1 to 3 of [the plan](plan.md) are built and tested. Step 4 is not landed. |
+| **Agenda** | For the maintainer: what installing a rule that holds a pattern should do; today it is refused by a panic that says why, since an assertion returns nothing. Whether a pattern with no rest is the map of exactly its entries, as built. Whether a composite keeps a number under the narrowest type that holds it, as built. Whether a tuple's name is its own type, `tuple:`, as built. Whether any embedder has stored a record that starts with `0x01` to `0x17`. Then: how a pattern is typed. | Step 4: inference over a pattern's shape and its leaves. |
 
 ## 2026-11-11, Directing: a pattern in place of a term
 
@@ -63,3 +63,15 @@ Two of these rest on the builder's opinion and are on the agenda: the number's t
 - A pattern is named by its parts and has no wire form. A rule that holds one has an identity and no stored body, and installing it is refused with that reason ([design-rule-identity.md](design-rule-identity.md)).
 
 The first rests on facts in the code. The second and the manner of the third's refusal are the builder's opinion, and on the agenda.
+
+## 2026-11-11, Building: the planner
+
+**Asked.** When a slot that holds a pattern counts as bound. What a refusal names.
+
+**Learned.**
+
+- With the pattern lowered to an equality, the planner needs one new rule and no new step: a slot that holds a shape is bound when every variable inside it is. The equality costs 1, so it is taken as soon as it is feasible, which builds a record before the premise read by it and takes a row apart right after the premise that yielded it.
+- The same premise plans both ways. With nothing bound the concept runs first and the equality takes apart. With the pattern's variables bound the equality runs first and the concept is read by the built value.
+- A negated premise is not lowered, so the anti-join that reads the negated relation in bulk has to key on the variables inside the pattern. It keyed on the terms and would have missed them.
+
+**Decided.** By the builder: a shape is bound when all its variables are, binds or requires each that is not, and a blank inside it is neither ([design-feasibility.md](design-feasibility.md)). The hypothesis that a premise can be planned by the variables inside its patterns is confirmed.
