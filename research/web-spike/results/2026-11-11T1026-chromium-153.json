@@ -1,0 +1,3491 @@
+{
+  "date": "2026-11-11T10:24:05.981Z",
+  "quick": false,
+  "browser": "153.0.8010.12",
+  "env": {
+    "crossOriginIsolated": true,
+    "isSecureContext": true,
+    "userAgent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/153.0.8010.12 Safari/537.36",
+    "hardwareConcurrency": 4,
+    "hasSharedWorker": "function",
+    "hasLocks": "object"
+  },
+  "machine": {
+    "platform": "linux",
+    "release": "6.18.44-fc-v378",
+    "cpus": 4,
+    "cpuModel": "Intel(R) Xeon(R) Processor @ 2.10GHz",
+    "memGiB": 16
+  },
+  "profileDir": "a fresh temporary directory under os.tmpdir()",
+  "q1": {
+    "persistent": {
+      "timerResolutionUs": 5,
+      "calls": {
+        "read4k": {
+          "perCall": {
+            "n": 2000,
+            "min": 0,
+            "median": 0,
+            "p95": 5,
+            "p99": 10,
+            "max": 500,
+            "mean": 2
+          },
+          "perBatch": {
+            "n": 100,
+            "min": 0.8,
+            "median": 1.2,
+            "p95": 1.7,
+            "p99": 3.2,
+            "max": 3.2,
+            "mean": 1.2
+          },
+          "batch": 20
+        },
+        "read100k": {
+          "perCall": {
+            "n": 2000,
+            "min": 0,
+            "median": 10,
+            "p95": 20,
+            "p99": 55,
+            "max": 2145,
+            "mean": 13.6
+          },
+          "perBatch": {
+            "n": 100,
+            "min": 7.3,
+            "median": 9,
+            "p95": 13.7,
+            "p99": 215.7,
+            "max": 215.7,
+            "mean": 15.3
+          },
+          "batch": 20
+        },
+        "write4k": {
+          "perCall": {
+            "n": 2000,
+            "min": 0,
+            "median": 25,
+            "p95": 40,
+            "p99": 65,
+            "max": 1565,
+            "mean": 25.7
+          },
+          "perBatch": {
+            "n": 100,
+            "min": 5.7,
+            "median": 24.2,
+            "p95": 35.2,
+            "p99": 85.3,
+            "max": 85.3,
+            "mean": 22.7
+          },
+          "batch": 20
+        },
+        "write100k": {
+          "perCall": {
+            "n": 2000,
+            "min": 10,
+            "median": 35,
+            "p95": 55,
+            "p99": 80,
+            "max": 8110,
+            "mean": 45.2
+          },
+          "perBatch": {
+            "n": 100,
+            "min": 19.8,
+            "median": 44.3,
+            "p95": 234.2,
+            "p99": 435.3,
+            "max": 435.3,
+            "mean": 56.6
+          },
+          "batch": 20
+        },
+        "append4k": {
+          "perCall": {
+            "n": 2000,
+            "min": 0,
+            "median": 30,
+            "p95": 40,
+            "p99": 65,
+            "max": 2140,
+            "mean": 27.4
+          },
+          "perBatch": {
+            "n": 100,
+            "min": 6,
+            "median": 6.8,
+            "p95": 31.3,
+            "p99": 35.7,
+            "max": 35.7,
+            "mean": 10.7
+          },
+          "batch": 20
+        },
+        "append100k": {
+          "perCall": {
+            "n": 2000,
+            "min": 25,
+            "median": 45,
+            "p95": 70,
+            "p99": 4110,
+            "max": 10995,
+            "mean": 117.5
+          },
+          "perBatch": {
+            "n": 100,
+            "min": 32.3,
+            "median": 57.8,
+            "p95": 250.3,
+            "p99": 449.2,
+            "max": 449.2,
+            "mean": 78.8
+          },
+          "batch": 20
+        },
+        "getSize": {
+          "perCall": {
+            "n": 2000,
+            "min": 0,
+            "median": 0,
+            "p95": 5,
+            "p99": 5,
+            "max": 55,
+            "mean": 0.9
+          },
+          "perBatch": {
+            "n": 100,
+            "min": 0.2,
+            "median": 0.3,
+            "p95": 0.5,
+            "p99": 1.5,
+            "max": 1.5,
+            "mean": 0.4
+          },
+          "batch": 20
+        },
+        "flushClean": {
+          "perCall": {
+            "n": 200,
+            "min": 35,
+            "median": 45,
+            "p95": 3995,
+            "p99": 4010,
+            "max": 4055,
+            "mean": 320.7
+          },
+          "perBatch": {
+            "n": 40,
+            "min": 41,
+            "median": 71,
+            "p95": 4001,
+            "p99": 4002,
+            "max": 4002,
+            "mean": 1547.7
+          },
+          "batch": 5
+        },
+        "flushAfter4k": {
+          "n": 200,
+          "min": 290,
+          "median": 560,
+          "p95": 3945,
+          "p99": 5520,
+          "max": 5605,
+          "mean": 1975
+        },
+        "flushAfter100k": {
+          "n": 200,
+          "min": 340,
+          "median": 500,
+          "p95": 725,
+          "p99": 895,
+          "max": 1980,
+          "mean": 522.5
+        },
+        "flushAfter1M": {
+          "n": 200,
+          "min": 1015,
+          "median": 1305,
+          "p95": 1585,
+          "p99": 3540,
+          "max": 4285,
+          "mean": 1332.9
+        },
+        "append4kFlush": {
+          "n": 200,
+          "min": 205,
+          "median": 315,
+          "p95": 425,
+          "p99": 2650,
+          "max": 3610,
+          "mean": 351.7
+        }
+      },
+      "flushProbe": [
+        {
+          "mode": "readwrite",
+          "growMiB": 0,
+          "clean": {
+            "n": 100,
+            "min": 40,
+            "median": 50,
+            "p95": 95,
+            "p99": 105,
+            "max": 105,
+            "mean": 56.4
+          },
+          "overwrite4kThenFlush": {
+            "n": 100,
+            "min": 190,
+            "median": 265,
+            "p95": 395,
+            "p99": 460,
+            "max": 460,
+            "mean": 278.4
+          },
+          "append4kThenFlush": {
+            "n": 100,
+            "min": 215,
+            "median": 315,
+            "p95": 480,
+            "p99": 1810,
+            "max": 1810,
+            "mean": 350.5
+          },
+          "cleanAfterAppends": {
+            "n": 100,
+            "min": 45,
+            "median": 50,
+            "p95": 90,
+            "p99": 140,
+            "max": 140,
+            "mean": 57.8
+          },
+          "cleanAfterTruncate": {
+            "n": 100,
+            "min": 45,
+            "median": 50,
+            "p95": 80,
+            "p99": 130,
+            "max": 130,
+            "mean": 54.8
+          }
+        },
+        {
+          "mode": "readwrite",
+          "growMiB": 32,
+          "clean": {
+            "n": 100,
+            "min": 30,
+            "median": 45,
+            "p95": 85,
+            "p99": 175,
+            "max": 175,
+            "mean": 48.8
+          },
+          "overwrite4kThenFlush": {
+            "n": 100,
+            "min": 290,
+            "median": 410,
+            "p95": 645,
+            "p99": 695,
+            "max": 695,
+            "mean": 428.5
+          },
+          "append4kThenFlush": {
+            "n": 100,
+            "min": 230,
+            "median": 320,
+            "p95": 450,
+            "p99": 3985,
+            "max": 3985,
+            "mean": 367.4
+          },
+          "cleanAfterAppends": {
+            "n": 100,
+            "min": 25,
+            "median": 35,
+            "p95": 55,
+            "p99": 90,
+            "max": 90,
+            "mean": 38.3
+          },
+          "cleanAfterTruncate": {
+            "n": 100,
+            "min": 30,
+            "median": 45,
+            "p95": 105,
+            "p99": 305,
+            "max": 305,
+            "mean": 53.3
+          }
+        },
+        {
+          "mode": "readwrite-unsafe",
+          "growMiB": 0,
+          "clean": {
+            "n": 100,
+            "min": 35,
+            "median": 45,
+            "p95": 70,
+            "p99": 130,
+            "max": 130,
+            "mean": 48.4
+          },
+          "overwrite4kThenFlush": {
+            "n": 100,
+            "min": 130,
+            "median": 185,
+            "p95": 305,
+            "p99": 1915,
+            "max": 1915,
+            "mean": 214.2
+          },
+          "append4kThenFlush": {
+            "n": 100,
+            "min": 210,
+            "median": 325,
+            "p95": 500,
+            "p99": 755,
+            "max": 755,
+            "mean": 340.8
+          },
+          "cleanAfterAppends": {
+            "n": 100,
+            "min": 35,
+            "median": 45,
+            "p95": 75,
+            "p99": 260,
+            "max": 260,
+            "mean": 50.4
+          },
+          "cleanAfterTruncate": {
+            "n": 100,
+            "min": 35,
+            "median": 45,
+            "p95": 75,
+            "p99": 95,
+            "max": 95,
+            "mean": 46.7
+          }
+        },
+        {
+          "mode": "readwrite-unsafe",
+          "growMiB": 32,
+          "clean": {
+            "n": 100,
+            "min": 35,
+            "median": 45,
+            "p95": 75,
+            "p99": 175,
+            "max": 175,
+            "mean": 49.4
+          },
+          "overwrite4kThenFlush": {
+            "n": 100,
+            "min": 245,
+            "median": 320,
+            "p95": 460,
+            "p99": 610,
+            "max": 610,
+            "mean": 331.5
+          },
+          "append4kThenFlush": {
+            "n": 100,
+            "min": 170,
+            "median": 205,
+            "p95": 280,
+            "p99": 745,
+            "max": 745,
+            "mean": 219.6
+          },
+          "cleanAfterAppends": {
+            "n": 100,
+            "min": 30,
+            "median": 45,
+            "p95": 60,
+            "p99": 130,
+            "max": 130,
+            "mean": 47.4
+          },
+          "cleanAfterTruncate": {
+            "n": 100,
+            "min": 35,
+            "median": 45,
+            "p95": 85,
+            "p99": 125,
+            "max": 125,
+            "mean": 47.5
+          }
+        }
+      ],
+      "open": {
+        "readwrite": {
+          "mode": "readwrite (default)",
+          "getFileHandle": {
+            "n": 300,
+            "min": 260,
+            "median": 345,
+            "p95": 425,
+            "p99": 495,
+            "max": 3360,
+            "mean": 357.1
+          },
+          "createSyncAccessHandle": {
+            "n": 300,
+            "min": 335,
+            "median": 420,
+            "p95": 500,
+            "p99": 565,
+            "max": 825,
+            "mean": 425
+          },
+          "close": {
+            "n": 300,
+            "min": 205,
+            "median": 275,
+            "p95": 340,
+            "p99": 415,
+            "max": 550,
+            "mean": 277.4
+          },
+          "openPlusClose": {
+            "n": 300,
+            "min": 575,
+            "median": 695,
+            "p95": 825,
+            "p99": 965,
+            "max": 1100,
+            "mean": 702.4
+          }
+        },
+        "readwrite-unsafe": {
+          "mode": "readwrite-unsafe",
+          "getFileHandle": {
+            "n": 300,
+            "min": 235,
+            "median": 360,
+            "p95": 435,
+            "p99": 550,
+            "max": 725,
+            "mean": 358.6
+          },
+          "createSyncAccessHandle": {
+            "n": 300,
+            "min": 295,
+            "median": 440,
+            "p95": 525,
+            "p99": 615,
+            "max": 1010,
+            "mean": 443.7
+          },
+          "close": {
+            "n": 300,
+            "min": 220,
+            "median": 290,
+            "p95": 355,
+            "p99": 480,
+            "max": 670,
+            "mean": 294.1
+          },
+          "openPlusClose": {
+            "n": 300,
+            "min": 570,
+            "median": 720,
+            "p95": 870,
+            "p99": 1065,
+            "max": 1425,
+            "mean": 737.7
+          }
+        },
+        "read-only": {
+          "mode": "read-only",
+          "getFileHandle": {
+            "n": 300,
+            "min": 305,
+            "median": 385,
+            "p95": 480,
+            "p99": 555,
+            "max": 620,
+            "mean": 395.1
+          },
+          "createSyncAccessHandle": {
+            "n": 300,
+            "min": 370,
+            "median": 475,
+            "p95": 580,
+            "p99": 705,
+            "max": 1480,
+            "mean": 486.5
+          },
+          "close": {
+            "n": 300,
+            "min": 230,
+            "median": 310,
+            "p95": 400,
+            "p99": 490,
+            "max": 1985,
+            "mean": 324.6
+          },
+          "openPlusClose": {
+            "n": 300,
+            "min": 625,
+            "median": 790,
+            "p95": 950,
+            "p99": 1915,
+            "max": 2660,
+            "mean": 811.1
+          }
+        }
+      }
+    },
+    "incognito": {
+      "timerResolutionUs": 5,
+      "calls": {
+        "read4k": {
+          "perCall": {
+            "n": 2000,
+            "min": 205,
+            "median": 260,
+            "p95": 340,
+            "p99": 510,
+            "max": 4420,
+            "mean": 272.6
+          },
+          "perBatch": {
+            "n": 100,
+            "min": 267,
+            "median": 306.8,
+            "p95": 366.5,
+            "p99": 730,
+            "max": 730,
+            "mean": 313.4
+          },
+          "batch": 20
+        },
+        "read100k": {
+          "perCall": {
+            "n": 2000,
+            "min": 630,
+            "median": 1035,
+            "p95": 1325,
+            "p99": 1845,
+            "max": 4460,
+            "mean": 1060.6
+          },
+          "perBatch": {
+            "n": 100,
+            "min": 635.5,
+            "median": 943.8,
+            "p95": 1333.5,
+            "p99": 1619,
+            "max": 1619,
+            "mean": 972.3
+          },
+          "batch": 20
+        },
+        "write4k": {
+          "perCall": {
+            "n": 2000,
+            "min": 400,
+            "median": 620,
+            "p95": 890,
+            "p99": 1455,
+            "max": 5150,
+            "mean": 653.7
+          },
+          "perBatch": {
+            "n": 100,
+            "min": 516.5,
+            "median": 614,
+            "p95": 743.2,
+            "p99": 916.2,
+            "max": 916.2,
+            "mean": 625.2
+          },
+          "batch": 20
+        },
+        "write100k": {
+          "perCall": {
+            "n": 2000,
+            "min": 625,
+            "median": 925,
+            "p95": 1150,
+            "p99": 1660,
+            "max": 5300,
+            "mean": 955.1
+          },
+          "perBatch": {
+            "n": 100,
+            "min": 846.5,
+            "median": 1231,
+            "p95": 2348.8,
+            "p99": 14972.8,
+            "max": 14972.8,
+            "mean": 1474.6
+          },
+          "batch": 20
+        },
+        "append4k": {
+          "perCall": {
+            "n": 2000,
+            "min": 445,
+            "median": 810,
+            "p95": 1875,
+            "p99": 4340,
+            "max": 7650,
+            "mean": 975.2
+          },
+          "perBatch": {
+            "n": 100,
+            "min": 678.5,
+            "median": 829.2,
+            "p95": 1289,
+            "p99": 1902.5,
+            "max": 1902.5,
+            "mean": 887.9
+          },
+          "batch": 20
+        },
+        "append100k": {
+          "perCall": {
+            "n": 2000,
+            "min": 665,
+            "median": 1060,
+            "p95": 1965,
+            "p99": 4310,
+            "max": 170875,
+            "mean": 1337.3
+          },
+          "perBatch": {
+            "n": 100,
+            "min": 846.8,
+            "median": 1328.7,
+            "p95": 3337.8,
+            "p99": 4190.3,
+            "max": 4190.3,
+            "mean": 1620.8
+          },
+          "batch": 20
+        },
+        "getSize": {
+          "perCall": {
+            "n": 2000,
+            "min": 145,
+            "median": 240,
+            "p95": 350,
+            "p99": 540,
+            "max": 935,
+            "mean": 250.2
+          },
+          "perBatch": {
+            "n": 100,
+            "min": 138.5,
+            "median": 240.5,
+            "p95": 283.8,
+            "p99": 319.8,
+            "max": 319.8,
+            "mean": 238.9
+          },
+          "batch": 20
+        },
+        "flushClean": {
+          "perCall": {
+            "n": 200,
+            "min": 0,
+            "median": 0,
+            "p95": 5,
+            "p99": 5,
+            "max": 10,
+            "mean": 0.5
+          },
+          "perBatch": {
+            "n": 40,
+            "min": 0,
+            "median": 0,
+            "p95": 1,
+            "p99": 1,
+            "max": 1,
+            "mean": 0.2
+          },
+          "batch": 5
+        },
+        "flushAfter4k": {
+          "n": 200,
+          "min": 0,
+          "median": 5,
+          "p95": 10,
+          "p99": 35,
+          "max": 35,
+          "mean": 3.5
+        },
+        "flushAfter100k": {
+          "n": 200,
+          "min": 0,
+          "median": 5,
+          "p95": 10,
+          "p99": 30,
+          "max": 260,
+          "mean": 4.3
+        },
+        "flushAfter1M": {
+          "n": 200,
+          "min": 0,
+          "median": 5,
+          "p95": 5,
+          "p99": 15,
+          "max": 25,
+          "mean": 3.2
+        },
+        "append4kFlush": {
+          "n": 200,
+          "min": 560,
+          "median": 680,
+          "p95": 850,
+          "p99": 2545,
+          "max": 2710,
+          "mean": 714.7
+        }
+      },
+      "flushProbe": [
+        {
+          "mode": "readwrite",
+          "growMiB": 0,
+          "clean": {
+            "n": 100,
+            "min": 0,
+            "median": 0,
+            "p95": 5,
+            "p99": 25,
+            "max": 25,
+            "mean": 0.9
+          },
+          "overwrite4kThenFlush": {
+            "n": 100,
+            "min": 450,
+            "median": 580,
+            "p95": 875,
+            "p99": 3660,
+            "max": 3660,
+            "mean": 645.5
+          },
+          "append4kThenFlush": {
+            "n": 100,
+            "min": 510,
+            "median": 615,
+            "p95": 825,
+            "p99": 1085,
+            "max": 1085,
+            "mean": 642.3
+          },
+          "cleanAfterAppends": {
+            "n": 100,
+            "min": 0,
+            "median": 0,
+            "p95": 5,
+            "p99": 75,
+            "max": 75,
+            "mean": 1.2
+          },
+          "cleanAfterTruncate": {
+            "n": 100,
+            "min": 0,
+            "median": 0,
+            "p95": 5,
+            "p99": 15,
+            "max": 15,
+            "mean": 0.4
+          }
+        },
+        {
+          "mode": "readwrite",
+          "growMiB": 32,
+          "clean": {
+            "n": 100,
+            "min": 0,
+            "median": 0,
+            "p95": 5,
+            "p99": 5,
+            "max": 5,
+            "mean": 0.4
+          },
+          "overwrite4kThenFlush": {
+            "n": 100,
+            "min": 555,
+            "median": 680,
+            "p95": 1265,
+            "p99": 4005,
+            "max": 4005,
+            "mean": 800.9
+          },
+          "append4kThenFlush": {
+            "n": 100,
+            "min": 485,
+            "median": 635,
+            "p95": 810,
+            "p99": 27925,
+            "max": 27925,
+            "mean": 912
+          },
+          "cleanAfterAppends": {
+            "n": 100,
+            "min": 0,
+            "median": 0,
+            "p95": 5,
+            "p99": 5,
+            "max": 5,
+            "mean": 0.3
+          },
+          "cleanAfterTruncate": {
+            "n": 100,
+            "min": 0,
+            "median": 0,
+            "p95": 5,
+            "p99": 5,
+            "max": 5,
+            "mean": 0.4
+          }
+        },
+        {
+          "mode": "readwrite-unsafe",
+          "growMiB": 0,
+          "clean": {
+            "n": 100,
+            "min": 0,
+            "median": 0,
+            "p95": 5,
+            "p99": 5,
+            "max": 5,
+            "mean": 0.5
+          },
+          "overwrite4kThenFlush": {
+            "n": 100,
+            "min": 580,
+            "median": 720,
+            "p95": 905,
+            "p99": 1020,
+            "max": 1020,
+            "mean": 729.9
+          },
+          "append4kThenFlush": {
+            "n": 100,
+            "min": 525,
+            "median": 870,
+            "p95": 2845,
+            "p99": 183735,
+            "max": 183735,
+            "mean": 4622.1
+          },
+          "cleanAfterAppends": {
+            "n": 100,
+            "min": 0,
+            "median": 0,
+            "p95": 5,
+            "p99": 10,
+            "max": 10,
+            "mean": 0.8
+          },
+          "cleanAfterTruncate": {
+            "n": 100,
+            "min": 0,
+            "median": 0,
+            "p95": 5,
+            "p99": 30,
+            "max": 30,
+            "mean": 0.8
+          }
+        },
+        {
+          "mode": "readwrite-unsafe",
+          "growMiB": 32,
+          "clean": {
+            "n": 100,
+            "min": 0,
+            "median": 0,
+            "p95": 5,
+            "p99": 5,
+            "max": 5,
+            "mean": 0.5
+          },
+          "overwrite4kThenFlush": {
+            "n": 100,
+            "min": 415,
+            "median": 635,
+            "p95": 2420,
+            "p99": 9170,
+            "max": 9170,
+            "mean": 812.5
+          },
+          "append4kThenFlush": {
+            "n": 100,
+            "min": 545,
+            "median": 805,
+            "p95": 2405,
+            "p99": 25545,
+            "max": 25545,
+            "mean": 1199.4
+          },
+          "cleanAfterAppends": {
+            "n": 100,
+            "min": 0,
+            "median": 0,
+            "p95": 5,
+            "p99": 5,
+            "max": 5,
+            "mean": 0.5
+          },
+          "cleanAfterTruncate": {
+            "n": 100,
+            "min": 0,
+            "median": 0,
+            "p95": 5,
+            "p99": 25,
+            "max": 25,
+            "mean": 0.8
+          }
+        }
+      ],
+      "open": {
+        "readwrite": {
+          "mode": "readwrite (default)",
+          "getFileHandle": {
+            "n": 300,
+            "min": 245,
+            "median": 395,
+            "p95": 745,
+            "p99": 3450,
+            "max": 4645,
+            "mean": 489.8
+          },
+          "createSyncAccessHandle": {
+            "n": 300,
+            "min": 105,
+            "median": 160,
+            "p95": 315,
+            "p99": 430,
+            "max": 4270,
+            "mean": 193.2
+          },
+          "close": {
+            "n": 300,
+            "min": 85,
+            "median": 135,
+            "p95": 270,
+            "p99": 520,
+            "max": 1355,
+            "mean": 153
+          },
+          "openPlusClose": {
+            "n": 300,
+            "min": 195,
+            "median": 300,
+            "p95": 530,
+            "p99": 1040,
+            "max": 4625,
+            "mean": 346.2
+          }
+        },
+        "readwrite-unsafe": {
+          "mode": "readwrite-unsafe",
+          "getFileHandle": {
+            "n": 300,
+            "min": 245,
+            "median": 315,
+            "p95": 740,
+            "p99": 2400,
+            "max": 3380,
+            "mean": 392.8
+          },
+          "createSyncAccessHandle": {
+            "n": 300,
+            "min": 80,
+            "median": 140,
+            "p95": 290,
+            "p99": 535,
+            "max": 1160,
+            "mean": 158.5
+          },
+          "close": {
+            "n": 300,
+            "min": 65,
+            "median": 105,
+            "p95": 240,
+            "p99": 530,
+            "max": 1870,
+            "mean": 131.8
+          },
+          "openPlusClose": {
+            "n": 300,
+            "min": 150,
+            "median": 250,
+            "p95": 575,
+            "p99": 1390,
+            "max": 2045,
+            "mean": 290.3
+          }
+        },
+        "read-only": {
+          "mode": "read-only",
+          "getFileHandle": {
+            "n": 300,
+            "min": 240,
+            "median": 365,
+            "p95": 790,
+            "p99": 3615,
+            "max": 4050,
+            "mean": 445.4
+          },
+          "createSyncAccessHandle": {
+            "n": 300,
+            "min": 105,
+            "median": 155,
+            "p95": 310,
+            "p99": 885,
+            "max": 1835,
+            "mean": 183.5
+          },
+          "close": {
+            "n": 300,
+            "min": 85,
+            "median": 130,
+            "p95": 270,
+            "p99": 1370,
+            "max": 8720,
+            "mean": 197.8
+          },
+          "openPlusClose": {
+            "n": 300,
+            "min": 190,
+            "median": 290,
+            "p95": 570,
+            "p99": 2290,
+            "max": 8930,
+            "mean": 381.3
+          }
+        }
+      }
+    }
+  },
+  "q2": {
+    "sharedWorkerProbe": {
+      "crossOriginIsolated": false,
+      "hasWorker": "undefined",
+      "hasLocks": "object",
+      "hasStorage": "object",
+      "nested": "Worker is not defined in SharedWorkerGlobalScope",
+      "hasCreateSyncAccessHandle": "undefined",
+      "getFile": "ok, 0 bytes",
+      "lockCycle": "granted"
+    },
+    "rtt": {
+      "pageToOwnWorker": {
+        "n": 2000,
+        "min": 35,
+        "median": 55,
+        "p95": 85,
+        "p99": 130,
+        "max": 1540,
+        "mean": 60.1
+      },
+      "pageToSharedWorker": {
+        "n": 2000,
+        "min": 85,
+        "median": 120,
+        "p95": 195,
+        "p99": 335,
+        "max": 4265,
+        "mean": 132.6
+      },
+      "pageToSharedToSamePageWorker": {
+        "n": 2000,
+        "min": 170,
+        "median": 260,
+        "p95": 510,
+        "p99": 810,
+        "max": 4290,
+        "mean": 301
+      },
+      "pageToSharedToOtherPageWorker": {
+        "n": 2000,
+        "min": 175,
+        "median": 270,
+        "p95": 565,
+        "p99": 1130,
+        "max": 5525,
+        "mean": 323.5
+      },
+      "workerToWorkerSamePage": {
+        "n": 2000,
+        "min": 35,
+        "median": 50,
+        "p95": 85,
+        "p99": 150,
+        "max": 4275,
+        "mean": 61.4
+      },
+      "workerToWorkerOtherPage": {
+        "n": 2000,
+        "min": 80,
+        "median": 110,
+        "p95": 160,
+        "p99": 280,
+        "max": 1180,
+        "mean": 119.9
+      },
+      "workerToWorkerOtherPageAfterForget": {
+        "n": 500,
+        "min": 90,
+        "median": 115,
+        "p95": 155,
+        "p99": 245,
+        "max": 995,
+        "mean": 121
+      }
+    }
+  },
+  "q3": {
+    "uncontendedInWorker": {
+      "exclusive": {
+        "n": 2000,
+        "min": 75,
+        "median": 150,
+        "p95": 195,
+        "p99": 255,
+        "max": 3665,
+        "mean": 153.2
+      },
+      "shared": {
+        "n": 2000,
+        "min": 75,
+        "median": 135,
+        "p95": 180,
+        "p99": 275,
+        "max": 4215,
+        "mean": 135.4
+      },
+      "ifAvailableFree": {
+        "n": 2000,
+        "min": 90,
+        "median": 135,
+        "p95": 195,
+        "p99": 330,
+        "max": 2740,
+        "mean": 145
+      },
+      "ifAvailableHeld": {
+        "n": 2000,
+        "min": 75,
+        "median": 110,
+        "p95": 160,
+        "p99": 250,
+        "max": 975,
+        "mean": 117.5,
+        "refused": 2100
+      },
+      "holdAcquire": {
+        "n": 2000,
+        "min": 70,
+        "median": 130,
+        "p95": 190,
+        "p99": 350,
+        "max": 2520,
+        "mean": 137.3
+      },
+      "holdReleaseSettled": {
+        "n": 2000,
+        "min": 5,
+        "median": 15,
+        "p95": 35,
+        "p99": 50,
+        "max": 95,
+        "mean": 18.7
+      },
+      "query": {
+        "n": 300,
+        "min": 80,
+        "median": 100,
+        "p95": 165,
+        "p99": 255,
+        "max": 275,
+        "mean": 107.8
+      }
+    },
+    "uncontendedInPage": {
+      "n": 2000,
+      "min": 75,
+      "median": 120,
+      "p95": 200,
+      "p99": 325,
+      "max": 2565,
+      "mean": 135.6
+    },
+    "contention": {
+      "2pages_hold0ms": {
+        "grants": 2000,
+        "handoffUs": {
+          "n": 1999,
+          "min": 75,
+          "median": 135,
+          "p95": 210,
+          "p99": 300,
+          "max": 1109.9
+        },
+        "sameHolderTwiceInARow": 0,
+        "fifoViolations": 0,
+        "grantsPerSecond": 6969
+      },
+      "3pages_hold0ms": {
+        "grants": 3000,
+        "handoffUs": {
+          "n": 2999,
+          "min": 69.8,
+          "median": 154.8,
+          "p95": 255.4,
+          "p99": 599.9,
+          "max": 4309.8
+        },
+        "sameHolderTwiceInARow": 0,
+        "fifoViolations": 6,
+        "grantsPerSecond": 5632
+      },
+      "3pages_hold0.2ms": {
+        "grants": 3000,
+        "handoffUs": {
+          "n": 2999,
+          "min": 94.7,
+          "median": 230,
+          "p95": 369.9,
+          "p99": 1579.8,
+          "max": 5054.7
+        },
+        "sameHolderTwiceInARow": 0,
+        "fifoViolations": 2,
+        "grantsPerSecond": 2104
+      },
+      "4pages_hold0ms": {
+        "grants": 4000,
+        "handoffUs": {
+          "n": 3999,
+          "min": 64.9,
+          "median": 165,
+          "p95": 280,
+          "p99": 414.8,
+          "max": 4925
+        },
+        "sameHolderTwiceInARow": 4,
+        "fifoViolations": 31,
+        "grantsPerSecond": 5434
+      }
+    },
+    "release": {
+      "release": {
+        "releasedAfterMs": [
+          2,
+          3,
+          3,
+          3,
+          2
+        ]
+      },
+      "close": {
+        "releasedAfterMs": [
+          13,
+          12,
+          10,
+          8,
+          11
+        ]
+      },
+      "pageThreadClose": {
+        "releasedAfterMs": [
+          14,
+          13,
+          15,
+          15,
+          15
+        ]
+      },
+      "terminate": {
+        "releasedAfterMs": [
+          3,
+          2,
+          3,
+          3,
+          2
+        ]
+      },
+      "navigate": {
+        "releasedAfterMs": [
+          40,
+          46,
+          37,
+          51,
+          41
+        ]
+      },
+      "crash": {
+        "releasedAfterMs": [
+          12,
+          7,
+          9,
+          12,
+          12
+        ]
+      }
+    },
+    "freeze": {
+      "waiterGrantedWhileHolderFrozen": false,
+      "heartbeatsFromFrozenPagesWorkerIn1_5s": 146,
+      "stealGrantedAfterMs": 3,
+      "holderSawAfterUnfreeze": "AbortError: Lock broken by another request with the 'steal' option.",
+      "heartbeatsIn500msAfterUnfreeze": 50,
+      "waiterGrantedEventually": true
+    },
+    "presentLeaveTogether": {
+      "workers": 4,
+      "trials": 20,
+      "workersThatThoughtTheyWereLast": {
+        "1": 17,
+        "2": 3
+      }
+    }
+  },
+  "q4": {
+    "matrix": {
+      "readwrite": {
+        "readwrite": {
+          "otherPage": "NoModificationAllowedError: Failed to execute 'createSyncAccessHandle' on 'FileSystemFileHandle': Access Handles cannot be created if there is another open Access Handle or Writable stream associated with the same file.",
+          "sameWorker": "NoModificationAllowedError: Failed to execute 'createSyncAccessHandle' on 'FileSystemFileHandle': Access Handles cannot be created if there is another open Access Handle or Writable stream associated with the same file."
+        },
+        "readwrite-unsafe": {
+          "otherPage": "NoModificationAllowedError: Failed to execute 'createSyncAccessHandle' on 'FileSystemFileHandle': Access Handles cannot be created if there is another open Access Handle or Writable stream associated with the same file.",
+          "sameWorker": "NoModificationAllowedError: Failed to execute 'createSyncAccessHandle' on 'FileSystemFileHandle': Access Handles cannot be created if there is another open Access Handle or Writable stream associated with the same file."
+        },
+        "read-only": {
+          "otherPage": "NoModificationAllowedError: Failed to execute 'createSyncAccessHandle' on 'FileSystemFileHandle': Access Handles cannot be created if there is another open Access Handle or Writable stream associated with the same file.",
+          "sameWorker": "NoModificationAllowedError: Failed to execute 'createSyncAccessHandle' on 'FileSystemFileHandle': Access Handles cannot be created if there is another open Access Handle or Writable stream associated with the same file."
+        }
+      },
+      "readwrite-unsafe": {
+        "readwrite": {
+          "otherPage": "NoModificationAllowedError: Failed to execute 'createSyncAccessHandle' on 'FileSystemFileHandle': Access Handles cannot be created if there is another open Access Handle or Writable stream associated with the same file.",
+          "sameWorker": "NoModificationAllowedError: Failed to execute 'createSyncAccessHandle' on 'FileSystemFileHandle': Access Handles cannot be created if there is another open Access Handle or Writable stream associated with the same file."
+        },
+        "readwrite-unsafe": {
+          "otherPage": "opened",
+          "sameWorker": "opened"
+        },
+        "read-only": {
+          "otherPage": "NoModificationAllowedError: Failed to execute 'createSyncAccessHandle' on 'FileSystemFileHandle': Access Handles cannot be created if there is another open Access Handle or Writable stream associated with the same file.",
+          "sameWorker": "NoModificationAllowedError: Failed to execute 'createSyncAccessHandle' on 'FileSystemFileHandle': Access Handles cannot be created if there is another open Access Handle or Writable stream associated with the same file."
+        }
+      },
+      "read-only": {
+        "readwrite": {
+          "otherPage": "NoModificationAllowedError: Failed to execute 'createSyncAccessHandle' on 'FileSystemFileHandle': Access Handles cannot be created if there is another open Access Handle or Writable stream associated with the same file.",
+          "sameWorker": "NoModificationAllowedError: Failed to execute 'createSyncAccessHandle' on 'FileSystemFileHandle': Access Handles cannot be created if there is another open Access Handle or Writable stream associated with the same file."
+        },
+        "readwrite-unsafe": {
+          "otherPage": "NoModificationAllowedError: Failed to execute 'createSyncAccessHandle' on 'FileSystemFileHandle': Access Handles cannot be created if there is another open Access Handle or Writable stream associated with the same file.",
+          "sameWorker": "NoModificationAllowedError: Failed to execute 'createSyncAccessHandle' on 'FileSystemFileHandle': Access Handles cannot be created if there is another open Access Handle or Writable stream associated with the same file."
+        },
+        "read-only": {
+          "otherPage": "opened",
+          "sameWorker": "opened"
+        }
+      }
+    },
+    "othersWhileHeld": {
+      "readwrite": {
+        "getFile": "read 16 of 65536 bytes",
+        "createWritable": "NoModificationAllowedError: Failed to execute 'createWritable' on 'FileSystemFileHandle': An attempt was made to modify an object where modifications are not allowed."
+      },
+      "readwrite-unsafe": {
+        "getFile": "read 16 of 65536 bytes",
+        "createWritable": "NoModificationAllowedError: Failed to execute 'createWritable' on 'FileSystemFileHandle': An attempt was made to modify an object where modifications are not allowed."
+      },
+      "read-only": {
+        "getFile": "read 16 of 65536 bytes",
+        "createWritable": "NoModificationAllowedError: Failed to execute 'createWritable' on 'FileSystemFileHandle': An attempt was made to modify an object where modifications are not allowed."
+      }
+    },
+    "getFileWhileHeld": {
+      "getFile": {
+        "n": 500,
+        "min": 180,
+        "median": 305,
+        "p95": 420,
+        "p99": 1275,
+        "max": 4390,
+        "mean": 336.7
+      },
+      "sliceRead": {
+        "n": 500,
+        "min": 580,
+        "median": 930,
+        "p95": 3615,
+        "p99": 4135,
+        "max": 9915,
+        "mean": 1165.2
+      },
+      "fileTakenBeforeAWriteReadAfterIt": "NotReadableError: The requested file could not be read, typically due to permission problems that have occurred after a reference to a file was acquired.",
+      "visibility": {
+        "n": 500,
+        "wrong": 0,
+        "notifyAndCheck": {
+          "n": 500,
+          "min": 1465,
+          "median": 2330,
+          "p95": 2770,
+          "p99": 4900,
+          "max": 10715,
+          "mean": 2391.9
+        }
+      }
+    },
+    "threeUnsafeAtOnce": [
+      "opened",
+      "opened",
+      "opened"
+    ],
+    "visibility": {
+      "4096": {
+        "n": 2000,
+        "wrong": 0,
+        "notifyAndCheck": {
+          "n": 2000,
+          "min": 100,
+          "median": 140,
+          "p95": 195,
+          "p99": 285,
+          "max": 4130,
+          "mean": 148.8
+        }
+      },
+      "102400": {
+        "n": 2000,
+        "wrong": 0,
+        "notifyAndCheck": {
+          "n": 2000,
+          "min": 135,
+          "median": 210,
+          "p95": 305,
+          "p99": 2750,
+          "max": 23540,
+          "mean": 288.8
+        }
+      }
+    },
+    "tornReads": {
+      "4096": {
+        "writer": {
+          "writes": 126072
+        },
+        "reader": {
+          "reads": 96147,
+          "mixed": 527,
+          "headerMismatch": 0
+        }
+      },
+      "102400": {
+        "writer": {
+          "writes": 52652
+        },
+        "reader": {
+          "reads": 7825,
+          "mixed": 3073,
+          "headerMismatch": 0
+        }
+      },
+      "1048576": {
+        "writer": {
+          "writes": 7539
+        },
+        "reader": {
+          "reads": 877,
+          "mixed": 252,
+          "headerMismatch": 0
+        }
+      }
+    },
+    "twoWriters": {
+      "102400": [
+        {
+          "writes": [
+            5057,
+            8070
+          ],
+          "reads": 788,
+          "mixedReads": 310,
+          "distinctBytesLeft": 1
+        },
+        {
+          "writes": [
+            6812,
+            7788
+          ],
+          "reads": 783,
+          "mixedReads": 516,
+          "distinctBytesLeft": 1
+        },
+        {
+          "writes": [
+            5319,
+            5158
+          ],
+          "reads": 831,
+          "mixedReads": 167,
+          "distinctBytesLeft": 1
+        },
+        {
+          "writes": [
+            4698,
+            6150
+          ],
+          "reads": 705,
+          "mixedReads": 98,
+          "distinctBytesLeft": 1
+        },
+        {
+          "writes": [
+            6059,
+            5355
+          ],
+          "reads": 512,
+          "mixedReads": 76,
+          "distinctBytesLeft": 1
+        }
+      ],
+      "1048576": [
+        {
+          "writes": [
+            982,
+            987
+          ],
+          "reads": 39,
+          "mixedReads": 4,
+          "distinctBytesLeft": 1
+        },
+        {
+          "writes": [
+            726,
+            987
+          ],
+          "reads": 148,
+          "mixedReads": 72,
+          "distinctBytesLeft": 1
+        },
+        {
+          "writes": [
+            714,
+            809
+          ],
+          "reads": 76,
+          "mixedReads": 3,
+          "distinctBytesLeft": 1
+        },
+        {
+          "writes": [
+            777,
+            692
+          ],
+          "reads": 106,
+          "mixedReads": 49,
+          "distinctBytesLeft": 1
+        },
+        {
+          "writes": [
+            733,
+            815
+          ],
+          "reads": 75,
+          "mixedReads": 28,
+          "distinctBytesLeft": 1
+        }
+      ]
+    },
+    "flushCoverageMs": {
+      "cleanFlushB": {
+        "n": 10,
+        "min": 0.1,
+        "median": 0.2,
+        "p95": 0.2,
+        "p99": 0.2,
+        "max": 0.2
+      },
+      "flushBAfterAWrote16M": {
+        "n": 10,
+        "min": 17.1,
+        "median": 18.2,
+        "p95": 20.2,
+        "p99": 20.2,
+        "max": 20.2
+      },
+      "flushAAfterAWrote16M": {
+        "n": 10,
+        "min": 16.5,
+        "median": 18,
+        "p95": 19.6,
+        "p99": 19.6,
+        "max": 19.6
+      },
+      "writeA16M": {
+        "n": 10,
+        "min": 10.7,
+        "median": 14.7,
+        "p95": 21.2,
+        "p99": 21.2,
+        "max": 21.2
+      }
+    },
+    "turns": {
+      "openClosePerTurn_1writer": {
+        "turnsPerSecond": 619,
+        "errors": 0,
+        "lastError": null,
+        "perWorker": [
+          {
+            "count": 1237,
+            "turn": {
+              "n": 1237,
+              "min": 640,
+              "median": 1100,
+              "p95": 3930,
+              "p99": 5870,
+              "max": 9175,
+              "mean": 1377.9
+            },
+            "open": {
+              "n": 1237,
+              "min": 320,
+              "median": 515,
+              "p95": 645,
+              "p99": 4070,
+              "max": 8530,
+              "mean": 601.8
+            },
+            "close": {
+              "n": 1237,
+              "min": 120,
+              "median": 305,
+              "p95": 445,
+              "p99": 4275,
+              "max": 7730,
+              "mean": 414.9
+            },
+            "waited": {
+              "n": 1237,
+              "min": 125,
+              "median": 170,
+              "p95": 235,
+              "p99": 1105,
+              "max": 4120,
+              "mean": 204
+            }
+          }
+        ]
+      },
+      "openClosePerTurn_2writers": {
+        "turnsPerSecond": 614,
+        "errors": 0,
+        "lastError": null,
+        "perWorker": [
+          {
+            "count": 614,
+            "turn": {
+              "n": 614,
+              "min": 730,
+              "median": 1175,
+              "p95": 2990,
+              "p99": 5355,
+              "max": 8420,
+              "mean": 1356.4
+            },
+            "open": {
+              "n": 614,
+              "min": 390,
+              "median": 545,
+              "p95": 700,
+              "p99": 3575,
+              "max": 5620,
+              "mean": 616.6
+            },
+            "close": {
+              "n": 614,
+              "min": 170,
+              "median": 340,
+              "p95": 450,
+              "p99": 2880,
+              "max": 5490,
+              "mean": 405.7
+            },
+            "waited": {
+              "n": 614,
+              "min": 150,
+              "median": 1605,
+              "p95": 4330,
+              "p99": 6040,
+              "max": 10615,
+              "mean": 1834.5
+            }
+          },
+          {
+            "count": 613,
+            "turn": {
+              "n": 613,
+              "min": 925,
+              "median": 1240,
+              "p95": 2600,
+              "p99": 5320,
+              "max": 10215,
+              "mean": 1427.4
+            },
+            "open": {
+              "n": 613,
+              "min": 385,
+              "median": 575,
+              "p95": 715,
+              "p99": 4295,
+              "max": 5645,
+              "mean": 658.8
+            },
+            "close": {
+              "n": 613,
+              "min": 210,
+              "median": 340,
+              "p95": 470,
+              "p99": 3630,
+              "max": 4700,
+              "mean": 406.9
+            },
+            "waited": {
+              "n": 613,
+              "min": 1045,
+              "median": 1575,
+              "p95": 4055,
+              "p99": 6255,
+              "max": 8885,
+              "mean": 1799.9
+            }
+          }
+        ]
+      },
+      "heldUnsafeHandle_1writer": {
+        "turnsPerSecond": 3102,
+        "errors": 0,
+        "lastError": null,
+        "perWorker": [
+          {
+            "count": 6203,
+            "turn": {
+              "n": 6203,
+              "min": 0,
+              "median": 20,
+              "p95": 45,
+              "p99": 70,
+              "max": 1960,
+              "mean": 23.4
+            },
+            "open": {
+              "n": 0
+            },
+            "close": {
+              "n": 0
+            },
+            "waited": {
+              "n": 6203,
+              "min": 35,
+              "median": 125,
+              "p95": 1105,
+              "p99": 4125,
+              "max": 33110,
+              "mean": 274.7
+            }
+          }
+        ]
+      },
+      "heldUnsafeHandle_2writers": {
+        "turnsPerSecond": 3099,
+        "errors": 0,
+        "lastError": null,
+        "perWorker": [
+          {
+            "count": 3100,
+            "turn": {
+              "n": 3100,
+              "min": 5,
+              "median": 30,
+              "p95": 45,
+              "p99": 70,
+              "max": 780,
+              "mean": 29.3
+            },
+            "open": {
+              "n": 0
+            },
+            "close": {
+              "n": 0
+            },
+            "waited": {
+              "n": 3100,
+              "min": 115,
+              "median": 335,
+              "p95": 2510,
+              "p99": 4380,
+              "max": 7360,
+              "mean": 588
+            }
+          },
+          {
+            "count": 3098,
+            "turn": {
+              "n": 3098,
+              "min": 0,
+              "median": 25,
+              "p95": 55,
+              "p99": 145,
+              "max": 2875,
+              "mean": 30.8
+            },
+            "open": {
+              "n": 0
+            },
+            "close": {
+              "n": 0
+            },
+            "waited": {
+              "n": 3098,
+              "min": 95,
+              "median": 340,
+              "p95": 2630,
+              "p99": 4475,
+              "max": 7390,
+              "mean": 589.9
+            }
+          }
+        ]
+      },
+      "openClosePerTurn_1writer_flush": {
+        "turnsPerSecond": 285,
+        "errors": 0,
+        "lastError": null,
+        "perWorker": [
+          {
+            "count": 570,
+            "turn": {
+              "n": 570,
+              "min": 1180,
+              "median": 3705,
+              "p95": 7640,
+              "p99": 9590,
+              "max": 11995,
+              "mean": 3260.3
+            },
+            "open": {
+              "n": 570,
+              "min": 410,
+              "median": 575,
+              "p95": 685,
+              "p99": 2320,
+              "max": 3755,
+              "mean": 601.9
+            },
+            "close": {
+              "n": 570,
+              "min": 265,
+              "median": 400,
+              "p95": 480,
+              "p99": 855,
+              "max": 4355,
+              "mean": 416.9
+            },
+            "waited": {
+              "n": 570,
+              "min": 125,
+              "median": 185,
+              "p95": 230,
+              "p99": 320,
+              "max": 3660,
+              "mean": 213.6
+            }
+          }
+        ]
+      },
+      "openClosePerTurn_2writers_flush": {
+        "turnsPerSecond": 481,
+        "errors": 0,
+        "lastError": null,
+        "perWorker": [
+          {
+            "count": 481,
+            "turn": {
+              "n": 481,
+              "min": 1020,
+              "median": 1620,
+              "p95": 4225,
+              "p99": 6535,
+              "max": 9250,
+              "mean": 1861.2
+            },
+            "open": {
+              "n": 481,
+              "min": 325,
+              "median": 540,
+              "p95": 655,
+              "p99": 840,
+              "max": 5050,
+              "mean": 563.3
+            },
+            "close": {
+              "n": 481,
+              "min": 245,
+              "median": 350,
+              "p95": 445,
+              "p99": 565,
+              "max": 5100,
+              "mean": 369.6
+            },
+            "waited": {
+              "n": 481,
+              "min": 320,
+              "median": 2060,
+              "p95": 4155,
+              "p99": 6340,
+              "max": 17255,
+              "mean": 2261.2
+            }
+          },
+          {
+            "count": 480,
+            "turn": {
+              "n": 480,
+              "min": 1175,
+              "median": 1630,
+              "p95": 3760,
+              "p99": 5940,
+              "max": 11960,
+              "mean": 1831.5
+            },
+            "open": {
+              "n": 480,
+              "min": 355,
+              "median": 535,
+              "p95": 650,
+              "p99": 785,
+              "max": 4275,
+              "mean": 541.1
+            },
+            "close": {
+              "n": 480,
+              "min": 225,
+              "median": 350,
+              "p95": 445,
+              "p99": 500,
+              "max": 4285,
+              "mean": 360.1
+            },
+            "waited": {
+              "n": 480,
+              "min": 1195,
+              "median": 2045,
+              "p95": 4735,
+              "p99": 7110,
+              "max": 9605,
+              "mean": 2301.8
+            }
+          }
+        ]
+      },
+      "heldUnsafeHandle_1writer_flush": {
+        "turnsPerSecond": 350,
+        "errors": 0,
+        "lastError": null,
+        "perWorker": [
+          {
+            "count": 700,
+            "turn": {
+              "n": 700,
+              "min": 150,
+              "median": 2970,
+              "p95": 7665,
+              "p99": 7765,
+              "max": 11800,
+              "mean": 2585.1
+            },
+            "open": {
+              "n": 0
+            },
+            "close": {
+              "n": 0
+            },
+            "waited": {
+              "n": 700,
+              "min": 105,
+              "median": 180,
+              "p95": 255,
+              "p99": 2770,
+              "max": 4150,
+              "mean": 227
+            }
+          }
+        ]
+      },
+      "heldUnsafeHandle_2writers_flush": {
+        "turnsPerSecond": 295,
+        "errors": 0,
+        "lastError": null,
+        "perWorker": [
+          {
+            "count": 294,
+            "turn": {
+              "n": 294,
+              "min": 365,
+              "median": 3680,
+              "p95": 3750,
+              "p99": 5860,
+              "max": 23725,
+              "mean": 3298.6
+            },
+            "open": {
+              "n": 0
+            },
+            "close": {
+              "n": 0
+            },
+            "waited": {
+              "n": 294,
+              "min": 640,
+              "median": 4230,
+              "p95": 4795,
+              "p99": 8265,
+              "max": 24415,
+              "mean": 3465
+            }
+          },
+          {
+            "count": 296,
+            "turn": {
+              "n": 296,
+              "min": 360,
+              "median": 3675,
+              "p95": 3760,
+              "p99": 7750,
+              "max": 23560,
+              "mean": 2865.1
+            },
+            "open": {
+              "n": 0
+            },
+            "close": {
+              "n": 0
+            },
+            "waited": {
+              "n": 296,
+              "min": 210,
+              "median": 4225,
+              "p95": 4305,
+              "p99": 8245,
+              "max": 24400,
+              "mean": 3836.7
+            }
+          }
+        ]
+      }
+    },
+    "failover": {
+      "closeHandle": [
+        {
+          "openedAfterMs": 4,
+          "attempts": 1702
+        },
+        {
+          "openedAfterMs": 4,
+          "attempts": 1326
+        },
+        {
+          "openedAfterMs": 5,
+          "attempts": 2096
+        },
+        {
+          "openedAfterMs": 5,
+          "attempts": 2044
+        },
+        {
+          "openedAfterMs": 3,
+          "attempts": 2483
+        }
+      ],
+      "close": [
+        {
+          "openedAfterMs": 29,
+          "attempts": 3097
+        },
+        {
+          "openedAfterMs": 13,
+          "attempts": 3864
+        },
+        {
+          "openedAfterMs": 11,
+          "attempts": 2073
+        },
+        {
+          "openedAfterMs": 13,
+          "attempts": 2029
+        },
+        {
+          "openedAfterMs": 12,
+          "attempts": 2176
+        }
+      ],
+      "terminate": [
+        {
+          "openedAfterMs": 5,
+          "attempts": 2033
+        },
+        {
+          "openedAfterMs": 4,
+          "attempts": 1972
+        },
+        {
+          "openedAfterMs": 5,
+          "attempts": 2067
+        },
+        {
+          "openedAfterMs": 4,
+          "attempts": 1941
+        },
+        {
+          "openedAfterMs": 4,
+          "attempts": 2321
+        }
+      ],
+      "crash": [
+        {
+          "openedAfterMs": 12,
+          "attempts": 1986
+        },
+        {
+          "openedAfterMs": 13,
+          "attempts": 2099
+        },
+        {
+          "openedAfterMs": 14,
+          "attempts": 2133
+        },
+        {
+          "openedAfterMs": 12,
+          "attempts": 2162
+        },
+        {
+          "openedAfterMs": 15,
+          "attempts": 2127
+        }
+      ]
+    }
+  },
+  "q5": {
+    "runs": [
+      {
+        "design": "unsafe",
+        "writers": 1,
+        "sync": false,
+        "kill": null,
+        "elapsedMs": 3001,
+        "committedRecords": 5405,
+        "commitsPerSecond": 1801,
+        "commitLatencyUs": [
+          {
+            "median": 460,
+            "p95": 795
+          }
+        ],
+        "turnWaitUs": [
+          {
+            "median": 145,
+            "p95": 255
+          }
+        ],
+        "readerReads": 90368,
+        "readsPerSecond": 30113,
+        "recordReadUs": {
+          "n": 90368,
+          "min": 5,
+          "median": 20,
+          "p95": 35,
+          "p99": 75,
+          "max": 8135,
+          "mean": 21
+        },
+        "slotReadUs": {
+          "n": 91168,
+          "min": 0,
+          "median": 5,
+          "p95": 10,
+          "p99": 45,
+          "max": 5925,
+          "mean": 4.8
+        },
+        "check": {
+          "badCommittedRecords": 0,
+          "readerBad": 0,
+          "readerBadKinds": {},
+          "readerCellTorn": 0,
+          "readerCellBackwards": 0,
+          "readerWalked": 5405,
+          "ackedButLost": [],
+          "writerErrors": 0,
+          "writerFailures": [],
+          "fullExtents": 0,
+          "cellValue": 5405,
+          "cellShortOfRecords": 0,
+          "pastEnd": [
+            "end of file"
+          ],
+          "writerCommitsCounted": 5405
+        },
+        "killed": null,
+        "adopted": [],
+        "owner": null,
+        "fileBytes": 22204416
+      },
+      {
+        "design": "unsafe",
+        "writers": 2,
+        "sync": false,
+        "kill": null,
+        "elapsedMs": 3001,
+        "committedRecords": 7727,
+        "commitsPerSecond": 2575,
+        "commitLatencyUs": [
+          {
+            "median": 700,
+            "p95": 1235
+          },
+          {
+            "median": 690,
+            "p95": 1245
+          }
+        ],
+        "turnWaitUs": [
+          {
+            "median": 255,
+            "p95": 500
+          },
+          {
+            "median": 255,
+            "p95": 505
+          }
+        ],
+        "readerReads": 111521,
+        "readsPerSecond": 37161,
+        "recordReadUs": {
+          "n": 111521,
+          "min": 5,
+          "median": 20,
+          "p95": 25,
+          "p99": 40,
+          "max": 1815,
+          "mean": 18.5
+        },
+        "slotReadUs": {
+          "n": 111968,
+          "min": 0,
+          "median": 5,
+          "p95": 10,
+          "p99": 10,
+          "max": 2075,
+          "mean": 3.4
+        },
+        "check": {
+          "badCommittedRecords": 0,
+          "readerBad": 0,
+          "readerBadKinds": {},
+          "readerCellTorn": 0,
+          "readerCellBackwards": 0,
+          "readerWalked": 7727,
+          "ackedButLost": [],
+          "writerErrors": 0,
+          "writerFailures": [],
+          "fullExtents": 0,
+          "cellValue": 7727,
+          "cellShortOfRecords": 0,
+          "pastEnd": [
+            "zeros",
+            "end of file"
+          ],
+          "writerCommitsCounted": 7727
+        },
+        "killed": null,
+        "adopted": [],
+        "owner": null,
+        "fileBytes": 150220800
+      },
+      {
+        "design": "unsafe",
+        "writers": 4,
+        "sync": false,
+        "kill": null,
+        "elapsedMs": 3000,
+        "committedRecords": 8480,
+        "commitsPerSecond": 2827,
+        "commitLatencyUs": [
+          {
+            "median": 1275,
+            "p95": 2650
+          },
+          {
+            "median": 1265,
+            "p95": 2630
+          },
+          {
+            "median": 1265,
+            "p95": 2685
+          },
+          {
+            "median": 1280,
+            "p95": 2675
+          }
+        ],
+        "turnWaitUs": [
+          {
+            "median": 550,
+            "p95": 1345
+          },
+          {
+            "median": 555,
+            "p95": 1330
+          },
+          {
+            "median": 550,
+            "p95": 1300
+          },
+          {
+            "median": 540,
+            "p95": 1395
+          }
+        ],
+        "readerReads": 119311,
+        "readsPerSecond": 39770,
+        "recordReadUs": {
+          "n": 119311,
+          "min": 5,
+          "median": 15,
+          "p95": 20,
+          "p99": 40,
+          "max": 5135,
+          "mean": 15.7
+        },
+        "slotReadUs": {
+          "n": 120016,
+          "min": 0,
+          "median": 5,
+          "p95": 10,
+          "p99": 15,
+          "max": 5015,
+          "mean": 4
+        },
+        "check": {
+          "badCommittedRecords": 0,
+          "readerBad": 0,
+          "readerBadKinds": {},
+          "readerCellTorn": 0,
+          "readerCellBackwards": 0,
+          "readerWalked": 8480,
+          "ackedButLost": [],
+          "writerErrors": 0,
+          "writerFailures": [],
+          "fullExtents": 0,
+          "cellValue": 8480,
+          "cellShortOfRecords": 0,
+          "pastEnd": [
+            "zeros",
+            "zeros",
+            "zeros",
+            "end of file"
+          ],
+          "writerCommitsCounted": 8480
+        },
+        "killed": null,
+        "adopted": [],
+        "owner": null,
+        "fileBytes": 411377664
+      },
+      {
+        "design": "owner",
+        "writers": 1,
+        "sync": false,
+        "kill": null,
+        "elapsedMs": 3000,
+        "committedRecords": 11142,
+        "commitsPerSecond": 3714,
+        "commitLatencyUs": [
+          {
+            "median": 250,
+            "p95": 380
+          }
+        ],
+        "turnWaitUs": [
+          {}
+        ],
+        "readerReads": 4934,
+        "readsPerSecond": 1645,
+        "recordReadUs": {
+          "n": 4934,
+          "min": 110,
+          "median": 210,
+          "p95": 345,
+          "p99": 540,
+          "max": 7080,
+          "mean": 232.2
+        },
+        "slotReadUs": {
+          "n": 4946,
+          "min": 80,
+          "median": 165,
+          "p95": 285,
+          "p99": 500,
+          "max": 7595,
+          "mean": 186.9
+        },
+        "check": {
+          "badCommittedRecords": 0,
+          "readerBad": 0,
+          "readerBadKinds": {},
+          "readerCellTorn": 0,
+          "readerCellBackwards": 0,
+          "readerWalked": 0,
+          "ackedButLost": [],
+          "writerErrors": 0,
+          "writerFailures": [],
+          "fullExtents": 0,
+          "cellValue": 11142,
+          "cellShortOfRecords": 0,
+          "pastEnd": [
+            "end of file"
+          ],
+          "writerCommitsCounted": 11142
+        },
+        "killed": null,
+        "adopted": [],
+        "owner": {
+          "role": "owner",
+          "commits": 11142,
+          "reads": 4934,
+          "errors": 0,
+          "lastError": null
+        },
+        "fileBytes": 45703168
+      },
+      {
+        "design": "owner",
+        "writers": 2,
+        "sync": false,
+        "kill": null,
+        "elapsedMs": 3001,
+        "committedRecords": 18420,
+        "commitsPerSecond": 6138,
+        "commitLatencyUs": [
+          {
+            "median": 295,
+            "p95": 495
+          },
+          {
+            "median": 290,
+            "p95": 500
+          }
+        ],
+        "turnWaitUs": [
+          {},
+          {}
+        ],
+        "readerReads": 3672,
+        "readsPerSecond": 1224,
+        "recordReadUs": {
+          "n": 3672,
+          "min": 100,
+          "median": 280,
+          "p95": 485,
+          "p99": 735,
+          "max": 7715,
+          "mean": 306.3
+        },
+        "slotReadUs": {
+          "n": 3688,
+          "min": 55,
+          "median": 225,
+          "p95": 415,
+          "p99": 690,
+          "max": 8280,
+          "mean": 253.8
+        },
+        "check": {
+          "badCommittedRecords": 0,
+          "readerBad": 0,
+          "readerBadKinds": {},
+          "readerCellTorn": 0,
+          "readerCellBackwards": 0,
+          "readerWalked": 0,
+          "ackedButLost": [],
+          "writerErrors": 0,
+          "writerFailures": [],
+          "fullExtents": 0,
+          "cellValue": 18420,
+          "cellShortOfRecords": 0,
+          "pastEnd": [
+            "zeros",
+            "end of file"
+          ],
+          "writerCommitsCounted": 18420
+        },
+        "killed": null,
+        "adopted": [],
+        "owner": {
+          "role": "owner",
+          "commits": 18420,
+          "reads": 3672,
+          "errors": 0,
+          "lastError": null
+        },
+        "fileBytes": 172118016
+      },
+      {
+        "design": "owner",
+        "writers": 4,
+        "sync": false,
+        "kill": null,
+        "elapsedMs": 3000,
+        "committedRecords": 26712,
+        "commitsPerSecond": 8904,
+        "commitLatencyUs": [
+          {
+            "median": 390,
+            "p95": 815
+          },
+          {
+            "median": 375,
+            "p95": 755
+          },
+          {
+            "median": 375,
+            "p95": 795
+          },
+          {
+            "median": 370,
+            "p95": 765
+          }
+        ],
+        "turnWaitUs": [
+          {},
+          {},
+          {},
+          {}
+        ],
+        "readerReads": 2640,
+        "readsPerSecond": 880,
+        "recordReadUs": {
+          "n": 2640,
+          "min": 95,
+          "median": 360,
+          "p95": 730,
+          "p99": 1415,
+          "max": 23150,
+          "mean": 421.9
+        },
+        "slotReadUs": {
+          "n": 2653,
+          "min": 75,
+          "median": 290,
+          "p95": 660,
+          "p99": 1465,
+          "max": 10280,
+          "mean": 352
+        },
+        "check": {
+          "badCommittedRecords": 0,
+          "readerBad": 0,
+          "readerBadKinds": {},
+          "readerCellTorn": 0,
+          "readerCellBackwards": 0,
+          "readerWalked": 0,
+          "ackedButLost": [],
+          "writerErrors": 0,
+          "writerFailures": [],
+          "fullExtents": 0,
+          "cellValue": 26712,
+          "cellShortOfRecords": 0,
+          "pastEnd": [
+            "zeros",
+            "zeros",
+            "zeros",
+            "end of file"
+          ],
+          "writerCommitsCounted": 26712
+        },
+        "killed": null,
+        "adopted": [],
+        "owner": {
+          "role": "owner",
+          "commits": 26712,
+          "reads": 2640,
+          "errors": 0,
+          "lastError": null
+        },
+        "fileBytes": 430387200
+      },
+      {
+        "design": "unsafe",
+        "writers": 1,
+        "sync": true,
+        "kill": null,
+        "elapsedMs": 3001,
+        "committedRecords": 2372,
+        "commitsPerSecond": 790,
+        "commitLatencyUs": [
+          {
+            "median": 1165,
+            "p95": 1850
+          }
+        ],
+        "turnWaitUs": [
+          {
+            "median": 215,
+            "p95": 370
+          }
+        ],
+        "readerReads": 101568,
+        "readsPerSecond": 33845,
+        "recordReadUs": {
+          "n": 101568,
+          "min": 5,
+          "median": 20,
+          "p95": 35,
+          "p99": 55,
+          "max": 1655,
+          "mean": 20.4
+        },
+        "slotReadUs": {
+          "n": 102000,
+          "min": 0,
+          "median": 5,
+          "p95": 10,
+          "p99": 25,
+          "max": 435,
+          "mean": 4.1
+        },
+        "check": {
+          "badCommittedRecords": 0,
+          "readerBad": 0,
+          "readerBadKinds": {},
+          "readerCellTorn": 0,
+          "readerCellBackwards": 0,
+          "readerWalked": 2372,
+          "ackedButLost": [],
+          "writerErrors": 0,
+          "writerFailures": [],
+          "fullExtents": 0,
+          "cellValue": 2372,
+          "cellShortOfRecords": 0,
+          "pastEnd": [
+            "end of file"
+          ],
+          "writerCommitsCounted": 2372
+        },
+        "killed": null,
+        "adopted": [],
+        "owner": null,
+        "fileBytes": 9781248
+      },
+      {
+        "design": "unsafe",
+        "writers": 2,
+        "sync": true,
+        "kill": null,
+        "elapsedMs": 3000,
+        "committedRecords": 3221,
+        "commitsPerSecond": 1074,
+        "commitLatencyUs": [
+          {
+            "median": 1460,
+            "p95": 3710
+          },
+          {
+            "median": 1465,
+            "p95": 3635
+          }
+        ],
+        "turnWaitUs": [
+          {
+            "median": 260,
+            "p95": 965
+          },
+          {
+            "median": 270,
+            "p95": 1020
+          }
+        ],
+        "readerReads": 118484,
+        "readsPerSecond": 39495,
+        "recordReadUs": {
+          "n": 118484,
+          "min": 5,
+          "median": 15,
+          "p95": 30,
+          "p99": 50,
+          "max": 2325,
+          "mean": 16
+        },
+        "slotReadUs": {
+          "n": 119760,
+          "min": 0,
+          "median": 5,
+          "p95": 10,
+          "p99": 25,
+          "max": 3920,
+          "mean": 4.3
+        },
+        "check": {
+          "badCommittedRecords": 0,
+          "readerBad": 0,
+          "readerBadKinds": {},
+          "readerCellTorn": 0,
+          "readerCellBackwards": 0,
+          "readerWalked": 3221,
+          "ackedButLost": [],
+          "writerErrors": 0,
+          "writerFailures": [],
+          "fullExtents": 0,
+          "cellValue": 3221,
+          "cellShortOfRecords": 0,
+          "pastEnd": [
+            "zeros",
+            "end of file"
+          ],
+          "writerCommitsCounted": 3221
+        },
+        "killed": null,
+        "adopted": [],
+        "owner": null,
+        "fileBytes": 140902400
+      },
+      {
+        "design": "unsafe",
+        "writers": 4,
+        "sync": true,
+        "kill": null,
+        "elapsedMs": 3001,
+        "committedRecords": 2971,
+        "commitsPerSecond": 990,
+        "commitLatencyUs": [
+          {
+            "median": 2995,
+            "p95": 5970
+          },
+          {
+            "median": 2945,
+            "p95": 6065
+          },
+          {
+            "median": 3065,
+            "p95": 5645
+          },
+          {
+            "median": 2965,
+            "p95": 5810
+          }
+        ],
+        "turnWaitUs": [
+          {
+            "median": 1425,
+            "p95": 2965
+          },
+          {
+            "median": 1470,
+            "p95": 3095
+          },
+          {
+            "median": 1410,
+            "p95": 3020
+          },
+          {
+            "median": 1380,
+            "p95": 3085
+          }
+        ],
+        "readerReads": 121967,
+        "readsPerSecond": 40642,
+        "recordReadUs": {
+          "n": 121967,
+          "min": 5,
+          "median": 15,
+          "p95": 20,
+          "p99": 40,
+          "max": 3470,
+          "mean": 15.4
+        },
+        "slotReadUs": {
+          "n": 123552,
+          "min": 0,
+          "median": 5,
+          "p95": 10,
+          "p99": 15,
+          "max": 2700,
+          "mean": 4.1
+        },
+        "check": {
+          "badCommittedRecords": 0,
+          "readerBad": 0,
+          "readerBadKinds": {},
+          "readerCellTorn": 0,
+          "readerCellBackwards": 0,
+          "readerWalked": 2971,
+          "ackedButLost": [],
+          "writerErrors": 0,
+          "writerFailures": [],
+          "fullExtents": 0,
+          "cellValue": 2971,
+          "cellShortOfRecords": 0,
+          "pastEnd": [
+            "zeros",
+            "zeros",
+            "zeros",
+            "end of file"
+          ],
+          "writerCommitsCounted": 2971
+        },
+        "killed": null,
+        "adopted": [],
+        "owner": null,
+        "fileBytes": 405798912
+      },
+      {
+        "design": "owner",
+        "writers": 1,
+        "sync": true,
+        "kill": null,
+        "elapsedMs": 3000,
+        "committedRecords": 2527,
+        "commitsPerSecond": 842,
+        "commitLatencyUs": [
+          {
+            "median": 900,
+            "p95": 1395
+          }
+        ],
+        "turnWaitUs": [
+          {}
+        ],
+        "readerReads": 1369,
+        "readsPerSecond": 456,
+        "recordReadUs": {
+          "n": 1369,
+          "min": 125,
+          "median": 710,
+          "p95": 1100,
+          "p99": 1670,
+          "max": 191900,
+          "mean": 914.9
+        },
+        "slotReadUs": {
+          "n": 1375,
+          "min": 95,
+          "median": 250,
+          "p95": 985,
+          "p99": 1440,
+          "max": 29655,
+          "mean": 466.3
+        },
+        "check": {
+          "badCommittedRecords": 0,
+          "readerBad": 0,
+          "readerBadKinds": {},
+          "readerCellTorn": 0,
+          "readerCellBackwards": 0,
+          "readerWalked": 0,
+          "ackedButLost": [],
+          "writerErrors": 0,
+          "writerFailures": [],
+          "fullExtents": 0,
+          "cellValue": 2527,
+          "cellShortOfRecords": 0,
+          "pastEnd": [
+            "end of file"
+          ],
+          "writerCommitsCounted": 2527
+        },
+        "killed": null,
+        "adopted": [],
+        "owner": {
+          "role": "owner",
+          "commits": 2527,
+          "reads": 1369,
+          "errors": 0,
+          "lastError": null
+        },
+        "fileBytes": 10416128
+      },
+      {
+        "design": "owner",
+        "writers": 2,
+        "sync": true,
+        "kill": null,
+        "elapsedMs": 3001,
+        "committedRecords": 3359,
+        "commitsPerSecond": 1119,
+        "commitLatencyUs": [
+          {
+            "median": 1695,
+            "p95": 2565
+          },
+          {
+            "median": 1700,
+            "p95": 2525
+          }
+        ],
+        "turnWaitUs": [
+          {},
+          {}
+        ],
+        "readerReads": 765,
+        "readsPerSecond": 255,
+        "recordReadUs": {
+          "n": 765,
+          "min": 160,
+          "median": 1100,
+          "p95": 2220,
+          "p99": 3245,
+          "max": 7060,
+          "mean": 1304
+        },
+        "slotReadUs": {
+          "n": 774,
+          "min": 110,
+          "median": 990,
+          "p95": 2015,
+          "p99": 3380,
+          "max": 6655,
+          "mean": 1174.6
+        },
+        "check": {
+          "badCommittedRecords": 0,
+          "readerBad": 0,
+          "readerBadKinds": {},
+          "readerCellTorn": 0,
+          "readerCellBackwards": 0,
+          "readerWalked": 0,
+          "ackedButLost": [],
+          "writerErrors": 0,
+          "writerFailures": [],
+          "fullExtents": 0,
+          "cellValue": 3359,
+          "cellShortOfRecords": 0,
+          "pastEnd": [
+            "zeros",
+            "end of file"
+          ],
+          "writerCommitsCounted": 3359
+        },
+        "killed": null,
+        "adopted": [],
+        "owner": {
+          "role": "owner",
+          "commits": 3359,
+          "reads": 765,
+          "errors": 0,
+          "lastError": null
+        },
+        "fileBytes": 141176832
+      },
+      {
+        "design": "owner",
+        "writers": 4,
+        "sync": true,
+        "kill": null,
+        "elapsedMs": 3000,
+        "committedRecords": 3958,
+        "commitsPerSecond": 1319,
+        "commitLatencyUs": [
+          {
+            "median": 2940,
+            "p95": 4125
+          },
+          {
+            "median": 2965,
+            "p95": 4175
+          },
+          {
+            "median": 2955,
+            "p95": 4170
+          },
+          {
+            "median": 2960,
+            "p95": 4240
+          }
+        ],
+        "turnWaitUs": [
+          {},
+          {},
+          {},
+          {}
+        ],
+        "readerReads": 386,
+        "readsPerSecond": 129,
+        "recordReadUs": {
+          "n": 386,
+          "min": 165,
+          "median": 2495,
+          "p95": 3760,
+          "p99": 5895,
+          "max": 9555,
+          "mean": 2585.1
+        },
+        "slotReadUs": {
+          "n": 405,
+          "min": 90,
+          "median": 2395,
+          "p95": 3635,
+          "p99": 4745,
+          "max": 8590,
+          "mean": 2423.8
+        },
+        "check": {
+          "badCommittedRecords": 0,
+          "readerBad": 0,
+          "readerBadKinds": {},
+          "readerCellTorn": 0,
+          "readerCellBackwards": 0,
+          "readerWalked": 0,
+          "ackedButLost": [],
+          "writerErrors": 0,
+          "writerFailures": [],
+          "fullExtents": 0,
+          "cellValue": 3958,
+          "cellShortOfRecords": 0,
+          "pastEnd": [
+            "zeros",
+            "zeros",
+            "zeros",
+            "end of file"
+          ],
+          "writerCommitsCounted": 3958
+        },
+        "killed": null,
+        "adopted": [],
+        "owner": {
+          "role": "owner",
+          "commits": 3958,
+          "reads": 386,
+          "errors": 0,
+          "lastError": null
+        },
+        "fileBytes": 406781952
+      },
+      {
+        "design": "unsafe",
+        "writers": 4,
+        "sync": false,
+        "kill": "close",
+        "elapsedMs": 3000,
+        "committedRecords": 7864,
+        "commitsPerSecond": 2621,
+        "commitLatencyUs": [
+          {
+            "median": 1320,
+            "p95": 2905
+          },
+          {
+            "median": 1320,
+            "p95": 2730
+          },
+          {
+            "median": 1325,
+            "p95": 2845
+          },
+          {
+            "median": 1405,
+            "p95": 2690
+          }
+        ],
+        "turnWaitUs": [
+          {
+            "median": 570,
+            "p95": 1440
+          },
+          {
+            "median": 565,
+            "p95": 1420
+          },
+          {
+            "median": 560,
+            "p95": 1470
+          },
+          {
+            "median": 595,
+            "p95": 1260
+          }
+        ],
+        "readerReads": 110543,
+        "readsPerSecond": 36848,
+        "recordReadUs": {
+          "n": 110543,
+          "min": 5,
+          "median": 15,
+          "p95": 25,
+          "p99": 40,
+          "max": 3195,
+          "mean": 17.3
+        },
+        "slotReadUs": {
+          "n": 110912,
+          "min": 0,
+          "median": 5,
+          "p95": 10,
+          "p99": 15,
+          "max": 4135,
+          "mean": 4.1
+        },
+        "check": {
+          "badCommittedRecords": 0,
+          "readerBad": 0,
+          "readerBadKinds": {},
+          "readerCellTorn": 0,
+          "readerCellBackwards": 0,
+          "readerWalked": 7864,
+          "ackedButLost": [],
+          "writerErrors": 0,
+          "writerFailures": [],
+          "fullExtents": 0,
+          "cellValue": 7864,
+          "cellShortOfRecords": 0,
+          "pastEnd": [
+            "zeros",
+            "zeros",
+            "zeros",
+            "end of file"
+          ],
+          "writerCommitsCounted": 6824
+        },
+        "killed": {
+          "at": 1500,
+          "progressBefore": {
+            "0": 982,
+            "1": 991,
+            "2": 975,
+            "3": 988
+          }
+        },
+        "adopted": [
+          {
+            "e": 3,
+            "adoptedAt": 1040
+          }
+        ],
+        "owner": null,
+        "fileBytes": 410263552
+      },
+      {
+        "design": "unsafe",
+        "writers": 4,
+        "sync": false,
+        "kill": "crash",
+        "elapsedMs": 3000,
+        "committedRecords": 7819,
+        "commitsPerSecond": 2606,
+        "commitLatencyUs": [
+          {
+            "median": 1305,
+            "p95": 2900
+          },
+          {
+            "median": 1290,
+            "p95": 2875
+          },
+          {
+            "median": 1300,
+            "p95": 2980
+          },
+          {
+            "median": 1230,
+            "p95": 2625
+          }
+        ],
+        "turnWaitUs": [
+          {
+            "median": 570,
+            "p95": 1420
+          },
+          {
+            "median": 570,
+            "p95": 1500
+          },
+          {
+            "median": 575,
+            "p95": 1520
+          },
+          {
+            "median": 545,
+            "p95": 1175
+          }
+        ],
+        "readerReads": 95579,
+        "readsPerSecond": 31860,
+        "recordReadUs": {
+          "n": 95579,
+          "min": 5,
+          "median": 20,
+          "p95": 25,
+          "p99": 45,
+          "max": 4120,
+          "mean": 20.7
+        },
+        "slotReadUs": {
+          "n": 96096,
+          "min": 0,
+          "median": 5,
+          "p95": 10,
+          "p99": 15,
+          "max": 1560,
+          "mean": 4.4
+        },
+        "check": {
+          "badCommittedRecords": 0,
+          "readerBad": 0,
+          "readerBadKinds": {},
+          "readerCellTorn": 0,
+          "readerCellBackwards": 0,
+          "readerWalked": 7819,
+          "ackedButLost": [],
+          "writerErrors": 0,
+          "writerFailures": [],
+          "fullExtents": 0,
+          "cellValue": 7818,
+          "cellShortOfRecords": 1,
+          "pastEnd": [
+            "zeros",
+            "zeros",
+            "zeros",
+            "end of file"
+          ],
+          "writerCommitsCounted": 6831
+        },
+        "killed": {
+          "at": 1500,
+          "progressBefore": {
+            "0": 993,
+            "1": 989,
+            "2": 985,
+            "3": 915
+          }
+        },
+        "adopted": [
+          {
+            "e": 3,
+            "adoptedAt": 988
+          }
+        ],
+        "owner": null,
+        "fileBytes": 410300416
+      },
+      {
+        "design": "owner",
+        "writers": 4,
+        "sync": false,
+        "kill": "close",
+        "elapsedMs": 3001,
+        "committedRecords": 24305,
+        "commitsPerSecond": 8099,
+        "commitLatencyUs": [
+          {
+            "median": 415,
+            "p95": 840
+          },
+          {
+            "median": 425,
+            "p95": 855
+          },
+          {
+            "median": 425,
+            "p95": 870
+          },
+          {
+            "median": 410,
+            "p95": 815
+          }
+        ],
+        "turnWaitUs": [
+          {},
+          {},
+          {},
+          {}
+        ],
+        "readerReads": 2383,
+        "readsPerSecond": 794,
+        "recordReadUs": {
+          "n": 2383,
+          "min": 120,
+          "median": 410,
+          "p95": 815,
+          "p99": 1555,
+          "max": 7445,
+          "mean": 463.9
+        },
+        "slotReadUs": {
+          "n": 2393,
+          "min": 70,
+          "median": 335,
+          "p95": 800,
+          "p99": 2065,
+          "max": 7375,
+          "mean": 404.6
+        },
+        "check": {
+          "badCommittedRecords": 0,
+          "readerBad": 0,
+          "readerBadKinds": {},
+          "readerCellTorn": 0,
+          "readerCellBackwards": 0,
+          "readerWalked": 0,
+          "ackedButLost": [],
+          "writerErrors": 0,
+          "writerFailures": [],
+          "fullExtents": 0,
+          "cellValue": 24305,
+          "cellShortOfRecords": 0,
+          "pastEnd": [
+            "zeros",
+            "zeros",
+            "zeros",
+            "end of file"
+          ],
+          "writerCommitsCounted": 21149
+        },
+        "killed": {
+          "at": 1500,
+          "progressBefore": {
+            "0": 3278,
+            "1": 2903,
+            "2": 2845,
+            "3": 2980
+          }
+        },
+        "adopted": [
+          {
+            "e": 3,
+            "adoptedAt": 3156
+          }
+        ],
+        "owner": {
+          "role": "owner",
+          "commits": 24305,
+          "reads": 2383,
+          "errors": 0,
+          "lastError": null
+        },
+        "fileBytes": 426291200
+      },
+      {
+        "design": "owner",
+        "writers": 4,
+        "sync": false,
+        "kill": "crash",
+        "elapsedMs": 3000,
+        "committedRecords": 23733,
+        "commitsPerSecond": 7911,
+        "commitLatencyUs": [
+          {
+            "median": 405,
+            "p95": 870
+          },
+          {
+            "median": 410,
+            "p95": 865
+          },
+          {
+            "median": 415,
+            "p95": 895
+          },
+          {
+            "median": 440,
+            "p95": 975
+          }
+        ],
+        "turnWaitUs": [
+          {},
+          {},
+          {},
+          {}
+        ],
+        "readerReads": 2338,
+        "readsPerSecond": 779,
+        "recordReadUs": {
+          "n": 2338,
+          "min": 145,
+          "median": 410,
+          "p95": 880,
+          "p99": 2100,
+          "max": 18650,
+          "mean": 488.4
+        },
+        "slotReadUs": {
+          "n": 2346,
+          "min": 90,
+          "median": 335,
+          "p95": 730,
+          "p99": 1915,
+          "max": 9800,
+          "mean": 406.4
+        },
+        "check": {
+          "badCommittedRecords": 0,
+          "readerBad": 0,
+          "readerBadKinds": {},
+          "readerCellTorn": 0,
+          "readerCellBackwards": 0,
+          "readerWalked": 0,
+          "ackedButLost": [],
+          "writerErrors": 0,
+          "writerFailures": [],
+          "fullExtents": 0,
+          "cellValue": 23733,
+          "cellShortOfRecords": 0,
+          "pastEnd": [
+            "zeros",
+            "zeros",
+            "zeros",
+            "end of file"
+          ],
+          "writerCommitsCounted": 20534
+        },
+        "killed": {
+          "at": 1500,
+          "progressBefore": {
+            "0": 3245,
+            "1": 3158,
+            "2": 3192,
+            "3": 2990
+          }
+        },
+        "adopted": [
+          {
+            "e": 3,
+            "adoptedAt": 3199
+          }
+        ],
+        "owner": {
+          "role": "owner",
+          "commits": 23733,
+          "reads": 2338,
+          "errors": 0,
+          "lastError": null
+        },
+        "fileBytes": 424390656
+      }
+    ]
+  },
+  "wallSeconds": 167
+}

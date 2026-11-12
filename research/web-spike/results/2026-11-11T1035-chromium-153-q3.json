@@ -1,0 +1,235 @@
+{
+  "date": "2026-11-11T10:35:01.682Z",
+  "quick": false,
+  "browser": "153.0.8010.12",
+  "env": {
+    "crossOriginIsolated": true,
+    "isSecureContext": true,
+    "userAgent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/153.0.8010.12 Safari/537.36",
+    "hardwareConcurrency": 4,
+    "hasSharedWorker": "function",
+    "hasLocks": "object"
+  },
+  "machine": {
+    "platform": "linux",
+    "release": "6.18.44-fc-v378",
+    "cpus": 4,
+    "cpuModel": "Intel(R) Xeon(R) Processor @ 2.10GHz",
+    "memGiB": 16
+  },
+  "profileDir": "a fresh temporary directory under os.tmpdir()",
+  "q3": {
+    "uncontendedInWorker": {
+      "exclusive": {
+        "n": 2000,
+        "min": 85,
+        "median": 140,
+        "p95": 190,
+        "p99": 280,
+        "max": 3425,
+        "mean": 144.2
+      },
+      "shared": {
+        "n": 2000,
+        "min": 85,
+        "median": 125,
+        "p95": 165,
+        "p99": 210,
+        "max": 3685,
+        "mean": 132.5
+      },
+      "ifAvailableFree": {
+        "n": 2000,
+        "min": 85,
+        "median": 120,
+        "p95": 160,
+        "p99": 180,
+        "max": 1615,
+        "mean": 121.6
+      },
+      "ifAvailableHeld": {
+        "n": 2000,
+        "min": 70,
+        "median": 95,
+        "p95": 130,
+        "p99": 160,
+        "max": 270,
+        "mean": 99.7,
+        "refused": 2100
+      },
+      "holdAcquire": {
+        "n": 2000,
+        "min": 80,
+        "median": 120,
+        "p95": 160,
+        "p99": 210,
+        "max": 2270,
+        "mean": 125.6
+      },
+      "holdReleaseSettled": {
+        "n": 2000,
+        "min": 5,
+        "median": 15,
+        "p95": 30,
+        "p99": 45,
+        "max": 110,
+        "mean": 16.3
+      },
+      "query": {
+        "n": 300,
+        "min": 85,
+        "median": 100,
+        "p95": 155,
+        "p99": 210,
+        "max": 355,
+        "mean": 106
+      }
+    },
+    "uncontendedInPage": {
+      "n": 2000,
+      "min": 80,
+      "median": 145,
+      "p95": 200,
+      "p99": 335,
+      "max": 1665,
+      "mean": 150.5
+    },
+    "contention": {
+      "2pages_hold0ms": {
+        "grants": 2000,
+        "handoffUs": {
+          "n": 1999,
+          "min": 74.7,
+          "median": 135.3,
+          "p95": 200,
+          "p99": 269.8,
+          "max": 1159.9
+        },
+        "sameHolderTwiceInARow": 2,
+        "fifoViolations": 2,
+        "grantsPerSecond": 6843
+      },
+      "3pages_hold0ms": {
+        "grants": 3000,
+        "handoffUs": {
+          "n": 2999,
+          "min": 75.2,
+          "median": 150.1,
+          "p95": 224.9,
+          "p99": 300,
+          "max": 3294.9
+        },
+        "sameHolderTwiceInARow": 0,
+        "fifoViolations": 1,
+        "grantsPerSecond": 6226
+      },
+      "3pages_hold0.2ms": {
+        "grants": 3000,
+        "handoffUs": {
+          "n": 2999,
+          "min": 125,
+          "median": 260,
+          "p95": 425.3,
+          "p99": 825,
+          "max": 4369.9
+        },
+        "sameHolderTwiceInARow": 0,
+        "fifoViolations": 0,
+        "grantsPerSecond": 2021
+      },
+      "4pages_hold0ms": {
+        "grants": 4000,
+        "handoffUs": {
+          "n": 3999,
+          "min": 74.7,
+          "median": 145,
+          "p95": 214.8,
+          "p99": 329.8,
+          "max": 3809.8
+        },
+        "sameHolderTwiceInARow": 5,
+        "fifoViolations": 14,
+        "grantsPerSecond": 6270
+      }
+    },
+    "release": {
+      "release": {
+        "releasedAfterMs": [
+          2,
+          3,
+          3,
+          3,
+          2
+        ]
+      },
+      "close": {
+        "releasedAfterMs": [
+          10,
+          10,
+          8,
+          8,
+          8
+        ]
+      },
+      "pageThreadClose": {
+        "releasedAfterMs": [
+          9,
+          10,
+          8,
+          10,
+          10
+        ]
+      },
+      "terminate": {
+        "releasedAfterMs": [
+          3,
+          4,
+          2,
+          2,
+          3
+        ]
+      },
+      "navigate": {
+        "releasedAfterMs": [
+          34,
+          32,
+          28,
+          35,
+          33
+        ]
+      },
+      "crash": {
+        "releasedAfterMs": [
+          12,
+          8,
+          8,
+          7,
+          8
+        ]
+      }
+    },
+    "freeze": {
+      "waiterGrantedWhileHolderFrozen": false,
+      "heartbeatsFromFrozenPagesWorkerIn1_5s": 146,
+      "stealGrantedAfterMs": 3,
+      "holderSawAfterUnfreeze": "AbortError: Lock broken by another request with the 'steal' option.",
+      "heartbeatsIn500msAfterUnfreeze": 50,
+      "waiterGrantedEventually": true
+    },
+    "presentLeaveTogether": {
+      "workers": 4,
+      "trials": 20,
+      "workersThatThoughtTheyWereLast": {
+        "1": 20
+      }
+    },
+    "presentLeaveTogetherInTurn": {
+      "workers": 4,
+      "trials": 20,
+      "workersThatThoughtTheyWereLast": {
+        "1": 20
+      }
+    }
+  },
+  "wallSeconds": 28
+}
