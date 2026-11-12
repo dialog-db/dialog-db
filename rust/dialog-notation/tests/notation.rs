@@ -580,7 +580,29 @@ async fn it_keeps_a_struct_and_takes_it_apart_by_a_pattern() -> Result<()> {
         1
     );
 
-    // In a rule a struct is not had yet.
+    // A query of several premises is a rule laid over the branch for
+    // the query alone. The notation hands Dialog-DB that rule with the
+    // struct in it, and Dialog-DB names a rule laid over a branch by its
+    // stored form, which has no way to write a pattern. So it is not had
+    // yet, though nothing would be stored.
+    notebook
+        .submit(r#"(assert! (xyz.person person:ada name: "Ada"))"#)
+        .await?;
+    let joined = notebook
+        .submit(
+            "(query (xyz.person ?p name: ?who)
+               (when (xyz.note ?n about: {author: ?who tags: _ pinned: _})
+                     (xyz.person ?p name: ?who)))",
+        )
+        .await
+        .map_err(|error| error.downcast::<Error>());
+    assert!(
+        matches!(joined, Err(Ok(Error::Unsupported(_)))),
+        "{joined:?}"
+    );
+
+    // Nor can Dialog-DB keep a rule that holds a struct, for the same
+    // reason.
     let rule = notebook
         .submit("(rule (xyz.by ?n author: ?who) (when (xyz.note ?n about: {author: ?who})))")
         .await

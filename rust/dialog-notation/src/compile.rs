@@ -25,8 +25,9 @@ use dialog_corpus::{Composite, Entity, Value};
 use dialog_query::concept::descriptor::ConceptStatement;
 use dialog_query::formula::entity::derive;
 use dialog_query::{
-    Any, AttributeDescriptor, ConceptConclusion, ConceptQuery, DeductiveRule, InductiveRule,
-    Pattern, Term as Variable,
+    Any, AttributeDescriptor, ConceptConclusion, ConceptQuery, DeductiveRule,
+    DeductiveRuleDescriptor, InductiveRule, InductiveRuleDescriptor, Pattern,
+    Premise as DialogPremise, Proposition, Term as Variable,
 };
 use serde_json::{Map, Value as Json, json};
 
@@ -849,18 +850,21 @@ impl Scope {
         }
     }
 
-    /// A rule is written out for Dialog-DB to read, and a pattern has no
-    /// written form there yet.
-    fn written(&self) -> Result<(), Error> {
-        if self.shapes.is_empty() {
-            Ok(())
-        } else {
-            Err(Error::Unsupported(
-                "a struct in a rule: a rule is handed to Dialog-DB written out, and a pattern \
-                 has no written form there yet. A query of one read takes one"
-                    .into(),
-            ))
-        }
+    /// What ties each pattern to the variable written in its place: an
+    /// equality, which builds the value where the pattern's variables
+    /// are bound and takes it apart where the variable is. A rule is
+    /// handed to Dialog-DB written out, and a pattern has no written
+    /// form, so these join its premises once the rest is read.
+    fn equalities(&self) -> Vec<Proposition> {
+        self.shapes
+            .iter()
+            .filter_map(|(place, _, pattern)| {
+                match Pattern::from(Variable::<Any>::var(place.clone())).is(pattern.clone()) {
+                    DialogPremise::Assert(proposition) => Some(proposition),
+                    DialogPremise::Unless(_) => None,
+                }
+            })
+            .collect()
     }
 
     fn rule(self, head: &str, concept: Json, description: Option<&str>) -> Json {
@@ -878,25 +882,43 @@ impl Scope {
 }
 
 /// A Dialog-DB rule concluding `read` when the premises of `rule` hold.
-fn concluding(rule: &Rule, read: &Read, head: &str) -> Result<Json, Error> {
+fn concluding(rule: &Rule, read: &Read, head: &str) -> Result<(Json, Vec<Proposition>), Error> {
     whole(read, &bound(rule))?;
     let fields: Vec<&Field> = read.fields.iter().collect();
     let mut scope = Scope::default();
     scope.adopt(read, &fields);
     scope.body(rule)?;
     let concept = scope.head(read, &fields)?;
-    scope.written()?;
-    Ok(scope.rule(head, concept, rule.description.as_deref()))
+    let patterns = scope.equalities();
+    Ok((
+        scope.rule(head, concept, rule.description.as_deref()),
+        patterns,
+    ))
 }
 
-fn deduce(rule: &Rule, read: &Read) -> Result<Step, Error> {
-    serde_json::from_value(concluding(rule, read, "deduce")?)
-        .map(|rule| Step::Deduce(Box::new(rule)))
+/// A deductive rule as Dialog-DB reads it written out, with the
+/// patterns it holds put among its premises.
+fn deductive(written: Json, patterns: Vec<Proposition>) -> Result<DeductiveRule, Error> {
+    let mut descriptor: DeductiveRuleDescriptor =
+        serde_json::from_value(written).map_err(|error| refused("the rule", error))?;
+    descriptor.when.extend(patterns);
+    descriptor
+        .compile()
         .map_err(|error| refused("the rule", error))
 }
 
+fn deduce(rule: &Rule, read: &Read) -> Result<Step, Error> {
+    let (written, patterns) = concluding(rule, read, "deduce")?;
+    deductive(written, patterns).map(|rule| Step::Deduce(Box::new(rule)))
+}
+
 fn induce(rule: &Rule, read: &Read, head: &str) -> Result<InductiveRule, Error> {
-    serde_json::from_value(concluding(rule, read, head)?)
+    let (written, patterns) = concluding(rule, read, head)?;
+    let mut descriptor: InductiveRuleDescriptor =
+        serde_json::from_value(written).map_err(|error| refused("the rule", error))?;
+    descriptor.when.extend(patterns);
+    descriptor
+        .compile()
         .map_err(|error| refused("the rule", error))
 }
 
@@ -1034,7 +1056,7 @@ fn report(rule: &Rule, read: &Read, site: &str) -> Result<Step, Error> {
         fields: columns,
     };
     let concept = scope.head(&head, &head.fields.iter().collect::<Vec<_>>())?;
-    scope.written()?;
+    let patterns = scope.equalities();
     let mut terms = Map::new();
     terms.insert("this".into(), variable("this"));
     for column in &head.fields {
@@ -1042,10 +1064,7 @@ fn report(rule: &Rule, read: &Read, site: &str) -> Result<Step, Error> {
     }
     let select = json!({ "assert": concept.clone(), "where": terms });
     Ok(Step::Query(Box::new(Query {
-        rule: Some(
-            serde_json::from_value(scope.rule("deduce", concept, None))
-                .map_err(|error| refused("the rule behind the query", error))?,
-        ),
+        rule: Some(deductive(scope.rule("deduce", concept, None), patterns)?),
         select: serde_json::from_value(select).map_err(|error| refused("the query", error))?,
         domain: read.domain.clone(),
         entity,

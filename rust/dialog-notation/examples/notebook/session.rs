@@ -2,7 +2,7 @@
 //! to it so far. The example and the tests share it.
 
 use anyhow::Result;
-use dialog_notation::{Diagnostic, Expander, Step, compile};
+use dialog_notation::{Diagnostic, Error, Expander, Step, compile};
 use dialog_peer::helpers::{test_repo, test_session_with_peer};
 use dialog_peer::{Peer, Session};
 use dialog_query::ConceptConclusion;
@@ -44,8 +44,19 @@ impl Notebook {
                     Step::Assert(statement) => transaction.assert(statement),
                     Step::Retract(statement) => transaction.retract(statement),
                     Step::Issue(statement) => transaction.dispatch(statement),
-                    Step::Deduce(rule) => transaction.assert(*rule),
-                    Step::Induce(rule) => transaction.assert(*rule),
+                    // Dialog-DB refuses to keep a rule its stored form
+                    // cannot write, and an assertion has no error to
+                    // return, so it is asked first.
+                    Step::Deduce(rule) => {
+                        rule.storable()
+                            .map_err(|refusal| Error::Unsupported(refusal.to_string()))?;
+                        transaction.assert(*rule)
+                    }
+                    Step::Induce(rule) => {
+                        rule.storable()
+                            .map_err(|refusal| Error::Unsupported(refusal.to_string()))?;
+                        transaction.assert(*rule)
+                    }
                     Step::Transient(concept) => transaction.assert(Transient(concept)),
                     Step::Query(query) => {
                         queries.push(query);
@@ -64,8 +75,14 @@ impl Notebook {
         }
         let mut report = Vec::new();
         for query in queries {
+            // A rule laid over the branch is named as a stored one is,
+            // so one Dialog-DB cannot write out is refused here too.
             let layer = match &query.rule {
-                Some(rule) => self.branch.with(rule.clone()),
+                Some(rule) => {
+                    rule.storable()
+                        .map_err(|refusal| Error::Unsupported(refusal.to_string()))?;
+                    self.branch.with(rule.clone())
+                }
                 None => self.branch.query(),
             };
             let rows: Vec<ConceptConclusion> = layer
