@@ -208,11 +208,15 @@ fn build(
     node: &mut FileNode,
 ) -> Option<()> {
     if rows.kind != INDEX {
+        // A segment's every entry has a value, and `value` hands it out
+        // with no way to fail: a frame whose row names none, which only a
+        // damaged frame holds, is not served, and the node is read from
+        // its block instead.
         node.entries = rows
             .sections
             .first()?
             .iter()
-            .map(|row| entry(archive, snapshot, row))
+            .map(|row| entry(archive, snapshot, row).filter(|entry| entry.value.is_some()))
             .collect::<Option<_>>()?;
         return Some(());
     }
