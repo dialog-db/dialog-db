@@ -585,6 +585,22 @@ fn collection_premise(query: &ConceptQuery) -> Option<Entry<'_>> {
     })
 }
 
+/// The variable that `premise` takes as its entity, where the premise must
+/// hold for a row: a positive premise that is not optional, which reads an
+/// attribute of the variable or applies a concept to it. Such a variable
+/// holds an entity in each row. A negated premise holds where its fact is
+/// absent, and an optional premise holds with no fact, so a variable that
+/// only such a premise takes as its entity can hold any value in a row.
+fn entity_of(premise: &Premise) -> Option<&str> {
+    match premise {
+        Premise::Assert(Proposition::Attribute(query)) => query.of().name(),
+        Premise::Assert(Proposition::Concept(query)) => {
+            query.terms.get("this").and_then(|term| term.name())
+        }
+        _ => None,
+    }
+}
+
 /// The concept application of a premise, and whether it is negated.
 fn concept_premise(premise: &Premise) -> Option<(&ConceptQuery, bool)> {
     match premise {
@@ -613,6 +629,10 @@ where
 {
     let premises = &rule.analysis().premises;
     let mut heads = Heads::default();
+    // The head, and each variable that a premise must take as its entity
+    // for a row to hold (see `entity_of`).
+    let mut entities: BTreeSet<&str> = BTreeSet::from(["this"]);
+    entities.extend(premises.iter().filter_map(entity_of));
 
     for premise in premises {
         // Attribute premises (positive, optional, or negated) are
@@ -701,12 +721,14 @@ where
                     (entry.key, Value::String(fact.the.name().to_owned())),
                     (entry.value, value),
                 ];
-                // A head is an entity. A field with no type can hold an
-                // entry of another value, and where the premise names the
-                // head as the value of its entry, such an entry reaches no
-                // head.
+                // A head is an entity, and so is each variable that a
+                // premise of the rule takes as its entity. A field with no
+                // type can hold an entry of another value, and where the
+                // premise names such a variable as the value of its entry,
+                // such an entry reaches no head.
                 if slots.iter().any(|(term, value)| {
-                    term.is_some_and(|term| term.name() == Some("this"))
+                    term.and_then(|term| term.name())
+                        .is_some_and(|name| entities.contains(name))
                         && !matches!(value, Value::Entity(_))
                 }) {
                     continue;
