@@ -471,7 +471,10 @@ mod tests {
             "{routes:?}"
         );
 
-        let pulled = feature.pull().perform(&operator).await;
+        let pulled = feature
+            .pull(crate::Download::MinimalRanges)
+            .perform(&operator)
+            .await;
         assert!(
             matches!(pulled, Err(PullError::Unreachable { .. })),
             "{pulled:?}"

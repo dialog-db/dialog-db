@@ -148,7 +148,7 @@ let remote_main = origin.branch("main").open().perform(&operator).await?;
 main.set_upstream(remote_main).perform(&operator).await?;
 
 main.push().perform(&operator).await?;
-main.pull().perform(&operator).await?;
+main.pull(dialog_repository::Download::MinimalRanges).perform(&operator).await?;
 ```
 
 To point at a different repository (e.g., pulling from someone else's repo):
@@ -255,7 +255,7 @@ let remote_main = origin.branch("main").open().perform(&bob_operator).await?;
 main.set_upstream(remote_main).perform(&bob_operator).await?;
 
 // Pull, edit, push
-main.pull().perform(&bob_operator).await?;
+main.pull(dialog_repository::Download::MinimalRanges).perform(&bob_operator).await?;
 
 main.transaction()
     .assert(Name::of(bob).is("Bob"))
@@ -269,5 +269,5 @@ main.push().perform(&bob_operator).await?;
 Alice pulls to get Bob's changes:
 
 ```rs
-main.pull().perform(&operator).await?;
+main.pull(dialog_repository::Download::MinimalRanges).perform(&operator).await?;
 ```

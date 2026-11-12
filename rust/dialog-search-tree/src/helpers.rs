@@ -1460,3 +1460,10 @@ macro_rules! tree_spec {
         TreeDescriptor(levels)
     }};
 }
+
+/// How many novelty buffers the calling thread has decoded so far. Take
+/// it before and after an operation to pin that the operation decodes
+/// none; a test's single-threaded runtime keeps the count its own.
+pub fn buffer_decodes() -> usize {
+    crate::buffer_decodes::count()
+}

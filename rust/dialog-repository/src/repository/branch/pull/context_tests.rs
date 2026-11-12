@@ -94,7 +94,11 @@ macro_rules! passing_writers {
                 .perform($env)
                 .await?;
             if let Some(previous) = &previous {
-                writer.pull().from(previous).perform($env).await?;
+                writer
+                    .pull(crate::Download::MinimalRanges)
+                    .from(previous)
+                    .perform($env)
+                    .await?;
             }
             writer
                 .commit(stream::iter(vec![Instruction::Assert(
@@ -179,7 +183,10 @@ async fn it_writes_both_origins_where_a_chain_changes_hands() -> Result<()> {
     region_agrees(&a, &operator, "A's chain").await?;
     let a_origin = a.revision().expect("A has a head").origin();
 
-    b.pull().from(&a).perform(&operator).await?;
+    b.pull(crate::Download::MinimalRanges)
+        .from(&a)
+        .perform(&operator)
+        .await?;
     commit!(b, &operator, "post:b0");
     let (after_b, walked) = region_agrees(&b, &operator, "B on A's head").await?;
     assert_eq!(walked.len(), 2);
@@ -191,7 +198,10 @@ async fn it_writes_both_origins_where_a_chain_changes_hands() -> Result<()> {
     commit!(b, &operator, "post:b1");
     region_agrees(&b, &operator, "B's chain").await?;
 
-    a.pull().from(&b).perform(&operator).await?;
+    a.pull(crate::Download::MinimalRanges)
+        .from(&b)
+        .perform(&operator)
+        .await?;
     commit!(a, &operator, "post:a2");
     region_agrees(&a, &operator, "A again, on B's head").await?;
     commit!(a, &operator, "post:a3");
@@ -214,22 +224,37 @@ async fn it_keeps_the_region_exact_in_every_merge_direction() -> Result<()> {
 
     let seed = passing_writers!(repo, &operator, None, 5);
     let main = repo.branch("main").open().perform(&operator).await?;
-    main.pull().from(&seed).perform(&operator).await?;
+    main.pull(crate::Download::MinimalRanges)
+        .from(&seed)
+        .perform(&operator)
+        .await?;
     commit!(main, &operator, "post:0");
     region_agrees(&main, &operator, "a commit on a passing writer's head").await?;
 
     let feature = repo.branch("feature").open().perform(&operator).await?;
     feature.set_upstream(&main).perform(&operator).await?;
-    feature.pull().perform(&operator).await?;
+    feature
+        .pull(crate::Download::MinimalRanges)
+        .perform(&operator)
+        .await?;
     commit!(main, &operator, "post:1");
-    feature.pull().perform(&operator).await?;
+    feature
+        .pull(crate::Download::MinimalRanges)
+        .perform(&operator)
+        .await?;
     assert_eq!(feature.revision(), main.revision(), "feature adopted main");
     region_agrees(&feature, &operator, "a fast-forward").await?;
 
     commit!(feature, &operator, "post:2");
-    main.pull().from(&feature).perform(&operator).await?;
+    main.pull(crate::Download::MinimalRanges)
+        .from(&feature)
+        .perform(&operator)
+        .await?;
     let before = feature.revision();
-    feature.pull().perform(&operator).await?;
+    feature
+        .pull(crate::Download::MinimalRanges)
+        .perform(&operator)
+        .await?;
     assert_eq!(feature.revision(), before, "nothing new keeps the head");
     region_agrees(&feature, &operator, "nothing new").await?;
 
@@ -237,24 +262,36 @@ async fn it_keeps_the_region_exact_in_every_merge_direction() -> Result<()> {
         commit!(feature, &operator, format!("post:f{i}"));
     }
     commit!(main, &operator, "post:m0");
-    feature.pull().perform(&operator).await?;
+    feature
+        .pull(crate::Download::MinimalRanges)
+        .perform(&operator)
+        .await?;
     region_agrees(&feature, &operator, "the screened merge").await?;
 
     for i in 0..4 {
         commit!(main, &operator, format!("post:m{}", i + 1));
     }
     commit!(feature, &operator, "post:f9");
-    feature.pull().perform(&operator).await?;
+    feature
+        .pull(crate::Download::MinimalRanges)
+        .perform(&operator)
+        .await?;
     region_agrees(&feature, &operator, "the replay").await?;
 
     for i in 0..(super::SMALL_DIVERGENCE + 2) {
         commit!(main, &operator, format!("post:gm{i}"));
         commit!(feature, &operator, format!("post:gf{i}"));
     }
-    feature.pull().perform(&operator).await?;
+    feature
+        .pull(crate::Download::MinimalRanges)
+        .perform(&operator)
+        .await?;
     region_agrees(&feature, &operator, "the graft").await?;
 
-    main.pull().from(&feature).perform(&operator).await?;
+    main.pull(crate::Download::MinimalRanges)
+        .from(&feature)
+        .perform(&operator)
+        .await?;
     region_agrees(&main, &operator, "the reverse pull").await?;
     commit!(main, &operator, "post:after");
     region_agrees(&main, &operator, "a commit on a merge").await?;
@@ -280,7 +317,11 @@ async fn it_keeps_the_region_exact_through_amend_reset_and_adoption() -> Result<
     commit!(main, &operator, "post:1");
 
     let amended = repo.branch("amended").open().perform(&operator).await?;
-    amended.pull().from(&main).perform(&operator).await?;
+    amended
+        .pull(crate::Download::MinimalRanges)
+        .from(&main)
+        .perform(&operator)
+        .await?;
     let batch = amended
         .transaction()
         .assert(note("t0")?)
@@ -310,7 +351,10 @@ async fn it_keeps_the_region_exact_through_amend_reset_and_adoption() -> Result<
 
     let adopted = repo.branch("adopted").open().perform(&operator).await?;
     adopted.set_upstream(&main).perform(&operator).await?;
-    adopted.pull().perform(&operator).await?;
+    adopted
+        .pull(crate::Download::MinimalRanges)
+        .perform(&operator)
+        .await?;
     assert_eq!(adopted.revision(), main.revision());
     commit!(adopted, &operator, "post:a0");
     region_agrees(&adopted, &operator, "a commit after adoption by root").await?;
@@ -331,7 +375,10 @@ async fn it_fast_forwards_a_follower_at_zero_reads() -> Result<()> {
     commit!(main, &writer, "post:0");
     let feature = repo.branch("feature").open().perform(&writer).await?;
     feature.set_upstream(&main).perform(&writer).await?;
-    feature.pull().perform(&writer).await?;
+    feature
+        .pull(crate::Download::MinimalRanges)
+        .perform(&writer)
+        .await?;
 
     let device = profile
         .session(b"device")
@@ -344,7 +391,10 @@ async fn it_fast_forwards_a_follower_at_zero_reads() -> Result<()> {
 
     commit!(main, &writer, "post:1");
     device.reset();
-    synced.pull().perform(&device).await?;
+    synced
+        .pull(crate::Download::MinimalRanges)
+        .perform(&device)
+        .await?;
     assert_eq!(synced.revision(), main.revision(), "a fast-forward");
     assert_eq!(
         device.block_reads(),
@@ -354,11 +404,19 @@ async fn it_fast_forwards_a_follower_at_zero_reads() -> Result<()> {
     );
 
     let relay = repo.branch("relay").open().perform(&writer).await?;
-    relay.pull().from(&main).perform(&writer).await?;
+    relay
+        .pull(crate::Download::MinimalRanges)
+        .from(&main)
+        .perform(&writer)
+        .await?;
     let relayed = local.branch("relay").open().perform(&device).await?;
     let before = synced.revision();
     device.reset();
-    synced.pull().from(&relayed).perform(&device).await?;
+    synced
+        .pull(crate::Download::MinimalRanges)
+        .from(&relayed)
+        .perform(&device)
+        .await?;
     assert_eq!(synced.revision(), before, "nothing new keeps the head");
     assert_eq!(
         device.block_reads(),
@@ -395,14 +453,23 @@ async fn it_reads_the_upstreams_region_to_fast_forward_across_origins() -> Resul
     let ours = local.branch("ours").open().perform(&device).await?;
     let upstream = local.branch("main").open().perform(&device).await?;
     ours.set_upstream(&upstream).perform(&device).await?;
-    ours.pull().perform(&device).await?;
+    ours.pull(crate::Download::MinimalRanges)
+        .perform(&device)
+        .await?;
     assert_eq!(ours.revision(), main.revision(), "we follow main");
 
     // A third writer builds on main's head, and main takes its head.
     let third = repo.branch("third").open().perform(&writer).await?;
-    third.pull().from(&main).perform(&writer).await?;
+    third
+        .pull(crate::Download::MinimalRanges)
+        .from(&main)
+        .perform(&writer)
+        .await?;
     commit!(third, &writer, "post:third");
-    main.pull().from(&third).perform(&writer).await?;
+    main.pull(crate::Download::MinimalRanges)
+        .from(&third)
+        .perform(&writer)
+        .await?;
     assert_eq!(
         main.revision(),
         third.revision(),
@@ -419,7 +486,9 @@ async fn it_reads_the_upstreams_region_to_fast_forward_across_origins() -> Resul
     // seen the upstream's new head does.
     HeldCaches::of(&device).release(ours.of());
     device.reset();
-    ours.pull().perform(&device).await?;
+    ours.pull(crate::Download::MinimalRanges)
+        .perform(&device)
+        .await?;
     assert_eq!(ours.revision(), main.revision(), "a fast-forward");
     let reads = device.block_reads();
     assert!(
@@ -453,10 +522,15 @@ async fn it_does_not_resurrect_a_deleted_fact_whose_deleter_is_only_in_the_regio
     commit!(main, &operator, "post:1");
     let feature = repo.branch("feature").open().perform(&operator).await?;
     feature.set_upstream(&main).perform(&operator).await?;
-    feature.pull().perform(&operator).await?;
+    feature
+        .pull(crate::Download::MinimalRanges)
+        .perform(&operator)
+        .await?;
     let peer = repo.branch("peer").open().perform(&operator).await?;
     peer.set_upstream(&main).perform(&operator).await?;
-    peer.pull().perform(&operator).await?;
+    peer.pull(crate::Download::MinimalRanges)
+        .perform(&operator)
+        .await?;
 
     feature
         .commit(stream::iter(vec![Instruction::Retract(fact("post:1"))]))
@@ -493,13 +567,19 @@ async fn it_does_not_resurrect_a_deleted_fact_whose_deleter_is_only_in_the_regio
 
     assert_eq!(titles(last.clone(), &cold).await?, 0);
     assert_eq!(titles(peer.clone(), &cold).await?, 1, "peer still holds it");
-    last.pull().from(&peer).perform(&cold).await?;
+    last.pull(crate::Download::MinimalRanges)
+        .from(&peer)
+        .perform(&cold)
+        .await?;
     assert_eq!(
         titles(last.clone(), &cold).await?,
         0,
         "a stale copy must not resurrect a fact deleted by an origin only the region holds"
     );
-    peer.pull().from(&last).perform(&cold).await?;
+    peer.pull(crate::Download::MinimalRanges)
+        .from(&last)
+        .perform(&cold)
+        .await?;
     assert_eq!(
         titles(peer.clone(), &cold).await?,
         0,
@@ -535,7 +615,11 @@ async fn it_pulls_and_commits_across_heads_minted_before_the_region() -> Result<
 
     let feature = repo.branch("feature").open().perform(&operator).await?;
     commit!(feature, &operator, "post:ours");
-    feature.pull().from(&inline).perform(&operator).await?;
+    feature
+        .pull(crate::Download::MinimalRanges)
+        .from(&inline)
+        .perform(&operator)
+        .await?;
     region_agrees(&feature, &operator, "a merge with an inline upstream").await?;
 
     commit!(inline, &operator, "post:inline");
@@ -553,7 +637,11 @@ async fn it_pulls_and_commits_across_heads_minted_before_the_region() -> Result<
         head.count = None;
     });
     commit!(feature, &operator, "post:ours-again");
-    other.pull().from(&feature).perform(&operator).await?;
+    other
+        .pull(crate::Download::MinimalRanges)
+        .from(&feature)
+        .perform(&operator)
+        .await?;
     region_agrees(&other, &operator, "an inline head pulling a region head").await?;
 
     let bare = repo.branch("bare").open().perform(&operator).await?;
@@ -564,7 +652,11 @@ async fn it_pulls_and_commits_across_heads_minted_before_the_region() -> Result<
     });
     let plain = repo.branch("plain").open().perform(&operator).await?;
     commit!(plain, &operator, "post:plain");
-    plain.pull().from(&bare).perform(&operator).await?;
+    plain
+        .pull(crate::Download::MinimalRanges)
+        .from(&bare)
+        .perform(&operator)
+        .await?;
     region_agrees(&plain, &operator, "a merge with a pre-context upstream").await?;
 
     // A region head minted before heads carried their own count: a commit
@@ -579,7 +671,11 @@ async fn it_pulls_and_commits_across_heads_minted_before_the_region() -> Result<
         .expect("an uncounted region head still verifies");
     assert!(planted.region && planted.own_watermark().is_none());
     let taker = repo.branch("taker").open().perform(&operator).await?;
-    taker.pull().from(&uncounted).perform(&operator).await?;
+    taker
+        .pull(crate::Download::MinimalRanges)
+        .from(&uncounted)
+        .perform(&operator)
+        .await?;
     commit!(taker, &operator, "post:taker");
     region_agrees(&taker, &operator, "a takeover of an uncounted head").await?;
     commit!(uncounted, &operator, "post:uncounted");
@@ -656,7 +752,11 @@ async fn it_refuses_to_pull_a_head_whose_region_no_head_minted() -> Result<()> {
 
     for (why, from) in cases {
         let upstream = repo.branch(from).open().perform(&cold).await?;
-        let pulled = puller.pull().from(&upstream).perform(&cold).await;
+        let pulled = puller
+            .pull(crate::Download::MinimalRanges)
+            .from(&upstream)
+            .perform(&cold)
+            .await;
         assert!(
             matches!(
                 pulled,
@@ -684,7 +784,10 @@ async fn it_takes_over_an_adopted_head_without_reading_its_region() -> Result<()
     let main = repo.branch("main").open().perform(&writer).await?;
     commit!(main, &writer, "post:0");
     let last = passing_writers!(repo, &writer, Some(main.clone()), 12);
-    main.pull().from(&last).perform(&writer).await?;
+    main.pull(crate::Download::MinimalRanges)
+        .from(&last)
+        .perform(&writer)
+        .await?;
 
     let device = profile
         .session(b"joiner")
@@ -696,7 +799,10 @@ async fn it_takes_over_an_adopted_head_without_reading_its_region() -> Result<()
     let upstream = local.branch("main").open().perform(&device).await?;
     let joiner = local.branch("joiner").open().perform(&device).await?;
     joiner.set_upstream(&upstream).perform(&device).await?;
-    joiner.pull().perform(&device).await?;
+    joiner
+        .pull(crate::Download::MinimalRanges)
+        .perform(&device)
+        .await?;
     let adopted = joiner.revision().expect("the joiner adopted main's head");
     assert_eq!(Some(&adopted), main.revision().as_ref(), "adopted by root");
 
@@ -733,7 +839,10 @@ async fn it_answers_observes_after_a_takeover_at_zero_reads() -> Result<()> {
     let main = repo.branch("main").open().perform(&writer).await?;
     commit!(main, &writer, "post:0");
     let last = passing_writers!(repo, &writer, Some(main.clone()), 12);
-    main.pull().from(&last).perform(&writer).await?;
+    main.pull(crate::Download::MinimalRanges)
+        .from(&last)
+        .perform(&writer)
+        .await?;
 
     let device = profile
         .session(b"joiner")
@@ -745,7 +854,10 @@ async fn it_answers_observes_after_a_takeover_at_zero_reads() -> Result<()> {
     let upstream = local.branch("main").open().perform(&device).await?;
     let joiner = local.branch("joiner").open().perform(&device).await?;
     joiner.set_upstream(&upstream).perform(&device).await?;
-    joiner.pull().perform(&device).await?;
+    joiner
+        .pull(crate::Download::MinimalRanges)
+        .perform(&device)
+        .await?;
     let adopted = joiner.revision();
     commit!(joiner, &device, "post:claim");
     let head = joiner.revision();
@@ -754,10 +866,18 @@ async fn it_answers_observes_after_a_takeover_at_zero_reads() -> Result<()> {
     // pull has no sync base to short-circuit on, and asks whether our head
     // has seen theirs.
     let mirror = local.branch("mirror").open().perform(&device).await?;
-    mirror.pull().from(&upstream).perform(&device).await?;
+    mirror
+        .pull(crate::Download::MinimalRanges)
+        .from(&upstream)
+        .perform(&device)
+        .await?;
     assert_eq!(mirror.revision(), adopted);
     device.reset();
-    joiner.pull().from(&mirror).perform(&device).await?;
+    joiner
+        .pull(crate::Download::MinimalRanges)
+        .from(&mirror)
+        .perform(&device)
+        .await?;
     assert_eq!(joiner.revision(), head, "nothing new keeps the head");
     assert_eq!(
         device.block_reads(),
@@ -814,7 +934,10 @@ async fn it_answers_observes_after_a_takeover_at_zero_reads() -> Result<()> {
 
     joiner.push().perform(&device).await?;
     device.reset();
-    joiner.pull().perform(&device).await?;
+    joiner
+        .pull(crate::Download::MinimalRanges)
+        .perform(&device)
+        .await?;
     assert_eq!(joiner.revision(), head, "the pushed head is our own");
     assert_eq!(
         device.block_reads(),
@@ -883,13 +1006,19 @@ async fn it_alternates_writers_with_exact_counts() -> Result<()> {
     let seed = repo.branch("main").open().perform(&writer).await?;
     commit!(seed, &writer, "post:seed");
     let last = passing_writers!(repo, &writer, Some(seed.clone()), 12);
-    seed.pull().from(&last).perform(&writer).await?;
+    seed.pull(crate::Download::MinimalRanges)
+        .from(&last)
+        .perform(&writer)
+        .await?;
 
     let alice = session!(profile, b"alice");
     let bob = session!(profile, b"bob");
     let a = line!(profile, name, &alice, "alice");
     let b = line!(profile, name, &bob, "bob");
-    a.pull().from(&seed).perform(&alice).await?;
+    a.pull(crate::Download::MinimalRanges)
+        .from(&seed)
+        .perform(&alice)
+        .await?;
     commit!(a, &alice, "post:a0");
     assert_exact_count!(&a, &alice, "the first takeover");
 
@@ -898,7 +1027,11 @@ async fn it_alternates_writers_with_exact_counts() -> Result<()> {
             1 => (&b, &bob, &a),
             _ => (&a, &alice, &b),
         };
-        writer.pull().from(from).perform(env).await?;
+        writer
+            .pull(crate::Download::MinimalRanges)
+            .from(from)
+            .perform(env)
+            .await?;
         assert_eq!(writer.revision(), from.revision(), "a fast-forward");
         commit!(writer, env, format!("post:{round}"));
         assert_exact_count!(writer, env, format!("round {round}"));
@@ -922,17 +1055,29 @@ async fn it_counts_a_takeover_exactly_after_a_reset_to_an_adopted_head() -> Resu
     let b = line!(profile, name, &bob, "b");
 
     commit!(a, &alice, "post:a1");
-    b.pull().from(&a).perform(&bob).await?;
+    b.pull(crate::Download::MinimalRanges)
+        .from(&a)
+        .perform(&bob)
+        .await?;
     commit!(b, &bob, "post:x");
     let x = b.revision().expect("X");
-    a.pull().from(&b).perform(&alice).await?;
+    a.pull(crate::Download::MinimalRanges)
+        .from(&b)
+        .perform(&alice)
+        .await?;
     commit!(a, &alice, "post:a2");
-    b.pull().from(&a).perform(&bob).await?;
+    b.pull(crate::Download::MinimalRanges)
+        .from(&a)
+        .perform(&bob)
+        .await?;
     commit!(b, &bob, "post:u");
     let u = b.revision().expect("U");
 
     a.reset(x).perform_unchecked(&alice).await?;
-    a.pull().from(&b).perform(&alice).await?;
+    a.pull(crate::Download::MinimalRanges)
+        .from(&b)
+        .perform(&alice)
+        .await?;
     assert_eq!(a.revision().as_ref(), Some(&u), "a fast-forward to U");
     assert!(
         a.contexts().cached(&u.version()).await.is_none(),
@@ -966,16 +1111,25 @@ async fn it_counts_a_takeover_exactly_after_a_reset_to_its_own_head() -> Result<
     // a has pulled from b before, so its next pull from b has a sync
     // base and fast-forwards without computing b's whole context.
     commit!(b, &bob, "post:b0");
-    a.pull().from(&b).perform(&alice).await?;
+    a.pull(crate::Download::MinimalRanges)
+        .from(&b)
+        .perform(&alice)
+        .await?;
     commit!(a, &alice, "post:a1");
     let l1 = a.revision().expect("L1");
     commit!(a, &alice, "post:a2");
-    b.pull().from(&a).perform(&bob).await?;
+    b.pull(crate::Download::MinimalRanges)
+        .from(&a)
+        .perform(&bob)
+        .await?;
     commit!(b, &bob, "post:u");
     let u = b.revision().expect("U");
 
     a.reset(l1).perform_unchecked(&alice).await?;
-    a.pull().from(&b).perform(&alice).await?;
+    a.pull(crate::Download::MinimalRanges)
+        .from(&b)
+        .perform(&alice)
+        .await?;
     assert_eq!(a.revision().as_ref(), Some(&u), "a fast-forward to U");
     commit!(a, &alice, "post:a3");
     assert_exact_count!(&a, &alice, "a takeover after a reset to our own head");
@@ -1003,15 +1157,24 @@ async fn it_counts_a_takeover_exactly_after_a_reset_and_a_restart() -> Result<()
     let b = line!(profile, name, &bob, "b");
 
     commit!(b, &bob, "post:b0");
-    a.pull().from(&b).perform(&alice).await?;
+    a.pull(crate::Download::MinimalRanges)
+        .from(&b)
+        .perform(&alice)
+        .await?;
     commit!(a, &alice, "post:a1");
     let l1 = a.revision().expect("L1");
     commit!(a, &alice, "post:a2");
-    b.pull().from(&a).perform(&bob).await?;
+    b.pull(crate::Download::MinimalRanges)
+        .from(&a)
+        .perform(&bob)
+        .await?;
     commit!(b, &bob, "post:u");
     let u = b.revision().expect("U");
     a.reset(l1).perform_unchecked(&alice).await?;
-    a.pull().from(&b).perform(&alice).await?;
+    a.pull(crate::Download::MinimalRanges)
+        .from(&b)
+        .perform(&alice)
+        .await?;
     assert_eq!(a.revision().as_ref(), Some(&u), "a's head is U");
 
     let restarted = open_peer(storage, location).await?;
@@ -1051,7 +1214,10 @@ async fn it_counts_a_takeover_exactly_after_every_head_move() -> Result<()> {
     let b = line!(profile, name, &bob, "b");
 
     commit!(b, &bob, "post:b0");
-    a.pull().from(&b).perform(&alice).await?;
+    a.pull(crate::Download::MinimalRanges)
+        .from(&b)
+        .perform(&alice)
+        .await?;
     let older = a.revision().expect("b's first head");
 
     // An amend replaces the head with a revision of the same version.
@@ -1069,18 +1235,30 @@ async fn it_counts_a_takeover_exactly_after_every_head_move() -> Result<()> {
         .await?;
     batch.publish().perform(&alice).await?;
     assert_exact_count!(&a, &alice, "an amended takeover");
-    b.pull().from(&a).perform(&bob).await?;
+    b.pull(crate::Download::MinimalRanges)
+        .from(&a)
+        .perform(&bob)
+        .await?;
     commit!(b, &bob, "post:b1");
-    a.pull().from(&b).perform(&alice).await?;
+    a.pull(crate::Download::MinimalRanges)
+        .from(&b)
+        .perform(&alice)
+        .await?;
     commit!(a, &alice, "post:after-amend");
     assert_exact_count!(&a, &alice, "a takeover after an amend");
 
     // A reset to b's older head, then a fast-forward to b's newest.
-    b.pull().from(&a).perform(&bob).await?;
+    b.pull(crate::Download::MinimalRanges)
+        .from(&a)
+        .perform(&bob)
+        .await?;
     commit!(b, &bob, "post:b2");
     a.reset(older).perform_unchecked(&alice).await?;
     assert_exact_count!(&a, &alice, "a reset to an older head");
-    a.pull().from(&b).perform(&alice).await?;
+    a.pull(crate::Download::MinimalRanges)
+        .from(&b)
+        .perform(&alice)
+        .await?;
     assert_exact_count!(&a, &alice, "a pull after a reset");
     commit!(a, &alice, "post:after-reset");
     assert_exact_count!(&a, &alice, "a takeover after a reset to an older head");
@@ -1089,12 +1267,21 @@ async fn it_counts_a_takeover_exactly_after_every_head_move() -> Result<()> {
     // takes b's head back over.
     commit!(a, &alice, "post:a-side");
     commit!(b, &bob, "post:b-side");
-    a.pull().from(&b).perform(&alice).await?;
+    a.pull(crate::Download::MinimalRanges)
+        .from(&b)
+        .perform(&alice)
+        .await?;
     assert_exact_count!(&a, &alice, "a merge");
-    b.pull().from(&a).perform(&bob).await?;
+    b.pull(crate::Download::MinimalRanges)
+        .from(&a)
+        .perform(&bob)
+        .await?;
     commit!(b, &bob, "post:b4");
     assert_exact_count!(&b, &bob, "b's takeover of a's merge");
-    a.pull().from(&b).perform(&alice).await?;
+    a.pull(crate::Download::MinimalRanges)
+        .from(&b)
+        .perform(&alice)
+        .await?;
     commit!(a, &alice, "post:after-merge");
     assert_exact_count!(&a, &alice, "a takeover after a merge");
     Ok(())
@@ -1190,7 +1377,10 @@ async fn it_signs_walked_counts_under_random_interleavings() -> Result<()> {
                     continue;
                 };
                 let before = line.revision();
-                line.pull().from(from).perform(env).await?;
+                line.pull(crate::Download::MinimalRanges)
+                    .from(from)
+                    .perform(env)
+                    .await?;
                 let after = line.revision().expect("a pull leaves a head");
                 // A head that is neither ours before nor theirs is a
                 // merge, minted under this writer's origin.
