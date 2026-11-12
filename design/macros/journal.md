@@ -406,3 +406,11 @@ Not examined yet. They are columns, not recommendations.
 
 **Decided.** Not decided, and now the only thing between structs and rules: whether a stored rule may hold a pattern, which is a new rule body format. Asked of the patterns work: that a rule holding a pattern can be laid over a branch without one.
 
+## 2026-11-11, Designing: format 4 is its own topic
+
+**Asked.** Whether a stored rule may hold a pattern, as a new rule body format. Irakli: yes, format 4 is the natural next step, and it depends on patterns, records, syntax forms and rules of several heads.
+
+**Learned.** A rule is named by its canonical spelling and since format 3 its body is that spelling, so a format that spells a rule another way names it another entity. That is a reason for one format and not four.
+
+**Decided.** By the maintainer: one format 4, for all four. It is a topic of its own, [rule-format](https://github.com/dialog-db/dialog-db/pull/779), in the Describing phase. What this topic asks of it: a head that is not a concept and a premise that takes a form apart, so a rule about syntax can be stored. Until it lands a struct stays out of rules here.
+

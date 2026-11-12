@@ -448,7 +448,7 @@ H2 is now a requirement in the table above, not a hypothesis. H3 and H4 stand.
 
 ## Next
 
-1. A stored rule that holds a pattern. The compiler hands dialog a rule with a struct in it now, and dialog can neither keep it nor lay it over a branch, since both name a rule by a stored form that cannot write a pattern. `entity/derive` over a record waits on the same: built once, it made every rule that derives an entity uninstallable, and was taken out.
+1. A stored rule that holds a pattern: format 4 of a rule body, its own topic (#779), for patterns, records, several heads and rules about syntax together. The compiler hands dialog a rule with a struct in it now, and dialog can neither keep it nor lay it over a branch, since both name a rule by a stored form that cannot write a pattern. `entity/derive` over a record waits on the same: built once, it made every rule that derives an entity uninstallable, and was taken out.
 2. The expander and the compiler read the tree, an application lowers to a `ConceptQuery` of the definition's concept, and `kernel.rs` gives way to dialog's own forms.
 
 Parked by the maintainer: what decides between two definitions of one signature written apart. `last` elects one.
