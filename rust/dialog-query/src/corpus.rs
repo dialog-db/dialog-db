@@ -1,7 +1,8 @@
 pub use dialog_corpus::selector::Constrained;
 pub use dialog_corpus::{
-    Cause, DialogCorpusError, Entity, Fact, Instruction, NameShape, Relation as CorpusRelation,
-    Select, Selector, TypeError as CorpusTypeError, Value, ValueDataType as Type, decode_value,
+    COMPOSITE_VERSION, Cause, Composite, CompositeError, CompositeItems, CompositeMap,
+    DialogCorpusError, Entity, Fact, Instruction, NameShape, Relation as CorpusRelation, Select,
+    Selector, TypeError as CorpusTypeError, Value, ValueDataType as Type, decode_value,
     encode_value_owned,
 };
 pub use futures_util::stream::Stream;
