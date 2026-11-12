@@ -639,7 +639,7 @@ mod profile {
 
     /// Times each part of splitting every node of the archive file at
     /// `DIALOG_ARCHIVE_PROFILE` into rows. Run by hand.
-    #[test]
+    #[dialog_common::test]
     #[ignore = "profiles a file named by DIALOG_ARCHIVE_PROFILE"]
     fn split_costs() -> anyhow::Result<()> {
         let Ok(path) = std::env::var("DIALOG_ARCHIVE_PROFILE") else {
@@ -898,7 +898,7 @@ pub(crate) mod tests {
         Ok(())
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_realizes_each_layout_from_its_tokens() -> anyhow::Result<()> {
         let manifest = spilling();
         let facts = facts()?;
@@ -918,7 +918,7 @@ pub(crate) mod tests {
         Ok(())
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_realizes_a_segment_of_mixed_layouts_from_its_tokens() -> anyhow::Result<()> {
         let manifest = spilling();
         let mut keys = Vec::new();
@@ -949,7 +949,7 @@ mod warm_split {
     /// `DIALOG_ARCHIVE_PROFILE` into rows against the file's own id table,
     /// full, as an append's split runs: most tokens are found, not added.
     /// Run by hand.
-    #[test]
+    #[dialog_common::test]
     #[ignore = "profiles a file named by DIALOG_ARCHIVE_PROFILE"]
     fn warm_split() -> anyhow::Result<()> {
         let Ok(path) = std::env::var("DIALOG_ARCHIVE_PROFILE") else {

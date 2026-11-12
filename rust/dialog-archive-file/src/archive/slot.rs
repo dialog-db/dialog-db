@@ -334,7 +334,7 @@ pub(crate) fn boot() -> u64 {
 mod tests {
     use super::*;
 
-    #[test]
+    #[dialog_common::test]
     fn it_reads_the_newer_whole_slot() -> io::Result<()> {
         let directory = tempfile::tempdir()?;
         let file = std::fs::OpenOptions::new()

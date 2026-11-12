@@ -3092,7 +3092,7 @@ mod tests {
     /// back at once, here and through another handle. Once the turn is
     /// free, the next append folds them into the file and retires the
     /// extent; everything reads back after reopening.
-    #[test]
+    #[dialog_common::test]
     fn it_appends_without_waiting_while_another_process_holds_the_turn() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("archive");
@@ -3184,7 +3184,7 @@ mod tests {
     /// process as it opened is before its blocks, so it stays, free, and
     /// the next open takes it again instead of growing the file. The file
     /// reopens whole, and every block reads back.
-    #[test]
+    #[dialog_common::test]
     fn it_cuts_free_extents_off_the_end_at_the_last_close() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("archive");
@@ -3231,7 +3231,7 @@ mod tests {
     /// An extent a writer left before folding it in (its process gone) is
     /// read from where it is after reopening, and folded in by the next
     /// writer to take the turn.
-    #[test]
+    #[dialog_common::test]
     fn it_reads_and_folds_in_an_extent_its_writer_left() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("archive");
@@ -3298,7 +3298,7 @@ mod tests {
     /// it, and reads what was appended after the mapping was made; past
     /// it, the file is mapped again, reserving room to grow.
     #[cfg(unix)]
-    #[test]
+    #[dialog_common::test]
     fn it_maps_the_file_again_only_when_it_outgrows_the_mapping() -> io::Result<()> {
         let directory = tempfile::tempdir()?;
         let file = OpenOptions::new()
@@ -3348,7 +3348,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[dialog_common::test]
     async fn it_returns_none_for_missing_content() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let archive = FileArchive::open(directory.path().join("archive"))?;
@@ -3363,7 +3363,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[dialog_common::test]
     async fn it_stores_and_retrieves_content() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let archive = FileArchive::open(directory.path().join("archive"))?;
@@ -3386,7 +3386,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[dialog_common::test]
     async fn it_keeps_catalogs_apart() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let archive = FileArchive::open(directory.path().join("archive"))?;
@@ -3409,7 +3409,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[dialog_common::test]
     async fn it_imports_a_batch() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let archive = FileArchive::open(directory.path().join("archive"))?;
@@ -3429,7 +3429,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[dialog_common::test]
     async fn it_writes_a_block_it_holds_only_once() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("archive");
@@ -3443,7 +3443,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[dialog_common::test]
     async fn it_reads_what_it_wrote_after_reopening() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("archive");
@@ -3463,7 +3463,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[dialog_common::test]
     async fn it_drops_a_torn_tail_and_keeps_the_whole_records() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("archive");
@@ -3502,7 +3502,7 @@ mod tests {
 
     /// A slot whose bytes changed is not whole: opening takes the other,
     /// and drops the append only the changed one named.
-    #[tokio::test]
+    #[dialog_common::test]
     async fn it_opens_from_the_other_slot_when_one_changed() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("archive");
@@ -3536,7 +3536,7 @@ mod tests {
     /// yet), a reader on another thread reads what was there before, frames
     /// in place included, and misses the block being appended rather than
     /// waiting for it; once the append publishes, the block reads.
-    #[test]
+    #[dialog_common::test]
     fn it_reads_while_an_append_is_under_way() -> anyhow::Result<()> {
         use crate::node::tests::{entity_segment, segment_manifest};
         use std::sync::mpsc::channel;
@@ -3618,7 +3618,7 @@ mod tests {
     /// its turn comes: a node the other appended is not written again,
     /// tokens the other wrote first are not either, and every block reads
     /// back, in this process and after reopening.
-    #[test]
+    #[dialog_common::test]
     fn it_reconciles_an_append_prepared_before_another() -> anyhow::Result<()> {
         use crate::node::tests::{entity_segment, segment_manifest};
 
@@ -3685,7 +3685,7 @@ mod tests {
     /// A node an append framed before its turn, which another writer
     /// appended whole meanwhile, cannot be named by a frame of its own:
     /// the append prepares again in its turn, and the node stays whole.
-    #[test]
+    #[dialog_common::test]
     fn it_prepares_again_when_a_framed_node_was_appended_whole() -> anyhow::Result<()> {
         use crate::node::tests::{entity_segment, index_over, segment_manifest};
 
@@ -3776,7 +3776,7 @@ mod tests {
     /// over where they were: every page in the file is one the root
     /// reaches or one free to write over, and the file holds fewer pages
     /// than were written.
-    #[test]
+    #[dialog_common::test]
     fn it_writes_index_pages_over_once_a_sync_point_frees_them() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let archive = FileArchive::open(directory.path().join("archive"))?;
@@ -3810,7 +3810,7 @@ mod tests {
     /// finds them stale rather than reading another node's entries (or
     /// reads them as they were, from the pages this process kept), and a
     /// read through the archive looks again from a newer one.
-    #[test]
+    #[dialog_common::test]
     fn it_finds_a_page_written_over_stale_and_reads_on() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let archive = FileArchive::open(directory.path().join("archive"))?;
@@ -3843,7 +3843,7 @@ mod tests {
     /// Readers on other threads read every block they hold while a writer
     /// writes the index's pages over: each read is the block, whether its
     /// snapshot's pages were still there or it looked again.
-    #[test]
+    #[dialog_common::test]
     fn it_reads_every_block_while_pages_are_written_over() -> anyhow::Result<()> {
         use std::sync::atomic::AtomicBool;
 
@@ -3882,7 +3882,7 @@ mod tests {
 
     /// `sync` makes a sync point: the durable slot is the file as it was,
     /// and every page freed until then is free to write over.
-    #[test]
+    #[dialog_common::test]
     fn it_makes_a_sync_point() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let archive = FileArchive::open(directory.path().join("archive"))?;
@@ -3912,7 +3912,7 @@ mod tests {
     /// opening checks what was written since the durable slot, finds the
     /// record damaged, and goes back to the newest state that is whole: no
     /// block it holds is damaged, and every block synced before is there.
-    #[test]
+    #[dialog_common::test]
     fn it_goes_back_to_what_is_whole_after_a_power_loss() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("archive");
@@ -3969,7 +3969,7 @@ mod tests {
     /// lost (the page there is still the one it wrote over) fails its
     /// check when the file is opened in the next boot, and the file goes
     /// back to the durable slot, whose pages nothing wrote over.
-    #[test]
+    #[dialog_common::test]
     fn it_goes_back_to_the_durable_slot_when_a_page_did_not_reach_the_disk() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("archive");
@@ -4012,7 +4012,7 @@ mod tests {
     /// Readers on other threads read every block they find while one writer
     /// keeps appending frames and whole blocks: whatever a reader finds, it
     /// reads whole, and its bytes hash to its name.
-    #[test]
+    #[dialog_common::test]
     fn it_reads_whole_whatever_it_finds_while_appending() -> anyhow::Result<()> {
         use crate::node::tests::{entity_segment, segment_manifest};
         use std::sync::atomic::AtomicBool;
@@ -4067,7 +4067,7 @@ mod tests {
     /// A read of a block the file does not hold, while an append holds the
     /// writer's turn, answers without waiting for it: the file has not
     /// grown past what this process knows, so there is nothing to read.
-    #[test]
+    #[dialog_common::test]
     fn it_answers_a_miss_while_an_append_holds_the_turn() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let archive = FileArchive::open(directory.path().join("archive"))?;
@@ -4091,7 +4091,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[dialog_common::test]
     async fn it_refuses_a_file_that_is_not_an_archive() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("archive");
@@ -4151,7 +4151,7 @@ mod tests {
     /// parses as a tree node with padding between its prelude and its
     /// body. Today, without verify, it is kept as a frame whose rows
     /// rebuild other bytes, which are served under the block's hash.
-    #[test]
+    #[dialog_common::test]
     fn it_reads_back_a_padded_node_as_appended_without_verify() -> anyhow::Result<()> {
         use crate::node::tests::entity_segment;
         use dialog_search_tree::Manifest;
@@ -4169,7 +4169,7 @@ mod tests {
     /// under the layout the keys imply, so `get` returns other bytes and
     /// the served node's `buffer()` fails ("Rows built a block other than
     /// the one they stand for"), which any write of that node meets.
-    #[test]
+    #[dialog_common::test]
     fn it_reads_back_a_mixed_layout_segment_as_appended_without_verify() -> anyhow::Result<()> {
         use crate::node::tests::{mixed_entity_segment, segment_manifest};
 
@@ -4191,7 +4191,7 @@ mod breakdown {
     /// the mapping, checking each one's checksum, the keys of every block,
     /// frame and token, sorting them, and writing the tree in one batch
     /// (in memory). Run by hand.
-    #[test]
+    #[dialog_common::test]
     #[ignore = "rebuilds the index of the file named by DIALOG_ARCHIVE_INDEX"]
     fn rebuild() -> anyhow::Result<()> {
         use crate::archive::tree::{Node, tests::Memory};
@@ -4256,7 +4256,7 @@ mod breakdown {
     /// `DIALOG_ARCHIVE_INDEX` takes alone, as a file holding no history
     /// would: every frame the root reaches written whole (against nothing)
     /// and every token those frames name. Run by hand.
-    #[test]
+    #[dialog_common::test]
     #[ignore = "sizes the tree DIALOG_ARCHIVE_ROOT names in DIALOG_ARCHIVE_INDEX"]
     fn live() -> anyhow::Result<()> {
         use crate::rows::{INDEX, NONE, put_rows};
@@ -4359,7 +4359,7 @@ mod breakdown {
     /// kind by kind, what its tokens' records spend on lengths and
     /// padding, and what the archive keeps in memory to read it. Run by
     /// hand.
-    #[test]
+    #[dialog_common::test]
     #[ignore = "breaks down the file named by DIALOG_ARCHIVE_INDEX"]
     fn breakdown() -> anyhow::Result<()> {
         let Ok(path) = std::env::var("DIALOG_ARCHIVE_INDEX") else {

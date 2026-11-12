@@ -43,6 +43,7 @@ anyhow = { workspace = true }
 dialog-archive-file = { workspace = true }
 dialog-corpus = { workspace = true }
 dialog-capability = { workspace = true }
+dialog-common = { workspace = true, features = ["helpers"] }
 dialog-effects = { workspace = true }
 # The crate itself with every migration, so its tests run whatever features
 # the test run picks.
@@ -55,4 +56,4 @@ tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros"] }
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(dialog_test_wasm_integration)"] }
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(dialog_test_wasm_integration)", "cfg(feature, values(\"web-integration-tests\", \"integration-tests\", \"helpers\"))"] }

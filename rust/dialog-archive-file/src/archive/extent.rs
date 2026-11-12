@@ -229,7 +229,7 @@ mod tests {
     use super::*;
     use crate::file::read_at;
 
-    #[test]
+    #[dialog_common::test]
     fn it_reads_back_the_blocks_an_extent_holds() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let file = std::fs::OpenOptions::new()

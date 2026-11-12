@@ -79,7 +79,7 @@ macro_rules! select_all {
     }};
 }
 
-#[tokio::test]
+#[dialog_common::test]
 async fn it_transcodes_a_replica_the_fs_provider_wrote() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let at = At::At(directory.path().to_string_lossy().into_owned());
@@ -165,7 +165,7 @@ async fn it_transcodes_a_replica_the_fs_provider_wrote() -> anyhow::Result<()> {
 /// a run that moves every space, and a second run with nothing left to do;
 /// a run interrupted mid-way picks up where it stopped; and the `fs`
 /// archives go once asked to.
-#[tokio::test]
+#[dialog_common::test]
 async fn it_migrates_a_replica_as_an_application_would() -> anyhow::Result<()> {
     use dialog_migration::Migrations;
     use dialog_migration::archive_file::{ArchiveFile, MIGRATING};
@@ -272,7 +272,7 @@ fn buffer(text: &str) -> dialog_common::Buffer {
 /// file holds: blocks a file-archive space wrote are not dropped for the
 /// `fs` archive's. Today the transcode writes a new file and renames it
 /// over the existing one, so a block only the existing file held is gone.
-#[test]
+#[dialog_common::test]
 fn it_keeps_what_an_existing_archive_file_holds_when_migrating() -> anyhow::Result<()> {
     use dialog_migration::archive_file::migrate_space;
 
@@ -304,7 +304,7 @@ fn it_keeps_what_an_existing_archive_file_holds_when_migrating() -> anyhow::Resu
 /// it) but whose `fs` archive holds blocks still needs migrating. Today a
 /// space with any `archive.dialog` counts as migrated, so its blocks are
 /// never moved and a run reports nothing to do.
-#[test]
+#[dialog_common::test]
 fn it_counts_a_space_with_an_empty_archive_file_as_unmigrated() -> anyhow::Result<()> {
     use dialog_migration::Migrations;
     use dialog_migration::archive_file::{ArchiveFile, unmigrated};
@@ -333,7 +333,7 @@ fn it_counts_a_space_with_an_empty_archive_file_as_unmigrated() -> anyhow::Resul
 /// its name, or a file not named as a block, is reported and kept (or the
 /// run fails). Today they are left out silently and then deleted with the
 /// rest of the `fs` archive.
-#[test]
+#[dialog_common::test]
 fn it_does_not_remove_files_the_migration_left_out() -> anyhow::Result<()> {
     use dialog_migration::Migrations;
     use dialog_migration::archive_file::ArchiveFile;

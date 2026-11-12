@@ -243,7 +243,7 @@ pub(crate) mod tests {
     /// Another process's lock is what a try reports as taken; a process's
     /// own locks never exclude each other (POSIX), which the archive's
     /// mutexes cover. The test binary runs itself as the other process.
-    #[test]
+    #[dialog_common::test]
     fn it_reports_a_byte_another_process_holds() -> anyhow::Result<()> {
         use std::io::{BufRead, BufReader, Read, Write};
         use std::process::{Command, Stdio};

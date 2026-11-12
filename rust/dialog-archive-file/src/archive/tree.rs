@@ -764,7 +764,7 @@ pub(crate) mod tests {
     /// Inserts, a batch at a time as appends would, agree with a map at
     /// every step, and reading back from an old root, while no page is
     /// written over, sees the tree as it was.
-    #[test]
+    #[dialog_common::test]
     fn it_finds_what_it_holds_as_a_map_does() -> io::Result<()> {
         let mut memory = Memory::default();
         let mut root = Node::default();
@@ -802,7 +802,7 @@ pub(crate) mod tests {
     /// With pages written over once freed, the tree keeps no more pages
     /// than it reaches and the last append freed; an old root that reaches
     /// a page written over finds it stale, never another node's entries.
-    #[test]
+    #[dialog_common::test]
     fn it_reuses_pages_and_an_old_root_finds_them_stale() -> io::Result<()> {
         let mut memory = Memory::reusing();
         let mut root = Node::default();
@@ -855,7 +855,7 @@ pub(crate) mod tests {
     }
 
     /// A page caught half written fails its checksum and reads as stale.
-    #[test]
+    #[dialog_common::test]
     fn it_finds_a_torn_page_stale() -> io::Result<()> {
         let mut memory = Memory::default();
         let child = memory.write(&Node::Leaf(vec![(1, 2), (3, 4)]))?;
@@ -872,7 +872,7 @@ pub(crate) mod tests {
     }
 
     /// Only the pages written after an append are read to check them.
-    #[test]
+    #[dialog_common::test]
     fn it_lists_the_pages_written_since_an_append() -> io::Result<()> {
         let mut memory = Memory::reusing();
         let mut root = Node::default();
@@ -892,7 +892,7 @@ pub(crate) mod tests {
     }
 
     /// The root fits a slot with room to spare, whatever it buffers.
-    #[test]
+    #[dialog_common::test]
     fn it_keeps_the_root_small() -> io::Result<()> {
         let mut memory = Memory::reusing();
         let mut root = Node::default();

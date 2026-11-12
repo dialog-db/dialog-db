@@ -338,7 +338,7 @@ pub(crate) fn catalog_in(slot: &mut Slot, name: &str) -> io::Result<u16> {
 mod tests {
     use super::*;
 
-    #[test]
+    #[dialog_common::test]
     fn it_keeps_key_spaces_apart() {
         let hash = Blake3Hash::hash(b"block");
         assert_eq!(block_key(0, &hash) >> SPACE, BLOCKS);
@@ -356,7 +356,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_reads_back_a_frame_header() -> io::Result<()> {
         let header = FrameHeader {
             hash: Blake3Hash::hash(b"node"),

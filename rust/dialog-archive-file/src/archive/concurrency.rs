@@ -357,7 +357,7 @@ fn race<T>(outcome: Result<T, MemoryError>) -> anyhow::Result<()> {
 
 /// A child's part, when this binary runs as one; nothing in an ordinary
 /// run.
-#[test]
+#[dialog_common::test]
 fn child() -> anyhow::Result<()> {
     let Ok(role) = std::env::var(ROLE) else {
         return Ok(());
@@ -528,7 +528,7 @@ fn child() -> anyhow::Result<()> {
 /// A process writing alone writes as it always did, in the turn: nothing
 /// goes into an extent. It keeps one extent for its own writers and one
 /// for a process that has none, both empty.
-#[test]
+#[dialog_common::test]
 fn a_lone_writer_writes_nothing_into_extents() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let archive = FileArchive::open(archive_in(&directory))?;
@@ -552,7 +552,7 @@ fn a_lone_writer_writes_nothing_into_extents() -> anyhow::Result<()> {
 /// Processes appending to one file at once all get through, and every
 /// block of every one reads back, is filed once, and is there after
 /// reopening. Small extents make them fill extents and claim more.
-#[test]
+#[dialog_common::test]
 fn processes_append_to_one_file_at_once() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let path = archive_in(&directory);
@@ -578,7 +578,7 @@ fn processes_append_to_one_file_at_once() -> anyhow::Result<()> {
 /// Threads of one process appending at once all get through: the ones
 /// that find the turn taken write into the process's extents, never two
 /// into one at once (two would write over each other's blocks).
-#[test]
+#[dialog_common::test]
 fn threads_append_to_one_file_at_once() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let path = archive_in(&directory);
@@ -610,7 +610,7 @@ fn threads_append_to_one_file_at_once() -> anyhow::Result<()> {
 /// handle: two would both hold the writer's turn, as the turn's lock
 /// belongs to the process, and closing either would let go of the other's
 /// locks.
-#[test]
+#[dialog_common::test]
 fn a_file_reached_by_two_names_is_one_handle() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let path = archive_in(&directory);
@@ -634,7 +634,7 @@ fn a_file_reached_by_two_names_is_one_handle() -> anyhow::Result<()> {
 /// it takes the extent a turn holder left for one, while another process
 /// holds the turn throughout. Another process reads its blocks from the
 /// extent, and its close folds them in once the turn is free.
-#[test]
+#[dialog_common::test]
 fn a_process_that_never_held_the_turn_writes_without_waiting() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let path = archive_in(&directory);
@@ -660,7 +660,7 @@ fn a_process_that_never_held_the_turn_writes_without_waiting() -> anyhow::Result
 /// Processes that have never held the turn, arriving together while
 /// another holds it throughout, all write without waiting: every process
 /// that opened the file with the turn free left an extent for one.
-#[test]
+#[dialog_common::test]
 fn processes_arriving_together_while_the_turn_is_held_do_not_wait() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let path = archive_in(&directory);
@@ -695,7 +695,7 @@ fn processes_arriving_together_while_the_turn_is_held_do_not_wait() -> anyhow::R
 /// The extents processes leave as they open are taken back as they close:
 /// processes opening and closing the file one after another, while
 /// another keeps it open, leave no more of them than were there.
-#[test]
+#[dialog_common::test]
 fn extents_left_for_others_do_not_pile_up() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let path = archive_in(&directory);
@@ -730,7 +730,7 @@ fn extents_left_for_others_do_not_pile_up() -> anyhow::Result<()> {
 /// A writer that finds the turn held by another process does not wait,
 /// and a reader in another process reads its blocks from the extent before
 /// they are folded in.
-#[test]
+#[dialog_common::test]
 fn another_process_reads_blocks_still_in_an_extent() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let path = archive_in(&directory);
@@ -762,7 +762,7 @@ fn another_process_reads_blocks_still_in_an_extent() -> anyhow::Result<()> {
 /// appended after its own extents are folded in, and another's are folded
 /// only when that one commits, so the head could otherwise reach the file
 /// before the block.
-#[test]
+#[dialog_common::test]
 fn a_block_only_another_process_holds_loose_is_written_again() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let path = archive_in(&directory);
@@ -798,7 +798,7 @@ fn a_block_only_another_process_holds_loose_is_written_again() -> anyhow::Result
 /// A sync point falling due as a writer writes without the turn, because
 /// another process holds it, is made without waiting for the turn either:
 /// what it frees is taken up by the next commit in the turn.
-#[test]
+#[dialog_common::test]
 fn a_sync_point_due_while_another_holds_the_turn_does_not_wait() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let path = archive_in(&directory);
@@ -832,7 +832,7 @@ fn a_sync_point_due_while_another_holds_the_turn_does_not_wait() -> anyhow::Resu
 
 /// A writer that died with blocks in an extent leaves them readable, and
 /// the next writer to take the turn folds them in, filing each once.
-#[test]
+#[dialog_common::test]
 fn a_dead_writers_extent_is_folded_in_by_the_next() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let path = archive_in(&directory);
@@ -866,7 +866,7 @@ fn a_dead_writers_extent_is_folded_in_by_the_next() -> anyhow::Result<()> {
 /// A process that takes a dead writer's extent for its own writes still
 /// reads the blocks the dead writer left in it, and so does every other
 /// process: what it writes follows them, and they are folded in with it.
-#[test]
+#[dialog_common::test]
 fn a_dead_writers_extent_taken_over_keeps_its_blocks() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let path = archive_in(&directory);
@@ -912,7 +912,7 @@ fn a_dead_writers_extent_taken_over_keeps_its_blocks() -> anyhow::Result<()> {
 /// integration retired it: the integration let go of the extent only
 /// after writing the slot that retires it, and a process that takes an
 /// extent checks that the newest slot still lists it.
-#[test]
+#[dialog_common::test]
 fn an_extent_retired_under_a_stale_snapshot_is_not_taken() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let path = archive_in(&directory);
@@ -962,7 +962,7 @@ fn an_extent_retired_under_a_stale_snapshot_is_not_taken() -> anyhow::Result<()>
 /// A crash between appending an extent's blocks as frames and retiring
 /// the extent leaves both: reads stay right, and the next integration
 /// retires it without filing anything twice.
-#[test]
+#[dialog_common::test]
 fn a_crash_between_folding_and_retiring_is_finished_by_the_next() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let path = archive_in(&directory);
@@ -1001,7 +1001,7 @@ fn a_crash_between_folding_and_retiring_is_finished_by_the_next() -> anyhow::Res
 /// reader that read blocks from it before it was claimed again still
 /// reads every block right after: its old ones from the index, the new
 /// ones from the extent.
-#[test]
+#[dialog_common::test]
 fn an_extent_is_reused_only_after_a_sync_point_and_stale_readers_stay_right() -> anyhow::Result<()>
 {
     let directory = tempfile::tempdir()?;
@@ -1060,7 +1060,7 @@ fn an_extent_is_reused_only_after_a_sync_point_and_stale_readers_stay_right() ->
 /// One whose bytes arrive later (read before they all had) is read then,
 /// from where the walk stopped; one cut short by a crash never is, and the
 /// rest are folded in.
-#[test]
+#[dialog_common::test]
 fn a_torn_frame_in_an_extent_ends_what_is_read_of_it() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let path = archive_in(&directory);
@@ -1116,7 +1116,7 @@ fn a_torn_frame_in_an_extent_ends_what_is_read_of_it() -> anyhow::Result<()> {
 
 /// A writer that needs a catalog the file has never numbered waits for
 /// the turn: it cannot number one without it.
-#[test]
+#[dialog_common::test]
 fn a_new_catalog_waits_for_the_turn() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let path = archive_in(&directory);
@@ -1141,7 +1141,7 @@ fn a_new_catalog_waits_for_the_turn() -> anyhow::Result<()> {
 /// A writer whose extents are full, and that finds no other to take,
 /// claims one, which takes the turn: it waits for it, then writes, and
 /// nothing is lost.
-#[test]
+#[dialog_common::test]
 fn a_full_extent_waits_for_the_turn_to_claim_another() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let path = archive_in(&directory);
@@ -1170,7 +1170,7 @@ fn a_full_extent_waits_for_the_turn_to_claim_another() -> anyhow::Result<()> {
 
 /// The file is cut at a close only by the last process to close it: one
 /// that closes while another has it open leaves its length alone.
-#[test]
+#[dialog_common::test]
 fn only_the_last_process_to_close_cuts_the_file() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let path = archive_in(&directory);
@@ -1210,7 +1210,7 @@ fn only_the_last_process_to_close_cuts_the_file() -> anyhow::Result<()> {
 
 /// Processes creating one cell at once: exactly one creates it, the
 /// others are told it is taken, and it holds the one's value.
-#[test]
+#[dialog_common::test]
 fn one_of_many_creating_a_cell_wins() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let path = archive_in(&directory);
@@ -1244,7 +1244,7 @@ fn one_of_many_creating_a_cell_wins() -> anyhow::Result<()> {
 
 /// Processes and threads counting one cell up with compare-and-swap lose
 /// no update: the count is every increment.
-#[test]
+#[dialog_common::test]
 fn counting_one_cell_up_from_many_writers_loses_no_update() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let path = archive_in(&directory);
@@ -1280,7 +1280,7 @@ fn counting_one_cell_up_from_many_writers_loses_no_update() -> anyhow::Result<()
 
 /// A swap and a retraction racing from the same edition: exactly one
 /// lands, and the cell holds what it left, in every round.
-#[test]
+#[dialog_common::test]
 fn a_swap_and_a_retraction_racing_land_one() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let path = archive_in(&directory);
@@ -1317,7 +1317,7 @@ fn a_swap_and_a_retraction_racing_land_one() -> anyhow::Result<()> {
 /// A cell is updated in the writer's turn, as SQLite commits under its
 /// write lock: an update waits while another process holds the turn, and
 /// lands once it is let go. A read never waits.
-#[test]
+#[dialog_common::test]
 fn a_cell_update_waits_for_the_turn_and_a_read_does_not() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let path = archive_in(&directory);
@@ -1349,7 +1349,7 @@ fn a_cell_update_waits_for_the_turn_and_a_read_does_not() -> anyhow::Result<()> 
 /// A reader reading a cell while another process writes it, small values
 /// and large in turn, reads only values that were written, whole, in the
 /// order they were written.
-#[test]
+#[dialog_common::test]
 fn a_cell_read_while_written_is_always_a_written_value() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let path = archive_in(&directory);
@@ -1394,7 +1394,7 @@ fn a_cell_read_while_written_is_always_a_written_value() -> anyhow::Result<()> {
 
 /// Processes creating different cells at once all create theirs, and a
 /// listing names every one.
-#[test]
+#[dialog_common::test]
 fn cells_created_at_once_are_all_listed() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let path = archive_in(&directory);
@@ -1423,7 +1423,7 @@ fn cells_created_at_once_are_all_listed() -> anyhow::Result<()> {
 
 /// A retraction naming an edition the cell is no longer at is refused
 /// and changes nothing; one naming its edition empties it.
-#[test]
+#[dialog_common::test]
 fn a_stale_retraction_is_refused() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let archive = FileArchive::open(archive_in(&directory))?;
@@ -1445,7 +1445,7 @@ fn a_stale_retraction_is_refused() -> anyhow::Result<()> {
 /// How long a cell's update waits, with one process or four committing
 /// to cells of their own at once. A measurement, not a check: run it by
 /// name, with `--ignored --nocapture`.
-#[test]
+#[dialog_common::test]
 #[ignore = "a measurement, run by name"]
 fn measure_how_long_a_cell_update_waits() -> anyhow::Result<()> {
     for processes in [1, 4] {
@@ -1484,7 +1484,7 @@ fn measure_how_long_a_cell_update_waits() -> anyhow::Result<()> {
 /// so none takes itself for the last to close and cuts or retires what
 /// this one uses. Today the closing handle lets go of the byte after the
 /// new handle has taken over its state, so another process takes it.
-#[test]
+#[dialog_common::test]
 fn it_keeps_the_file_present_for_a_handle_opened_while_the_last_closes() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let path = archive_in(&directory);
@@ -1517,7 +1517,7 @@ fn it_keeps_the_file_present_for_a_handle_opened_while_the_last_closes() -> anyh
 /// the file's length stay level however many die. Today each open claims
 /// two new extents of 1 MiB whatever is left, so both grow with every
 /// death, and the list heads for the slot's 64 KiB limit.
-#[test]
+#[dialog_common::test]
 fn it_does_not_pile_up_extents_left_by_processes_that_die() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let path = archive_in(&directory);

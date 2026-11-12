@@ -453,7 +453,7 @@ mod tests {
     /// A cell is created, updated, listed and retracted, and every value it
     /// held is a record of its own: the file grows with each update, and
     /// reopens with the last.
-    #[test]
+    #[dialog_common::test]
     fn it_keeps_a_cell_in_the_file() -> anyhow::Result<()> {
         let (_directory, path, archive) = archive()?;
         assert_eq!(archive.resolve_cell("local", "main")?, None);
@@ -485,7 +485,7 @@ mod tests {
     }
 
     /// A value of any size is kept in its record: no capacity to outgrow.
-    #[test]
+    #[dialog_common::test]
     fn it_keeps_a_value_of_any_size() -> anyhow::Result<()> {
         let (_directory, path, archive) = archive()?;
         let small = archive.publish_cell("local", "main", b"small", None)?;
@@ -505,7 +505,7 @@ mod tests {
 
     /// A publish naming an edition the cell is not at is refused with what
     /// it holds, and writes nothing.
-    #[test]
+    #[dialog_common::test]
     fn it_refuses_a_stale_publish_and_writes_nothing() -> anyhow::Result<()> {
         let (_directory, path, archive) = archive()?;
         let first = archive.publish_cell("local", "main", b"first", None)?;
@@ -537,7 +537,7 @@ mod tests {
 
     /// Another handle on the file, as another process has, reads a value
     /// written through this one as soon as it is published.
-    #[test]
+    #[dialog_common::test]
     fn it_reads_another_handles_update_at_once() -> anyhow::Result<()> {
         let (_directory, path, archive) = archive()?;
         let other = FileArchive::open_unshared(&path, super::super::Options::default())?;
