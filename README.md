@@ -18,17 +18,17 @@ that ran `ci.sh` on every push to the branch of
 [#733](https://github.com/dialog-db/dialog-db/pull/733), comparing the
 file archive with main's store; it is kept here as it was, not run.
 
-## `research/web-spike/`
+## `research/single-file-format/browser/`
 
-The web spike's harness, run and report scripts; its `README.md` is the
+The browser research's harness, run and report scripts; its `README.md` is the
 runbook.
 
-## `research/web-spike/results/`
+## `research/single-file-format/browser/results/`
 
-Every run of the web spike (`research/web-spike` on `main`): one JSON
+Every run of the browser research (`research/single-file-format/browser` on `main`): one JSON
 file per run, named `<date>T<time>-chromium-<major>[-quick][-qN|-roundN].json`,
 as `run.js`, `round3.js` and `round4.js` write them. The journal,
-`research/web-spike/journal.md`, cites them by name. They were moved
+`research/single-file-format/browser/journal.md`, cites them by name. They were moved
 here from `worker/pensive-edison-fu3bx5` at `7dfb9f2c`.
 
 To print a run's tables, from a dialog checkout with this branch beside it:
@@ -36,7 +36,7 @@ To print a run's tables, from a dialog checkout with this branch beside it:
 ```sh
 git fetch origin research-data
 git worktree add ../research-data research-data
-cd ../research-data/research/web-spike
+cd ../research-data/research/single-file-format/browser
 node report.js results/<file>.json          # rounds 1 and 2
 node round3-report.js results/<file>.json   # round 3
 node round4-report.js results/<file>.json   # round 4

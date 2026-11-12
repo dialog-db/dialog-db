@@ -1,9 +1,9 @@
-# Web spike: a space file on OPFS, many workers (runbook)
+# The single-file format in a browser: runbook
 
 The harness and its runs, kept on the `research-data` branch. The
 questions, numbers and conclusions are in the journal on `main`,
-`research/web-spike/journal.md`, and the report in
-`research/web-spike/README.md` there.
+`research/single-file-format/browser/journal.md`, and the report in
+`research/single-file-format/browser/README.md` there.
 
 A measured spike of the browser side of the file archive. Round one: what a
 sync access handle, a MessagePort and a Web Lock cost in Chromium, whether
@@ -30,7 +30,7 @@ Needs Node and Playwright with its Chromium (`require('playwright')` must
 resolve; nothing here installs it).
 
 ```sh
-cd research/web-spike
+cd research/single-file-format/browser
 node run.js                 # every question, about ten minutes
 node run.js q1 q4           # some questions
 node run.js q6 q7 q8 q9     # round two only, about seven minutes
