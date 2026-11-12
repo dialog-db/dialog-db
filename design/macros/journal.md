@@ -5,7 +5,7 @@
 |  | Understanding | Activity |
 |---|---|---|
 | **Status** | The kernel and the core forms run on a real branch through `rust/dialog-notation` ([poc.md](poc.md)); the prelude is rules only. The syntax tree is built, apart from the notation as parsed, and kept as data: maps that say their `type` ([design-forms.md](design-forms.md#the-syntax-tree)). A struct is a value and, with a variable in it, a pattern, which is a topic of its own with an agent on it (#777). Rules of several heads are #776. Expanding and compiling still read the notation as parsed, and `kernel.rs` still copies dialog's forms. | **Directing**, backtracked from Designing on 2026-11-12. Direction decided by the maintainer: phases as formulas and a resolver, one rule over them. A proof of concept runs. A name is kept as a name, what is named and a signature; a definition under it is read `last`; an application resolves by the labels written and a read that fits several is of all. Built and tested, by pattern, in the expander. |
-| **Agenda** | Parked by the maintainer: authority, for two definitions of one signature written apart; `last` elects one until then. How a query reports. What a kept rule about syntax holds where its template names something, a name or a hash. Whether the analyzer, a resolver by the maintainer's word, gives back the table of what each name meant. Whether dialog can be asked for an expansion a form at a time (H3). What a read with no pick reads. | The notation is on top of patterns (#778, merged in, its perf gate failing): a struct is a value in a write and a pattern in a query of one read. Next: a struct in a rule, which needs the compiler to build dialog's forms in Rust, since a pattern has no wire form; `entity/derive` over a record; then an application lowers to a `ConceptQuery` of the definition's concept. Not waiting: a helper rule for a negated conjunction. Waiting on patterns (#777, #778): a struct as a term, `entity/derive` over a record, syntax kept on the branch. Waiting on #776: a rule of several heads. |
+| **Agenda** | Parked by the maintainer: authority, for two definitions of one signature written apart; `last` elects one until then. How a query reports. What a template holds where it applies itself or what is defined after it. Whether the name as written is part of what names a macro. Whether the analyzer, a resolver by the maintainer's word, gives back the table of what each name meant. Whether dialog can be asked for an expansion a form at a time (H3). What a read with no pick reads. | The notation is on top of patterns (#778, merged in, its perf gate failing): a struct is a value in a write and a pattern in a query of one read. Next: a struct in a rule, which needs the compiler to build dialog's forms in Rust, since a pattern has no wire form; `entity/derive` over a record; then an application lowers to a `ConceptQuery` of the definition's concept. Not waiting: a helper rule for a negated conjunction. Waiting on patterns (#777, #778): a struct as a term, `entity/derive` over a record, syntax kept on the branch. Waiting on #776: a rule of several heads. |
 
 ## Candidate problems
 
@@ -515,3 +515,21 @@ Not examined yet. They are columns, not recommendations.
 - Either way analysis reads what a hash names, to expand by a rule it was not handed. That is a read by content, which a formula cannot do and a resolver can. So "the analyzer is a resolver" and "a resolver, then a formula" are one program with a boundary shown or not. What showing it buys is analysis over a context that is not a committed root.
 
 **Decided.** By the maintainer: do not complicate it, the analyzer as a resolver is fine. Proposed by the agent, not decided: it resolves names first, as one step, and gives the table back with the kernel forms and the diagnostics, so an editor can ask what a name meant and the boundary can be shown later. Open, and his: what a kept template holds where it names something.
+
+## 2026-11-12, Directing: a macro resolves its names when it is defined
+
+**Asked.** What a kept rule about syntax holds where its template names something. The agent's first example used `xyz.todo`, which is a domain and stands for itself; Irakli asked whether it was meant to be a name. It was not one. The name is `todo`, what `concept` defines.
+
+**Learned.**
+
+- A template that names only domains and kernel words has nothing to resolve. Every rule of the prelude is such a template, so the proof of concept never met the question.
+- A concept's entity is made of its attributes and does not hold what its fields are called (`Signature`, `syntax.rs`). So the entity of `todo` alone does not say which attribute `state:` is. A template resolved when defined has to hold the attribute of each labelled part as well, or the labels still read the name where the form is used.
+- A concept that applies its own name in its body can be resolved before its body is: its entity is its attributes. A rule about syntax whose template applies itself, or one defined later in the source, has no entity yet when the template is resolved.
+
+```
+ as written      (todo ?t state: :done)
+ as kept         concept:…  this: ?t   xyz.todo/state: :done      what it means, named by content
+ beside it       todo, state:, where in the source                what a source map reads
+```
+
+**Decided.** By the maintainer: a macro resolves every name when it is defined and holds the entity of what was named, the concept `todo` here. It also holds what the name was, so source maps work. So analysis resolves the names a source writes, once, and expanding brings none. Proposed by the agent, not decided: the name and the labels as written are kept beside the template and are no part of what names the macro, as a description is no part of what names a rule. Open: what a template holds where it applies itself or what is defined after it.
