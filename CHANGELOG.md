@@ -76,6 +76,41 @@ What this changes for you:
 
 Why: on a member whose blocks are all local, the walk was most of a view
 read, and its cost rose with every change that left more ops buffered.
+
+### A typed variable reads the values of its type through a concept, as it does through a scan
+
+[#782](https://github.com/dialog-db/dialog-db/pull/782),
+[design/typed-read-of-untyped-field.md](./design/typed-read-of-untyped-field.md).
+
+A variable's type says which values it reads, and an attribute's type is
+part of which attribute it is. A scan of an attribute into a variable
+typed as text passes over a number stored under it, and so does a read of
+a recursive concept. A read of a concept that is not recursive did not: a
+value of another type under a field that declares no type failed the
+whole query with `Variable ?x of kind String cannot bind UnsignedInt(7)`.
+It now takes such a value for a fact of another attribute, so every way
+a concept is read agrees.
+
+What this changes for you:
+
+- A query that reads a concept field into a typed variable no longer
+  fails when the field holds a value of another type for some entity. It
+  yields the rows whose value the variable reads.
+- A variable that reads a type or nothing (`Option<T>`) is bound absent
+  for an entity whose only values are of another type, as it is for an
+  entity with no value. A value of the variable's type that disagrees
+  with what the variable is already bound to is still no row.
+- Where a pick elects one of an entity's values (`max:`, `top:`, a field
+  a rule derives), a typed variable elects among the values of its type.
+  A greater value of another type no longer takes the place of the one
+  the variable reads.
+
+Why: which of a concept's rows a caller's terms match should not depend
+on whether a rule makes the concept recursive, which the caller cannot
+see. `Match::bind` already says a value a type does not read is a
+mismatch that "callers that filter rows treat as a non-match"; the plain
+concept read was the one caller that did not.
+
 ### A rule seeded by several rows of one entity is evaluated once when they agree
 
 [#763](https://github.com/dialog-db/dialog-db/pull/763), [#762](https://github.com/dialog-db/dialog-db/issues/762)
