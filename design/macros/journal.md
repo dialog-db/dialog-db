@@ -4,8 +4,8 @@
 
 |  | Understanding | Activity |
 |---|---|---|
-| **Status** | The kernel and the core forms run on a real branch through `rust/dialog-notation` ([poc.md](poc.md)); the prelude is rules only. The syntax tree is built, apart from the notation as parsed, and kept as data: maps that say their `type` ([design-forms.md](design-forms.md#the-syntax-tree)). A struct is a value and, with a variable in it, a pattern, which is a topic of its own with an agent on it (#777). Rules of several heads are #776. Expanding and compiling still read the notation as parsed, and `kernel.rs` still copies dialog's forms. | **Designing.** Direction decided by the maintainer. A proof of concept runs. A name is kept as a name, what is named and a signature; a definition under it is read `last`; an application resolves by the labels written and a read that fits several is of all. Built and tested, by pattern, in the expander. |
-| **Agenda** | Parked by the maintainer: authority, for two definitions of one signature written apart; `last` elects one until then. How a query reports. Whether dialog can be asked for an expansion a form at a time (H3). What a read with no pick reads. | The notation is on top of patterns (#778, merged in, its perf gate failing): a struct is a value in a write and a pattern in a query of one read. Next: a struct in a rule, which needs the compiler to build dialog's forms in Rust, since a pattern has no wire form; `entity/derive` over a record; then an application lowers to a `ConceptQuery` of the definition's concept. Not waiting: a helper rule for a negated conjunction. Waiting on patterns (#777, #778): a struct as a term, `entity/derive` over a record, syntax kept on the branch. Waiting on #776: a rule of several heads. |
+| **Status** | The kernel and the core forms run on a real branch through `rust/dialog-notation` ([poc.md](poc.md)); the prelude is rules only. The syntax tree is built, apart from the notation as parsed, and kept as data: maps that say their `type` ([design-forms.md](design-forms.md#the-syntax-tree)). A struct is a value and, with a variable in it, a pattern, which is a topic of its own with an agent on it (#777). Rules of several heads are #776. Expanding and compiling still read the notation as parsed, and `kernel.rs` still copies dialog's forms. | **Directing**, backtracked from Designing on 2026-11-12. Direction decided by the maintainer: phases as formulas and a resolver, one rule over them. A proof of concept runs. A name is kept as a name, what is named and a signature; a definition under it is read `last`; an application resolves by the labels written and a read that fits several is of all. Built and tested, by pattern, in the expander. |
+| **Agenda** | Parked by the maintainer: authority, for two definitions of one signature written apart; `last` elects one until then. How a query reports. Which of three things a phase that reads the database is, and whether analysis is a formula over a form and a context; how that context is gathered, when no fold collects and a fold may not sit in a cycle. Whether dialog can be asked for an expansion a form at a time (H3). What a read with no pick reads. | The notation is on top of patterns (#778, merged in, its perf gate failing): a struct is a value in a write and a pattern in a query of one read. Next: a struct in a rule, which needs the compiler to build dialog's forms in Rust, since a pattern has no wire form; `entity/derive` over a record; then an application lowers to a `ConceptQuery` of the definition's concept. Not waiting: a helper rule for a negated conjunction. Waiting on patterns (#777, #778): a struct as a term, `entity/derive` over a record, syntax kept on the branch. Waiting on #776: a rule of several heads. |
 
 ## Candidate problems
 
@@ -468,3 +468,26 @@ Not examined yet. They are columns, not recommendations.
 
 **Decided.** Not decided: which of the three. Installable formulas are a change to the engine of their own, with three things to settle first: what a build does with a rule that names a formula it does not have, what a registry costs where an enum dispatches today, and what keeps one name meaning one function across builds.
 
+
+## 2026-11-12, Directing: an analyzer given a context
+
+**Asked.** Irakli, on the three kinds: is the point that the analyzer need not be a resolver and could be rules? Staleness after every commit should not be perceivable, since `evaluate` is a command and lasts a tick. Then: a formula could give the names to resolve, a query could resolve them and aggregate them into a context, and the analyzer could be a formula over the form and the context; but aggregation is not allowed inside rules. "Having a formula that can analyze given a context does seem kind a neat."
+
+**Learned.**
+
+- He is right about staleness for a command: it runs once, in a commit, and nothing is kept to go stale. Staleness matters for the other use, a standing query an editor keeps open. What a resolver given the root does miss for a command is state that is not committed: the definitions of the commit in progress, and a rule laid over a branch. A source that defines a form and uses it is exactly that.
+- Aggregation is allowed in a deductive rule: a `reduce` clause folds a group with `count`, `count-distinct`, `sum`, `min`, `max` or `avg`. What is in the way is narrower, and it is three things:
+
+```
+ names of a form ──▶ read each ──▶ fold into a map ──▶ analyze(form, context)
+     formula          premises       no such fold          formula, pure
+                                     there is today
+```
+
+  - no fold gathers a group into one value, since there was no composite to gather into before #778;
+  - a fold inside a dependency cycle is a stratification violation, and expanding can introduce names the source did not have, which is a loop through the fold;
+  - a rule that writes has no `reduce`, so a deductive rule gathers the context and the rule that answers `evaluate` reads it.
+- Given a context, analysis is a pure function of two values. It sees whatever the premises that gathered the context saw, uncommitted or not. It works on text that is not committed. And an answer is as fresh as its context: a commit that leaves the context the same leaves the analysis valid, with nothing asked of the engine.
+- The loop goes away if the context is every name the space defines, gathered once. The cost is the size of that value and that any change of a name is a new context.
+
+**Decided.** Not decided. The maintainer likes an analyzer that is a formula over a form and a context; how the context is gathered is open. Three hypotheses are in the [ledger](claims.md). The test of the first waits on which value a composite is (`Value::Record` on #778, `Value::Composite` in #748's journal).
