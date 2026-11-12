@@ -69,3 +69,7 @@ Backtracking moves a topic to an earlier phase and says so in its journal.
   reference, so reads and writes of keys the replica held wait on the
   remote. A download can bring along only what the replica holds, and a
   pull can retry when a commit overtakes it.
+- [A typed variable over a field of no declared type fails the query](typed-read-of-untyped-field.md):
+  **Describing.** A value of another type than the variable's fails a
+  concept read, and is passed over by a recursive concept read and by an
+  attribute read. Seen while building patterns (#778).
