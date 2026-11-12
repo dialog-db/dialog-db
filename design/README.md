@@ -69,6 +69,10 @@ Backtracking moves a topic to an earlier phase and says so in its journal.
   reference, so reads and writes of keys the replica held wait on the
   remote. A download can bring along only what the replica holds, and a
   pull can retry when a commit overtakes it.
+- [A concept read is moved as 17 KB](read-stream-size.md):
+  **Describing.** The stream a concept read is has room in it for every
+  path a read can take, and is moved by value twice a read. Seen while
+  tracing a Perf gate failure on #778.
 - [A typed variable over a field of no declared type fails the query](typed-read-of-untyped-field.md):
   **Building.** A value of another type than the variable's failed a
   plain concept read and was passed over by every other read. Every read
