@@ -414,3 +414,15 @@ Not examined yet. They are columns, not recommendations.
 
 **Decided.** By the maintainer: one format 4, for all four. It is a topic of its own, [rule-format](https://github.com/dialog-db/dialog-db/pull/779), in the Describing phase. What this topic asks of it: a head that is not a concept and a premise that takes a form apart, so a rule about syntax can be stored. Until it lands a struct stays out of rules here.
 
+## 2026-11-12, Designing: a struct in a query of several premises and in a rule that derives
+
+**Asked.** Irakli: where the primary work stands, with #782 merged and patterns green.
+
+**Learned.**
+
+- Patterns (#778) lays a rule that holds a pattern over a branch and names it by its parts, with no stored form. That was the one thing asked of it here, and with it a query of several premises takes a struct apart.
+- A rule that derives is only ever read by queries, so the notebook can hold one dialog cannot keep and lay it over each query. A rule that writes cannot be held that way: it runs when a transaction commits.
+- So what is left behind format 4 is narrower than "structs in rules": a rule that writes, and `entity/derive` over a record, which makes every rule that derives an entity one that writes.
+
+**Decided.** Built: the notebook holds a deductive rule dialog cannot store (`Notebook::held`). It is a stand-in for format 4 and goes when a stored rule can hold a pattern. Not decided: the stamping policy of format 4, which is the maintainer's and is what #779 waits on.
+

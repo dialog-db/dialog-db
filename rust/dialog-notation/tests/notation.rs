@@ -581,33 +581,60 @@ async fn it_keeps_a_struct_and_takes_it_apart_by_a_pattern() -> Result<()> {
     );
 
     // A query of several premises is a rule laid over the branch for
-    // the query alone. The notation hands Dialog-DB that rule with the
-    // struct in it, and Dialog-DB names a rule laid over a branch by its
-    // stored form, which has no way to write a pattern. So it is not had
-    // yet, though nothing would be stored.
+    // the query alone, struct and all: nothing of it is stored.
     notebook
         .submit(r#"(assert! (xyz.person person:ada name: "Ada"))"#)
         .await?;
-    let joined = notebook
-        .submit(
+    assert_eq!(
+        report(
+            &mut notebook,
             "(query (xyz.person ?p name: ?who)
                (when (xyz.note ?n about: {author: ?who tags: _ pinned: _})
                      (xyz.person ?p name: ?who)))",
         )
+        .await?,
+        vec![r#"(xyz.person person:ada name: "Ada")"#]
+    );
+
+    // Dialog-DB cannot keep a rule that holds a struct: a stored rule
+    // has no way to write one yet. The notebook holds the rule itself
+    // and lays it over the branch for every query after.
+    notebook
+        .submit("(rule (xyz.by ?n author: ?who) (when (xyz.note ?n about: {author: ?who})))")
+        .await?;
+    assert_eq!(notebook.held(), 1);
+    assert_eq!(
+        report(&mut notebook, "(query (xyz.by ?n author: ?who))").await?,
+        vec![r#"(xyz.by note:2 author: "Grace")"#]
+    );
+    // A query of several premises reads through the held rule.
+    notebook
+        .submit(r#"(assert! (xyz.person person:grace name: "Grace"))"#)
+        .await?;
+    assert_eq!(
+        report(
+            &mut notebook,
+            "(query (xyz.person ?p name: ?who)
+               (when (xyz.by ?n author: ?who) (xyz.person ?p name: ?who)))",
+        )
+        .await?,
+        vec![r#"(xyz.person person:grace name: "Grace")"#]
+    );
+
+    // A rule that writes runs when a transaction commits, where a rule
+    // held for queries is never seen. So one that holds a struct is
+    // refused until Dialog-DB can keep it.
+    let writing = notebook
+        .submit(
+            "(rule (assert! (xyz.by ?n author: ?who))
+               (when (xyz.note ?n about: {author: ?who})))",
+        )
         .await
         .map_err(|error| error.downcast::<Error>());
     assert!(
-        matches!(joined, Err(Ok(Error::Unsupported(_)))),
-        "{joined:?}"
+        matches!(writing, Err(Ok(Error::Unsupported(_)))),
+        "{writing:?}"
     );
-
-    // Nor can Dialog-DB keep a rule that holds a struct, for the same
-    // reason.
-    let rule = notebook
-        .submit("(rule (xyz.by ?n author: ?who) (when (xyz.note ?n about: {author: ?who})))")
-        .await
-        .map_err(|error| error.downcast::<Error>());
-    assert!(matches!(rule, Err(Ok(Error::Unsupported(_)))), "{rule:?}");
     Ok(())
 }
 

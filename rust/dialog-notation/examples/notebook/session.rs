@@ -5,8 +5,8 @@ use anyhow::Result;
 use dialog_notation::{Diagnostic, Error, Expander, Step, compile};
 use dialog_peer::helpers::{test_repo, test_session_with_peer};
 use dialog_peer::{Peer, Session};
-use dialog_query::ConceptConclusion;
 use dialog_query::query::Output as _;
+use dialog_query::{ConceptConclusion, DeductiveRule};
 use dialog_repository::{Branch, Transient};
 use dialog_storage::provider::storage::VolatileSpace;
 
@@ -15,6 +15,11 @@ pub struct Notebook {
     pub operator: Peer<VolatileSpace, Session>,
     pub branch: Branch,
     expander: Expander,
+    /// The rules Dialog-DB cannot keep yet: a rule that holds a struct
+    /// has no stored form. The notebook holds them itself and lays them
+    /// over the branch for every query, so they last as long as it does
+    /// and no longer.
+    held: Vec<DeductiveRule>,
 }
 
 impl Notebook {
@@ -26,7 +31,14 @@ impl Notebook {
             operator,
             branch,
             expander: Expander::new()?,
+            held: Vec::new(),
         })
+    }
+
+    /// How many rules the notebook holds because Dialog-DB cannot keep
+    /// them.
+    pub fn held(&self) -> usize {
+        self.held.len()
     }
 
     /// Submit a document: one transaction for what it writes, installs
@@ -39,19 +51,24 @@ impl Notebook {
         let mut queries = Vec::new();
         for rule in &kernel {
             for step in compile(rule)? {
-                writes |= !matches!(step, Step::Query(_));
                 transaction = match step {
                     Step::Assert(statement) => transaction.assert(statement),
                     Step::Retract(statement) => transaction.retract(statement),
                     Step::Issue(statement) => transaction.dispatch(statement),
-                    // Dialog-DB refuses to keep a rule its stored form
-                    // cannot write, and an assertion has no error to
-                    // return, so it is asked first.
+                    // A rule Dialog-DB has no stored form for is held
+                    // here in place of being kept on the branch.
                     Step::Deduce(rule) => {
-                        rule.storable()
-                            .map_err(|refusal| Error::Unsupported(refusal.to_string()))?;
+                        if rule.storable().is_err() {
+                            self.held.push(*rule);
+                            continue;
+                        }
                         transaction.assert(*rule)
                     }
+                    // A rule that writes runs when a transaction
+                    // commits, which a rule laid over a branch for a
+                    // query never does. So one Dialog-DB cannot keep is
+                    // refused, and an assertion has no error to return,
+                    // so it is asked first.
                     Step::Induce(rule) => {
                         rule.storable()
                             .map_err(|refusal| Error::Unsupported(refusal.to_string()))?;
@@ -60,9 +77,10 @@ impl Notebook {
                     Step::Transient(concept) => transaction.assert(Transient(concept)),
                     Step::Query(query) => {
                         queries.push(query);
-                        transaction
+                        continue;
                     }
                 };
+                writes = true;
             }
         }
         if writes {
@@ -75,16 +93,13 @@ impl Notebook {
         }
         let mut report = Vec::new();
         for query in queries {
-            // A rule laid over the branch is named as a stored one is,
-            // so one Dialog-DB cannot write out is refused here too.
-            let layer = match &query.rule {
-                Some(rule) => {
-                    rule.storable()
-                        .map_err(|refusal| Error::Unsupported(refusal.to_string()))?;
-                    self.branch.with(rule.clone())
-                }
-                None => self.branch.query(),
-            };
+            // The rules held here, and the query's own when it has
+            // several premises, are laid over the branch for the query
+            // alone: nothing of them is written.
+            let mut layer = self.branch.query();
+            for rule in self.held.iter().chain(&query.rule) {
+                layer = layer.with(rule.clone());
+            }
             let rows: Vec<ConceptConclusion> = layer
                 .select(query.select.clone())
                 .perform(&self.operator)

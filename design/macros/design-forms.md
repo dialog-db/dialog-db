@@ -434,7 +434,16 @@ What the notation needs of it, for whoever builds records:
 | the pairs a pattern did not name, bound as a record | `...?rest` |
 | the keys a label writes: an attribute of a domain, and a name of none | `{xyz.todo/text: ?x}`, `{text: ?x}` |
 
-Built on #778 so far: a struct is a value where a write says one and a pattern in a query of one read (`it_keeps_a_struct_and_takes_it_apart_by_a_pattern`). A struct in a rule compiles and is refused where dialog would keep the rule or lay it over a branch, since format 3 of a rule body cannot write a pattern; `...?rest` in a struct is not read; and `entity/derive` stays the two-cell stand-in. H5 below asked whether this is one premise that runs both ways; that it is a pattern in a term is now the maintainer's, and how dialog evaluates one is the patterns topic's to build.
+Built on #778 so far (`it_keeps_a_struct_and_takes_it_apart_by_a_pattern`): a struct is a value where a write says one, and a pattern in a query of one read or of several, since dialog now lays a rule that holds a pattern over a branch. A struct in a rule that derives runs for as long as the notebook does: dialog cannot keep the rule, format 3 of a rule body having no way to write a pattern, so the notebook holds it and lays it over the branch for every query. A struct in a rule that writes is refused, since such a rule runs when a transaction commits and a rule held for queries is never seen there. `...?rest` in a struct is not read; and `entity/derive` stays the two-cell stand-in.
+
+```
+ a struct in                      today
+   a write                        kept as the value
+   a query, one read or several   laid over the branch for the query
+   a rule that derives            held by the notebook, laid over every query, lost with it
+   a rule that writes             refused: waits on format 4 (#779)
+   entity/derive                  not yet: every rule deriving an entity would be one that writes
+``` H5 below asked whether this is one premise that runs both ways; that it is a pattern in a term is now the maintainer's, and how dialog evaluates one is the patterns topic's to build.
 
 ## Hypotheses, after the decision
 
@@ -448,7 +457,7 @@ H2 is now a requirement in the table above, not a hypothesis. H3 and H4 stand.
 
 ## Next
 
-1. A stored rule that holds a pattern: format 4 of a rule body, its own topic (#779), for patterns, records, several heads and rules about syntax together. The compiler hands dialog a rule with a struct in it now, and dialog can neither keep it nor lay it over a branch, since both name a rule by a stored form that cannot write a pattern. `entity/derive` over a record waits on the same: built once, it made every rule that derives an entity uninstallable, and was taken out.
+1. A stored rule that holds a pattern: format 4 of a rule body, its own topic (#779), for patterns, records, several heads and rules about syntax together. Dialog lays a rule with a struct in it over a branch now and still cannot keep one, so a rule that writes cannot hold a struct. `entity/derive` over a record waits on the same: built once, it made every rule that derives an entity uninstallable, and was taken out.
 2. The expander and the compiler read the tree, an application lowers to a `ConceptQuery` of the definition's concept, and `kernel.rs` gives way to dialog's own forms.
 
 Parked by the maintainer: what decides between two definitions of one signature written apart. `last` elects one.
