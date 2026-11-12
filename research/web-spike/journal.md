@@ -4,9 +4,12 @@ What was tried, measured and decided, newest last. The questions come from
 the "What applies to us" and "Open questions" sections of
 [web-opfs.md](../single-file-format/web-opfs.md); the native design they
 port is [design/file-writers.md](../../design/file-writers.md) and the end
-of its [journal](../../design/file-writers/journal.md). How to run the
-harness: [README.md](README.md). Raw numbers: `results/`, rendered with
-`node report.js <file>`.
+of its [journal](../../design/file-writers/journal.md). The outcome is the
+report, [README.md](README.md). The harness, the scripts this journal names
+(`run.js`, `round3.js`, `round4.js`, `harness/…`, the report and chart
+scripts), their runbook and every run's raw JSON are on the
+[`research-data`](https://github.com/dialog-db/dialog-db/tree/research-data/research/web-spike)
+branch, at the same paths; the charts are here, in `results/`.
 
 ## Where things stand
 

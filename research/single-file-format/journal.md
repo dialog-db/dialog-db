@@ -5,6 +5,10 @@ What we tried, what it measured, and what we decided, newest last. The
 measurements in full; the [design](design.md) is the current decision.
 Work happens on the `worker/pensive-edison-fu3bx5` branch, PR
 [#733](https://github.com/dialog-db/dialog-db/pull/733).
+The bench, report and chart scripts this journal names (`bench/…`) are on
+the [`research-data`](https://github.com/dialog-db/dialog-db/tree/research-data/research/single-file-format/bench)
+branch, under `research/single-file-format/bench/`; the reports and their
+charts are here, in [results](results/).
 
 ## Where things stand
 

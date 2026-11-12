@@ -1,5 +1,7 @@
 # Single-file format: evaluation
 
+The scripts named `bench/…` below are on the [`research-data`](https://github.com/dialog-db/dialog-db/tree/research-data/research/single-file-format/bench) branch, under `research/single-file-format/bench/`.
+
 What we measure to decide the format's open choices, and against what.
 Size alone does not decide them: an index layout that saves a megabyte can
 cost every query a page, or every sync a rewrite. Each axis below says the
