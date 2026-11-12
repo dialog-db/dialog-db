@@ -957,6 +957,16 @@ impl Type {
         self.admits(&value).then_some(value)
     }
 
+    /// Whether a variable of this type reads `value` at all: as it is,
+    /// or through a number view. What [`Match::bind`] accepts for the
+    /// variable, without binding it.
+    ///
+    /// [`Match::bind`]: crate::Match::bind
+    pub fn reads(&self, value: &Value) -> bool {
+        (matches!(self, Type::Primitive(_)) && self.admits(value))
+            || self.view(value.clone()).is_some()
+    }
+
     /// True when the given runtime value inhabits this type: the
     /// value's data type is a member of the primitive part, and the
     /// refinement (if any) admits the value itself.
