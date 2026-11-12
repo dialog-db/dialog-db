@@ -1,6 +1,6 @@
 # A query or a click waits on blocks the replica does not hold
 
-Phase: **Diagnosing.** See the [design index](README.md) for what the
+Phase: **Delimiting.** See the [design index](README.md) for what the
 phases mean, and the [journal](partial-replicas/journal.md) for where the
 topic stands. The title is the symptom; it changes when the problem is
 stated.
@@ -72,8 +72,26 @@ What was checked in the code on 2026-11-12 (dialog `a31b144`, tonk
 
 ## Problem
 
-Not stated yet. The request names two remedies, and the cause they answer
-is an attribution that has not been measured: see the journal's agenda.
+*Draft, not yet accepted.* A replica holds the parts of a space its
+earlier reads reached, and no more, because a space may be larger than a
+device should hold. Whether an operation, a query or a commit, can
+complete from what the replica holds is not known before it runs and is
+not reported while it runs: an operation that reaches a block held by
+reference fetches it, and its caller sees an answer that took longer, an
+error, or nothing. So an application cannot tell a person what works now,
+what is waiting on the network and what cannot be done offline, and the
+person meets a control that does nothing.
+
+The maintainer's words, 2026-11-12: "we have no good way of recognizing
+what functionality is available and what isn't in a partial replica
+because any action or query may require part not yet available", and what
+is wanted is to "operate what can be operated in that mode and gracefully
+degrade or disable functions that can not be executed".
+
+Not yet settled in it: what "degrade" means for a query and for an action
+(the journal's agenda), and whether the two remedies the request arrived
+with, answers with holes and writes made without their read, are inside
+the problem or beside it.
 
 ## Approach
 

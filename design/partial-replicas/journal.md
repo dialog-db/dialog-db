@@ -4,8 +4,8 @@
 
 |  | Understanding | Activity |
 |---|---|---|
-| **Status** | *What do we know?* How a replica comes to hold a tree by reference (a lazy pull adopts by root), what a read does on a miss (fetch; fail naming the remote; or not return, there being no timeout), what a commit on main reads (one entity-index path per instruction, overflow cascades, induction, bookkeeping; the other writes are blind appends at the root), and the steps between a click in tonk and the page changing. That a write which did not observe a cell already has a defined meaning (a concurrent peer's), and that a read with holes has none in the engine. That stale and partial are two different states. | *Where are we at?* Diagnosing. The description is written. The cause the request assumes for the click (the commit replicating the tree where the write goes) is an attribution: nine places the time could be are in the ledger, none measured. |
-| **Agenda** | *What do we need to know?* (1) From the maintainer, the next question, asked and not yet answered: on the clicks that stall, is the person changing something the page was showing, or writing something the page never read (a new entity, a field not on screen)? Still open from the first sitting: when a device holds an older revision completely and a newer one by reference, what should a person looking at the page see, the older answer or the newer one with holes? (2) Where a stalled click's time goes: the result template below. (3) Whether the replica was complete for its reads before the pull that made it partial. (4) Whether a cell reads the same from the attribute ordering as from the entity ordering at every root. (5) How many of tonk's queries and rules read absence (a negation, an aggregate, a pick over a cell, an existence check before a write). | *Where are we going?* Stay in Diagnosing until (2) is filled in; then Delimiting. The measurement is tonk's to run and may become a research topic; link it from the ledger row. For Direction, later: what others do with a tree held by reference (git's partial clone and sparse index; Datomic peers; Zero's `unknown`/`complete` results; certain answers over incomplete databases), to be read, not yet read. |
+| **Status** | *What do we know?* A replica holds what its reads reached and never what the next interaction will read; a space may be too large to hold whole (the maintainer). An evaluation that reads only held blocks is exact, and whether an operation is such an evaluation cannot be known without running it. Nothing tells a caller that an operation needs the network: a local read exists only at the tree, and its miss is a string error. What a commit reads (the cell scan in the entity ordering above all), and that the same cell is held in the attribute ordering. That a write which did not observe its cell has a defined meaning and a read with holes has none. | *Where are we at?* Delimiting. The maintainer named the cause: nothing recognizes what can run on a partial replica. A problem statement is drafted in the top story, not accepted. |
+| **Agenda** | *What do we need to know?* (1) From the maintainer, asked and not yet answered: offline, a person marks done a to-do they can see, and the replica does not hold the cell. Is "degrade gracefully" that the control was already disabled, that the click is accepted and held until the block arrives, or that the write is made now without its read? (2) The same for a query: is a list that shows the rows it holds, marked as not all, a degraded answer or a wrong one? (3) Whether the wait or the silence is the complaint online. (4) Whether the draft problem statement is accepted. Carried over, now for Direction and not blocking: where a stalled click's time goes (the template below); whether a cell reads the same from the attribute ordering; how many of tonk's queries and rules read absence. | *Where are we going?* Accept or cut the problem statement, then Direction: use cases (what a person and an application could do were the verdict known), then approaches. What others do with a tree held by reference (git's partial clone and sparse index, Datomic peers, Zero's `unknown`/`complete` results, certain answers over incomplete databases) is still to be read. |
 
 ### Result template for agenda (2)
 
@@ -131,3 +131,56 @@ on this replica.
 **Decided.** Not decided. The agenda's first question changed: which kind
 of cell the stalled clicks write decides whether the two narrower answers
 cover the complaint or the blind write is needed.
+
+## 2026-11-12, Diagnosing to Delimiting: what can run on what is held
+
+**Asked.** The maintainer corrected a hypothesis of the first sitting: the
+replica was never complete. A space may hold huge amounts of data; a load
+runs queries and replicates only the segments they touched, and the next
+interaction may need more of the tree. The maintainer then offered a
+problem: "we have no good way of recognizing what functionality is
+available and what isn't in a partial replica because any action or query
+may require part not yet available", and what is needed is "a way to
+operate what can be operated in that mode and gracefully degrade or
+disable functions that can not be executed on the partial replica".
+
+**Learned.**
+
+- The hypothesis as written was about reads already made, not the whole
+  space, but the correction stands against what it was used for. "Stale
+  and complete" exists only for reading again what was read; the click's
+  read is a first read. The opinion built on it is narrowed in the ledger,
+  and holding the head back until blocks are local is not an answer to
+  this topic's complaint.
+- *That is a feature, not a problem*, half of it. "No way of recognizing
+  what is available" is a cause. "A way to operate what can be operated"
+  is a remedy, and it hides the word that needs a definition. An operation
+  that reads only held blocks is not operating in a lesser mode: its
+  answer is exact. So "what can be operated" has a plain meaning (every
+  block it reads is held), and the trouble is that this is not known
+  before an operation runs, since what it reads depends on what it reads
+  first, and is not said while it runs.
+- What exists toward a verdict: a read can be made local at the tree and
+  then misses as `None`. What does not: no query, subscription or commit
+  can be made local, and a local miss surfaces as a string error with no
+  range in it. A caller gets an answer, a late answer, an error or
+  nothing.
+- *Those two cannot both be true:* the request arrived asking for answers
+  that leave out what is not held and for writes made against the
+  incomplete tree. The problem as now stated asks for recognizing what
+  cannot run and disabling it. The first runs the operation anyway and
+  accepts a different result; the second refuses to. "Degrade" sits
+  between them and is not defined. The agenda's first two questions ask
+  which is meant, once for an action and once for a query.
+- "Disable" and "degrade" ask for the verdict at different times: before
+  the person acts, for everything on screen and again whenever the
+  replica changes; or when the operation is attempted.
+- The measurement of where a click's time goes matters less to this
+  statement than to the first: the statement does not depend on which
+  read waits. It moves to Direction, where it decides between approaches.
+
+**Decided.** Not decided. The phase moved to Delimiting on the
+maintainer's naming of the cause; the problem statement is a draft.
+
+**Backtracked.** No. The first sitting's opinion that holding the head
+back would spare the warm case partial answers is narrowed, not reversed.
