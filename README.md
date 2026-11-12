@@ -13,7 +13,10 @@ The bench, report and chart scripts of the single-file format
 evaluation name them (`bench/<script>`). Run them from a dialog
 checkout, with this branch's `research/` beside it (`git worktree add
 ../research-data research-data`), as they read and write paths relative
-to the repository root.
+to the repository root. `file-archive-bench.yml` is the GitHub workflow
+that ran `ci.sh` on every push to the branch of
+[#733](https://github.com/dialog-db/dialog-db/pull/733), comparing the
+file archive with main's store; it is kept here as it was, not run.
 
 ## `research/web-spike/`
 
