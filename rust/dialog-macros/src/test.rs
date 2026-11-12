@@ -520,35 +520,8 @@ impl<'a> IntegrationTest<'a> {
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped());
 
-                // The address is compiled into the wasm test binary, and
-                // every provisioned test of this package builds that one
-                // binary with its own address. Cargo lets go of its build
-                // lock before running what it built, so another test could
-                // build over the binary in between and this one would run
-                // with that test's address. One test of a package at a
-                // time builds and runs it, under a lock file named for the
-                // package's manifest directory.
-                let lock_path = {
-                    use ::std::hash::{Hash, Hasher};
-                    let mut hasher = ::std::collections::hash_map::DefaultHasher::new();
-                    env!("CARGO_MANIFEST_DIR").hash(&mut hasher);
-                    ::std::env::temp_dir().join(format!(
-                        "dialog-provisioned-wasm-{}-{:016x}.lock",
-                        pkg_name,
-                        hasher.finish()
-                    ))
-                };
                 let output = ::tokio::task::spawn_blocking(move || {
-                    let lock = ::std::fs::OpenOptions::new()
-                        .create(true)
-                        .truncate(false)
-                        .write(true)
-                        .open(&lock_path)
-                        .expect("Failed to open the provisioned wasm test lock");
-                    lock.lock().expect("Failed to take the provisioned wasm test lock");
-                    let output = cmd.output().expect("Failed to execute cargo test");
-                    drop(lock);
-                    output
+                    cmd.output().expect("Failed to execute cargo test")
                 }).await.expect("Failed to join blocking task");
 
                 // Combine stdout and stderr for display
