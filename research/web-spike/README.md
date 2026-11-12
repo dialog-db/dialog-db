@@ -33,6 +33,12 @@ node run.js --quick         # few iterations, short runs: a smoke test
 node report.js results/<file>.json   # the tables of a run, as Markdown
 ```
 
+A run writes its JSON into `results/`, which keeps it out of git
+(`.gitignore`): the runs the journal cites are on the `research-data`
+branch, at the same paths, so `git show
+origin/research-data:research/web-spike/results/<file>.json` gives one back
+for the report scripts.
+
 Round three replays a trace the native archive writes (the `trace`
 feature of `dialog-archive-file`, run through `tonk_bench`); make it
 outside the repository, then point `SPIKE_TRACES` at its directory:
@@ -119,7 +125,7 @@ off-the-record context.
 | `harness/sw4.js` | round four's service worker: today's dialog instance on IndexedDB (A), or the forwarder to the hosting tab's dialog worker (E) and the no-host reader through `getFile()` |
 | `harness/host4.js` | round four's dialog worker: the exclusive handle, the page cache, one operation at a time, the drain for a hand-off |
 | `harness/page4.js`, `harness/page4.html` | round four's tab: registers the service worker, waits on the host lock, makes and times the requests |
-| `results/` | the runs the journal cites |
+| `results/` | the charts the journal shows; the runs it cites are on the [`research-data`](https://github.com/dialog-db/dialog-db/tree/research-data/research/web-spike/results) branch, and a new run's JSON is not committed here |
 
 ## The questions
 

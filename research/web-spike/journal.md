@@ -1118,7 +1118,7 @@ space's), 25,146 pages caught, 197.7 MiB (most of it the blocks' bytes, for
 A; not committed). `round3.js` replays it in headless Chromium 153 on this
 4-CPU VM: one sitting of three rounds of A, B (16 KiB slices), C, D at one
 tab and at three, B at 64 KiB slices and C without a page cache
-(`results/2026-11-11T1555-chromium-153-round3.json`), and a second sitting
+([`2026-11-11T1555-chromium-153-round3.json`](https://github.com/dialog-db/dialog-db/blob/research-data/research/web-spike/results/2026-11-11T1555-chromium-153-round3.json), on the `research-data` branch), and a second sitting
 of three rounds of A and D with the owner's cache kept warm across tabs
 (`…T1600…`). A fresh profile per run; B, C and D rebuild both files byte
 for byte (checked against the native files in every run). Page caches of
@@ -1390,7 +1390,7 @@ requests; writes there are impossible. Reported, not judged.
 member 1: 236 operations; sha256 of the dataset `ce012eb67af6c628…`; not
 committed) in headless Chromium 153 on the same 4-CPU VM, one sitting of
 three rounds of A, E, Ek, Ed at one tab and at three, then the failovers
-(`results/2026-11-11T1733-chromium-153-round4.json`). Every request is a
+([`2026-11-11T1733-chromium-153-round4.json`](https://github.com/dialog-db/dialog-db/blob/research-data/research/web-spike/results/2026-11-11T1733-chromium-153-round4.json), on the `research-data` branch). Every request is a
 `fetch` of `/api/op` from the page (Ed: a message on a port), timed in the
 page, which is cross-origin isolated (5 µs timer). A fresh profile per run,
 a service worker registered in each. In E the host rebuilds both native
