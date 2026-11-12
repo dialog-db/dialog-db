@@ -1384,8 +1384,8 @@ mod tests {
             assert_eq!(results.len(), 1, "BranchRevision must surface after commit");
             assert_eq!(results[0].this, branch_concept.this);
             assert!(
-                !results[0].tree.0.is_empty(),
-                "tree hash should be non-empty"
+                results[0].tree.0.node_hash().is_some(),
+                "tree names the root node"
             );
             Ok(())
         }

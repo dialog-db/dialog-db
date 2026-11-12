@@ -353,11 +353,17 @@ one node's decoded summaries at a time — nodes are capped near
   node (bytes, in entry order). Entry *values*/states are v2 (see out
   of scope).
 
-Node references travel as the same base58 string `dialog.branch/tree`
-uses (`ToBase58` in `repository/branch/metadata.rs:76-79`) — no new
-entity scheme is needed now that rows are not EAV facts; whether to
-also mint a `tree:` URI form is a presentation choice, not a
-requirement.
+A node travels as its `node:<base58(hash)>` entity: what
+`dialog.branch/tree` carries, what `tree/span` yields as `node`, and
+what every resolver takes as `of` (a bare base58 string or the raw
+bytes are still accepted). This reverses the first cut, which passed
+the base58 string on the grounds that resolver rows are not EAV facts
+and so need no entity. The rows are not facts, but a rule that derives
+a concept from them needs a `this` per row, and with only a string to
+hand it had to borrow some other entity: every child of a node then
+landed on one subject and collapsed into a single row. An entry gets
+the same treatment, `entry:<base58(hash of its key)>`, from `tree/key`
+and `tree/entry`.
 
 Pure formulas (ordinary `Formula`s in `dialog-query/src/formula/`,
 registered in `define_formulas!` beside `dialog/revision`):

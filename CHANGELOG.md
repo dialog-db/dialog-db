@@ -14,6 +14,46 @@ says how to cut a release.
 
 ## Unreleased
 
+### A tree node and a tree entry are entities, so a rule can derive a concept from them
+
+A `tree/*` resolver named a node by the base58 string of its hash, and
+`dialog.branch/tree` carried the root the same way. A resolver row has no
+entity of its own, so a rule that derived a concept from one had to take
+`this` from somewhere else, usually the branch. Every child of a node
+then landed on that one entity: a concept over the 20 children of a root
+answered with one row, whose fields came from different children.
+
+A node is now named by an entity, `node:<base58(hash)>`
+(`Entity::from_node`, `Entity::node_hash`), and so is an entry,
+`entry:<base58(hash of its key)>`. A rule takes the one a resolver yields
+as its `this`:
+
+```text
+BranchRevision(tree: ?root)
+  ⋈ tree/span(of: ?root, node: ?this)
+  ⋈ tree/node(of: ?this, kind: ?kind)
+```
+
+What this changes for you:
+
+- `dialog.branch/tree` is an entity (`branch::Tree(Entity)`), not text.
+  A concept that reads it declares the field as an entity, and code that
+  read the base58 string takes it from `tree.0.node_hash()`.
+- `tree/span` yields `node` as an entity, not text.
+- `tree/key` and `tree/entry` have a new output, `entry`: the entry's
+  entity, the same from both. `TreeKeyQuery` and `TreeEntryQuery` have
+  the field to match.
+- Every `tree/*` resolver takes an entity as `of`. A base58 string and
+  the raw 32 bytes are still accepted, so a reference typed in by hand
+  keeps working.
+- `tree/entry`'s `spill` is unchanged: text, empty when the value is
+  inline.
+
+Why: a concept row is identified by its entity, so a resolver that
+yields none cannot be the subject of a derived concept. The hash is a
+node's whole identity, so the entity is the same on every replica and
+in every revision that reaches the node.
+
 ### A pull says how much it downloads, and can bring along only what the replica holds
 
 [#775](https://github.com/dialog-db/dialog-db/pull/775),
@@ -2571,6 +2611,13 @@ thread multiplies whatever it holds by the size of the thread pool.
 
 ### Compatibility and migration
 
+- **Tree nodes and entries as entities.** Nothing stored changes:
+  `dialog.branch/tree` is derived from the branch when a query runs and
+  was never written, and resolver rows are read off blocks. An older
+  release reads everything this one writes. A rule or concept stored on
+  a branch that reads `dialog.branch/tree` as text, or binds
+  `tree/span`'s `node` to a text field, stops matching and has to be
+  re-authored with the field as an entity.
 - Nothing stored or synced changes for the file store's lock; only the
   lock files beside its cells do. A lock file the previous release left
   behind holds a bare PID, which this release reads as a holder: one

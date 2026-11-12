@@ -4430,6 +4430,7 @@ mod resolver_tests {
         ResolverQuery::TreeEntry(TreeEntryQuery {
             of: Term::from(Value::String(reference.into())).into(),
             at: Term::var("at"),
+            entry: Term::var("entry"),
             key: Term::var("key"),
             state: Term::var("state"),
             retraction: Term::var("retraction"),
@@ -4454,6 +4455,7 @@ mod resolver_tests {
         ResolverQuery::TreeKey(TreeKeyQuery {
             of: Term::from(Value::String(reference.into())).into(),
             at: Term::var("at"),
+            entry: Term::var("entry"),
             key: Term::var("key"),
             rank: Term::var("rank"),
         })
@@ -4463,6 +4465,17 @@ mod resolver_tests {
         match row.get(slot) {
             Some(Value::UnsignedInt(value)) => *value,
             other => panic!("expected unsigned `{slot}`, got {other:?}"),
+        }
+    }
+
+    /// The base58 reference of the node entity a row bound to `slot`.
+    fn reference(row: &ResolverConclusion, slot: &str) -> String {
+        match row.get(slot) {
+            Some(Value::Entity(entity)) => entity
+                .node_hash()
+                .unwrap_or_else(|| panic!("`{slot}` is not a node entity: {entity}"))
+                .to_base58(),
+            other => panic!("expected node entity `{slot}`, got {other:?}"),
         }
     }
 
@@ -4571,7 +4584,7 @@ mod resolver_tests {
         // a child may itself be an index (the depth-3 draw that made
         // the one-level version of this walk flaky).
         let mut entries = 0usize;
-        let mut frontier: Vec<String> = spans.iter().map(|span| text(span, "node")).collect();
+        let mut frontier: Vec<String> = spans.iter().map(|span| reference(span, "node")).collect();
         while let Some(child) = frontier.pop() {
             let child_node: Vec<ResolverConclusion> = branch
                 .query()
@@ -4600,7 +4613,7 @@ mod resolver_tests {
                     .perform(&operator)
                     .try_vec()
                     .await?;
-                frontier.extend(child_spans.iter().map(|span| text(span, "node")));
+                frontier.extend(child_spans.iter().map(|span| reference(span, "node")));
             }
         }
         assert!(
@@ -4686,6 +4699,163 @@ mod resolver_tests {
         Ok(())
     }
 
+    /// A rule derives one row per child of the root, each on its own
+    /// entity: `dialog.branch/tree` hands the root to `tree/span` as an
+    /// entity, and `tree/span` hands each child on as one, which the rule
+    /// takes as `this`. Rows that share a `this` collapse into one, so
+    /// this is what lets a concept describe nodes at all.
+    #[dialog_common::test]
+    async fn it_derives_a_row_per_child_node() -> anyhow::Result<()> {
+        use dialog_query::concept::query::ConceptQuery;
+        use dialog_query::rule::DeductiveRuleDescriptor;
+        use dialog_query::{ConceptConclusion, Parameters};
+        use std::collections::BTreeSet;
+
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let (branch, _) = committed_wide_branch(&repo, &operator, 800).await?;
+
+        let descriptor: DeductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
+            "deduce": { "with": {
+                "parent": { "the": "probe/child-parent", "as": "entity:" },
+                "kind": { "the": "probe/child-kind", "as": "text:" }
+            }},
+            "when": [
+                {
+                    "assert": { "with": {
+                        "tree": { "the": "dialog.branch/tree", "as": "entity:" }
+                    }},
+                    "where": {
+                        "this": { "?": { "name": "branch" } },
+                        "tree": { "?": { "name": "parent" } }
+                    }
+                },
+                {
+                    "assert": "tree/span",
+                    "where": {
+                        "of": { "?": { "name": "parent" } },
+                        "node": { "?": { "name": "this" } }
+                    }
+                },
+                {
+                    "assert": "tree/node",
+                    "where": {
+                        "of": { "?": { "name": "this" } },
+                        "kind": { "?": { "name": "kind" } }
+                    }
+                }
+            ]
+        }))?;
+        let rule = descriptor.compile().expect("the walking rule compiles");
+        let conclusion = rule.conclusion().clone();
+        branch
+            .transaction()
+            .assert(&rule)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        // Installing the rule committed, so read the root it left.
+        let revision = branch.revision().expect("branch has a revision");
+        let root = ToBase58::to_base58(&revision.tree.hash()[..]);
+        let spans: Vec<ResolverConclusion> = branch
+            .query()
+            .select(tree_span(&root))
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        assert!(spans.len() > 1, "the root is an index: {spans:?}");
+        let expected: BTreeSet<String> = spans.iter().map(|span| reference(span, "node")).collect();
+
+        let mut terms = Parameters::new();
+        terms.insert("this".into(), Term::var("this"));
+        terms.insert("parent".into(), Term::var("parent"));
+        terms.insert("kind".into(), Term::var("kind"));
+        let rows: Vec<ConceptConclusion> = branch
+            .query()
+            .select(ConceptQuery {
+                predicate: conclusion,
+                terms,
+            })
+            .perform(&operator)
+            .try_vec()
+            .await?;
+
+        let derived: BTreeSet<String> = rows
+            .iter()
+            .map(|row| {
+                row.entity()
+                    .node_hash()
+                    .expect("each row is on a node entity")
+                    .to_base58()
+            })
+            .collect();
+        assert_eq!(rows.len(), spans.len(), "one row per child: {rows:?}");
+        assert_eq!(derived, expected, "each row is on its own child");
+        for row in &rows {
+            let parent: Entity = row.get("parent")?;
+            assert_eq!(
+                parent.node_hash().map(|hash| hash.to_base58()),
+                Some(root.clone()),
+                "every child names the root as its parent"
+            );
+        }
+        Ok(())
+    }
+
+    /// `tree/key` and `tree/entry` name an entry by the same entity, and
+    /// no two entries of a segment share one.
+    #[dialog_common::test]
+    async fn it_names_an_entry_the_same_in_key_and_entry() -> anyhow::Result<()> {
+        use std::collections::BTreeSet;
+
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let (branch, root) = committed_branch(&repo, &operator).await?;
+
+        // Descend to a segment: the root itself, or its first child.
+        let mut segment = root;
+        loop {
+            let spans: Vec<ResolverConclusion> = branch
+                .query()
+                .select(tree_span(&segment))
+                .perform(&operator)
+                .try_vec()
+                .await?;
+            match spans.first() {
+                Some(span) => segment = reference(span, "node"),
+                None => break,
+            }
+        }
+
+        let entity = |row: &ResolverConclusion| match row.get("entry") {
+            Some(Value::Entity(entity)) => entity.to_string(),
+            other => panic!("expected entity `entry`, got {other:?}"),
+        };
+        let keys: Vec<ResolverConclusion> = branch
+            .query()
+            .select(tree_key(&segment))
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        let entries: Vec<ResolverConclusion> = branch
+            .query()
+            .select(tree_entry(&segment))
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        assert!(!keys.is_empty(), "the segment has entries");
+        assert_eq!(
+            keys.iter().map(entity).collect::<Vec<_>>(),
+            entries.iter().map(entity).collect::<Vec<_>>(),
+            "both resolvers name each entry alike"
+        );
+        let distinct: BTreeSet<String> = keys.iter().map(entity).collect();
+        assert_eq!(distinct.len(), keys.len(), "no two entries share an entity");
+        Ok(())
+    }
+
     /// The committed root answers `tree/node` through the ordinary
     /// query path: one row, a real kind, a positive size, and a count.
     #[dialog_common::test]
@@ -4762,7 +4932,7 @@ mod resolver_tests {
                         "spans are contiguous: {spans:?}"
                     );
                 }
-                let child = text(&spans[0], "node");
+                let child = reference(&spans[0], "node");
                 let child_node: Vec<ResolverConclusion> = branch
                     .query()
                     .select(tree_node(&child))
@@ -4891,7 +5061,7 @@ mod resolver_tests {
                 .try_vec()
                 .await?
             {
-                queue.push(text(&span, "node"));
+                queue.push(reference(&span, "node"));
             }
         }
         assert!(!entries.is_empty(), "the committed tree has entries");

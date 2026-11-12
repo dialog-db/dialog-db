@@ -122,6 +122,9 @@ const ASSET_SCHEME: &str = "asset:";
 /// entities of this form.
 const LEGACY_BLOB_SCHEME: &str = "blob:";
 
+/// Scheme prefix for search-tree node entities: `node:<base58(hash)>`.
+const NODE_SCHEME: &str = "node:";
+
 impl Entity {
     /// Initialize a new [`Entity`] with a randomly generated, globally unique
     /// URI. The URI is formatted as an ed25519 DID Key.
@@ -177,6 +180,24 @@ impl Entity {
         let bytes = payload.from_base58().ok()?;
         <[u8; 32]>::try_from(bytes).ok()
     }
+
+    /// The entity naming a search-tree node by its content hash:
+    /// `node:<base58(hash)>`.
+    ///
+    /// A node is content addressed, so the hash is its whole identity: the
+    /// same node is the same entity on every replica and in every revision
+    /// that reaches it.
+    pub fn from_node(hash: &[u8; 32]) -> Result<Entity, IdentityError> {
+        format!("{}{}", NODE_SCHEME, hash.to_base58()).parse()
+    }
+
+    /// The content hash a `node:` entity names, if this entity is one and
+    /// its payload decodes to 32 base58 bytes.
+    pub fn node_hash(&self) -> Option<[u8; 32]> {
+        let payload = self.as_str().strip_prefix(NODE_SCHEME)?;
+        let bytes = payload.from_base58().ok()?;
+        <[u8; 32]>::try_from(bytes).ok()
+    }
 }
 
 impl Debug for Entity {
@@ -201,6 +222,22 @@ mod tests {
         // String round-trip: parse the display form back.
         let reparsed: Entity = entity.as_str().parse().expect("parses");
         assert_eq!(reparsed.blob_hash(), Some(hash));
+    }
+
+    #[dialog_common::test]
+    fn it_round_trips_a_node_entity() {
+        let hash: [u8; 32] = [9u8; 32];
+        let entity = Entity::from_node(&hash).expect("constructs");
+        assert!(entity.as_str().starts_with("node:"));
+        assert_eq!(entity.node_hash(), Some(hash));
+        let reparsed: Entity = entity.as_str().parse().expect("parses");
+        assert_eq!(reparsed.node_hash(), Some(hash));
+        // A node is not content in the blob store, and the reverse.
+        assert_eq!(entity.blob_hash(), None);
+        assert_eq!(
+            Entity::from_blob(&hash).expect("constructs").node_hash(),
+            None
+        );
     }
 
     #[dialog_common::test]

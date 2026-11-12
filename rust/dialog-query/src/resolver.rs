@@ -36,9 +36,12 @@
 //! or a segment (a run of entries); an index's spans each delegate a
 //! key range `[separator, until)` to a child and carry the ops
 //! buffered against it; a segment's entries are ranked keys; and every
-//! node embeds the format manifest it was written under. Nodes are
-//! keyed by the same base58 reference `dialog.branch/tree` carries, so
-//! a query reaches the tree by joining through `BranchRevision`:
+//! node embeds the format manifest it was written under. A node is
+//! named by its `node:<base58(hash)>` entity, which is what
+//! `dialog.branch/tree` carries and what `tree/span` hands out for each
+//! child, so a query reaches the tree by joining through
+//! `BranchRevision`, and a rule deriving a concept from a node has the
+//! node itself to use as `this`:
 //!
 //! ```text
 //! BranchRevision(branch, tree: ?root)
@@ -67,7 +70,7 @@ use crate::selection::{Match, Selection};
 use crate::term::Term;
 use crate::type_system::Type as Kind;
 use crate::types::Any;
-use crate::{Environment, Parameters, Schema, Scope, Value, try_stream};
+use crate::{Entity, Environment, Parameters, Schema, Scope, Value, try_stream};
 
 /// The archive a resolver reads a content address from: the wildcard
 /// subject's, meaning any archive the scope reads.
@@ -118,12 +121,36 @@ fn blank() -> Term<Any> {
     Term::blank()
 }
 
-/// The kind of a block-reference input cell: base58 `String` or raw
-/// 32-byte `Bytes` — the union the evaluator's `node_reference`
-/// actually accepts, so rule type inference admits chaining a
-/// decomposition formula's bytes output straight into a resolver.
+/// The kind of a block-reference input cell: a `node:` (or, for a
+/// spilled value, `asset:`) `Entity`, a base58 `String`, or raw 32-byte
+/// `Bytes` — the union the evaluator's `node_reference` actually
+/// accepts. The entity is what the resolvers themselves hand out
+/// (`tree/span`'s `node`, `dialog.branch/tree`), so a rule chains one
+/// into the next and can use it as a row's `this`; the other two admit a
+/// reference typed in by hand or taken from a decomposition formula's
+/// bytes output.
 fn reference_kind() -> Kind {
-    Kind::from(ValueType::String).union(&Kind::from(ValueType::Bytes))
+    Kind::from(ValueType::Entity)
+        .union(&Kind::from(ValueType::String))
+        .union(&Kind::from(ValueType::Bytes))
+}
+
+/// The entity naming the tree node behind `reference`.
+fn node_entity(reference: &inspect::NodeReference) -> Result<Entity, DialogCorpusError> {
+    Entity::from_node(reference)
+        .map_err(|error| DialogCorpusError::InvalidValue(format!("node entity: {error:?}")))
+}
+
+/// The entity naming the entry stored under `key`: `entry:<base58>` of
+/// the key's hash.
+///
+/// A key occurs once in a tree, so the key is the entry's whole
+/// identity, and `tree/key` and `tree/entry` name the same entry by the
+/// same entity wherever its segment sits.
+fn entry_entity(key: &[u8]) -> Result<Entity, DialogCorpusError> {
+    format!("entry:{}", Blake3Hash::hash(key).as_bytes().to_base58())
+        .parse()
+        .map_err(|error| DialogCorpusError::InvalidValue(format!("entry entity: {error:?}")))
 }
 
 /// The `tree/node` resolver: describe the node behind a reference.
@@ -160,7 +187,7 @@ pub struct TreeSpanQuery {
     /// Position among the node's spans.
     #[serde(default = "blank")]
     pub at: Term<Any>,
-    /// The child node reference (base58) rooting the span's subtree,
+    /// The child node rooting the span's subtree, as its `node:` entity,
     /// feeding the next `tree/node`/`tree/span` input.
     #[serde(default = "blank")]
     pub node: Term<Any>,
@@ -193,6 +220,10 @@ pub struct TreeKeyQuery {
     /// Position within the segment.
     #[serde(default = "blank")]
     pub at: Term<Any>,
+    /// The entry's own entity, derived from its key: the same entry is
+    /// the same entity in `tree/key` and `tree/entry`.
+    #[serde(default = "blank")]
+    pub entry: Term<Any>,
     /// The entry's variable-length index key bytes.
     #[serde(default = "blank")]
     pub key: Term<Any>,
@@ -215,6 +246,10 @@ pub struct TreeEntryQuery {
     /// Position within the segment.
     #[serde(default = "blank")]
     pub at: Term<Any>,
+    /// The entry's own entity, derived from its key: the same entry is
+    /// the same entity in `tree/key` and `tree/entry`.
+    #[serde(default = "blank")]
+    pub entry: Term<Any>,
     /// The entry's variable-length index key bytes.
     #[serde(default = "blank")]
     pub key: Term<Any>,
@@ -391,8 +426,8 @@ static TREE_SPAN_CELLS: LazyLock<Cells> = LazyLock::new(|| {
             .cell("at", Some(Kind::from(ValueType::UnsignedInt)))
             .the("Position among the node's spans.");
         builder
-            .cell("node", Some(Kind::from(ValueType::String)))
-            .the("The child node reference rooting the span's subtree.");
+            .cell("node", Some(Kind::from(ValueType::Entity)))
+            .the("The child node rooting the span's subtree, as its entity.");
         builder
             .cell("separator", Some(Kind::from(ValueType::Bytes)))
             .the("The span's lower bound (empty = −∞).");
@@ -421,6 +456,9 @@ static TREE_KEY_CELLS: LazyLock<Cells> = LazyLock::new(|| {
             .cell("at", Some(Kind::from(ValueType::UnsignedInt)))
             .the("Position within the segment.");
         builder
+            .cell("entry", Some(Kind::from(ValueType::Entity)))
+            .the("The entry's own entity, derived from its key.");
+        builder
             .cell("key", Some(Kind::from(ValueType::Bytes)))
             .the("The entry's variable-length index key bytes.");
         builder
@@ -438,6 +476,9 @@ static TREE_ENTRY_CELLS: LazyLock<Cells> = LazyLock::new(|| {
         builder
             .cell("at", Some(Kind::from(ValueType::UnsignedInt)))
             .the("Position within the segment.");
+        builder
+            .cell("entry", Some(Kind::from(ValueType::Entity)))
+            .the("The entry's own entity, derived from its key.");
         builder
             .cell("key", Some(Kind::from(ValueType::Bytes)))
             .the("The entry's variable-length index key bytes.");
@@ -623,12 +664,14 @@ impl ResolverQuery {
             Self::TreeKey(query) => {
                 params.insert("of".into(), query.of.clone());
                 params.insert("at".into(), query.at.clone());
+                params.insert("entry".into(), query.entry.clone());
                 params.insert("key".into(), query.key.clone());
                 params.insert("rank".into(), query.rank.clone());
             }
             Self::TreeEntry(query) => {
                 params.insert("of".into(), query.of.clone());
                 params.insert("at".into(), query.at.clone());
+                params.insert("entry".into(), query.entry.clone());
                 params.insert("key".into(), query.key.clone());
                 params.insert("state".into(), query.state.clone());
                 params.insert("retraction".into(), query.retraction.clone());
@@ -727,6 +770,9 @@ impl ResolverQuery {
                 if let Some(term) = terms.get("at") {
                     query.at = term.clone();
                 }
+                if let Some(term) = terms.get("entry") {
+                    query.entry = term.clone();
+                }
                 if let Some(term) = terms.get("key") {
                     query.key = term.clone();
                 }
@@ -740,6 +786,9 @@ impl ResolverQuery {
                 }
                 if let Some(term) = terms.get("at") {
                     query.at = term.clone();
+                }
+                if let Some(term) = terms.get("entry") {
+                    query.entry = term.clone();
                 }
                 if let Some(term) = terms.get("key") {
                     query.key = term.clone();
@@ -830,8 +879,9 @@ impl ResolverQuery {
         renamed
     }
 
-    /// Resolve the node-reference input against the row: a base58
-    /// string in a constant or a bound variable. `None` filters the
+    /// Resolve the node-reference input against the row, from a constant
+    /// or a bound variable: a `node:` entity (or the `asset:` entity of a
+    /// spilled value), a base58 string, or raw bytes. `None` filters the
     /// row (unresolvable or malformed references contribute nothing,
     /// mirroring the forged-record-projects-nothing convention).
     fn node_reference(&self, base: &Match) -> Option<inspect::NodeReference> {
@@ -843,6 +893,9 @@ impl ResolverQuery {
             },
         };
         match value {
+            // What the resolvers hand out: `tree/span`'s `node`, and the
+            // root `dialog.branch/tree` carries.
+            Value::Entity(entity) => entity.node_hash().or_else(|| entity.blob_hash()),
             Value::String(reference) => {
                 let bytes = reference.from_base58().ok()?;
                 <[u8; 32]>::try_from(bytes).ok()
@@ -920,7 +973,7 @@ impl ResolverQuery {
                         for span in spans {
                             let row = project(&base, &[
                                 (&query.at, Value::UnsignedInt(span.at.into())),
-                                (&query.node, Value::String(span.node.to_base58())),
+                                (&query.node, Value::Entity(node_entity(&span.node)?)),
                                 (&query.separator, Value::Bytes(span.separator)),
                                 (&query.until, Value::Bytes(span.until)),
                                 (&query.scale, Value::UnsignedInt(span.scale.into())),
@@ -939,6 +992,7 @@ impl ResolverQuery {
                         for (at, entry) in keys.into_iter().enumerate() {
                             let row = project(&base, &[
                                 (&query.at, Value::UnsignedInt(at as u128)),
+                                (&query.entry, Value::Entity(entry_entity(&entry.key)?)),
                                 (&query.key, Value::Bytes(entry.key)),
                                 (&query.rank, Value::UnsignedInt(entry.rank.into())),
                             ])?;
@@ -958,6 +1012,7 @@ impl ResolverQuery {
                                 .unwrap_or_default();
                             let row = project(&base, &[
                                 (&query.at, Value::UnsignedInt(entry.at.into())),
+                                (&query.entry, Value::Entity(entry_entity(&entry.key)?)),
                                 (&query.key, Value::Bytes(entry.key)),
                                 (&query.state, Value::String(entry.state.into())),
                                 (&query.retraction, Value::Boolean(entry.retraction)),
