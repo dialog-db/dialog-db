@@ -1062,7 +1062,10 @@ mod tests {
             .await?;
 
         let again = repo.branch("feature").open().perform(&operator).await?;
-        let pulled = again.pull().perform(&operator).await;
+        let pulled = again
+            .pull(dialog_repository::Download::MinimalRanges)
+            .perform(&operator)
+            .await;
         assert!(
             matches!(
                 pulled,

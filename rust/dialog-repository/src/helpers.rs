@@ -998,7 +998,10 @@ mod prune_tests {
         );
         let feature = local.branch("feature").open().perform(&device).await?;
         feature.set_upstream(&cold).perform(&device).await?;
-        feature.pull().perform(&device).await?;
+        feature
+            .pull(crate::Download::MinimalRanges)
+            .perform(&device)
+            .await?;
         assert_eq!(feature.revision(), cold.revision());
         Ok(())
     }

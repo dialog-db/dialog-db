@@ -525,7 +525,10 @@ mod tests {
         // `feature` tracks it and has nothing of its own: a first contact.
         let feature = repo.branch("feature").open().perform(&operator).await?;
         feature.set_upstream(&main).perform(&operator).await?;
-        feature.pull().perform(&operator).await?;
+        feature
+            .pull(crate::Download::MinimalRanges)
+            .perform(&operator)
+            .await?;
         feature.refresh(&operator).await?;
         assert_eq!(
             feature.storage_encoding(&operator).await?,
@@ -565,7 +568,10 @@ mod tests {
             vec![statement(&own, Value::Float(0.5), Pick::All)],
         )
         .await?;
-        feature.pull().perform(&operator).await?;
+        feature
+            .pull(crate::Download::MinimalRanges)
+            .perform(&operator)
+            .await?;
         feature.refresh(&operator).await?;
         assert_eq!(
             feature.storage_encoding(&operator).await?,
