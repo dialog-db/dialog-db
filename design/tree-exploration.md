@@ -1,6 +1,6 @@
 # A page cannot show a node's children with their details through the tree resolvers
 
-Phase: **Describing.** See the [design index](README.md) for what the
+Phase: **Diagnosing.** See the [design index](README.md) for what the
 phases mean, and the [journal](tree-exploration/journal.md) for where the
 topic stands.
 
@@ -60,3 +60,15 @@ pairing them, or as rows that cost a walk of the tree.
 The maintainer says the question being asked was the wrong one: not how
 to make the resolvers serve the inspector, but what the query engine
 should offer for exploring a search tree at all.
+
+## Problem
+
+As the maintainer gave it, 2026-11-12, not yet accepted as the statement:
+
+> The dialog query engine cannot be used to inspect the underlying tree,
+> which causes the embedder to implement side channels to do it.
+
+Two things stand between this and a statement (see the journal): the
+engine does answer tree queries today, so what it cannot do needs
+saying; and what goes wrong because an embedder has a side channel is
+not yet written.

@@ -19,3 +19,7 @@
 | Lower-level primitives (read a block, then one formula decoding it as an index node and another as a segment node) would be simpler | opinion | the maintainer, 2026-11-12, offered as a suspicion and asked not to bias the thinking | - |
 | A resolver should yield each span whole, as one record value | opinion | the agent, 2026-11-12 | - |
 | The question was the wrong one: ask what the query engine should offer for exploring a search tree, not how to make the resolvers serve the inspector | opinion | the maintainer, 2026-11-12 | - |
+| The problem is that the query engine cannot be used to inspect the underlying tree, which causes the embedder to implement side channels | opinion | the maintainer, 2026-11-12, offered as the problem statement | not yet accepted: contradicts row 4 as worded |
+| Tonk's side channel does five things a query did not: starts from the branch with nothing given; returns a child's details in one row; reports whether a block is local without fetching it; returns a key split into parts and the fact it encodes; merges a blob record into its entry's row | fact | tonk `rust/dialog-reactor/src/formula.rs`: `node_input` and `root_hash`, `child_rows`, `read_local`, `segment_rows` and `fact_fields`, `blob_fields` | holds |
+| Tonk's side channel is built from dialog's public API: `Load` through the environment and the `inspect_*` functions | fact | the imports of tonk `rust/dialog-reactor/src/formula.rs` | holds |
+

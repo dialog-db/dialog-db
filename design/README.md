@@ -70,5 +70,6 @@ Backtracking moves a topic to an earlier phase and says so in its journal.
   remote. A download can bring along only what the replica holds, and a
   pull can retry when a commit overtakes it.
 - [A page cannot show a node's children with their details through the tree resolvers](tree-exploration.md):
-  **Describing.** What tonk's tree inspector needs and what the tree
-  resolvers yield, tried against a real space; no problem stated yet.
+  **Diagnosing.** What tonk's tree inspector needs and what the tree
+  resolvers yield, tried against a real space; a problem statement is
+  offered and not yet accepted.
