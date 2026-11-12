@@ -69,3 +69,7 @@ Backtracking moves a topic to an earlier phase and says so in its journal.
   reference, so reads and writes of keys the replica held wait on the
   remote. A download can bring along only what the replica holds, and a
   pull can retry when a commit overtakes it.
+- [A stored rule says less than a rule can](rule-format.md):
+  **Describing.** A pattern, a rule of several heads and a rule about
+  syntax each reach something format 3 of a rule body cannot write. The
+  maintainer's direction is one format 4 for all of them.
