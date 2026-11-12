@@ -5,7 +5,7 @@
 |  | Understanding | Activity |
 |---|---|---|
 | **Status** | The kernel and the core forms run on a real branch through `rust/dialog-notation` ([poc.md](poc.md)); the prelude is rules only. The syntax tree is built, apart from the notation as parsed, and kept as data: maps that say their `type` ([design-forms.md](design-forms.md#the-syntax-tree)). A struct is a value and, with a variable in it, a pattern, which is a topic of its own with an agent on it (#777). Rules of several heads are #776. Expanding and compiling still read the notation as parsed, and `kernel.rs` still copies dialog's forms. | **Directing**, backtracked from Designing on 2026-11-12. Direction decided by the maintainer: phases as formulas and a resolver, one rule over them. A proof of concept runs. A name is kept as a name, what is named and a signature; a definition under it is read `last`; an application resolves by the labels written and a read that fits several is of all. Built and tested, by pattern, in the expander. |
-| **Agenda** | Parked by the maintainer: authority, for two definitions of one signature written apart; `last` elects one until then. How a query reports. What a template holds where it applies itself or what is defined after it. Whether the name as written is part of what names a macro. Whether the analyzer, a resolver by the maintainer's word, gives back the table of what each name meant. Whether dialog can be asked for an expansion a form at a time (H3). What a read with no pick reads. | The notation is on top of patterns (#778, merged in, its perf gate failing): a struct is a value in a write and a pattern in a query of one read. Next: a struct in a rule, which needs the compiler to build dialog's forms in Rust, since a pattern has no wire form; `entity/derive` over a record; then an application lowers to a `ConceptQuery` of the definition's concept. Not waiting: a helper rule for a negated conjunction. Waiting on patterns (#777, #778): a struct as a term, `entity/derive` over a record, syntax kept on the branch. Waiting on #776: a rule of several heads. |
+| **Agenda** | Parked by the maintainer: authority, for two definitions of one signature written apart; `last` elects one until then. How a query reports. Whether a rule keeps `when`, which two reader rounds leave to several heads and to patterns over rules. What a template holds where it applies itself or what is defined after it. Whether the name as written is part of what names a macro. Whether the analyzer, a resolver by the maintainer's word, gives back the table of what each name meant. Whether dialog can be asked for an expansion a form at a time (H3). What a read with no pick reads. | The notation is on top of patterns (#778, merged in, its perf gate failing): a struct is a value in a write and a pattern in a query of one read. Next: a struct in a rule, which needs the compiler to build dialog's forms in Rust, since a pattern has no wire form; `entity/derive` over a record; then an application lowers to a `ConceptQuery` of the definition's concept. Not waiting: a helper rule for a negated conjunction. Waiting on patterns (#777, #778): a struct as a term, `entity/derive` over a record, syntax kept on the branch. Waiting on #776: a rule of several heads. |
 
 ## Candidate problems
 
@@ -533,3 +533,23 @@ Not examined yet. They are columns, not recommendations.
 ```
 
 **Decided.** By the maintainer: a macro resolves every name when it is defined and holds the entity of what was named, the concept `todo` here. It also holds what the name was, so source maps work. So analysis resolves the names a source writes, once, and expanding brings none. Proposed by the agent, not decided: the name and the labels as written are kept beside the template and are no part of what names the macro, as a description is no part of what names a rule. Open: what a template holds where it applies itself or what is defined after it.
+
+## 2026-11-12, Directing: whether a rule needs `when`
+
+**Asked.** Irakli: use haiku readers to find out whether `when` is needed at all, or whether premises as plain clauses suffice. Run as #728's rounds were. Two rounds, ten readers each, five a spelling: [K1](rounds/k01.md), told how a rule is written; [K2](rounds/k02.md), shown three rules and told nothing.
+
+```
+ when    (rule head… (when premise…) (unless premise…))
+ bare    (rule head premise… (unless premise…))          several heads as (all head head)
+```
+
+**Learned.**
+
+- For a rule of one head `when` carried nothing the rounds could find. 20 of 20 read and wrote such rules rightly in both spellings, told or not, a rule that reads what it derives among them.
+- The difference is in several heads. Untold, three of five `bare` readers wrote `(rule h1 h2 p)`, which is one head and two premises; three of five `when` readers wrote two heads before `when`, which is what it means. Told to use `(all …)`, five of five `bare` readers did.
+- A second write after the head is read by its word by some and by its place by others. A parser can go by the word, since a write is never a premise. A head that derives has no word, so there only `when` or a wrapper tells a second head from a first premise.
+- The write that stands alone was named confusing by two `when` readers and no `bare` reader.
+- The agent's predictions that `bare` readers would take a command for something the rule issues, and a lone write for two writes, were wrong.
+- Not about `when`: nine of ten K1 readers saw that a head's variable bound only by a premise makes a rule of two heads give nothing when that premise has no match. Four of ten asked whether `assert!` replaces what is stored.
+
+**Decided.** Not decided; the maintainer's. What the rounds say: `when` is not needed to read or write a rule of one head, and what it buys is that several heads need no wrapper and no teaching. Not run: a rule about syntax, where `when` is also what a pattern over a rule matches on; and readers less capable or more hurried than these, since both rounds were at the ceiling on everything but several heads.
