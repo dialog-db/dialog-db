@@ -129,8 +129,12 @@ impl Equality {
     /// Returns the parameters for this constraint.
     pub fn parameters(&self) -> Parameters {
         let mut params = Parameters::new();
-        params.set("this".to_string(), self.this.clone());
-        params.set("is".to_string(), self.is.clone());
+        for (name, side) in [("this", &self.this), ("is", &self.is)] {
+            match side {
+                Pattern::Term(term) => params.insert(name.to_string(), term.clone()),
+                shape => params.set(name.to_string(), shape.clone()),
+            }
+        }
         params
     }
 
@@ -150,8 +154,58 @@ impl Equality {
                 let base = candidate?;
                 match (&self.this, &self.is) {
                     (Pattern::Term(this), Pattern::Term(is)) => {
-                        if let Some(extension) = Self::equate(base, this, is)? {
-                            yield extension;
+                        match (base.lookup(this), base.lookup(is)) {
+                            // Both Present: yield iff values match.
+                            (Ok(Binding::Present(this_val)), Ok(Binding::Present(is_val))) => {
+                                if this_val == is_val {
+                                    yield base;
+                                }
+                            }
+                            // Both Absent: Nothing == Nothing, yield.
+                            (Ok(Binding::Absent), Ok(Binding::Absent)) => {
+                                yield base;
+                            }
+                            // One side Absent, other Present: disjoint kinds
+                            // (Nothing vs primitive), can never be equal: filter.
+                            (Ok(Binding::Absent), Ok(Binding::Present(_)))
+                            | (Ok(Binding::Present(_)), Ok(Binding::Absent)) => {}
+                            // One side Present, other unbound: propagate the value.
+                            (Err(_), Ok(Binding::Present(is_val))) => {
+                                let mut extension = base.clone();
+                                extension.bind(this, is_val)?;
+                                yield extension;
+                            }
+                            (Ok(Binding::Present(this_val)), Err(_)) => {
+                                let mut extension = base.clone();
+                                extension.bind(is, this_val)?;
+                                yield extension;
+                            }
+                            // One side Absent, other unbound: propagate Absent
+                            // iff the unbound term's kind explicitly admits
+                            // Nothing. Types are checked, not assumed:
+                            // carrying a claimed absence into a term requires
+                            // the term to have opted into absence, so an
+                            // untyped term filters.
+                            (Ok(Binding::Absent), Err(_)) => {
+                                if is.is_optional() {
+                                    let mut extension = base.clone();
+                                    extension.bind_absent(is)?;
+                                    yield extension;
+                                }
+                            }
+                            (Err(_), Ok(Binding::Absent)) => {
+                                if this.is_optional() {
+                                    let mut extension = base.clone();
+                                    extension.bind_absent(this)?;
+                                    yield extension;
+                                }
+                            }
+                            // Neither bound: equality has nothing to work with.
+                            (Err(_), Err(_)) => {
+                                Err(EvaluationError::ConstraintViolation {
+                                    constraint: format!("{} == {}", this, is)
+                                })?;
+                            }
                         }
                     }
                     (this, is) => {
@@ -162,69 +216,6 @@ impl Equality {
                 }
             }
         }
-    }
-
-    /// One row of an equality between two terms: the row when it
-    /// satisfies the equality, extended with what the equality infers,
-    /// or nothing when it does not.
-    fn equate(
-        base: Match,
-        this: &Term<Any>,
-        is: &Term<Any>,
-    ) -> Result<Option<Match>, EvaluationError> {
-        Ok(match (base.lookup(this), base.lookup(is)) {
-            // Both Present: yield iff values match.
-            (Ok(Binding::Present(this_val)), Ok(Binding::Present(is_val))) => {
-                (this_val == is_val).then_some(base)
-            }
-            // Both Absent: Nothing == Nothing, yield.
-            (Ok(Binding::Absent), Ok(Binding::Absent)) => Some(base),
-            // One side Absent, other Present: disjoint kinds
-            // (Nothing vs primitive), can never be equal: filter.
-            (Ok(Binding::Absent), Ok(Binding::Present(_)))
-            | (Ok(Binding::Present(_)), Ok(Binding::Absent)) => None,
-            // One side Present, other unbound: propagate the value.
-            (Err(_), Ok(Binding::Present(is_val))) => {
-                let mut extension = base.clone();
-                extension.bind(this, is_val)?;
-                Some(extension)
-            }
-            (Ok(Binding::Present(this_val)), Err(_)) => {
-                let mut extension = base.clone();
-                extension.bind(is, this_val)?;
-                Some(extension)
-            }
-            // One side Absent, other unbound: propagate Absent
-            // iff the unbound term's kind explicitly admits
-            // Nothing. Types are checked, not assumed:
-            // carrying a claimed absence into a term requires
-            // the term to have opted into absence, so an
-            // untyped term filters.
-            (Ok(Binding::Absent), Err(_)) => {
-                if is.is_optional() {
-                    let mut extension = base.clone();
-                    extension.bind_absent(is)?;
-                    Some(extension)
-                } else {
-                    None
-                }
-            }
-            (Err(_), Ok(Binding::Absent)) => {
-                if this.is_optional() {
-                    let mut extension = base.clone();
-                    extension.bind_absent(this)?;
-                    Some(extension)
-                } else {
-                    None
-                }
-            }
-            // Neither bound: equality has nothing to work with.
-            (Err(_), Err(_)) => {
-                return Err(EvaluationError::ConstraintViolation {
-                    constraint: format!("{} == {}", this, is),
-                });
-            }
-        })
     }
 
     /// One row of an equality a side of which is a map, a list or a

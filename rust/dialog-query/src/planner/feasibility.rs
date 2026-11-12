@@ -85,10 +85,10 @@ enum Slot<'a> {
 
 impl<'a> Slot<'a> {
     fn of(params: &'a Parameters, name: &str) -> Option<Self> {
-        match params.shape(name) {
-            Some(pattern) => Some(Slot::Shape(pattern)),
-            None => params.get(name).map(Slot::Term),
-        }
+        params.slot(name).map(|(term, shape)| match shape {
+            Some(pattern) => Slot::Shape(pattern),
+            None => Slot::Term(term),
+        })
     }
 
     fn is_blank(&self) -> bool {

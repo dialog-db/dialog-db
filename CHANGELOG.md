@@ -52,7 +52,9 @@ the entities it names will change with it.
 [design/patterns/design-parameters.md](./design/patterns/design-parameters.md),
 [design/patterns/design-pattern-meaning.md](./design/patterns/design-pattern-meaning.md),
 [design/patterns/design-feasibility.md](./design/patterns/design-feasibility.md),
-[design/patterns/design-typing.md](./design/patterns/design-typing.md)
+[design/patterns/design-typing.md](./design/patterns/design-typing.md),
+[design/patterns/design-rule-identity.md](./design/patterns/design-rule-identity.md),
+[design/patterns/design-leaf-cost.md](./design/patterns/design-leaf-cost.md)
 
 A premise was applied to parameters that each held one variable or one
 constant, so a rule could not say a value by its shape. A parameter now
@@ -72,7 +74,7 @@ What this changes for you:
   items; `with_run` binds the ones after them, as a list. A tuple
   pattern is the tuple of exactly its items.
 - `Parameters::set` binds a name to a pattern, and `shape`, `pattern`,
-  `shapes`, `leaves` and `map_terms` look inside. `insert`, `get` and
+  `slot`, `shapes`, `leaves` and `map_terms` look inside. `insert`, `get` and
   `iter` take and give terms as before: for a name that holds a map, a
   list or a tuple, `get` gives the variable that stands for the whole
   value. Code that collects the variables a premise mentions from
@@ -97,6 +99,13 @@ What this changes for you:
   `try_encode` returns `None`, and asserting the rule into a
   transaction panics with that reason, as asserting a rule whose body
   reads an attribute through a raw scan already did.
+- Such a rule is laid over a branch for one query and run:
+  `Branch::with(rule)` and `QueryLayer::with(rule)` keep the rule as it
+  is, under the name its facts give it, and write nothing of its body.
+  `Update` has a new method for that, `hold`, which a target that is
+  never stored answers by keeping what it is given. Its default gives
+  the thing back, so an implementation of `Update` that is committed
+  needs no change and goes on refusing the rule.
 - A premise is feasible by the variables inside its patterns: a
   parameter that holds a map, a list or a tuple is bound when every
   variable inside it is, and a premise that binds it binds each of them.
@@ -116,6 +125,11 @@ What this changes for you:
   does not read is `EvaluationError::RecordVersion`, not a dropped row.
 - A rule's identity names a record constant that holds a composite by
   its parts, as `Value::reference` does.
+
+A premise whose parameters are all terms costs what it did: a concept
+read is the stream it was, field for field, and parameters of terms
+are the map of terms they were, with one place beside it for the
+patterns.
 
 Why: a rule that issues a command, derives an entity from a row or
 takes a form apart needs a value made of values where a term stands.
@@ -2570,7 +2584,9 @@ thread multiplies whatever it holds by the size of the thread pool.
 - Nothing stored or synced changes for patterns: the stored rule format
   is format 3 as before and has no way to write a pattern, so a rule
   that holds one is never stored, and an older replica never meets one.
-  Nothing is rewritten on upgrade and an embedder runs nothing. One
+  Laid over a branch for a query, such a rule is kept in memory beside
+  the query's changes and no fact holds its body. Nothing is rewritten
+  on upgrade and an embedder runs nothing. One
   rule changes identity between releases: a rule whose body holds a
   record constant that is a composite is named by the composite's parts
   here and by its bytes in an older release, so each release finds the

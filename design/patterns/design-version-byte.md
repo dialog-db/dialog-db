@@ -35,3 +35,5 @@ A. Version `1` is the byte `0x01`. A record is versioned when its first byte is 
 - A record under version 1 whose bytes are not the ones a composite is written in is refused when looked into (`Malformed`, `NotCanonical`) and named by its bytes. So a name changes only for bytes that are a composite's.
 
 No column is green on bytes a caller gave. No byte can be: a record was any bytes. What it costs is in [claims](claims.md).
+
+The matrix compared bytes inside a record only. A variant of its own was raised afterwards: a `Value::Composite` with its own type code, beside `Value::Record`. It would have changed two things. No bytes a caller gave could be misread, since a record of any bytes would stay a record. And an older release would refuse the key of a composite, since `varkey::value_payload_len` rejects a type code above `Number`, where today it carries the composite as the bytes of a record. The maintainer considered it on 2026-11-11 and kept the record under a version byte.

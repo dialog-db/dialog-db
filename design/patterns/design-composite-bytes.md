@@ -59,6 +59,6 @@ B, D, J and H. A composite under version 1 is `{"map:": [[part, part], …]}`, `
 - The reader is `serde_ipld_dagcbor`. It then writes what it read and refuses bytes that differ (`NotCanonical`), so one value has one byte string by construction, not by the reader being strict.
 - J is a choice the direction did not make. It is taken because step 3 asks that a rule pass in either order of premises, and under I it would not where number types differ. The cost is the 🟡 cell: the type a number was given in is not kept. It is on the [journal](journal.md)'s agenda for the maintainer.
 - A tuple is named under its own type, `tuple:` (`identity::TUPLE`), with a list's content. A tuple and a list of the same items are two values with two byte strings, so they cannot share a name. The direction named `Type::MAP` and `Type::LIST` only.
-- `Composite::reference` follows nesting 128 deep, and names a part below that by its bytes, so naming a hostile record cannot exhaust the stack.
+- `Composite::reference` follows nesting 128 deep, and names a part below that by its bytes. The depth bounds the work of naming a hostile record. It was meant to bound the stack too and did not on wasm; naming now uses the same stack at any nesting ([design-naming-depth.md](design-naming-depth.md)).
 
 The sizes in B are what "another layout later" is for.
