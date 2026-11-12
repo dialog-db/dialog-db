@@ -39,6 +39,8 @@
 //! as written, so one map has one byte string whatever order its
 //! entries were given in.
 
+use std::borrow::Cow;
+use std::mem;
 use std::ops::Deref;
 
 use merkle_reference::{Reference, Type};
@@ -60,7 +62,15 @@ const GREATEST_VERSION: u8 = 0x17;
 
 /// How deep [`Composite::reference`] follows composites nested in
 /// composites. A part nested deeper is named as the record it is, by
-/// its bytes, so naming a hostile record cannot exhaust the stack.
+/// its bytes.
+///
+/// It bounds the work of naming, not the stack: naming keeps the
+/// composites it is inside of on the heap and uses the same stack
+/// however deep a record nests. Each level followed reads what is
+/// nested in it again, so a record of `n` bytes nested without a bound
+/// would cost `n` times its depth to name. The depth is part of what a
+/// name is: change it and a record nested deeper than the lesser of
+/// the two has another name.
 pub(crate) const NAMED_DEPTH: usize = 128;
 
 /// Why bytes are not a composite, or parts do not make one.
@@ -335,16 +345,106 @@ impl Composite {
         self.reference_within(NAMED_DEPTH)
     }
 
+    /// [`reference`](Self::reference), following composites nested in
+    /// this one `depth` deep.
+    ///
+    /// A part that is a composite is named before the composite it is
+    /// in, and the one it is in waits. What waits is kept in a list on
+    /// the heap, innermost last, and not in a call for each level: a
+    /// call for each held about ten kilobytes of stack, a record nested
+    /// to the depth a name follows needed 1.4 megabytes of it, and a
+    /// stack of one megabyte, which is what a wasm module has, ran out.
     fn reference_within(&self, depth: usize) -> Reference {
-        let part = |value: &Value| value.reference_within(depth.saturating_sub(1));
-        match self {
-            Composite::Map(map) => Type::MAP.map(
-                map.entries
-                    .iter()
-                    .map(|entry| (part(&entry.key), part(&entry.value))),
-            ),
-            Composite::List(items) => Type::LIST.list(items.iter().map(part)),
-            Composite::Tuple(items) => TUPLE.list(items.iter().map(part)),
+        let mut waiting: Vec<Naming<'_>> = Vec::new();
+        let mut naming = Naming::of(Cow::Borrowed(self), depth);
+        loop {
+            // What is nested in this composite is followed one level
+            // less deep, and at no depth left is named by its bytes.
+            let below = naming.depth.saturating_sub(1);
+            let step = match naming.next() {
+                None => Step::Named,
+                Some(part) => match (below > 0).then(|| part.composite()) {
+                    Some(Ok(Some(nested))) => Step::Into(nested),
+                    _ => Step::Part(part.scalar_reference()),
+                },
+            };
+            match step {
+                Step::Part(name) => naming.names.push(name),
+                Step::Into(nested) => {
+                    let outer = mem::replace(&mut naming, Naming::of(Cow::Owned(nested), below));
+                    waiting.push(outer);
+                }
+                Step::Named => {
+                    let name = naming.name();
+                    match waiting.pop() {
+                        Some(mut outer) => {
+                            outer.names.push(name);
+                            naming = outer;
+                        }
+                        None => return name,
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A composite part-way through being named: the names of its first
+/// parts, in the order the parts are kept in. A map's parts are each
+/// entry's key and then its value.
+struct Naming<'a> {
+    composite: Cow<'a, Composite>,
+    /// How deep the composites nested in this one are followed.
+    depth: usize,
+    names: Vec<Reference>,
+}
+
+/// What naming a composite does next.
+enum Step {
+    /// A part is named, by its bytes.
+    Part(Reference),
+    /// A part is a composite, to be named by its own parts first.
+    Into(Composite),
+    /// Every part is named, and so the composite can be.
+    Named,
+}
+
+impl<'a> Naming<'a> {
+    fn of(composite: Cow<'a, Composite>, depth: usize) -> Self {
+        Self {
+            composite,
+            depth,
+            names: Vec::new(),
+        }
+    }
+
+    /// The part to name next, if any is left.
+    fn next(&self) -> Option<&Value> {
+        let at = self.names.len();
+        match self.composite.as_ref() {
+            Composite::Map(map) => {
+                let entry = map.entries.get(at / 2)?;
+                Some(if at % 2 == 0 {
+                    &entry.key
+                } else {
+                    &entry.value
+                })
+            }
+            Composite::List(items) | Composite::Tuple(items) => items.get(at),
+        }
+    }
+
+    /// The composite's name, from the names of all its parts.
+    fn name(self) -> Reference {
+        match self.composite.as_ref() {
+            Composite::Map(_) => {
+                Type::MAP.map(self.names.chunks_exact(2).filter_map(|entry| match entry {
+                    [key, value] => Some((*key, *value)),
+                    _ => None,
+                }))
+            }
+            Composite::List(_) => Type::LIST.list(self.names),
+            Composite::Tuple(_) => TUPLE.list(self.names),
         }
     }
 }
@@ -1036,14 +1136,144 @@ mod tests {
         ));
     }
 
-    /// Naming a record nested past the depth a name follows does not
-    /// exhaust the stack: the part at that depth is named by its bytes.
-    #[dialog_common::test]
-    fn it_names_a_record_nested_past_any_depth() {
+    /// A list of one item nested `nesting` deep around a text.
+    fn nested(nesting: usize) -> Value {
         let mut value = text("leaf");
-        for _ in 0..(NAMED_DEPTH * 4) {
+        for _ in 0..nesting {
             value = Composite::list([value]).into();
         }
-        let _ = value.reference();
+        value
+    }
+
+    /// Naming a record nested past the depth a name follows runs on the
+    /// stack a test is given on every target, which on wasm is the one
+    /// megabyte a module has: the composites a part is nested in wait
+    /// on the heap, not in a call each. A call each needed 1.4
+    /// megabytes for this record and ran out there.
+    #[dialog_common::test]
+    fn it_names_a_record_nested_past_any_depth() {
+        let _ = nested(NAMED_DEPTH * 4).reference();
+    }
+
+    /// The stack naming uses does not grow with how deep a record
+    /// nests: a record nested four times the depth a name follows is
+    /// named on a thread given a quarter of a megabyte, a fifth of
+    /// what a call a level needed, and has the name it has anywhere.
+    ///
+    /// Native only: a wasm test has no thread to give a stack to. There
+    /// the bound is the module's own stack, and
+    /// `it_names_a_record_nested_past_any_depth` names the same record
+    /// under it.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn it_names_a_deep_record_on_a_small_stack() {
+        let value = nested(NAMED_DEPTH * 4);
+        let name = value.reference();
+        let named = std::thread::Builder::new()
+            .stack_size(256 * 1024)
+            .spawn(move || value.reference())
+            .expect("a thread")
+            .join()
+            .expect("the record is named");
+        assert_eq!(named, name);
+    }
+
+    /// A record nested in records is named by its parts down to the
+    /// depth a name follows, and what is nested deeper goes in by its
+    /// bytes. The names are the ones a call a level gave (43d49a5), so
+    /// naming without one moved no name.
+    #[dialog_common::test]
+    fn it_names_a_nested_record_by_its_parts_down_to_a_depth() {
+        let named = |nesting: usize| {
+            // The part the last level followed holds: named as any
+            // value is where the nesting ends above the depth, and by
+            // its bytes where it goes on below.
+            let (levels, mut name) = if nesting < NAMED_DEPTH {
+                (nesting, text("leaf").reference())
+            } else {
+                let below = nested(nesting - NAMED_DEPTH);
+                (NAMED_DEPTH, below.scalar_reference())
+            };
+            for _ in 0..levels {
+                name = Type::LIST.list([name]);
+            }
+            name
+        };
+        for (nesting, name) in [
+            (
+                1,
+                "8c836a04ccd2cd271fc632e0cac1909876050be1099bd3e30aaca0ebda433f04",
+            ),
+            (
+                2,
+                "579fb308b3511aebcb1d60c1a29f22f3af5c82aedf9357ae45dd1107ac5476ca",
+            ),
+            (
+                NAMED_DEPTH - 1,
+                "5f8730f430b77da56d183af269798e61b60f4575ae57bd0f0bc79f988c188970",
+            ),
+            (
+                NAMED_DEPTH,
+                "12fe0412bc22863ce46468770690a9bfddd30ff036f3ab25986f4e3b651f70be",
+            ),
+            (
+                NAMED_DEPTH + 1,
+                "3ac3da0bfc3557f3a12a5c67e3f8a9e23f9b14ce32d946cdb0e5cc79bb2d831d",
+            ),
+            (
+                NAMED_DEPTH * 4,
+                "bfa65cda9f6779faddaeaea2d89389b1a3d894803ceab8a05af9b596f04fcf9e",
+            ),
+        ] {
+            let value = nested(nesting);
+            assert_eq!(value.reference(), named(nesting), "nesting {nesting}");
+            assert_eq!(
+                value.reference(),
+                Reference::from_hex(name),
+                "nesting {nesting}"
+            );
+        }
+        // At the depth the leaf is still named as a text; one deeper it
+        // is inside a record named by its bytes, which is another name.
+        assert_ne!(
+            nested(NAMED_DEPTH + 1).reference(),
+            {
+                let mut name = text("leaf").reference();
+                for _ in 0..=NAMED_DEPTH {
+                    name = Type::LIST.list([name]);
+                }
+                name
+            },
+            "what is nested past the depth is not named by its parts"
+        );
+    }
+
+    /// Composites nested in composites are named from the inside out,
+    /// each by the names of its parts: a map by each entry's key and
+    /// value, whatever order they were given in, a list and a tuple by
+    /// their items in order.
+    #[dialog_common::test]
+    fn it_names_composites_nested_in_composites_by_their_parts() {
+        let pair = Composite::tuple([text("t"), Value::Boolean(false)]);
+        let map = Composite::map([
+            (text("k"), Value::UnsignedInt(1)),
+            (text("j"), Value::from(&pair)),
+        ])
+        .expect("a map");
+        let list = Composite::list([Value::from(&map), text("z"), Value::from(&map)]);
+        let outer = Composite::tuple([Value::from(&list), Value::Boolean(true)]);
+
+        let pair_name = TUPLE.list([text("t").reference(), Value::Boolean(false).reference()]);
+        assert_eq!(pair.reference(), pair_name);
+        let map_name = Type::MAP.map([
+            (text("j").reference(), pair_name),
+            (text("k").reference(), Value::UnsignedInt(1).reference()),
+        ]);
+        assert_eq!(map.reference(), map_name);
+        let list_name = Type::LIST.list([map_name, text("z").reference(), map_name]);
+        assert_eq!(list.reference(), list_name);
+        let outer_name = TUPLE.list([list_name, Value::Boolean(true).reference()]);
+        assert_eq!(outer.reference(), outer_name);
+        assert_eq!(Value::from(&outer).reference(), outer_name);
     }
 }

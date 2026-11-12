@@ -37,6 +37,22 @@ Done when: the two tests of step 2 pass in either order of premises, and a rule 
 
 Done when: a rule that binds a text from inside a map and adds a number to it is refused as one that adds a number to a text is today.
 
+## 5. What a premise of terms alone costs
+
+Added 2026-11-11, by the maintainer, after the Perf gate failed on the four steps.
+
+- A premise whose parameters are all leaves costs what it did before a parameter could hold a pattern.
+
+Done when: on every scenario the Perf gate runs, a pull request holding the four steps counts the instructions the base counts, within what one binary's count moves between two runs of it; the stream a concept read is moved as has the layout it had; a read of terms alone allocates what it allocated. Nothing under `perf/baseline/` is re-recorded for it.
+
+## 6. A rule that holds a pattern, laid over a branch
+
+Added 2026-11-11, asked by the notation (#773).
+
+- `Branch::with(rule)` lays a rule that holds a pattern over a branch for one query and runs it. Nothing of the rule is stored, and no body format is added.
+
+Done when: a deductive rule whose premise holds a map pattern, laid over a branch that holds a matching record, selects the row; the same rule asserted into a batch that is committed is refused as before.
+
 ## What is not decided here
 
 - **What installing a rule that holds a pattern does.** Format 3 has no way to write one. Refuse it with that reason, and bring the question back; do not add a format.

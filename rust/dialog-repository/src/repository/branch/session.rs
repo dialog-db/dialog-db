@@ -2,6 +2,7 @@ use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::Read as BlobRead;
 use dialog_search_tree::nodes;
+use std::any::Any;
 use std::cell::Cell;
 use std::collections::HashSet;
 use std::iter::once;
@@ -12,8 +13,9 @@ use dialog_corpus::history::Edition;
 use dialog_corpus::selector::Constrained;
 use dialog_corpus::tree::CorpusNode;
 use dialog_corpus::{
-    Changes, DialogCorpusError, Entity, Estimate, Fact, FactStream, FactView, Likelihood, Preload,
-    PreloadRequest, Select, Selector, SortKey, Speculation, Statement, sort_key,
+    Asset, Changes, DialogCorpusError, Entity, Estimate, Fact, FactStream, FactView, Likelihood,
+    Pick, Preload, PreloadRequest, Select, Selector, SortKey, Speculation, Statement, Update,
+    sort_key,
 };
 use dialog_corpus::{Relation as CorpusRelation, Standing, Value};
 use dialog_effects::archive::{ArchiveError, Get, Put};
@@ -43,7 +45,7 @@ use crate::REGISTRY;
 use crate::layer::{Hidden, MergeKeys, filter_hidden, merge_grouped};
 use crate::repository::archive::TreeEnv;
 use crate::repository::branch::select::line_manifest;
-use crate::repository::ephemeral::Window;
+use crate::repository::ephemeral::{Bodies, Window};
 use crate::repository::fetch::Driven;
 use crate::repository::source::{Live, Source, View};
 use crate::repository::{CellSettlement, ReadObservation};
@@ -108,6 +110,43 @@ use crate::{Branch, Ephemeral, RemoteSite, Snapshot, Staged};
 pub struct QueryLayer<'a> {
     lines: Vec<Live<'a>>,
     changes: Changes,
+    /// The rules laid over the lines that have no stored body, each as
+    /// it was given (see [`Bodies`]).
+    bodies: Option<Bodies>,
+}
+
+/// A layer's overlay as a statement is laid into it. Its facts go into
+/// the layer's changes. What the statement has no bytes for and asks
+/// its target to hold (see [`Update::hold`]) is kept beside them when
+/// it is a deductive rule: a layer runs a rule and never stores it, so
+/// it needs the rule's name, which its facts carry, and the rule.
+struct Laying<'x> {
+    changes: &'x mut Changes,
+    bodies: &'x mut Option<Bodies>,
+}
+
+impl Update for Laying<'_> {
+    fn associate(&mut self, the: CorpusRelation, of: Entity, is: Value, policy: Pick) {
+        self.changes.associate(the, of, is, policy);
+    }
+
+    fn dissociate(&mut self, the: CorpusRelation, of: Entity, is: Value) {
+        self.changes.dissociate(the, of, is);
+    }
+
+    fn import(&mut self, asset: Asset) {
+        self.changes.import(asset);
+    }
+
+    fn discard(&mut self, asset: Asset) {
+        self.changes.discard(asset);
+    }
+
+    fn hold(&mut self, entity: &Entity, body: Box<dyn Any>) -> Result<(), Box<dyn Any>> {
+        let rule = body.downcast::<DeductiveRule>()?;
+        Arc::make_mut(self.bodies.get_or_insert_default()).insert(entity.clone(), *rule);
+        Ok(())
+    }
 }
 
 impl<'a> QueryLayer<'a> {
@@ -124,9 +163,15 @@ impl<'a> QueryLayer<'a> {
     ///
     /// A deductive rule is a `Statement` too, so `.with(rule)` folds it
     /// into the overlay — the query resolves it as a transient rule
-    /// without persisting it.
+    /// without persisting it. A rule that cannot be stored, one that
+    /// holds a map, a list or a tuple of terms, is laid over too: the
+    /// overlay keeps the rule as it is, under the name its facts give
+    /// it, and nothing is written of its body.
     pub fn with<S: Statement>(mut self, statement: S) -> Self {
-        statement.assert(&mut self.changes);
+        statement.assert(&mut Laying {
+            changes: &mut self.changes,
+            bodies: &mut self.bodies,
+        });
         self
     }
 
@@ -138,6 +183,13 @@ impl<'a> QueryLayer<'a> {
         let other = other.into();
         self.lines.extend(other.lines);
         other.changes.assert(&mut self.changes);
+        if let Some(bodies) = other.bodies {
+            Arc::make_mut(self.bodies.get_or_insert_default()).extend(
+                bodies
+                    .iter()
+                    .map(|(entity, rule)| (entity.clone(), rule.clone())),
+            );
+        }
         self
     }
 
@@ -213,7 +265,7 @@ impl<'a> QueryLayer<'a> {
         }
         let mut overlay = self.changes.clone();
         metadata.export().assert(&mut overlay);
-        Ephemeral::holding(overlay)
+        Ephemeral::holding(overlay).keeping(self.bodies.clone())
     }
 
     /// Stage a query application. Call `.perform(&operator)` to execute.
@@ -321,6 +373,7 @@ impl<'a> From<Live<'a>> for QueryLayer<'a> {
         Self {
             lines: vec![line],
             changes: Changes::new(),
+            bodies: None,
         }
     }
 }
@@ -342,6 +395,7 @@ impl From<Changes> for QueryLayer<'_> {
         Self {
             lines: Vec::new(),
             changes,
+            bodies: None,
         }
     }
 }
@@ -1311,6 +1365,10 @@ impl<'a> QueryEnv<'a> {
             let sources = source_selector(&rule_entity);
             self.read_rules(&sources, manifest);
             let Some(bytes) = source_bytes(overlay.scan(&sources)) else {
+                // A rule with no stored body is held as it is.
+                if let Some(rule) = overlay.body(&rule_entity) {
+                    rules.push((rule, Installed::Pending));
+                }
                 continue;
             };
             if let Some(rule) = self.pending_body(rule_entity, &bytes)? {
@@ -1793,6 +1851,17 @@ impl<'a> QueryEnv<'a> {
             };
             rules.push(rule);
         }
+        // The rules an overlay holds as they are have no body to scan.
+        for overlay in self.overlays() {
+            let Some(bodies) = overlay.bodies() else {
+                continue;
+            };
+            for (entity, rule) in bodies.iter() {
+                if seen.insert(entity.clone()) {
+                    rules.push(rule.clone());
+                }
+            }
+        }
         Ok(rules)
     }
 }
@@ -2241,7 +2310,6 @@ mod rule_tests {
     use super::*;
     use crate::helpers::{Counting, connect, test_repo};
     use crate::{Branch, Repository, Transaction};
-    use dialog_corpus::Update as _;
     use dialog_credentials::Credential;
     use dialog_peer::helpers::test_session_with_peer;
     use dialog_peer::{Peer, Session};
