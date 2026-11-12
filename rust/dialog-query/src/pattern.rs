@@ -33,6 +33,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::Environment;
+use crate::Parameters;
 use crate::Premise;
 use crate::concept::query::ConceptQuery;
 use crate::constraint::{Constraint, Equality};
@@ -46,6 +47,10 @@ use crate::types::Any;
 
 /// What a parameter holds: a variable, a constant, or a map, a list or
 /// a tuple of patterns. See the [module](self).
+///
+/// A pattern is no larger than a [`Term<Any>`], so what holds a
+/// pattern where it held a term (an [`Equality`]'s two sides) is the
+/// size it was, and is moved and cloned at the cost it was.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Pattern {
     /// A leaf: a variable or a constant, with the descriptor a term has.
@@ -58,6 +63,8 @@ pub enum Pattern {
     Tuple(Vec<Pattern>),
 }
 
+const _: () = assert!(size_of::<Pattern>() == size_of::<Term<Any>>());
+
 /// A map pattern: a pattern for the value under each key it names, and
 /// what the entries it did not name are bound to.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -65,8 +72,9 @@ pub struct MapPattern {
     /// The named entries, in the order a map of them is written in.
     entries: Vec<(Value, Pattern)>,
     /// What the entries not named are bound to, as a map. `None` when
-    /// the map holds no other entry.
-    rest: Option<Term<Any>>,
+    /// the map holds no other entry. Boxed, as a run is, so that a
+    /// pattern is no larger than the term its leaf is.
+    rest: Option<Box<Term<Any>>>,
 }
 
 /// A list pattern: a pattern for each of its first items, and what the
@@ -77,7 +85,7 @@ pub struct ListPattern {
     items: Vec<Pattern>,
     /// What the items after them are bound to, as a list. `None` when
     /// the list holds no other item.
-    run: Option<Term<Any>>,
+    run: Option<Box<Term<Any>>>,
 }
 
 impl MapPattern {
@@ -115,7 +123,7 @@ impl MapPattern {
     /// This pattern with the entries it does not name bound to `rest`,
     /// as a map. A blank takes them and binds nothing.
     pub fn with_rest(mut self, rest: Term<Any>) -> Self {
-        self.rest = Some(rest);
+        self.rest = Some(Box::new(rest));
         self
     }
 
@@ -126,7 +134,7 @@ impl MapPattern {
 
     /// What the entries not named are bound to.
     pub fn rest(&self) -> Option<&Term<Any>> {
-        self.rest.as_ref()
+        self.rest.as_deref()
     }
 }
 
@@ -142,7 +150,7 @@ impl ListPattern {
     /// This pattern with the items after its own bound to `run`, as a
     /// list. A blank takes them and binds nothing.
     pub fn with_run(mut self, run: Term<Any>) -> Self {
-        self.run = Some(run);
+        self.run = Some(Box::new(run));
         self
     }
 
@@ -153,7 +161,7 @@ impl ListPattern {
 
     /// What the items after the first are bound to.
     pub fn run(&self) -> Option<&Term<Any>> {
-        self.run.as_ref()
+        self.run.as_deref()
     }
 }
 
@@ -236,13 +244,13 @@ impl Pattern {
                 for (_, pattern) in &map.entries {
                     pattern.collect(terms);
                 }
-                terms.extend(map.rest.as_ref());
+                terms.extend(map.rest.as_deref());
             }
             Pattern::List(list) => {
                 for pattern in &list.items {
                     pattern.collect(terms);
                 }
-                terms.extend(list.run.as_ref());
+                terms.extend(list.run.as_deref());
             }
             Pattern::Tuple(items) => {
                 for pattern in items {
@@ -269,25 +277,39 @@ impl Pattern {
     /// Whether this pattern holds a blank: a place that matches any
     /// value and binds nothing, so the pattern cannot be built.
     pub fn has_blank(&self) -> bool {
-        self.terms().into_iter().any(Term::is_blank)
+        match self {
+            Pattern::Term(term) => term.is_blank(),
+            _ => self.terms().into_iter().any(Term::is_blank),
+        }
     }
 
     /// Whether this pattern holds no variable, and so is one value.
     pub fn is_constant(&self) -> bool {
-        self.terms().into_iter().all(Term::is_constant)
+        match self {
+            Pattern::Term(term) => term.is_constant(),
+            _ => self.terms().into_iter().all(Term::is_constant),
+        }
     }
 
     /// Whether every variable inside this pattern is bound in `env`, so
     /// the pattern is a value there. A pattern that holds a blank never
     /// is.
     pub fn is_bound(&self, env: &Environment) -> bool {
-        self.terms().into_iter().all(|term| term.is_bound(env))
+        match self {
+            Pattern::Term(term) => term.is_bound(env),
+            _ => self.terms().into_iter().all(|term| term.is_bound(env)),
+        }
     }
 
     /// Adds the names of the variables inside this pattern to `env`.
     pub fn bind(&self, env: &mut Environment) {
-        for term in self.terms() {
-            term.bind(env);
+        match self {
+            Pattern::Term(term) => term.bind(env),
+            _ => {
+                for term in self.terms() {
+                    term.bind(env);
+                }
+            }
         }
     }
 
@@ -302,11 +324,11 @@ impl Pattern {
                     .iter()
                     .map(|(key, pattern)| (key.clone(), pattern.map_terms(f)))
                     .collect(),
-                rest: map.rest.as_ref().map(f),
+                rest: map.rest.as_deref().map(|rest| Box::new(f(rest))),
             }),
             Pattern::List(list) => Pattern::List(ListPattern {
                 items: list.items.iter().map(|item| item.map_terms(f)).collect(),
-                run: list.run.as_ref().map(f),
+                run: list.run.as_deref().map(|run| Box::new(f(run))),
             }),
             Pattern::Tuple(items) => {
                 Pattern::Tuple(items.iter().map(|item| item.map_terms(f)).collect())
@@ -334,7 +356,7 @@ impl Pattern {
                     entries.push((key.clone(), pattern.build(row)?));
                 }
                 let named = CompositeMap::new(entries).ok()?;
-                match &map.rest {
+                match map.rest.as_deref() {
                     None => Composite::Map(named),
                     Some(rest) => {
                         let Ok(Some(Composite::Map(others))) = leaf(rest)?.composite() else {
@@ -357,7 +379,7 @@ impl Pattern {
                 for pattern in &list.items {
                     items.push(pattern.build(row)?);
                 }
-                if let Some(run) = &list.run {
+                if let Some(run) = list.run.as_deref() {
                     let Ok(Some(Composite::List(others))) = leaf(run)?.composite() else {
                         return None;
                     };
@@ -415,7 +437,7 @@ impl Pattern {
                         return Ok(false);
                     }
                 }
-                match &pattern.rest {
+                match pattern.rest.as_deref() {
                     None => Ok(map.len() == pattern.entries.len()),
                     Some(Term::Variable { name: None, .. }) => Ok(true),
                     Some(rest) => {
@@ -434,7 +456,7 @@ impl Pattern {
                         return Ok(false);
                     }
                 }
-                match &pattern.run {
+                match pattern.run.as_deref() {
                     None | Some(Term::Variable { name: None, .. }) => Ok(true),
                     Some(run) => Ok(unify_leaf(
                         run,
@@ -543,7 +565,7 @@ impl fmt::Display for Pattern {
                     }
                     write!(f, "{key:?}: {pattern}")?;
                 }
-                rest(map.entries.is_empty(), map.rest.as_ref(), f)?;
+                rest(map.entries.is_empty(), map.rest.as_deref(), f)?;
                 write!(f, "}}")
             }
             Pattern::List(list) => {
@@ -554,7 +576,7 @@ impl fmt::Display for Pattern {
                     }
                     write!(f, "{pattern}")?;
                 }
-                rest(list.items.is_empty(), list.run.as_ref(), f)?;
+                rest(list.items.is_empty(), list.run.as_deref(), f)?;
                 write!(f, "]")
             }
             Pattern::Tuple(items) => {
@@ -602,7 +624,7 @@ static WHOLE_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// one of whose parameters is a map, a list or a tuple runs with a
 /// variable there, the whole, and the pattern is applied around it:
 /// [`build`] binds the whole from the pattern where the pattern's
-/// variables are bound before the premise runs, and [`take_apart`]
+/// variables are bound before the premise runs, and `take_apart`
 /// matches what the premise bound the whole to against the pattern
 /// after it.
 #[derive(Debug, Clone, PartialEq)]
@@ -639,6 +661,20 @@ impl Shape {
             Self::whole_of(&pattern)
         };
         Self { whole, pattern }
+    }
+}
+
+/// Whether `proposition` holds a map, a list or a tuple of terms. Only
+/// a concept application and an equality can: every other premise is a
+/// struct of terms. Asked of every premise a rule is spelled from, so
+/// it builds no parameters to answer.
+pub(crate) fn holds_shape(proposition: &Proposition) -> bool {
+    match proposition {
+        Proposition::Concept(query) => query.terms.has_shapes(),
+        Proposition::Constraint(Constraint::Equality(equality)) => {
+            equality.this.is_composite() || equality.is.is_composite()
+        }
+        _ => false,
     }
 }
 
@@ -730,39 +766,35 @@ pub fn build<'a, M: Selection + 'a>(shapes: Arc<[Shape]>, selection: M) -> impl 
     }
 }
 
-/// After a premise ran: match what each whole is bound to against its
-/// pattern, binding the variables inside it, and drop a row that does
-/// not match. A whole bound to nothing (an optional field with no
-/// value) matches no pattern. A whole the premise left unbound leaves
-/// the pattern's variables unbound, as it would a variable in its
-/// place.
-pub fn take_apart<'a, M: Selection + 'a>(
-    shapes: Arc<[Shape]>,
-    selection: M,
-) -> impl Selection + 'a {
-    try_stream! {
-        for await row in selection {
-            let row: Match = row?;
-            let mut matched = row.clone();
-            let mut matches = true;
-            for shape in shapes.iter() {
-                let Some(binding) = row.get(shape.whole.name().unwrap_or_default()) else {
-                    continue;
-                };
-                let Some(value) = binding.as_value() else {
-                    matches = false;
-                    break;
-                };
-                if !shape.pattern.unify(value, &mut matched)? {
-                    matches = false;
-                    break;
-                }
-            }
-            if matches {
-                yield matched;
-            }
+/// After a premise ran with `terms`: match what the whole of each map,
+/// list and tuple they hold is bound to in `row` against its pattern,
+/// binding the variables inside it. `None` for a row that does not
+/// match, which is dropped. A whole bound to nothing (an optional field
+/// with no value) matches no pattern. A whole the premise left unbound
+/// leaves the pattern's variables unbound, as it would a variable in
+/// its place. A row that is an error passes as it is.
+pub(crate) fn take_apart(
+    terms: &Parameters,
+    row: Result<Match, EvaluationError>,
+) -> Option<Result<Match, EvaluationError>> {
+    let row = match row {
+        Ok(row) => row,
+        Err(error) => return Some(Err(error)),
+    };
+    let mut matched = row.clone();
+    for (name, pattern) in terms.shapes() {
+        let whole = terms.get(name).and_then(Term::name).unwrap_or_default();
+        let Some(binding) = row.get(whole) else {
+            continue;
+        };
+        let value = binding.as_value()?;
+        match pattern.unify(value, &mut matched) {
+            Ok(true) => {}
+            Ok(false) => return None,
+            Err(error) => return Some(Err(error)),
         }
     }
+    Some(Ok(matched))
 }
 
 #[cfg(test)]

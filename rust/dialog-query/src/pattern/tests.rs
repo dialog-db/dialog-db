@@ -1354,11 +1354,7 @@ fn it_holds_a_pattern_under_a_name() {
     assert_eq!(terms.get("payload"), Some(&Shape::whole_of(&pattern)));
     assert!(terms.has_shapes());
 
-    let mut names: Vec<&str> = terms
-        .leaves()
-        .into_iter()
-        .filter_map(|term| term.name())
-        .collect();
+    let mut names: Vec<&str> = terms.leaves().filter_map(|term| term.name()).collect();
     names.sort();
     assert_eq!(names, vec!["note", "rest", "title"]);
 
