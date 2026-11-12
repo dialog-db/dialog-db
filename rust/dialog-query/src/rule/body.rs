@@ -114,6 +114,28 @@ mod tests {
         assert_eq!(decode::<Body>(&bare), Ok(body()));
     }
 
+    /// A key of the envelope this release does not know is skipped,
+    /// and the body is read as its number says. So a release cannot be
+    /// told what a body holds by a key beside the number: only a later
+    /// number makes it refuse. A design that names what a body uses
+    /// has to move the number too.
+    #[dialog_common::test]
+    fn it_reads_past_an_envelope_key_it_does_not_know() {
+        #[derive(Serialize)]
+        struct Extended<'a> {
+            format: u64,
+            uses: Vec<&'a str>,
+            rule: &'a Body,
+        }
+        let extended = serde_ipld_dagcbor::to_vec(&Extended {
+            format: FORMAT,
+            uses: vec!["pattern"],
+            rule: &body(),
+        })
+        .expect("encodes");
+        assert_eq!(decode::<Body>(&extended), Ok(body()));
+    }
+
     /// A body in a later format is refused by name.
     #[dialog_common::test]
     fn it_refuses_a_later_format() {
