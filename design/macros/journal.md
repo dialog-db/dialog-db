@@ -5,7 +5,7 @@
 |  | Understanding | Activity |
 |---|---|---|
 | **Status** | The kernel and the core forms run on a real branch through `rust/dialog-notation` ([poc.md](poc.md)); the prelude is rules only. The syntax tree is built, apart from the notation as parsed, and kept as data: maps that say their `type` ([design-forms.md](design-forms.md#the-syntax-tree)). A struct is a value and, with a variable in it, a pattern, which is a topic of its own with an agent on it (#777). Rules of several heads are #776. Expanding and compiling still read the notation as parsed, and `kernel.rs` still copies dialog's forms. | **Directing**, backtracked from Designing on 2026-11-12. Direction decided by the maintainer: phases as formulas and a resolver, one rule over them. A proof of concept runs. A name is kept as a name, what is named and a signature; a definition under it is read `last`; an application resolves by the labels written and a read that fits several is of all. Built and tested, by pattern, in the expander. |
-| **Agenda** | Parked by the maintainer: authority, for two definitions of one signature written apart; `last` elects one until then. How a query reports. Which of three things a phase that reads the database is, and whether analysis is a formula over a form and a context; how that context is gathered, when no fold collects and a fold may not sit in a cycle. Whether dialog can be asked for an expansion a form at a time (H3). What a read with no pick reads. | The notation is on top of patterns (#778, merged in, its perf gate failing): a struct is a value in a write and a pattern in a query of one read. Next: a struct in a rule, which needs the compiler to build dialog's forms in Rust, since a pattern has no wire form; `entity/derive` over a record; then an application lowers to a `ConceptQuery` of the definition's concept. Not waiting: a helper rule for a negated conjunction. Waiting on patterns (#777, #778): a struct as a term, `entity/derive` over a record, syntax kept on the branch. Waiting on #776: a rule of several heads. |
+| **Agenda** | Parked by the maintainer: authority, for two definitions of one signature written apart; `last` elects one until then. How a query reports. What a kept rule about syntax holds where its template names something, a name or a hash. Whether the analyzer, a resolver by the maintainer's word, gives back the table of what each name meant. Whether dialog can be asked for an expansion a form at a time (H3). What a read with no pick reads. | The notation is on top of patterns (#778, merged in, its perf gate failing): a struct is a value in a write and a pattern in a query of one read. Next: a struct in a rule, which needs the compiler to build dialog's forms in Rust, since a pattern has no wire form; `entity/derive` over a record; then an application lowers to a `ConceptQuery` of the definition's concept. Not waiting: a helper rule for a negated conjunction. Waiting on patterns (#777, #778): a struct as a term, `entity/derive` over a record, syntax kept on the branch. Waiting on #776: a rule of several heads. |
 
 ## Candidate problems
 
@@ -491,3 +491,27 @@ Not examined yet. They are columns, not recommendations.
 - The loop goes away if the context is every name the space defines, gathered once. The cost is the size of that value and that any change of a name is a new context.
 
 **Decided.** Not decided. The maintainer likes an analyzer that is a formula over a form and a context; how the context is gathered is open. Three hypotheses are in the [ledger](claims.md). The test of the first waits on which value a composite is (`Value::Record` on #778, `Value::Composite` in #748's journal).
+
+## 2026-11-12, Directing: the parse names what to resolve
+
+**Asked.** Irakli, correcting the entry above: the parse gives the tree and a context that names the local definitions and the references. A resolver resolves the references. The local definitions and what was resolved go to the analyzer, a formula. And: none of it need be complicated, the analyzer as a resolver is fine too.
+
+**Learned.**
+
+- His shape needs no fold and no loop of mine. A resolver takes the references whole and gives one value back, so nothing is gathered by a rule. What a source defines comes from the source, so a definition used in the source it is written in needs nothing committed.
+
+```
+ source ──parse──▶ tree, every name written
+                        │
+                        ▼ resolver, the one step that reads state that moves
+                   name ──▶ hash
+                        │
+                        ▼ analyze: a function of the tree, the hashes and what they name
+                   kernel forms, what each name meant, what did not resolve
+```
+
+- The parse can name every reference and cannot name a definition. Every symbol is read as a `:reference` (`syntax.rs`). Which of them a form defines is said by the rule about that form: `concept` is a rule of the prelude, and its pattern is what finds the name. So what a source defines is something analysis finds, in order, and gives back; it is not an input to it. Resolving every name written and letting the misses be locals, binders or errors costs a lookup a name and loses nothing.
+- Whether one resolve is enough rests on what a kept rule about syntax holds where its template names something: the name, read where the form is used, or the hash of what the name meant where the rule was written. With hashes an expansion brings no name to resolve. Nothing about syntax is kept yet, so this is open, and it is the same question as whether a macro is hygienic.
+- Either way analysis reads what a hash names, to expand by a rule it was not handed. That is a read by content, which a formula cannot do and a resolver can. So "the analyzer is a resolver" and "a resolver, then a formula" are one program with a boundary shown or not. What showing it buys is analysis over a context that is not a committed root.
+
+**Decided.** By the maintainer: do not complicate it, the analyzer as a resolver is fine. Proposed by the agent, not decided: it resolves names first, as one step, and gives the table back with the kernel forms and the diagnostics, so an editor can ask what a name meant and the boundary can be shown later. Open, and his: what a kept template holds where it names something.
