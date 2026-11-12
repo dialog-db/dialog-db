@@ -910,3 +910,25 @@ its archive's blobs and its nodes through `Write`. The query session's
 wildcard read tries each line's subject in turn, as it tried each line's
 catalog. `CatalogScope` stays where blocks are read or written: `Load`,
 `Get`, `Import`, the baseline's block walks, `Select::catalog`.
+
+**Measured.** `dialog-perf` sweeps of main (`f65891b`, #755 and the
+corpus rename merged) and of this change on top of it, one toolchain, one
+machine, under callgrind. Every counter of every scenario is unchanged,
+and every scenario is within the gate's tolerance. Instructions move by
+less than 1.6% either way, except one:
+
+| scenario | main | this change | Δ |
+|---|--:|--:|--:|
+| first-query | 1,864,802 | 1,906,625 | +2.24% |
+| read-point | 22,679,174 | 22,458,969 | -0.97% |
+| read-sibling | 30,113,345 | 29,852,927 | -0.86% |
+| rule-point | 51,210,415 | 50,408,752 | -1.57% |
+| rule-recursive | 801,759,733 | 792,212,129 | -1.19% |
+| commit-succeed | 1,447,453,660 | 1,437,945,372 | -0.66% |
+
+`first-query` is 42 thousand instructions, inside the gate's absolute
+slack of a million. `commit-succeed` is the catalog's one volatile
+scenario, held to its counters. Against the checked-in baseline files
+this machine's toolchain reads 2% to 5% high on main as well, so the
+files say nothing locally; the pull request's own Perf gate is the check
+against them.
