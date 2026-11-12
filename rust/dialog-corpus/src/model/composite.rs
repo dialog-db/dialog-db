@@ -438,10 +438,8 @@ impl<'a> Naming<'a> {
     fn name(self) -> Reference {
         match self.composite.as_ref() {
             Composite::Map(_) => {
-                Type::MAP.map(self.names.chunks_exact(2).filter_map(|entry| match entry {
-                    [key, value] => Some((*key, *value)),
-                    _ => None,
-                }))
+                let (entries, _) = self.names.as_chunks::<2>();
+                Type::MAP.map(entries.iter().map(|[key, value]| (*key, *value)))
             }
             Composite::List(_) => Type::LIST.list(self.names),
             Composite::Tuple(_) => TUPLE.list(self.names),
