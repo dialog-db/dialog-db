@@ -5,7 +5,7 @@
 |  | Understanding | Activity |
 |---|---|---|
 | **Status** | The kernel and the core forms run on a real branch through `rust/dialog-notation` ([poc.md](poc.md)); the prelude is rules only. The syntax tree is built, apart from the notation as parsed, and kept as data: maps that say their `type` ([design-forms.md](design-forms.md#the-syntax-tree)). A struct is a value and, with a variable in it, a pattern, which is a topic of its own with an agent on it (#777). Rules of several heads are #776. Expanding and compiling still read the notation as parsed, and `kernel.rs` still copies dialog's forms. | **Directing**, backtracked from Designing on 2026-11-12. Direction decided by the maintainer: phases as formulas and a resolver, one rule over them. A proof of concept runs. A name is kept as a name, what is named and a signature; a definition under it is read `last`; an application resolves by the labels written and a read that fits several is of all. Built and tested, by pattern, in the expander. |
-| **Agenda** | Parked by the maintainer: authority, for two definitions of one signature written apart; `last` elects one until then. How a query reports. Whether a rule keeps `when`, which two reader rounds leave to several heads and to patterns over rules. What a template holds where it applies itself or what is defined after it. Whether the name as written is part of what names a macro. Whether the analyzer, a resolver by the maintainer's word, gives back the table of what each name meant. Whether dialog can be asked for an expansion a form at a time (H3). What a read with no pick reads. | The notation is on top of patterns (#778, merged in, its perf gate failing): a struct is a value in a write and a pattern in a query of one read. Next: a struct in a rule, which needs the compiler to build dialog's forms in Rust, since a pattern has no wire form; `entity/derive` over a record; then an application lowers to a `ConceptQuery` of the definition's concept. Not waiting: a helper rule for a negated conjunction. Waiting on patterns (#777, #778): a struct as a term, `entity/derive` over a record, syntax kept on the branch. Waiting on #776: a rule of several heads. |
+| **Agenda** | Parked by the maintainer: authority, for two definitions of one signature written apart; `last` elects one until then. How a query reports. Whether a rule keeps `when`, which two reader rounds leave to several heads and to patterns over rules. What `update` reaches: macros, or every kept form. Whether the name as written is part of what names a macro. Whether the analyzer, a resolver by the maintainer's word, gives back the table of what each name meant. Whether dialog can be asked for an expansion a form at a time (H3). What a read with no pick reads. | The notation is on top of patterns (#778, merged in, its perf gate failing): a struct is a value in a write and a pattern in a query of one read. Next: a struct in a rule, which needs the compiler to build dialog's forms in Rust, since a pattern has no wire form; `entity/derive` over a record; then an application lowers to a `ConceptQuery` of the definition's concept. Not waiting: a helper rule for a negated conjunction. Waiting on patterns (#777, #778): a struct as a term, `entity/derive` over a record, syntax kept on the branch. Waiting on #776: a rule of several heads. |
 
 ## Candidate problems
 
@@ -553,3 +553,27 @@ Not examined yet. They are columns, not recommendations.
 - Not about `when`: nine of ten K1 readers saw that a head's variable bound only by a premise makes a rule of two heads give nothing when that premise has no match. Four of ten asked whether `assert!` replaces what is stored.
 
 **Decided.** Not decided; the maintainer's. What the rounds say: `when` is not needed to read or write a rule of one head, and what it buys is that several heads need no wrapper and no teaching. Not run: a rule about syntax, where `when` is also what a pattern over a rule matches on; and readers less capable or more hurried than these, since both rounds were at the ceiling on everything but several heads.
+
+## 2026-11-12, Directing: a group that refers to itself, and a change that reaches what depends on it
+
+**Asked.** Irakli, on what Unison does. Hashing a definition that refers to itself, or a group that refer to each other, as one unit: "sounds like what we should do". On a change not reaching what depends on it: something like Unison's `update`, perhaps `(update my-concept)`, whose handler finds every reference and updates it. And from that: a macro should have relations to what it references, so they can be traced.
+
+**Learned.**
+
+- Dialog keeps such relations for a rule already: `dialog.rule/reads` and `dialog.rule/derives`, a fact for each attribute, are how a rule is found by what it reads. A fact for each entity a kept form holds is the same thing for definitions, and makes "what depends on this" a read by value.
+- What goes stale when `todo` changes is not the macros alone. Every kept rule that came of a form applying `todo` holds the old entity too. Storing those again means expanding their forms again, so the form each came of has to be kept, with its references. Syntax kept on the branch is not built yet.
+- A change reaches what depends on what depends on it: each thing stored again has a new entity, so what holds it is stale in turn. As rules at commit that is a round a link, and a commit has sixteen.
+- Unison stores a dependent again only when it still type-checks. The like of that here is the signature: a `todo` that lost a field a dependent names cannot be stored again for it, and has to be reported.
+
+```
+ (update todo)
+
+   name todo ──▶ concept:new          re-pointed by the definition
+        │
+        ▼ read by value: which kept forms reference concept:old
+   finished, pending, …               each stored again against concept:new, its name re-pointed
+        │
+        ▼ and what references those, a round later
+```
+
+**Decided.** By the maintainer: a group that refers to itself is named as one unit, as Unison does. A kept form has relations to what it references. A change reaches dependents by an `update` that is asked for, not by a name read late. Proposed by the agent, not decided: the relations are on every kept form and not on macros alone; `update` refuses, by name, a dependent whose labels the new definition does not take.
