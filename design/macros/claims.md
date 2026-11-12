@@ -89,3 +89,13 @@
 | the notation should be minimal and defined in itself, as McCarthy's evaluator is | opinion | Irakli, 2026-11-10 | - |
 | macros as rules is the direction, without a problem statement | opinion | Irakli, 2026-11-10 | decides |
 | whatever is built is as fast to use as the system is today | opinion | Irakli, 2026-11-11 | decides |
+| every phase is available to the query engine: parsing and analysis as formulas, expansion as a resolver, and a rule that runs them all for a command, `(dialog/evaluate (source "…"))`; an LSP server is then queries | opinion | Irakli, 2026-11-12 | decides |
+| formulas and resolvers are closed sets compiled into `dialog-query`, and `dialog-notation` depends on `dialog-query` | fact | `formula/query.rs` (`FormulaQuery`), `resolver.rs` (`ResolverQuery`), `rust/dialog-notation/Cargo.toml` | holds |
+| the parser, the tree and its data depend on `dialog-corpus` alone, so they can sit below the query engine | fact | the imports of `form.rs`, `data.rs`, `syntax.rs` | holds |
+| a formula may yield several rows | fact | `Formula::resolve`, "for each output" (`formula.rs`) | holds |
+| a resolver may select only from content-addressed storage; what is addressed by state that moves is a scan and records demand | fact | the admission rule in `resolver.rs` | holds |
+| a name is a fact that can be re-pointed, so finding a definition by name is a scan, and expanding a form by a definition given by its hash is a pure function of its inputs | hypothesis | confirmed if expansion can be written as two premises, a read of the name and a resolver over hashes, with no other state; refuted by a form whose expansion needs a name looked up inside the resolver | open |
+| a rule can write the facts that are another rule, and that rule fires in a later round of the same commit | hypothesis | `induce.rs` says the overlay is re-scanned each round "so rules installed by this very commit, or by a rule during induction, fire"; no test of it was found. Confirmed by a rule whose head is a rule's facts and a second command the new rule answers, in one commit | open |
+| a source that defines a form and then uses it evaluates in one command | hypothesis | every form of a source is read in one round against one state, so the use does not see the definition in that round. Confirmed if later rounds retry what did not resolve, within 16 rounds (`MAX_ROUNDS`); refuted if the order written has to be kept by something outside the rules | open |
+| a rule that compiles a form writes a rule body, so it can write no more than the stored format says: a pattern or a rule about syntax waits on format 4 | fact | `dialog.rule/source` is the format 3 body (`rule/body.rs`); #779 | holds |
+

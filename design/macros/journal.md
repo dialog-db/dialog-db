@@ -426,3 +426,26 @@ Not examined yet. They are columns, not recommendations.
 
 **Decided.** Built: the notebook holds a deductive rule dialog cannot store (`Notebook::held`). It is a stand-in for format 4 and goes when a stored rule can hold a pattern. Not decided: the stamping policy of format 4, which is the maintainer's and is what #779 waits on.
 
+## 2026-11-12, Directing: every phase where the query engine can reach it
+
+**Asked.** Irakli: all of it should be available to the query engine. A formula that parses source into a syntax tree. The analyzer the same way, over the parsed tree as a record, doing substitutions. Macro expansion "can't be a formula but can be a resolver". Then evaluating forms, so that a command `(dialog/evaluate (source "…"))` has a rule that does all the phases. An LSP server follows from being able to ask.
+
+**Learned.** Read in the code, not built:
+
+```
+ source text ──parse──▶ tree ──resolve names──▶ definitions ──expand──▶ kernel ──compile──▶ rule facts
+              formula          a read (a scan)    by hash        resolver         formula      written by a rule
+              pure             moves, so it                      pure                          that answers the
+                               records demand                                                  command
+```
+
+- Formulas and resolvers are closed sets inside `dialog-query`, and the notation crate depends on it. The parser, the tree and its data depend on `dialog-corpus` alone, so they can move below the engine. Expanding and compiling cannot as they are.
+- A resolver may read only what is addressed by content. A name moves, so looking one up is a scan. Expansion fits a resolver once the definition is given by hash, which is the split already chosen for names: a name is a fact, a definition is named by what it is.
+- Commit-time induction re-reads its rules each round so that a rule installed by a rule fires, by its own comment. That is what `dialog/evaluate` as a command needs. No test of it was found.
+- A command reports nothing back. A query inside an evaluated source has nowhere to put its rows.
+- Reading for an editor and evaluating are two uses of the same formulas: the first writes nothing and has to work on text that is not committed and does not parse; the second is a commit.
+
+**Decided.** The direction is the maintainer's: phases as formulas and a resolver, one rule over them. Not decided: what evaluating a query produces; how a source that defines a form and uses it gets its order; whether expansion splits at the name as above. Each is a hypothesis in the [ledger](claims.md). Nothing is built on this yet.
+
+**Backtracked.** From Designing to Directing: "macros are rules, compiling is a formula" was a column parked for Direction, and this is that column said in full.
+
