@@ -4,8 +4,8 @@
 
 |  | Understanding | Activity |
 |---|---|---|
-| **Status** | *What do we know?* What the tonk inspector shows and where its data comes from. What the seven resolvers and two formulas yield, and five things that held when a page's needs were tried against them. That a concept is read an attribute at a time and only `this` reaches a rule's body. What the draft branch changed and what it measured. The maintainer's statement of the problem: the query engine cannot be used to inspect the tree, so an embedder builds side channels. What tonk's side channel does that a query did not (five things, in the second entry). | *Where are we at?* Diagnosing. A problem statement was offered and is not yet accepted: it contradicts a fact in the ledger as worded, and its second half is a consequence whose cost is not written. |
-| **Agenda** | *What do we need to know?* What goes wrong because an embedder has a side channel (asked, not yet answered). Then: which of the five things tonk's side channel does are the embedder's need and which are how it happened to be built. What "inspect" covers: who does it and what they are finding out (asked in the first sitting, not answered). Open hypotheses in the ledger: a record value reaching a page whole; why a supplied value cannot be pushed into a body. | *Where are we going?* Diagnosing, then Delimiting: the statement cut to unmet objectives and their cause. |
+| **Status** | *What do we know?* What the tonk inspector shows and where its data comes from. What the resolvers and formulas yield, and what held when a page's needs were tried against them. That only `this` reaches a rule's body. What tonk's reader does that a query did not (five things). What goes wrong with that reader, in the maintainer's words: it was put together in haste and is hard to detangle from the embedder; and what it is woven into (four places, in the third entry). | *Where are we at?* Delimiting. A problem statement is drafted in the top story from the maintainer's two answers and awaits a yes or a correction. |
+| **Agenda** | *What do we need to know?* Whether the draft statement is right. Whether local-or-remote belongs in it. Who else than the inspector asks (asked twice, not answered; the draft names a command line and an agent on the agent's assumption). Open hypotheses in the ledger: a record value reaching a page whole; why a supplied value cannot be pushed into a body. | *Where are we going?* Direction once the statement is accepted: use cases, then approaches as columns, the two parked opinions among them. |
 
 ## 2026-11-12, Describing: what was tried and what was seen
 
@@ -66,3 +66,32 @@ replaces did. Two things in it do not yet hold up:
 **Decided.** Not decided. The statement is recorded in the top story as
 offered. The next question is what goes wrong because an embedder has a
 side channel.
+
+## 2026-11-12, Delimiting: what goes wrong with the side channel
+
+**Asked.** What goes wrong because an embedder has a side channel? The
+maintainer: "What exists today was a hastily put together bandaid that
+we're struggling to detangle from the embedder code."
+
+**Learned.** The harm is the braid, not the reading of blocks. What the
+reader is woven into in tonk, each checked:
+
+- the worker: `resolve_formula` answers `tree/*` by name;
+- the query wire format: `Predicate::Formula(String)` exists for it, and
+  the worker's `intent` operation now rides the same arm;
+- the page bundle: `<tonk-tree>` is Rust registered by `tonk-guest`;
+- display routing: `<tonk-display>` names `tonk-tree` among the elements
+  it forwards a space's context to.
+
+So the objective under the first statement is that showing the tree need
+not be part of the embedder's host at all, which holds only if a
+consumer that can do nothing but query can get what it draws. That gave
+the draft in the top story. It keeps three of the five things tonk's
+reader does (start from the branch, a child with its details, a key in
+parts) and leaves two out pending the maintainer: local-or-remote, and
+blob fields on an entry's row. "A number of reads that does not grow
+with the tree" is there because a walk of the whole tree to show one
+node's children was measured on the draft branch and is what a page
+cannot afford on a tree held partly on a remote.
+
+**Decided.** Not decided: the draft awaits the maintainer.

@@ -1,6 +1,6 @@
 # A page cannot show a node's children with their details through the tree resolvers
 
-Phase: **Diagnosing.** See the [design index](README.md) for what the
+Phase: **Delimiting.** See the [design index](README.md) for what the
 phases mean, and the [journal](tree-exploration/journal.md) for where the
 topic stands.
 
@@ -63,12 +63,23 @@ should offer for exploring a search tree at all.
 
 ## Problem
 
-As the maintainer gave it, 2026-11-12, not yet accepted as the statement:
+Draft, written by the agent from the maintainer's two answers of
+2026-11-12, awaiting the maintainer's yes or correction:
+
+A consumer that can only query (a page component stored as branch data,
+a command line, an agent) cannot draw a branch's search tree. Starting
+from the branch, it cannot read a node's children together with what
+their parent holds about each, nor an entry's key in readable parts, in
+a number of reads that does not grow with the tree. So the one embedder
+that shows the tree reads blocks itself, and that reader is woven into
+its worker, its query wire format, its page bundle and its display
+routing, where it cannot be changed or removed on its own.
+
+Left out on purpose, to be put back if the maintainer says they belong:
+knowing whether a block is held locally without fetching it, and a blob
+record's fields appearing on its entry's row.
+
+As the maintainer first gave it:
 
 > The dialog query engine cannot be used to inspect the underlying tree,
 > which causes the embedder to implement side channels to do it.
-
-Two things stand between this and a statement (see the journal): the
-engine does answer tree queries today, so what it cannot do needs
-saying; and what goes wrong because an embedder has a side channel is
-not yet written.
