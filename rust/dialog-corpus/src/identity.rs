@@ -9,7 +9,13 @@
 //! - [`TEXT`] (UTF-8, as written) and [`BOOLEAN`] (one byte, `0` or `1`);
 //! - raw bytes, referenced by their BLAKE3 hash like any blob;
 //! - [`ENTITY`], [`SYMBOL`] and [`RECORD`], whose content is their text or
-//!   bytes.
+//!   bytes;
+//! - a composite, a record that holds a map, a list or a tuple of values
+//!   (see [`Composite`](crate::Composite)): a map under [`Type::MAP`], a
+//!   list under [`Type::LIST`] and a tuple under [`TUPLE`], whose content
+//!   is its parts' references. Its name is its parts', not its bytes', so
+//!   no layout of the bytes moves it. Any other record is named by its
+//!   bytes under [`RECORD`], as every record was before.
 //!
 //! A number's identity is its value alone, not the band the value index
 //! keeps it in today or how it was written: a natural `5`, an integer `5` and
@@ -21,6 +27,7 @@
 use merkle_reference::{Reference, ToReference, Type};
 
 use crate::Value;
+use crate::model::NAMED_DEPTH;
 
 /// The type of text, `text:`: UTF-8, as written.
 pub const TEXT: Type = Type::from_reference(Reference::from_hex(
@@ -46,6 +53,12 @@ pub const SYMBOL: Type = Type::from_reference(Reference::from_hex(
 pub const RECORD: Type = Type::from_reference(Reference::from_hex(
     "419cfed454524033b3fc368ea2d718640f0ac99760c033353c4120c822c19589",
 ));
+/// The type of tuples, `tuple:`: the items' references, in order, as a
+/// list's are. A tuple and a list of the same items are two values, so
+/// they are named under two types.
+pub const TUPLE: Type = Type::from_reference(Reference::from_hex(
+    "6578edaf51160bf60892d3d6889b7972e8f8776b200b18d6d62ac3025b616381",
+));
 
 /// A number's identity content: its [`dialog_number`] encoding.
 fn number(encode: impl FnOnce(&mut Vec<u8>)) -> Reference {
@@ -56,7 +69,16 @@ fn number(encode: impl FnOnce(&mut Vec<u8>)) -> Reference {
 
 impl Value {
     /// The value's identity: its merkle reference under its value type.
+    /// A record that holds a composite is named by its parts (see
+    /// [`Composite::reference`](crate::Composite::reference)); any other
+    /// record by its bytes.
     pub fn reference(&self) -> Reference {
+        self.reference_within(NAMED_DEPTH)
+    }
+
+    /// The value's reference by its own bytes under its value type, a
+    /// record's included.
+    pub(crate) fn scalar_reference(&self) -> Reference {
         match self {
             Value::Bytes(bytes) => Reference::hash(bytes),
             Value::Entity(entity) => ENTITY.reference_of(entity.as_str().as_bytes()),
@@ -91,6 +113,7 @@ mod tests {
             ("entity:", ENTITY),
             ("symbol:", SYMBOL),
             ("record:", RECORD),
+            ("tuple:", TUPLE),
         ] {
             assert_eq!(Type::named(name), Ok(ty), "{name}");
         }

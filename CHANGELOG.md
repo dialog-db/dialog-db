@@ -14,6 +14,50 @@ says how to cut a release.
 
 ## Unreleased
 
+### A record can hold a map, a list or a tuple of values
+
+[#777](https://github.com/dialog-db/dialog-db/pull/777),
+[design/patterns.md](./design/patterns.md),
+[design/patterns/design-composite-bytes.md](./design/patterns/design-composite-bytes.md)
+
+A value was a scalar or a `Record`, bytes dialog did not look into. A
+`Composite` is a value made of values: a map from a value to a value
+that holds no key twice, a list, or a tuple, nested as deep as it is
+written. It is kept whole as a `Value::Record`: one version byte,
+`0x01`, then the dag-cbor of its parts. So a composite is a claim's
+value like any other: it is stored, keyed, compared, spilled and synced
+as the bytes it is. Its name is not a hash of those bytes. A composite
+is named by the merkle reference of its parts, a map under `map:`, a
+list under `list:` and a tuple under `tuple:`, each part by its own
+reference, so a later layout of the bytes moves no name.
+
+What this changes for you:
+
+- `dialog_corpus::Composite`, `CompositeMap` and `CompositeItems` build
+  one, and `Value::from` keeps it as a record. `Value::composite` reads
+  one back: `Ok(None)` for a scalar and for a record that starts with
+  no version byte, the composite for a record this release wrote, and
+  `Err(CompositeError::UnknownVersion { version })` for a record under a
+  version this release does not read.
+- One value has one byte string. A map's entries are written in one
+  order whatever order they were given in, a key given twice is refused
+  (`CompositeError::DuplicateKey`), and a number is kept under the
+  narrowest type that holds it, as a tree under the number band reads
+  one back: the natural `3`, the integer `3` and the float `3.0` are
+  one part, and read back as the natural `3`.
+- `Value::reference` of a record that holds a composite is the
+  reference of its parts. Of any other record it is what it was,
+  `RECORD.reference_of(bytes)`.
+- `dialog_corpus::identity::TUPLE` is the type tuples are named under.
+- Equality, ordering, `Value::to_bytes`, `Value::to_reference` (the
+  address a spilled value is stored under) and the key encoding treat a
+  record as its bytes, as before.
+
+Why: a rule could not hold a value made of other values, and everything
+that needed one waited on the layout of a record's bytes. A name that is
+a function of the parts does not depend on that layout, and the version
+byte leaves the layout free to change.
+
 ### A read reads one revision, and a transaction reads and commits against the one it opened at
 
 [#757](https://github.com/dialog-db/dialog-db/issues/757),
@@ -2409,6 +2453,22 @@ thread multiplies whatever it holds by the size of the thread pool.
 
 ### Compatibility and migration
 
+- A composite is a new kind of bytes under the existing `record:` value
+  type, so nothing is rewritten on upgrade and no tree, key or wire
+  format changes. What an older replica holds under `record:` is a
+  revision's record, a bare dag-cbor map whose first byte is `0xa7`, and
+  whatever bytes an embedder stored. This release reads a record as a
+  composite only when its first byte is `0x01` and the rest is exactly
+  the bytes a composite is written in; every other record reads,
+  compares, verifies and is named as before. An older release makes of a
+  versioned record what it makes of any record: bytes it stores, syncs
+  and compares, and names by a hash of the bytes, which is not the name
+  this release gives it. It cannot look inside. A record under a later
+  version than `0x01` is carried the same way by this release and refused
+  by its number when something looks into it. An embedder runs nothing.
+  One that stored records of its own starting with a byte from `0x01` to
+  `0x17` should say so before upgrading
+  ([design/patterns/design-version-byte.md](./design/patterns/design-version-byte.md)).
 - Nothing stored or synced changes for the file store's lock; only the
   lock files beside its cells do. A lock file the previous release left
   behind holds a bare PID, which this release reads as a holder: one
