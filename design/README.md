@@ -74,3 +74,9 @@ Backtracking moves a topic to an earlier phase and says so in its journal.
   plain concept read and was passed over by every other read. Every read
   now takes it for a fact of another attribute: passed over, not elected
   among, and absent to a variable that may be.
+- [A replica that holds every block still pays to warm it](warm-walk-on-local-tree.md):
+  **Designing.** A speculative walk asks only whether the repository can
+  fetch, never whether its tree has anything left to fetch. A record of
+  wholly local tree hashes, written by commits on a recorded tree and by
+  full downloads and read only by the walk, lets it return at once. Kept
+  in memory for now; whether it helps tonk is open.
