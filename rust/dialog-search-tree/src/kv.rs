@@ -48,7 +48,7 @@ pub trait Key:
     /// The layout id of this key, selecting which [`schema`](Key::schema)
     /// applies to it. A key type with a single uniform layout (the default,
     /// and `[u8; N]`) returns `0`. A key whose component layout varies (the
-    /// dialog artifact key, whose EAV/AEV/VAE orderings put their fields in
+    /// dialog fact key, whose EAV/AEV/VAE orderings put their fields in
     /// different byte positions) returns a distinct id per layout, typically
     /// derived from a leading tag byte.
     ///
@@ -169,7 +169,7 @@ pub trait Value:
     ///
     /// The default is the historical fixed slot estimate (32 bytes), which
     /// keeps every existing value type's tree shapes unchanged. Types whose
-    /// payloads vary meaningfully (the artifact `State<Datum>` carries
+    /// payloads vary meaningfully (the fact `State<Datum>` carries
     /// cause and version data from a dozen bytes to hundreds) override it
     /// with a calibrated per-content estimate so leaves pace against real
     /// encoded bytes rather than a flat guess — otherwise value-heavy
@@ -203,7 +203,7 @@ pub trait Value:
     /// whatever the LOSING value carries that must survive the contest into
     /// the winner. The default keeps the winner untouched (pure
     /// last-write-wins). An override exists for values that aggregate — the
-    /// dialog artifact datum collapses same-fact claim versions from both
+    /// dialog fact datum collapses same-fact claim versions from both
     /// sides into one entry, so a contest unions the two sets instead of
     /// silently orphaning the loser's.
     ///

@@ -30,7 +30,9 @@
 //! # }
 //! ```
 
-use crate::reads::*;
+use crate::nodes::{Preload, Read};
+use dialog_capability::Provider;
+use dialog_effects::archive::{Get, Load};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     fmt::Debug,
@@ -151,7 +153,9 @@ where
         storage: &'a Env,
     ) -> impl Stream<Item = Result<PersistentNode<Key, Value>, DialogSearchTreeError>> + 'a
     where
-        Env: Provider<Load> + Holds + ConditionalSync;
+        Env: Provider<Read<PersistentNode<Key, Value>>>
+            + Provider<Preload<PersistentNode<Key, Value>>>
+            + ConditionalSync;
 }
 
 impl<Key, Value, D> Traversable<Key, Value> for PersistentTree<Key, Value, D>
@@ -173,7 +177,9 @@ where
         storage: &'a Env,
     ) -> impl Stream<Item = Result<PersistentNode<Key, Value>, DialogSearchTreeError>> + 'a
     where
-        Env: Provider<Load> + Holds + ConditionalSync,
+        Env: Provider<Read<PersistentNode<Key, Value>>>
+            + Provider<Preload<PersistentNode<Key, Value>>>
+            + ConditionalSync,
     {
         let root = self.stored_root().cloned();
 
@@ -213,7 +219,9 @@ where
     Value::Archived: for<'b> CheckBytes<
             Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>,
-    Env: Provider<Load> + Holds + ConditionalSync,
+    Env: Provider<Read<PersistentNode<Key, Value>>>
+        + Provider<Preload<PersistentNode<Key, Value>>>
+        + ConditionalSync,
 {
     Accessor::new(storage, catalog).get_node(hash).await
 }
@@ -491,8 +499,9 @@ impl ObservingBlocks {
         self.blocks.store(block);
     }
 
-    /// Keeps every block `delta` holds, emptying it, without observing it.
-    pub fn flush(&self, delta: &mut Delta<Blake3Hash, dialog_common::Buffer>) {
+    /// Keeps the block of every node `delta` holds, emptying it, without
+    /// observing it.
+    pub fn flush<Key, Value>(&self, delta: &mut Delta<Blake3Hash, PersistentNode<Key, Value>>) {
         self.blocks.flush(delta);
     }
 
@@ -545,8 +554,7 @@ impl ObservingBlocks {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<Load> for ObservingBlocks {
     async fn execute(
         &self,
@@ -556,8 +564,9 @@ impl Provider<Load> for ObservingBlocks {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+crate::reads_nodes_through_blocks!(ObservingBlocks);
+
+#[dialog_capability::provider]
 impl Provider<Get> for ObservingBlocks {
     async fn execute(
         &self,
@@ -573,8 +582,7 @@ impl Provider<Get> for ObservingBlocks {
 
 /// A spilled value read is observed like a block read: these keep a value
 /// as a block of their catalog.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<dialog_effects::blob::Load> for ObservingBlocks {
     async fn execute(
         &self,
@@ -921,7 +929,7 @@ impl TreeDescriptor {
             tree = edit
                 .insert(encode_key(key, leaf_rank, seam_rank), key.clone(), &storage)
                 .await?
-                .persist(&mut delta, &storage)?;
+                .persist(&mut delta)?;
 
             // Flush after each persist so the next edit (and the differentials
             // that read afterwards) can load the nodes this persist created: a
@@ -1451,4 +1459,11 @@ macro_rules! tree_spec {
         // Construct TreeDescriptor directly
         TreeDescriptor(levels)
     }};
+}
+
+/// How many novelty buffers the calling thread has decoded so far. Take
+/// it before and after an operation to pin that the operation decodes
+/// none; a test's single-threaded runtime keeps the count its own.
+pub fn buffer_decodes() -> usize {
+    crate::buffer_decodes::count()
 }

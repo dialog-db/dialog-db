@@ -1,7 +1,7 @@
 use crate::Cardinality;
 use crate::Claim;
-use crate::artifact::{ArtifactSelector, ArtifactsRelation, Constrained};
 use crate::attribute::Relation;
+use crate::corpus::{Constrained, CorpusRelation, Selector};
 use crate::environment::Environment;
 use crate::negation::Negation;
 use crate::proposition::Proposition;
@@ -11,7 +11,7 @@ use crate::selection::{Match, Selection};
 use crate::type_system::Type as Kind;
 use crate::types::{Any, Record};
 use crate::{Entity, EvaluationError, Parameters, Premise, Schema, Term, Value};
-use dialog_artifacts::Cause;
+use dialog_corpus::Cause;
 use serde::Serialize;
 use std::fmt::Display;
 use std::fmt::{Formatter, Result as FmtResult};
@@ -23,16 +23,16 @@ use super::only::AttributeQueryOnly;
 
 /// Type-erased attribute query that dispatches between cardinality variants.
 ///
-/// `All` yields every matching artifact (Cardinality::Many semantics).
+/// `All` yields every matching fact (Cardinality::Many semantics).
 /// `Only` yields one winner per `(attribute, entity)` pair (Cardinality::One).
 ///
 /// When constructed with `cardinality: None` or `Some(Cardinality::Many)`,
 /// the `All` variant is used. `Some(Cardinality::One)` selects `Only`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum DynamicAttributeQuery {
-    /// Yield all matching artifacts.
+    /// Yield all matching facts.
     All(AttributeQueryAll),
-    /// Yield only the winning artifact per `(attribute, entity)`.
+    /// Yield only the winning fact per `(attribute, entity)`.
     Only(AttributeQueryOnly),
 }
 
@@ -114,7 +114,7 @@ impl DynamicAttributeQuery {
         }
     }
 
-    /// The [`ArtifactSelector`] this scan would issue against a store *given*
+    /// The [`Selector`] this scan would issue against a store *given*
     /// the bindings in `source`, resolving each term to a constant where the
     /// row binds it. This is the same selector the scan's own evaluation
     /// builds per row; exposed so a planner can estimate the scan's range
@@ -124,7 +124,7 @@ impl DynamicAttributeQuery {
     pub fn resolved_selector(
         &self,
         source: &Match,
-    ) -> Result<ArtifactSelector<Constrained>, EvaluationError> {
+    ) -> Result<Selector<Constrained>, EvaluationError> {
         let the = self.the().resolve(source);
         let of = self.of().resolve(source);
         let is = match source.lookup(self.is()).and_then(|b| b.content()) {
@@ -133,7 +133,7 @@ impl DynamicAttributeQuery {
         };
         let cause = self.cause().resolve(source);
         let resolved = AttributeQueryAll::lookup(the, of, is, cause);
-        ArtifactSelector::try_from(&resolved)
+        Selector::try_from(&resolved)
     }
 
     /// Get the source term (internal claim handle).
@@ -144,8 +144,8 @@ impl DynamicAttributeQuery {
         }
     }
 
-    /// Map `Term<Relation>` to `Term<ArtifactsRelation>`.
-    pub fn attribute(&self) -> Term<ArtifactsRelation> {
+    /// Map `Term<Relation>` to `Term<CorpusRelation>`.
+    pub fn attribute(&self) -> Term<CorpusRelation> {
         match self {
             DynamicAttributeQuery::All(q) => q.attribute(),
             DynamicAttributeQuery::Only(q) => q.attribute(),
@@ -258,13 +258,13 @@ impl Application for DynamicAttributeQuery {
     }
 }
 
-impl TryFrom<&DynamicAttributeQuery> for ArtifactSelector<Constrained> {
+impl TryFrom<&DynamicAttributeQuery> for Selector<Constrained> {
     type Error = EvaluationError;
 
     fn try_from(from: &DynamicAttributeQuery) -> Result<Self, Self::Error> {
         match from {
-            DynamicAttributeQuery::All(q) => ArtifactSelector::try_from(q),
-            DynamicAttributeQuery::Only(q) => ArtifactSelector::try_from(q),
+            DynamicAttributeQuery::All(q) => Selector::try_from(q),
+            DynamicAttributeQuery::Only(q) => Selector::try_from(q),
         }
     }
 }
@@ -311,8 +311,8 @@ mod tests {
 
     use super::*;
     use crate::Value;
-    use crate::artifact::Type as ValueType;
     use crate::attribute::AttributeStatement;
+    use crate::corpus::Type as ValueType;
     use crate::query::Output;
     use crate::selection::{Match, Selection};
     use crate::session::RuleRegistry;

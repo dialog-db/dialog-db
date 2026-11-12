@@ -11,14 +11,12 @@ use std::{
     sync::mpsc::{Receiver, channel},
 };
 
-use dialog_artifacts::{Datum, Key, State};
+use dialog_corpus::{Datum, Key, State};
 use dialog_storage::Blake3Hash;
 
 use crate::{Explored, Promise};
 
-use super::{
-    ArtifactsCursor, ArtifactsHierarchy, ArtifactsTreeAnalysis, ArtifactsTreeStats, TreeNode,
-};
+use super::{FactsCursor, FactsHierarchy, FactsTreeAnalysis, FactsTreeStats, TreeNode};
 
 /// A loaded fact for rendering: its index key (needed to reconstruct the
 /// entity, attribute, and inline value) paired with its payload, or pending.
@@ -42,7 +40,7 @@ pub enum WorkerMessage {
         data: State<Datum>,
     },
     /// Tree analysis statistics have been computed
-    Stats(ArtifactsTreeStats),
+    Stats(FactsTreeStats),
     /// A tree node has been loaded
     Node {
         /// Hash of the loaded node
@@ -59,11 +57,11 @@ pub enum WorkerMessage {
 /// a unified interface for the UI to access this data.
 pub struct DiagnoseStore {
     /// Worker for loading facts data
-    cursor: ArtifactsCursor,
+    cursor: FactsCursor,
     /// Worker for analyzing tree statistics
-    analysis: ArtifactsTreeAnalysis,
+    analysis: FactsTreeAnalysis,
     /// Worker for loading tree node hierarchy
-    hierarchy: ArtifactsHierarchy,
+    hierarchy: FactsHierarchy,
 
     /// Unified channel receiver for all worker messages
     message_rx: Receiver<WorkerMessage>,
@@ -73,7 +71,7 @@ pub struct DiagnoseStore {
     /// inline value from the key)
     facts: BTreeMap<usize, (Key, State<Datum>)>,
     /// Tree statistics (computed asynchronously)
-    stats: Promise<ArtifactsTreeStats>,
+    stats: Promise<FactsTreeStats>,
     /// Cache of loaded tree nodes indexed by hash
     nodes: BTreeMap<Blake3Hash, TreeNode>,
     /// Mapping from child node hash to parent node hash
@@ -93,9 +91,9 @@ impl DiagnoseStore {
 
         let (tx, message_rx) = channel();
         let tree_catalog = tree.catalog().clone();
-        let cursor = ArtifactsCursor::new(tree.clone(), storage.clone(), tx.clone());
-        let analysis = ArtifactsTreeAnalysis::new(tree, storage.clone(), tx.clone());
-        let hierarchy = ArtifactsHierarchy::new(storage, tree_catalog, tx);
+        let cursor = FactsCursor::new(tree.clone(), storage.clone(), tx.clone());
+        let analysis = FactsTreeAnalysis::new(tree, storage.clone(), tx.clone());
+        let hierarchy = FactsHierarchy::new(storage, tree_catalog, tx);
 
         Self {
             message_rx,
@@ -143,7 +141,7 @@ impl DiagnoseStore {
     ///
     /// The statistics are computed asynchronously in the background and cached
     /// once available.
-    pub fn stats(&self) -> &Promise<ArtifactsTreeStats> {
+    pub fn stats(&self) -> &Promise<FactsTreeStats> {
         if let Promise::Resolved(_) = &self.stats {
             return &self.stats;
         }

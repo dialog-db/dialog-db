@@ -1,20 +1,21 @@
-use dialog_artifacts::history::{
+use dialog_corpus::history::{
     Record as HistoryRecord, RevisionRecord, TreeHistory, Version, novelty,
 };
 use std::collections::BTreeSet;
 use std::mem;
 use std::sync::{Arc, Mutex};
 
-use dialog_artifacts::ArchiveDelta;
-use dialog_artifacts::FromKey as _;
-use dialog_artifacts::history::{Context, History as _, region_writes};
-use dialog_artifacts::merge;
-use dialog_artifacts::tree::ArtifactTreeExt as _;
-use dialog_capability::Provider;
+use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::ConditionalSync;
+use dialog_corpus::ArchiveDelta;
+use dialog_corpus::FromKey as _;
+use dialog_corpus::history::{Context, History as _, region_writes};
+use dialog_corpus::merge;
+use dialog_corpus::tree::CorpusExt as _;
 use dialog_effects::archive::prelude::CatalogScope;
 use dialog_effects::authority::{Attest, Identify, OperatorExt};
+use dialog_effects::blob::Read as BlobRead;
 use dialog_effects::memory::{Publish, Resolve};
 use futures_util::TryStreamExt as _;
 use futures_util::future::{Either, join_all};
@@ -23,14 +24,14 @@ use super::context::{full_context, head_observes, held, own_count, published_con
 use super::fetch::fetch_one;
 use super::migrate::aligned;
 use super::resolve::resolve;
-use crate::ResolveEnv;
 use crate::repository::archive::persist;
 use crate::repository::archive::routes;
 use crate::repository::archive::{TreeEnv, erased};
 use crate::{
-    Branch, Checkpoint, Index, PublishError, PullError, Revision, TreeReference, Upstream,
-    UpstreamBranch,
+    Branch, Checkpoint, Download, DownloadBranch, Index, PublishError, PullError, Revision,
+    TreeReference, Upstream, UpstreamBranch,
 };
+use crate::{RemoteSite, ResolveEnv};
 
 /// Below this divergence mass (summed edition excess, roughly commits),
 /// a merge routes to the direct replay or screen instead of the graft:
@@ -38,30 +39,73 @@ use crate::{
 /// then exceeds simply walking the few entries.
 pub(crate) const SMALL_DIVERGENCE: u64 = 8;
 
+/// How many times a pull that lost its publish is made again. See
+/// [`Pull::retry`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Limit {
+    /// At most this many more times. `Times(0)`, the default, is not at
+    /// all: the pull fails with the head where the commit put it.
+    Times(usize),
+    /// Until it lands.
+    Unlimited,
+}
+
+impl Default for Limit {
+    fn default() -> Self {
+        Self::Times(0)
+    }
+}
+
+impl Limit {
+    /// Whether one more attempt is allowed, taking it if so.
+    pub(crate) fn take(&mut self) -> bool {
+        match self {
+            Self::Unlimited => true,
+            Self::Times(0) => false,
+            Self::Times(left) => {
+                *left -= 1;
+                true
+            }
+        }
+    }
+}
+
+/// Whether `error` is a pull losing its publish: the head moved, by a
+/// commit or another pull of this writer, between the head the merge was
+/// prepared on and the publish.
+pub(crate) fn lost_publish(error: &PullError) -> bool {
+    matches!(
+        error,
+        PullError::Publish(PublishError::VersionMismatch { .. })
+    )
+}
+
+/// The environment a pull runs against: what resolving its upstreams and
+/// merging them needs ([`ResolveEnv`]), and reading a blob from the
+/// upstream's site, which a [`Download`] that brings blobs along does.
+pub trait PullEnv: ResolveEnv + Provider<Fork<RemoteSite, BlobRead>> {}
+
+impl<T: ResolveEnv + Provider<Fork<RemoteSite, BlobRead>>> PullEnv for T {}
+
 /// Command struct for pulling from upstream (auto-dispatches local/remote).
+#[derive(Clone)]
 pub struct Pull<'a> {
     branch: &'a Branch,
     from: Option<Upstream>,
     confirm_upstream: bool,
+    retry: Limit,
+    download: Download,
 }
 
 impl<'a> Pull<'a> {
-    fn new(branch: &'a Branch) -> Self {
+    fn new(branch: &'a Branch, download: Download) -> Self {
         Self {
             branch,
             from: None,
             confirm_upstream: true,
+            retry: Limit::default(),
+            download,
         }
-    }
-
-    /// The branch this pull targets.
-    pub(crate) fn branch(&self) -> &'a Branch {
-        self.branch
-    }
-
-    /// The explicit source set through [`Pull::from`], if any.
-    pub(crate) fn source(&self) -> Option<&Upstream> {
-        self.from.as_ref()
     }
 
     /// Pull from the given branch alone, instead of every upstream.
@@ -93,14 +137,45 @@ impl<'a> Pull<'a> {
         self.confirm_upstream = false;
         self
     }
+
+    /// Make the pull again, up to `limit` times, when it loses its
+    /// publish.
+    ///
+    /// A pull merges onto the head it read, and publishes only if the
+    /// head is still that one. A commit that lands in between, on a
+    /// replica that goes on writing while it syncs, makes the publish
+    /// fail with [`PublishError::VersionMismatch`], the head where the
+    /// commit put it. Without a retry that is the pull's answer, and the
+    /// caller pulls again. With one, the pull does: it merges onto the
+    /// head the commit left and publishes that, as many times as `limit`
+    /// allows. Every attempt starts from the upstream's head as it then
+    /// is, and finds held whatever an earlier attempt fetched.
+    ///
+    /// Only a lost publish is retried. Any other failure is the pull's
+    /// answer at once.
+    pub fn retry(mut self, limit: Limit) -> Self {
+        self.retry = limit;
+        self
+    }
 }
 
 impl Branch {
-    /// Pull from every branch this one pulls from.
+    /// Pull from every branch this one pulls from, bringing local what
+    /// `download` names of each head it would adopt before the head
+    /// moves there.
+    ///
+    /// How much a pull fetches is asked every time, since no answer
+    /// suits every branch: [`Download::MinimalRanges`] adopts by
+    /// reference and fetches nothing, [`Download::QueriedRanges`] keeps
+    /// what the replica read and wrote readable and writable from its
+    /// own blocks, [`Download::Operational`] and [`Download::Everything`]
+    /// bring whole regions. A download that fails, offline included,
+    /// fails the pull and leaves the head where it was: the branch never
+    /// points at blocks the download was asked for and the store lacks.
     ///
     /// Chain [`Pull::from`] to pull from one branch alone instead.
-    pub fn pull(&self) -> Pull<'_> {
-        Pull::new(self)
+    pub fn pull(&self, download: Download) -> Pull<'_> {
+        Pull::new(self, download)
     }
 }
 
@@ -108,33 +183,51 @@ impl<'a> Pull<'a> {
     /// Execute the pull operation: [`prepare`](Self::prepare) the merge, then
     /// [`commit`](PreparedPull::commit) it.
     ///
-    /// The one-shot form. To interpose work between the (network-bound)
-    /// fetch + rebase and the (instant) cell advance -- materializing the
-    /// merged head before the branch points at it, say -- drive the two
-    /// phases separately:
+    /// The one-shot form: the merge is prepared, what the pull's
+    /// [`Download`] names of the head it would adopt is fetched, and only
+    /// then do the cells advance. To interpose work of the caller's own
+    /// before the advance, drive the two phases separately:
     ///
     /// ```no_run
-    /// # use dialog_repository::{Branch, PullError};
+    /// # use dialog_repository::{Branch, Download, PullError};
     /// # async fn example<Env>(branch: &Branch, env: &Env) -> Result<(), PullError>
     /// # where
-    /// #     Env: dialog_repository::ResolveEnv,
+    /// #     Env: dialog_repository::PullEnv,
     /// # {
-    /// let prepared = branch.pull().prepare(env).await?; // fetch + rebase, no cell writes
-    /// let revision = prepared.commit(env).await?;       // advance the cells
+    /// // fetch, rebase and download: no cell is written
+    /// let prepared = branch.pull(Download::QueriedRanges).prepare(env).await?;
+    /// // advance the cells
+    /// let revision = prepared.commit(env).await?;
     /// # Ok(())
     /// # }
     /// ```
     pub async fn perform<Env>(self, env: &Env) -> Result<Option<Revision>, PullError>
     where
-        Env: ResolveEnv,
+        Env: PullEnv,
+    {
+        let mut retries = self.retry;
+        loop {
+            match Box::pin(self.attempt(env)).await {
+                Err(error) if lost_publish(&error) && retries.take() => continue,
+                result => return result,
+            }
+        }
+    }
+
+    /// One attempt of [`perform`](Self::perform): prepare and land every
+    /// upstream once.
+    async fn attempt<Env>(&self, env: &Env) -> Result<Option<Revision>, PullError>
+    where
+        Env: PullEnv,
     {
         if self.from.is_some() {
             let upstream = self.upstream(env).await?;
             let confirm = self.confirm_upstream;
-            let prepared = Box::pin(prepare_upstream(
+            let prepared = Box::pin(prepare_downloaded(
                 self.branch,
                 upstream.clone(),
                 confirm,
+                &self.download,
                 env,
             ))
             .await?;
@@ -161,11 +254,16 @@ impl<'a> Pull<'a> {
         // whose merge cannot land does not keep the others from landing,
         // nor hide what landed before it: the pull lands what it can and
         // reports the rest, with the head the landed ones left.
-        let prepared =
-            join_all(upstreams.iter().map(|upstream| {
-                Box::pin(prepare_upstream(branch, upstream.clone(), confirm, env))
-            }))
-            .await;
+        let prepared = join_all(upstreams.iter().map(|upstream| {
+            Box::pin(prepare_downloaded(
+                branch,
+                upstream.clone(),
+                confirm,
+                &self.download,
+                env,
+            ))
+        }))
+        .await;
         let total = upstreams.len();
         let mut unreached = Vec::new();
         // Like a single pull, answer the merged head, or `None` when no
@@ -207,14 +305,15 @@ impl<'a> Pull<'a> {
     /// branch's write lock.
     pub async fn prepare<Env>(self, env: &Env) -> Result<PreparedPull<'a>, PullError>
     where
-        Env: ResolveEnv,
+        Env: PullEnv,
     {
         let branch = self.branch;
         let upstream = self.upstream(env).await?;
-        Box::pin(prepare_upstream(
+        Box::pin(prepare_downloaded(
             branch,
             upstream,
             self.confirm_upstream,
+            &self.download,
             env,
         ))
         .await
@@ -255,6 +354,33 @@ impl<'a> Pull<'a> {
         };
         Ok(upstream)
     }
+}
+
+/// Phase one of a pull for one upstream, with what the pull was asked to
+/// download: the merge is prepared ([`prepare_upstream`]), then what
+/// `download` names of the head it would adopt is fetched, all before any
+/// cell is written. A download that fails fails the pull, the head where
+/// it was.
+async fn prepare_downloaded<'a, Env: PullEnv>(
+    branch: &'a Branch,
+    upstream: Upstream,
+    confirm_upstream: bool,
+    download: &Download,
+    env: &Env,
+) -> Result<PreparedPull<'a>, PullError> {
+    let prepared = Box::pin(prepare_upstream(
+        branch,
+        upstream.clone(),
+        confirm_upstream,
+        env,
+    ))
+    .await?;
+    if let Some(revision) = prepared.revision() {
+        DownloadBranch::prepared(branch, upstream, revision.clone(), download.clone())
+            .perform(env)
+            .await?;
+    }
+    Ok(prepared)
 }
 
 /// Land `prepared`, the pull of `upstream`, holding the branch's write
@@ -326,11 +452,11 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
         // the signature is the named issuer's — a forged or tampered head
         // (wrong tree root, reattributed issuer, adjusted edition) is
         // rejected here, before any of its blocks are walked.
-        // Surface head verification as an artifact error, the shape callers
+        // Surface head verification as a fact error, the shape callers
         // (and the forged-head test) match on.
         upstream_revision
             .verify()
-            .map_err(dialog_artifacts::DialogArtifactsError::from)?;
+            .map_err(dialog_corpus::DialogCorpusError::from)?;
 
         // A rival head: the upstream's head is another revision under our
         // head's own version, minted by a replica writing with our key on
@@ -859,7 +985,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                         let dialog_search_tree::Change::Add(entry) = change? else {
                             continue;
                         };
-                        let dialog_artifacts::State::Added(record) = &entry.value else {
+                        let dialog_corpus::State::Added(record) = &entry.value else {
                             continue;
                         };
                         if record.supersedes.is_empty() {
@@ -880,7 +1006,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                                 futures_util::StreamExt::next(&mut candidates).await
                             {
                                 let candidate = candidate?;
-                                if let dialog_artifacts::State::Added(datum) = &candidate.value
+                                if let dialog_corpus::State::Added(datum) = &candidate.value
                                     && datum
                                         .versions()
                                         .any(|version| record.supersedes.contains(version))
@@ -893,10 +1019,9 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                             }
                         }
                         for (key, surviving) in retire {
-                            let entity_key = dialog_artifacts::EntityKey(key);
-                            let attribute_key =
-                                dialog_artifacts::AttributeKey::from_key(&entity_key);
-                            let value_key = dialog_artifacts::ValueKey::from_key(&entity_key);
+                            let entity_key = dialog_corpus::EntityKey(key);
+                            let attribute_key = dialog_corpus::AttributeKey::from_key(&entity_key);
+                            let value_key = dialog_corpus::ValueKey::from_key(&entity_key);
                             for key in [
                                 entity_key.into_key(),
                                 attribute_key.into_key(),
@@ -908,7 +1033,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                                         stitched
                                             .insert(
                                                 key,
-                                                dialog_artifacts::State::Added(datum.clone()),
+                                                dialog_corpus::State::Added(datum.clone()),
                                                 &tree_store,
                                             )
                                             .await?
@@ -920,7 +1045,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 }
 
                 let mut delta = ArchiveDelta::zero();
-                let mut merged = stitched.persist(delta.blocks(), &tree_store)?;
+                let mut merged = stitched.persist(delta.nodes())?;
                 let merged_tree = TreeReference::from(*merged.root().as_bytes());
 
                 // Head selection mirrors the other merge paths, so
@@ -1085,7 +1210,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 let mut delta = ArchiveDelta::zero();
                 merged = Box::pin(merged.edit().integrate(screened, &tree_store))
                     .await?
-                    .persist(delta.blocks(), &tree_store)?;
+                    .persist(delta.nodes())?;
                 let merged_tree = TreeReference::from(*merged.root().as_bytes());
 
                 // The replay can degenerate, and the head selection must
@@ -1256,7 +1381,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
         let mut delta = ArchiveDelta::zero();
         merged = Box::pin(merged.edit().integrate(screened, &tree_store))
             .await?
-            .persist(delta.blocks(), &tree_store)?;
+            .persist(delta.nodes())?;
 
         let merged_tree = TreeReference::from(*merged.root().as_bytes());
 
@@ -1340,7 +1465,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 // A merge records no skip table: a skip chain must never
                 // cross a revision with more than one parent, or leaping
                 // it would lose the ancestry entering through the other
-                // parent (see `dialog_artifacts::history::skip`). Sign the
+                // parent (see `dialog_corpus::history::skip`). Sign the
                 // record before it enters the tree, and the head once the
                 // merged root is final — same order as `Commit`.
                 let mut record =
@@ -1537,8 +1662,8 @@ impl PreparedPull<'_> {
     /// is new: a revision the branch records needs no second look. A
     /// revision of the upstream's history whose record is not present — a
     /// head whose history the peer does not serve — fails the walk with
-    /// [`IncompleteHistory`](dialog_artifacts::DialogArtifactsError::IncompleteHistory),
-    /// where a history walk of [`log`](dialog_artifacts::history::log)
+    /// [`IncompleteHistory`](dialog_corpus::DialogCorpusError::IncompleteHistory),
+    /// where a history walk of [`log`](dialog_corpus::history::log)
     /// would skip it. Each record is verified as it is read, so a forged
     /// one fails too.
     ///
@@ -1726,7 +1851,7 @@ mod tests {
     use anyhow::Result;
     use dialog_peer::helpers::test_session_with_peer;
 
-    use dialog_artifacts::{Artifact, Instruction, Value};
+    use dialog_corpus::{Fact, Instruction, Value};
     use futures_util::stream;
 
     #[dialog_common::test]
@@ -1736,13 +1861,13 @@ mod tests {
 
         let main = repo.branch("main").open().perform(&operator).await?;
         main.commit(stream::iter(vec![Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "user/name".parse()?,
                 of: "user:seed".parse()?,
                 is: Value::String("Seed".to_string()),
                 cause: None,
             },
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -1750,7 +1875,10 @@ mod tests {
         let feature = repo.branch("feature").open().perform(&operator).await?;
         feature.set_upstream(&main).perform(&operator).await?;
 
-        let pulled = feature.pull().perform(&operator).await?;
+        let pulled = feature
+            .pull(crate::Download::MinimalRanges)
+            .perform(&operator)
+            .await?;
         assert!(pulled.is_some());
         Ok(())
     }
@@ -1762,13 +1890,13 @@ mod tests {
 
         let main = repo.branch("main").open().perform(&operator).await?;
         main.commit(stream::iter(vec![Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "user/name".parse()?,
                 of: "user:main".parse()?,
                 is: Value::String("Main data".to_string()),
                 cause: None,
             },
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -1777,7 +1905,10 @@ mod tests {
         let feature = repo.branch("feature").open().perform(&operator).await?;
         feature.set_upstream(&main).perform(&operator).await?;
 
-        let pulled = feature.pull().perform(&operator).await?;
+        let pulled = feature
+            .pull(crate::Download::MinimalRanges)
+            .perform(&operator)
+            .await?;
         assert!(pulled.is_some());
         let feature_rev = feature
             .revision()
@@ -1792,7 +1923,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_pulls_from_a_non_default_upstream_and_tracks_it() -> Result<()> {
         use crate::Upstream;
-        use dialog_artifacts::ArtifactSelector;
+        use dialog_corpus::Selector;
         use futures_util::StreamExt as _;
 
         let (operator, profile) = test_session_with_peer().await;
@@ -1800,42 +1931,49 @@ mod tests {
 
         let main = repo.branch("main").open().perform(&operator).await?;
         main.commit(stream::iter(vec![Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "user/name".parse()?,
                 of: "user:main".parse()?,
                 is: Value::String("Main data".to_string()),
                 cause: None,
             },
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         )]))
         .perform(&operator)
         .await?;
 
         let dev = repo.branch("dev").open().perform(&operator).await?;
         dev.commit(stream::iter(vec![Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "user/email".parse()?,
                 of: "user:dev".parse()?,
                 is: Value::String("dev@test.com".to_string()),
                 cause: None,
             },
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         )]))
         .perform(&operator)
         .await?;
 
         let feature = repo.branch("feature").open().perform(&operator).await?;
         feature.set_upstream(&main).perform(&operator).await?;
-        feature.pull().perform(&operator).await?;
+        feature
+            .pull(crate::Download::MinimalRanges)
+            .perform(&operator)
+            .await?;
 
         // Explicit pull from a branch that is not the default upstream.
-        let merged = feature.pull().from(&dev).perform(&operator).await?;
+        let merged = feature
+            .pull(crate::Download::MinimalRanges)
+            .from(&dev)
+            .perform(&operator)
+            .await?;
         assert!(merged.is_some(), "pull from a second upstream merges");
 
         // Both data sets are visible on the feature branch.
         let emails = feature
             .claims()
-            .select(ArtifactSelector::new().the("user/email".parse()?))
+            .select(Selector::new().the("user/email".parse()?))
             .to_owned()
             .perform(&operator)
             .await?
@@ -1861,14 +1999,22 @@ mod tests {
         );
 
         // Dev hasn't moved since, so re-pulling it is a no-op.
-        let again = feature.pull().from(&dev).perform(&operator).await?;
+        let again = feature
+            .pull(crate::Download::MinimalRanges)
+            .from(&dev)
+            .perform(&operator)
+            .await?;
         assert!(
             again.is_none(),
             "tracked sync base makes the re-pull a no-op"
         );
 
         // Pulling from the branch itself is refused.
-        let selfish = feature.pull().from(&feature).perform(&operator).await;
+        let selfish = feature
+            .pull(crate::Download::MinimalRanges)
+            .from(&feature)
+            .perform(&operator)
+            .await;
         assert!(matches!(
             selfish,
             Err(crate::PullError::UpstreamIsItself { .. })
@@ -1884,13 +2030,13 @@ mod tests {
 
         let main = repo.branch("main").open().perform(&operator).await?;
         main.commit(stream::iter(vec![Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "user/name".parse()?,
                 of: "user:main".parse()?,
                 is: Value::String("Main data".to_string()),
                 cause: None,
             },
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -1900,18 +2046,21 @@ mod tests {
         feature.set_upstream(&main).perform(&operator).await?;
         feature
             .commit(stream::iter(vec![Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "user/email".parse()?,
                     of: "user:feature".parse()?,
                     is: Value::String("feature@test.com".to_string()),
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             )]))
             .perform(&operator)
             .await?;
 
-        let pulled = feature.pull().perform(&operator).await?;
+        let pulled = feature
+            .pull(crate::Download::MinimalRanges)
+            .perform(&operator)
+            .await?;
         assert!(pulled.is_some());
         let feature_rev = feature
             .revision()
@@ -1941,7 +2090,7 @@ mod tests {
     /// fetched.
     #[dialog_common::test]
     async fn it_fails_a_pull_racing_a_commit_then_reconciles_on_refresh() -> Result<()> {
-        use dialog_artifacts::ArtifactSelector;
+        use dialog_corpus::Selector;
         use futures_util::StreamExt as _;
 
         let (operator, profile) = test_session_with_peer().await;
@@ -1950,13 +2099,13 @@ mod tests {
         // Upstream `main` has a change to pull in.
         let main = repo.branch("main").open().perform(&operator).await?;
         main.commit(stream::iter(vec![Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "user/name".parse()?,
                 of: "user:main".parse()?,
                 is: Value::String("Main data".to_string()),
                 cause: None,
             },
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -1972,20 +2121,23 @@ mod tests {
         // feature head in storage. `feature_pull`'s cache is now stale.
         feature_commit
             .commit(stream::iter(vec![Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "user/email".parse()?,
                     of: "user:feature".parse()?,
                     is: Value::String("feature@test.com".to_string()),
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             )]))
             .perform(&operator)
             .await?;
 
         // The pull handle, unaware of that commit, pulls from upstream. It must
         // fail loudly (version mismatch) rather than silently drop the commit.
-        let raced = feature_pull.pull().perform(&operator).await;
+        let raced = feature_pull
+            .pull(crate::Download::MinimalRanges)
+            .perform(&operator)
+            .await;
         assert!(
             matches!(
                 raced,
@@ -1999,13 +2151,16 @@ mod tests {
         // Recovery: refresh the stale handle to pick up the current head, then
         // re-pull. This reconciles upstream with the raced commit.
         feature_pull.refresh(&operator).await?;
-        feature_pull.pull().perform(&operator).await?;
+        feature_pull
+            .pull(crate::Download::MinimalRanges)
+            .perform(&operator)
+            .await?;
 
         // Both changes are now present on the branch.
         let feature = repo.branch("feature").open().perform(&operator).await?;
         let committed: Vec<_> = feature
             .claims()
-            .select(ArtifactSelector::new().the("user/email".parse()?))
+            .select(Selector::new().the("user/email".parse()?))
             .to_owned()
             .perform(&operator)
             .await?
@@ -2018,7 +2173,7 @@ mod tests {
 
         let pulled: Vec<_> = feature
             .claims()
-            .select(ArtifactSelector::new().the("user/name".parse()?))
+            .select(Selector::new().the("user/name".parse()?))
             .to_owned()
             .perform(&operator)
             .await?
@@ -2048,13 +2203,13 @@ mod tests {
         let repo = test_repo(&operator, &profile).await;
         let assert = |the: &str, of: &str| -> Result<Instruction> {
             Ok(Instruction::Assert(
-                Artifact {
+                Fact {
                     the: the.parse()?,
                     of: of.parse()?,
                     is: Value::String(of.to_string()),
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             ))
         };
 
@@ -2077,7 +2232,10 @@ mod tests {
             .commit(stream::iter(vec![assert("user/email", "user:f2")?]))
             .perform(&operator)
             .await?;
-        let prepared = feature.pull().prepare(&operator).await?;
+        let prepared = feature
+            .pull(crate::Download::MinimalRanges)
+            .prepare(&operator)
+            .await?;
         let minted = prepared.revision().map(|revision| revision.version());
         let landed = other.revision().map(|revision| revision.version());
         assert_eq!(
@@ -2108,13 +2266,13 @@ mod tests {
 
         let main = repo.branch("main").open().perform(&operator).await?;
         main.commit(stream::iter(vec![Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "user/name".parse()?,
                 of: "user:main".parse()?,
                 is: Value::String("Main data".to_string()),
                 cause: None,
             },
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -2124,7 +2282,10 @@ mod tests {
         feature.set_upstream(&main).perform(&operator).await?;
 
         // Phase one: fetch + rebase, no cell writes yet — the head is unchanged.
-        let prepared = feature.pull().prepare(&operator).await?;
+        let prepared = feature
+            .pull(crate::Download::MinimalRanges)
+            .prepare(&operator)
+            .await?;
         assert!(
             feature.revision().is_none(),
             "prepare must not advance the head"
@@ -2157,13 +2318,13 @@ mod tests {
         let repo = test_repo(&operator, &profile).await;
         let assert = |entity: &str, name: &str| -> Result<Vec<Instruction>> {
             Ok(vec![Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "user/name".parse()?,
                     of: entity.parse()?,
                     is: Value::String(name.to_string()),
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             )])
         };
 
@@ -2173,7 +2334,10 @@ mod tests {
             .await?;
         let feature = repo.branch("feature").open().perform(&operator).await?;
         feature.set_upstream(&main).perform(&operator).await?;
-        feature.pull().perform(&operator).await?;
+        feature
+            .pull(crate::Download::MinimalRanges)
+            .perform(&operator)
+            .await?;
 
         main.commit(stream::iter(assert("user:two", "Two")?))
             .perform(&operator)
@@ -2183,7 +2347,10 @@ mod tests {
             .await?;
         let checked = main.revision().expect("main has a head");
 
-        let prepared = feature.pull().prepare(&operator).await?;
+        let prepared = feature
+            .pull(crate::Download::MinimalRanges)
+            .prepare(&operator)
+            .await?;
 
         assert_eq!(prepared.upstream(), Some(&checked));
         let novelty = prepared.novelty(&operator).await?;
@@ -2229,13 +2396,13 @@ mod tests {
 
         let main = repo.branch("main").open().perform(&operator).await?;
         main.commit(stream::iter(vec![Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "user/name".parse()?,
                 of: "user:main".parse()?,
                 is: Value::String("Main data".to_string()),
                 cause: None,
             },
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -2244,11 +2411,14 @@ mod tests {
         feature.set_upstream(&main).perform(&operator).await?;
 
         // First pull lands main's change.
-        feature.pull().perform(&operator).await?;
+        feature
+            .pull(crate::Download::MinimalRanges)
+            .perform(&operator)
+            .await?;
 
         // Upstream hasn't moved since, so a second pull is a no-op.
         let pulled = feature
-            .pull()
+            .pull(crate::Download::MinimalRanges)
             .prepare(&operator)
             .await?
             .commit(&operator)
@@ -2286,7 +2456,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_pulls_from_every_upstream() -> Result<()> {
-        use dialog_artifacts::ArtifactSelector;
+        use dialog_corpus::Selector;
         use futures_util::StreamExt as _;
 
         let (operator, profile) = test_session_with_peer().await;
@@ -2296,13 +2466,13 @@ mod tests {
             let source = repo.branch(name).open().perform(&operator).await?;
             source
                 .commit(stream::iter(vec![Instruction::Assert(
-                    Artifact {
+                    Fact {
                         the: "user/name".parse()?,
                         of: format!("user:{name}").parse()?,
                         is: Value::String(value.to_string()),
                         cause: None,
                     },
-                    dialog_artifacts::Pick::All,
+                    dialog_corpus::Pick::All,
                 )]))
                 .perform(&operator)
                 .await?;
@@ -2313,7 +2483,10 @@ mod tests {
         for source in &sources {
             feature.pull_from(source).perform(&operator).await?;
         }
-        let pulled = feature.pull().perform(&operator).await?;
+        let pulled = feature
+            .pull(crate::Download::MinimalRanges)
+            .perform(&operator)
+            .await?;
         assert_eq!(
             pulled,
             feature.revision(),
@@ -2322,7 +2495,7 @@ mod tests {
 
         let names: Vec<_> = feature
             .claims()
-            .select(ArtifactSelector::new().the("user/name".parse()?))
+            .select(Selector::new().the("user/name".parse()?))
             .to_owned()
             .perform(&operator)
             .await?
@@ -2332,7 +2505,10 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(names.len(), 2, "both upstreams' data arrived: {names:?}");
 
-        let again = feature.pull().perform(&operator).await?;
+        let again = feature
+            .pull(crate::Download::MinimalRanges)
+            .perform(&operator)
+            .await?;
         assert!(again.is_none(), "nothing new from either upstream");
         Ok(())
     }
@@ -2346,20 +2522,20 @@ mod tests {
         use crate::RepositoryMemoryExt as _;
         use crate::registry::{apply, pull};
         use crate::schema::Replica;
-        use dialog_artifacts::Changes;
+        use dialog_corpus::Changes;
         use dialog_query::Statement as _;
 
         let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let main = repo.branch("main").open().perform(&operator).await?;
         main.commit(stream::iter(vec![Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "user/name".parse()?,
                 of: "user:main".parse()?,
                 is: Value::String("Main data".to_string()),
                 cause: None,
             },
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -2381,7 +2557,10 @@ mod tests {
         let registry = repo.subject().registry().open().perform(&operator).await?;
         apply(&registry, changes, &operator).await?;
 
-        let pulled = feature.pull().perform(&operator).await;
+        let pulled = feature
+            .pull(crate::Download::MinimalRanges)
+            .perform(&operator)
+            .await;
         assert_eq!(
             feature.revision().map(|revision| revision.tree),
             main.revision().map(|revision| revision.tree),
@@ -2410,13 +2589,13 @@ mod tests {
             let upstream = repo.branch(name).open().perform(&operator).await?;
             upstream
                 .commit(stream::iter(vec![Instruction::Assert(
-                    Artifact {
+                    Fact {
                         the: "user/name".parse()?,
                         of: format!("user:{name}").parse()?,
                         is: Value::String(name.to_string()),
                         cause: None,
                     },
-                    dialog_artifacts::Pick::All,
+                    dialog_corpus::Pick::All,
                 )]))
                 .perform(&operator)
                 .await?;
@@ -2434,7 +2613,10 @@ mod tests {
             .memory;
         memory.lose_publishes("branch/feature", "revision", 2..3);
 
-        let pulled = feature.pull().perform(&operator).await;
+        let pulled = feature
+            .pull(crate::Download::MinimalRanges)
+            .perform(&operator)
+            .await;
         let Err(PullError::Partial { landed, unreached }) = pulled else {
             panic!("what landed is reported: {pulled:?}");
         };
@@ -2466,10 +2648,10 @@ mod history_tests {
     use anyhow::Result;
     use dialog_peer::helpers::{test_session_with_peer, unique_name};
 
-    use dialog_artifacts::history::{
+    use dialog_corpus::history::{
         Causality, History as _, HistorySelector, causality, common_ancestor,
     };
-    use dialog_artifacts::{Artifact, Instruction, Value};
+    use dialog_corpus::{Fact, Instruction, Value};
     use futures_util::{TryStreamExt as _, stream};
 
     /// A scenario-2 pull ("upstream moved, but with things we already
@@ -2500,13 +2682,19 @@ mod history_tests {
         // Main adopts feature's head, so feature's next pull of main is
         // the scenario-2 skip: main moved, but only with feature's own
         // work.
-        main.pull().from(&feature).perform(&operator).await?;
+        main.pull(crate::Download::MinimalRanges)
+            .from(&feature)
+            .perform(&operator)
+            .await?;
 
         // A second handle of feature, its head checkpoint taken BEFORE
         // the pull below.
         let racer = repo.branch("feature").open().perform(&operator).await?;
 
-        feature.pull().perform(&operator).await?;
+        feature
+            .pull(crate::Download::MinimalRanges)
+            .perform(&operator)
+            .await?;
 
         // The pull kept the head and must not have bumped the head cell:
         // the racer's commit still lands against its pre-pull checkpoint.
@@ -2525,13 +2713,13 @@ mod history_tests {
 
     fn assert_one(the: &str, of: &str, value: &str) -> Instruction {
         Instruction::Assert(
-            Artifact {
+            Fact {
                 the: the.parse().unwrap(),
                 of: of.parse().unwrap(),
                 is: Value::String(value.to_string()),
                 cause: None,
             },
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         )
     }
 
@@ -2574,8 +2762,16 @@ mod history_tests {
 
         let mut quiesced = false;
         for _ in 0..4 {
-            let pulled_a = a.pull().from(&b).perform(&operator).await?;
-            let pulled_b = b.pull().from(&a).perform(&operator).await?;
+            let pulled_a = a
+                .pull(crate::Download::MinimalRanges)
+                .from(&b)
+                .perform(&operator)
+                .await?;
+            let pulled_b = b
+                .pull(crate::Download::MinimalRanges)
+                .from(&a)
+                .perform(&operator)
+                .await?;
             if pulled_a.is_none() && pulled_b.is_none() {
                 quiesced = true;
                 break;
@@ -2608,8 +2804,14 @@ mod history_tests {
         )]))
         .perform(&operator)
         .await?;
-        b.pull().from(&a).perform(&operator).await?;
-        a.pull().from(&b).perform(&operator).await?;
+        b.pull(crate::Download::MinimalRanges)
+            .from(&a)
+            .perform(&operator)
+            .await?;
+        a.pull(crate::Download::MinimalRanges)
+            .from(&b)
+            .perform(&operator)
+            .await?;
         a.commit(stream::iter(vec![assert_one(
             "item/name",
             "item:sword",
@@ -2617,10 +2819,17 @@ mod history_tests {
         )]))
         .perform(&operator)
         .await?;
-        b.pull().from(&a).perform(&operator).await?;
+        b.pull(crate::Download::MinimalRanges)
+            .from(&a)
+            .perform(&operator)
+            .await?;
 
         let head = a.revision().map(|revision| revision.version());
-        let seen = a.pull().from(&b).prepare(&operator).await?;
+        let seen = a
+            .pull(crate::Download::MinimalRanges)
+            .from(&b)
+            .prepare(&operator)
+            .await?;
         assert!(
             matches!(&seen, PreparedPull::Merged(merged) if Some(merged.new_revision.version()) == head),
             "the pull keeps the branch's head"
@@ -2657,8 +2866,14 @@ mod history_tests {
         )]))
         .perform(&operator)
         .await?;
-        b.pull().from(&a).perform(&operator).await?;
-        a.pull().from(&b).perform(&operator).await?;
+        b.pull(crate::Download::MinimalRanges)
+            .from(&a)
+            .perform(&operator)
+            .await?;
+        a.pull(crate::Download::MinimalRanges)
+            .from(&b)
+            .perform(&operator)
+            .await?;
 
         a.commit(stream::iter(vec![assert_one(
             "item/name",
@@ -2678,8 +2893,16 @@ mod history_tests {
 
         // Both prepare before either commits, so each mints a merge of the
         // same two heads: two rival merges.
-        let into_a = a.pull().from(&b).prepare(&operator).await?;
-        let into_b = b.pull().from(&a).prepare(&operator).await?;
+        let into_a = a
+            .pull(crate::Download::MinimalRanges)
+            .from(&b)
+            .prepare(&operator)
+            .await?;
+        let into_b = b
+            .pull(crate::Download::MinimalRanges)
+            .from(&a)
+            .prepare(&operator)
+            .await?;
         into_a.commit(&operator).await?;
         into_b.commit(&operator).await?;
 
@@ -2690,8 +2913,16 @@ mod history_tests {
             b.revision().expect("b merged").version(),
         );
         assert_ne!(a_head, b_head, "the two sides hold rival merges");
-        let into_a = a.pull().from(&b).prepare(&operator).await?;
-        let into_b = b.pull().from(&a).prepare(&operator).await?;
+        let into_a = a
+            .pull(crate::Download::MinimalRanges)
+            .from(&b)
+            .prepare(&operator)
+            .await?;
+        let into_b = b
+            .pull(crate::Download::MinimalRanges)
+            .from(&a)
+            .prepare(&operator)
+            .await?;
         let (greater, lesser, greater_head) = if a_head > b_head {
             (&into_a, &into_b, a_head)
         } else {
@@ -2716,8 +2947,16 @@ mod history_tests {
         let mut quiesced = false;
         for _ in 0..4 {
             // Both prepare before either commits: the two pulls run at once.
-            let into_a = a.pull().from(&b).prepare(&operator).await?;
-            let into_b = b.pull().from(&a).prepare(&operator).await?;
+            let into_a = a
+                .pull(crate::Download::MinimalRanges)
+                .from(&b)
+                .prepare(&operator)
+                .await?;
+            let into_b = b
+                .pull(crate::Download::MinimalRanges)
+                .from(&a)
+                .prepare(&operator)
+                .await?;
             let pulled_a = into_a.commit(&operator).await?;
             let pulled_b = into_b.commit(&operator).await?;
             if pulled_a.is_none() && pulled_b.is_none() {
@@ -2804,7 +3043,7 @@ mod history_tests {
                     .query()
                     .select(AttributeQuery::from(
                         Term::<Relation>::from(the!("post/title"))
-                            .of(Term::<dialog_artifacts::Entity>::var("of"))
+                            .of(Term::<dialog_corpus::Entity>::var("of"))
                             .is(Term::<String>::var("is")),
                     ))
                     .perform(operator)
@@ -2818,9 +3057,17 @@ mod history_tests {
         // commits enough unrelated local novelty to hold the merge in
         // the screen-theirs direction (see the doc comment).
         let peer_a = repo.branch("peer-a").open().perform(&operator).await?;
-        peer_a.pull().from(&a).perform(&operator).await?;
+        peer_a
+            .pull(crate::Download::MinimalRanges)
+            .from(&a)
+            .perform(&operator)
+            .await?;
         let peer_b = repo.branch("peer-b").open().perform(&operator).await?;
-        peer_b.pull().from(&b).perform(&operator).await?;
+        peer_b
+            .pull(crate::Download::MinimalRanges)
+            .from(&b)
+            .perform(&operator)
+            .await?;
         for at in 0..8 {
             peer_a
                 .commit(stream::iter(vec![assert_one(
@@ -2846,8 +3093,16 @@ mod history_tests {
         // claim versions into one canonical entry.
         let mut quiesced = false;
         for _ in 0..4 {
-            let pulled_a = a.pull().from(&b).perform(&operator).await?;
-            let pulled_b = b.pull().from(&a).perform(&operator).await?;
+            let pulled_a = a
+                .pull(crate::Download::MinimalRanges)
+                .from(&b)
+                .perform(&operator)
+                .await?;
+            let pulled_b = b
+                .pull(crate::Download::MinimalRanges)
+                .from(&a)
+                .perform(&operator)
+                .await?;
             if pulled_a.is_none() && pulled_b.is_none() {
                 quiesced = true;
                 break;
@@ -2858,7 +3113,7 @@ mod history_tests {
         // Minted against the fused entry, the retraction's record
         // covers every claim version the entry collapsed. It reaches
         // `b` through the tracked pull.
-        a.commit(stream::iter(vec![Instruction::Retract(Artifact {
+        a.commit(stream::iter(vec![Instruction::Retract(Fact {
             the: "post/title".parse()?,
             of: "post:1".parse()?,
             is: Value::String("Hej".to_string()),
@@ -2866,19 +3121,30 @@ mod history_tests {
         })]))
         .perform(&operator)
         .await?;
-        b.pull().from(&a).perform(&operator).await?;
+        b.pull(crate::Download::MinimalRanges)
+            .from(&a)
+            .perform(&operator)
+            .await?;
         assert_eq!(titles(&b).await?, 0, "the retraction propagates to b");
 
         // The crossed, first-time pulls: each peer merges from the
         // writer it never synced with, over an empty base — coverage is
         // the only carrier of the deletion.
-        peer_a.pull().from(&b).perform(&operator).await?;
+        peer_a
+            .pull(crate::Download::MinimalRanges)
+            .from(&b)
+            .perform(&operator)
+            .await?;
         assert_eq!(
             titles(&peer_a).await?,
             0,
             "coverage retires the claim peer-a replicated"
         );
-        peer_b.pull().from(&a).perform(&operator).await?;
+        peer_b
+            .pull(crate::Download::MinimalRanges)
+            .from(&a)
+            .perform(&operator)
+            .await?;
         assert_eq!(
             titles(&peer_b).await?,
             0,
@@ -2921,11 +3187,16 @@ mod history_tests {
         // never tracks).
         let feature = repo.branch("feature").open().perform(&operator).await?;
         feature.set_upstream(&main).perform(&operator).await?;
-        feature.pull().perform(&operator).await?;
+        feature
+            .pull(crate::Download::MinimalRanges)
+            .perform(&operator)
+            .await?;
 
         let peer = repo.branch("peer").open().perform(&operator).await?;
         peer.set_upstream(&main).perform(&operator).await?;
-        peer.pull().perform(&operator).await?;
+        peer.pull(crate::Download::MinimalRanges)
+            .perform(&operator)
+            .await?;
 
         let titles = |branch: &crate::Branch| {
             let branch = branch.clone();
@@ -2935,7 +3206,7 @@ mod history_tests {
                     .query()
                     .select(AttributeQuery::from(
                         Term::<Relation>::from(the!("post/title"))
-                            .of(Term::<dialog_artifacts::Entity>::var("of"))
+                            .of(Term::<dialog_corpus::Entity>::var("of"))
                             .is(Term::<String>::var("is")),
                     ))
                     .perform(operator)
@@ -2948,7 +3219,7 @@ mod history_tests {
 
         // Feature deletes the fact.
         feature
-            .commit(stream::iter(vec![Instruction::Retract(Artifact {
+            .commit(stream::iter(vec![Instruction::Retract(Fact {
                 the: "post/title".parse()?,
                 of: "post:1".parse()?,
                 is: Value::String("Hej".to_string()),
@@ -2967,7 +3238,10 @@ mod history_tests {
         )]))
         .perform(&operator)
         .await?;
-        feature.pull().perform(&operator).await?;
+        feature
+            .pull(crate::Download::MinimalRanges)
+            .perform(&operator)
+            .await?;
         assert_eq!(
             titles(&feature).await?,
             0,
@@ -2978,7 +3252,11 @@ mod history_tests {
         // `feature` has no sync base for it, so the local replay is the
         // only carrier of the deletion.
         assert_eq!(titles(&peer).await?, 1, "peer still holds the fact");
-        feature.pull().from(&peer).perform(&operator).await?;
+        feature
+            .pull(crate::Download::MinimalRanges)
+            .from(&peer)
+            .perform(&operator)
+            .await?;
         assert_eq!(
             titles(&feature).await?,
             0,
@@ -2989,7 +3267,10 @@ mod history_tests {
         // same verdict. Deletion wins the concurrent contest in *both*
         // integration directions, so the replicas agree instead of each
         // re-imposing its own copy.
-        peer.pull().from(&feature).perform(&operator).await?;
+        peer.pull(crate::Download::MinimalRanges)
+            .from(&feature)
+            .perform(&operator)
+            .await?;
         assert_eq!(
             titles(&peer).await?,
             0,
@@ -3022,7 +3303,10 @@ mod history_tests {
 
         let feature = repo.branch("feature").open().perform(&operator).await?;
         feature.set_upstream(&main).perform(&operator).await?;
-        feature.pull().perform(&operator).await?;
+        feature
+            .pull(crate::Download::MinimalRanges)
+            .perform(&operator)
+            .await?;
         assert_eq!(
             feature.revision().map(|r| r.tree),
             Some(first.tree.clone()),
@@ -3033,13 +3317,13 @@ mod history_tests {
         // of main's claim, because the pulled data is version-tagged.
         feature
             .commit(stream::iter(vec![Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "post/title".parse()?,
                     of: "post:1".parse()?,
                     is: Value::String("Hi".to_string()),
                     cause: None,
                 },
-                dialog_artifacts::Pick::Last,
+                dialog_corpus::Pick::Last,
             )]))
             .perform(&operator)
             .await?;
@@ -3057,7 +3341,7 @@ mod history_tests {
         let concurrent = main.revision().expect("main has a revision");
 
         let merged = feature
-            .pull()
+            .pull(crate::Download::MinimalRanges)
             .perform(&operator)
             .await?
             .expect("pull merges");
@@ -3124,11 +3408,11 @@ mod history_tests {
         // The supersession holds in the merged *data* region too: the
         // replaced value must not resurrect when the deletion crosses the
         // sync boundary through the differential.
-        use dialog_artifacts::ArtifactSelector;
+        use dialog_corpus::Selector;
         use futures_util::StreamExt as _;
         let titles: Vec<_> = feature
             .claims()
-            .select(ArtifactSelector::new().the("post/title".parse()?))
+            .select(Selector::new().the("post/title".parse()?))
             .to_owned()
             .perform(&operator)
             .await?
@@ -3198,16 +3482,19 @@ mod history_tests {
 
         let feature = repo.branch("feature").open().perform(&operator).await?;
         feature.set_upstream(&main).perform(&operator).await?;
-        feature.pull().perform(&operator).await?;
+        feature
+            .pull(crate::Download::MinimalRanges)
+            .perform(&operator)
+            .await?;
         feature
             .commit(stream::iter(vec![Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "post/title".parse()?,
                     of: "post:1".parse()?,
                     is: Value::String("Hi".to_string()),
                     cause: None,
                 },
-                dialog_artifacts::Pick::Last,
+                dialog_corpus::Pick::Last,
             )]))
             .perform(&operator)
             .await?;
@@ -3223,7 +3510,7 @@ mod history_tests {
         let theirs = main.revision().expect("main has a revision");
 
         let merged = feature
-            .pull()
+            .pull(crate::Download::MinimalRanges)
             .perform(&operator)
             .await?
             .expect("pull merges");
@@ -3286,7 +3573,10 @@ mod history_tests {
 
         let feature = repo.branch("feature").open().perform(&operator).await?;
         feature.set_upstream(&main).perform(&operator).await?;
-        feature.pull().perform(&operator).await?;
+        feature
+            .pull(crate::Download::MinimalRanges)
+            .perform(&operator)
+            .await?;
         feature
             .commit(stream::iter(vec![assert_one("post/body", "post:1", "...")]))
             .perform(&operator)
@@ -3303,7 +3593,7 @@ mod history_tests {
         let theirs = main.revision().expect("main has a revision");
 
         let merged = feature
-            .pull()
+            .pull(crate::Download::MinimalRanges)
             .perform(&operator)
             .await?
             .expect("pull merges");
@@ -3339,8 +3629,8 @@ mod history_tests {
     #[dialog_common::test]
     async fn it_refuses_to_pull_a_forged_head() -> Result<()> {
         use crate::{Revision, TreeReference};
-        use dialog_artifacts::DialogArtifactsError;
-        use dialog_artifacts::history::Edition;
+        use dialog_corpus::DialogCorpusError;
+        use dialog_corpus::history::Edition;
 
         let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
@@ -3363,14 +3653,17 @@ mod history_tests {
 
         let feature = repo.branch("feature").open().perform(&operator).await?;
         feature.set_upstream(&evil).perform(&operator).await?;
-        let pulled = feature.pull().perform(&operator).await;
+        let pulled = feature
+            .pull(crate::Download::MinimalRanges)
+            .perform(&operator)
+            .await;
 
         assert!(
             matches!(
                 pulled,
-                Err(crate::PullError::Artifact(
-                    DialogArtifactsError::InvalidSignature(_)
-                ))
+                Err(crate::PullError::Fact(DialogCorpusError::InvalidSignature(
+                    _
+                )))
             ),
             "pulling a forged head must fail verification; got {pulled:?}"
         );
@@ -3389,7 +3682,7 @@ mod history_tests {
     /// reports them concurrent — resolution is deferred to whoever asks.
     #[dialog_common::test]
     async fn it_surfaces_concurrent_replacements_after_a_merge() -> Result<()> {
-        use dialog_artifacts::ArtifactSelector;
+        use dialog_corpus::Selector;
         use futures_util::StreamExt as _;
 
         let (operator, profile) = test_session_with_peer().await;
@@ -3406,18 +3699,21 @@ mod history_tests {
         .await?;
         let feature = repo.branch("feature").open().perform(&operator).await?;
         feature.set_upstream(&main).perform(&operator).await?;
-        feature.pull().perform(&operator).await?;
+        feature
+            .pull(crate::Download::MinimalRanges)
+            .perform(&operator)
+            .await?;
 
         // Both sides replace it, without seeing each other.
         let replace = |value: &str| -> Result<Instruction> {
             Ok(Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "post/title".parse()?,
                     of: "post:1".parse()?,
                     is: Value::String(value.to_string()),
                     cause: None,
                 },
-                dialog_artifacts::Pick::Last,
+                dialog_corpus::Pick::Last,
             ))
         };
         main.commit(stream::iter(vec![replace("MainSide")?]))
@@ -3431,7 +3727,7 @@ mod history_tests {
         let ours = feature.revision().expect("feature has a revision");
 
         feature
-            .pull()
+            .pull(crate::Download::MinimalRanges)
             .perform(&operator)
             .await?
             .expect("pull merges");
@@ -3440,7 +3736,7 @@ mod history_tests {
         // the cardinality-one (entity, attribute).
         let titles: Vec<_> = feature
             .claims()
-            .select(ArtifactSelector::new().the("post/title".parse()?))
+            .select(Selector::new().the("post/title".parse()?))
             .to_owned()
             .perform(&operator)
             .await?
@@ -3448,7 +3744,7 @@ mod history_tests {
             .await
             .into_iter()
             .collect::<Result<Vec<_>, _>>()?;
-        let mut values: Vec<_> = titles.iter().map(|artifact| artifact.is.clone()).collect();
+        let mut values: Vec<_> = titles.iter().map(|fact| fact.is.clone()).collect();
         values.sort_by_key(|value| value.to_utf8());
         assert_eq!(
             values,
@@ -3491,7 +3787,7 @@ mod history_tests {
     /// merged tree must not resurrect the retracted value.
     #[dialog_common::test]
     async fn it_propagates_a_retraction_across_a_merge() -> Result<()> {
-        use dialog_artifacts::ArtifactSelector;
+        use dialog_corpus::Selector;
         use futures_util::StreamExt as _;
 
         let (operator, profile) = test_session_with_peer().await;
@@ -3508,11 +3804,14 @@ mod history_tests {
         .await?;
         let feature = repo.branch("feature").open().perform(&operator).await?;
         feature.set_upstream(&main).perform(&operator).await?;
-        feature.pull().perform(&operator).await?;
+        feature
+            .pull(crate::Download::MinimalRanges)
+            .perform(&operator)
+            .await?;
 
         // Feature retracts the title — causally after the assertion.
         feature
-            .commit(stream::iter(vec![Instruction::Retract(Artifact {
+            .commit(stream::iter(vec![Instruction::Retract(Fact {
                 the: "post/title".parse()?,
                 of: "post:1".parse()?,
                 is: Value::String("Hej".to_string()),
@@ -3531,14 +3830,14 @@ mod history_tests {
         .await?;
 
         feature
-            .pull()
+            .pull(crate::Download::MinimalRanges)
             .perform(&operator)
             .await?
             .expect("pull merges");
 
         let titles: Vec<_> = feature
             .claims()
-            .select(ArtifactSelector::new().the("post/title".parse()?))
+            .select(Selector::new().the("post/title".parse()?))
             .to_owned()
             .perform(&operator)
             .await?
@@ -3561,7 +3860,7 @@ mod history_tests {
     /// is it gone everywhere.
     #[dialog_common::test]
     async fn it_keeps_a_concurrent_assertion_the_retraction_never_observed() -> Result<()> {
-        use dialog_artifacts::ArtifactSelector;
+        use dialog_corpus::Selector;
         use futures_util::StreamExt as _;
 
         let (operator, profile) = test_session_with_peer().await;
@@ -3572,7 +3871,7 @@ mod history_tests {
             async move {
                 let rows: Vec<_> = branch
                     .claims()
-                    .select(ArtifactSelector::new().the("task/label".parse().unwrap()))
+                    .select(Selector::new().the("task/label".parse().unwrap()))
                     .to_owned()
                     .perform(operator)
                     .await
@@ -3584,13 +3883,13 @@ mod history_tests {
         };
         let label = |value: &str| {
             Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "task/label".parse().unwrap(),
                     of: "task:7".parse().unwrap(),
                     is: Value::String(value.to_string()),
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             )
         };
 
@@ -3602,7 +3901,9 @@ mod history_tests {
         for name in ["alice", "mallory", "jordan"] {
             let b = repo.branch(name).open().perform(&operator).await?;
             b.set_upstream(&bob).perform(&operator).await?;
-            b.pull().perform(&operator).await?;
+            b.pull(crate::Download::MinimalRanges)
+                .perform(&operator)
+                .await?;
         }
         let alice = repo.branch("alice").load().perform(&operator).await?;
         let mallory = repo.branch("mallory").load().perform(&operator).await?;
@@ -3611,7 +3912,7 @@ mod history_tests {
         // Concurrently: Alice retracts (observing only Bob's claim);
         // Mallory re-asserts the same value under her own claim.
         alice
-            .commit(stream::iter(vec![Instruction::Retract(Artifact {
+            .commit(stream::iter(vec![Instruction::Retract(Fact {
                 the: "task/label".parse()?,
                 of: "task:7".parse()?,
                 is: Value::String("urgent".to_string()),
@@ -3625,13 +3926,21 @@ mod history_tests {
             .await?;
 
         // Jordan pulls Alice's deletion, then Mallory's assertion.
-        jordan.pull().from(&alice).perform(&operator).await?;
+        jordan
+            .pull(crate::Download::MinimalRanges)
+            .from(&alice)
+            .perform(&operator)
+            .await?;
         assert_eq!(
             count_labels(jordan.clone()).await,
             0,
             "Alice's retraction lands"
         );
-        jordan.pull().from(&mallory).perform(&operator).await?;
+        jordan
+            .pull(crate::Download::MinimalRanges)
+            .from(&mallory)
+            .perform(&operator)
+            .await?;
         assert_eq!(
             count_labels(jordan.clone()).await,
             1,
@@ -3640,7 +3949,7 @@ mod history_tests {
 
         // Jordan, having now seen both, retracts — and it clears everywhere.
         jordan
-            .commit(stream::iter(vec![Instruction::Retract(Artifact {
+            .commit(stream::iter(vec![Instruction::Retract(Fact {
                 the: "task/label".parse()?,
                 of: "task:7".parse()?,
                 is: Value::String("urgent".to_string()),
@@ -3648,7 +3957,11 @@ mod history_tests {
             })]))
             .perform(&operator)
             .await?;
-        mallory.pull().from(&jordan).perform(&operator).await?;
+        mallory
+            .pull(crate::Download::MinimalRanges)
+            .from(&jordan)
+            .perform(&operator)
+            .await?;
         assert_eq!(
             count_labels(mallory.clone()).await,
             0,
@@ -3669,7 +3982,7 @@ mod history_tests {
     /// divergence with all further pulls quiescing.
     #[dialog_common::test]
     async fn it_retracts_collapsed_same_value_claims_everywhere() -> Result<()> {
-        use dialog_artifacts::ArtifactSelector;
+        use dialog_corpus::Selector;
         use futures_util::StreamExt as _;
 
         let (operator, profile) = test_session_with_peer().await;
@@ -3680,7 +3993,7 @@ mod history_tests {
             async move {
                 let rows: Vec<_> = branch
                     .claims()
-                    .select(ArtifactSelector::new().the("task/label".parse().unwrap()))
+                    .select(Selector::new().the("task/label".parse().unwrap()))
                     .to_owned()
                     .perform(operator)
                     .await
@@ -3690,7 +4003,7 @@ mod history_tests {
                 rows.len()
             }
         };
-        let urgent = || Artifact {
+        let urgent = || Fact {
             the: "task/label".parse().unwrap(),
             of: "task:7".parse().unwrap(),
             is: Value::String("urgent".to_string()),
@@ -3701,14 +4014,16 @@ mod history_tests {
         let bob = repo.branch("bob").open().perform(&operator).await?;
         bob.commit(stream::iter(vec![Instruction::Assert(
             urgent(),
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         )]))
         .perform(&operator)
         .await?;
         for name in ["alice", "mallory"] {
             let b = repo.branch(name).open().perform(&operator).await?;
             b.set_upstream(&bob).perform(&operator).await?;
-            b.pull().perform(&operator).await?;
+            b.pull(crate::Download::MinimalRanges)
+                .perform(&operator)
+                .await?;
         }
         let alice = repo.branch("alice").load().perform(&operator).await?;
         let mallory = repo.branch("mallory").load().perform(&operator).await?;
@@ -3719,11 +4034,15 @@ mod history_tests {
         mallory
             .commit(stream::iter(vec![Instruction::Assert(
                 urgent(),
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             )]))
             .perform(&operator)
             .await?;
-        alice.pull().from(&mallory).perform(&operator).await?;
+        alice
+            .pull(crate::Download::MinimalRanges)
+            .from(&mallory)
+            .perform(&operator)
+            .await?;
         alice
             .commit(stream::iter(vec![Instruction::Retract(urgent())]))
             .perform(&operator)
@@ -3734,17 +4053,28 @@ mod history_tests {
         // converge on the deletion: his stale copy is dropped by R1
         // (both its versions are in Alice's ancestry), and her covering
         // record retires his live copy by R3.
-        bob.pull().from(&alice).perform(&operator).await?;
+        bob.pull(crate::Download::MinimalRanges)
+            .from(&alice)
+            .perform(&operator)
+            .await?;
         assert_eq!(
             count_labels(bob.clone()).await,
             0,
             "the retraction covers Bob's collapsed claim too — no resurrection"
         );
-        alice.pull().from(&bob).perform(&operator).await?;
+        alice
+            .pull(crate::Download::MinimalRanges)
+            .from(&bob)
+            .perform(&operator)
+            .await?;
         assert_eq!(count_labels(alice.clone()).await, 0, "and stays dead");
 
         // Mallory converges the same way.
-        mallory.pull().from(&alice).perform(&operator).await?;
+        mallory
+            .pull(crate::Download::MinimalRanges)
+            .from(&alice)
+            .perform(&operator)
+            .await?;
         assert_eq!(
             count_labels(mallory.clone()).await,
             0,
@@ -3761,7 +4091,7 @@ mod history_tests {
     /// `notes/version-control.md`.
     #[dialog_common::test]
     async fn it_resurrects_a_deleted_fact_and_the_resurrection_survives() -> Result<()> {
-        use dialog_artifacts::ArtifactSelector;
+        use dialog_corpus::Selector;
         use futures_util::StreamExt as _;
 
         let (operator, profile) = test_session_with_peer().await;
@@ -3772,7 +4102,7 @@ mod history_tests {
             async move {
                 let rows: Vec<_> = branch
                     .claims()
-                    .select(ArtifactSelector::new().the("post/title".parse().unwrap()))
+                    .select(Selector::new().the("post/title".parse().unwrap()))
                     .to_owned()
                     .perform(operator)
                     .await
@@ -3795,15 +4125,21 @@ mod history_tests {
         // Laptop and the (soon-stale) tablet both take the fact.
         let laptop = repo.branch("laptop").open().perform(&operator).await?;
         laptop.set_upstream(&main).perform(&operator).await?;
-        laptop.pull().perform(&operator).await?;
+        laptop
+            .pull(crate::Download::MinimalRanges)
+            .perform(&operator)
+            .await?;
         let tablet = repo.branch("tablet").open().perform(&operator).await?;
         tablet.set_upstream(&main).perform(&operator).await?;
-        tablet.pull().perform(&operator).await?;
+        tablet
+            .pull(crate::Download::MinimalRanges)
+            .perform(&operator)
+            .await?;
 
         // Laptop deletes, then brings it back — the tablet never learns
         // of either.
         laptop
-            .commit(stream::iter(vec![Instruction::Retract(Artifact {
+            .commit(stream::iter(vec![Instruction::Retract(Fact {
                 the: "post/title".parse()?,
                 of: "post:1".parse()?,
                 is: Value::String("Hej".to_string()),
@@ -3824,7 +4160,11 @@ mod history_tests {
 
         // Empty-base pull from the stale tablet, still holding the old
         // copy: the resurrection must stand.
-        laptop.pull().from(&tablet).perform(&operator).await?;
+        laptop
+            .pull(crate::Download::MinimalRanges)
+            .from(&tablet)
+            .perform(&operator)
+            .await?;
         assert_eq!(
             titles(laptop.clone()).await,
             1,
@@ -3832,7 +4172,11 @@ mod history_tests {
         );
 
         // And the tablet converges onto the resurrected fact.
-        tablet.pull().from(&laptop).perform(&operator).await?;
+        tablet
+            .pull(crate::Download::MinimalRanges)
+            .from(&laptop)
+            .perform(&operator)
+            .await?;
         assert_eq!(
             titles(tablet.clone()).await,
             1,
@@ -3852,7 +4196,7 @@ mod history_tests {
     /// the record's (entity, attribute) slot, not probe the record's keys.
     #[dialog_common::test]
     async fn it_retires_a_replaced_value_on_an_empty_base_pull() -> Result<()> {
-        use dialog_artifacts::ArtifactSelector;
+        use dialog_corpus::Selector;
         use futures_util::StreamExt as _;
 
         let (operator, profile) = test_session_with_peer().await;
@@ -3872,15 +4216,18 @@ mod history_tests {
         // `main` adopts it, then replaces it. The replace record's
         // supersedes names the version of feature's claim.
         let main = repo.branch("main").open().perform(&operator).await?;
-        main.pull().from(&feature).perform(&operator).await?;
+        main.pull(crate::Download::MinimalRanges)
+            .from(&feature)
+            .perform(&operator)
+            .await?;
         main.commit(stream::iter(vec![Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "user/name".parse()?,
                 of: "user:1".parse()?,
                 is: Value::String("Bob".to_string()),
                 cause: None,
             },
-            dialog_artifacts::Pick::Last,
+            dialog_corpus::Pick::Last,
         )]))
         .perform(&operator)
         .await?;
@@ -3888,11 +4235,15 @@ mod history_tests {
         // `feature` pulls main for the first time — an empty-base merge.
         // Its live copy of the old value can only be retired by the
         // incoming replace record's coverage.
-        feature.pull().from(&main).perform(&operator).await?;
+        feature
+            .pull(crate::Download::MinimalRanges)
+            .from(&main)
+            .perform(&operator)
+            .await?;
 
         let names: Vec<_> = feature
             .claims()
-            .select(ArtifactSelector::new().the("user/name".parse()?))
+            .select(Selector::new().the("user/name".parse()?))
             .to_owned()
             .perform(&operator)
             .await?
@@ -3909,7 +4260,10 @@ mod history_tests {
 
         // Confluence: the reverse pull agrees and both replicas quiesce
         // onto the same tree.
-        main.pull().from(&feature).perform(&operator).await?;
+        main.pull(crate::Download::MinimalRanges)
+            .from(&feature)
+            .perform(&operator)
+            .await?;
         assert_eq!(
             main.revision().map(|r| r.tree),
             feature.revision().map(|r| r.tree),
@@ -3928,7 +4282,7 @@ mod history_tests {
     /// an over-watermark drops live claims).
     #[dialog_common::test]
     async fn it_maintains_the_context_memo_incrementally() -> Result<()> {
-        use dialog_artifacts::history::{Context, context_of};
+        use dialog_corpus::history::{Context, context_of};
 
         let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
@@ -3948,7 +4302,10 @@ mod history_tests {
         // the delta's revision records.
         let feature = repo.branch("feature").open().perform(&operator).await?;
         feature.set_upstream(&main).perform(&operator).await?;
-        feature.pull().perform(&operator).await?;
+        feature
+            .pull(crate::Download::MinimalRanges)
+            .perform(&operator)
+            .await?;
 
         let agree = |branch: crate::Branch| {
             let operator = &operator;
@@ -3990,7 +4347,10 @@ mod history_tests {
         )]))
         .perform(&operator)
         .await?;
-        feature.pull().perform(&operator).await?;
+        feature
+            .pull(crate::Download::MinimalRanges)
+            .perform(&operator)
+            .await?;
         let (memo, walked) = agree(feature.clone()).await?;
         assert_eq!(memo, walked, "merge: memo must equal the walk");
 
@@ -4006,10 +4366,10 @@ mod history_tests {
     #[dialog_common::test]
     async fn it_publishes_the_watermark_with_the_head() -> Result<()> {
         use crate::Index;
-        use dialog_artifacts::history::{
+        use dialog_common::Blake3Hash;
+        use dialog_corpus::history::{
             Edition, HistoryError, Origin, Version, context_in, context_of,
         };
-        use dialog_common::Blake3Hash;
 
         let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
@@ -4076,7 +4436,7 @@ mod history_tests {
     async fn it_adopts_an_upstream_head_without_reading_its_novelty() -> Result<()> {
         use crate::RepositoryExt as _;
         use crate::helpers::Counting;
-        use dialog_artifacts::ArtifactSelector;
+        use dialog_corpus::Selector;
         use futures_util::StreamExt as _;
 
         let (operator, profile) = test_session_with_peer().await;
@@ -4105,7 +4465,11 @@ mod history_tests {
         let feature = repo.branch("feature").open().perform(&env).await?;
         feature.set_upstream(&main).perform(&env).await?;
         env.reset();
-        feature.pull().perform(&env).await?.expect("head adopted");
+        feature
+            .pull(crate::Download::MinimalRanges)
+            .perform(&env)
+            .await?
+            .expect("head adopted");
         assert_eq!(
             env.block_reads(),
             0,
@@ -4128,7 +4492,11 @@ mod history_tests {
         .perform(&env)
         .await?;
         env.reset();
-        feature.pull().perform(&env).await?.expect("head adopted");
+        feature
+            .pull(crate::Download::MinimalRanges)
+            .perform(&env)
+            .await?
+            .expect("head adopted");
         assert_eq!(
             env.block_reads(),
             0,
@@ -4139,7 +4507,7 @@ mod history_tests {
         // The adopted data is really there: reads hydrate lazily.
         let rows: Vec<_> = feature
             .claims()
-            .select(ArtifactSelector::new().the("user/name".parse()?))
+            .select(Selector::new().the("user/name".parse()?))
             .to_owned()
             .perform(&env)
             .await?
@@ -4182,7 +4550,10 @@ mod history_tests {
         // so feature has seen everything main has (and more).
         let feature = repo.branch("feature").open().perform(&env).await?;
         feature.set_upstream(&main).perform(&env).await?;
-        feature.pull().perform(&env).await?;
+        feature
+            .pull(crate::Download::MinimalRanges)
+            .perform(&env)
+            .await?;
         feature
             .commit(stream::iter(vec![assert_one(
                 "post/title",
@@ -4197,7 +4568,10 @@ mod history_tests {
         // feature's, so there is nothing to gain. Zero reads, head
         // stands.
         env.reset();
-        feature.pull().perform(&env).await?;
+        feature
+            .pull(crate::Download::MinimalRanges)
+            .perform(&env)
+            .await?;
         assert_eq!(
             env.block_reads(),
             0,
@@ -4221,7 +4595,7 @@ mod history_tests {
     /// rejects the stale fact.
     #[dialog_common::test]
     async fn it_refuses_adoption_when_local_knowledge_exceeds_the_upstreams() -> Result<()> {
-        use dialog_artifacts::ArtifactSelector;
+        use dialog_corpus::Selector;
         use futures_util::StreamExt as _;
 
         let (operator, profile) = test_session_with_peer().await;
@@ -4242,9 +4616,12 @@ mod history_tests {
 
         let moderator = repo.branch("moderator").open().perform(&operator).await?;
         moderator.set_upstream(&author).perform(&operator).await?;
-        moderator.pull().perform(&operator).await?;
         moderator
-            .commit(stream::iter(vec![Instruction::Retract(Artifact {
+            .pull(crate::Download::MinimalRanges)
+            .perform(&operator)
+            .await?;
+        moderator
+            .commit(stream::iter(vec![Instruction::Retract(Fact {
                 the: "post/title".parse()?,
                 of: "post:1".parse()?,
                 is: Value::String("Spam".to_string()),
@@ -4286,7 +4663,10 @@ mod history_tests {
         // the novelty.
         let replica = repo.branch("replica").open().perform(&operator).await?;
         replica.set_upstream(&moderator).perform(&operator).await?;
-        replica.pull().perform(&operator).await?;
+        replica
+            .pull(crate::Download::MinimalRanges)
+            .perform(&operator)
+            .await?;
 
         // Routing witness: neither side includes the other (adoption and
         // skip both refuse), and our divergence mass exceeds the
@@ -4305,11 +4685,15 @@ mod history_tests {
             theirs.divergence(&ours)
         );
 
-        replica.pull().from(&author).perform(&operator).await?;
+        replica
+            .pull(crate::Download::MinimalRanges)
+            .from(&author)
+            .perform(&operator)
+            .await?;
 
         let titles: Vec<_> = replica
             .claims()
-            .select(ArtifactSelector::new().the("post/title".parse()?))
+            .select(Selector::new().the("post/title".parse()?))
             .to_owned()
             .perform(&operator)
             .await?
@@ -4338,7 +4722,7 @@ mod history_tests {
     async fn it_replays_local_novelty_onto_an_upstream_without_reading_its_churn() -> Result<()> {
         use crate::RepositoryExt as _;
         use crate::helpers::Counting;
-        use dialog_artifacts::ArtifactSelector;
+        use dialog_corpus::Selector;
         use futures_util::StreamExt as _;
 
         let (operator, profile) = test_session_with_peer().await;
@@ -4360,7 +4744,10 @@ mod history_tests {
 
         let feature = repo.branch("feature").open().perform(&env).await?;
         feature.set_upstream(&main).perform(&env).await?;
-        feature.pull().perform(&env).await?;
+        feature
+            .pull(crate::Download::MinimalRanges)
+            .perform(&env)
+            .await?;
 
         // The replica commits one fact of its own; the upstream churns
         // through two hundred commits in a namespace the replica never
@@ -4384,7 +4771,11 @@ mod history_tests {
         }
 
         env.reset();
-        feature.pull().perform(&env).await?.expect("merged");
+        feature
+            .pull(crate::Download::MinimalRanges)
+            .perform(&env)
+            .await?
+            .expect("merged");
         let reads = env.block_reads();
         assert!(
             reads <= 30,
@@ -4396,7 +4787,7 @@ mod history_tests {
         // Both sides' content is present.
         let titles: Vec<_> = feature
             .claims()
-            .select(ArtifactSelector::new().the("post/title".parse()?))
+            .select(Selector::new().the("post/title".parse()?))
             .to_owned()
             .perform(&env)
             .await?
@@ -4407,7 +4798,7 @@ mod history_tests {
         assert_eq!(titles.len(), 2, "seed and local novelty both present");
         let churn: Vec<_> = feature
             .claims()
-            .select(ArtifactSelector::new().the("user/name".parse()?))
+            .select(Selector::new().the("user/name".parse()?))
             .to_owned()
             .perform(&env)
             .await?
@@ -4427,7 +4818,7 @@ mod history_tests {
     /// upstream tree.
     #[dialog_common::test]
     async fn it_carries_a_covering_record_when_replaying_onto_a_stale_holder() -> Result<()> {
-        use dialog_artifacts::ArtifactSelector;
+        use dialog_corpus::Selector;
         use futures_util::StreamExt as _;
 
         let (operator, profile) = test_session_with_peer().await;
@@ -4445,7 +4836,9 @@ mod history_tests {
         .await?;
         let f = repo.branch("f").open().perform(&operator).await?;
         f.set_upstream(&m).perform(&operator).await?;
-        f.pull().perform(&operator).await?;
+        f.pull(crate::Download::MinimalRanges)
+            .perform(&operator)
+            .await?;
 
         // `a` authors the fact; both `m` and `f` adopt it laterally, so
         // it postdates f's sync base with m.
@@ -4457,13 +4850,19 @@ mod history_tests {
         )]))
         .perform(&operator)
         .await?;
-        m.pull().from(&a).perform(&operator).await?;
-        f.pull().from(&a).perform(&operator).await?;
+        m.pull(crate::Download::MinimalRanges)
+            .from(&a)
+            .perform(&operator)
+            .await?;
+        f.pull(crate::Download::MinimalRanges)
+            .from(&a)
+            .perform(&operator)
+            .await?;
 
         // f retracts it: net zero in f's data diff against its base
         // with m (the fact was never in that base), so only f's retract
         // record carries the deletion into the replay.
-        f.commit(stream::iter(vec![Instruction::Retract(Artifact {
+        f.commit(stream::iter(vec![Instruction::Retract(Fact {
             the: "post/title".parse()?,
             of: "post:1".parse()?,
             is: Value::String("Spam".to_string()),
@@ -4508,11 +4907,14 @@ mod history_tests {
             theirs.divergence(&ours)
         );
 
-        f.pull().perform(&operator).await?.expect("merged");
+        f.pull(crate::Download::MinimalRanges)
+            .perform(&operator)
+            .await?
+            .expect("merged");
 
         let values: Vec<_> = f
             .claims()
-            .select(ArtifactSelector::new().the("post/title".parse()?))
+            .select(Selector::new().the("post/title".parse()?))
             .to_owned()
             .perform(&operator)
             .await?
@@ -4543,7 +4945,7 @@ mod history_tests {
     /// above the watermark and land as news.
     #[dialog_common::test]
     async fn it_drops_observed_adds_when_replaying_onto_a_covering_upstream() -> Result<()> {
-        use dialog_artifacts::ArtifactSelector;
+        use dialog_corpus::Selector;
         use futures_util::StreamExt as _;
 
         let (operator, profile) = test_session_with_peer().await;
@@ -4559,7 +4961,9 @@ mod history_tests {
         .await?;
         let f = repo.branch("f").open().perform(&operator).await?;
         f.set_upstream(&m).perform(&operator).await?;
-        f.pull().perform(&operator).await?;
+        f.pull(crate::Download::MinimalRanges)
+            .perform(&operator)
+            .await?;
 
         // `a` authors the fact. The upstream adopts it AND covers it;
         // the replica adopts it and keeps it live, plus commits novelty
@@ -4572,8 +4976,11 @@ mod history_tests {
         )]))
         .perform(&operator)
         .await?;
-        m.pull().from(&a).perform(&operator).await?;
-        m.commit(stream::iter(vec![Instruction::Retract(Artifact {
+        m.pull(crate::Download::MinimalRanges)
+            .from(&a)
+            .perform(&operator)
+            .await?;
+        m.commit(stream::iter(vec![Instruction::Retract(Fact {
             the: "post/title".parse()?,
             of: "post:1".parse()?,
             is: Value::String("Spam".to_string()),
@@ -4581,7 +4988,10 @@ mod history_tests {
         })]))
         .perform(&operator)
         .await?;
-        f.pull().from(&a).perform(&operator).await?;
+        f.pull(crate::Download::MinimalRanges)
+            .from(&a)
+            .perform(&operator)
+            .await?;
         f.commit(stream::iter(vec![assert_one(
             "post/title",
             "post:2",
@@ -4593,11 +5003,14 @@ mod history_tests {
         // f's delta adds the authored fact; m has observed it and
         // covered it, so the replay's swapped R1 must drop the add
         // rather than resurrect m's deletion.
-        f.pull().perform(&operator).await?.expect("merged");
+        f.pull(crate::Download::MinimalRanges)
+            .perform(&operator)
+            .await?
+            .expect("merged");
 
         let values: Vec<_> = f
             .claims()
-            .select(ArtifactSelector::new().the("post/title".parse()?))
+            .select(Selector::new().the("post/title".parse()?))
             .to_owned()
             .perform(&operator)
             .await?
@@ -4629,7 +5042,7 @@ mod history_tests {
     async fn it_first_contacts_a_churning_upstream_from_the_small_side() -> Result<()> {
         use crate::RepositoryExt as _;
         use crate::helpers::Counting;
-        use dialog_artifacts::ArtifactSelector;
+        use dialog_corpus::Selector;
         use futures_util::StreamExt as _;
 
         let (operator, profile) = test_session_with_peer().await;
@@ -4667,7 +5080,7 @@ mod history_tests {
 
         env.reset();
         feature
-            .pull()
+            .pull(crate::Download::MinimalRanges)
             .from(&main)
             .perform(&env)
             .await?
@@ -4682,7 +5095,7 @@ mod history_tests {
         // Both sides' content is present in the merged state.
         let ours: Vec<_> = feature
             .claims()
-            .select(ArtifactSelector::new().the("post/title".parse()?))
+            .select(Selector::new().the("post/title".parse()?))
             .to_owned()
             .perform(&env)
             .await?
@@ -4693,7 +5106,7 @@ mod history_tests {
         assert_eq!(ours.len(), 2, "our facts survive");
         let theirs: Vec<_> = feature
             .claims()
-            .select(ArtifactSelector::new().the("user/name".parse()?))
+            .select(Selector::new().the("user/name".parse()?))
             .to_owned()
             .perform(&env)
             .await?
@@ -4741,19 +5154,19 @@ mod history_tests {
         for _round in 0..12 {
             // Every branch performs one pseudo-random write.
             for branch in branches {
-                let of: dialog_artifacts::Entity = entity(next(4)).parse()?;
-                let the: dialog_artifacts::Relation = "bench/field".parse()?;
+                let of: dialog_corpus::Entity = entity(next(4)).parse()?;
+                let the: dialog_corpus::Relation = "bench/field".parse()?;
                 let is = value(next(3));
-                let artifact = Artifact {
+                let fact = Fact {
                     the,
                     of,
                     is,
                     cause: None,
                 };
                 let instruction = match next(3) {
-                    0 => Instruction::Assert(artifact, dialog_artifacts::Pick::All),
-                    1 => Instruction::Assert(artifact, dialog_artifacts::Pick::Last),
-                    _ => Instruction::Retract(artifact),
+                    0 => Instruction::Assert(fact, dialog_corpus::Pick::All),
+                    1 => Instruction::Assert(fact, dialog_corpus::Pick::Last),
+                    _ => Instruction::Retract(fact),
                 };
                 // A retract of an absent fact is a no-op commit; both
                 // outcomes are fine for the property.
@@ -4766,7 +5179,7 @@ mod history_tests {
             let from = next(3) as usize;
             let into = (from + 1 + next(2) as usize) % 3;
             branches[into]
-                .pull()
+                .pull(crate::Download::MinimalRanges)
                 .from(branches[from])
                 .perform(&operator)
                 .await?;
@@ -4780,7 +5193,7 @@ mod history_tests {
                 for from in 0..3 {
                     if into != from {
                         branches[into]
-                            .pull()
+                            .pull(crate::Download::MinimalRanges)
                             .from(branches[from])
                             .perform(&operator)
                             .await?;
@@ -4818,7 +5231,7 @@ mod history_tests {
     async fn it_grafts_a_tracked_merge_without_walking_adopted_bulk() -> Result<()> {
         use crate::RepositoryExt as _;
         use crate::helpers::Counting;
-        use dialog_artifacts::ArtifactSelector;
+        use dialog_corpus::Selector;
         use futures_util::StreamExt as _;
 
         let (operator, profile) = test_session_with_peer().await;
@@ -4841,19 +5254,29 @@ mod history_tests {
         // Bob diverges from the seed while small; we sync him (tracked).
         let bob = repo.branch("bob").open().perform(&env).await?;
         bob.set_upstream(&seed).perform(&env).await?;
-        bob.pull().perform(&env).await?;
+        bob.pull(crate::Download::MinimalRanges)
+            .perform(&env)
+            .await?;
 
         let us = repo.branch("us").open().perform(&env).await?;
         us.set_upstream(&seed).perform(&env).await?;
-        us.pull().perform(&env).await?;
-        us.pull().from(&bob).perform(&env).await?;
+        us.pull(crate::Download::MinimalRanges)
+            .perform(&env)
+            .await?;
+        us.pull(crate::Download::MinimalRanges)
+            .from(&bob)
+            .perform(&env)
+            .await?;
 
         // Alice's bulk lands on us (adopt-or-merge; either way we now
         // carry two hundred commits Bob has never seen), plus one commit
         // of our own so we are not a pure adoption.
         let alice = repo.branch("alice").open().perform(&env).await?;
         alice.set_upstream(&seed).perform(&env).await?;
-        alice.pull().perform(&env).await?;
+        alice
+            .pull(crate::Download::MinimalRanges)
+            .perform(&env)
+            .await?;
         for i in 0..200 {
             alice
                 .commit(stream::iter(vec![assert_one(
@@ -4864,7 +5287,10 @@ mod history_tests {
                 .perform(&env)
                 .await?;
         }
-        us.pull().from(&alice).perform(&env).await?;
+        us.pull(crate::Download::MinimalRanges)
+            .from(&alice)
+            .perform(&env)
+            .await?;
         us.commit(stream::iter(vec![assert_one(
             "post/title",
             "post:1",
@@ -4902,7 +5328,11 @@ mod history_tests {
         );
 
         env.reset();
-        us.pull().from(&bob).perform(&env).await?.expect("merged");
+        us.pull(crate::Download::MinimalRanges)
+            .from(&bob)
+            .perform(&env)
+            .await?
+            .expect("merged");
         let reads = env.block_reads();
         assert!(
             reads <= 120,
@@ -4912,13 +5342,13 @@ mod history_tests {
 
         // Everything is present afterwards.
         let count = |the: &str| {
-            let the: dialog_artifacts::Relation = the.parse().unwrap();
+            let the: dialog_corpus::Relation = the.parse().unwrap();
             let us = us.clone();
             let env = &env;
             async move {
                 anyhow::Ok(
                     us.claims()
-                        .select(ArtifactSelector::new().the(the))
+                        .select(Selector::new().the(the))
                         .to_owned()
                         .perform(env)
                         .await?
@@ -4947,7 +5377,7 @@ mod history_tests {
     #[dialog_common::test]
     async fn it_propagates_deletions_across_a_graft_merge() -> Result<()> {
         use crate::RepositoryExt as _;
-        use dialog_artifacts::ArtifactSelector;
+        use dialog_corpus::Selector;
         use futures_util::StreamExt as _;
 
         let (operator, profile) = test_session_with_peer().await;
@@ -4968,12 +5398,19 @@ mod history_tests {
 
         let bob = repo.branch("bob").open().perform(&operator).await?;
         bob.set_upstream(&seed).perform(&operator).await?;
-        bob.pull().perform(&operator).await?;
+        bob.pull(crate::Download::MinimalRanges)
+            .perform(&operator)
+            .await?;
 
         let us = repo.branch("us").open().perform(&operator).await?;
         us.set_upstream(&seed).perform(&operator).await?;
-        us.pull().perform(&operator).await?;
-        us.pull().from(&bob).perform(&operator).await?;
+        us.pull(crate::Download::MinimalRanges)
+            .perform(&operator)
+            .await?;
+        us.pull(crate::Download::MinimalRanges)
+            .from(&bob)
+            .perform(&operator)
+            .await?;
 
         // Both sides now diverge past the graft threshold: a dozen churn
         // commits each, plus one retraction each of a base fact the
@@ -4994,7 +5431,7 @@ mod history_tests {
             .perform(&operator)
             .await?;
         }
-        bob.commit(stream::iter(vec![Instruction::Retract(Artifact {
+        bob.commit(stream::iter(vec![Instruction::Retract(Fact {
             the: "task/label".parse()?,
             of: "task:bobs-victim".parse()?,
             is: Value::String("urgent".to_string()),
@@ -5002,7 +5439,7 @@ mod history_tests {
         })]))
         .perform(&operator)
         .await?;
-        us.commit(stream::iter(vec![Instruction::Retract(Artifact {
+        us.commit(stream::iter(vec![Instruction::Retract(Fact {
             the: "task/label".parse()?,
             of: "task:ours-victim".parse()?,
             is: Value::String("blocked".to_string()),
@@ -5021,7 +5458,7 @@ mod history_tests {
             theirs.divergence(&ours)
         );
 
-        us.pull()
+        us.pull(crate::Download::MinimalRanges)
             .from(&bob)
             .perform(&operator)
             .await?
@@ -5029,7 +5466,7 @@ mod history_tests {
 
         let labels: Vec<_> = us
             .claims()
-            .select(ArtifactSelector::new().the("task/label".parse()?))
+            .select(Selector::new().the("task/label".parse()?))
             .to_owned()
             .perform(&operator)
             .await?
@@ -5044,13 +5481,13 @@ mod history_tests {
 
         // Both sides' churn crossed the merge intact.
         let count = |the: &str| {
-            let the: dialog_artifacts::Relation = the.parse().unwrap();
+            let the: dialog_corpus::Relation = the.parse().unwrap();
             let us = us.clone();
             let operator = &operator;
             async move {
                 anyhow::Ok(
                     us.claims()
-                        .select(ArtifactSelector::new().the(the))
+                        .select(Selector::new().the(the))
                         .to_owned()
                         .perform(operator)
                         .await?
@@ -5068,7 +5505,10 @@ mod history_tests {
         // And the merge quiesces: pulling the same upstream again keeps
         // the head (only bookkeeping may advance).
         let settled = us.revision().expect("merged head");
-        us.pull().from(&bob).perform(&operator).await?;
+        us.pull(crate::Download::MinimalRanges)
+            .from(&bob)
+            .perform(&operator)
+            .await?;
         assert_eq!(
             us.revision().expect("head stands"),
             settled,
@@ -5112,7 +5552,10 @@ mod history_tests {
         // The pull is prepared from one handle; before it commits, the
         // other handle pushes to a different target, advancing the shared
         // upstream cell underneath it.
-        let prepared = puller.pull().prepare(&operator).await?;
+        let prepared = puller
+            .pull(crate::Download::MinimalRanges)
+            .prepare(&operator)
+            .await?;
         pusher.push().to(&backup).perform(&operator).await?;
         let merged = prepared.commit(&operator).await?;
         assert!(merged.is_some(), "the racing pull still lands");

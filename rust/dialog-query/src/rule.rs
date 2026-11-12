@@ -15,8 +15,8 @@
 //! [`AnalyzerError`](crate::AnalyzerError)) reference, so error
 //! reporting is uniform across both kinds.
 
-use crate::artifact::Value;
 use crate::concept::descriptor::ConceptDescriptor;
+use crate::corpus::Value;
 use crate::error::{AnalysisError, TypeError};
 use crate::negation::Negation;
 use crate::planner::Planner;
@@ -493,7 +493,7 @@ pub(crate) fn fmt_rule_schema(conclusion: &ConceptDescriptor, f: &mut Formatter<
 /// This macro provides the most concise way to create rule conditions:
 ///
 /// ```rust
-/// use dialog_query::{when, When, Term, Any, artifact::Value, the};
+/// use dialog_query::{when, When, Term, Any, corpus::Value, the};
 /// use dialog_query::AttributeQuery;
 ///
 /// fn example() -> impl When {
@@ -529,8 +529,8 @@ mod tests {
     use core::option::Option as Maybe;
 
     use super::*;
-    use crate::artifact::{Entity, Type};
     use crate::concept::descriptor::ConceptDescriptor;
+    use crate::corpus::{Entity, Type};
     use crate::session::RuleRegistry;
     use crate::term::Term;
     use crate::{AttributeStatement, Concept, Query};

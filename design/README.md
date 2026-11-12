@@ -55,6 +55,27 @@ Backtracking moves a topic to an earlier phase and says so in its journal.
 
 ## Topics
 
-| topic | phase |
-|---|---|
-| [Importing a large dataset into dialog](large-transactions.md) | Delimiting |
+- [A read follows the head it should have pinned](query-isolation.md):
+  **Building.** Every unit of isolation (a query, a select, a poll, a
+  transaction) reads one revision, and the types make a live read
+  unwritable; the [journal](query-isolation/journal.md) records what the
+  harness found on main.
+- [The search tree's concerns are not expressed as capabilities](tree-node-reads.md):
+  **Building.** The tree talks in nodes through capabilities it performs on
+  the environment; caching, decoding and storage form belong to providers.
+  The [plan](tree-node-reads/plan.md) is for whoever builds it.
+- [A replica cannot read or write what it held once a pull moves its head](held-across-pull.md):
+  **Building.** A head adopted by root leaves every changed leaf by
+  reference, so reads and writes of keys the replica held wait on the
+  remote. A download can bring along only what the replica holds, and a
+  pull can retry when a commit overtakes it.
+- [A typed variable over a field of no declared type fails the query](typed-read-of-untyped-field.md):
+  **Building.** A value of another type than the variable's failed a
+  plain concept read and was passed over by every other read. Every read
+  now takes it for a fact of another attribute: passed over, not elected
+  among, and absent to a variable that may be.
+- [Importing a large dataset into dialog](large-transactions.md):
+  **Delimiting.** As one commit an import holds every new node in memory
+  until it seals; as many commits it writes the same nodes again and
+  again. The objective is confirmed; its bounds (how large, on what
+  machine, within what memory and time) are not yet stated.

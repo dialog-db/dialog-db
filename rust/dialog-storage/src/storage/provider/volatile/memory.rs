@@ -4,7 +4,6 @@
 //! Uses BLAKE3 content hashing for edition tracking.
 
 use super::{MemoryKey, Volatile};
-use async_trait::async_trait;
 use dialog_capability::{Capability, Provider};
 use dialog_common::Blake3Hash;
 use dialog_effects::memory::prelude::{ListExt, PublishExt, ResolveExt, RetractExt};
@@ -32,8 +31,7 @@ fn format_edition(edition: Option<&[u8]>) -> Option<Version> {
     edition.map(Version::from)
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<Resolve> for Volatile {
     async fn execute(
         &self,
@@ -59,8 +57,7 @@ impl Provider<Resolve> for Volatile {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<Publish> for Volatile {
     async fn execute(&self, effect: Capability<Publish>) -> Result<Version, MemoryError> {
         let subject = effect.subject().into();
@@ -121,8 +118,7 @@ impl Provider<Publish> for Volatile {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<Retract> for Volatile {
     async fn execute(&self, effect: Capability<Retract>) -> Result<(), MemoryError> {
         let subject = effect.subject().into();
@@ -157,8 +153,7 @@ impl Provider<Retract> for Volatile {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<List> for Volatile {
     async fn execute(&self, effect: Capability<List>) -> Result<Vec<String>, MemoryError> {
         let subject = effect.subject().into();

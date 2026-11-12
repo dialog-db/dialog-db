@@ -7,13 +7,14 @@ use std::future::Future;
 use std::pin::Pin;
 
 use anyhow::Result;
-use dialog_artifacts::Pick;
+use dialog_corpus::Pick;
 use dialog_query::ConceptDescriptor;
 
 use crate::env::{Env, assert_all, concept, entity, fact, text};
 
 mod commit;
 mod export;
+mod member;
 mod number;
 mod read;
 mod replica;
@@ -155,6 +156,29 @@ pub fn catalog() -> Vec<Spec> {
             volatile: false,
             cross_cpu_pct: 0.0,
             prepare: |size| Box::pin(read::join(size)),
+        },
+        Spec {
+            name: "query-member",
+            size: 2000,
+            about: "on a member that tracks a remote and holds every block, one cold read of every entity's name and role, then the names of one role: the reads that warm ahead of demand",
+            volatile: false,
+            // CI sweeps of #767 (instructions, then `_int_malloc`
+            // inclusive where it was read):
+            //   387f06b  Xeon Platinum 8370C  662b464ced6baa9c  115,986,589  8,068,511
+            //   18d5a61  Xeon Platinum 8370C  662b464ced6baa9c  115,829,922  7,974,892
+            //   6587a02  EPYC 9V45            060ba73ad866d3a8  115,729,243  7,921,637
+            //   d152a84  EPYC 7763            d14bb80d302b2adf  116,264,748  8,118,501
+            //   da530de  EPYC 9V74            1551aebb00c12037  116,225,137
+            //   4557565  EPYC 9V74            1551aebb00c12037  116,485,183
+            // 0.46% across the first four, one code state, less 0.135%
+            // within the 8370C pair, rounded as #653 rounds. The last two
+            // took main (#761, #763, #782) between them, so their spread
+            // mixes code with CPU; across all six it is 0.65%. The
+            // baseline file is the 4557565 sweep. blake3, verifying the 1.5 MB its 32
+            // cold loads read (12% of the phase), retired 13,672,977 on
+            // every model; the allocator moved by up to 197 K.
+            cross_cpu_pct: 0.3,
+            prepare: |size| Box::pin(member::view(size)),
         },
         Spec {
             name: "rule-scan",

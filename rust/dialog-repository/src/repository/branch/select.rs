@@ -1,16 +1,15 @@
 use base58::ToBase58;
-use dialog_artifacts::selector::Constrained;
-use dialog_artifacts::tree::ArtifactTreeExt as _;
-use dialog_artifacts::{
-    Artifact, ArtifactSelector, ArtifactStream, ArtifactView, Datum, DialogArtifactsError, Key,
-    State,
-};
 use dialog_capability::Provider;
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::{ConditionalSend, ConditionalSync, Holds};
+use dialog_corpus::selector::Constrained;
+use dialog_corpus::tree::CorpusExt as _;
+use dialog_corpus::tree::CorpusNode;
+use dialog_corpus::{Datum, DialogCorpusError, Fact, FactStream, FactView, Key, Selector, State};
 use dialog_effects::archive::Get;
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::blob::Load as BlobLoad;
+use dialog_search_tree::nodes;
 use dialog_search_tree::{DialogSearchTreeError, Manifest, load_node};
 use dialog_storage::Blake3Hash;
 use futures_util::Stream;
@@ -18,37 +17,39 @@ use futures_util::Stream;
 use dialog_effects::archive::prelude::CatalogScope;
 
 use crate::repository::archive::erased;
-use crate::repository::source::SourceRef;
+use crate::repository::source::{Live, View};
 use crate::{Branch, Index};
 
 /// Command struct for selecting artifacts from a branch or a snapshot.
+///
+/// A select reads one revision: the one its line stood at when the
+/// select was made (see [`View`]). A commit that lands on the branch
+/// afterwards is read by the next select, not by this one.
 pub struct Select<'a> {
-    source: SourceRef<'a>,
-    selector: ArtifactSelector<Constrained>,
+    view: View<'a>,
+    selector: Selector<Constrained>,
 }
 
 impl<'a> Select<'a> {
-    /// Create a select command for the given branch and artifact selector.
-    pub fn new(branch: &'a Branch, selector: ArtifactSelector<Constrained>) -> Self {
-        Self::from_source(SourceRef::from(branch), selector)
+    /// Create a select command for the given branch and artifact
+    /// selector, over the branch as it stands now.
+    pub fn new(branch: &'a Branch, selector: Selector<Constrained>) -> Self {
+        Self::from_view(Live::from(branch).pin(), selector)
     }
 
-    /// Create a select command for the given line (branch or snapshot)
-    /// and artifact selector.
-    pub(crate) fn from_source(
-        source: SourceRef<'a>,
-        selector: ArtifactSelector<Constrained>,
-    ) -> Self {
-        Self { source, selector }
+    /// Create a select command for the given pinned line (branch or
+    /// snapshot) and artifact selector.
+    pub(crate) fn from_view(view: View<'a>, selector: Selector<Constrained>) -> Self {
+        Self { view, selector }
     }
 
     fn tree_hash(&self) -> Option<Blake3Hash> {
-        self.source.root()
+        self.view.root()
     }
 
     /// The catalog (archive index) scoped to this line's subject.
     pub fn catalog(&self) -> CatalogScope {
-        self.source.catalog()
+        self.view.catalog()
     }
 }
 
@@ -58,18 +59,26 @@ impl<'a> Select<'a> {
 /// the line are keyed under it, so anything compared against them — an
 /// overlay row, a retracted fact, a demanded range — is keyed under it too.
 pub(crate) async fn line_manifest<Env>(
-    source: SourceRef<'_>,
+    view: &View<'_>,
     env: &Env,
-) -> Result<Manifest, DialogArtifactsError>
+) -> Result<Manifest, DialogCorpusError>
 where
-    Env: Provider<ArchiveLoad> + Holds + ConditionalSync + ?Sized,
+    Env: Provider<ArchiveLoad>
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
+        + Holds
+        + ConditionalSync
+        + ?Sized,
 {
-    Ok(source.tree().manifest(&env).await?)
+    Ok(view.tree().manifest(&env).await?)
 }
 
 impl<'a> Select<'a> {
     /// Materialize every row: the select's streams yield owned
-    /// [`Artifact`]s instead of borrowed-access [`ArtifactView`]s.
+    /// [`Fact`]s instead of borrowed-access [`FactView`]s.
     ///
     /// `select(..).to_owned().perform(..)` is the drop-in spelling for
     /// consumers of the pre-view API; prefer reading fields off the views
@@ -87,18 +96,27 @@ impl Select<'_> {
     /// Execute the select, using fallback to remote if the line is a
     /// branch with a remote upstream.
     ///
-    /// Rows stream as borrowed-access [`ArtifactView`]s; chain
+    /// Rows stream as borrowed-access [`FactView`]s; chain
     /// [`to_owned`](Self::to_owned) before this call for owned
-    /// [`Artifact`]s. The per-item error type remains
-    /// [`DialogArtifactsError`] because stream items surface
-    /// artifact-decoding errors that the caller may want to inspect
+    /// [`Fact`]s. The per-item error type remains
+    /// [`DialogCorpusError`] because stream items surface
+    /// fact-decoding errors that the caller may want to inspect
     /// directly.
     pub async fn perform<Env>(
         self,
         env: &Env,
-    ) -> Result<impl Stream<Item = Result<ArtifactView, DialogArtifactsError>>, DialogSearchTreeError>
+    ) -> Result<impl Stream<Item = Result<FactView, DialogCorpusError>>, DialogSearchTreeError>
     where
-        Env: Provider<Get> + Provider<ArchiveLoad> + Provider<BlobLoad> + Holds + ConditionalSync,
+        Env: Provider<Get>
+            + Provider<ArchiveLoad>
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<BlobLoad>
+            + Holds
+            + ConditionalSync,
     {
         // A block missing locally hydrates through the env, from the
         // remotes the subject's open branches track. A remote that failed
@@ -111,7 +129,14 @@ impl Select<'_> {
     /// The tree this select scans, with its root block probed eagerly.
     async fn probed_tree<S>(&self, store: &S) -> Result<Index, DialogSearchTreeError>
     where
-        S: Provider<ArchiveLoad> + Holds + ConditionalSync,
+        S: Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + Holds
+            + ConditionalSync,
     {
         // Tree hydration is lazy (nodes load on demand during the scan),
         // but unreachable branches should fail here rather than midway
@@ -154,11 +179,16 @@ impl Select<'_> {
         self,
         store: S,
     ) -> Result<
-        impl Stream<Item = Result<ArtifactView, DialogArtifactsError>> + 's + use<'s, S>,
+        impl Stream<Item = Result<FactView, DialogCorpusError>> + 's + use<'s, S>,
         DialogSearchTreeError,
     >
     where
         S: Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
             + Holds
             + ConditionalSend
@@ -168,10 +198,10 @@ impl Select<'_> {
     {
         let tree = self.probed_tree(&store).await?;
         // EAV/AEV/VAE dispatch + per-entry filtering lives in the shared
-        // `ArtifactTreeExt::scan` so branch scans and Changes-overlay
+        // `CorpusExt::scan` so branch scans and Changes-overlay
         // scans agree on key order — that adjacency invariant is what
         // the cardinality-one sliding window relies on.
-        Ok(tree.scan(store, self.source.spill_cache(), self.selector))
+        Ok(tree.scan(store, self.view.spill_cache(), self.selector))
     }
 
     /// [`execute`](Self::execute), with the scan stream built directly in
@@ -181,9 +211,14 @@ impl Select<'_> {
     pub(crate) async fn execute_boxed<'s, S>(
         self,
         store: S,
-    ) -> Result<ArtifactStream<'s>, DialogSearchTreeError>
+    ) -> Result<FactStream<'s>, DialogSearchTreeError>
     where
         S: Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
             + Holds
             + ConditionalSend
@@ -194,23 +229,32 @@ impl Select<'_> {
         let tree = self.probed_tree(&store).await?;
         Ok(Box::pin(tree.scan(
             store,
-            self.source.spill_cache(),
+            self.view.spill_cache(),
             self.selector,
         )))
     }
 
     /// Estimate this selector's range size, picking a store the same way
     /// [`perform`](Self::perform) does. See [`estimate`](Self::estimate).
-    pub async fn estimate_perform<Env>(self, env: &Env) -> Result<Option<u64>, DialogArtifactsError>
+    pub async fn estimate_perform<Env>(self, env: &Env) -> Result<Option<u64>, DialogCorpusError>
     where
-        Env: Provider<Get> + Provider<ArchiveLoad> + Provider<BlobLoad> + Holds + ConditionalSync,
+        Env: Provider<Get>
+            + Provider<ArchiveLoad>
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<BlobLoad>
+            + Holds
+            + ConditionalSync,
     {
         self.estimate(erased(env)).await
     }
 
-    /// An advisory upper-bound estimate of how many artifacts this selector's
+    /// An advisory upper-bound estimate of how many facts this selector's
     /// range spans, read from the range's edge paths (see
-    /// [`ArtifactTreeExt::estimate`](dialog_artifacts::tree::ArtifactTreeExt::estimate)).
+    /// [`CorpusExt::estimate`](dialog_corpus::tree::CorpusExt::estimate)).
     ///
     /// A couple of blocks per level rather than a scan, for a planner
     /// comparing scan sizes.
@@ -218,9 +262,14 @@ impl Select<'_> {
     /// `Changes` overlay, whose in-memory edits are small relative to the tree
     /// and do not change the order-of-magnitude answer a strategy choice
     /// needs. Returns `None` for an empty tree.
-    pub async fn estimate<S>(self, store: S) -> Result<Option<u64>, DialogArtifactsError>
+    pub async fn estimate<S>(self, store: S) -> Result<Option<u64>, DialogCorpusError>
     where
         S: Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
             + Holds
             + ConditionalSend
@@ -241,12 +290,14 @@ impl Select<'_> {
     async fn execute_owned<'s, S>(
         self,
         store: S,
-    ) -> Result<
-        impl Stream<Item = Result<Artifact, DialogArtifactsError>> + 's,
-        DialogSearchTreeError,
-    >
+    ) -> Result<impl Stream<Item = Result<Fact, DialogCorpusError>> + 's, DialogSearchTreeError>
     where
         S: Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
             + Holds
             + ConditionalSend
@@ -255,15 +306,15 @@ impl Select<'_> {
             + 's,
     {
         let tree = self.probed_tree(&store).await?;
-        Ok(tree.scan_owned(store, self.source.spill_cache(), self.selector))
+        Ok(tree.scan_owned(store, self.view.spill_cache(), self.selector))
     }
 }
 
 /// A [`Select`] whose streams materialize every row into an owned
-/// [`Artifact`] — the explicit opt-in produced by [`Select::to_owned`].
+/// [`Fact`] — the explicit opt-in produced by [`Select::to_owned`].
 ///
 /// The query pipeline itself traffics in borrowed-access views
-/// (`ArtifactStream` yields [`ArtifactView`]s; the k-way merge and the
+/// (`FactStream` yields [`FactView`]s; the k-way merge and the
 /// `Changes` overlay operate on them, and the engine materializes only the
 /// rows its filters admit). This form is for CONSUMERS that want every row
 /// owned — a collect-everything read, an export — where materializing from
@@ -281,9 +332,18 @@ impl SelectOwned<'_> {
     pub async fn perform<Env>(
         self,
         env: &Env,
-    ) -> Result<impl Stream<Item = Result<Artifact, DialogArtifactsError>>, DialogSearchTreeError>
+    ) -> Result<impl Stream<Item = Result<Fact, DialogCorpusError>>, DialogSearchTreeError>
     where
-        Env: Provider<Get> + Provider<ArchiveLoad> + Provider<BlobLoad> + Holds + ConditionalSync,
+        Env: Provider<Get>
+            + Provider<ArchiveLoad>
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<BlobLoad>
+            + Holds
+            + ConditionalSync,
     {
         self.execute(erased(env)).await
     }
@@ -293,12 +353,14 @@ impl SelectOwned<'_> {
     pub async fn execute<'s, S>(
         self,
         store: S,
-    ) -> Result<
-        impl Stream<Item = Result<Artifact, DialogArtifactsError>> + 's,
-        DialogSearchTreeError,
-    >
+    ) -> Result<impl Stream<Item = Result<Fact, DialogCorpusError>> + 's, DialogSearchTreeError>
     where
         S: Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
             + Holds
             + ConditionalSend

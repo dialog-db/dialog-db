@@ -7,7 +7,7 @@
 //! one split:
 //!
 //! - A **scan** selects by key range over the mutable head of the
-//!   indexes ([`Select`](dialog_artifacts::Select)). The head moves,
+//!   indexes ([`Select`](dialog_corpus::Select)). The head moves,
 //!   so its result set can be invalidated — hence demand covers,
 //!   recorded per scanned range. A range can also be enumerated, so
 //!   an unconstrained scan is expensive but defined.
@@ -16,7 +16,7 @@
 //!   [`anywhere`] the scope reads). A hash
 //!   resolves to the same bytes forever, so a resolver's rows are a pure
 //!   function of its bound inputs — no fact demand exists to record
-//!   (see `dialog_artifacts::inspect` for the full soundness
+//!   (see `dialog_corpus::inspect` for the full soundness
 //!   argument); what changes over time is *reachability* — which
 //!   root the branch head names — and the revision-anchored
 //!   subscription (`Demand::head`) tracks exactly that. A content
@@ -52,14 +52,14 @@ use std::fmt::{self, Display};
 use std::sync::LazyLock;
 
 use base58::{FromBase58, ToBase58};
-use dialog_artifacts::{DialogArtifactsError, inspect};
 use dialog_capability::Subject;
 use dialog_common::{Blake3Hash, Buffer};
+use dialog_corpus::{DialogCorpusError, inspect};
 use dialog_effects::archive::prelude::ArchiveScope;
 use dialog_effects::{archive, blob};
 use serde::{Deserialize, Serialize};
 
-use crate::artifact::Type as ValueType;
+use crate::corpus::Type as ValueType;
 use crate::error::EvaluationError;
 use crate::formula::cell::Cells;
 use crate::query::Application;
@@ -98,9 +98,9 @@ pub fn anywhere() -> ArchiveScope {
 fn verified(
     reference: &inspect::NodeReference,
     block: Buffer,
-) -> Result<Buffer, DialogArtifactsError> {
+) -> Result<Buffer, DialogCorpusError> {
     if block.blake3_hash() != &Blake3Hash::from(*reference) {
-        return Err(DialogArtifactsError::InvalidValue(format!(
+        return Err(DialogCorpusError::InvalidValue(format!(
             "block {} does not hash to its reference",
             reference.to_base58()
         )));
@@ -887,11 +887,11 @@ impl ResolverQuery {
                     ResolverQuery::TreeValue(_) => blob::Load::new(anywhere(), reference)
                         .perform(env)
                         .await
-                        .map_err(DialogArtifactsError::from)?,
+                        .map_err(DialogCorpusError::from)?,
                     _ => archive::Load::new(anywhere().index(), reference)
                         .perform(env)
                         .await
-                        .map_err(DialogArtifactsError::from)?,
+                        .map_err(DialogCorpusError::from)?,
                 };
                 let Some(block) = loaded else {
                     continue;
@@ -1125,7 +1125,7 @@ mod tests {
         assert_eq!(verified(&reference, asked.clone()).unwrap(), asked);
         assert!(matches!(
             verified(&reference, other),
-            Err(DialogArtifactsError::InvalidValue(_))
+            Err(DialogCorpusError::InvalidValue(_))
         ));
     }
 }

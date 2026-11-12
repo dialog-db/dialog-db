@@ -25,7 +25,7 @@ use crate::helpers::test_repo;
 use crate::repository::branch::session::{QueryEnv, QueryLayer};
 use crate::repository::source::Source;
 use anyhow::{Result, anyhow};
-use dialog_artifacts::{Entity, Pick, Relation as ArtifactsRelation, Value, make_reference};
+use dialog_corpus::{Entity, Pick, Relation as CorpusRelation, Value, make_reference};
 use dialog_effects::authority::Identify;
 use dialog_peer::helpers::test_session_with_peer;
 use dialog_query::attribute::Relation;
@@ -136,7 +136,7 @@ fn select_of(policy: &Pick) -> &'static str {
     }
 }
 
-fn salary_attribute() -> ArtifactsRelation {
+fn salary_attribute() -> CorpusRelation {
     "org/salary".parse().expect("an attribute")
 }
 
@@ -353,7 +353,7 @@ async fn replay(seed: u64, steps: usize) -> Result<()> {
             }
             history.push(format!("{} pulls from {}", names[at], names[from]));
             branches[at]
-                .pull()
+                .pull(crate::Download::MinimalRanges)
                 .from(&branches[from])
                 .perform(&operator)
                 .await?;
@@ -370,7 +370,7 @@ async fn replay(seed: u64, steps: usize) -> Result<()> {
             for from in 0..branches.len() {
                 if at != from && branches[from].revision().is_some() {
                     changed |= branches[at]
-                        .pull()
+                        .pull(crate::Download::MinimalRanges)
                         .from(&branches[from])
                         .perform(&operator)
                         .await?

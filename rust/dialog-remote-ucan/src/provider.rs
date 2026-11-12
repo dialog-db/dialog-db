@@ -56,8 +56,7 @@ where
         .await
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<ForkInvocation<UcanSite, Get>> for UcanSite {
     async fn execute(
         &self,
@@ -84,8 +83,7 @@ impl Provider<ForkInvocation<UcanSite, Get>> for UcanSite {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<ForkInvocation<UcanSite, Put>> for UcanSite {
     async fn execute(&self, invocation: ForkInvocation<UcanSite, Put>) -> Result<(), ArchiveError> {
         if invocation.address.exchange() == Exchange::Permit {
@@ -110,8 +108,7 @@ impl Provider<ForkInvocation<UcanSite, Put>> for UcanSite {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<ForkInvocation<UcanSite, Resolve>> for UcanSite {
     async fn execute(
         &self,
@@ -139,8 +136,7 @@ impl Provider<ForkInvocation<UcanSite, Resolve>> for UcanSite {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<ForkInvocation<UcanSite, Publish>> for UcanSite {
     async fn execute(
         &self,
@@ -172,8 +168,7 @@ impl Provider<ForkInvocation<UcanSite, Publish>> for UcanSite {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<ForkInvocation<UcanSite, Retract>> for UcanSite {
     async fn execute(
         &self,
@@ -200,8 +195,7 @@ impl Provider<ForkInvocation<UcanSite, Retract>> for UcanSite {
 
 /// A blob read answers with the bytes, the range the invocation asked
 /// for when it asked for one, as chunks off the wire.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<ForkInvocation<UcanSite, Read>> for UcanSite {
     async fn execute(
         &self,
@@ -233,8 +227,7 @@ impl Provider<ForkInvocation<UcanSite, Read>> for UcanSite {
 /// A blob import is written into a sink that sends the bytes when it
 /// is finished: the digest is bound in the invocation, so the bytes are
 /// checked against it before anything is sent.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<ForkInvocation<UcanSite, Import>> for UcanSite {
     async fn execute(
         &self,
@@ -304,8 +297,7 @@ impl BlobSink for Upload {
 /// every watch of a cell in the same space: a service that names no
 /// socket cannot follow a cell, and a watch there is refused, so the cell
 /// is read by resolving it again.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<ForkInvocation<UcanSite, Watch>> for UcanSite {
     async fn execute(
         &self,

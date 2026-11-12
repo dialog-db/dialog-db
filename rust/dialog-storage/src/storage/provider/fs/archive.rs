@@ -24,8 +24,7 @@ impl From<FileSystemError> for ArchiveError {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<Get> for FileSystem {
     async fn execute(&self, effect: Capability<Get>) -> Result<Option<Vec<u8>>, ArchiveError> {
         let catalog = effect.catalog();
@@ -40,8 +39,7 @@ impl Provider<Get> for FileSystem {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<Put> for FileSystem {
     async fn execute(&self, effect: Capability<Put>) -> Result<(), ArchiveError> {
         let catalog = effect.catalog();
@@ -62,8 +60,7 @@ impl Provider<Put> for FileSystem {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<Import> for FileSystem {
     async fn execute(&self, effect: Capability<Import>) -> Result<(), ArchiveError> {
         let catalog = effect.catalog();

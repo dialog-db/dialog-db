@@ -49,7 +49,8 @@
 //! key …" at the causing edit. Cost is O(n) in entries plus one in-memory
 //! rebuild; no reference store, no second persist.
 
-use crate::reads::*;
+use crate::nodes::{Preload, Read};
+use dialog_capability::Provider;
 use dialog_common::{Blake3Hash, ConditionalSync};
 use rkyv::{
     Deserialize, Serialize,
@@ -106,7 +107,10 @@ where
         storage: &Env,
     ) -> Result<Vec<String>, DialogSearchTreeError>
     where
-        Env: Provider<Load> + Holds + ConditionalSync + Clone,
+        Env: Provider<Read<PersistentNode<K, V>>>
+            + Provider<Preload<PersistentNode<K, V>>>
+            + ConditionalSync
+            + Clone,
     {
         // An unpersisted empty tree has no stored form to validate; it is
         // trivially canonical.
@@ -230,7 +234,7 @@ mod tests {
     use anyhow::Result;
     use dialog_common::Blake3Hash;
 
-    use crate::{Buffer, Delta, HitchhikerTree, Manifest, PersistentTree, TransientTree};
+    use crate::{Delta, HitchhikerTree, Manifest, PersistentTree, TransientTree};
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
@@ -238,9 +242,12 @@ mod tests {
     type Store = Blocks;
     type Tree = PersistentTree<[u8; 4], Vec<u8>>;
 
-    async fn settle(delta: &mut Delta<Blake3Hash, Buffer>, storage: &mut Store) -> Result<()> {
-        for (_, buffer) in delta.flush() {
-            storage.store(buffer);
+    async fn settle(
+        delta: &mut Delta<Blake3Hash, crate::PersistentNode<[u8; 4], Vec<u8>>>,
+        storage: &mut Store,
+    ) -> Result<()> {
+        for (_, node) in delta.flush() {
+            storage.store(node.buffer().clone());
         }
         Ok(())
     }
@@ -260,7 +267,7 @@ mod tests {
                 .edit()
                 .insert(key, vec![i as u8; (i % 60) as usize + 1], &storage)
                 .await?
-                .persist(&mut delta, &storage)?;
+                .persist(&mut delta)?;
             settle(&mut delta, &mut storage).await?;
 
             if i % 50 == 49 {
@@ -320,7 +327,7 @@ mod tests {
                 .edit()
                 .insert(key, vec![i as u8], &storage)
                 .await?
-                .persist(&mut delta, &storage)?;
+                .persist(&mut delta)?;
             settle(&mut delta, &mut storage).await?;
         }
         let mut buffered = HitchhikerTree::open(&tree);
@@ -329,7 +336,7 @@ mod tests {
             buffered = buffered.insert(key, vec![i as u8], &storage).await?;
         }
         let mut delta = Delta::zero();
-        let root = buffered.persist(&mut delta, &storage)?;
+        let root = buffered.persist(&mut delta)?;
         settle(&mut delta, &mut storage).await?;
         let tree = Tree::at(crate::helpers::test_catalog(), root);
 
@@ -365,7 +372,7 @@ mod tests {
                 crate::helpers::test_catalog(),
                 manifest,
             )
-            .persist(&mut delta, &storage)?;
+            .persist(&mut delta)?;
             settle(&mut delta, &mut storage).await?;
             assert!(emptied.stored_root().is_some());
             assert_eq!(

@@ -86,7 +86,7 @@ impl<S: Signature> Revocation<S> {
 
 /// Why an invocation is not a well-formed revocation.
 ///
-/// Every variant says the artifact is malformed, never that its issuer was
+/// Every variant says the fact is malformed, never that its issuer was
 /// unauthorized: authority is judged separately, and only once the shape is
 /// known to hold.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -102,7 +102,7 @@ pub enum MalformedRevocation {
 
     /// The nonce is not empty. Revocation is idempotent, so the schema
     /// pins `nnc` to `""`; a nonce would make two revocations of the same
-    /// delegation distinct artifacts.
+    /// delegation distinct facts.
     #[error("a revocation's nonce must be empty")]
     NonEmptyNonce,
 
@@ -243,7 +243,7 @@ mod tests {
 
         assert_eq!(revocation.revoked(), &target);
         assert_eq!(revocation.path(), &[target]);
-        // The revoker is the subject: this artifact is about their
+        // The revoker is the subject: this fact is about their
         // withdrawal, not about the capability being withdrawn.
         assert_eq!(revocation.revoker(), &alice.did());
         assert_eq!(revocation.invocation().subject(), &alice.did());

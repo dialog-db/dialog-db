@@ -18,8 +18,7 @@ use dialog_effects::memory::{
 use crate::fs::Fs;
 use crate::fs::simulation::{self, Traffic};
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<ForkInvocation<Fs, Resolve>> for Fs {
     async fn execute(
         &self,
@@ -40,8 +39,7 @@ impl Provider<ForkInvocation<Fs, Resolve>> for Fs {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<ForkInvocation<Fs, Publish>> for Fs {
     async fn execute(&self, input: ForkInvocation<Fs, Publish>) -> Result<Version, MemoryError> {
         let flight = simulation::begin(Traffic::MemoryPublish).await;
@@ -56,8 +54,7 @@ impl Provider<ForkInvocation<Fs, Publish>> for Fs {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<ForkInvocation<Fs, Retract>> for Fs {
     async fn execute(&self, input: ForkInvocation<Fs, Retract>) -> Result<(), MemoryError> {
         let flight = simulation::begin(Traffic::MemoryRetract).await;
@@ -73,8 +70,7 @@ impl Provider<ForkInvocation<Fs, Retract>> for Fs {
 
 /// A directory cannot follow a cell as it changes: a watch is refused, and the
 /// cell is read by resolving it again instead.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl Provider<ForkInvocation<Fs, Watch>> for Fs {
     async fn execute(&self, _: ForkInvocation<Fs, Watch>) -> Result<Editions, MemoryError> {
         Err(Rejection::Unsupported {

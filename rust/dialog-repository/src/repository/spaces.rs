@@ -6,7 +6,7 @@
 //! environment provides `space::Load` and `space::Create` over these,
 //! falling back to its base directory for a name it has no record of.
 
-use dialog_artifacts::{Changes, Entity};
+use dialog_corpus::{Changes, Entity};
 use dialog_effects::storage::Location;
 use dialog_query::{EvaluationError, Output as _, Query, Statement as _, Term};
 use dialog_varsig::Did;

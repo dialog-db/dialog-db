@@ -21,11 +21,12 @@
 //! wrote: the storage rewrite, then [`Branch::upgrade_rules`], which
 //! re-installs rules under the identities this release gives them.
 
-use dialog_artifacts::tree::rekey::rekey_tree;
-use dialog_artifacts::{ArchiveDelta, DialogArtifactsError, NUMBER_BAND};
 use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::{ConditionalSync, Holds};
+use dialog_corpus::tree::CorpusNode;
+use dialog_corpus::tree::rekey::rekey_tree;
+use dialog_corpus::{ArchiveDelta, DialogCorpusError, NUMBER_BAND};
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify};
@@ -35,6 +36,7 @@ use dialog_effects::blob::Read as BlobRead;
 use dialog_effects::blob::Size as BlobSize;
 use dialog_effects::memory::{Publish, Resolve};
 use dialog_search_tree::Manifest;
+use dialog_search_tree::nodes;
 use futures_util::stream;
 
 use crate::repository::archive::persist;
@@ -71,6 +73,11 @@ impl Branch {
             + Provider<Put>
             + Provider<Resolve>
             + Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
             + Provider<Fork<RemoteSite, Resolve>>
             + dialog_common::Holds
@@ -88,7 +95,7 @@ impl Branch {
         let manifest = tree
             .manifest(&store)
             .await
-            .map_err(DialogArtifactsError::from)?;
+            .map_err(DialogCorpusError::from)?;
         Ok(Some(manifest.value_encoding))
     }
 
@@ -101,6 +108,11 @@ impl Branch {
             + Provider<Put>
             + Provider<Resolve>
             + Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
             + Provider<Fork<RemoteSite, Resolve>>
             + dialog_common::Holds
@@ -157,11 +169,18 @@ impl RekeyStorage<'_> {
             + Provider<Get>
             + Provider<Put>
             + Provider<Import>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
             + Provider<Resolve>
             + Provider<Publish>
             + Provider<Identify>
             + Provider<Attest>
             + Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
             + Provider<Fork<RemoteSite, Resolve>>
             + dialog_common::Holds
@@ -178,7 +197,7 @@ impl RekeyStorage<'_> {
         let manifest = tree
             .manifest(&store)
             .await
-            .map_err(DialogArtifactsError::from)?;
+            .map_err(DialogCorpusError::from)?;
         if manifest.value_encoding == self.value_encoding {
             return Ok(None);
         }
@@ -219,14 +238,21 @@ impl Migrate<'_> {
             + Provider<BlobRead>
             + Provider<Put>
             + Provider<Import>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
             + Provider<Resolve>
             + Provider<Publish>
             + Provider<Identify>
             + Provider<Attest>
             + Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
-            + Provider<dialog_artifacts::Preload>
-            + Provider<dialog_artifacts::Speculation>
+            + Provider<dialog_corpus::Preload>
+            + Provider<dialog_corpus::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + Holds
             + ConditionalSync
@@ -258,15 +284,22 @@ pub(crate) async fn aligned<Env>(
     tree: Index,
     store: &dyn TreeEnv,
     env: &Env,
-) -> Result<Index, DialogArtifactsError>
+) -> Result<Index, DialogCorpusError>
 where
     Env: Provider<Get>
         + Provider<Put>
         + Provider<Import>
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
         + Provider<BlobImport>
         + Provider<BlobRead>
         + Provider<Resolve>
         + Provider<ArchiveLoad>
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
         + Provider<BlobLoad>
         + Provider<Fork<RemoteSite, Resolve>>
         + dialog_common::Holds
@@ -300,9 +333,7 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use anyhow::Result;
-    use dialog_artifacts::{
-        ArtifactSelector, Entity, NUMBER_BAND, Pick, Relation as ArtifactsRelation, Value,
-    };
+    use dialog_corpus::{Entity, NUMBER_BAND, Pick, Relation as CorpusRelation, Selector, Value};
     use dialog_peer::helpers::test_session_with_peer;
     use dialog_query::attribute::Relation;
     use dialog_query::{AttributeStatement, Cardinality};
@@ -314,7 +345,7 @@ mod tests {
 
     type Operator = dialog_peer::Peer<VolatileSpace, dialog_peer::Session>;
 
-    fn size() -> ArtifactsRelation {
+    fn size() -> CorpusRelation {
         "item/size".parse().expect("a relation")
     }
 
@@ -351,7 +382,7 @@ mod tests {
     async fn sizes(branch: &Branch, operator: &Operator) -> Result<Vec<(Entity, Value)>> {
         let rows = branch
             .claims()
-            .select(ArtifactSelector::new().the(size()))
+            .select(Selector::new().the(size()))
             .perform(operator)
             .await?
             .try_collect::<Vec<_>>()
@@ -494,7 +525,10 @@ mod tests {
         // `feature` tracks it and has nothing of its own: a first contact.
         let feature = repo.branch("feature").open().perform(&operator).await?;
         feature.set_upstream(&main).perform(&operator).await?;
-        feature.pull().perform(&operator).await?;
+        feature
+            .pull(crate::Download::MinimalRanges)
+            .perform(&operator)
+            .await?;
         feature.refresh(&operator).await?;
         assert_eq!(
             feature.storage_encoding(&operator).await?,
@@ -534,7 +568,10 @@ mod tests {
             vec![statement(&own, Value::Float(0.5), Pick::All)],
         )
         .await?;
-        feature.pull().perform(&operator).await?;
+        feature
+            .pull(crate::Download::MinimalRanges)
+            .perform(&operator)
+            .await?;
         feature.refresh(&operator).await?;
         assert_eq!(
             feature.storage_encoding(&operator).await?,

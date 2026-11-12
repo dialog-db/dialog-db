@@ -1,10 +1,9 @@
-use dialog_artifacts::history::Version;
-use dialog_artifacts::{
-    Datum, Key as ArtifactKey, ShipmentRef, State, shipment_ref, shipment_refs,
-};
 use dialog_capability::{Fork, Provider, Subject};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::{Buffer, ConditionalSync, Holds};
+use dialog_corpus::history::Version;
+use dialog_corpus::tree::CorpusNode;
+use dialog_corpus::{Datum, Key as CorpusKey, ShipmentRef, State, shipment_ref, shipment_refs};
 use dialog_effects::MethodExt as _;
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::prelude::ArchiveExt as _;
@@ -14,6 +13,7 @@ use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::prelude::{ArchiveBlobExt as _, ReadBlobExt as _, WriteBlobExt as _};
 use dialog_effects::blob::{BlobError, BlobReader, Import as BlobImport, Read as BlobRead};
 use dialog_effects::memory::{Current, Publish, Resolve};
+use dialog_search_tree::nodes;
 use dialog_search_tree::{
     Accessor, MissingBlocks, MissingPolicy, NodeBody, NoveltyOp, PersistentNode, Reading,
     TreeDifference, into_owned,
@@ -316,7 +316,7 @@ async fn holds<Env: ResolveEnv>(
             let history = branch.history(env);
             let context =
                 full_context(head, &branch.contexts(), &catalog, &store, &history).await?;
-            Ok::<_, dialog_artifacts::DialogArtifactsError>(context.observes(version))
+            Ok::<_, dialog_corpus::DialogCorpusError>(context.observes(version))
         };
         answer.await.map_err(|error| match &serving {
             Some(remote) => PushError::Unreachable {
@@ -454,7 +454,7 @@ where
                 if let Some(fetched) = upstream.revision() {
                     fetched
                         .verify()
-                        .map_err(dialog_artifacts::DialogArtifactsError::from)?;
+                        .map_err(dialog_corpus::DialogCorpusError::from)?;
                     refuse_rival(branch, &revision, Some(&fetched))?;
                 }
 
@@ -783,7 +783,7 @@ where
 
 /// The direct children of a tree node, by hash. A segment has none.
 fn node_children(
-    node: &PersistentNode<ArtifactKey, State<Datum>>,
+    node: &PersistentNode<CorpusKey, State<Datum>>,
 ) -> Result<Vec<NodeHash>, PushError> {
     match node.body() {
         NodeBody::Index(index) => {
@@ -889,7 +889,7 @@ const SHIPMENT_CONCURRENCY: usize = 16;
 /// attribution, otherwise `ensure_*` adjudicates with one probe.
 #[allow(clippy::too_many_arguments)]
 async fn ship<Env>(
-    shipment: Result<ShipmentRef, dialog_artifacts::DialogArtifactsError>,
+    shipment: Result<ShipmentRef, dialog_corpus::DialogCorpusError>,
     branch: &Branch,
     remote: &ConnectedReplica,
     sources: &[ConnectedReplica],
@@ -903,6 +903,11 @@ where
         + Provider<BlobRead>
         + Provider<Fork<RemoteSite, Get>>
         + Provider<ArchiveLoad>
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
         + Provider<BlobLoad>
         + Provider<Fork<RemoteSite, Put>>
         + Provider<Fork<RemoteSite, BlobImport>>
@@ -1227,11 +1232,16 @@ async fn node_from_anywhere<Env>(
     branch: &Branch,
     sources: &[ConnectedReplica],
     env: &Env,
-) -> Result<Option<PersistentNode<ArtifactKey, State<Datum>>>, PushError>
+) -> Result<Option<PersistentNode<CorpusKey, State<Datum>>>, PushError>
 where
     Env: Provider<Get>
         + Provider<Put>
         + Provider<ArchiveLoad>
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
         + Provider<Fork<RemoteSite, Get>>
         + Holds
         + ConditionalSync
@@ -1394,6 +1404,11 @@ where
         + Provider<BlobRead>
         + Provider<Fork<RemoteSite, Get>>
         + Provider<ArchiveLoad>
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
         + Provider<BlobLoad>
         + Provider<Fork<RemoteSite, Put>>
         + Provider<Fork<RemoteSite, BlobRead>>
@@ -1429,18 +1444,18 @@ where
                 // buffered in an index) may name blob bytes and spilled
                 // value blocks the target also lacks; ship those before
                 // the node lands, mirroring the top-level shipment loop.
-                let mut entries: Vec<(ArtifactKey, State<Datum>)> = Vec::new();
+                let mut entries: Vec<(CorpusKey, State<Datum>)> = Vec::new();
                 match node.body() {
                     NodeBody::Segment(segment) => {
-                        segment.for_each_entry::<ArtifactKey, _>(|key, value| {
-                            entries.push((ArtifactKey::from(key.to_vec()), into_owned(value)?));
+                        segment.for_each_entry::<CorpusKey, _>(|key, value| {
+                            entries.push((CorpusKey::from(key.to_vec()), into_owned(value)?));
                             Ok(())
                         })?;
                     }
                     NodeBody::Index(index) => {
-                        for entry in index.all_novelty::<ArtifactKey>()? {
+                        for entry in index.all_novelty::<CorpusKey>()? {
                             if let NoveltyOp::Assert(value) = entry.op {
-                                entries.push((ArtifactKey::from(entry.key), value));
+                                entries.push((CorpusKey::from(entry.key), value));
                             }
                         }
                     }
@@ -1510,7 +1525,7 @@ mod tests {
     use anyhow::Result;
     use dialog_peer::helpers::test_session_with_peer;
 
-    use dialog_artifacts::{Artifact, Instruction, Value};
+    use dialog_corpus::{Fact, Instruction, Value};
     use futures_util::{StreamExt as _, stream};
 
     #[dialog_common::test]
@@ -1523,7 +1538,7 @@ mod tests {
         let feature = repo.branch("feature").open().perform(&operator).await?;
         feature.set_upstream(&main).perform(&operator).await?;
 
-        let artifact = Artifact {
+        let fact = Fact {
             the: "user/name".parse()?,
             of: "user:123".parse()?,
             is: Value::String("Alice".to_string()),
@@ -1531,8 +1546,8 @@ mod tests {
         };
         let _hash = feature
             .commit(stream::iter(vec![Instruction::Assert(
-                artifact,
-                dialog_artifacts::Pick::All,
+                fact,
+                dialog_corpus::Pick::All,
             )]))
             .perform(&operator)
             .await?;
@@ -1571,22 +1586,22 @@ mod tests {
         feature
             .commit(stream::iter(vec![
                 Instruction::Assert(
-                    Artifact {
+                    Fact {
                         the: "doc/body".parse()?,
                         of: "doc:a".parse()?,
                         is: value.clone(),
                         cause: None,
                     },
-                    dialog_artifacts::Pick::All,
+                    dialog_corpus::Pick::All,
                 ),
                 Instruction::Assert(
-                    Artifact {
+                    Fact {
                         the: "doc/body".parse()?,
                         of: "doc:b".parse()?,
                         is: value.clone(),
                         cause: None,
                     },
-                    dialog_artifacts::Pick::All,
+                    dialog_corpus::Pick::All,
                 ),
             ]))
             .perform(&operator)
@@ -1600,7 +1615,7 @@ mod tests {
         let main_reloaded = repo.branch("main").load().perform(&operator).await?;
         let results: Vec<_> = main_reloaded
             .claims()
-            .select(dialog_artifacts::ArtifactSelector::new().the("doc/body".parse()?))
+            .select(dialog_corpus::Selector::new().the("doc/body".parse()?))
             .to_owned()
             .perform(&operator)
             .await?
@@ -1643,13 +1658,13 @@ mod tests {
 
         feature
             .commit(stream::iter(vec![Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "user/name".parse()?,
                     of: "user:123".parse()?,
                     is: Value::String("Alice".to_string()),
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             )]))
             .perform(&operator)
             .await?;
@@ -1703,13 +1718,13 @@ mod tests {
         feature_a.set_upstream(&main).perform(&operator).await?;
         feature_a
             .commit(stream::iter(vec![Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "user/name".parse()?,
                     of: "user:1".parse()?,
                     is: Value::String("Alice".to_string()),
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             )]))
             .perform(&operator)
             .await?;
@@ -1770,13 +1785,13 @@ mod tests {
 
         feature
             .commit(stream::iter(vec![Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "user/name".parse()?,
                     of: "user:123".parse()?,
                     is: Value::String("Alice".to_string()),
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             )]))
             .perform(&operator)
             .await?;
@@ -1830,13 +1845,13 @@ mod tests {
         let occupied = repo.branch("occupied").open().perform(&operator).await?;
         occupied
             .commit(stream::iter(vec![Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "user/name".parse()?,
                     of: "user:theirs".parse()?,
                     is: Value::String("Existing".to_string()),
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             )]))
             .perform(&operator)
             .await?;
@@ -1844,13 +1859,13 @@ mod tests {
         let feature = repo.branch("feature").open().perform(&operator).await?;
         feature
             .commit(stream::iter(vec![Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "user/name".parse()?,
                     of: "user:ours".parse()?,
                     is: Value::String("New".to_string()),
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             )]))
             .perform(&operator)
             .await?;
@@ -1872,13 +1887,13 @@ mod tests {
         let main = repo.branch("main").open().perform(&operator).await?;
         let _hash = main
             .commit(stream::iter(vec![Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "user/name".parse()?,
                     of: "user:main".parse()?,
                     is: Value::String("Main data".to_string()),
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             )]))
             .perform(&operator)
             .await?;
@@ -1888,13 +1903,13 @@ mod tests {
 
         let _hash = feature
             .commit(stream::iter(vec![Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "user/email".parse()?,
                     of: "user:feature".parse()?,
                     is: Value::String("feature@example.com".to_string()),
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             )]))
             .perform(&operator)
             .await?;
@@ -1965,13 +1980,13 @@ mod tests {
         }
         feature
             .commit(stream::iter(vec![Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "user/name".parse()?,
                     of: "user:1".parse()?,
                     is: Value::String("Alice".into()),
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             )]))
             .perform(&operator)
             .await?;
@@ -2013,13 +2028,13 @@ mod tests {
         for value in ["Alice", "Bob"] {
             feature
                 .commit(stream::iter(vec![Instruction::Assert(
-                    Artifact {
+                    Fact {
                         the: "user/name".parse()?,
                         of: format!("user:{value}").parse()?,
                         is: Value::String(value.into()),
                         cause: None,
                     },
-                    dialog_artifacts::Pick::All,
+                    dialog_corpus::Pick::All,
                 )]))
                 .perform(&operator)
                 .await?;
@@ -2038,13 +2053,13 @@ mod tests {
 
     fn post(of: &str) -> Instruction {
         Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "post/title".parse().expect("attribute parses"),
                 of: of.parse().expect("entity parses"),
                 is: Value::String(of.to_string()),
                 cause: None,
             },
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         )
     }
 
@@ -2101,7 +2116,10 @@ mod tests {
             ),
             "the push over the rival head is refused: {refused:?}"
         );
-        let refused = feature.pull().perform(&operator).await;
+        let refused = feature
+            .pull(crate::Download::MinimalRanges)
+            .perform(&operator)
+            .await;
         assert!(
             matches!(
                 &refused,

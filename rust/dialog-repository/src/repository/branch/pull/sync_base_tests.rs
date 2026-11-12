@@ -21,9 +21,9 @@ use std::collections::{BTreeSet, HashMap};
 use std::env;
 
 use anyhow::Result;
-use dialog_artifacts::history::{Edition, Origin, Version, context_of};
-use dialog_artifacts::{Artifact, ArtifactSelector, Instruction, Pick, Value};
 use dialog_capability::Subject;
+use dialog_corpus::history::{Edition, Origin, Version, context_of};
+use dialog_corpus::{Fact, Instruction, Pick, Selector, Value};
 use dialog_effects::authority::{Identify, OperatorExt as _};
 use dialog_peer::helpers::{test_session_with_peer, unique_name};
 use futures_util::{StreamExt as _, stream};
@@ -31,8 +31,8 @@ use futures_util::{StreamExt as _, stream};
 use crate::repository::branch::upstream::Bases;
 use crate::{HeldCaches, RepositoryExt as _, Revision, TreeReference};
 
-fn title(of: &str) -> Artifact {
-    Artifact {
+fn title(of: &str) -> Fact {
+    Fact {
         the: "post/title".parse().expect("attribute parses"),
         of: of.parse().expect("entity parses"),
         is: Value::String("body".to_string()),
@@ -46,13 +46,13 @@ fn retract_one(of: &str) -> Instruction {
 
 fn assert_one(of: &str) -> Instruction {
     Instruction::Assert(
-        Artifact {
+        Fact {
             the: "post/title".parse().expect("attribute parses"),
             of: of.parse().expect("entity parses"),
             is: Value::String("body".to_string()),
             cause: None,
         },
-        dialog_artifacts::Pick::All,
+        dialog_corpus::Pick::All,
     )
 }
 
@@ -148,7 +148,7 @@ macro_rules! titles {
     ($branch:expr, $env:expr) => {{
         let rows = $branch
             .claims()
-            .select(ArtifactSelector::new().the("post/title".parse()?))
+            .select(Selector::new().the("post/title".parse()?))
             .to_owned()
             .perform($env)
             .await?
@@ -170,7 +170,7 @@ macro_rules! claims {
         for the in ["post/title", "post/state"] {
             let rows = $branch
                 .claims()
-                .select(ArtifactSelector::new().the(the.parse()?))
+                .select(Selector::new().the(the.parse()?))
                 .to_owned()
                 .perform($env)
                 .await?
@@ -259,10 +259,19 @@ async fn rival_merges(greater_keeps: bool) -> Result<()> {
 
     commit!(c, ce, "post:a");
     commit!(k, ke, "post:b");
-    b.pull().from(c).perform(be).await?;
-    b.pull().from(k).perform(be).await?;
+    b.pull(crate::Download::MinimalRanges)
+        .from(c)
+        .perform(be)
+        .await?;
+    b.pull(crate::Download::MinimalRanges)
+        .from(k)
+        .perform(be)
+        .await?;
     let builder_merge = b.revision().expect("the builder's merge");
-    k.pull().from(c).perform(ke).await?;
+    k.pull(crate::Download::MinimalRanges)
+        .from(c)
+        .perform(ke)
+        .await?;
     let keeper_merge = k.revision().expect("the keeper's merge");
     assert_eq!(
         builder_merge.edition, keeper_merge.edition,
@@ -271,7 +280,10 @@ async fn rival_merges(greater_keeps: bool) -> Result<()> {
     commit!(c, ce, "post:a2");
 
     // The keeper meets the builder's rival.
-    k.pull().from(b).perform(ke).await?;
+    k.pull(crate::Download::MinimalRanges)
+        .from(b)
+        .perform(ke)
+        .await?;
     let settled = k.revision().expect("the keeper's head");
     if greater_keeps {
         assert_eq!(settled, keeper_merge, "the greater rival keeps its head");
@@ -283,23 +295,30 @@ async fn rival_merges(greater_keeps: bool) -> Result<()> {
     }
 
     // The builder builds on its rival before it meets the other.
-    b.pull().from(c).perform(be).await?;
+    b.pull(crate::Download::MinimalRanges)
+        .from(c)
+        .perform(be)
+        .await?;
     // The keeper pulls the builder's line again.
-    k.pull().from(b).perform(ke).await?;
+    k.pull(crate::Download::MinimalRanges)
+        .from(b)
+        .perform(ke)
+        .await?;
 
     assert_eq!(walkable!(k, ke), Ok(()), "the keeper's history is whole");
     let expected: BTreeSet<String> = ["post:a", "post:b", "post:a2"]
         .iter()
-        .map(|of| {
-            of.parse::<dialog_artifacts::Entity>()
-                .map(|of| of.to_string())
-        })
+        .map(|of| of.parse::<dialog_corpus::Entity>().map(|of| of.to_string()))
         .collect::<Result<_, _>>()?;
     assert_eq!(titles!(k, ke), expected, "the keeper holds every fact");
 
     // A writer that never held the builder's rival can vouch for every
     // revision the keeper's head brings in.
-    let prepared = c.pull().from(k).prepare(ce).await?;
+    let prepared = c
+        .pull(crate::Download::MinimalRanges)
+        .from(k)
+        .prepare(ce)
+        .await?;
     prepared.novelty(ce).await?;
     prepared.commit(ce).await?;
     assert_eq!(walkable!(c, ce), Ok(()), "the committer's history is whole");
@@ -342,14 +361,23 @@ async fn reset_behind_the_base(separate_caches: bool, record: Record) -> Result<
     commit!(w2, &two, "post:two");
     commit!(w1, &one, "post:one");
     let first = w1.revision().expect("w1's first commit");
-    w1.pull().from(&w2).perform(&one).await?;
+    w1.pull(crate::Download::MinimalRanges)
+        .from(&w2)
+        .perform(&one)
+        .await?;
     let merge = w1.revision().expect("w1's merge");
-    w2.pull().from(&w1).perform(&two).await?;
+    w2.pull(crate::Download::MinimalRanges)
+        .from(&w1)
+        .perform(&two)
+        .await?;
     assert_eq!(w2.revision().as_ref(), Some(&merge), "w2 fast-forwards");
 
     w1.reset(first).perform_unchecked(&one).await?;
     rewrite_bases!(w1, &one, record);
-    w1.pull().from(&w2).perform(&one).await?;
+    w1.pull(crate::Download::MinimalRanges)
+        .from(&w2)
+        .perform(&one)
+        .await?;
 
     assert_eq!(
         w1.revision().as_ref(),
@@ -359,10 +387,7 @@ async fn reset_behind_the_base(separate_caches: bool, record: Record) -> Result<
     assert_eq!(walkable!(w1, &one), Ok(()), "w1's history is whole");
     let expected: BTreeSet<String> = ["post:one", "post:two"]
         .iter()
-        .map(|of| {
-            of.parse::<dialog_artifacts::Entity>()
-                .map(|of| of.to_string())
-        })
+        .map(|of| of.parse::<dialog_corpus::Entity>().map(|of| of.to_string()))
         .collect::<Result<_, _>>()?;
     assert_eq!(titles!(w1, &one), expected, "w1 holds both facts");
     Ok(())
@@ -427,11 +452,17 @@ async fn no_base(record: Record) -> Result<()> {
     let w2 = line!(profile, name, &two, "two");
 
     commit!(w1, &one, "post:a");
-    w2.pull().from(&w1).perform(&two).await?;
+    w2.pull(crate::Download::MinimalRanges)
+        .from(&w1)
+        .perform(&two)
+        .await?;
     commit!(w2, &two, "post:b");
     let b = w2.revision().expect("B");
     commit!(w2, &two, "post:c");
-    w1.pull().from(&w2).perform(&one).await?;
+    w1.pull(crate::Download::MinimalRanges)
+        .from(&w2)
+        .perform(&one)
+        .await?;
     assert_eq!(w1.revision(), w2.revision(), "w1 fast-forwards to C");
     commit!(w2, &two, "post:d");
 
@@ -439,15 +470,15 @@ async fn no_base(record: Record) -> Result<()> {
     w1.reset(b).perform_unchecked(&one).await?;
     commit!(w1, &one, "post:e");
     rewrite_bases!(w1, &one, record);
-    w1.pull().from(&w2).perform(&one).await?;
+    w1.pull(crate::Download::MinimalRanges)
+        .from(&w2)
+        .perform(&one)
+        .await?;
 
     assert_eq!(walkable!(w1, &one), Ok(()), "w1's history is whole");
     let expected: BTreeSet<String> = ["post:a", "post:b", "post:c", "post:d", "post:e"]
         .iter()
-        .map(|of| {
-            of.parse::<dialog_artifacts::Entity>()
-                .map(|of| of.to_string())
-        })
+        .map(|of| of.parse::<dialog_corpus::Entity>().map(|of| of.to_string()))
         .collect::<Result<_, _>>()?;
     assert_eq!(titles!(w1, &one), expected, "w1 holds every fact");
     Ok(())
@@ -493,11 +524,20 @@ async fn upstream_reset(commit_on_top: bool, record: Record) -> Result<()> {
     let w3 = line!(profile, name, &three, "three");
 
     commit!(w1, &one, "post:a");
-    w2.pull().from(&w1).perform(&two).await?;
-    w3.pull().from(&w1).perform(&three).await?;
+    w2.pull(crate::Download::MinimalRanges)
+        .from(&w1)
+        .perform(&two)
+        .await?;
+    w3.pull(crate::Download::MinimalRanges)
+        .from(&w1)
+        .perform(&three)
+        .await?;
     commit!(w2, &two, "post:c");
     let c = w2.revision().expect("C");
-    w1.pull().from(&w2).perform(&one).await?;
+    w1.pull(crate::Download::MinimalRanges)
+        .from(&w2)
+        .perform(&one)
+        .await?;
     assert_eq!(w1.revision().as_ref(), Some(&c), "w1 fast-forwards to C");
     commit!(w3, &three, "post:y");
     commit!(w3, &three, "post:z");
@@ -511,15 +551,15 @@ async fn upstream_reset(commit_on_top: bool, record: Record) -> Result<()> {
         facts.push("post:x");
     }
     rewrite_bases!(w1, &one, record);
-    w1.pull().from(&w2).perform(&one).await?;
+    w1.pull(crate::Download::MinimalRanges)
+        .from(&w2)
+        .perform(&one)
+        .await?;
 
     assert_eq!(walkable!(w1, &one), Ok(()), "w1's history is whole");
     let expected: BTreeSet<String> = facts
         .iter()
-        .map(|of| {
-            of.parse::<dialog_artifacts::Entity>()
-                .map(|of| of.to_string())
-        })
+        .map(|of| of.parse::<dialog_corpus::Entity>().map(|of| of.to_string()))
         .collect::<Result<_, _>>()?;
     assert_eq!(titles!(w1, &one), expected, "w1 keeps c");
     Ok(())
@@ -544,13 +584,22 @@ async fn it_keeps_a_replica_that_never_reset_whole_when_another_resets_and_pushe
     let w3 = line!(profile, name, &three, "three");
 
     commit!(w2, &two, "post:a");
-    w1.pull().from(&w2).perform(&one).await?;
+    w1.pull(crate::Download::MinimalRanges)
+        .from(&w2)
+        .perform(&one)
+        .await?;
     let b = w1.revision().expect("B");
     commit!(w3, &three, "post:w3");
-    w3.pull().from(&w2).perform(&three).await?;
+    w3.pull(crate::Download::MinimalRanges)
+        .from(&w2)
+        .perform(&three)
+        .await?;
     w3.push().to(&w2).perform(&three).await?;
     let c = w3.revision().expect("C");
-    w1.pull().from(&w2).perform(&one).await?;
+    w1.pull(crate::Download::MinimalRanges)
+        .from(&w2)
+        .perform(&one)
+        .await?;
 
     w1.reset(b).perform_unchecked(&one).await?;
     let pushed = w1.push().to(&w2).perform(&one).await;
@@ -568,14 +617,14 @@ async fn it_keeps_a_replica_that_never_reset_whole_when_another_resets_and_pushe
     assert_eq!(w2.revision().as_ref(), Some(&c), "the upstream keeps C");
 
     commit!(w3, &three, "post:e");
-    w3.pull().from(&w2).perform(&three).await?;
+    w3.pull(crate::Download::MinimalRanges)
+        .from(&w2)
+        .perform(&three)
+        .await?;
     assert_eq!(walkable!(w3, &three), Ok(()), "w3's history is whole");
     let expected: BTreeSet<String> = ["post:a", "post:w3", "post:e"]
         .iter()
-        .map(|of| {
-            of.parse::<dialog_artifacts::Entity>()
-                .map(|of| of.to_string())
-        })
+        .map(|of| of.parse::<dialog_corpus::Entity>().map(|of| of.to_string()))
         .collect::<Result<_, _>>()?;
     assert_eq!(titles!(w3, &three), expected, "w3 keeps its own fact");
     Ok(())
@@ -615,11 +664,23 @@ async fn it_lets_the_greater_rival_push_onto_the_lesser_after_a_pull() -> Result
     let (ce, be, ke) = (&envs[committer], &envs[lesser], &envs[greater]);
     commit!(c, ce, "post:a");
     commit!(k, ke, "post:b");
-    b.pull().from(c).perform(be).await?;
-    b.pull().from(k).perform(be).await?;
-    k.pull().from(c).perform(ke).await?;
+    b.pull(crate::Download::MinimalRanges)
+        .from(c)
+        .perform(be)
+        .await?;
+    b.pull(crate::Download::MinimalRanges)
+        .from(k)
+        .perform(be)
+        .await?;
+    k.pull(crate::Download::MinimalRanges)
+        .from(c)
+        .perform(ke)
+        .await?;
     let keeper_merge = k.revision().expect("the greater merge");
-    k.pull().from(b).perform(ke).await?;
+    k.pull(crate::Download::MinimalRanges)
+        .from(b)
+        .perform(ke)
+        .await?;
     assert_eq!(
         k.revision().as_ref(),
         Some(&keeper_merge),
@@ -635,10 +696,7 @@ async fn it_lets_the_greater_rival_push_onto_the_lesser_after_a_pull() -> Result
     assert_eq!(walkable!(b, be), Ok(()), "the lesser's history is whole");
     let expected: BTreeSet<String> = ["post:a", "post:b"]
         .iter()
-        .map(|of| {
-            of.parse::<dialog_artifacts::Entity>()
-                .map(|of| of.to_string())
-        })
+        .map(|of| of.parse::<dialog_corpus::Entity>().map(|of| of.to_string()))
         .collect::<Result<_, _>>()?;
     assert_eq!(titles!(b, be), expected, "the lesser holds every fact");
     Ok(())
@@ -698,7 +756,10 @@ async fn it_refuses_a_takeover_so_a_push_cannot_rewind_the_upstream() -> Result<
     let w2 = line!(profile, name, &two, "two");
     let w3 = line!(profile, name, &three, "three");
     commit!(w1, &one, "post:a");
-    w3.pull().from(&w1).perform(&three).await?;
+    w3.pull(crate::Download::MinimalRanges)
+        .from(&w1)
+        .perform(&three)
+        .await?;
     commit!(w3, &three, "post:y");
     commit!(w3, &three, "post:z");
     let z = w3.revision().expect("Z");
@@ -716,10 +777,7 @@ async fn it_refuses_a_takeover_so_a_push_cannot_rewind_the_upstream() -> Result<
     let w2 = line!(profile, name, &two, "two");
     let expected: BTreeSet<String> = ["post:a", "post:b", "post:e"]
         .iter()
-        .map(|of| {
-            of.parse::<dialog_artifacts::Entity>()
-                .map(|of| of.to_string())
-        })
+        .map(|of| of.parse::<dialog_corpus::Entity>().map(|of| of.to_string()))
         .collect::<Result<_, _>>()?;
     assert_eq!(titles!(w2, &two), expected, "the upstream keeps b");
     Ok(())
@@ -738,7 +796,10 @@ async fn it_moves_a_branch_forward() -> Result<()> {
     let w2 = line!(profile, name, &two, "two");
     commit!(w1, &one, "post:a");
     let a = w1.revision().expect("A");
-    w2.pull().from(&w1).perform(&two).await?;
+    w2.pull(crate::Download::MinimalRanges)
+        .from(&w1)
+        .perform(&two)
+        .await?;
     commit!(w2, &two, "post:b");
     let b = w2.revision().expect("B");
 
@@ -775,12 +836,21 @@ async fn it_keeps_a_retraction_when_it_merges_from_no_base() -> Result<()> {
     let w2 = line!(profile, name, &two, "two");
 
     commit!(w1, &one, "post:a");
-    w2.pull().from(&w1).perform(&two).await?;
+    w2.pull(crate::Download::MinimalRanges)
+        .from(&w1)
+        .perform(&two)
+        .await?;
     commit!(w2, &two, "post:f");
-    w1.pull().from(&w2).perform(&one).await?;
+    w1.pull(crate::Download::MinimalRanges)
+        .from(&w2)
+        .perform(&one)
+        .await?;
     let holding = w1.revision().expect("w1 holds f");
     retract!(w2, &two, "post:f");
-    w1.pull().from(&w2).perform(&one).await?;
+    w1.pull(crate::Download::MinimalRanges)
+        .from(&w2)
+        .perform(&one)
+        .await?;
     assert_eq!(w1.revision(), w2.revision(), "w1 takes the retraction");
     commit!(w2, &two, "post:x");
 
@@ -788,15 +858,15 @@ async fn it_keeps_a_retraction_when_it_merges_from_no_base() -> Result<()> {
     // mint, with a commit on top the upstream has not seen.
     w1.reset(holding).perform_unchecked(&one).await?;
     commit!(w1, &one, "post:g");
-    w1.pull().from(&w2).perform(&one).await?;
+    w1.pull(crate::Download::MinimalRanges)
+        .from(&w2)
+        .perform(&one)
+        .await?;
 
     assert_eq!(walkable!(w1, &one), Ok(()), "w1's history is whole");
     let expected: BTreeSet<String> = ["post:a", "post:g", "post:x"]
         .iter()
-        .map(|of| {
-            of.parse::<dialog_artifacts::Entity>()
-                .map(|of| of.to_string())
-        })
+        .map(|of| of.parse::<dialog_corpus::Entity>().map(|of| of.to_string()))
         .collect::<Result<_, _>>()?;
     assert_eq!(titles!(w1, &one), expected, "f stays retracted");
     Ok(())
@@ -817,11 +887,17 @@ async fn it_does_not_push_a_head_a_reset_left_behind_the_base() -> Result<()> {
     let w1 = line!(profile, name, &one, "one");
     let w2 = line!(profile, name, &two, "two");
     commit!(w1, &one, "post:a");
-    w2.pull().from(&w1).perform(&two).await?;
+    w2.pull(crate::Download::MinimalRanges)
+        .from(&w1)
+        .perform(&two)
+        .await?;
     commit!(w2, &two, "post:b");
     let b = w2.revision().expect("B");
     commit!(w2, &two, "post:c");
-    w1.pull().from(&w2).perform(&one).await?;
+    w1.pull(crate::Download::MinimalRanges)
+        .from(&w2)
+        .perform(&one)
+        .await?;
     w1.reset(b).perform_unchecked(&one).await?;
     let (head, tracked, based) = (w1.revision(), w1.tracked(), w1.based());
     let pushed = w1.push().to(&w2).perform(&one).await;
@@ -834,7 +910,7 @@ async fn it_does_not_push_a_head_a_reset_left_behind_the_base() -> Result<()> {
     assert_eq!(w1.tracked(), tracked, "the refusal records no sync");
     assert_eq!(w1.based(), based, "the refusal records no base");
     let w2 = line!(profile, name, &two, "two");
-    let c = "post:c".parse::<dialog_artifacts::Entity>()?.to_string();
+    let c = "post:c".parse::<dialog_corpus::Entity>()?.to_string();
     assert!(titles!(w2, &two).contains(&c), "the upstream keeps c");
     Ok(())
 }
@@ -1120,7 +1196,7 @@ async fn it_keeps_histories_whole_and_facts_kept_under_random_interleavings() ->
                 expected.extend(of(&live, Some(&theirs)));
                 let expected: Written = expected.difference(&covered).cloned().collect();
                 lines[to]
-                    .pull()
+                    .pull(crate::Download::MinimalRanges)
                     .from(&lines[from])
                     .perform(&envs[to])
                     .await?;
@@ -1253,15 +1329,15 @@ impl Claim {
         Self {
             the: the.to_string(),
             of: of
-                .parse::<dialog_artifacts::Entity>()
+                .parse::<dialog_corpus::Entity>()
                 .expect("entity parses")
                 .to_string(),
             is: is.to_string(),
         }
     }
 
-    fn artifact(&self) -> Artifact {
-        Artifact {
+    fn fact(&self) -> Fact {
+        Fact {
             the: self.the.parse().expect("attribute parses"),
             of: self.of.parse().expect("entity parses"),
             is: Value::String(self.is.clone()),
@@ -1276,10 +1352,10 @@ impl Claim {
         } else {
             Pick::All
         };
-        Instruction::Assert(self.artifact(), pick)
+        Instruction::Assert(self.fact(), pick)
     }
 
     fn retract(&self) -> Instruction {
-        Instruction::Retract(self.artifact())
+        Instruction::Retract(self.fact())
     }
 }

@@ -4,22 +4,22 @@ use crate::{CacheBudget, Ephemeral, RemoteFallback, ResolveError, Revision};
 use dialog_capability::Provider;
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::{ConditionalSync, Holds};
+use dialog_corpus::tree::CorpusNode;
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::memory;
 use dialog_query::concept::query::PlanCache;
+use dialog_search_tree::nodes;
 
-use crate::repository::source::{Caches, SourceRef};
-use dialog_artifacts::Changes;
-use dialog_artifacts::DialogArtifactsError;
-use dialog_artifacts::Entity;
-use dialog_artifacts::history::Origin;
-use dialog_artifacts::history::{
-    CausalityCache, ContextCache, RevisionRecord, TreeHistory, Version,
-};
-use dialog_artifacts::tree::{ArtifactNodeCache, SpillCache};
-use dialog_artifacts::{Exporter, Importer};
+use crate::repository::source::{Caches, Live};
 use dialog_capability::{Capability, Did, Subject};
+use dialog_corpus::Changes;
+use dialog_corpus::DialogCorpusError;
+use dialog_corpus::Entity;
+use dialog_corpus::history::Origin;
+use dialog_corpus::history::{CausalityCache, ContextCache, RevisionRecord, TreeHistory, Version};
+use dialog_corpus::tree::{CorpusCache, SpillCache};
+use dialog_corpus::{Exporter, Importer};
 use dialog_effects::authority::{Operator, OperatorExt as _};
 use dialog_query::query::Application;
 use futures_util::lock::{Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard};
@@ -121,6 +121,8 @@ pub use upstream::*;
 ))]
 mod integration_tests;
 
+#[cfg(test)]
+mod isolation_tests;
 #[cfg(all(
     test,
     any(feature = "integration-tests", feature = "web-integration-tests")
@@ -128,7 +130,7 @@ mod integration_tests;
 mod read_amplification;
 
 /// Type alias for the search tree index.
-pub type Index = dialog_artifacts::Index;
+pub type Index = dialog_corpus::Index;
 
 /// A branch represents a named line of development within a repository.
 ///
@@ -159,7 +161,7 @@ pub struct Branch {
     /// query stay warm for the next, and for the next open of the branch,
     /// instead of being re-fetched from storage. Content-addressed keys make
     /// sharing across revisions safe.
-    node_cache: ArtifactNodeCache,
+    node_cache: CorpusCache,
     /// Shared cache of spilled value blocks, keyed by their 32-byte content
     /// reference. Held by the environment for every repository and carried
     /// into every select so a repeated read of the same large (spilled) value
@@ -218,7 +220,7 @@ pub struct Branch {
     /// safely misses), sparing every commit the root-frame decode and
     /// sealed-buffer bulk copies of a fresh open. Shared across clones like
     /// the caches.
-    spine: dialog_artifacts::SpineSlot,
+    spine: dialog_corpus::SpineSlot,
     /// Memo of the commit identity derived for this branch. The branch
     /// entity and origin are pure functions of (subject, name, profile,
     /// issuer), but deriving them costs blake3 hashes, a base58 render,
@@ -380,9 +382,10 @@ impl Writer {
 }
 
 impl Branch {
-    /// The metadata a query layer over this branch alone folds in, as
-    /// `derive` computes it (`heads` computing its revision facts alone), reused while the profile, operator, and head
-    /// are those it was derived under. Shared rather than copied: every
+    /// The metadata a query layer over this branch alone folds in at
+    /// `revision`, as `derive` computes it (`heads` computing its
+    /// revision facts alone), reused while the profile, operator, and
+    /// revision are those it was derived under. Shared rather than copied: every
     /// query over the branch reads the same facts.
     ///
     /// Only the revision facts move with the head, so the rest is kept
@@ -392,19 +395,19 @@ impl Branch {
     pub(crate) fn layer_metadata(
         &self,
         operator: &Capability<Operator>,
+        revision: Option<&Revision>,
         derive: impl FnOnce() -> (Changes, Changes),
         heads: impl FnOnce() -> Changes,
     ) -> Ephemeral {
         let profile = operator.profile();
         let did = operator.did();
-        let revision = self.revision();
         let mut cache = self
             .layer_metadata_cache
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let fixed = match cache.as_ref() {
             Some(memo) if memo.profile == *profile && memo.operator == did => {
-                if memo.revision == revision {
+                if memo.revision.as_ref() == revision {
                     return memo.metadata.clone();
                 }
                 Some(memo.fixed.clone())
@@ -422,7 +425,7 @@ impl Branch {
         *cache = Some(LayerMetadata {
             profile: profile.clone(),
             operator: did,
-            revision,
+            revision: revision.cloned(),
             fixed,
             metadata: metadata.clone(),
         });
@@ -432,7 +435,9 @@ impl Branch {
 
 /// A branch's metadata memo: the profile and head it was derived under,
 /// and what was derived.
-type MetadataMemo = Arc<Mutex<Option<(Did, Option<Revision>, metadata::BranchMetadata)>>>;
+pub(crate) use metadata::BranchMetadata;
+
+type MetadataMemo = Arc<Mutex<Option<(Did, Option<Revision>, BranchMetadata)>>>;
 
 /// A single-branch query layer's metadata memo.
 pub(crate) type LayerMetadataMemo = Arc<Mutex<Option<LayerMetadata>>>;
@@ -677,7 +682,7 @@ impl Branch {
 
     /// The recorded claim lineage at this branch's current revision, which
     /// powers claim-level conflict detection (see
-    /// [`dialog_artifacts::history::causality`]).
+    /// [`dialog_corpus::history::causality`]).
     ///
     /// History records live in the same tree as the data, so this reads the
     /// history region of the current revision's tree. A read that misses
@@ -687,14 +692,23 @@ impl Branch {
     /// branches tracks a remote reads purely locally.
     pub fn history<'a, Env>(&self, env: &'a Env) -> TreeHistory<&'a Env>
     where
-        Env: Provider<ArchiveLoad> + Provider<BlobLoad> + Holds + ConditionalSync + ?Sized,
+        Env: Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + Provider<BlobLoad>
+            + Holds
+            + ConditionalSync
+            + ?Sized,
     {
-        SourceRef::from(self).history(env)
+        Live::from(self).pin().history(env)
     }
 
     /// The branch's committed history, newest first — at most `limit`
     /// entries of `(version, record)`, every revision before any of its
-    /// ancestors (see [`dialog_artifacts::history::log`]). A branch with
+    /// ancestors (see [`dialog_corpus::history::log`]). A branch with
     /// no commits logs nothing; unreplicated ancestry truncates the walk
     /// rather than failing it. Each record was verified on read, so the
     /// attribution it reports is the issuer's own signed claim.
@@ -702,21 +716,30 @@ impl Branch {
         &self,
         env: &Env,
         limit: usize,
-    ) -> Result<Vec<(Version, RevisionRecord)>, DialogArtifactsError>
+    ) -> Result<Vec<(Version, RevisionRecord)>, DialogCorpusError>
     where
-        Env: Provider<ArchiveLoad> + Provider<BlobLoad> + Holds + ConditionalSync + ?Sized,
+        Env: Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + Provider<BlobLoad>
+            + Holds
+            + ConditionalSync
+            + ?Sized,
     {
-        SourceRef::from(self).log(env, limit).await
+        Live::from(self).pin().log(env, limit).await
     }
 
-    /// Export all artifacts from this branch to the given exporter.
+    /// Export all facts from this branch to the given exporter.
     pub fn export<E: Exporter>(&self, exporter: E) -> Export<'_, E> {
         Export::new(self, exporter)
     }
 
-    /// Import artifacts into this branch from the given importer.
+    /// Import facts into this branch from the given importer.
     ///
-    /// Each artifact read from the importer is committed as an assertion.
+    /// Each fact read from the importer is committed as an assertion.
     pub fn import<I: Importer>(&self, importer: I) -> Import<'_, I> {
         Import::new(self, importer)
     }
@@ -729,7 +752,7 @@ impl Branch {
     /// A shared handle to this branch's node cache: the one every tree read
     /// through the environment it was opened with keeps its nodes in.
     #[cfg(test)]
-    pub(crate) fn node_cache(&self) -> ArtifactNodeCache {
+    pub(crate) fn node_cache(&self) -> CorpusCache {
         self.node_cache.clone()
     }
 
@@ -754,7 +777,7 @@ impl Branch {
     }
 
     /// The live-spine slot this branch's commits reuse.
-    pub(crate) fn spine(&self) -> &dialog_artifacts::SpineSlot {
+    pub(crate) fn spine(&self) -> &dialog_corpus::SpineSlot {
         &self.spine
     }
 

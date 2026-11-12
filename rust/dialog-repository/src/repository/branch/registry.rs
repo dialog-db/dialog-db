@@ -13,9 +13,10 @@
 //! it goes through the same [`machinery`](super::Commit::machinery)
 //! scope, beside the delegation records that already use it.
 
-use dialog_artifacts::{Changes, DialogArtifactsError, Entity, Statement};
 use dialog_capability::{Capability, Fork, Provider, Subject};
 use dialog_common::{ConditionalSync, Holds};
+use dialog_corpus::tree::CorpusNode;
+use dialog_corpus::{Changes, DialogCorpusError, Entity, Statement};
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify, Operator, OperatorExt as _};
@@ -23,6 +24,7 @@ use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::{Import as BlobImport, Read as BlobRead};
 use dialog_effects::memory::{Publish, Resolve};
 use dialog_query::{Output as _, Query, Term};
+use dialog_search_tree::nodes;
 use futures_util::stream;
 use std::sync::Arc;
 
@@ -38,14 +40,21 @@ pub trait RegistryEnv:
     + Provider<BlobImport>
     + Provider<Put>
     + Provider<Import>
+    + Provider<nodes::Write<CorpusNode>>
+    + ConditionalSync
     + Provider<Resolve>
     + Provider<Publish>
     + Provider<Identify>
     + Provider<Attest>
     + Provider<ArchiveLoad>
+    + Provider<nodes::Write<CorpusNode>>
+    + ConditionalSync
+    + Provider<nodes::Read<CorpusNode>>
+    + Provider<nodes::Preload<CorpusNode>>
+    + ConditionalSync
     + Provider<BlobLoad>
-    + Provider<dialog_artifacts::Preload>
-    + Provider<dialog_artifacts::Speculation>
+    + Provider<dialog_corpus::Preload>
+    + Provider<dialog_corpus::Speculation>
     + Provider<Fork<RemoteSite, Resolve>>
     + Holds
     + ConditionalSync
@@ -59,14 +68,21 @@ impl<T> RegistryEnv for T where
         + Provider<BlobImport>
         + Provider<Put>
         + Provider<Import>
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
         + Provider<Resolve>
         + Provider<Publish>
         + Provider<Identify>
         + Provider<Attest>
         + Provider<ArchiveLoad>
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
         + Provider<BlobLoad>
-        + Provider<dialog_artifacts::Preload>
-        + Provider<dialog_artifacts::Speculation>
+        + Provider<dialog_corpus::Preload>
+        + Provider<dialog_corpus::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
         + Holds
         + ConditionalSync
@@ -341,7 +357,7 @@ pub(crate) async fn apply<Env: RegistryEnv>(
     env: &Env,
 ) -> Result<(), CommitError> {
     if changes.has_assets() {
-        return Err(DialogArtifactsError::AssetsUnsupported("the replica registry".into()).into());
+        return Err(DialogCorpusError::AssetsUnsupported("the replica registry".into()).into());
     }
     let mut instructions = changes.clone().into_instructions();
     if instructions.is_empty() {
@@ -442,11 +458,9 @@ mod tests {
     use crate::helpers::test_repo;
     use crate::schema::{Branch as BranchConcept, Replica};
     use crate::{REGISTRY, RepositoryExt as _, RepositoryMemoryExt};
-    use dialog_artifacts::{
-        ArtifactSelector, Asset, DialogArtifactsError, Entity, Statement as _, Value,
-    };
     use dialog_capability::Subject;
     use dialog_common::Holds as _;
+    use dialog_corpus::{Asset, DialogCorpusError, Entity, Selector, Statement as _, Value};
     use dialog_effects::authority::Identify;
     use dialog_effects::authority::OperatorExt as _;
     use dialog_peer::helpers::{test_session_with_peer, unique_name};
@@ -625,7 +639,7 @@ mod tests {
             .perform(&operator)
             .await?;
         let select = registry.claims().select(
-            ArtifactSelector::new()
+            Selector::new()
                 .the("dialog.replica/active-branch".parse()?)
                 .of(replica.this.clone()),
         );
@@ -633,8 +647,8 @@ mod tests {
         let rows: Vec<_> = select.execute(store).await?.collect::<Vec<_>>().await;
 
         assert_eq!(rows.len(), 1, "one active branch recorded: {}", rows.len());
-        let artifact = rows.into_iter().next().expect("one row")?;
-        assert_eq!(artifact.to_owned()?.is, Value::Entity(feature));
+        let fact = rows.into_iter().next().expect("one row")?;
+        assert_eq!(fact.to_owned()?.is, Value::Entity(feature));
         Ok(())
     }
 
@@ -653,7 +667,7 @@ mod tests {
         let head = registry.revision();
 
         let replica = Replica::new(identity.profile().clone(), registry.of().clone());
-        let mut changes = dialog_artifacts::Changes::new();
+        let mut changes = dialog_corpus::Changes::new();
         super::ActiveBranch {
             this: replica.this,
             branch: Entity::new()?.into(),
@@ -665,9 +679,7 @@ mod tests {
         assert!(
             matches!(
                 refused,
-                Err(CommitError::Artifact(
-                    DialogArtifactsError::AssetsUnsupported(_)
-                ))
+                Err(CommitError::Fact(DialogCorpusError::AssetsUnsupported(_)))
             ),
             "got {refused:?}"
         );

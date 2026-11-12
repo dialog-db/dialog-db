@@ -19,6 +19,7 @@ use core::fmt::Display;
 use dialog_capability::{Capability, Fork, Policy, Provider, Subject};
 use dialog_common::Blake3Hash;
 use dialog_common::{ConditionalSend, ConditionalSync};
+use dialog_corpus::tree::CorpusNode;
 use dialog_effects::Void;
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::prelude::{ArchiveScope, GetBlockExt as _};
@@ -35,6 +36,7 @@ use dialog_repository::{
     Branch, LEGACY_EMPTY_ROOT, PublishError, REGISTRY, RemoteSite, RepositoryMemoryExt,
     RetractError,
 };
+use dialog_search_tree::nodes;
 
 /// The environment a branch operation runs against.
 ///
@@ -47,15 +49,22 @@ pub trait BranchEnv:
     + Provider<BlobImport>
     + Provider<Put>
     + Provider<Import>
+    + Provider<nodes::Write<CorpusNode>>
+    + ConditionalSync
     + Provider<Resolve>
     + Provider<Publish>
     + Provider<Retract>
     + Provider<Identify>
     + Provider<Attest>
     + Provider<ArchiveLoad>
+    + Provider<nodes::Write<CorpusNode>>
+    + ConditionalSync
+    + Provider<nodes::Read<CorpusNode>>
+    + Provider<nodes::Preload<CorpusNode>>
+    + ConditionalSync
     + Provider<BlobLoad>
-    + Provider<dialog_artifacts::Preload>
-    + Provider<dialog_artifacts::Speculation>
+    + Provider<dialog_corpus::Preload>
+    + Provider<dialog_corpus::Speculation>
     + Provider<Fork<RemoteSite, Resolve>>
     + ConditionalSync
     + 'static
@@ -68,15 +77,22 @@ impl<T> BranchEnv for T where
         + Provider<BlobImport>
         + Provider<Put>
         + Provider<Import>
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
         + Provider<Resolve>
         + Provider<Publish>
         + Provider<Retract>
         + Provider<Identify>
         + Provider<Attest>
         + Provider<ArchiveLoad>
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
         + Provider<BlobLoad>
-        + Provider<dialog_artifacts::Preload>
-        + Provider<dialog_artifacts::Speculation>
+        + Provider<dialog_corpus::Preload>
+        + Provider<dialog_corpus::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
         + ConditionalSync
         + 'static
@@ -104,8 +120,7 @@ where
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl<S, M: Mode> Provider<branch_fx::Create> for Peer<S, M>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
@@ -200,8 +215,7 @@ where
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl<S, M: Mode> Provider<branch_fx::List> for Peer<S, M>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
@@ -220,8 +234,7 @@ where
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl<S, M: Mode> Provider<branch_fx::Delete> for Peer<S, M>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
@@ -326,8 +339,7 @@ where
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl<S, M: Mode> Provider<branch_fx::Switch> for Peer<S, M>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
@@ -358,9 +370,9 @@ mod tests {
 
     use crate::helpers::{test_repo, test_session_with_peer};
     use crate::{Mode, Peer};
-    use dialog_artifacts::{Artifact, Entity, Instruction, Value};
     use dialog_capability::identity::TreeReference;
     use dialog_capability::{Did, Subject};
+    use dialog_corpus::{Entity, Fact, Instruction, Value};
     use dialog_effects::MethodExt as _;
     use dialog_effects::authority::{Identify, OperatorExt as _};
     use dialog_effects::branch::prelude::*;
@@ -997,13 +1009,13 @@ mod tests {
             .transaction()
             .integrate(
                 vec![Instruction::Assert(
-                    Artifact {
+                    Fact {
                         the: "user/name".parse()?,
                         of: "user:elsewhere".parse()?,
                         is: Value::String("Elsewhere".into()),
                         cause: None,
                     },
-                    dialog_artifacts::Pick::All,
+                    dialog_corpus::Pick::All,
                 )]
                 .into_iter()
                 .collect(),
@@ -1050,7 +1062,10 @@ mod tests {
             .await?;
 
         let again = repo.branch("feature").open().perform(&operator).await?;
-        let pulled = again.pull().perform(&operator).await;
+        let pulled = again
+            .pull(dialog_repository::Download::MinimalRanges)
+            .perform(&operator)
+            .await;
         assert!(
             matches!(
                 pulled,

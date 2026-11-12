@@ -40,9 +40,10 @@
 
 use crate::rules::transient_attr;
 use crate::{Branch, CommitError, RemoteSite, Revision, Transient};
-use dialog_artifacts::{ArtifactSelector, Entity, Pick, Relation as ArtifactsRelation, Value};
 use dialog_capability::{Fork, Provider};
 use dialog_common::{ConditionalSync, Holds};
+use dialog_corpus::tree::CorpusNode;
+use dialog_corpus::{Entity, Pick, Relation as CorpusRelation, Selector, Value};
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify};
@@ -54,6 +55,7 @@ use dialog_query::migration::concept_identity_v0;
 use dialog_query::rule::statement::source_attr;
 use dialog_query::rule::{DeductiveRule, InductiveRule};
 use dialog_query::{AttributeStatement, Cardinality, ConceptDescriptor};
+use dialog_search_tree::nodes;
 use futures_util::TryStreamExt as _;
 
 /// What [`Branch::upgrade_rules`] did.
@@ -139,14 +141,21 @@ impl UpgradeRules<'_> {
             + Provider<BlobRead>
             + Provider<Put>
             + Provider<Import>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
             + Provider<Resolve>
             + Provider<Publish>
             + Provider<Identify>
             + Provider<Attest>
             + Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
             + Provider<BlobLoad>
-            + Provider<dialog_artifacts::Preload>
-            + Provider<dialog_artifacts::Speculation>
+            + Provider<dialog_corpus::Preload>
+            + Provider<dialog_corpus::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + Holds
             + ConditionalSync
@@ -155,7 +164,7 @@ impl UpgradeRules<'_> {
         let branch = self.branch;
         let sources: Vec<_> = branch
             .claims()
-            .select(ArtifactSelector::new().the(source_attr()))
+            .select(Selector::new().the(source_attr()))
             .perform(env)
             .await?
             .try_collect::<Vec<_>>()
@@ -214,7 +223,7 @@ impl UpgradeRules<'_> {
             // entity, withdrawn.
             let facts: Vec<_> = branch
                 .claims()
-                .select(ArtifactSelector::new().of(stored.of.clone()))
+                .select(Selector::new().of(stored.of.clone()))
                 .perform(env)
                 .await?
                 .try_collect::<Vec<_>>()
@@ -242,11 +251,7 @@ impl UpgradeRules<'_> {
             }
             let marked = branch
                 .claims()
-                .select(
-                    ArtifactSelector::new()
-                        .the(transient_attr())
-                        .of(earlier.clone()),
-                )
+                .select(Selector::new().the(transient_attr()).of(earlier.clone()))
                 .perform(env)
                 .await?
                 .try_collect::<Vec<_>>()
@@ -272,7 +277,7 @@ impl UpgradeRules<'_> {
 
 /// A rule fact as a statement, under `all`, the pick rule facts are
 /// written under.
-fn statement(the: ArtifactsRelation, of: Entity, is: Value) -> AttributeStatement {
+fn statement(the: CorpusRelation, of: Entity, is: Value) -> AttributeStatement {
     AttributeStatement {
         the: Relation::from(the),
         of,

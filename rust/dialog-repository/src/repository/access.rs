@@ -37,17 +37,19 @@
 //!   any not-yet-upgraded code path. A rerun after a partial failure
 //!   re-skips by content address and drains the remainder.
 
+use dialog_corpus::tree::CorpusNode;
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::blob::Load as BlobLoad;
+use dialog_search_tree::nodes;
 use std::collections::BTreeMap;
 
 use crate::RemoteSite;
-use dialog_artifacts::Entity;
 use dialog_capability::access::{
     Access as AccessAttenuation, AuthorizeError, Certificate as _, Export, Forget,
 };
-use dialog_capability::{Command, Fork, Provider, Subject};
+use dialog_capability::{Command, Fork, Provider, Resume, Subject};
 use dialog_common::{ConditionalSend, ConditionalSync, Held, Holdings, Holds};
+use dialog_corpus::Entity;
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify};
 use dialog_effects::blob::Write as BlobWrite;
@@ -115,20 +117,16 @@ impl<S: Clone> Holds for MigrateEnv<S> {
 
 macro_rules! migrate_storage {
     ($($effect:ty),+ $(,)?) => {$(
-        #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-        #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
         impl<S> Provider<$effect> for MigrateEnv<S>
         where
-            S: Clone + ConditionalSend + ConditionalSync + 'static,
-            <$effect as Command>::Input: ConditionalSend,
+            S: Clone,
             Storage<S>: Provider<$effect>,
-            Self: ConditionalSync,
         {
-            async fn execute(
+            fn execute(
                 &self,
                 input: <$effect as Command>::Input,
-            ) -> <$effect as Command>::Output {
-                Provider::<$effect>::execute(&self.storage, input).await
+            ) -> Resume<'_, <$effect as Command>::Output> {
+                Provider::<$effect>::execute(&self.storage, input)
             }
         }
     )+};
@@ -136,20 +134,16 @@ macro_rules! migrate_storage {
 
 macro_rules! migrate_authority {
     ($($effect:ty),+ $(,)?) => {$(
-        #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-        #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
         impl<S> Provider<$effect> for MigrateEnv<S>
         where
-            S: Clone + ConditionalSend + ConditionalSync + 'static,
-            <$effect as Command>::Input: ConditionalSend,
+            S: Clone,
             Authority: Provider<$effect>,
-            Self: ConditionalSync,
         {
-            async fn execute(
+            fn execute(
                 &self,
                 input: <$effect as Command>::Input,
-            ) -> <$effect as Command>::Output {
-                Provider::<$effect>::execute(&self.authority, input).await
+            ) -> Resume<'_, <$effect as Command>::Output> {
+                Provider::<$effect>::execute(&self.authority, input)
             }
         }
     )+};
@@ -168,11 +162,13 @@ migrate_storage!(
     BlobImport,
     ArchiveLoad,
     BlobLoad,
+    nodes::Read<CorpusNode>,
+    nodes::Preload<CorpusNode>,
+    nodes::Write<CorpusNode>,
 );
 migrate_authority!(Identify, Attest);
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl<S> Provider<Fork<RemoteSite, Get>> for MigrateEnv<S>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
@@ -186,8 +182,7 @@ where
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl<S> Provider<Fork<RemoteSite, BlobRead>> for MigrateEnv<S>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
@@ -201,8 +196,7 @@ where
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[dialog_capability::provider]
 impl<S> Provider<Fork<RemoteSite, Resolve>> for MigrateEnv<S>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
@@ -251,6 +245,9 @@ impl MigrateCertificates {
             + Provider<BlobRead>
             + Provider<BlobWrite>
             + Provider<BlobImport>
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + Provider<nodes::Write<CorpusNode>>
             + Clone
             + 'static,
         Storage<S>: Provider<Export<Ucan>> + Provider<Forget<Ucan>> + ConditionalSync,
@@ -332,8 +329,8 @@ mod tests {
     use super::*;
     use crate::DELEGATION_AUDIENCE;
     use anyhow::Result;
-    use dialog_artifacts::{ArtifactSelector, Value};
     use dialog_capability::access::Retain;
+    use dialog_corpus::{Selector, Value};
     use dialog_credentials::Ed25519Signer;
     use dialog_effects::storage::Location;
     use dialog_peer::Peer;
@@ -459,7 +456,7 @@ mod tests {
         let facts: Vec<_> = branch
             .claims()
             .select(
-                ArtifactSelector::new()
+                Selector::new()
                     .the(DELEGATION_AUDIENCE.parse()?)
                     .is(Value::String(profile.did().to_string())),
             )

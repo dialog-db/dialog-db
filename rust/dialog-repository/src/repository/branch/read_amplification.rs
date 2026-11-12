@@ -19,6 +19,8 @@
 //! ancestry includes, is measured by `context_cost_by_origins` the same
 //! way (`DIALOG_RA_MAX_ORIGINS` caps its sweep).
 
+use dialog_corpus::tree::CorpusNode;
+use dialog_search_tree::nodes;
 use std::env;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -26,17 +28,17 @@ use std::time::Instant;
 use anyhow::Result;
 use futures_util::stream;
 
-use dialog_artifacts::history::{Context, context_of};
-use dialog_artifacts::{
-    ATTRIBUTE_KEY_TAG, ArchiveDelta, Artifact, BLOB_KEY_TAG, COVERAGE_KEY_TAG, Datum,
-    ENTITY_KEY_TAG, HISTORY_KEY_TAG, Instruction, Key, State, VALUE_KEY_TAG, Value,
-};
 use dialog_capability::Provider;
 use dialog_common::Holds;
 use dialog_common::{Blake3Hash, ConditionalSync};
+use dialog_corpus::history::{Context, context_of};
+use dialog_corpus::{
+    ATTRIBUTE_KEY_TAG, ArchiveDelta, BLOB_KEY_TAG, COVERAGE_KEY_TAG, ENTITY_KEY_TAG, Fact,
+    HISTORY_KEY_TAG, Instruction, VALUE_KEY_TAG, Value,
+};
 use dialog_effects::archive::Load;
 use dialog_effects::archive::prelude::CatalogScope;
-use dialog_search_tree::{FrameAttribution, Manifest, PersistentNode};
+use dialog_search_tree::{FrameAttribution, Manifest};
 
 use crate::RepositoryExt as _;
 use crate::helpers::{Counting, prune_unreachable as prune};
@@ -88,13 +90,13 @@ fn print_resident_peak() {
 
 fn assert_fact(entity: usize, value: &str) -> Instruction {
     Instruction::Assert(
-        Artifact {
+        Fact {
             the: "bench/field".parse().unwrap(),
             of: format!("user:{entity}").parse().unwrap(),
             is: Value::String(value.to_string()),
             cause: None,
         },
-        dialog_artifacts::Pick::All,
+        dialog_corpus::Pick::All,
     )
 }
 
@@ -200,7 +202,10 @@ async fn measure_depth(depth: usize, samples: &mut Vec<Sample>) -> Result<()> {
         env,
         depth,
         "initial pull (adopt all)",
-        feature.pull().perform(&env).await?
+        feature
+            .pull(crate::Download::MinimalRanges)
+            .perform(&env)
+            .await?
     );
 
     // The idle sync tick: upstream unchanged.
@@ -209,7 +214,10 @@ async fn measure_depth(depth: usize, samples: &mut Vec<Sample>) -> Result<()> {
         env,
         depth,
         "no-op tick",
-        feature.pull().perform(&env).await?
+        feature
+            .pull(crate::Download::MinimalRanges)
+            .perform(&env)
+            .await?
     );
 
     // The common auto-sync case: upstream moved by one commit, the
@@ -222,7 +230,10 @@ async fn measure_depth(depth: usize, samples: &mut Vec<Sample>) -> Result<()> {
         env,
         depth,
         "fast-forward (1 commit)",
-        feature.pull().perform(&env).await?
+        feature
+            .pull(crate::Download::MinimalRanges)
+            .perform(&env)
+            .await?
     );
 
     // A real merge: both sides moved.
@@ -238,7 +249,10 @@ async fn measure_depth(depth: usize, samples: &mut Vec<Sample>) -> Result<()> {
         env,
         depth,
         "merge (both sides moved)",
-        feature.pull().perform(&env).await?
+        feature
+            .pull(crate::Download::MinimalRanges)
+            .perform(&env)
+            .await?
     );
 
     // The context derivation alone, on the (now deep) feature head.
@@ -280,7 +294,9 @@ async fn measure_triangle(depth: usize, samples: &mut Vec<Sample>) -> Result<()>
     // Bob diverges from the seed with a handful of commits.
     let bob = repo.branch("bob").open().perform(&env).await?;
     bob.set_upstream(&seed).perform(&env).await?;
-    bob.pull().perform(&env).await?;
+    bob.pull(crate::Download::MinimalRanges)
+        .perform(&env)
+        .await?;
     for i in 0..5 {
         bob.commit(stream::iter(vec![assert_fact(depth + 10 + i, "bob")]))
             .perform(&env)
@@ -290,7 +306,10 @@ async fn measure_triangle(depth: usize, samples: &mut Vec<Sample>) -> Result<()>
     // Alice diverges from the seed with `depth` commits of bulk.
     let alice = repo.branch("alice").open().perform(&env).await?;
     alice.set_upstream(&seed).perform(&env).await?;
-    alice.pull().perform(&env).await?;
+    alice
+        .pull(crate::Download::MinimalRanges)
+        .perform(&env)
+        .await?;
     for i in 0..depth {
         alice
             .commit(stream::iter(vec![assert_fact(i + 1, "alice")]))
@@ -308,8 +327,13 @@ async fn measure_triangle(depth: usize, samples: &mut Vec<Sample>) -> Result<()>
     // side, not the tracked-ness of the upstream.
     let us = repo.branch("us").open().perform(&env).await?;
     us.set_upstream(&seed).perform(&env).await?;
-    us.pull().perform(&env).await?;
-    us.pull().from(&bob).perform(&env).await?;
+    us.pull(crate::Download::MinimalRanges)
+        .perform(&env)
+        .await?;
+    us.pull(crate::Download::MinimalRanges)
+        .from(&bob)
+        .perform(&env)
+        .await?;
     for i in 0..3 {
         bob.commit(stream::iter(vec![assert_fact(depth + 20 + i, "bob late")]))
             .perform(&env)
@@ -323,7 +347,10 @@ async fn measure_triangle(depth: usize, samples: &mut Vec<Sample>) -> Result<()>
             "triangle: adopt alice [{}]",
             routed_label(&us, &alice).await
         ),
-        us.pull().from(&alice).perform(&env).await?
+        us.pull(crate::Download::MinimalRanges)
+            .from(&alice)
+            .perform(&env)
+            .await?
     );
     // A 3-commit late delta sits under the graft threshold: this row
     // measures the screened direction.
@@ -332,7 +359,10 @@ async fn measure_triangle(depth: usize, samples: &mut Vec<Sample>) -> Result<()>
         env,
         depth,
         format!("triangle: bob small [{}]", routed_label(&us, &bob).await),
-        us.pull().from(&bob).perform(&env).await?
+        us.pull(crate::Download::MinimalRanges)
+            .from(&bob)
+            .perform(&env)
+            .await?
     );
     // A dozen more late commits push Bob's delta past the threshold:
     // this row measures the graft itself (partition, stitch, contested
@@ -350,7 +380,10 @@ async fn measure_triangle(depth: usize, samples: &mut Vec<Sample>) -> Result<()>
         env,
         depth,
         format!("triangle: bob bulky [{}]", routed_label(&us, &bob).await),
-        us.pull().from(&bob).perform(&env).await?
+        us.pull(crate::Download::MinimalRanges)
+            .from(&bob)
+            .perform(&env)
+            .await?
     );
 
     Ok(())
@@ -434,9 +467,9 @@ async fn measure_shape(depth: usize) -> Result<()> {
 ///   would look like if it could defer the flush (publishing a head only at a
 ///   sync/publish point). This is the regime the buffer is designed for.
 async fn measure_write_paths(depth: usize, batches: usize) -> Result<()> {
-    use dialog_artifacts::tree::ArtifactTreeExt as _;
-    use dialog_artifacts::tree::{Stamp, WriteScope, write_instructions};
-    use dialog_artifacts::{Instruction as I, apply_buffered};
+    use dialog_corpus::tree::CorpusExt as _;
+    use dialog_corpus::tree::{Stamp, WriteScope, write_instructions};
+    use dialog_corpus::{Instruction as I, apply_buffered};
 
     let (operator, profile) = test_session_with_peer().await;
     let env = Counting::new(operator);
@@ -465,17 +498,22 @@ async fn measure_write_paths(depth: usize, batches: usize) -> Result<()> {
     // per-batch costs are least amortized and buffering has the most to prove.
     let batch = |i: usize| -> Vec<I> { vec![assert_fact(depth + i, "write-path")] };
 
-    // Every batch's new nodes are imported into the archive, exactly as the
+    // Every batch's new nodes are written to the archive, exactly as the
     // commit path does before it references the root in a revision. Without
-    // this the next batch cannot read back what the last one wrote.
+    // this the next batch cannot read back what the last one wrote. A
+    // spilled value is kept as a block of the catalog, where a spilled-value
+    // load finds it.
     macro_rules! persist {
-        ($delta:expr) => {
+        ($delta:expr) => {{
+            nodes::Write::<CorpusNode>::new(main.archive().index(), $delta.flush_nodes())
+                .perform(&env)
+                .await?;
             main.archive()
                 .index()
-                .import($delta.flush_blocks().chain($delta.flush_blobs()))
+                .import($delta.flush_blobs())
                 .perform(&env)
                 .await?
-        };
+        }};
     }
 
     // Canonical: reshape per batch, exactly what the commit path does today.
@@ -511,7 +549,7 @@ async fn measure_write_paths(depth: usize, batches: usize) -> Result<()> {
 
     // Buffered, flushed once at the end: the regime buffering is built for.
     let mut delta = ArchiveDelta::zero();
-    let staged = dialog_artifacts::DeltaOverlay::new(&delta, &store);
+    let staged = dialog_corpus::DeltaOverlay::new(&delta, &store);
     let mut deferred = dialog_search_tree::HitchhikerTree::open(&base);
     let started = Instant::now();
     for i in 0..batches {
@@ -528,7 +566,7 @@ async fn measure_write_paths(depth: usize, batches: usize) -> Result<()> {
         .await?;
         deferred = next;
     }
-    let _ = deferred.canonicalize(&staged, delta.blocks()).await?;
+    let _ = deferred.canonicalize(&staged, delta.nodes()).await?;
     let deferred_ms = started.elapsed().as_millis();
     persist!(delta);
 
@@ -552,7 +590,7 @@ async fn measure_write_paths(depth: usize, batches: usize) -> Result<()> {
 async fn measure_origins(origins: usize) -> Result<()> {
     use std::mem::size_of;
 
-    use dialog_artifacts::history::{Origin, Watermark};
+    use dialog_corpus::history::{Origin, Watermark};
 
     let (operator, profile) = test_session_with_peer().await;
     let env = Counting::new(operator);
@@ -567,7 +605,11 @@ async fn measure_origins(origins: usize) -> Result<()> {
             .perform(&env)
             .await?;
         if let Some(previous) = &previous {
-            writer.pull().from(previous).perform(&env).await?;
+            writer
+                .pull(crate::Download::MinimalRanges)
+                .from(previous)
+                .perform(&env)
+                .await?;
         }
         writer
             .commit(stream::iter(vec![assert_fact(i, "origin")]))
@@ -585,7 +627,10 @@ async fn measure_origins(origins: usize) -> Result<()> {
     // The branch under measurement starts from the last writer's head and
     // commits on top of it.
     let main = repo.branch("main").open().perform(&env).await?;
-    main.pull().from(&last).perform(&env).await?;
+    main.pull(crate::Download::MinimalRanges)
+        .from(&last)
+        .perform(&env)
+        .await?;
     main.commit(stream::iter(vec![assert_fact(origins, "main")]))
         .perform(&env)
         .await?;
@@ -636,7 +681,10 @@ async fn measure_origins(origins: usize) -> Result<()> {
 
     let feature = repo.branch("feature").open().perform(&env).await?;
     feature.set_upstream(&main).perform(&env).await?;
-    feature.pull().perform(&env).await?;
+    feature
+        .pull(crate::Download::MinimalRanges)
+        .perform(&env)
+        .await?;
     main.commit(stream::iter(vec![assert_fact(origins + COMMITS + 1, "ff")]))
         .perform(&env)
         .await?;
@@ -653,7 +701,10 @@ async fn measure_origins(origins: usize) -> Result<()> {
     let local = profile.space(name).open().perform(&device).await?;
     let synced = local.branch("feature").open().perform(&device).await?;
     device.reset();
-    synced.pull().perform(&device).await?;
+    synced
+        .pull(crate::Download::MinimalRanges)
+        .perform(&device)
+        .await?;
     let ff_reads = device.block_reads();
     // Nothing new: the upstream moves, but only to a head we already
     // hold (it adopts our commit).
@@ -665,9 +716,16 @@ async fn measure_origins(origins: usize) -> Result<()> {
         .perform(&device)
         .await?;
     let upstream = local.branch("main").open().perform(&device).await?;
-    upstream.pull().from(&synced).perform(&device).await?;
+    upstream
+        .pull(crate::Download::MinimalRanges)
+        .from(&synced)
+        .perform(&device)
+        .await?;
     device.reset();
-    synced.pull().perform(&device).await?;
+    synced
+        .pull(crate::Download::MinimalRanges)
+        .perform(&device)
+        .await?;
     let noop_reads = device.block_reads();
 
     println!(
@@ -733,14 +791,21 @@ async fn measure_first_query(origins: usize) -> Result<()> {
             .open()
             .perform(&operator)
             .await?;
-        writer.pull().from(&previous).perform(&operator).await?;
+        writer
+            .pull(crate::Download::MinimalRanges)
+            .from(&previous)
+            .perform(&operator)
+            .await?;
         writer
             .commit(stream::iter(vec![assert_fact(100 + i, "origin")]))
             .perform(&operator)
             .await?;
         previous = writer;
     }
-    main.pull().from(&previous).perform(&operator).await?;
+    main.pull(crate::Download::MinimalRanges)
+        .from(&previous)
+        .perform(&operator)
+        .await?;
 
     let reader = profile
         .session(b"reader")
@@ -751,7 +816,11 @@ async fn measure_first_query(origins: usize) -> Result<()> {
     let local = profile.space(name).open().perform(&reader).await?;
     let upstream = local.branch("main").open().perform(&reader).await?;
     let adopter = local.branch("adopter").open().perform(&reader).await?;
-    adopter.pull().from(&upstream).perform(&reader).await?;
+    adopter
+        .pull(crate::Download::MinimalRanges)
+        .from(&upstream)
+        .perform(&reader)
+        .await?;
     let head = adopter.revision().expect("the adopter took main's head");
 
     let cache = adopter.node_cache();
@@ -770,8 +839,8 @@ async fn measure_first_query(origins: usize) -> Result<()> {
         .query()
         .select(AttributeQuery::from(
             Term::<Relation>::from(the!("bench/field"))
-                .of(Term::<dialog_artifacts::Entity>::from(
-                    "user:7".parse::<dialog_artifacts::Entity>()?,
+                .of(Term::<dialog_corpus::Entity>::from(
+                    "user:7".parse::<dialog_corpus::Entity>()?,
                 ))
                 .is(Term::<String>::var("is")),
         ))
@@ -830,13 +899,17 @@ async fn measure_pull_shapes(origins: usize) -> Result<Vec<(&'static str, u64)>>
             .perform(&operator)
             .await?;
         if let Some(previous) = &previous {
-            writer.pull().from(previous).perform(&operator).await?;
+            writer
+                .pull(crate::Download::MinimalRanges)
+                .from(previous)
+                .perform(&operator)
+                .await?;
         }
         bump(&writer, i, &operator).await?;
         previous = Some(writer);
     }
     let main = repo.branch("main").open().perform(&operator).await?;
-    main.pull()
+    main.pull(crate::Download::MinimalRanges)
         .from(previous.as_ref().expect("at least one origin"))
         .perform(&operator)
         .await?;
@@ -854,7 +927,10 @@ async fn measure_pull_shapes(origins: usize) -> Result<Vec<(&'static str, u64)>>
         async move {
             let branch = repo.branch(label).open().perform(operator).await?;
             branch.set_upstream(main).perform(operator).await?;
-            branch.pull().perform(operator).await?;
+            branch
+                .pull(crate::Download::MinimalRanges)
+                .perform(operator)
+                .await?;
             anyhow::Ok(branch)
         }
     };
@@ -882,11 +958,18 @@ async fn measure_pull_shapes(origins: usize) -> Result<Vec<(&'static str, u64)>>
                 .open()
                 .perform(&device)
                 .await?;
-            warmup.pull().from(&source).perform(&device).await?;
+            warmup
+                .pull(crate::Download::MinimalRanges)
+                .from(&source)
+                .perform(&device)
+                .await?;
             bump(&warmup, 0, &device).await?;
             let branch = local.branch(label).open().perform(&device).await?;
             device.reset();
-            branch.pull().perform(&device).await?;
+            branch
+                .pull(crate::Download::MinimalRanges)
+                .perform(&device)
+                .await?;
             anyhow::Ok(device.block_reads())
         }
     };
@@ -906,7 +989,10 @@ async fn measure_pull_shapes(origins: usize) -> Result<Vec<(&'static str, u64)>>
 
     let held = follower("nothing-new").await?;
     bump(&held, next(), &operator).await?;
-    main.pull().from(&held).perform(&operator).await?;
+    main.pull(crate::Download::MinimalRanges)
+        .from(&held)
+        .perform(&operator)
+        .await?;
     rows.push(("nothing-new", measure("nothing-new").await?));
 
     // Main takes its head back, so the followers hold a head of main's
@@ -924,14 +1010,24 @@ async fn measure_pull_shapes(origins: usize) -> Result<Vec<(&'static str, u64)>>
     follower("ff-other-1").await?;
     follower("ff-other-k").await?;
     let third = repo.branch("third").open().perform(&operator).await?;
-    third.pull().from(&main).perform(&operator).await?;
+    third
+        .pull(crate::Download::MinimalRanges)
+        .from(&main)
+        .perform(&operator)
+        .await?;
     bump(&third, next(), &operator).await?;
-    main.pull().from(&third).perform(&operator).await?;
+    main.pull(crate::Download::MinimalRanges)
+        .from(&third)
+        .perform(&operator)
+        .await?;
     rows.push(("ff other origin, 1 ahead", measure("ff-other-1").await?));
     for _ in 0..9 {
         bump(&third, next(), &operator).await?;
     }
-    main.pull().from(&third).perform(&operator).await?;
+    main.pull(crate::Download::MinimalRanges)
+        .from(&third)
+        .perform(&operator)
+        .await?;
     rows.push(("ff other origin, 10 ahead", measure("ff-other-k").await?));
 
     let screened = follower("screened").await?;
@@ -958,8 +1054,16 @@ async fn measure_pull_shapes(origins: usize) -> Result<Vec<(&'static str, u64)>>
     let b = follower("rival-b").await?;
     bump(&a, next(), &operator).await?;
     bump(&b, next(), &operator).await?;
-    let into_a = a.pull().from(&b).prepare(&operator).await?;
-    let into_b = b.pull().from(&a).prepare(&operator).await?;
+    let into_a = a
+        .pull(crate::Download::MinimalRanges)
+        .from(&b)
+        .prepare(&operator)
+        .await?;
+    let into_b = b
+        .pull(crate::Download::MinimalRanges)
+        .from(&a)
+        .prepare(&operator)
+        .await?;
     into_a.commit(&operator).await?;
     into_b.commit(&operator).await?;
     a.set_upstream(&b).perform(&operator).await?;
@@ -1068,7 +1172,10 @@ async fn current_costs() -> Result<()> {
 
         let feature = repo.branch("feature").open().perform(&env).await?;
         feature.set_upstream(&main).perform(&env).await?;
-        feature.pull().perform(&env).await?;
+        feature
+            .pull(crate::Download::MinimalRanges)
+            .perform(&env)
+            .await?;
         main.commit(stream::iter(vec![assert_fact(depth + 500, "theirs")]))
             .perform(&env)
             .await?;
@@ -1078,21 +1185,30 @@ async fn current_costs() -> Result<()> {
             .await?;
         env.reset();
         let started = Instant::now();
-        feature.pull().perform(&env).await?;
+        feature
+            .pull(crate::Download::MinimalRanges)
+            .perform(&env)
+            .await?;
         let merge_ms = started.elapsed().as_millis();
         let merge_reads = env.block_reads();
 
         let ff = repo.branch("ff").open().perform(&env).await?;
         ff.set_upstream(&main).perform(&env).await?;
-        ff.pull().perform(&env).await?;
+        ff.pull(crate::Download::MinimalRanges)
+            .perform(&env)
+            .await?;
         main.commit(stream::iter(vec![assert_fact(depth + 700, "ff")]))
             .perform(&env)
             .await?;
         env.reset();
-        ff.pull().perform(&env).await?;
+        ff.pull(crate::Download::MinimalRanges)
+            .perform(&env)
+            .await?;
         let ff_reads = env.block_reads();
         env.reset();
-        ff.pull().perform(&env).await?;
+        ff.pull(crate::Download::MinimalRanges)
+            .perform(&env)
+            .await?;
         let noop_reads = env.block_reads();
 
         println!(
@@ -1104,9 +1220,6 @@ async fn current_costs() -> Result<()> {
     print_resident_peak();
     Ok(())
 }
-
-/// The node type the artifact tree persists, read back for attribution.
-type ArtifactNode = PersistentNode<Key, State<Datum>>;
 
 /// Records the length and hash of every archive block the operator moves,
 /// beneath every cache, so a block a commit wrote or a query read can be
@@ -1159,7 +1272,12 @@ async fn attribute_block<Env>(
     hash: &Blake3Hash,
 ) -> Result<Option<FrameAttribution>>
 where
-    Env: Provider<Load> + Holds + ConditionalSync,
+    Env: Provider<Load>
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
+        + Holds
+        + ConditionalSync,
 {
     let Some(buffer) = Load::new(catalog.clone(), hash.clone())
         .perform(store)
@@ -1167,7 +1285,7 @@ where
     else {
         anyhow::bail!("block {hash} is not in the archive");
     };
-    let Ok(node) = ArtifactNode::try_from(buffer) else {
+    let Ok(node) = CorpusNode::try_from(buffer) else {
         return Ok(None);
     };
     let manifest = node.manifest()?;
@@ -1290,14 +1408,21 @@ async fn attribute_first_query(origins: usize) -> Result<()> {
             .open()
             .perform(&operator)
             .await?;
-        writer.pull().from(&previous).perform(&operator).await?;
+        writer
+            .pull(crate::Download::MinimalRanges)
+            .from(&previous)
+            .perform(&operator)
+            .await?;
         writer
             .commit(stream::iter(vec![assert_fact(100 + i, "origin")]))
             .perform(&operator)
             .await?;
         previous = writer;
     }
-    main.pull().from(&previous).perform(&operator).await?;
+    main.pull(crate::Download::MinimalRanges)
+        .from(&previous)
+        .perform(&operator)
+        .await?;
 
     let reader = profile
         .session(b"reader")
@@ -1309,7 +1434,11 @@ async fn attribute_first_query(origins: usize) -> Result<()> {
     let local = profile.space(name).open().perform(&reader).await?;
     let upstream = local.branch("main").open().perform(&reader).await?;
     let adopter = local.branch("adopter").open().perform(&reader).await?;
-    adopter.pull().from(&upstream).perform(&reader).await?;
+    adopter
+        .pull(crate::Download::MinimalRanges)
+        .from(&upstream)
+        .perform(&reader)
+        .await?;
     let head = adopter.revision().expect("the adopter took main's head");
 
     recorder.clear();
@@ -1317,8 +1446,8 @@ async fn attribute_first_query(origins: usize) -> Result<()> {
         .query()
         .select(AttributeQuery::from(
             Term::<Relation>::from(the!("bench/field"))
-                .of(Term::<dialog_artifacts::Entity>::from(
-                    "user:7".parse::<dialog_artifacts::Entity>()?,
+                .of(Term::<dialog_corpus::Entity>::from(
+                    "user:7".parse::<dialog_corpus::Entity>()?,
                 ))
                 .is(Term::<String>::var("is")),
         ))
@@ -1347,7 +1476,7 @@ async fn attribute_first_query(origins: usize) -> Result<()> {
                     .perform(&store)
                     .await?
                     .expect("just read");
-                let manifest = ArtifactNode::try_from(node)?.manifest()?;
+                let manifest = CorpusNode::try_from(node)?.manifest()?;
                 let label = if at == 0 {
                     format!("root ({len} bytes)")
                 } else {
@@ -1395,7 +1524,11 @@ async fn attribute_crowd(origins: usize) -> Result<()> {
             .perform(&env)
             .await?;
         if let Some(previous) = &previous {
-            writer.pull().from(previous).perform(&env).await?;
+            writer
+                .pull(crate::Download::MinimalRanges)
+                .from(previous)
+                .perform(&env)
+                .await?;
         }
         writer
             .commit(stream::iter(vec![assert_fact(i, "origin")]))
@@ -1406,7 +1539,10 @@ async fn attribute_crowd(origins: usize) -> Result<()> {
     let last = previous.expect("at least one origin");
 
     let main = repo.branch("main").open().perform(&env).await?;
-    main.pull().from(&last).perform(&env).await?;
+    main.pull(crate::Download::MinimalRanges)
+        .from(&last)
+        .perform(&env)
+        .await?;
     main.commit(stream::iter(vec![assert_fact(origins, "main")]))
         .perform(&env)
         .await?;
@@ -1421,7 +1557,7 @@ async fn attribute_crowd(origins: usize) -> Result<()> {
             .perform(&store)
             .await?
             .expect("the root is stored");
-        ArtifactNode::try_from(node)?.manifest()?
+        CorpusNode::try_from(node)?.manifest()?
     };
 
     let start = attribute_block(&store, &catalog, &root_of(&main))

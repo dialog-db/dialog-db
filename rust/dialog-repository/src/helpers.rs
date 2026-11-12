@@ -1,19 +1,22 @@
+use dialog_corpus::tree::{CorpusCache, CorpusNode};
 use dialog_effects::archive::ArchiveError;
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::blob::Load as BlobLoad;
+use dialog_search_tree::DialogSearchTreeError;
+use dialog_search_tree::nodes;
 use std::any::{Any, type_name};
 use std::collections::BTreeMap;
 use std::fmt;
-use std::future::Future;
-use std::future::poll_fn;
+use std::future::{Future, poll_fn};
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::task::Poll;
 
-use dialog_capability::{Command, Provider, Subject};
+use dialog_capability::{Command, Provider, Resume, Subject};
 use dialog_common::{Blake3Hash, Buffer, ConditionalSend, ConditionalSync};
-use dialog_effects::archive::Get;
 use dialog_effects::archive::prelude::ArchiveScope;
+use dialog_effects::archive::{Get, Import};
 use dialog_search_tree::{NodeBody, PersistentNode};
 use parking_lot::Mutex;
 use std::collections::HashSet;
@@ -169,15 +172,22 @@ where
         + Provider<Identify>
         + Provider<Attest>
         + Provider<Import>
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
         + Provider<Write>
         + Provider<ArchiveLoad>
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + ConditionalSync
         + Provider<BlobLoad>
         + Provider<Fork<Network, Resolve>>
         + dialog_common::Holds
         + ConditionalSync
         + 'static,
 {
-    use dialog_artifacts::{Artifact, Instruction, Value};
+    use dialog_corpus::{Fact, Instruction, Value};
     use dialog_credentials::Ed25519Signer;
     use dialog_ucan_core::subject::Subject;
     use dialog_varsig::Principal as _;
@@ -209,13 +219,13 @@ where
         let rows: Vec<_> = (0..150)
             .map(|i| {
                 Instruction::Assert(
-                    Artifact {
+                    Fact {
                         the: "device/link".parse().expect("valid attribute"),
                         of: format!("device:{round}-{i}").parse().expect("valid entity"),
                         is: Value::String(format!("device-{round}-{i}").repeat(24)),
                         cause: None,
                     },
-                    dialog_artifacts::Pick::All,
+                    dialog_corpus::Pick::All,
                 )
             })
             .collect();
@@ -226,9 +236,10 @@ where
 }
 
 #[cfg(test)]
+#[cfg(test)]
 use dialog_capability::Fork;
 #[cfg(test)]
-use dialog_effects::archive::{Import, Put};
+use dialog_effects::archive::Put;
 #[cfg(test)]
 use dialog_effects::authority::{Attest, Identify};
 #[cfg(test)]
@@ -278,19 +289,21 @@ impl<P: fmt::Debug> fmt::Debug for Counting<P> {
     }
 }
 
-/// A load's answer, boxed.
-#[cfg(not(target_arch = "wasm32"))]
-type LoadFuture<'a> =
-    Pin<Box<dyn Future<Output = Result<Option<Buffer>, ArchiveError>> + Send + 'a>>;
-/// A load's answer, boxed (single-threaded wasm form).
-#[cfg(target_arch = "wasm32")]
-type LoadFuture<'a> = Pin<Box<dyn Future<Output = Result<Option<Buffer>, ArchiveError>> + 'a>>;
+/// A load's answer.
+type Loaded<'a> = Resume<'a, Result<Option<Buffer>, ArchiveError>>;
+/// A node read's answer.
+type NodeRead<'a> = Resume<'a, Result<Option<CorpusNode>, DialogSearchTreeError>>;
+/// A node write's answer.
+type NodesWritten<'a> = Resume<'a, Result<(), DialogSearchTreeError>>;
 
 /// How a [`Counting`] answers the two loads through itself, fixed when it
 /// is built, where the wrapped env's capabilities are known.
 struct Loads<P> {
-    block: for<'a> fn(&'a Counting<P>, ArchiveLoad) -> LoadFuture<'a>,
-    blob: for<'a> fn(&'a Counting<P>, BlobLoad) -> LoadFuture<'a>,
+    block: for<'a> fn(&'a Counting<P>, ArchiveLoad) -> Loaded<'a>,
+    blob: for<'a> fn(&'a Counting<P>, BlobLoad) -> Loaded<'a>,
+    read: for<'a> fn(&'a Counting<P>, nodes::Read<CorpusNode>) -> NodeRead<'a>,
+    preload: for<'a> fn(&'a Counting<P>, nodes::Preload<CorpusNode>) -> Resume<'a, ()>,
+    write: for<'a> fn(&'a Counting<P>, nodes::Write<CorpusNode>) -> NodesWritten<'a>,
 }
 
 impl<P> Clone for Loads<P> {
@@ -306,6 +319,7 @@ impl<P> Copy for Loads<P> {}
 /// itself.
 pub trait CountedLoads:
     Provider<Get>
+    + Provider<Import>
     + Provider<BlobRead>
     + Provider<crate::Hydrate>
     + dialog_common::Holds
@@ -316,6 +330,7 @@ pub trait CountedLoads:
 
 impl<T> CountedLoads for T where
     T: Provider<Get>
+        + Provider<Import>
         + Provider<BlobRead>
         + Provider<crate::Hydrate>
         + dialog_common::Holds
@@ -324,12 +339,51 @@ impl<T> CountedLoads for T where
 {
 }
 
-fn load_block<P: CountedLoads>(env: &Counting<P>, load: ArchiveLoad) -> LoadFuture<'_> {
-    Box::pin(crate::load_or_hydrate(env, load))
+fn load_block<P: CountedLoads>(env: &Counting<P>, load: ArchiveLoad) -> Loaded<'_> {
+    Resume::later(crate::load_or_hydrate(env, load))
 }
 
-fn load_blob<P: CountedLoads>(env: &Counting<P>, load: BlobLoad) -> LoadFuture<'_> {
-    Box::pin(crate::load_blob_or_hydrate(env, load))
+// The node requests are answered through this env's own loads and
+// imports, so every block a node read or write touches is tallied as the
+// `Get`, `Hydrate` or `Import` it is. A node the env holds is at hand,
+// uncounted: no block is read for it.
+fn read_node<P: CountedLoads>(env: &Counting<P>, read: nodes::Read<CorpusNode>) -> NodeRead<'_> {
+    let Some(cache) = CorpusCache::of(env, read.catalog.subject()) else {
+        return read.through_loader(|load| crate::load_or_hydrate(env, load), None);
+    };
+    if let Some(node) = cache.get_cached(&read.name) {
+        return Resume::now(Ok(Some(node)));
+    }
+    Resume::later(async move {
+        read.through_loader(|load| crate::load_or_hydrate(env, load), Some(&cache))
+            .await
+    })
+}
+
+fn preload_node<P: CountedLoads>(
+    env: &Counting<P>,
+    preload: nodes::Preload<CorpusNode>,
+) -> Resume<'_, ()> {
+    if CorpusCache::of(env, preload.catalog.subject()).is_none() {
+        return Resume::now(());
+    }
+    match read_node(env, preload.read()).into_now() {
+        Ok(_) => Resume::now(()),
+        Err(reading) => Resume::later(async move {
+            let _ = reading.await;
+        }),
+    }
+}
+
+fn write_nodes<P: CountedLoads>(
+    env: &Counting<P>,
+    write: nodes::Write<CorpusNode>,
+) -> NodesWritten<'_> {
+    write.through_held_blocks(env)
+}
+
+fn load_blob<P: CountedLoads>(env: &Counting<P>, load: BlobLoad) -> Loaded<'_> {
+    Resume::later(crate::load_blob_or_hydrate(env, load))
 }
 
 impl<P: dialog_common::Holds> dialog_common::Holds for Counting<P> {
@@ -384,6 +438,9 @@ impl<P: CountedLoads> Counting<P> {
             loads: Loads {
                 block: load_block::<P>,
                 blob: load_blob::<P>,
+                read: read_node::<P>,
+                preload: preload_node::<P>,
+                write: write_nodes::<P>,
             },
         }
     }
@@ -460,37 +517,61 @@ impl<P> Counting<P> {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+/// A request's answer as the output of the command `C` it was performed
+/// as: the two are the same type, told apart only at run time.
+fn answered<C: Command>(output: impl Any) -> C::Output
+where
+    C::Output: 'static,
+{
+    let mut output = Some(output);
+    (&mut output as &mut dyn Any)
+        .downcast_mut::<Option<C::Output>>()
+        .and_then(Option::take)
+        .expect("a request answers with its own output")
+}
+
 impl<C, P> Provider<C> for Counting<P>
 where
     C: Command + 'static,
     C::Input: ConditionalSend + 'static,
-    C::Output: 'static,
+    C::Output: ConditionalSend + 'static,
     P: Provider<C> + ConditionalSync,
 {
-    async fn execute(&self, input: C::Input) -> C::Output {
+    fn execute(&self, input: C::Input) -> Resume<'_, C::Output> {
         // A load is answered through this env's own reads (see the type's
         // docs), and tallied by what it reads, not as itself.
         let mut input = Some(input);
         let slot = &mut input as &mut dyn Any;
-        let loaded = if let Some(load) = slot.downcast_mut::<Option<ArchiveLoad>>() {
+        if let Some(load) = slot.downcast_mut::<Option<ArchiveLoad>>() {
             let load = load.take().expect("the input is taken once");
-            Some((self.loads.block)(self, load).await)
+            return (self.loads.block)(self, load).map(answered::<C>);
         } else if let Some(load) = slot.downcast_mut::<Option<BlobLoad>>() {
             let load = load.take().expect("the input is taken once");
-            Some((self.loads.blob)(self, load).await)
-        } else {
-            None
-        };
-        if let Some(loaded) = loaded {
-            let mut output = Some(loaded);
-            return (&mut output as &mut dyn Any)
-                .downcast_mut::<Option<C::Output>>()
-                .and_then(Option::take)
-                .expect("a load answers with a load's output");
+            return (self.loads.blob)(self, load).map(answered::<C>);
+        } else if let Some(read) = slot.downcast_mut::<Option<nodes::Read<CorpusNode>>>() {
+            let read = read.take().expect("the input is taken once");
+            return (self.loads.read)(self, read).map(answered::<C>);
+        } else if let Some(preload) = slot.downcast_mut::<Option<nodes::Preload<CorpusNode>>>() {
+            let preload = preload.take().expect("the input is taken once");
+            return (self.loads.preload)(self, preload).map(answered::<C>);
+        } else if let Some(write) = slot.downcast_mut::<Option<nodes::Write<CorpusNode>>>() {
+            let write = write.take().expect("the input is taken once");
+            return (self.loads.write)(self, write).map(answered::<C>);
         }
         let input = input.expect("the input is taken only by a load");
+        Resume::later(self.counted(input))
+    }
+}
+
+impl<P> Counting<P> {
+    /// Performs `input` on the wrapped env, tallied as the command it is
+    /// and, for what crosses to a store or a remote, as one more read in
+    /// flight while it runs.
+    async fn counted<C>(&self, input: C::Input) -> C::Output
+    where
+        C: Command + 'static,
+        P: Provider<C> + ConditionalSync,
+    {
         let name = type_name::<C>();
         *self.counts.lock().entry(name).or_insert(0) += 1;
 
@@ -539,6 +620,188 @@ where
     }
 }
 
+/// A future an [`Interposing`] env runs under a read, before answering it.
+#[cfg(not(target_arch = "wasm32"))]
+pub type Interposed<'a> = Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
+/// A future an [`Interposing`] env runs under a read, before answering it.
+#[cfg(target_arch = "wasm32")]
+pub type Interposed<'a> = Pin<Box<dyn Future<Output = ()> + 'a>>;
+
+#[cfg(not(target_arch = "wasm32"))]
+type Interposition<P> = Box<dyn for<'a> FnOnce(&'a P) -> Interposed<'a> + Send>;
+#[cfg(target_arch = "wasm32")]
+type Interposition<P> = Box<dyn for<'a> FnOnce(&'a P) -> Interposed<'a>>;
+
+/// What an [`Interposing`] env has armed: the read to act under, which
+/// one, and the action.
+type Armed<P> = Option<(Under, u64, Interposition<P>)>;
+
+/// Which read an [`Interposing`] env acts under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Under {
+    /// A tree node read ([`nodes::Read`] of a [`CorpusNode`]): every
+    /// block a scan, a history walk or a commit's descent touches.
+    NodeRead,
+    /// A spilled value's load ([`blob::Load`](BlobLoad)): a value too
+    /// large for its row, read from the blob store when the row is.
+    BlobLoad,
+}
+
+/// A [`Provider`] wrapper that does something else under one read:
+/// forwards every effect to the env it wraps, and before answering the
+/// k-th tree node read (or the k-th blob load) runs an action the test
+/// armed, against the wrapped env.
+///
+/// This is how a test puts a commit *inside* a read path: arm it with a
+/// commit through another handle of the branch, and the k-th read the
+/// path performs finds the head moved when it resumes. Sweeping k over
+/// the reads a path performs puts the move at every point of the path,
+/// which is what shows whether the path reads one revision throughout
+/// (dialog-db/dialog-db#757). The action runs against the wrapped env,
+/// so the reads it performs itself are not counted and cannot fire it
+/// again.
+///
+/// Clones share the counters and the armed action.
+pub struct Interposing<P> {
+    inner: P,
+    reads: Arc<AtomicU64>,
+    loads: Arc<AtomicU64>,
+    armed: Arc<Mutex<Armed<P>>>,
+    fired: Arc<AtomicBool>,
+}
+
+impl<P: fmt::Debug> fmt::Debug for Interposing<P> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Interposing")
+            .field("inner", &self.inner)
+            .field("reads", &self.reads)
+            .field("loads", &self.loads)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<P: Clone> Clone for Interposing<P> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            reads: Arc::clone(&self.reads),
+            loads: Arc::clone(&self.loads),
+            armed: Arc::clone(&self.armed),
+            fired: Arc::clone(&self.fired),
+        }
+    }
+}
+
+impl<P> Interposing<P> {
+    /// Wrap `inner`, with nothing armed: every read is answered as the
+    /// wrapped env answers it.
+    pub fn new(inner: P) -> Self {
+        Self {
+            inner,
+            reads: Arc::new(AtomicU64::new(0)),
+            loads: Arc::new(AtomicU64::new(0)),
+            armed: Arc::new(Mutex::new(None)),
+            fired: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// The env this one wraps: where an armed action runs.
+    pub fn inner(&self) -> &P {
+        &self.inner
+    }
+
+    /// Arm `action` to run under the `at`-th read of the kind `under`
+    /// (counted from 1, from now), once. A read the env never reaches
+    /// leaves it unfired, which [`fired`](Self::fired) reports.
+    pub fn under<F>(&self, under: Under, at: u64, action: F)
+    where
+        F: for<'a> FnOnce(&'a P) -> Interposed<'a> + ConditionalSend + 'static,
+    {
+        self.reads.store(0, Ordering::SeqCst);
+        self.loads.store(0, Ordering::SeqCst);
+        self.fired.store(false, Ordering::SeqCst);
+        *self.armed.lock() = Some((under, at, Box::new(action)));
+    }
+
+    /// Drop whatever is armed and has not run.
+    pub fn disarm(&self) {
+        *self.armed.lock() = None;
+    }
+
+    /// Whether the armed action has run since it was armed.
+    pub fn fired(&self) -> bool {
+        self.fired.load(Ordering::SeqCst)
+    }
+
+    /// Tree node reads performed so far.
+    pub fn reads(&self) -> u64 {
+        self.reads.load(Ordering::SeqCst)
+    }
+
+    /// Blob loads performed so far.
+    pub fn loads(&self) -> u64 {
+        self.loads.load(Ordering::SeqCst)
+    }
+
+    /// Count one read of the kind `under`, and take the armed action when
+    /// this read is the one it waits for.
+    fn due(&self, under: Under) -> Option<Interposition<P>> {
+        let counter = match under {
+            Under::NodeRead => &self.reads,
+            Under::BlobLoad => &self.loads,
+        };
+        let count = counter.fetch_add(1, Ordering::SeqCst) + 1;
+        let mut armed = self.armed.lock();
+        match armed.as_ref() {
+            Some((kind, at, _)) if *kind == under && *at == count => {
+                self.fired.store(true, Ordering::SeqCst);
+                armed.take().map(|(_, _, action)| action)
+            }
+            _ => None,
+        }
+    }
+}
+
+impl<P: dialog_common::Holds> dialog_common::Holds for Interposing<P> {
+    fn held(&self, key: &str) -> Option<dialog_common::Held> {
+        self.inner.held(key)
+    }
+
+    fn hold(&self, key: String, handle: dialog_common::Held) {
+        self.inner.hold(key, handle)
+    }
+
+    fn held_or(&self, key: &str, make: &dyn Fn() -> dialog_common::Held) -> dialog_common::Held {
+        self.inner.held_or(key, make)
+    }
+}
+
+impl<C, P> Provider<C> for Interposing<P>
+where
+    C: Command + 'static,
+    C::Input: ConditionalSend + 'static,
+    C::Output: ConditionalSend + 'static,
+    P: Provider<C> + ConditionalSync,
+{
+    fn execute(&self, input: C::Input) -> Resume<'_, C::Output> {
+        let input_of = &input as &dyn Any;
+        let under = if input_of.is::<nodes::Read<CorpusNode>>() {
+            Some(Under::NodeRead)
+        } else if input_of.is::<BlobLoad>() {
+            Some(Under::BlobLoad)
+        } else {
+            None
+        };
+        let Some(action) = under.and_then(|under| self.due(under)) else {
+            return self.inner.execute(input);
+        };
+        Resume::later(async move {
+            action(&self.inner).await;
+            self.inner.execute(input).await
+        })
+    }
+}
+
 /// The tree nodes of `subject`'s index that `roots` reach, by digest: each
 /// root, and every node an index node among them links to, down to the
 /// leaves. A root the archive does not hold is counted and not descended.
@@ -556,7 +819,7 @@ pub async fn reachable_blocks<Env>(
 where
     Env: Provider<Get> + ConditionalSync,
 {
-    use dialog_artifacts::{Datum, Key, State};
+    use dialog_corpus::{Datum, Key, State};
 
     let catalog = ArchiveScope::new(Subject::from(subject.clone())).index();
     let mut reachable = HashSet::new();
@@ -623,8 +886,8 @@ mod prune_tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use anyhow::Result;
-    use dialog_artifacts::{Artifact, DialogArtifactsError, Exporter, Instruction, Pick, Value};
     use dialog_capability::Subject;
+    use dialog_corpus::{DialogCorpusError, Exporter, Fact, Instruction, Pick, Value};
     use dialog_effects::archive::prelude::DEFAULT_CATALOG;
     use dialog_peer::helpers::{test_session_with_peer, unique_name};
     use futures_util::stream;
@@ -643,21 +906,21 @@ mod prune_tests {
     #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
     #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
     impl Exporter for Count {
-        async fn write(&mut self, artifact: &Artifact) -> Result<(), DialogArtifactsError> {
-            if artifact.the.to_string() == "prune/field" {
+        async fn write(&mut self, fact: &Fact) -> Result<(), DialogCorpusError> {
+            if fact.the.to_string() == "prune/field" {
                 *self.0.lock() += 1;
             }
             Ok(())
         }
 
-        async fn close(&mut self) -> Result<(), DialogArtifactsError> {
+        async fn close(&mut self) -> Result<(), DialogCorpusError> {
             Ok(())
         }
     }
 
     fn assert_fact(entity: usize) -> Instruction {
         Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "prune/field".parse().expect("a relation"),
                 of: format!("user:{entity}").parse().expect("an entity"),
                 is: Value::String("x".into()),
@@ -735,7 +998,10 @@ mod prune_tests {
         );
         let feature = local.branch("feature").open().perform(&device).await?;
         feature.set_upstream(&cold).perform(&device).await?;
-        feature.pull().perform(&device).await?;
+        feature
+            .pull(crate::Download::MinimalRanges)
+            .perform(&device)
+            .await?;
         assert_eq!(feature.revision(), cold.revision());
         Ok(())
     }

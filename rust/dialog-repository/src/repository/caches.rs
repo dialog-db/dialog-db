@@ -64,10 +64,10 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use dialog_artifacts::history::{CausalityCache, ContextCache, RevisionRecord, Version};
-use dialog_artifacts::tree::{ArtifactNodeCache, SPILL_CACHE_BUDGET, SpillCache};
-use dialog_artifacts::{SpineSlot, WeakSpineSlot};
 use dialog_common::{Blake3Hash, Holds, held_key};
+use dialog_corpus::history::{CausalityCache, ContextCache, RevisionRecord, Version};
+use dialog_corpus::tree::{CorpusCache, SPILL_CACHE_BUDGET, SpillCache};
+use dialog_corpus::{SpineSlot, WeakSpineSlot};
 use dialog_query::concept::query::{PLAN_CACHE_CAPACITY, PlanCache};
 use dialog_query::formula::{FORMULA_CACHE_CAPACITY, FormulaCache};
 use dialog_search_tree::{CACHE_CAPACITY, Cache, NODE_CACHE_BUDGET, NodeCache, Scope};
@@ -293,7 +293,7 @@ pub struct HeldCaches {
     /// How large each cache may grow.
     limits: CacheBudget,
     /// Tree nodes of every repository, each reading through its own scope.
-    nodes: ArtifactNodeCache,
+    nodes: CorpusCache,
     /// Spilled values of every repository, by content.
     spills: SpillCache,
     /// The outputs of formulas marked `#[formula(cached)]`.
@@ -382,7 +382,7 @@ impl HeldCaches {
         // So are routes branches registered before any caches were held,
         // and the nodes trees read through `env` kept before then.
         let routes = crate::Routes::of(env);
-        let nodes = ArtifactNodeCache::held_by(env);
+        let nodes = CorpusCache::held_by(env);
         let caches = env
             .held_or(&key, &|| {
                 let mut caches = Self::within(CacheBudget::default(), formulas.clone());
@@ -626,10 +626,10 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use anyhow::Result;
-    use dialog_artifacts::{Artifact, Instruction, Pick, Value};
     use dialog_capability::{Command, Fork, Provider};
     use dialog_common::Blake3Hash as NodeHash;
     use dialog_common::{ConditionalSync, Held, Holds};
+    use dialog_corpus::{Fact, Instruction, Pick, Value};
     use dialog_credentials::Credential;
     use dialog_effects::archive::{ArchiveError, Get, Import, Put};
     use dialog_effects::authority::{Attest, Identify};
@@ -639,7 +639,7 @@ mod tests {
     use dialog_peer::{Peer, PeerSpace, Session};
     use futures_util::stream;
 
-    use dialog_artifacts::tree::SPILL_CACHE_BUDGET;
+    use dialog_corpus::tree::SPILL_CACHE_BUDGET;
     use dialog_query::concept::query::PLAN_CACHE_CAPACITY;
     use dialog_query::formula::FORMULA_CACHE_CAPACITY;
     use dialog_query::the;
@@ -675,8 +675,7 @@ mod tests {
     macro_rules! delegate_provider {
         ($($command:ty),+ $(,)?) => {
             $(
-                #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-                #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+                #[dialog_capability::provider]
                 impl<P> Provider<$command> for RefusingImport<P>
                 where
                     P: Provider<$command> + ConditionalSync,
@@ -706,8 +705,18 @@ mod tests {
         Fork<RemoteSite, Resolve>,
     );
 
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    // The node requests are answered through this env's own loads and
+    // imports, so a write meets the refusal.
+    dialog_search_tree::reads_nodes_through_blocks!(
+        impl[P,] RefusingImport<P>
+        where [P: Provider<ArchiveLoad> + Holds + ConditionalSync,]
+    );
+    dialog_search_tree::writes_nodes_through_blocks!(
+        impl[P,] RefusingImport<P>
+        where [P: Holds + ConditionalSync,]
+    );
+
+    #[dialog_capability::provider]
     impl<P: ConditionalSync> Provider<Import> for RefusingImport<P> {
         async fn execute(&self, _input: <Import as Command>::Input) -> <Import as Command>::Output {
             Err(ArchiveError::Storage(
@@ -724,7 +733,7 @@ mod tests {
     ) -> Result<(Branch, NodeHash)> {
         let main = repository.branch("main").open().perform(operator).await?;
         main.commit(stream::iter(vec![Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "user/name".parse()?,
                 of: "user:1".parse()?,
                 is: Value::String("Alice".into()),
@@ -843,7 +852,7 @@ mod tests {
         };
         let failed = main
             .commit(stream::iter(vec![Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "user/name".parse()?,
                     of: "user:2".parse()?,
                     is: Value::String("Bob".into()),
@@ -855,7 +864,7 @@ mod tests {
             .await;
 
         assert!(
-            matches!(failed, Err(CommitError::Artifact(_))),
+            matches!(failed, Err(CommitError::Fact(_))),
             "the commit fails at the flush: {failed:?}"
         );
         assert_eq!(
@@ -884,7 +893,7 @@ mod tests {
     {
         branch
             .commit(stream::iter(vec![Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "user/name".parse()?,
                     of: format!("user:{fact}").parse()?,
                     is: Value::String("Alice".into()),
@@ -1174,7 +1183,7 @@ mod tests {
             .transaction()
             .assert(
                 the!("user/name")
-                    .of("user:1".parse::<dialog_artifacts::Entity>()?)
+                    .of("user:1".parse::<dialog_corpus::Entity>()?)
                     .is("Alice".to_string()),
             )
             .commit()

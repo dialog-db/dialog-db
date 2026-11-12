@@ -13,7 +13,7 @@ pub use query::{AttributeQuery, DynamicAttributeQuery, StaticAttributeQuery};
 pub use statement::*;
 pub use the::*;
 
-pub use crate::artifact::{ArtifactsRelation, Cause, DialogArtifactsError, Entity, Value};
+pub use crate::corpus::{Cause, CorpusRelation, DialogCorpusError, Entity, Value};
 pub use crate::schema::Cardinality;
 pub use crate::types::{Scalar, Type, Typed};
 pub use crate::{Predicate, Premise, Term};
@@ -70,18 +70,18 @@ pub trait Attribute: Predicate + Sized {
 
 #[cfg(test)]
 mod tests {
-    use crate::artifact::Type;
     use crate::attribute::{Attribute, AttributeDescriptor, Cardinality};
+    use crate::corpus::Type;
     use crate::term::Term;
     use crate::the;
 
     mod person {
         use std::sync::OnceLock;
 
-        use crate::artifact::Value;
         use crate::attribute::expression::typed::StaticAttributeStatement;
         use crate::attribute::query::StaticAttributeQuery;
         use crate::attribute::{Attribute, AttributeDescriptor, StaticAttributeExpressionBuilder};
+        use crate::corpus::Value;
         use crate::descriptor::Descriptor;
         use crate::term::Term;
         use crate::the;

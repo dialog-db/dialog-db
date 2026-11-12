@@ -395,7 +395,7 @@ impl Default for Manifest {
         // Experiment plumbing for the boundary-policy arms (see
         // notes/boundary-policy-experiment.md): the manifest a fresh tree is
         // created under can be overridden through the environment, so the
-        // whole artifact stack runs a capture under an arm's format without
+        // whole fact stack runs a capture under an arm's format without
         // threading configuration through every layer. Unset variables leave
         // the table defaults untouched; existing trees always keep the
         // manifest their root node carries.

@@ -13,10 +13,10 @@
 #[cfg(target_arch = "wasm32")]
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-use crate::artifact::{ArtifactsRelation, Type};
 use crate::attribute::query::all::AttributeQueryAll;
 use crate::attribute::{AttributeStatement, Relation};
 use crate::concept::descriptor::ConceptStatement;
+use crate::corpus::{CorpusRelation, Type};
 use crate::query::Application as _;
 use crate::query::Output as _;
 use crate::rule::DeductiveRuleDescriptor;
@@ -56,9 +56,7 @@ fn sorted(mut values: Vec<Value>) -> Vec<Value> {
 
 /// The relation `name` names, composed at runtime.
 fn relation(name: &str) -> anyhow::Result<Relation> {
-    Ok(Relation::from(ArtifactsRelation::try_from(
-        name.to_string(),
-    )?))
+    Ok(Relation::from(CorpusRelation::try_from(name.to_string())?))
 }
 
 /// Store each of `values` under `the` of its own fresh entity, in one
@@ -1656,7 +1654,7 @@ fn human_notation_round_trips_numbers() -> anyhow::Result<()> {
     assert!(
         matches!(
             "float:NaN".parse::<Value>(),
-            Err(crate::DialogArtifactsError::InvalidValue(reason)) if reason == "NaN is not a value"
+            Err(crate::DialogCorpusError::InvalidValue(reason)) if reason == "NaN is not a value"
         ),
         "NaN is not a value"
     );

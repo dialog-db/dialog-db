@@ -183,7 +183,7 @@ mod tests {
     use crate::source::test::TestEnv;
     use crate::the;
     use crate::{Cardinality, Proposition, Term, Value};
-    use dialog_artifacts::Entity;
+    use dialog_corpus::Entity;
     use dialog_peer::helpers::{test_repo, test_session_with_peer};
 
     #[dialog_common::test]
@@ -414,7 +414,7 @@ mod plan_ordering {
     use crate::{
         AttributeDescriptor, Cardinality, ConceptDescriptor, Parameters, Proposition, Term, Type,
     };
-    use dialog_artifacts::Entity;
+    use dialog_corpus::Entity;
     use std::collections::BTreeSet;
 
     /// An order signature for a planned conjunction: the per-step

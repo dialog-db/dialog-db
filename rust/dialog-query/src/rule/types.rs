@@ -26,7 +26,7 @@ use crate::FormulaQuery;
 use crate::Premise;
 use crate::Proposition;
 use crate::Term;
-use crate::artifact::Type as ValueType;
+use crate::corpus::Type as ValueType;
 use crate::error::InferenceError;
 use crate::formula::number::Numeric;
 use crate::type_system::Primitive;
@@ -563,9 +563,9 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
-    use crate::artifact::{Entity, Type as ValueType};
     use crate::attribute::Relation;
     use crate::attribute::query::AttributeQuery;
+    use crate::corpus::{Entity, Type as ValueType};
     use crate::error::TypeError;
     use crate::formula::Formula;
     use crate::formula::math::Sum;
@@ -698,6 +698,51 @@ mod tests {
             "the predicate narrowed the scan variable"
         );
         Ok(())
+    }
+
+    /// One variable read through two fields of a concept that declare
+    /// types with nothing in common is refused when the query is
+    /// planned, before any row is read: no value is both a text and a
+    /// natural. A field that declares no type refuses nothing here; a
+    /// typed variable then reads the values of its type from it as rows
+    /// arrive (`typed_read_tests`).
+    #[dialog_common::test]
+    fn it_refuses_one_variable_read_through_fields_of_two_types() {
+        let field = |the, kind| {
+            ConceptFieldDescriptor::required(AttributeDescriptor::new(
+                the,
+                "",
+                Cardinality::One,
+                Some(kind),
+            ))
+        };
+        let concept = ConceptDescriptor::try_from(vec![
+            (
+                "name".to_string(),
+                field(the!("person/name"), ValueType::String),
+            ),
+            (
+                "age".to_string(),
+                field(the!("person/age"), ValueType::UnsignedInt),
+            ),
+        ])
+        .unwrap();
+        let mut terms = Parameters::new();
+        terms.insert("this".to_string(), Term::var("entity"));
+        terms.insert("name".to_string(), Term::var("x"));
+        terms.insert("age".to_string(), Term::var("x"));
+        let premises = vec![Premise::Assert(Proposition::Concept(ConceptQuery {
+            terms,
+            predicate: concept,
+        }))];
+
+        let refused = Planner::from(premises)
+            .plan(&Environment::new())
+            .unwrap_err();
+        assert!(
+            matches!(&refused, TypeError::TypeInference { reason } if reason.contains("x")),
+            "expected a type inference error naming ?x, got {refused:?}"
+        );
     }
 
     /// Conflicting type predicates are a compile-time error.
