@@ -1,4 +1,4 @@
-//! The three slots after the magic number: where the file says what it
+//! The four slots after the magic number: where the file says what it
 //! holds.
 //!
 //! A slot is the file's state as of an append: a sequence number, where
@@ -10,11 +10,15 @@
 //! leaves the other, and records past its end, which the next writer
 //! drops.
 //!
-//! The third slot is durable: it is written only at a sync point, once
-//! everything before it is on the disk, and synced itself. The index's
+//! The other two hold the durable slot: it is written only at a sync point,
+//! once everything before it is on the disk, and synced itself. The index's
 //! pages are written over only once a sync point has made that safe (see
 //! the archive's sync), so nothing the durable slot reaches is ever written
-//! over, and after a power loss the file can always go back to it.
+//! over, and after a power loss the file can always go back to it. A slot
+//! can span sectors, and a power loss during its write can keep one and
+//! lose another, so each sync point writes over the copy that does not
+//! hold the newest whole durable slot, and opening takes the newer of the
+//! two that is whole: one is whole whatever a power loss cut short.
 //!
 //! A slot is its body's length (u32), the crc32 of the body, then the body:
 //! sequence, end, the last sync point's sequence and the boot it was
@@ -37,11 +41,11 @@ use crate::rows::{Reader, invalid, put_varint};
 /// The bytes a slot may take.
 pub(crate) const SLOT: u64 = 64 * 1024;
 
-/// Where the durable slot is.
-const DURABLE: u64 = MAGIC.len() as u64 + 2 * SLOT;
+/// Where the two copies of the durable slot are.
+const DURABLE: [u64; 2] = [MAGIC.len() as u64 + 2 * SLOT, MAGIC.len() as u64 + 3 * SLOT];
 
 /// Where the first record goes: after the magic number and the slots.
-pub(crate) const DATA: u64 = MAGIC.len() as u64 + 3 * SLOT;
+pub(crate) const DATA: u64 = MAGIC.len() as u64 + 4 * SLOT;
 
 /// What the archive reports holding, kept in the slot so a reopened file
 /// reports it without reading everything.
@@ -284,11 +288,24 @@ impl Slot {
         }
     }
 
-    /// Writes this slot as the durable one.
+    /// Writes this slot as the durable one, over the copy that does not
+    /// hold the newest whole durable slot.
     pub fn write_durable(&self, file: &File) -> io::Result<()> {
         #[cfg(test)]
         self.check_extents();
-        write_at(file, DURABLE, &self.encode()?)
+        let len = file.metadata()?.len();
+        let held = [
+            Self::read_at(file, DURABLE[0], len)?,
+            Self::read_at(file, DURABLE[1], len)?,
+        ];
+        let newest = match &held {
+            [Some(a), Some(b)] => Some(usize::from(b.sequence > a.sequence)),
+            [Some(_), None] => Some(0),
+            [None, Some(_)] => Some(1),
+            [None, None] => None,
+        };
+        let copy = newest.map_or(0, |newest| 1 - newest);
+        write_at(file, DURABLE[copy], &self.encode()?)
     }
 
     fn read_at(file: &File, offset: u64, len: u64) -> io::Result<Option<Slot>> {
@@ -313,9 +330,15 @@ impl Slot {
         Ok(slots)
     }
 
-    /// The durable slot, if it is whole.
+    /// The durable slot: the newer copy that is whole, if either is.
     pub fn read_durable(file: &File) -> io::Result<Option<Slot>> {
-        Self::read_at(file, DURABLE, file.metadata()?.len())
+        let len = file.metadata()?.len();
+        let a = Self::read_at(file, DURABLE[0], len)?;
+        let b = Self::read_at(file, DURABLE[1], len)?;
+        Ok(match (a, b) {
+            (Some(a), Some(b)) => Some(if b.sequence > a.sequence { b } else { a }),
+            (a, b) => a.or(b),
+        })
     }
 }
 

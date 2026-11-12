@@ -1,4 +1,4 @@
-//! The file: a magic number, three slots (see the archive's `slot`
+//! The file: a magic number, four slots (see the archive's `slot`
 //! module), then a sequence of records, appended.
 //!
 //! Every record is its kind (1 byte), its body's length (4 bytes, little
@@ -18,7 +18,7 @@ use std::io;
 
 /// The first bytes of every archive file. The last byte is the format
 /// version.
-pub(crate) const MAGIC: &[u8; 8] = b"DIALOGA\x0e";
+pub(crate) const MAGIC: &[u8; 8] = b"DIALOGA\x0f";
 
 /// The bytes of a record before its body.
 pub(crate) const HEADER: u64 = 1 + 4 + 4;

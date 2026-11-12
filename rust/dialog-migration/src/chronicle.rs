@@ -219,6 +219,12 @@ pub fn transcode(source: &impl BlockSource, target: &Chronicle) -> io::Result<Re
 /// `archive.dialog`.
 pub const MIGRATING: &str = "archive.dialog.migrating";
 
+/// What says a space was migrated, written once its file is in place: a
+/// space with an `archive.dialog` was not necessarily migrated (opening one
+/// creates it, and a space opened on the file writes to it whatever its
+/// `fs` archive holds).
+pub const MIGRATED: &str = "archive.dialog.migrated";
+
 /// Every space under `root`: each directory holding an `fs` archive,
 /// `{space}/archive/{catalog}/{hash}`. A profile directory holds several
 /// (the peer's own state, and a space per repository).
@@ -241,13 +247,48 @@ pub fn spaces(root: impl AsRef<Path>) -> io::Result<Vec<PathBuf>> {
 }
 
 /// The spaces under `root` that have not moved to the file yet: an `fs`
-/// archive and no [`FILE_NAME`] beside it. A space that has one was
-/// migrated, or was written by a file-archive space all along.
+/// archive and no [`MIGRATED`] beside it, whatever `archive.dialog` they
+/// have.
 pub fn unmigrated(root: impl AsRef<Path>) -> io::Result<Vec<PathBuf>> {
     Ok(spaces(root)?
         .into_iter()
-        .filter(|space| !space.join(FILE_NAME).exists())
+        .filter(|space| !space.join(MIGRATED).exists())
         .collect())
+}
+
+/// The files in a space's `fs` archive that are not blocks a transcode
+/// reads: not named by a hash, or not files, in a catalog or beside them.
+pub fn strays(space: impl AsRef<Path>) -> io::Result<Vec<PathBuf>> {
+    let source = Directory::space(space.as_ref());
+    let root = space.as_ref().join("archive");
+    let catalogs = source.catalogs()?;
+    let mut strays = Vec::new();
+    for entry in std::fs::read_dir(&root)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if !entry.file_type()?.is_dir()
+            || !name
+                .to_str()
+                .is_some_and(|name| catalogs.iter().any(|c| c == name))
+        {
+            strays.push(entry.path());
+        }
+    }
+    for catalog in &catalogs {
+        for entry in std::fs::read_dir(source.directory(catalog))? {
+            let entry = entry?;
+            let named = entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.from_base58().ok())
+                .is_some_and(|bytes| bytes.len() == 32);
+            if !entry.file_type()?.is_file() || !named {
+                strays.push(entry.path());
+            }
+        }
+    }
+    strays.sort();
+    Ok(strays)
 }
 
 /// How many blocks a space's `fs` archive holds, and their bytes: what
@@ -268,14 +309,26 @@ pub fn size(space: impl AsRef<Path>) -> io::Result<(u64, u64)> {
 }
 
 /// Moves one space into the file a file-archive space reads: transcodes its
-/// `fs` archive into [`MIGRATING`], makes that durable, then renames it to
-/// [`FILE_NAME`]. Interrupted, it resumes: the blocks already in
-/// [`MIGRATING`] are not written again. With `remove_source`, the `fs`
-/// archive is deleted once the file is in place; otherwise it is left, and
-/// a file-archive space never reads it.
+/// `fs` archive into [`MIGRATING`] (a copy of the space's `archive.dialog`
+/// when it has one, so what that holds stays), makes that durable, renames
+/// it to [`FILE_NAME`] and writes [`MIGRATED`]. Interrupted, it resumes: the
+/// blocks already in [`MIGRATING`] are not written again. Run it while no
+/// process has the space open: what one writes to `archive.dialog` during
+/// the copy is not in the file that replaces it.
+///
+/// With `remove_source`, the `fs` archive is deleted once the file is in
+/// place, but only if every file in it went in: a block whose bytes do not
+/// match its name ([`CatalogReport::corrupt`]) or a file that is not a
+/// block ([`strays`]) fails the migration instead, with the file written,
+/// the `fs` archive kept and the space left to migrate again. Without it,
+/// the `fs` archive is left, and a file-archive space never reads it.
 pub fn migrate_space(space: impl AsRef<Path>, remove_source: bool) -> io::Result<Report> {
     let space = space.as_ref();
     let migrating = space.join(MIGRATING);
+    let file = space.join(FILE_NAME);
+    if !migrating.exists() && file.exists() {
+        std::fs::copy(&file, &migrating)?;
+    }
     let report = {
         let archive =
             Chronicle::open(&migrating).map_err(|error| io::Error::other(error.to_string()))?;
@@ -285,7 +338,29 @@ pub fn migrate_space(space: impl AsRef<Path>, remove_source: bool) -> io::Result
             .map_err(|error| io::Error::other(error.to_string()))?;
         report
     };
-    std::fs::rename(&migrating, space.join(FILE_NAME))?;
+    std::fs::rename(&migrating, &file)?;
+    if remove_source {
+        let corrupt: usize = report.catalogs.iter().map(|c| c.corrupt.len()).sum();
+        let strays = strays(space)?;
+        if corrupt > 0 || !strays.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{}: {corrupt} blocks whose bytes do not match their names and {} files \
+                     that are not blocks were left out ({}); the fs archive is kept",
+                    space.display(),
+                    strays.len(),
+                    strays
+                        .iter()
+                        .map(|path| path.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            ));
+        }
+    }
+    std::fs::write(space.join(MIGRATED), b"")?;
+    std::fs::File::open(space)?.sync_all().ok();
     if remove_source {
         std::fs::remove_dir_all(space.join("archive"))?;
     }

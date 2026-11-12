@@ -292,7 +292,7 @@ fn every_power_loss_recovers_to_what_was_synced() -> anyhow::Result<()> {
 /// each. Its durable slot, written over in place at each sync point,
 /// spans two sectors, so a power loss can keep one of them only.
 fn wide_slots(path: &Path, watch: &disk::Watch) -> anyhow::Result<Done> {
-    let archive = FileArchive::open_with(
+    let archive = Chronicle::open_with(
         path,
         Options {
             extent: 4096,
@@ -347,7 +347,7 @@ fn it_opens_after_a_durable_slot_torn_at_a_sector() -> anyhow::Result<()> {
 
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("archive");
-    let archive = FileArchive::open(&path)?;
+    let archive = Chronicle::open(&path)?;
     let catalog = |n: usize| format!("{n}{}", "c".repeat(200));
     let mut synced = Vec::new();
     for n in 0..4 {
@@ -368,11 +368,17 @@ fn it_opens_after_a_durable_slot_torn_at_a_sector() -> anyhow::Result<()> {
         .store(true, std::sync::atomic::Ordering::Relaxed);
     drop(archive);
 
-    let durable = MAGIC.len() + 2 * SLOT as usize;
+    // The copy of the durable slot the second sync point wrote: the one
+    // that differs between the two images (the other keeps the first).
+    let durable = [2, 3]
+        .map(|copy| MAGIC.len() + copy * SLOT as usize)
+        .into_iter()
+        .find(|&at| before[at..at + SLOT as usize] != after[at..at + SLOT as usize])
+        .expect("a sync point writes a durable slot");
     let sector = (durable / 512 + 1) * 512;
     let length = |bytes: &[u8]| u32::from_le_bytes(bytes[durable..durable + 4].try_into().unwrap());
     assert!(
-        durable + 8 + length(&before) as usize > sector,
+        durable + 8 + length(&before).max(length(&after)) as usize > sector,
         "the durable slot spans a sector boundary"
     );
     for (kept, torn) in [(&before, &after), (&after, &before)] {
@@ -381,7 +387,7 @@ fn it_opens_after_a_durable_slot_torn_at_a_sector() -> anyhow::Result<()> {
         let image_path = directory.path().join("torn");
         std::fs::write(&image_path, &image)?;
         as_if_rebooted(&image_path)?;
-        let reopened = FileArchive::open_with(
+        let reopened = Chronicle::open_with(
             &image_path,
             Options {
                 leave_extent: false,

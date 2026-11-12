@@ -56,7 +56,7 @@ mod walk {
     /// The byte of the writer's turn: past any file the archive grows to.
     const TURN: u64 = 1 << 62;
     const SLOT: u64 = 64 * 1024;
-    const DATA: u64 = 8 + 3 * SLOT;
+    const DATA: u64 = 8 + 4 * SLOT;
     const ALIGN: u64 = 16;
     const PAGE: u64 = 4096;
 
@@ -463,7 +463,10 @@ mod walk {
                 hex(&bytes[..8])
             );
             let mut newest = None;
-            for (index, name) in ["rolling 0", "rolling 1", "durable"].iter().enumerate() {
+            for (index, name) in ["rolling 0", "rolling 1", "durable 0", "durable 1"]
+                .iter()
+                .enumerate()
+            {
                 let at = 8 + index as u64 * SLOT;
                 let slot = self.slot(&bytes, at, name)?;
                 if let Some(slot) = slot.filter(|_| index < 2)

@@ -659,7 +659,17 @@ What this changes for you:
 - The file syncs itself every 64 appends or 2 seconds, and on
   `Chronicle::sync`. A power loss loses at most the appends since, and
   never leaves the file damaged: opening goes back to the newest state
-  that is whole.
+  that is whole. The slot that state is read from is kept twice, and a
+  sync writes over the older copy, so a sync torn by power loss leaves
+  the previous copy whole.
+- Every frame is checked before it is written: one that does not realize
+  to the exact block it stands for (a node another peer wrote in another
+  layout, say) is kept whole, never written as rows that read back
+  different bytes.
+- An extent a process left behind when it closed or died is written into
+  again by the next writer that needs one, instead of a new one, so a
+  file opened and closed many times does not grow a dead extent each
+  time.
 - Opening reads small slots at the head of the file and nothing else.
   The file's index is in the file, so a reader holds a few tens of KB,
   not an index that grows with the file; its pages are written over once
@@ -674,8 +684,14 @@ What this changes for you:
   it, and an interrupted run picks up where it stopped. The `chronicle`
   step (`chronicle::IntoChronicle`) moves every space of a replica the
   `fs` provider wrote into the `archive.dialog` a file-archive space reads,
-  writing it under another name and renaming it once complete; with
-  `remove_source` it deletes the `fs` archive after. It is a conversion an
+  writing it under another name (starting from the space's
+  `archive.dialog`, if it has one, so what that holds stays), renaming it
+  once complete and writing `archive.dialog.migrated`. A space is
+  migrated when that marker is there, not when it has an `archive.dialog`
+  (opening a `Chronicle` creates one). With `remove_source` it deletes
+  the `fs` archive after, unless a block's bytes did not match its name
+  or a file in it was not a block (`chronicle::strays`): then it fails and
+  keeps the `fs` archive. It is a conversion an
   application opts into, not an upgrade every replica needs. Every block
   reads back as the bytes it was; nodes in an older layout are kept whole.
   `dialog-migrate [--dry-run] [--step <id>] [--remove-source] <replica>`
@@ -1975,8 +1991,8 @@ has a tree to canonicalize even when the link itself wrote nothing.
 
 #### Compatibility and migration
 
-- A `Chronicle` file is format 14; one written by an earlier build of
-  this branch's `dialog-chronicle` (format 10 to 13) does not open, and is
+- A `Chronicle` file is format 15; one written by an earlier build of
+  this branch's `dialog-chronicle` (format 10 to 14) does not open, and is
   moved again from the replica it came from with `dialog-migrate`. Nothing
   else stored or synced changes: blocks, their hashes and what a replica
   syncs are the same.

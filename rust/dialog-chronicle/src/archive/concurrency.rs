@@ -1489,7 +1489,7 @@ fn it_keeps_the_file_present_for_a_handle_opened_while_the_last_closes() -> anyh
     let directory = tempfile::tempdir()?;
     let path = archive_in(&directory);
     let path_text = path.to_string_lossy().into_owned();
-    let archive = FileArchive::open(&path)?;
+    let archive = Chronicle::open(&path)?;
     archive.append("index", &[block("first")])?;
     // The close waits for the turn another process holds, after it found
     // itself the last handle.
@@ -1497,7 +1497,7 @@ fn it_keeps_the_file_present_for_a_handle_opened_while_the_last_closes() -> anyh
     let closing = std::thread::spawn(move || drop(archive));
     std::thread::sleep(A_WHILE);
     anyhow::ensure!(!closing.is_finished(), "the close waits for the turn");
-    let reopened = FileArchive::open(&path)?;
+    let reopened = Chronicle::open(&path)?;
     holder.finish()?;
     closing
         .join()
@@ -1522,7 +1522,7 @@ fn it_does_not_pile_up_extents_left_by_processes_that_die() -> anyhow::Result<()
     let directory = tempfile::tempdir()?;
     let path = archive_in(&directory);
     let look = || -> anyhow::Result<(usize, u64)> {
-        let archive = FileArchive::open_with(
+        let archive = Chronicle::open_with(
             &path,
             Options {
                 leave_extent: false,

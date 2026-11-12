@@ -40,6 +40,14 @@ pub(crate) fn owner(extent: u64) -> u64 {
     BASE + 1 + extent
 }
 
+/// The byte a process holds shared while an extent it left for others (see
+/// the archive's `leave_extent`) is its to take back: one listed empty,
+/// unowned and not left by a live process is an orphan, which a process
+/// that died left behind, and is taken before any new extent is claimed.
+pub(crate) fn left(extent: u64) -> u64 {
+    BASE + (1 << 61) + extent
+}
+
 /// Takes the lock on `byte` of `file`, exclusive or shared; waits for it
 /// when `wait`, else returns whether it was taken.
 pub(crate) fn lock(file: &File, byte: u64, exclusive: bool, wait: bool) -> io::Result<bool> {

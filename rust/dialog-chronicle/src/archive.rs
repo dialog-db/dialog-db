@@ -3,6 +3,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::io;
+use std::mem::ManuallyDrop;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Weak};
@@ -146,17 +147,6 @@ pub struct Options {
     /// How many nodes' decoded rows are kept, so a read of a node written
     /// against another does not decode that one again.
     pub rows_cached: usize,
-    /// Whether every frame is checked by building its block again from the
-    /// rows it decodes to and comparing the bytes, keeping the block whole
-    /// if they differ. The tree's encoding is canonical (the same entries
-    /// under the same manifest make the same bytes, which replicas already
-    /// rely on to agree on hashes), so a frame of a node in the current
-    /// layout rebuilds its block by construction, and this re-tests that on
-    /// every block. On in debug builds, so the tests check it everywhere,
-    /// and when `DIALOG_ARCHIVE_VERIFY` is set; off otherwise. Every build
-    /// checks that a frame decodes back to its rows, and keeps a node of
-    /// another layout whole without framing it.
-    pub verify: bool,
     /// The bytes of blocks an extent holds: what a writer that finds the
     /// writer's turn taken claims once, to append to without the turn.
     pub extent: u64,
@@ -175,7 +165,6 @@ impl Default for Options {
             rows_cached: 4096,
             extent: 1 << 20,
             leave_extent: true,
-            verify: cfg!(debug_assertions) || std::env::var_os("DIALOG_ARCHIVE_VERIFY").is_some(),
         }
     }
 }
@@ -353,9 +342,10 @@ struct Inner {
     extents: Mutex<Extents>,
     /// The blocks extents hold, as far as this process has read them.
     loose: Mutex<Loose>,
-    /// Whether this process left an extent for another as it opened, to
-    /// take back as it closes.
-    left_extent: std::sync::atomic::AtomicBool,
+    /// The extent this process left for another as it opened, to take back
+    /// as it closes: it holds the extent's left byte shared meanwhile (see
+    /// [`locks::left`]).
+    left_extent: Mutex<Option<u64>>,
     /// The end of what this process has read of the file or is writing to
     /// it, so a read that misses looks for another process's appends only
     /// when the file grew past it, and takes no lock otherwise.
@@ -417,8 +407,7 @@ pub struct Stats {
     /// Rows framed nodes took from the nodes they supersede, unchanged,
     /// rather than interning their entries again.
     pub rows_taken: u64,
-    /// Nodes kept whole because their rows did not rebuild their block,
-    /// when frames are verified ([`Options::verify`]).
+    /// Nodes kept whole because their rows did not rebuild their block.
     pub unverified: u64,
     /// Time spent serving them: finding where each part of each row is.
     pub serve: Duration,
@@ -440,7 +429,7 @@ pub struct Stats {
 /// is not a tree node, or does not rebuild from its frame, is kept whole. A
 /// read of a frame realizes the block through the tree's own encoder.
 ///
-/// The file is a magic number, three slots, then records: tokens, frames
+/// The file is a magic number, four slots, then records: tokens, frames
 /// (blocks kept whole among them), and pages of the file's index, a tree
 /// whose root is in the slot. Every append writes its records past the end
 /// and its index pages, then the older of two rolling slots; opening reads
@@ -473,7 +462,9 @@ pub struct Stats {
 /// Clones share the file.
 #[derive(Clone)]
 pub struct Chronicle {
-    inner: Arc<Inner>,
+    /// Taken out only by `drop`, which lets it go holding the table of open
+    /// files when this is the last handle (see `Drop for Chronicle`).
+    inner: ManuallyDrop<Arc<Inner>>,
 }
 
 fn storage_error(path: &Path, error: io::Error) -> ArchiveError {
@@ -1143,7 +1134,9 @@ impl Chronicle {
         if let Some(id) = FileId::at(&path).map_err(|error| storage_error(&path, error))?
             && let Some(inner) = open.get(&id).and_then(Weak::upgrade)
         {
-            return Ok(Self { inner });
+            return Ok(Self {
+                inner: ManuallyDrop::new(inner),
+            });
         }
         let opened = Self::open_unshared(&path, options)?;
         let id = FileId::of(&opened.inner.file).map_err(|error| storage_error(&path, error))?;
@@ -1152,7 +1145,9 @@ impl Chronicle {
             // look and the open. The new descriptor is never closed, so
             // the open one keeps its locks.
             std::mem::forget(opened);
-            return Ok(Self { inner });
+            return Ok(Self {
+                inner: ManuallyDrop::new(inner),
+            });
         }
         open.insert(id, Arc::downgrade(&opened.inner));
         Ok(opened)
@@ -1201,7 +1196,7 @@ impl Chronicle {
             turn_waited: AtomicU64::new(0),
             extents: Mutex::new(Extents::default()),
             loose: Mutex::new(Loose::default()),
-            left_extent: std::sync::atomic::AtomicBool::new(false),
+            left_extent: Mutex::new(None),
             #[cfg(test)]
             before_publish: Mutex::new(None),
             #[cfg(test)]
@@ -1209,7 +1204,9 @@ impl Chronicle {
             #[cfg(test)]
             stop_before_retire: std::sync::atomic::AtomicBool::new(false),
         });
-        let archive = Self { inner };
+        let archive = Self {
+            inner: ManuallyDrop::new(inner),
+        };
         // An extent for the next process to open, so it writes without
         // waiting for a turn some process holds: one per process that has
         // the file open, each taken back as its process closes. Left only
@@ -1217,9 +1214,8 @@ impl Chronicle {
         // one instead.
         if archive.inner.options.leave_extent
             && let Ok(Some(turn)) = archive.try_turn()
-            && archive.leave_extent(&turn).is_ok()
         {
-            archive.inner.left_extent.store(true, Ordering::Relaxed);
+            let _ = archive.leave_on_open(&turn);
         }
         Ok(archive)
     }
@@ -1930,52 +1926,114 @@ impl Chronicle {
                 }
             }
         }
-        self.leave_extent(turn)
+        self.leave_extent(turn).map(|_| ())
     }
 
     /// Claims an extent and leaves it to no process, for one that has
-    /// none to take (see [`adopt`](Self::adopt)).
-    fn leave_extent(&self, turn: &Turn<'_>) -> io::Result<()> {
-        let left = self.claim_in_turn(turn)?;
-        let unlocked = locks::unlock(&self.inner.file, locks::owner(left.record));
-        self.inner.extents.lock().busy.remove(&left.record);
-        unlocked
+    /// none to take (see [`adopt`](Self::adopt)): an orphan if the file
+    /// lists one, else a new one. Its record.
+    fn leave_extent(&self, turn: &Turn<'_>) -> io::Result<u64> {
+        let snapshot = self.newest_in_turn(turn)?;
+        let record = match self.orphan(&snapshot)? {
+            Some(record) => record,
+            None => self.claim_in_turn(turn)?.record,
+        };
+        let unlocked = locks::unlock(&self.inner.file, locks::owner(record));
+        self.inner.extents.lock().busy.remove(&record);
+        unlocked.map(|()| record)
     }
 
-    /// Retires one empty extent no process owns, in the writer's turn: the
-    /// one a process left when it opened, taken back as it closes.
-    fn retire_left_extent(&self, turn: &Turn<'_>) -> io::Result<()> {
-        let snapshot = self.newest_in_turn(turn)?;
-        let file = &self.inner.file;
-        let extents = self.inner.extents.lock();
-        for &record in &snapshot.slot.extents {
-            if extents.busy.contains(&record)
-                || extents.idle.iter().any(|owned| owned.record == record)
-                || extent::used(snapshot.bytes(), record) != Some(0)
-                || !locks::lock(file, locks::owner(record), true, false)?
-            {
-                continue;
-            }
-            let mut slot = snapshot.slot.clone();
-            slot.sequence += 1;
-            slot.extents.retain(|listed| *listed != record);
-            slot.extents_pending.push(record);
-            slot.boot = boot();
-            let written = slot
-                .write(file)
-                .and_then(|()| self::snapshot(file, slot, Some(&self.current())));
-            let _ = locks::unlock(file, locks::owner(record));
-            self.publish(written?);
-            return Ok(());
+    /// Leaves an extent as this process opens the file, holding its left
+    /// byte shared so no other process takes it for an orphan while this
+    /// one lives, and takes it back as this one closes.
+    fn leave_on_open(&self, turn: &Turn<'_>) -> io::Result<()> {
+        let record = self.leave_extent(turn)?;
+        if locks::lock(&self.inner.file, locks::left(record), false, false)? {
+            *self.inner.left_extent.lock() = Some(record);
         }
         Ok(())
     }
 
-    /// Claims an extent in the writer's turn: one freed by an integration a
-    /// sync point has made durable, else a new one at the file's end.
+    /// An extent the file lists that a process which died left behind:
+    /// empty, owned by none, and not left by a live process. Its owner's
+    /// byte is taken for this process, and the extent marked busy. A
+    /// process's own locks never exclude its threads, so the one this
+    /// process left is told apart here, not by its lock.
+    fn orphan(&self, snapshot: &Snapshot) -> io::Result<Option<u64>> {
+        let file = &self.inner.file;
+        let ours = *self.inner.left_extent.lock();
+        let mut extents = self.inner.extents.lock();
+        for &record in &snapshot.slot.extents {
+            if Some(record) == ours
+                || extents.busy.contains(&record)
+                || extents.idle.iter().any(|owned| owned.record == record)
+                || extent::used(snapshot.bytes(), record) != Some(0)
+            {
+                continue;
+            }
+            if !locks::lock(file, locks::owner(record), true, false)? {
+                continue;
+            }
+            if locks::lock(file, locks::left(record), true, false)? {
+                locks::unlock(file, locks::left(record))?;
+                extents.busy.insert(record);
+                return Ok(Some(record));
+            }
+            locks::unlock(file, locks::owner(record))?;
+        }
+        Ok(None)
+    }
+
+    /// Retires the empty extent this process left as it opened, taken back
+    /// as it closes, in the writer's turn; if another process took it to
+    /// write, an orphan instead. Lets go of its left byte either way.
+    fn retire_left_extent(&self, turn: &Turn<'_>) -> io::Result<()> {
+        let snapshot = self.newest_in_turn(turn)?;
+        let file = &self.inner.file;
+        let Some(left) = self.inner.left_extent.lock().take() else {
+            return Ok(());
+        };
+        let _ = locks::unlock(file, locks::left(left));
+        let mine = snapshot.slot.extents.contains(&left)
+            && extent::used(snapshot.bytes(), left) == Some(0)
+            && locks::lock(file, locks::owner(left), true, false)?;
+        let record = if mine {
+            self.inner.extents.lock().busy.insert(left);
+            Some(left)
+        } else {
+            self.orphan(&snapshot)?
+        };
+        let Some(record) = record else {
+            return Ok(());
+        };
+        let mut slot = snapshot.slot.clone();
+        slot.sequence += 1;
+        slot.extents.retain(|listed| *listed != record);
+        slot.extents_pending.push(record);
+        slot.boot = boot();
+        let written = slot
+            .write(file)
+            .and_then(|()| self::snapshot(file, slot, Some(&self.current())));
+        let _ = locks::unlock(file, locks::owner(record));
+        self.inner.extents.lock().busy.remove(&record);
+        self.publish(written?);
+        Ok(())
+    }
+
+    /// Claims an extent in the writer's turn: an orphan the file lists (see
+    /// [`orphan`](Self::orphan)), else one freed by an integration a sync
+    /// point has made durable, else a new one at the file's end.
     fn claim_in_turn(&self, turn: &Turn<'_>) -> io::Result<Owned> {
         let snapshot = self.newest_in_turn(turn)?;
         let file = &self.inner.file;
+        if let Some(record) = self.orphan(&snapshot)? {
+            let owned = Owned::of(snapshot.bytes(), record);
+            if owned.is_err() {
+                let _ = locks::unlock(file, locks::owner(record));
+                self.inner.extents.lock().busy.remove(&record);
+            }
+            return owned;
+        }
         let mut slot = snapshot.slot.clone();
         slot.sequence += 1;
         // Owned before any slot lists it, so no process adopts it, and
@@ -2797,9 +2855,12 @@ impl Chronicle {
                 depth_of(*base).is_some_and(|depth| (depth as usize) + 1 < self.inner.options.chain)
             });
         let depth = base.and_then(depth_of).map_or(0, |depth| depth + 1);
-        // When verifying, the rows rebuild the very block (see
-        // `Options::verify`).
-        if self.inner.options.verify {
+        // A frame is written only if its rows rebuild the very block: a
+        // block that parses as a tree node need not be canonical (a peer
+        // can send padding, or keys in a layout their encoding would not
+        // choose), and its rows would rebuild other bytes than its hash
+        // names. Such a block is kept whole.
+        {
             let started = Instant::now();
             let realized = realize(&rows, &*draft, &manifest, |id| {
                 if id >= staging.first {
@@ -2911,26 +2972,50 @@ fn snapshot_after_claim(
     Ok(owned)
 }
 
-/// The last handle of a file in this process folds what its extents hold
-/// into the file before it goes, waiting for the turn: closing a space
-/// waits for it. What it cannot fold, the next writer to take the turn
-/// does, as the extent's owner is gone.
+/// The last handle of a file in this process closes it (see
+/// [`close`](Chronicle::close)).
 impl Drop for Chronicle {
     fn drop(&mut self) {
+        let open = self.close();
+        // SAFETY: taken once, here, and not used again: `self` is going.
+        let inner = unsafe { ManuallyDrop::take(&mut self.inner) };
+        // The last handle's state, its descriptor among it, goes while the
+        // table of open files is held: an open of the file in this process
+        // waits for it, and opens a descriptor of its own only once this
+        // one is closed. Closing a descriptor lets go of every lock this
+        // process holds on the file, a new handle's among them.
+        drop(inner);
+        drop(open);
+    }
+}
+
+impl Chronicle {
+    /// What the last handle of a file in this process does before it goes:
+    /// folds in what its extents hold, waiting for the turn (closing a
+    /// space waits for it), takes back the extent it left as it opened,
+    /// and, the last process to close, cuts free extents off the file's
+    /// end. What it cannot fold, the next writer to take the turn does, as
+    /// the extent's owner is gone. The table of open files, held from once
+    /// the turn is had if this is still the last handle: an open that came
+    /// while the close waited shares this handle, so the close stands down
+    /// and nothing it would let go of is let go.
+    fn close(&self) -> Option<parking_lot::MutexGuard<'static, HashMap<FileId, Weak<Inner>>>> {
         if Arc::strong_count(&self.inner) != 1 {
-            return;
+            return None;
         }
         #[cfg(test)]
         if self.inner.dies.load(Ordering::Relaxed) {
-            return;
+            return None;
         }
-        let Ok(turn) = self.turn() else {
-            return;
-        };
+        let turn = self.turn().ok()?;
+        let open = OPEN.lock();
+        if Arc::strong_count(&self.inner) != 1 {
+            return None;
+        }
         if let Ok(snapshot) = self.newest_in_turn(&turn) {
             let _ = self.integrate_some(&turn, snapshot, true);
         }
-        if self.inner.left_extent.load(Ordering::Relaxed) {
+        if self.inner.left_extent.lock().is_some() {
             let _ = self.retire_left_extent(&turn);
         }
         // The last process to close cuts free extents off the file's end.
@@ -2942,6 +3027,7 @@ impl Drop for Chronicle {
             let _ = self.truncate_free_tail(&turn);
             let _ = locks::unlock(file, locks::PRESENT);
         }
+        Some(open)
     }
 }
 
@@ -4103,23 +4189,16 @@ mod tests {
         Ok(())
     }
 
-    /// Appends `node`, a tree node that is not byte-canonical, to an archive
-    /// with `verify` off, and checks it reads back as appended: through
-    /// `get`, and through the node a tree is served, whose block is the
-    /// one its hash names.
-    fn non_canonical_node_reads_back_without_verify(node: Buffer) -> anyhow::Result<()> {
+    /// Appends `node`, a tree node that is not byte-canonical, and checks
+    /// it reads back as appended: through `get`, and through the node a
+    /// tree is served, whose block is the one its hash names.
+    fn non_canonical_node_reads_back(node: Buffer) -> anyhow::Result<()> {
         assert!(
             crate::node::tree_node(&node).is_some(),
             "the block parses as a tree node"
         );
         let directory = tempfile::tempdir()?;
-        let archive = FileArchive::open_with(
-            directory.path().join("archive"),
-            Options {
-                verify: false,
-                ..Options::default()
-            },
-        )?;
+        let archive = Chronicle::open(directory.path().join("archive"))?;
         archive.append("index", std::slice::from_ref(&node))?;
         let framed = archive.is_frame("index", node.blake3_hash());
         let mut wrong = Vec::new();
@@ -4146,13 +4225,12 @@ mod tests {
         Ok(())
     }
 
-    /// A block reads back as the very bytes appended under its hash, with
-    /// `verify` off (the release default) as with it on, even when it
-    /// parses as a tree node with padding between its prelude and its
-    /// body. Today, without verify, it is kept as a frame whose rows
-    /// rebuild other bytes, which are served under the block's hash.
+    /// A block reads back as the very bytes appended under its hash, in
+    /// every build, even when it parses as a tree node with padding
+    /// between its prelude and its body: its rows would rebuild other
+    /// bytes, so it is kept whole, not as a frame.
     #[test]
-    fn it_reads_back_a_padded_node_as_appended_without_verify() -> anyhow::Result<()> {
+    fn it_reads_back_a_padded_node_as_appended() -> anyhow::Result<()> {
         use crate::node::tests::entity_segment;
         use dialog_search_tree::Manifest;
 
@@ -4160,23 +4238,18 @@ mod tests {
         let mut bytes = canonical.as_ref()[..16].to_vec();
         bytes.extend_from_slice(&[0u8; 16]);
         bytes.extend_from_slice(&canonical.as_ref()[16..]);
-        non_canonical_node_reads_back_without_verify(Buffer::from(bytes))
+        non_canonical_node_reads_back(Buffer::from(bytes))
     }
 
     /// A segment whose keys share one layout but are encoded whole under
     /// the mixed layout (as `PersistentSegment::from_columns` allows) reads
-    /// back as appended with `verify` off. Today its rows are re-encoded
-    /// under the layout the keys imply, so `get` returns other bytes and
-    /// the served node's `buffer()` fails ("Rows built a block other than
-    /// the one they stand for"), which any write of that node meets.
+    /// back as appended: its rows would be encoded again under the layout
+    /// the keys imply, other bytes, so it is kept whole.
     #[test]
-    fn it_reads_back_a_mixed_layout_segment_as_appended_without_verify() -> anyhow::Result<()> {
+    fn it_reads_back_a_mixed_layout_segment_as_appended() -> anyhow::Result<()> {
         use crate::node::tests::{mixed_entity_segment, segment_manifest};
 
-        non_canonical_node_reads_back_without_verify(mixed_entity_segment(
-            "alice",
-            &segment_manifest(),
-        )?)
+        non_canonical_node_reads_back(mixed_entity_segment("alice", &segment_manifest())?)
     }
 }
 

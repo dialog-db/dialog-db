@@ -565,13 +565,11 @@ async fn it_selects_through_nodes_served_in_place() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A node in an older layout is kept whole even when frames are not checked
-/// by rebuilding their blocks (`Options::verify` off, as in a release
-/// build): its frame would rebuild it in the current layout, other bytes
-/// than were stored. The node is a real segment from a committed tree,
+/// A node in an older layout is kept whole: its frame would rebuild it in
+/// the current layout, other bytes than were stored. The node is a real segment from a committed tree,
 /// archived again under the older layout's header.
 #[tokio::test]
-async fn it_keeps_a_node_of_another_layout_whole_unverified() -> anyhow::Result<()> {
+async fn it_keeps_a_node_of_another_layout_whole() -> anyhow::Result<()> {
     use dialog_corpus::{Datum, Key, State};
     use dialog_search_tree::{
         LEGACY_LAYOUT, LegacyManifest, LegacyNodeBody, LegacySegment, NodeBody, PersistentNode,
@@ -626,13 +624,7 @@ async fn it_keeps_a_node_of_another_layout_whole_unverified() -> anyhow::Result<
     let node = PersistentNode::<Key, State<Datum>>::try_from(bytes.clone())?;
     assert_eq!(node.layout_version(), LEGACY_LAYOUT);
 
-    let target = Chronicle::open_with(
-        directory.path().join("legacy.dialog"),
-        Options {
-            verify: false,
-            ..Options::default()
-        },
-    )?;
+    let target = Chronicle::open(directory.path().join("legacy.dialog"))?;
     target.append(&catalog, std::slice::from_ref(&bytes))?;
     assert_eq!(target.stats().frames, 0, "the older node is not framed");
     assert_eq!(

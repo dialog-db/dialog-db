@@ -648,7 +648,7 @@ The six new rows are then written column by column:
 
 Neighboring rows mostly share their parts, so each column is written as the difference from the row above, and a run of equal values is written once. The whole section of 16 operations takes 76 bytes. The frame's data is 126 bytes, header included, for a block of 4,372.
 
-A frame stands for its block exactly. The tree's encoding is canonical, so the rows rebuild the block byte for byte. Every build checks that a frame decodes back to its rows before writing it, and a debug build, or one with `DIALOG_ARCHIVE_VERIFY` set, also rebuilds the block and compares. A node in an older layout, or a block that is not a tree node, is kept whole instead, as a frame of kind `ff` with the block's bytes after the header.
+A frame stands for its block exactly. The tree's own encoding is canonical, so the rows of a node dialog wrote rebuild its block byte for byte, and before writing a frame the archive rebuilds the block and compares. A block that parses as a node but is not canonical (padded, say, or in a layout its keys would not choose), a node in an older layout, and a block that is not a tree node are kept whole, as a frame of kind `ff` with the block's bytes after the header.
 
 <div class="aside">
 

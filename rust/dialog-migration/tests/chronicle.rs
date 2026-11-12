@@ -276,19 +276,19 @@ fn buffer(text: &str) -> dialog_common::Buffer {
 /// over the existing one, so a block only the existing file held is gone.
 #[test]
 fn it_keeps_what_an_existing_archive_file_holds_when_migrating() -> anyhow::Result<()> {
-    use dialog_migration::archive_file::migrate_space;
+    use dialog_migration::chronicle::migrate_space;
 
     let directory = tempfile::tempdir()?;
     let space = directory.path().join("repo");
     let (old, new) = (buffer("only in the fs archive"), buffer("only in the file"));
     put_block(&space, "index", old.as_ref(), old.as_ref())?;
     {
-        let archive = FileArchive::open(space.join(FILE_NAME))?;
+        let archive = Chronicle::open(space.join(FILE_NAME))?;
         archive.append("index", std::slice::from_ref(&new))?;
         archive.sync()?;
     }
     migrate_space(&space, false)?;
-    let archive = FileArchive::open(space.join(FILE_NAME))?;
+    let archive = Chronicle::open(space.join(FILE_NAME))?;
     assert_eq!(
         archive.get("index", old.blake3_hash())?.as_deref(),
         Some(old.as_ref()),
@@ -309,20 +309,20 @@ fn it_keeps_what_an_existing_archive_file_holds_when_migrating() -> anyhow::Resu
 #[test]
 fn it_counts_a_space_with_an_empty_archive_file_as_unmigrated() -> anyhow::Result<()> {
     use dialog_migration::Migrations;
-    use dialog_migration::archive_file::{ArchiveFile, unmigrated};
+    use dialog_migration::chronicle::{IntoChronicle, unmigrated};
 
     let directory = tempfile::tempdir()?;
     let space = directory.path().join("repo");
     let block = buffer("a block");
     put_block(&space, "index", block.as_ref(), block.as_ref())?;
-    drop(FileArchive::open(space.join(FILE_NAME))?);
+    drop(Chronicle::open(space.join(FILE_NAME))?);
     assert_eq!(
         unmigrated(directory.path())?,
         vec![space.clone()],
         "the space is still to migrate"
     );
     let plan = Migrations::new()
-        .with(ArchiveFile {
+        .with(IntoChronicle {
             remove_source: false,
         })
         .plan(directory.path())?;
@@ -338,7 +338,7 @@ fn it_counts_a_space_with_an_empty_archive_file_as_unmigrated() -> anyhow::Resul
 #[test]
 fn it_does_not_remove_files_the_migration_left_out() -> anyhow::Result<()> {
     use dialog_migration::Migrations;
-    use dialog_migration::archive_file::ArchiveFile;
+    use dialog_migration::chronicle::IntoChronicle;
 
     let directory = tempfile::tempdir()?;
     let space = directory.path().join("repo");
@@ -352,7 +352,7 @@ fn it_does_not_remove_files_the_migration_left_out() -> anyhow::Result<()> {
     )?;
 
     let run = Migrations::new()
-        .with(ArchiveFile {
+        .with(IntoChronicle {
             remove_source: true,
         })
         .run(directory.path());

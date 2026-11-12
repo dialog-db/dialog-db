@@ -844,3 +844,51 @@ again. A fold now retires only the extents the newest slot still lists in
 the epoch they were read in. Every slot a test writes is checked for an
 extent listed twice: with the old retire put back, 216 of 240 runs trip
 it; with the fix, 320 runs pass.
+
+## 2026-11-12: defects a review found
+
+A review on a branch stacked on this one
+([#786](https://github.com/dialog-db/dialog-db/pull/786)) added failing
+tests for seven defects. Each is fixed here, and its test now passes.
+
+**A torn durable slot.** There was one durable slot. A sync torn by power
+loss in the middle of writing it left no whole durable state, and opening
+fell back to a rolling slot that may name pages the torn sync had freed.
+Format 15 keeps two durable copies. A sync writes over the copy that does
+not hold the newest whole state, and opening reads the newer whole copy.
+
+**A reopen during the last close.** fcntl locks belong to the process,
+and closing any descriptor of the file drops all of them. The last close
+released PRESENT and then dropped the descriptor. Meanwhile a reopen in
+the same process could take the shared `Inner` from the open table, and
+it lost its locks when the old descriptor closed. The last close now holds
+the open table until the descriptor is closed, and it stands down if a
+reopen took a reference first.
+
+**Extents piling up.** A process that left an extent on open (or one that
+died) left it listed and empty. Nothing claimed it again, so every
+crashed or briefly opened process added one. A process now holds a `left`
+lock byte for the extent it left. An extent that is listed and empty, with
+its owner byte and `left` byte both free, is an orphan. The next writer
+that needs an extent takes the orphan before it claims a new one.
+
+**Frames for a node in another layout.** With `verify` off, a frame was
+written for a node whose rows realize to different bytes than the block
+(a padded node, or a segment in a mixed layout, which another peer can
+send). A read then served bytes that do not hash to the name. Frames are
+now always checked, and `Options::verify` is gone. The test that put the
+option there measured its cost as small next to the encode.
+
+**Migration.** Three defects:
+
+- `migrate_space` wrote a fresh file and renamed it over an existing
+  `archive.dialog`, which dropped whatever a space had already written to
+  it. It now starts from a copy of that file.
+- `unmigrated` took any `archive.dialog` to mean "migrated", but opening
+  a `Chronicle` creates one. Migration now writes
+  `archive.dialog.migrated` last, and that marker decides.
+- With `remove_source`, the `fs` archive was deleted even when the
+  transcode had left something out: a block whose bytes do not match its
+  name, or a file that is not a block. The migration now fails instead,
+  with the file written and the `fs` archive kept, and `strays` lists
+  those files.
