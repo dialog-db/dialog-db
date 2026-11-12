@@ -42,7 +42,7 @@ use dialog_search_tree::{
 use futures_util::{Stream, StreamExt};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::iter::repeat_n;
-use std::ops::RangeInclusive;
+use std::ops::{Deref, RangeInclusive};
 use std::sync::{Arc, Mutex};
 
 use crate::history::{Cause as HistoryCause, Claim, Record, RecordEntries, Version};
@@ -416,7 +416,7 @@ fn value_lower_edge(value: &Value, manifest: &Manifest) -> Vec<u8> {
 /// superset of the matches; [`match_selector_and_key_ref`] filters
 /// the rest) and tightens the range whenever every more-significant
 /// dimension is exact.
-fn apply_prefix_bounds<K: KeyViewMut>(
+fn apply_prefix_bounds<K: KeyViewMut + Deref<Target = [u8]>>(
     start: K,
     end: K,
     selector: &Selector<Constrained>,
@@ -516,6 +516,21 @@ fn apply_prefix_bounds<K: KeyViewMut>(
         let bytes = prefix.as_bytes();
         let lo = prefix_lower(&bytes[..bytes.len().min(manifest.spill_prefix as usize)]);
         let hi = prefix_upper(bytes);
+        // In the value index the attribute and the entity follow the value
+        // slot. The lower edge holds the prefix as a fragment with no
+        // terminator, so an attribute after it compares with the bytes that
+        // follow the prefix in a stored value. The value `Alice` sorts below
+        // the prefix `Al` with the attribute `x/b` after it, because `i`
+        // sorts below `x`, and the range would start above it. So the lower
+        // edge leaves the attribute and the entity empty. It then sits at or
+        // below each key whose value starts with the prefix, and the check
+        // of each entry applies the attribute and the entity. In the entity
+        // index the value slot ends the key, and its lower edge keeps them.
+        if start.first() == Some(&VALUE_KEY_TAG) {
+            start = start
+                .set_attribute(AttributeKeyPart(&[]))
+                .set_entity(EntityKeyPart(&[]));
+        }
         start = start.set_value(ValueDataType::String, ValuePayload::Inline(lo));
         end = end.set_value(ValueDataType::String, ValuePayload::Inline(hi));
     }
@@ -2981,6 +2996,413 @@ mod attribute_range_tests {
         assert_eq!(
             visits[0], visits[1],
             "the visits follow the count, and not the length of the log"
+        );
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod value_prefix_tests {
+    //! A prefix of the value beside a constraint on the attribute. The value
+    //! index sorts each key by its value, then its attribute, then its
+    //! entity, so a value prefix with no entity reads a range of the value
+    //! index. A value prefix under one entity reads a range of the entity
+    //! index. These tests hold each such scan to the rows that a filter over
+    //! the whole index gives.
+
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    use super::{Corpus, CorpusExt, spill_cache};
+    use crate::selector::Constrained;
+    use crate::{ArchiveDelta, Fact, Instruction, Selector, Value};
+    use dialog_search_tree::helpers::{Blocks, test_catalog};
+    use futures_util::{TryStreamExt as _, stream};
+    use rand::{Rng, SeedableRng};
+    use rand_chacha::ChaCha8Rng;
+
+    fn fact(the: &str, of: &str, is: Value) -> Fact {
+        Fact {
+            the: the.parse().expect("an attribute"),
+            of: of.parse().expect("an entity"),
+            is,
+            cause: None,
+        }
+    }
+
+    async fn tree_of(facts: Vec<Fact>) -> anyhow::Result<(Corpus, Blocks)> {
+        let store = Blocks::new();
+        let mut delta = ArchiveDelta::zero();
+        let mut tree = Corpus::empty_in(test_catalog());
+        tree.apply(
+            &store,
+            &mut delta,
+            stream::iter(
+                facts
+                    .into_iter()
+                    .map(|fact| Instruction::Assert(fact, crate::Pick::All)),
+            ),
+        )
+        .await?;
+        delta.flush_into(&store);
+        Ok((tree, store))
+    }
+
+    /// A row as its entity, its attribute, and its value. A long string
+    /// shows its first bytes and its length, so that a failure stays short.
+    type Row = (String, String, String);
+
+    fn row(artifact: &Fact) -> Row {
+        let is = match &artifact.is {
+            Value::String(text) if text.len() > 100 => {
+                format!("String({:?}, {} bytes)", &text[..90], text.len())
+            }
+            other => format!("{other:?}"),
+        };
+        (artifact.of.to_string(), artifact.the.to_string(), is)
+    }
+
+    fn rows(artifacts: &[Fact]) -> Vec<Row> {
+        let mut rows: Vec<Row> = artifacts.iter().map(row).collect();
+        rows.sort();
+        rows
+    }
+
+    /// The rows a scan yields.
+    async fn scanned(
+        tree: &Corpus,
+        store: &Blocks,
+        selector: Selector<Constrained>,
+    ) -> anyhow::Result<Vec<Fact>> {
+        let artifacts: Vec<Fact> = tree
+            .clone()
+            .scan_owned(store.clone(), spill_cache(), selector)
+            .try_collect()
+            .await?;
+        Ok(artifacts)
+    }
+
+    /// The rows a reverse scan yields.
+    async fn scanned_in_reverse(
+        tree: &Corpus,
+        store: &Blocks,
+        selector: Selector<Constrained>,
+    ) -> anyhow::Result<Vec<Fact>> {
+        let views: Vec<_> = tree
+            .clone()
+            .scan_reverse(store.clone(), spill_cache(), selector)
+            .try_collect()
+            .await?;
+        Ok(views
+            .into_iter()
+            .map(|view| view.to_owned())
+            .collect::<Result<Vec<Fact>, _>>()?)
+    }
+
+    /// Each row of the tree: a scan of the whole attribute index.
+    async fn everything(tree: &Corpus, store: &Blocks) -> anyhow::Result<Vec<Fact>> {
+        scanned(tree, store, Selector::new().the_starting_with("")).await
+    }
+
+    fn starts_with(row: &Fact, prefix: &str) -> bool {
+        matches!(&row.is, Value::String(text) if text.starts_with(prefix))
+    }
+
+    /// The facts of the review of the bounds on an attribute: values that
+    /// share the prefix `Al` under several attributes. A value that goes on
+    /// with a byte below the first byte of the attribute, such as `Alice`
+    /// beside `x/b`, sorts below the prefix with the attribute after it.
+    fn names() -> Vec<Fact> {
+        vec![
+            fact("x/a", "e:1", "Al".to_string().into()),
+            fact("x/b", "e:1", "Alice".to_string().into()),
+            fact("x/b", "e:2", "Albert".to_string().into()),
+            fact("x/c", "e:3", "Alzzzz".to_string().into()),
+            fact("x/c", "e:4", "Bob".to_string().into()),
+            fact("y/a", "e:5", "Alice".to_string().into()),
+        ]
+    }
+
+    /// A value prefix beside an exact attribute, a prefix of the attribute,
+    /// or a bound on the attribute finds each row whose value starts with
+    /// the prefix, and none other.
+    #[dialog_common::test]
+    async fn it_finds_each_row_for_a_value_prefix_beside_an_attribute_constraint()
+    -> anyhow::Result<()> {
+        let (tree, store) = tree_of(names()).await?;
+        let all = everything(&tree, &store).await?;
+        let expect = |admit: &dyn Fn(&str) -> bool| -> Vec<Row> {
+            let kept: Vec<Fact> = all
+                .iter()
+                .filter(|row| starts_with(row, "Al") && admit(&row.the.to_string()))
+                .cloned()
+                .collect();
+            rows(&kept)
+        };
+
+        let exact = Selector::new().the("x/b".parse()?).is_starting_with("Al");
+        let found = rows(&scanned(&tree, &store, exact).await?);
+        assert_eq!(found, expect(&|the| the == "x/b"));
+        assert_eq!(found.len(), 2, "Alice and Albert under x/b");
+
+        let prefix = Selector::new()
+            .the_starting_with("x/")
+            .is_starting_with("Al");
+        let found = rows(&scanned(&tree, &store, prefix).await?);
+        assert_eq!(found, expect(&|the| the.starts_with("x/")));
+        assert_eq!(
+            found.len(),
+            4,
+            "each value of the domain x that starts with Al"
+        );
+
+        let bound = Selector::new()
+            .the_at_least("x/a")
+            .the_less_than("y/")
+            .is_starting_with("Al");
+        let found = rows(&scanned(&tree, &store, bound).await?);
+        assert_eq!(
+            found,
+            expect(&|the| ("x/a"..="y/").contains(&the) && the != "y/")
+        );
+        assert_eq!(found.len(), 4);
+
+        let lower = Selector::new().the_at_least("x/b").is_starting_with("Al");
+        let found = rows(&scanned(&tree, &store, lower).await?);
+        assert_eq!(found, expect(&|the| the >= "x/b"));
+        assert_eq!(
+            found.len(),
+            4,
+            "Alice and Albert under x/b, Alzzzz, and Alice under y/a"
+        );
+        Ok(())
+    }
+
+    /// The letters of the random values and prefixes. A value may also
+    /// hold a zero byte, which a key escapes.
+    const LETTERS: &[char] = &['A', 'l', 'i', 'c', 'e', 'b', 'x', 'z'];
+
+    const ATTRIBUTES: &[&str] = &["x/a", "x/b", "x/c", "x.y/b", "xa/b", "y/a", "a/z"];
+
+    const ENTITIES: &[&str] = &["e:1", "e:2", "e:3", "f:1", "f:2"];
+
+    fn text(rng: &mut ChaCha8Rng, longest: usize) -> String {
+        let length = rng.gen_range(0..=longest);
+        (0..length)
+            .map(|_| LETTERS[rng.gen_range(0..LETTERS.len())])
+            .collect()
+    }
+
+    /// A random value. Most are short strings. Some are strings that hold a
+    /// zero byte, some are strings long enough to spill out of the key, so
+    /// that the key holds only their first bytes, and some are not strings.
+    fn value(rng: &mut ChaCha8Rng) -> Value {
+        match rng.gen_range(0..20) {
+            0 => Value::UnsignedInt(rng.gen_range(0..100)),
+            1 => Value::Symbol("Al/ice".parse().expect("a symbol")),
+            2 | 3 => {
+                let head = text(rng, 3);
+                let tail = LETTERS[rng.gen_range(0..LETTERS.len())];
+                Value::String(format!("{head}{}", tail.to_string().repeat(4_200)))
+            }
+            4 => Value::String(format!("{}\0{}", text(rng, 2), text(rng, 2))),
+            _ => Value::String(text(rng, 5)),
+        }
+    }
+
+    /// A random prefix of a value. Some are longer than the part of a
+    /// spilled value that its key holds.
+    fn value_prefix(rng: &mut ChaCha8Rng, facts: &[Fact]) -> String {
+        if rng.gen_range(0..8) == 0 {
+            let long = facts.iter().find_map(|fact| match &fact.is {
+                Value::String(text) if text.len() > 4_000 => Some(text.clone()),
+                _ => None,
+            });
+            if let Some(long) = long {
+                let length = rng.gen_range(60..90);
+                return long[..length].to_string();
+            }
+        }
+        text(rng, 3)
+    }
+
+    /// A random prefix of a random attribute, which may be empty or whole.
+    fn attribute_prefix(rng: &mut ChaCha8Rng) -> String {
+        let attribute = ATTRIBUTES[rng.gen_range(0..ATTRIBUTES.len())];
+        attribute[..rng.gen_range(0..=attribute.len())].to_string()
+    }
+
+    /// One of the three constraints on the attribute that a selector with a
+    /// value prefix can hold.
+    #[derive(Debug, Clone)]
+    enum Attribute {
+        Exact(String),
+        Prefix(String),
+        Bounds {
+            lower: Option<(String, bool)>,
+            upper: Option<(String, bool)>,
+        },
+    }
+
+    impl Attribute {
+        fn random(rng: &mut ChaCha8Rng, form: usize) -> Attribute {
+            match form {
+                0 => Attribute::Exact(ATTRIBUTES[rng.gen_range(0..ATTRIBUTES.len())].to_string()),
+                1 => Attribute::Prefix(attribute_prefix(rng)),
+                _ => {
+                    let bound = |rng: &mut ChaCha8Rng| {
+                        rng.gen_bool(0.7)
+                            .then(|| (attribute_prefix(rng), rng.gen_bool(0.5)))
+                    };
+                    let (lower, upper) = loop {
+                        let lower = bound(rng);
+                        let upper = bound(rng);
+                        if lower.is_some() || upper.is_some() {
+                            break (lower, upper);
+                        }
+                    };
+                    Attribute::Bounds { lower, upper }
+                }
+            }
+        }
+
+        fn admits(&self, the: &str) -> bool {
+            match self {
+                Attribute::Exact(attribute) => the == attribute,
+                Attribute::Prefix(prefix) => the.starts_with(prefix.as_str()),
+                Attribute::Bounds { lower, upper } => {
+                    lower.as_ref().is_none_or(|(bound, inclusive)| {
+                        the > bound.as_str() || (*inclusive && the == bound)
+                    }) && upper.as_ref().is_none_or(|(bound, inclusive)| {
+                        the < bound.as_str() || (*inclusive && the == bound)
+                    })
+                }
+            }
+        }
+    }
+
+    /// The constraint on the entity: none, which reads the value index, one
+    /// entity, which reads the entity index, or a prefix of the entity,
+    /// which reads the value index.
+    #[derive(Debug, Clone)]
+    enum Of {
+        Any,
+        Exact(String),
+        Prefix(String),
+    }
+
+    impl Of {
+        fn admits(&self, of: &str) -> bool {
+            match self {
+                Of::Any => true,
+                Of::Exact(entity) => of == entity,
+                Of::Prefix(prefix) => of.starts_with(prefix.as_str()),
+            }
+        }
+    }
+
+    fn selector(
+        of: &Of,
+        attribute: &Attribute,
+        prefix: &str,
+    ) -> anyhow::Result<Selector<Constrained>> {
+        let selector = Selector::new().is_starting_with(prefix);
+        let selector = match of {
+            Of::Any => selector,
+            Of::Exact(entity) => selector.of(entity.parse()?),
+            Of::Prefix(prefix) => selector.of_starting_with(prefix.clone()),
+        };
+        Ok(match attribute {
+            Attribute::Exact(attribute) => selector.the(attribute.parse()?),
+            Attribute::Prefix(prefix) => selector.the_starting_with(prefix.clone()),
+            Attribute::Bounds { lower, upper } => {
+                let selector = match lower {
+                    Some((bound, true)) => selector.the_at_least(bound.clone()),
+                    Some((bound, false)) => selector.the_greater_than(bound.clone()),
+                    None => selector,
+                };
+                match upper {
+                    Some((bound, true)) => selector.the_at_most(bound.clone()),
+                    Some((bound, false)) => selector.the_less_than(bound.clone()),
+                    None => selector,
+                }
+            }
+        })
+    }
+
+    /// For random facts and random prefixes of the value, a scan with the
+    /// prefix beside an exact attribute, a prefix of the attribute, or bounds
+    /// on the attribute gives the rows of a filter over the whole index. Each
+    /// shape runs with no entity and under an entity prefix, which read the
+    /// value index, and under one entity, which reads the entity index. A
+    /// reverse scan gives the same rows.
+    #[dialog_common::test]
+    async fn it_scans_a_value_prefix_beside_an_attribute_as_a_filter_does() -> anyhow::Result<()> {
+        // The rows that the selectors of each shape admit, by the form of
+        // the entity and then the form of the attribute, and the rows that
+        // the prefixes longer than the key part of a spilled value admit.
+        let mut admitted = [[0usize; 3]; 3];
+        let mut admitted_by_long_prefixes = 0usize;
+        for seed in 0..64u64 {
+            let mut rng = ChaCha8Rng::seed_from_u64(seed);
+            let facts: Vec<Fact> = (0..rng.gen_range(20..80))
+                .map(|_| {
+                    fact(
+                        ATTRIBUTES[rng.gen_range(0..ATTRIBUTES.len())],
+                        ENTITIES[rng.gen_range(0..ENTITIES.len())],
+                        value(&mut rng),
+                    )
+                })
+                .collect();
+            let (tree, store) = tree_of(facts.clone()).await?;
+            let all = everything(&tree, &store).await?;
+            for round in 0..60usize {
+                let attribute_form = round % 3;
+                let entity_form = (round / 3) % 3;
+                let attribute = Attribute::random(&mut rng, attribute_form);
+                let of = match entity_form {
+                    0 => Of::Any,
+                    1 => Of::Exact(ENTITIES[rng.gen_range(0..ENTITIES.len())].to_string()),
+                    _ => {
+                        let entity = ENTITIES[rng.gen_range(0..ENTITIES.len())];
+                        Of::Prefix(entity[..rng.gen_range(0..=entity.len())].to_string())
+                    }
+                };
+                let prefix = value_prefix(&mut rng, &facts);
+                let selector = selector(&of, &attribute, &prefix)?;
+                let kept: Vec<Fact> = all
+                    .iter()
+                    .filter(|row| {
+                        starts_with(row, &prefix)
+                            && attribute.admits(&row.the.to_string())
+                            && of.admits(&row.of.to_string())
+                    })
+                    .cloned()
+                    .collect();
+                let expected = rows(&kept);
+                let forward = rows(&scanned(&tree, &store, selector.clone()).await?);
+                assert_eq!(
+                    forward, expected,
+                    "seed {seed}, round {round}: {of:?} {attribute:?} {prefix:?}"
+                );
+                let reverse = rows(&scanned_in_reverse(&tree, &store, selector).await?);
+                assert_eq!(
+                    reverse, expected,
+                    "reverse, seed {seed}, round {round}: {of:?} {attribute:?} {prefix:?}"
+                );
+                admitted[entity_form][attribute_form] += expected.len();
+                if prefix.len() > 64 {
+                    admitted_by_long_prefixes += expected.len();
+                }
+            }
+        }
+        assert!(
+            admitted.iter().flatten().all(|rows| *rows > 0),
+            "the selectors of each shape admit rows: {admitted:?}"
+        );
+        assert!(
+            admitted_by_long_prefixes > 0,
+            "a prefix longer than the key part of a spilled value admits rows"
         );
         Ok(())
     }
