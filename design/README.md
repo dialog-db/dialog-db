@@ -73,3 +73,13 @@ Backtracking moves a topic to an earlier phase and says so in its journal.
   **Describing.** The allocator is called the same number of times and
   costs a different number of instructions each run, up to 1.8% of a
   scenario. Seen while tracing a Perf gate failure on #778.
+- [A typed variable over a field of no declared type fails the query](typed-read-of-untyped-field.md):
+  **Building.** A value of another type than the variable's failed a
+  plain concept read and was passed over by every other read. Every read
+  now takes it for a fact of another attribute: passed over, not elected
+  among, and absent to a variable that may be.
+- [Importing a large dataset into dialog](large-transactions.md):
+  **Delimiting.** As one commit an import holds every new node in memory
+  until it seals; as many commits it writes the same nodes again and
+  again. The objective is confirmed; its bounds (how large, on what
+  machine, within what memory and time) are not yet stated.
