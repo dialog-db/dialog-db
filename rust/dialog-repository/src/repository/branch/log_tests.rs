@@ -2682,6 +2682,142 @@ async fn evaluations_in_full(
     Ok(live.recomputes())
 }
 
+/// The chat of Sapling keeps its live queries on the incremental path. The
+/// model of a message is typed as Sapling writes it (`MESSAGE` in
+/// `tests/support/chat_log.rs` of Sapling). A segment of the log of a
+/// channel joins each entry of the log, from a lower key up to an upper key,
+/// to the message that it holds, as the renderer writes it
+/// (`collectionBody`). A list of the model reads each message, with or
+/// without a lower bound on its time (`segmentBody`). Messages arrive, a text
+/// changes, and an entry leaves the log. After each step each live query
+/// holds the rows of a first read, and it evaluated its rule in full once, at
+/// its first poll.
+#[dialog_common::test]
+async fn it_keeps_each_live_query_of_the_chat_on_the_incremental_path() -> Result<()> {
+    let variable = |name: &str| json!({ "?": { "name": name } });
+    let message = json!({ "with": {
+        "channel": { "the": "chat.message/channel", "as": "Entity", "cardinality": "one" },
+        "author": { "the": "chat.message/author", "as": "Entity", "cardinality": "one" },
+        "time": { "the": "chat.message/time", "as": "UnsignedInteger", "cardinality": "one" },
+        "text": { "the": "chat.message/text", "as": "Text", "cardinality": "one" },
+    } });
+    let log = json!({ "with": { "log": {
+        "the": { "domain": "chat.channel.log", "keyed": "sequence" },
+        "as": "entity:",
+        "pick": "all:",
+    } } });
+    let posted = |message: &'static str, entry: &'static str, time: u64| -> Result<Vec<Write>> {
+        let entity = |name: &str| -> Result<Value> { Ok(Value::Entity(name.parse()?)) };
+        Ok(vec![
+            (true, "chat.message/channel", message, entity("channel:0")?),
+            (true, "chat.message/author", message, entity("person:1")?),
+            (
+                true,
+                "chat.message/time",
+                message,
+                Value::UnsignedInt(time.into()),
+            ),
+            (
+                true,
+                "chat.message/text",
+                message,
+                Value::String(format!("hi {time}")),
+            ),
+            (true, entry, "channel:0", entity(message)?),
+        ])
+    };
+    let setup = posted("message:1", "chat.channel.log/b0", 1)?;
+    let steps = vec![
+        posted("message:2", "chat.channel.log/b1", 2)?,
+        posted("message:3", "chat.channel.log/a5", 3)?,
+        vec![(
+            true,
+            "chat.message/text",
+            "message:1",
+            Value::String("edited".into()),
+        )],
+        vec![(
+            false,
+            "chat.channel.log/b1",
+            "channel:0",
+            Value::Entity("message:2".parse()?),
+        )],
+    ];
+    // The head and the read of the model: each field of a message under
+    // `sapling.segment/`, with the key of an entry beside them for a segment
+    // of the log.
+    let model = |key: bool| {
+        let mut head = Map::new();
+        if key {
+            head.insert(
+                "key".into(),
+                json!({ "the": "sapling.segment/key", "as": "text:", "pick": "all:" }),
+            );
+        }
+        let mut fields = Map::new();
+        fields.insert("this".into(), variable("this"));
+        for (field, descriptor) in message["with"].as_object().expect("the fields") {
+            head.insert(
+                field.clone(),
+                json!({ "the": format!("sapling.segment/{field}"), "as": descriptor["as"] }),
+            );
+            fields.insert(field.clone(), variable(field));
+        }
+        (
+            json!({ "with": head }),
+            json!({ "assert": message, "where": fields }),
+        )
+    };
+    for (lower, upper) in [
+        (None, None),
+        (Some("a0"), None),
+        (None, Some("b1")),
+        (Some("a0"), Some("b1")),
+    ] {
+        let (head, read) = model(true);
+        let mut when = vec![json!({
+            "assert": log,
+            "where": {
+                "this": { "entity:": "channel:0" },
+                "log": { "the": variable("key"), "is": variable("this") },
+            },
+        })];
+        for (assert, key) in [(">=", lower), ("<", upper)] {
+            if let Some(key) = key {
+                when.push(json!({
+                    "assert": assert,
+                    "where": { "of": variable("key"), "with": { "text:": key } },
+                }));
+            }
+        }
+        when.push(read);
+        let rule: DeductiveRuleDescriptor =
+            serde_json::from_value(json!({ "deduce": head, "when": when }))?;
+        assert_eq!(
+            evaluations_in_full(&rule.compile()?, &head, &setup, &steps).await?,
+            1,
+            "a segment of the log from {lower:?} up to {upper:?}"
+        );
+    }
+    for lower in [None, Some(2)] {
+        let (head, read) = model(false);
+        let mut when = vec![read];
+        if let Some(lower) = lower {
+            when.push(
+                json!({ "assert": ">=", "where": { "of": variable("time"), "with": lower } }),
+            );
+        }
+        let rule: DeductiveRuleDescriptor =
+            serde_json::from_value(json!({ "deduce": head, "when": when }))?;
+        assert_eq!(
+            evaluations_in_full(&rule.compile()?, &head, &setup, &steps).await?,
+            1,
+            "a list of the model with the time at least {lower:?}"
+        );
+    }
+    Ok(())
+}
+
 /// A list of a model with a filter on one field, as the renderer writes it
 /// (`segmentBody`): each entity of the model, with its fields, whose `score`
 /// equals `constant`, and whose name is at least `a`. With `owner`, the rule
