@@ -88,10 +88,10 @@ a second source of truth.
 
 ## The storage boundary
 
-`ArtifactSelector` gains prefix bounds beside its exact fields:
+`Selector` gains prefix bounds beside its exact fields:
 `the_starting_with(prefix)` / `of_starting_with(prefix)` (both produce a
 `Constrained` selector — a prefix is a constraint). The scan
-(`ArtifactTreeExt::scan`):
+(`CorpusExt::scan`):
 
 - picks the index as before by exact fields (entity / value / attribute), and
   a prefix on a leading dimension picks its index when no exact field does;

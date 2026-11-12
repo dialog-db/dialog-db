@@ -58,7 +58,7 @@ Three layers:
   A request is written at the node it is about (`Read<N>` for an
   `N: nodes::Node`, a sealed trait `PersistentNode<Key, Value>`
   implements), so a crate that fixes the keys and values names its node
-  once (`dialog_artifacts::tree::CorpusNode`) and bounds on
+  once (`dialog_corpus::tree::CorpusNode`) and bounds on
   `Provider<Read<CorpusNode>>`; the tree crate, which does not care what
   the keys and values are, spells the bound a tree operation puts on its
   environment out at every site:
@@ -211,12 +211,12 @@ Built. In the tree crate every `Env: Provider<Load> + Holds +
 ConditionalSync` (and the `+ Provider<Get>` variants) is
 `Env: Provider<Read<PersistentNode<Key, Value>>> +
 Provider<Preload<PersistentNode<Key, Value>>> + ConditionalSync`, spelled
-out at each site. `dialog-artifacts` and the crates above it
+out at each site. `dialog-corpus` and the crates above it
 bound on the requests at the corpus's node, `Provider<nodes::Read<CorpusNode>>
 + Provider<nodes::Preload<CorpusNode>>` (and `Provider<nodes::Write<CorpusNode>>`
 where they persist), with no alias trait in between: the maintainer
 wanted a signature to show the providers it needs, and the first build's
-`ArtifactNodes` and `ArtifactWrites` hid them. `TreeEnv`, `Capabilities`,
+`FactNodes` and `FactWrites` hid them. `TreeEnv`, `Capabilities`,
 `BranchEnv`, `PeerSpace` and `Scope` carry them. The repository's own
 bounds keep `Provider<ArchiveLoad>` and `Holds` where they still load
 blocks or hold routes; those were not pruned.
@@ -232,7 +232,7 @@ environment's way to find its own cache.
 
 - `cargo clippy --workspace --all-targets --all-features -D warnings`, the
   tests of every crate touched, and the wasm build of the tree, storage,
-  artifacts, repository, peer and query crates.
+  facts, repository, peer and query crates.
 - `dialog-perf` on main (`9b98395`) and on this branch with one toolchain,
   under callgrind: the journal has the numbers.
 

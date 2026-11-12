@@ -7,7 +7,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use anyhow::Result;
-use dialog_artifacts::{Pick, Value};
+use dialog_corpus::{Pick, Value};
 use dialog_query::attribute::query::all::AttributeQueryAll;
 use dialog_query::query::Output as _;
 use dialog_query::type_system::{Primitive, Type as Kind};

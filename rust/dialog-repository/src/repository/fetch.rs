@@ -19,7 +19,7 @@
 //!   consumer polls a driven stream — on any executor, wasm included,
 //!   with nothing detached. A queue nobody drives holds no resources.
 //!   The queue being ambient (an operator field, reached by the
-//!   [`Speculation`](dialog_artifacts::Speculation) command) is what
+//!   [`Speculation`](dialog_corpus::Speculation) command) is what
 //!   lets one evaluation's polling execute another's hints: queries,
 //!   subscriptions, and transaction queries all enqueue and all drive.
 //! - **A hint outlives the driver that took it.** A driver that ends
@@ -34,14 +34,13 @@ use std::sync::Arc;
 
 use std::task::{Context, Poll};
 
-use dialog_artifacts::selector::Constrained;
-use dialog_artifacts::{ArtifactSelector, FetchBudget, Likelihood, PreloadQueue, PreloadRequest};
+use dialog_corpus::selector::Constrained;
+use dialog_corpus::{FetchBudget, Likelihood, PreloadQueue, PreloadRequest, Selector};
 use futures_util::stream::FuturesUnordered;
 use futures_util::{Stream, StreamExt as _};
 
-use dialog_artifacts::tree::selector_range;
 use dialog_common::Blake3Hash as NodeHash;
-use dialog_effects::archive::prelude::ArchiveScope;
+use dialog_corpus::tree::selector_range;
 use dialog_search_tree::{DialogSearchTreeError, Traversable as _};
 
 use crate::repository::archive::TreeEnv;
@@ -58,7 +57,7 @@ type FetchFuture<'a> = Pin<Box<dyn Future<Output = Likelihood> + 'a>>;
 /// kept beside it so a driver that ends before the walk does can hand
 /// the description back to the queue.
 struct Job<'a> {
-    selector: Arc<ArtifactSelector<Constrained>>,
+    selector: Arc<Selector<Constrained>>,
     likelihood: Likelihood,
     walk: FetchFuture<'a>,
 }
@@ -188,7 +187,7 @@ where
 /// the queue, so whichever evaluation drives next resumes them:
 /// speculation belongs to whoever is running, not to the evaluation that
 /// happened to pop it. Each goes through [`PreloadQueue::preload`], the
-/// path a [`Preload`](dialog_artifacts::Preload) hint takes, so it obeys
+/// path a [`Preload`](dialog_corpus::Preload) hint takes, so it obeys
 /// what that path does: with a zero budget it is refused (speculation was
 /// turned off, so it is dropped), a selector already pending in its rank
 /// is not enqueued twice, and it queues behind fresher hints, under the
@@ -275,22 +274,23 @@ async fn warm_source(
     source: Source,
     routes: &Routes,
     env: &Erased,
-    selector: &ArtifactSelector<Constrained>,
+    selector: &Selector<Constrained>,
     likelihood: Likelihood,
 ) -> Result<(), DialogSearchTreeError> {
-    let Some(root) = source.as_ref().root() else {
+    let view = source.as_view();
+    let Some(root) = view.root() else {
         return Ok(());
     };
     // Warming exists to fetch ahead of demand. With nowhere to fetch
     // from, every block is local already and a demand read finds it; a
     // walk here would only re-read, and re-hash, what is already there.
-    if !routes.fetches(source.as_ref().subject().did()) {
+    if !routes.fetches(view.subject().did()) {
         return Ok(());
     }
     // Counted by whoever subscribes (the perf harness counts spans by
     // name): a walk started, and below, each node it visited.
     drop(tracing::trace_span!("warm_walk"));
-    let catalog = ArchiveScope::new(source.as_ref().subject()).index();
+    let catalog = view.catalog();
     let storage: &dyn TreeEnv = env;
     // Every load the walk performs is ranked at the hint's likelihood.
     let tree = Index::at(catalog, NodeHash::from(root)).ranked(likelihood.into());
@@ -324,18 +324,20 @@ mod tests {
     use dialog_storage::provider::storage::VolatileSpace;
 
     use super::*;
+    use crate::Download;
     use crate::RepositoryExt as _;
     use crate::helpers::{Counting, connect};
-    use dialog_artifacts::tree::ArtifactNodeCache;
-    use dialog_artifacts::tree::ArtifactTreeExt as _;
-    use dialog_artifacts::{
-        ArchiveDelta, Artifact, Datum, Entity, Instruction, Key, Preload, PreloadRequest,
-        Speculation, State, Value,
-    };
     use dialog_capability::Provider;
     use dialog_capability::{Capability, Subject};
     use dialog_common::{Held, Holdings, Holds};
+    use dialog_corpus::tree::CorpusCache;
+    use dialog_corpus::tree::CorpusExt as _;
+    use dialog_corpus::{
+        ArchiveDelta, Datum, Entity, Fact, Instruction, Key, Preload, PreloadRequest, Speculation,
+        State, Value,
+    };
     use dialog_effects::archive::Get;
+    use dialog_effects::archive::prelude::ArchiveScope;
     use dialog_query::query::Output as _;
     use dialog_search_tree::helpers::{Blocks, buffer_decodes};
     use dialog_storage::DialogStorageError;
@@ -392,13 +394,13 @@ mod tests {
             blocks,
             &mut delta,
             stream::iter(vec![Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "profile/name".parse()?,
                     of: Entity::new()?,
                     is: Value::String(name.into()),
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             )]),
         )
         .await?;
@@ -423,7 +425,7 @@ mod tests {
                 .into_vec(),
             Holdings::default(),
         );
-        let cache = ArtifactNodeCache::new();
+        let cache = CorpusCache::new();
         cache.hold(&archive);
 
         let loaded: Result<Option<dialog_search_tree::PersistentNode<Key, State<Datum>>>, _> =
@@ -438,7 +440,7 @@ mod tests {
             ),
             "a node that does not hash to the one asked for must be refused, got {loaded:?}"
         );
-        let held = ArtifactNodeCache::of(&archive, catalog.subject())
+        let held = CorpusCache::of(&archive, catalog.subject())
             .expect("the archive holds the line's node cache");
         assert!(
             held.get_cached(&asked).is_none(),
@@ -447,8 +449,8 @@ mod tests {
         Ok(())
     }
 
-    fn selector(attribute: &str) -> ArtifactSelector<Constrained> {
-        ArtifactSelector::new().the(attribute.parse().expect("a valid attribute"))
+    fn selector(attribute: &str) -> Selector<Constrained> {
+        Selector::new().the(attribute.parse().expect("a valid attribute"))
     }
 
     /// A zero budget turns speculation off without touching demand:
@@ -479,7 +481,7 @@ mod tests {
         let branch = repo.branch("main").open().perform(&env).await?;
 
         let queue = Provider::<Speculation>::execute(&env, ()).await;
-        queue.set_budget(dialog_artifacts::FetchBudget::ZERO);
+        queue.set_budget(dialog_corpus::FetchBudget::ZERO);
 
         let listening = Provider::<Preload>::execute(
             &env,
@@ -526,7 +528,7 @@ mod tests {
 
         let mut transaction = branch.transaction();
         for index in 0..40 {
-            let entity: dialog_artifacts::Entity = format!("id:{index}").parse()?;
+            let entity: dialog_corpus::Entity = format!("id:{index}").parse()?;
             transaction = transaction
                 .assert(
                     the!("left/name")
@@ -599,7 +601,7 @@ mod tests {
 
         let mut transaction = branch.transaction();
         for index in 0..10 {
-            let entity: dialog_artifacts::Entity = format!("id:{index}").parse()?;
+            let entity: dialog_corpus::Entity = format!("id:{index}").parse()?;
             transaction = transaction
                 .assert(the!("a/name").of(entity.clone()).is(format!("a {index}")))
                 .assert(the!("b/name").of(entity.clone()).is(format!("b {index}")))
@@ -682,13 +684,13 @@ mod tests {
     /// `rounds` batches of `per` entities' `a/name` and `b/name`. Each
     /// committed on its own leaves the index nodes above the leaves
     /// holding ops in their links' buffers.
-    fn rounds(rounds: usize, per: usize) -> Result<Vec<dialog_artifacts::Changes>> {
-        use dialog_artifacts::Statement as _;
+    fn rounds(rounds: usize, per: usize) -> Result<Vec<dialog_corpus::Changes>> {
+        use dialog_corpus::Statement as _;
         let mut batches = Vec::with_capacity(rounds);
         for round in 0..rounds {
-            let mut changes = dialog_artifacts::Changes::new();
+            let mut changes = dialog_corpus::Changes::new();
             for index in 0..per {
-                let entity: dialog_artifacts::Entity = format!("id:{round}-{index}").parse()?;
+                let entity: dialog_corpus::Entity = format!("id:{round}-{index}").parse()?;
                 the!("a/name")
                     .of(entity.clone())
                     .is(format!("a {round} {index}"))
@@ -775,11 +777,9 @@ mod tests {
         // The nodes a walk of `b/name` passes hold buffered links it could
         // decode: without them this pins nothing.
         let source = Source::from(branch.clone());
-        let root = source.as_ref().root().expect("the branch has a head");
-        let tree = Index::at(
-            ArchiveScope::new(source.as_ref().subject()).index(),
-            NodeHash::from(root),
-        );
+        let view = source.as_view();
+        let root = view.root().expect("the branch has a head");
+        let tree = Index::at(view.catalog(), NodeHash::from(root));
         let manifest = tree.manifest(&env).await?;
         let range = selector_range(&selector("b/name"), &manifest);
         let scope = [range.start().as_ref().to_vec()..=range.end().as_ref().to_vec()];
@@ -937,7 +937,7 @@ mod tests {
             .perform(&replica_operator)
             .await?;
         replica
-            .pull()
+            .pull(Download::MinimalRanges)
             .perform(&replica_operator)
             .await?
             .expect("the replica adopts the upstream head");

@@ -73,8 +73,8 @@
 //! on a replica.
 
 use anyhow::{Context as _, Result};
-use dialog_artifacts::{Artifact, ArtifactSelector, Instruction, Pick, Value};
 use dialog_capability::Provider;
+use dialog_corpus::{Fact, Instruction, Pick, Selector, Value};
 use dialog_query::{Query, Term};
 use dialog_remote_fs::simulation;
 use dialog_repository::Branch;
@@ -109,7 +109,7 @@ fn landing() -> Query<Card> {
 fn toggle(entities: usize, k: usize, j: usize, round: usize) -> Result<Instruction> {
     let index = j * entities / k;
     Ok(Instruction::Assert(
-        Artifact {
+        Fact {
             the: "bug/status".parse()?,
             of: format!("bug:{index}").parse()?,
             is: Value::String(format!("touched-{round}")),
@@ -144,7 +144,10 @@ pub(crate) async fn phases(
 
     // The subscribed replica: joined, and its first poll paid.
     let (client, client_operator) = site.mount("soak-catchup").await?;
-    client.pull().perform(&client_operator).await?;
+    client
+        .pull(dialog_repository::Download::MinimalRanges)
+        .perform(&client_operator)
+        .await?;
     let mut subscription = client.subscribe(landing());
     let first = subscription
         .poll(&client_operator)
@@ -158,12 +161,12 @@ pub(crate) async fn phases(
     );
     // The application's reads after joining drive the first poll's
     // hints, so the measured catch-ups start with nothing pending.
-    let queue = Provider::<dialog_artifacts::Speculation>::execute(&client_operator, ()).await;
+    let queue = Provider::<dialog_corpus::Speculation>::execute(&client_operator, ()).await;
     let mut reads = 0;
     while queue.pending() > 0 && reads < 64 {
         let rows = client
             .claims()
-            .select(ArtifactSelector::new().the("db/name".parse()?))
+            .select(Selector::new().the("db/name".parse()?))
             .to_owned()
             .perform(&client_operator)
             .await?
@@ -202,7 +205,10 @@ pub(crate) async fn phases(
         let mut writers = Vec::with_capacity(m);
         for index in 0..m {
             let (writer, writer_operator) = site.mount(&format!("soak-writer-{index}")).await?;
-            writer.pull().perform(&writer_operator).await?;
+            writer
+                .pull(dialog_repository::Download::MinimalRanges)
+                .perform(&writer_operator)
+                .await?;
             writers.push((writer, writer_operator));
         }
         for j in 0..k {
@@ -216,7 +222,10 @@ pub(crate) async fn phases(
             // Merge what the other writers pushed since, then push: the
             // head the client catches up on is a chain of merges minted
             // by m origins.
-            writer.pull().perform(writer_operator).await?;
+            writer
+                .pull(dialog_repository::Download::MinimalRanges)
+                .perform(writer_operator)
+                .await?;
             writer
                 .push()
                 .perform(writer_operator)
@@ -248,7 +257,10 @@ async fn catch_up(
     phases: &mut Vec<PhaseReport>,
 ) -> Result<()> {
     measured(&format!("pull-{suffix}"), phases, async {
-        client.pull().perform(operator).await?;
+        client
+            .pull(dialog_repository::Download::MinimalRanges)
+            .perform(operator)
+            .await?;
         Ok(())
     })
     .await?;

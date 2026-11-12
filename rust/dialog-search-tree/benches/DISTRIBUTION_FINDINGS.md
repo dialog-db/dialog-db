@@ -23,7 +23,7 @@ top-level `target/criterion/report/index.html`. Branch factors swept: 32, 64,
   round-trips.
 - The threshold tree is **slower for insert and point-get at large `m`**, but
   this is **not a cost of correct branching**: at moderate `m` (32) it is
-  within ~5% of bit-batch, and the get cost is an implementation artifact of
+  within ~5% of bit-batch, and the get cost is an implementation fact of
   the shared search path (see "Why get is slower"), not the algorithm.
 - Range scans are a wash (slightly faster with threshold).
 
@@ -177,7 +177,7 @@ shorter threshold tree is now **faster than bit-batch on get at every branch
 factor**. (bit-batch improved too, since it shares the new read path; threshold
 gains more because it had the wide nodes the old path punished.)
 
-This confirms the get slowdown was an **implementation artifact, not a cost of
+This confirms the get slowdown was an **implementation fact, not a cost of
 correct branching**. Range scans benefit from the same change (the start-key
 descent no longer materializes siblings, and `into_indexed` no longer re-derives
 each child index with a binary search -- `search` already recorded it). The

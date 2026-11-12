@@ -1,6 +1,6 @@
 use async_stream::try_stream;
-use dialog_artifacts::Entity;
 use dialog_common::ConditionalSend;
+use dialog_corpus::Entity;
 
 use crate::concept::descriptor::ConceptDescriptor;
 use crate::error::EvaluationError;

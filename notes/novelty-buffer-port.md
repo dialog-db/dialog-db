@@ -1,6 +1,6 @@
 # Porting the novelty buffer onto version control
 
-Status notes for landing the hitchhiker tree (`feat/novelty-buffer`) underneath the version-control stack. The core is rebased and green; what follows is the integration contract the artifact and repository layers must honor.
+Status notes for landing the hitchhiker tree (`feat/novelty-buffer`) underneath the version-control stack. The core is rebased and green; what follows is the integration contract the fact and repository layers must honor.
 
 ## Status: the differential now reads novelty
 
@@ -19,7 +19,7 @@ So **canonicalize is now an optimization, not a correctness requirement**, and t
 
 A buffered node's hash is not that identity: `TransientIndex::novelty` is part of the node's bytes, so two replicas holding the same facts hash differently if their flush histories differ. Worse, `TreeDifference` reads `index.links` and leaf entries only, never `index.novelty`, so a key that lives in a buffer is *invisible to the differential*. Reconciling two buffered trees directly can therefore drop a buffered insert, or let one side's flushed delete lose to the other side's still-buffered key, which resurrects a deleted fact. That is precisely the failure the observed-remove design exists to prevent.
 
-So the buffer is a **commit-path staging area**, never a published representation. `HitchhikerTree::canonicalize` is the only exit: it drains every buffer through the canonical edit path and returns a `PersistentTree`. Because our published type (`ArtifactTree`) *is* a `PersistentTree`, this rule is enforceable by the type system rather than by convention: code that never sees a buffered tree cannot publish one.
+So the buffer is a **commit-path staging area**, never a published representation. `HitchhikerTree::canonicalize` is the only exit: it drains every buffer through the canonical edit path and returns a `PersistentTree`. Because our published type (`FactTree`) *is* a `PersistentTree`, this rule is enforceable by the type system rather than by convention: code that never sees a buffered tree cannot publish one.
 
 ## What a buffered write must still read
 

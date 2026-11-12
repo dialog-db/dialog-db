@@ -6,11 +6,11 @@ use std::future::Future;
 use std::pin::Pin;
 
 use anyhow::Result;
-use dialog_artifacts::{Pick, Value};
 use dialog_capability::Did;
+use dialog_corpus::{Pick, Value};
 use dialog_query::query::Output as _;
 use dialog_query::{ConceptQuery, InductiveRule, Parameters, Term};
-use dialog_repository::{Branch, contact};
+use dialog_repository::{Branch, Download, contact};
 
 use super::{Outcome, Prepared, stuff};
 use crate::env::{Env, assert_all, entity, fact, text, var};
@@ -143,7 +143,7 @@ pub async fn view(size: usize) -> Result<Box<dyn Prepared>> {
 
     let member = env.branch("member").await?;
     member
-        .pull()
+        .pull(Download::MinimalRanges)
         .from(&env.branch)
         .perform(&env.operator)
         .await?;

@@ -216,8 +216,8 @@ mod tests {
 
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use dialog_artifacts::Entity;
     use dialog_capability::{Fork, Provider, Subject};
+    use dialog_corpus::Entity;
     use dialog_effects::memory::prelude::CellScope;
     use dialog_effects::memory::{MemoryError, Publish, Version};
     use dialog_remote_s3::Address as S3Address;

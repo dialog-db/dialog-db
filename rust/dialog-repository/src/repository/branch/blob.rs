@@ -27,7 +27,7 @@
 //! # async fn example<Env>(
 //! #     branch: &Branch,
 //! #     env: &Env,
-//! #     entity: dialog_artifacts::Entity,
+//! #     entity: dialog_corpus::Entity,
 //! #     range: ByteRange,
 //! #     chunks: futures_util::stream::Iter<std::vec::IntoIter<Result<Vec<u8>, BlobError>>>,
 //! # ) -> Result<(), CommitError>
@@ -44,9 +44,9 @@
 //! #         + Provider<BlobImport>
 //! #         + Provider<dialog_effects::archive::Load>
 //! #         + Provider<dialog_effects::blob::Load>
-//! #         + dialog_capability::Provider<dialog_search_tree::nodes::Read<dialog_artifacts::tree::CorpusNode>>
-//! #         + dialog_capability::Provider<dialog_search_tree::nodes::Preload<dialog_artifacts::tree::CorpusNode>>
-//! #         + dialog_capability::Provider<dialog_search_tree::nodes::Write<dialog_artifacts::tree::CorpusNode>>
+//! #         + dialog_capability::Provider<dialog_search_tree::nodes::Read<dialog_corpus::tree::CorpusNode>>
+//! #         + dialog_capability::Provider<dialog_search_tree::nodes::Preload<dialog_corpus::tree::CorpusNode>>
+//! #         + dialog_capability::Provider<dialog_search_tree::nodes::Write<dialog_corpus::tree::CorpusNode>>
 //! #         + Provider<Fork<RemoteSite, Resolve>>
 //! #         + Provider<Fork<RemoteSite, BlobRead>>
 //! #         + dialog_common::Holds
@@ -76,13 +76,13 @@
 use crate::repository::archive::erased;
 use crate::repository::branch::asset::recorded_size;
 use crate::repository::remote::Step;
-use crate::repository::source::SourceRef;
+use crate::repository::source::{Live, View};
 use crate::{Branch, CommitError, Index, RemoteFallback, RemoteSite, Snapshot};
-use dialog_artifacts::tree::CorpusNode;
-use dialog_artifacts::{Asset, BlobIndexExt as _, BlobRecord, Entity, Instruction};
 use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync};
+use dialog_corpus::tree::CorpusNode;
+use dialog_corpus::{Asset, BlobIndexExt as _, BlobRecord, Entity, Instruction};
 use dialog_effects::MethodExt as _;
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::prelude::ArchiveExt as _;
@@ -108,15 +108,18 @@ use futures_util::{Stream, stream};
 /// which a reference to a snapshot cannot do (its revision is held by
 /// value): they fail with [`CommitError::Detached`], and the snapshot is
 /// advanced by consuming it instead.
+///
+/// Holds the line live: each operation pins it when performed, so a
+/// size lookup or a read names the revision the line stands at then.
 #[derive(Clone, Copy)]
 pub struct BlobArchive<'a> {
-    source: SourceRef<'a>,
+    line: Live<'a>,
 }
 
 impl<'a> From<&'a Branch> for BlobArchive<'a> {
     fn from(branch: &'a Branch) -> Self {
         Self {
-            source: SourceRef::from(branch),
+            line: Live::from(branch),
         }
     }
 }
@@ -124,7 +127,7 @@ impl<'a> From<&'a Branch> for BlobArchive<'a> {
 impl<'a> From<&'a Snapshot> for BlobArchive<'a> {
     fn from(snapshot: &'a Snapshot) -> Self {
         Self {
-            source: SourceRef::from(snapshot),
+            line: Live::from(snapshot),
         }
     }
 }
@@ -133,10 +136,7 @@ impl<'a> BlobArchive<'a> {
     /// The branch behind this archive, for the operations that advance
     /// it; a snapshot's archive refuses them.
     fn branch(&self) -> Result<&'a Branch, CommitError> {
-        match self.source {
-            SourceRef::Branch(branch) => Ok(branch),
-            SourceRef::Snapshot(_) => Err(CommitError::Detached),
-        }
+        self.line.branch().ok_or(CommitError::Detached)
     }
 }
 
@@ -235,7 +235,7 @@ fn blob_hash(entity: &Entity) -> Result<Blake3Hash, BlobError> {
 /// by an asset's `dialog.asset/size` fact or a legacy blob-index entry, or
 /// `None` when it vouches for no such content.
 async fn index_size<Env>(
-    source: SourceRef<'_>,
+    view: &View<'_>,
     hash: &Blake3Hash,
     env: &Env,
 ) -> Result<Option<u64>, CommitError>
@@ -255,20 +255,20 @@ where
         + ConditionalSync
         + 'static,
 {
-    let Some(revision) = source.revision() else {
+    let Some(revision) = view.revision() else {
         return Ok(None);
     };
     // A tree node the replica lacks (after a fast-forward pull only the
     // revision pointer is local) hydrates through the env's load.
     let store = erased(env);
-    let tree = Index::at(source.catalog(), NodeHash::from(*revision.tree.hash()));
+    let tree = Index::at(view.catalog(), NodeHash::from(*revision.tree.hash()));
     Ok(tree.content_size(&store, hash.as_bytes()).await?)
 }
 
 /// Whether the line's blob index itself still references `hash`: content a
 /// tree recorded before assets, which a retraction tombstones.
 async fn index_references<Env>(
-    source: SourceRef<'_>,
+    view: &View<'_>,
     hash: &Blake3Hash,
     env: &Env,
 ) -> Result<bool, CommitError>
@@ -288,13 +288,13 @@ where
         + ConditionalSync
         + 'static,
 {
-    let Some(revision) = source.revision() else {
+    let Some(revision) = view.revision() else {
         return Ok(false);
     };
     // A tree node the replica lacks (after a fast-forward pull only the
     // revision pointer is local) hydrates through the env's load.
     let store = erased(env);
-    let tree = Index::at(source.catalog(), NodeHash::from(*revision.tree.hash()));
+    let tree = Index::at(view.catalog(), NodeHash::from(*revision.tree.hash()));
     Ok(tree.get_blob(&store, hash.as_bytes()).await?.is_some())
 }
 
@@ -325,7 +325,7 @@ impl BlobSize<'_> {
             + 'static,
     {
         let hash = blob_hash(&self.entity)?;
-        index_size(self.archive.source, &hash, env).await
+        index_size(&self.archive.line.pin(), &hash, env).await
     }
 }
 
@@ -364,7 +364,7 @@ impl ReadBlob<'_> {
             + ConditionalSync
             + 'static,
     {
-        let line = self.archive.source;
+        let line = self.archive.line;
         let hash = blob_hash(&self.entity)?;
         let range = self.range;
 
@@ -387,9 +387,9 @@ impl ReadBlob<'_> {
         // Local miss. Hydrate from the upstream peer, if any (a snapshot
         // has none: its reads are local). Asked only now, on the miss: a
         // read the local blob store answers never works out the route.
-        let route = match line {
-            SourceRef::Branch(branch) => branch.fallback(),
-            SourceRef::Snapshot(_) => RemoteFallback::None,
+        let route = match line.branch() {
+            Some(branch) => branch.fallback(),
+            None => RemoteFallback::None,
         };
         let remote = match route {
             RemoteFallback::Remote(remote) => remote,
@@ -403,7 +403,7 @@ impl ReadBlob<'_> {
 
         // The tree must already vouch for the blob for us to import it; without
         // a size we have no import to issue and the miss is genuine.
-        let Some(size) = index_size(line, &hash, env).await? else {
+        let Some(size) = index_size(&line.pin(), &hash, env).await? else {
             return Err(BlobError::NotFound(miss_key).into());
         };
 
@@ -507,7 +507,7 @@ where
             branch
                 .commit(stream::iter(vec![Instruction::Assert(
                     asset.fact()?,
-                    dialog_artifacts::Pick::Last,
+                    dialog_corpus::Pick::Last,
                 )]))
                 .machinery()
                 .perform(env),
@@ -567,15 +567,15 @@ impl RetractBlob<'_> {
     {
         let branch = self.archive.branch()?;
         let hash = blob_hash(&self.entity)?;
-        let source = SourceRef::from(branch);
+        let view = Live::from(branch).pin();
         let mut retractions = Vec::new();
-        if let Some(size) = recorded_size(source, hash.as_bytes(), env).await? {
+        if let Some(size) = recorded_size(&view, hash.as_bytes(), env).await? {
             retractions.push(Instruction::Retract(
                 Asset::stored(*hash.as_bytes(), size).fact()?,
             ));
         }
         let mut entries = Vec::new();
-        if index_references(source, &hash, env).await? {
+        if index_references(&view, &hash, env).await? {
             entries.push(BlobRecord::retract_entry(hash.as_bytes()));
         }
         if retractions.is_empty() && entries.is_empty() {
@@ -603,8 +603,8 @@ mod tests {
     use super::Blob;
     use crate::RepositoryExt as _;
     use anyhow::Result;
-    use dialog_artifacts::{BlobIndexExt as _, BlobRecord, Entity};
     use dialog_capability::Subject;
+    use dialog_corpus::{BlobIndexExt as _, BlobRecord, Entity};
     use dialog_effects::blob::{BlobError, BlobReader, ByteRange};
     use dialog_peer::helpers::{open_peer, test_storage, unique_name};
 
@@ -878,7 +878,7 @@ mod tests {
             .await?;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
-        let entity: dialog_artifacts::Entity = "user:alice".parse()?;
+        let entity: dialog_corpus::Entity = "user:alice".parse()?;
         let result = Blob::from(entity)
             .read((&branch).into())
             .perform(&operator)

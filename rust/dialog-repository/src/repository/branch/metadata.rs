@@ -4,7 +4,7 @@
 //! identity into a typed [`BranchMetadata`] — the [`Replica`], the
 //! [`Branch`](BranchConcept) concept, and a [`BranchRevision`] when
 //! the branch has a commit. `BranchMetadata` implements [`Statement`],
-//! so it folds straight into a [`Changes`](dialog_artifacts::Changes)
+//! so it folds straight into a [`Changes`](dialog_corpus::Changes)
 //! batch.
 //!
 //! The query layer composes these per-branch bundles (plus a
@@ -13,14 +13,14 @@
 //! [`QueryLayer::metadata`](super::session::QueryLayer::metadata).
 
 use base58::ToBase58;
-use dialog_artifacts::{Statement, Update};
 use dialog_capability::{Capability, Did};
+use dialog_corpus::{Statement, Update};
 use dialog_effects::authority::{Operator, OperatorExt as _};
 
-use crate::Branch;
 use crate::schema::Branch as BranchConcept;
 use crate::schema::branch::{Edition, Revision as RevisionEntity, Tree};
 use crate::schema::{BranchRevision, Replica};
+use crate::{Branch, Revision};
 
 /// The schema-shaped metadata for a single branch.
 ///
@@ -70,28 +70,38 @@ impl Branch {
     /// [`Identify`](dialog_effects::authority::Identify)) carries both
     /// the profile and operator DIDs.
     pub fn metadata(&self, operator: &Capability<Operator>) -> BranchMetadata {
+        self.metadata_at(operator, self.revision().as_ref())
+    }
+
+    /// [`metadata`](Self::metadata) as of `revision` rather than the
+    /// head: what a read pinned to a revision folds in.
+    pub(crate) fn metadata_at(
+        &self,
+        operator: &Capability<Operator>,
+        revision: Option<&Revision>,
+    ) -> BranchMetadata {
         let profile = operator.profile();
-        let revision = self.revision();
         let mut cache = self
             .metadata_cache
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         if let Some((cached_profile, cached_revision, metadata)) = cache.as_ref()
             && cached_profile == profile
-            && *cached_revision == revision
+            && cached_revision.as_ref() == revision
         {
             return metadata.clone();
         }
-        let metadata = self.derive_metadata(profile);
-        *cache = Some((profile.clone(), revision, metadata.clone()));
+        let metadata = self.derive_metadata(profile, revision);
+        *cache = Some((profile.clone(), revision.cloned(), metadata.clone()));
         metadata
     }
 
-    /// Derive the metadata [`metadata`](Self::metadata) memoizes.
-    fn derive_metadata(&self, profile: &Did) -> BranchMetadata {
+    /// Derive the metadata [`metadata`](Self::metadata) memoizes, as of
+    /// `revision`.
+    fn derive_metadata(&self, profile: &Did, revision: Option<&Revision>) -> BranchMetadata {
         let replica = Replica::new(profile.clone(), self.of().clone());
         let branch = BranchConcept::new(&replica, self.name());
-        let revision = self.revision().map(|revision| {
+        let revision = revision.map(|revision| {
             let tree_bytes: &[u8] = revision.tree.hash();
             BranchRevision {
                 this: branch.this.clone(),

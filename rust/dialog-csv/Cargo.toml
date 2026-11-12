@@ -6,7 +6,7 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
-dialog-artifacts = { workspace = true }
+dialog-corpus = { workspace = true }
 async-trait = { workspace = true }
 base58 = { workspace = true }
 csv-async = { workspace = true, features = ["tokio"] }

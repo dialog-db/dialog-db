@@ -5,7 +5,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use anyhow::Result;
-use dialog_artifacts::Pick;
+use dialog_corpus::Pick;
 use dialog_query::ConceptConclusion;
 use dialog_query::query::Output as _;
 

@@ -24,7 +24,7 @@
 use std::collections::BTreeSet;
 use std::{error, fmt};
 
-use dialog_artifacts::identity::{BOOLEAN, ENTITY, NUMBER, RECORD, SYMBOL, TEXT};
+use dialog_corpus::identity::{BOOLEAN, ENTITY, NUMBER, RECORD, SYMBOL, TEXT};
 use merkle_reference::{Reference, Type};
 use serde::Serialize;
 use serde::ser::{self, SerializeMap as _};
@@ -560,8 +560,8 @@ impl ser::SerializeStructVariant for Variant<Entries> {
 mod tests {
     use super::*;
     use crate::Value;
-    use crate::artifact::Entity;
     use crate::attribute::Relation;
+    use crate::corpus::Entity;
     use crate::rule::{DeductiveRule, DeductiveRuleDescriptor};
 
     /// A constant inside a premise's wire form references as the value it

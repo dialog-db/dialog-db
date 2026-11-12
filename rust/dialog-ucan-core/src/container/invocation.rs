@@ -143,7 +143,7 @@ impl<S: Signature> InvocationChain<S> {
     }
 
     /// The value this container carries for `key` in signed meta: the
-    /// invocation's own entry first — it is the artifact minted last, at
+    /// invocation's own entry first — it is the fact minted last, at
     /// invoke time — then its `prf` delegations leaf-to-root, so the hop
     /// minted closest to the invoker wins among the proofs.
     ///

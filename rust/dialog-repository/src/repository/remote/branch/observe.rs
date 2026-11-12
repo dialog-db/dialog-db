@@ -2,10 +2,10 @@
 
 use super::RemoteEdition;
 use crate::{ConnectedBranch, ObserveRemoteBranchError, PublishError, Revision};
-use dialog_artifacts::DialogArtifactsError;
 use dialog_capability::Provider;
 use dialog_capability::identity::Precedence;
 use dialog_common::ConditionalSync;
+use dialog_corpus::DialogCorpusError;
 use dialog_effects::memory::{Publish, Resolve};
 
 /// Command to record a head of the remote branch that was observed
@@ -52,7 +52,7 @@ impl<'a> ObserveRemoteBranch<'a> {
         Env: Provider<Resolve> + Provider<Publish> + ConditionalSync,
     {
         let observed = &self.edition.content;
-        observed.verify().map_err(DialogArtifactsError::from)?;
+        observed.verify().map_err(DialogCorpusError::from)?;
 
         // A head recorded through another handle between the read and the
         // write loses the write; it is read again and compared once more,
@@ -99,7 +99,7 @@ mod tests {
         TreeReference, Upstream,
     };
     use anyhow::Result;
-    use dialog_artifacts::{Artifact, DialogArtifactsError, Entity, Instruction, Value};
+    use dialog_corpus::{DialogCorpusError, Entity, Fact, Instruction, Value};
     use dialog_effects::memory::Version;
     use dialog_peer::helpers::test_session_with_peer;
     use dialog_remote_s3::Address;
@@ -141,13 +141,13 @@ mod tests {
     {
         branch
             .commit(stream::iter(vec![Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "user/name".parse()?,
                     of: format!("user:{name}").parse()?,
                     is: Value::String(name.into()),
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             )]))
             .perform(env)
             .await?;
@@ -181,7 +181,10 @@ mod tests {
             .perform(&operator)
             .await?;
         assert_eq!(observed, Observation::Advanced(second.clone()));
-        main.pull().assuming_upstream().perform(&operator).await?;
+        main.pull(crate::Download::MinimalRanges)
+            .assuming_upstream()
+            .perform(&operator)
+            .await?;
         assert_eq!(
             main.revision().map(|head| head.tree),
             Some(second.tree.clone())
@@ -194,7 +197,10 @@ mod tests {
             .perform(&operator)
             .await?;
 
-        main.pull().assuming_upstream().perform(&operator).await?;
+        main.pull(crate::Download::MinimalRanges)
+            .assuming_upstream()
+            .perform(&operator)
+            .await?;
         let pushed = main.push().assuming_upstream().perform(&operator).await?;
         assert_eq!(
             pushed.map(|head| head.tree),
@@ -297,8 +303,8 @@ mod tests {
         assert!(
             matches!(
                 observed,
-                Err(ObserveRemoteBranchError::Artifact(
-                    DialogArtifactsError::InvalidSignature(_)
+                Err(ObserveRemoteBranchError::Fact(
+                    DialogCorpusError::InvalidSignature(_)
                 ))
             ),
             "an unsigned head must be refused; got {observed:?}"

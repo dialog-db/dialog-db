@@ -78,7 +78,7 @@ impl<S: Signature, I: Issuer<S> + Principal> RevocationBuilder<S, I> {
 
         let invocation: Invocation<S> = Invocation::builder()
             .issuer(self.revoker)
-            // The revoker is the subject: this artifact is about *their*
+            // The revoker is the subject: this fact is about *their*
             // withdrawal, not about the capability being withdrawn.
             .subject(&revoker_did)
             .audience(&revoker_did)
@@ -86,7 +86,7 @@ impl<S: Signature, I: Issuer<S> + Principal> RevocationBuilder<S, I> {
             .arguments(arguments)
             .proofs(vec![])
             // `nnc ""`: revocation is idempotent, so two revocations of the
-            // same delegation by the same principal are the same artifact.
+            // same delegation by the same principal are the same fact.
             .nonce(crate::crypto::nonce::Nonce::Custom(Vec::new()))
             .try_build()
             .await?;

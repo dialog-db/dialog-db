@@ -12,10 +12,10 @@ use crate::{
     Branch, ConnectedBranch, ConnectedReplica, PublishError, ResolveError, Revision, SiteAddress,
     TreeReference,
 };
-use dialog_artifacts::Entity;
-use dialog_artifacts::history::Version;
 use dialog_capability::{Did, Provider, Subject};
 use dialog_common::ConditionalSync;
+use dialog_corpus::Entity;
+use dialog_corpus::history::Version;
 use dialog_effects::memory::{Publish, Resolve};
 use serde::{Deserialize, Serialize};
 
@@ -582,7 +582,7 @@ mod tests {
 
     use super::{Bases, Target, Tracking, Upstream};
     use crate::TreeReference;
-    use dialog_artifacts::history::{Edition, Origin, Version};
+    use dialog_corpus::history::{Edition, Origin, Version};
 
     /// Reads fall back to the first route at a peer among the pulls and
     /// then the pushes, an unreachable one included; local routes and an
@@ -595,7 +595,7 @@ mod tests {
         };
         let unreachable = |reason: &str| -> anyhow::Result<Route> {
             Ok(Route::Unreachable {
-                target: dialog_artifacts::Entity::new()?,
+                target: dialog_corpus::Entity::new()?,
                 reason: reason.into(),
             })
         };

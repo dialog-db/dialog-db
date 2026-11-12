@@ -8,15 +8,15 @@ license.workspace = true
 
 [features]
 # Enable integration tests (tests with service provisioning)
-integration-tests = ["dialog-artifacts/integration-tests"]
+integration-tests = ["dialog-corpus/integration-tests"]
 # Enable web integration tests
-web-integration-tests = ["dialog-artifacts/web-integration-tests"]
+web-integration-tests = ["dialog-corpus/web-integration-tests"]
 
 [dependencies]
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 base58 = { workspace = true }
-dialog-artifacts = { workspace = true, features = ["csv", "debug"] }
+dialog-corpus = { workspace = true, features = ["csv", "debug"] }
 dialog-capability = { workspace = true }
 dialog-common = { workspace = true }
 dialog-csv = { workspace = true }

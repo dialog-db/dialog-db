@@ -83,7 +83,7 @@ impl Parameters {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::artifact::{Type, Value};
+    use crate::corpus::{Type, Value};
     use crate::term::Term;
     use crate::types::Any;
 

@@ -21,7 +21,7 @@
 //!   `Formula<Numeric>`, so dynamic evaluation is just another
 //!   monomorphization; typed Rust callers use `u64`/`i64`/`f64`.
 
-use crate::artifact::{ArtifactTypeError, Type as ValueType, Value};
+use crate::corpus::{CorpusTypeError, Type as ValueType, Value};
 use crate::type_system::{Primitive, Type as Kind};
 use crate::types::{Scalar, TypeDescriptor, Typed};
 use std::cmp::Ordering;
@@ -52,7 +52,7 @@ pub trait Number:
     SchemeBound
     + Scalar
     + PartialEq
-    + TryFrom<Value, Error = ArtifactTypeError>
+    + TryFrom<Value, Error = CorpusTypeError>
     + dialog_common::ConditionalSync
 {
     /// This type read as a number that may be negative: the integer
@@ -310,14 +310,14 @@ impl Numeric {
 }
 
 impl TryFrom<Value> for Numeric {
-    type Error = ArtifactTypeError;
+    type Error = CorpusTypeError;
 
     fn try_from(value: Value) -> Result<Self, Self::Error> {
         match value {
             Value::UnsignedInt(v) => Ok(Numeric::UnsignedInt(v)),
             Value::SignedInt(v) => Ok(Numeric::SignedInt(v)),
             Value::Float(v) => Ok(Numeric::Float(v)),
-            other => Err(ArtifactTypeError::TypeMismatch(
+            other => Err(CorpusTypeError::TypeMismatch(
                 ValueType::Float,
                 other.data_type(),
             )),

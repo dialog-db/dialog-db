@@ -4,8 +4,8 @@
 use std::collections::BTreeMap;
 use std::ops::Bound;
 
-use dialog_artifacts::selector::Constrained;
-use dialog_artifacts::{ArtifactSelector, Entity, NameShape, Relation};
+use dialog_corpus::selector::Constrained;
+use dialog_corpus::{Entity, NameShape, Relation, Selector};
 
 /// One entry per cell a write under a choosing pick asserted, kept
 /// past its retraction: the cells a read of a range must settle. Kept
@@ -69,10 +69,7 @@ impl ElectingCells {
     /// attribute when the read bounds one exactly or by prefix, else on
     /// the entity when the read bounds one; a read bounding neither,
     /// or only an attribute's name or shape, visits every cell.
-    pub(crate) fn within(
-        &self,
-        selector: &ArtifactSelector<Constrained>,
-    ) -> Vec<(Relation, Entity)> {
+    pub(crate) fn within(&self, selector: &Selector<Constrained>) -> Vec<(Relation, Entity)> {
         let admits_attribute = |the: &Relation| {
             selector
                 .attribute_name()
@@ -136,22 +133,22 @@ mod tests {
         }
         let (the, of) = cell("person/name", "id:a");
         assert!(!cells.insert(&the, &of), "kept once");
-        let within = |selector: ArtifactSelector<Constrained>| {
+        let within = |selector: Selector<Constrained>| {
             let mut found = cells.within(&selector);
             found.sort();
             found
         };
 
         assert_eq!(
-            within(ArtifactSelector::new().the(the.clone())),
+            within(Selector::new().the(the.clone())),
             vec![cell("person/name", "id:a"), cell("person/name", "id:b")]
         );
         assert_eq!(
-            within(ArtifactSelector::new().the(the.clone()).of(of.clone())),
+            within(Selector::new().the(the.clone()).of(of.clone())),
             vec![cell("person/name", "id:a")]
         );
         assert_eq!(
-            within(ArtifactSelector::new().of(of.clone())),
+            within(Selector::new().of(of.clone())),
             vec![
                 cell("list/Mx", "id:a"),
                 cell("person/age", "id:a"),
@@ -159,7 +156,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            within(ArtifactSelector::new().the_starting_with("person/")),
+            within(Selector::new().the_starting_with("person/")),
             vec![
                 cell("person/age", "id:a"),
                 cell("person/name", "id:a"),
@@ -167,18 +164,14 @@ mod tests {
             ]
         );
         assert_eq!(
-            within(
-                ArtifactSelector::new()
-                    .the_starting_with("person/")
-                    .of(of.clone())
-            ),
+            within(Selector::new().the_starting_with("person/").of(of.clone())),
             vec![cell("person/age", "id:a"), cell("person/name", "id:a")]
         );
         assert_eq!(
             within(
-                ArtifactSelector::new()
+                Selector::new()
                     .of_starting_with("id:")
-                    .with_name("name".parse::<dialog_artifacts::Name>().expect("name"))
+                    .with_name("name".parse::<dialog_corpus::Name>().expect("name"))
             ),
             vec![
                 cell("other/name", "id:c"),
@@ -188,7 +181,7 @@ mod tests {
         );
         assert_eq!(
             within(
-                ArtifactSelector::new()
+                Selector::new()
                     .of(of.clone())
                     .with_name_shape(NameShape::Position)
             ),
@@ -196,20 +189,20 @@ mod tests {
         );
         assert_eq!(
             within(
-                ArtifactSelector::new()
+                Selector::new()
                     .with_name_shape(NameShape::Position)
-                    .is(dialog_artifacts::Value::String("x".into()))
+                    .is(dialog_corpus::Value::String("x".into()))
             ),
             vec![cell("list/Mx", "id:a")],
             "a shape alone visits every cell"
         );
         assert_eq!(
-            within(ArtifactSelector::new().is(dialog_artifacts::Value::String("x".into()))).len(),
+            within(Selector::new().is(dialog_corpus::Value::String("x".into()))).len(),
             5,
             "a value bound reads every cell"
         );
-        assert!(within(ArtifactSelector::new().the(cell("person/born", "id:a").0)).is_empty());
-        assert!(within(ArtifactSelector::new().of_starting_with("id:z")).is_empty());
+        assert!(within(Selector::new().the(cell("person/born", "id:a").0)).is_empty());
+        assert!(within(Selector::new().of_starting_with("id:z")).is_empty());
         assert!(!cells.is_empty());
         assert!(ElectingCells::default().is_empty());
     }

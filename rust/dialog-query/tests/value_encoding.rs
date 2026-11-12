@@ -7,7 +7,7 @@
 #[cfg(target_arch = "wasm32")]
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-use dialog_query::artifact::Value;
+use dialog_query::corpus::Value;
 use dialog_query::error::TypeError;
 use dialog_query::proposition::Proposition;
 use dialog_query::rule::{DeductiveRule, DeductiveRuleDescriptor};

@@ -1,6 +1,7 @@
 //! Headless Chrome ownership and a minimal Chrome DevTools Protocol client.
-//! Only three CDP operations are needed: create a tab, close a tab, and (on
-//! timeout) scrape the harness output out of a wedged page.
+//! Only three CDP operations are needed: create a tab that behaves as the
+//! focused one, close a tab, and (on timeout) scrape the harness output out
+//! of a wedged page.
 
 use anyhow::{anyhow, bail, Context, Result};
 use futures_util::{SinkExt, StreamExt};
@@ -49,18 +50,8 @@ impl BrowserPool {
                 *inner = Some(Browser::launch(&self.profile_dir).await?);
             }
             let browser = inner.as_ref().unwrap();
-            match browser
-                .cdp
-                .call("Target.createTarget", json!({ "url": url }), None)
-                .await
-            {
-                Ok(result) => {
-                    let target_id = result
-                        .get("targetId")
-                        .and_then(Value::as_str)
-                        .context("Target.createTarget returned no targetId")?;
-                    return Ok(target_id.to_string());
-                }
+            match open_tab(&browser.cdp, url).await {
+                Ok(target_id) => return Ok(target_id),
                 Err(error) if attempt == 0 && !browser.cdp.is_alive() => {
                     let _ = error;
                     if let Some(mut browser) = inner.take() {
@@ -138,6 +129,62 @@ impl BrowserPool {
             browser.kill().await;
         }
     }
+}
+
+/// Opens a tab at `url` that behaves as the focused one, whatever tabs are
+/// open beside it.
+///
+/// Every test owns a tab and many are open at once. Chrome treats only the
+/// latest as focused: in the others `document.hasFocus()` is false, focus
+/// events do not fire, and rendering opportunities such as `ResizeObserver`
+/// delivery are held back. A test that depends on any of those passes alone
+/// and fails or hangs in a full run. CDP's focus emulation makes each page
+/// act as the focused, active one, without running the tabs one at a time.
+///
+/// A tab that cannot be given focus is closed and the failure returned: a
+/// test left to run without it would fail for a reason its output does not
+/// show.
+async fn open_tab(cdp: &CdpClient, url: &str) -> Result<String> {
+    let created = cdp
+        .call("Target.createTarget", json!({ "url": url }), None)
+        .await?;
+    let target_id = created
+        .get("targetId")
+        .and_then(Value::as_str)
+        .context("Target.createTarget returned no targetId")?
+        .to_string();
+
+    if let Err(error) = focus_tab(cdp, &target_id).await {
+        let _ = cdp
+            .call("Target.closeTarget", json!({ "targetId": target_id }), None)
+            .await;
+        return Err(error.context("failed to give a test's tab focus"));
+    }
+    Ok(target_id)
+}
+
+/// Turns focus emulation on for a tab. The session it attaches for that is
+/// the tab's to keep: Chrome ends it when the tab closes, and the client
+/// holds nothing per session.
+async fn focus_tab(cdp: &CdpClient, target_id: &str) -> Result<()> {
+    let session = cdp
+        .call(
+            "Target.attachToTarget",
+            json!({ "targetId": target_id, "flatten": true }),
+            None,
+        )
+        .await?;
+    let session_id = session
+        .get("sessionId")
+        .and_then(Value::as_str)
+        .context("Target.attachToTarget returned no sessionId")?;
+    cdp.call(
+        "Emulation.setFocusEmulationEnabled",
+        json!({ "enabled": true }),
+        Some(session_id),
+    )
+    .await?;
+    Ok(())
 }
 
 struct Browser {
@@ -418,6 +465,110 @@ mod test {
             drop(tokio_tungstenite::accept_async(stream).await.unwrap());
         });
         format!("ws://{addr}")
+    }
+
+    /// A DevTools endpoint that answers each call through `answer` and
+    /// records what it was asked, as `(method, params, sessionId)`.
+    async fn scripted_devtools_endpoint(
+        answer: fn(&str) -> Value,
+    ) -> (String, Arc<std::sync::Mutex<Vec<(String, Value, Value)>>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = calls.clone();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(message)) = socket.next().await {
+                let Ok(text) = message.into_text() else {
+                    continue;
+                };
+                let call: Value = serde_json::from_str(text.as_str()).unwrap();
+                let method = call["method"].as_str().unwrap().to_string();
+                recorded.lock().unwrap().push((
+                    method.clone(),
+                    call["params"].clone(),
+                    call["sessionId"].clone(),
+                ));
+                let mut reply = answer(&method);
+                reply["id"] = call["id"].clone();
+                let reply = tokio_tungstenite::tungstenite::Message::text(reply.to_string());
+                if socket.send(reply).await.is_err() {
+                    break;
+                }
+            }
+        });
+        (format!("ws://{addr}"), calls)
+    }
+
+    #[tokio::test]
+    async fn it_gives_every_tab_focus_as_it_opens() {
+        let (endpoint, calls) = scripted_devtools_endpoint(|method| match method {
+            "Target.createTarget" => json!({ "result": { "targetId": "tab-1" } }),
+            "Target.attachToTarget" => json!({ "result": { "sessionId": "session-1" } }),
+            _ => json!({ "result": {} }),
+        })
+        .await;
+        let client = CdpClient::connect(&endpoint).await.unwrap();
+
+        let target = open_tab(&client, "http://t-1.localhost/r/1/")
+            .await
+            .unwrap();
+
+        assert_eq!(target, "tab-1");
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![
+                (
+                    "Target.createTarget".to_string(),
+                    json!({ "url": "http://t-1.localhost/r/1/" }),
+                    Value::Null,
+                ),
+                (
+                    "Target.attachToTarget".to_string(),
+                    json!({ "targetId": "tab-1", "flatten": true }),
+                    Value::Null,
+                ),
+                (
+                    "Emulation.setFocusEmulationEnabled".to_string(),
+                    json!({ "enabled": true }),
+                    json!("session-1"),
+                ),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn it_closes_a_tab_it_cannot_give_focus() {
+        let (endpoint, calls) = scripted_devtools_endpoint(|method| match method {
+            "Target.createTarget" => json!({ "result": { "targetId": "tab-1" } }),
+            "Target.attachToTarget" => json!({ "result": { "sessionId": "session-1" } }),
+            "Emulation.setFocusEmulationEnabled" => {
+                json!({ "error": { "code": -32601, "message": "method not found" } })
+            }
+            _ => json!({ "result": {} }),
+        })
+        .await;
+        let client = CdpClient::connect(&endpoint).await.unwrap();
+
+        let error = open_tab(&client, "http://t-1.localhost/r/1/")
+            .await
+            .unwrap_err();
+
+        assert!(
+            format!("{error:#}").contains("failed to give a test's tab focus"),
+            "unexpected error: {error:#}"
+        );
+        let calls = calls.lock().unwrap();
+        assert_eq!(
+            calls.last(),
+            Some(&(
+                "Target.closeTarget".to_string(),
+                json!({ "targetId": "tab-1" }),
+                Value::Null,
+            )),
+            "the tab was left open: {calls:?}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
