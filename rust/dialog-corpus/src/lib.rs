@@ -29,8 +29,8 @@
 //! use futures_util::{StreamExt, stream};
 //!
 //! // Any environment that answers the corpus's node reads and spilled-value
-//! // loads will do; this one keeps everything in memory. The corpus lives
-//! // in a catalog of a subject's archive.
+//! // loads will do; this one keeps everything in memory. The corpus reads
+//! // a subject's nodes, kept as blocks in that subject's archive.
 //! let blocks = Blocks::new();
 //! let mut corpus = Corpus::empty_in(test_subject());
 //! let mut delta = ArchiveDelta::zero();
