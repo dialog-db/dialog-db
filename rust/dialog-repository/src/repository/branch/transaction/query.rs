@@ -49,10 +49,10 @@
 //! queried mid-transaction or after commit — it's part of evaluating a
 //! query, not an optional composition.
 
-use dialog_artifacts::DialogArtifactsError;
-use dialog_artifacts::tree::CorpusNode;
 use dialog_capability::{Fork, Provider};
 use dialog_common::{ConditionalSync, Holds};
+use dialog_corpus::DialogCorpusError;
+use dialog_corpus::tree::CorpusNode;
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::Identify;
@@ -62,10 +62,10 @@ use dialog_effects::memory::Resolve;
 use dialog_query::query::{Application, Output};
 use dialog_search_tree::nodes;
 
-use crate::repository::branch::QueryLayer;
-use crate::repository::branch::session::QueryEnv;
-use crate::repository::source::SourceRef;
+use crate::repository::branch::session::{QueryEnv, shared_metadata};
+use crate::repository::source::View;
 use crate::{RemoteSite, Staged};
+use std::slice::from_ref;
 
 /// A non-composable query handle returned by
 /// [`Transaction::query`](crate::repository::branch::Transaction::query)
@@ -73,28 +73,26 @@ use crate::{RemoteSite, Staged};
 ///
 /// Holds the transaction's staged layers as they stand (shared, so
 /// taking them copies nothing, and later writes to the transaction do
-/// not reach them) plus a reference to the line (branch or snapshot)
-/// it runs on. The transaction itself remains open and committable.
+/// not reach them) plus the line (branch or snapshot) it runs on, at
+/// the revision the transaction pinned when it opened. The transaction
+/// itself remains open and committable.
 ///
 /// See module docs for tombstone semantics.
 pub struct TransactionQuery<'a> {
-    source: SourceRef<'a>,
+    view: View<'a>,
     layers: Vec<Staged>,
 }
 
 impl<'a> TransactionQuery<'a> {
-    pub(crate) fn new(source: impl Into<SourceRef<'a>>, layers: Vec<Staged>) -> Self {
-        Self {
-            source: source.into(),
-            layers,
-        }
+    pub(crate) fn new(view: View<'a>, layers: Vec<Staged>) -> Self {
+        Self { view, layers }
     }
 
     /// Stage a query against this transaction's view. Call
     /// [`perform`](TransactionSelectQuery::perform) to execute.
     pub fn select<Q: Application>(self, query: Q) -> TransactionSelectQuery<'a, Q> {
         TransactionSelectQuery {
-            source: self.source,
+            view: self.view,
             layers: self.layers,
             query,
         }
@@ -103,7 +101,7 @@ impl<'a> TransactionQuery<'a> {
 
 /// A staged query on a [`TransactionQuery`].
 pub struct TransactionSelectQuery<'a, Q> {
-    source: SourceRef<'a>,
+    view: View<'a>,
     layers: Vec<Staged>,
     query: Q,
 }
@@ -133,15 +131,15 @@ impl<'a, Q: Application> TransactionSelectQuery<'a, Q> {
             + Provider<nodes::Preload<CorpusNode>>
             + ConditionalSync
             + Provider<BlobLoad>
-            + Provider<dialog_artifacts::Preload>
-            + Provider<dialog_artifacts::Speculation>
+            + Provider<dialog_corpus::Preload>
+            + Provider<dialog_corpus::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + Holds
             + ConditionalSync
             + 'static,
     {
         let TransactionSelectQuery {
-            source,
+            view,
             layers,
             query,
         } = self;
@@ -149,25 +147,25 @@ impl<'a, Q: Application> TransactionSelectQuery<'a, Q> {
             let operator = Identify
                 .perform(env)
                 .await
-                .map_err(|e| DialogArtifactsError::InvalidSignature(format!("identify: {e}")))?;
+                .map_err(|e| DialogCorpusError::InvalidSignature(format!("identify: {e}")))?;
 
             // The same schema-injected metadata Branch::query() folds
             // in (Session, SessionBranch, per-branch BranchMetadata),
             // shared rather than rebuilt, beside the transaction's
             // staged layers.
-            let overlay = QueryLayer::from(source).overlay(&operator);
+            let overlay = shared_metadata(from_ref(&view), &operator);
 
             // A transaction query is just a single-line `QueryEnv`.
             // Constructing the *same* env type the branch-session path
             // uses is what guarantees identical behavior — fact reads,
             // tombstones, schema metadata, and deductive-rule
             // resolution all share one implementation.
-            let sources = vec![source.to_source()];
+            let sources = vec![view.into_source()];
             let query_env = QueryEnv::new(sources.clone(), overlay, env).with_layers(layers);
             let results = Box::pin(query.perform(&query_env));
             // Mid-transaction queries drive the ambient preload queue
             // like any other evaluation (see `crate::repository::fetch`).
-            let queue = Provider::<dialog_artifacts::Speculation>::execute(env, ()).await;
+            let queue = Provider::<dialog_corpus::Speculation>::execute(env, ()).await;
             let driven = crate::repository::fetch::Driven::new(results, sources, env, queue);
             for await result in driven {
                 yield result?;
@@ -184,7 +182,7 @@ mod tests {
     use crate::helpers::test_repo;
     use crate::schema;
     use crate::schema::DidExt as _;
-    use dialog_artifacts::Entity;
+    use dialog_corpus::Entity;
     use dialog_peer::helpers::test_session_with_peer;
     use dialog_query::query::Output;
     use dialog_query::{Concept, ConceptDescriptor, Query, Term, the};
@@ -218,7 +216,7 @@ mod tests {
     /// ported back.
     #[dialog_common::test]
     async fn it_integrates_external_changes_into_branch_transaction() -> anyhow::Result<()> {
-        use dialog_artifacts::Changes;
+        use dialog_corpus::Changes;
 
         let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
@@ -798,7 +796,7 @@ mod tests {
     /// constant with it.
     #[dialog_common::test]
     async fn it_derives_through_a_committed_rule_matching_uri_shaped_text() -> anyhow::Result<()> {
-        use dialog_artifacts::Value;
+        use dialog_corpus::Value;
         use dialog_query::rule::DeductiveRuleDescriptor;
         use dialog_query::{ConceptQuery, Parameters, Proposition};
 

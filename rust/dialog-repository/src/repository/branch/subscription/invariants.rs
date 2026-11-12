@@ -13,9 +13,9 @@ use crate::Branch;
 use crate::RepositoryExt as _;
 use crate::helpers::test_repo;
 use anyhow::Context as _;
-use dialog_artifacts::{Changes, Entity};
 use dialog_capability::Subject;
 use dialog_common::ConditionalSync;
+use dialog_corpus::{Changes, Entity};
 use dialog_peer::helpers::{test_session_with_peer, unique_name};
 use dialog_peer::{Peer, Session};
 use dialog_query::rule::{DeductiveRule, DeductiveRuleDescriptor};
@@ -1989,7 +1989,10 @@ async fn a_merge_leaving_two_claims_in_a_cell_keeps_a_recursive_subscription_fre
     let initial = subscription.poll(&one).await?.expect("initial");
     assert_eq!(initial.asserted.len(), 1, "p1 is above p0");
 
-    w1.pull().from(&w2).perform(&one).await?;
+    w1.pull(crate::Download::MinimalRanges)
+        .from(&w2)
+        .perform(&one)
+        .await?;
     let (maintained, expected) =
         maintained_and_fresh::<Superior>(&mut subscription, &w1, &one).await?;
     assert_eq!(

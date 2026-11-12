@@ -19,8 +19,8 @@ pub use tab::*;
 mod analysis;
 pub use analysis::*;
 
-mod artifacts;
-pub use artifacts::*;
+mod facts;
+pub use facts::*;
 
 mod hierarchy;
 pub use hierarchy::*;
@@ -176,7 +176,7 @@ pub struct DiagnoseState {
 }
 
 impl DiagnoseState {
-    /// Creates a new `DiagnoseState` from the given artifacts database.
+    /// Creates a new `DiagnoseState` from the given facts database.
     ///
     /// This initializes all the state components and sets up the tree view
     /// to start at the root of the probabilistic search tree.

@@ -1,8 +1,8 @@
 use crate::{Fetched, Revision, Target, TreeReference};
-use dialog_artifacts::DialogArtifactsError;
 use dialog_capability::access::{AuthorizationFailure, AuthorizeError};
 use dialog_capability::identity::IdentityError;
 use dialog_common::Blake3Hash;
+use dialog_corpus::DialogCorpusError;
 use dialog_credentials::Ed25519SignerError;
 use dialog_effects::Rejection;
 use dialog_effects::archive::ArchiveError;
@@ -41,7 +41,7 @@ pub enum FetchRemoteBranchError {
 pub enum ObserveRemoteBranchError {
     /// The observed head is not signed by its issuer.
     #[error("Observed head does not verify: {0}")]
-    Artifact(#[from] DialogArtifactsError),
+    Fact(#[from] DialogCorpusError),
 
     /// Reading the head recorded in the local cache failed.
     #[error("Failed to read the recorded revision from local cache: {0}")]
@@ -55,7 +55,7 @@ pub enum ObserveRemoteBranchError {
 impl From<ObserveRemoteBranchError> for PushError {
     fn from(error: ObserveRemoteBranchError) -> Self {
         match error {
-            ObserveRemoteBranchError::Artifact(error) => Self::Artifact(error),
+            ObserveRemoteBranchError::Fact(error) => Self::Fact(error),
             ObserveRemoteBranchError::Resolve(error) => Self::Resolve(error),
             ObserveRemoteBranchError::Publish(error) => Self::Publish(error),
         }
@@ -559,9 +559,9 @@ pub enum CommitError {
     #[error("Tree operation failed during commit: {0}")]
     Tree(#[from] DialogSearchTreeError),
 
-    /// An artifact decode during commit failed.
-    #[error("Artifact decode failed during commit: {0}")]
-    Artifact(#[from] DialogArtifactsError),
+    /// A fact decode during commit failed.
+    #[error("Fact decode failed during commit: {0}")]
+    Fact(#[from] DialogCorpusError),
 
     /// Identifying the current authority for the new revision failed.
     #[error("Failed to identify authority for commit: {0}")]
@@ -690,9 +690,9 @@ pub enum PullError {
     #[error("Block streaming failed during pull: {0}")]
     Storage(#[from] DialogStorageError),
 
-    /// An artifact decode during pull failed.
-    #[error("Artifact decode failed during pull: {0}")]
-    Artifact(#[from] DialogArtifactsError),
+    /// A fact decode during pull failed.
+    #[error("Fact decode failed during pull: {0}")]
+    Fact(#[from] DialogCorpusError),
 
     /// Materializing the adopted head after the pull failed
     /// ([`Pull::download`](crate::Pull::download)).
@@ -820,8 +820,8 @@ pub enum PushError {
     Tree(#[from] DialogSearchTreeError),
 
     /// Reading the blob differential or a blob record from the index failed.
-    #[error("Artifact operation failed during push: {0}")]
-    Artifact(#[from] DialogArtifactsError),
+    #[error("Fact operation failed during push: {0}")]
+    Fact(#[from] DialogCorpusError),
 
     /// Shipping a newly-referenced blob to the remote failed.
     #[error("Blob operation failed during push: {0}")]
@@ -1134,10 +1134,10 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn it_preserves_artifact_reasons_through_push() {
+    async fn it_preserves_fact_reasons_through_push() {
         let tree = DialogSearchTreeError::from(DialogStorageError::Authorization(revoked()));
-        let push = PushError::Artifact(DialogArtifactsError::from(tree));
-        let PushError::Artifact(DialogArtifactsError::Authorization(reason)) = &push else {
+        let push = PushError::Fact(DialogCorpusError::from(tree));
+        let PushError::Fact(DialogCorpusError::Authorization(reason)) = &push else {
             panic!("the conversion flattened the reason: {push:?}");
         };
         assert!(matches!(reason, AuthorizeError::Revoked { .. }));
@@ -1161,6 +1161,12 @@ pub enum DownloadError {
     /// The materializing walk failed.
     #[error("Download walk failed: {0}")]
     Snapshot(#[from] SnapshotError),
+
+    /// A node the replica holds a leaf under could not be read: the walk
+    /// of a [`Download::QueriedRanges`](crate::Download::QueriedRanges)
+    /// download.
+    #[error("Download could not follow the tree: {0}")]
+    Tree(DialogSearchTreeError),
 }
 
 /// Errors from snapshot export and import.
@@ -1231,9 +1237,9 @@ pub enum SnapshotError {
     #[error(transparent)]
     Tree(#[from] DialogSearchTreeError),
 
-    /// Reading a referenced artifact failed.
+    /// Reading a referenced fact failed.
     #[error(transparent)]
-    Artifact(#[from] DialogArtifactsError),
+    Fact(#[from] DialogCorpusError),
 
     /// Accessing the archive backend failed.
     #[error(transparent)]
@@ -1242,6 +1248,6 @@ pub enum SnapshotError {
 
 impl From<IdentityError> for CommitError {
     fn from(error: IdentityError) -> Self {
-        Self::Artifact(error.into())
+        Self::Fact(error.into())
     }
 }

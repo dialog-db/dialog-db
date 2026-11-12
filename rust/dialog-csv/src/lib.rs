@@ -1,11 +1,11 @@
 #![warn(missing_docs)]
 
-//! CSV format support for the Dialog artifact exchange system.
+//! CSV format support for the Dialog fact exchange system.
 //!
 //! Provides [`CsvExporter`] and [`CsvImporter`] that implement the
-//! [`Exporter`] and [`Importer`] traits from `dialog-artifacts`.
+//! [`Exporter`] and [`Importer`] traits from `dialog-corpus`.
 //!
-//! Each CSV row represents a single artifact with columns:
+//! Each CSV row represents a single fact with columns:
 //! `the` (attribute), `of` (entity), `as` (value type), `is` (value),
 //! `cause` (optional causal reference).
 
@@ -19,8 +19,8 @@ pub use importer::CsvImporter;
 
 #[cfg(test)]
 mod tests {
-    use dialog_artifacts::Exporter;
-    use dialog_artifacts::{Artifact, Cause, Value};
+    use dialog_corpus::Exporter;
+    use dialog_corpus::{Cause, Fact, Value};
     use futures_util::StreamExt;
     use std::io::Cursor;
 
@@ -29,21 +29,21 @@ mod tests {
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_service_worker);
 
-    fn test_artifacts() -> Vec<Artifact> {
+    fn test_facts() -> Vec<Fact> {
         vec![
-            Artifact {
+            Fact {
                 the: "user/name".parse().unwrap(),
                 of: "user:alice".parse().unwrap(),
                 is: Value::String("Alice".into()),
                 cause: None,
             },
-            Artifact {
+            Fact {
                 the: "user/email".parse().unwrap(),
                 of: "user:alice".parse().unwrap(),
                 is: Value::String("alice@example.com".into()),
                 cause: None,
             },
-            Artifact {
+            Fact {
                 the: "user/name".parse().unwrap(),
                 of: "user:bob".parse().unwrap(),
                 is: Value::String("Bob".into()),
@@ -52,19 +52,19 @@ mod tests {
         ]
     }
 
-    async fn export_artifacts(artifacts: &[Artifact]) -> Vec<u8> {
+    async fn export_facts(facts: &[Fact]) -> Vec<u8> {
         let mut buf = Vec::new();
         {
             let mut exporter = CsvExporter::from(&mut buf);
-            for artifact in artifacts {
-                exporter.write(artifact).await.unwrap();
+            for fact in facts {
+                exporter.write(fact).await.unwrap();
             }
             exporter.close().await.unwrap();
         }
         buf
     }
 
-    async fn import_artifacts(csv: Vec<u8>) -> Vec<Artifact> {
+    async fn import_facts(csv: Vec<u8>) -> Vec<Fact> {
         CsvImporter::from(Cursor::new(csv))
             .collect::<Vec<_>>()
             .await
@@ -74,13 +74,13 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn it_roundtrips_artifacts() {
-        let artifacts = test_artifacts();
-        let csv = export_artifacts(&artifacts).await;
-        let imported = import_artifacts(csv).await;
+    async fn it_roundtrips_facts() {
+        let facts = test_facts();
+        let csv = export_facts(&facts).await;
+        let imported = import_facts(csv).await;
 
-        assert_eq!(artifacts.len(), imported.len());
-        for (original, imported) in artifacts.iter().zip(imported.iter()) {
+        assert_eq!(facts.len(), imported.len());
+        for (original, imported) in facts.iter().zip(imported.iter()) {
             assert_eq!(original.the, imported.the);
             assert_eq!(original.of, imported.of);
             assert_eq!(original.is, imported.is);
@@ -90,8 +90,8 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_produces_valid_csv() {
-        let artifacts = test_artifacts();
-        let csv = export_artifacts(&artifacts).await;
+        let facts = test_facts();
+        let csv = export_facts(&facts).await;
         let content = String::from_utf8(csv).unwrap();
 
         // Header + 3 data rows
@@ -101,7 +101,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_exports_empty_input() {
-        let csv = export_artifacts(&[]).await;
+        let csv = export_facts(&[]).await;
         let content = String::from_utf8(csv).unwrap();
 
         // Header only
@@ -113,50 +113,50 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_roundtrips_all_value_types() {
-        let artifacts = vec![
-            Artifact {
+        let facts = vec![
+            Fact {
                 the: "test/string".parse().unwrap(),
                 of: "item:1".parse().unwrap(),
                 is: Value::String("hello world".into()),
                 cause: None,
             },
-            Artifact {
+            Fact {
                 the: "test/uint".parse().unwrap(),
                 of: "item:1".parse().unwrap(),
                 is: Value::UnsignedInt(12345),
                 cause: None,
             },
-            Artifact {
+            Fact {
                 the: "test/sint".parse().unwrap(),
                 of: "item:1".parse().unwrap(),
                 is: Value::SignedInt(-42),
                 cause: None,
             },
-            Artifact {
+            Fact {
                 the: "test/bool".parse().unwrap(),
                 of: "item:1".parse().unwrap(),
                 is: Value::Boolean(false),
                 cause: None,
             },
-            Artifact {
+            Fact {
                 the: "test/float".parse().unwrap(),
                 of: "item:1".parse().unwrap(),
                 is: Value::Float(1.23),
                 cause: None,
             },
-            Artifact {
+            Fact {
                 the: "test/bytes".parse().unwrap(),
                 of: "item:1".parse().unwrap(),
                 is: Value::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF]),
                 cause: None,
             },
-            Artifact {
+            Fact {
                 the: "test/entity".parse().unwrap(),
                 of: "item:1".parse().unwrap(),
                 is: Value::Entity("ref:other".parse().unwrap()),
                 cause: None,
             },
-            Artifact {
+            Fact {
                 the: "test/symbol".parse().unwrap(),
                 of: "item:1".parse().unwrap(),
                 is: Value::Symbol("meta/attribute".parse().unwrap()),
@@ -164,33 +164,33 @@ mod tests {
             },
         ];
 
-        let csv = export_artifacts(&artifacts).await;
-        let imported = import_artifacts(csv).await;
+        let csv = export_facts(&facts).await;
+        let imported = import_facts(csv).await;
 
-        assert_eq!(artifacts.len(), imported.len());
-        for (original, imported) in artifacts.iter().zip(imported.iter()) {
+        assert_eq!(facts.len(), imported.len());
+        for (original, imported) in facts.iter().zip(imported.iter()) {
             assert_eq!(original.is, imported.is, "mismatch for {:?}", original.the);
         }
     }
 
     #[dialog_common::test]
     async fn it_roundtrips_cause() {
-        let base = Artifact {
+        let base = Fact {
             the: "test/name".parse().unwrap(),
             of: "item:1".parse().unwrap(),
             is: Value::String("v1".into()),
             cause: None,
         };
         let cause = Cause::from(&base);
-        let updated = Artifact {
+        let updated = Fact {
             the: "test/name".parse().unwrap(),
             of: "item:1".parse().unwrap(),
             is: Value::String("v2".into()),
             cause: Some(cause.clone()),
         };
 
-        let csv = export_artifacts(std::slice::from_ref(&updated)).await;
-        let imported = import_artifacts(csv).await;
+        let csv = export_facts(std::slice::from_ref(&updated)).await;
+        let imported = import_facts(csv).await;
 
         assert_eq!(imported.len(), 1);
         assert_eq!(imported[0].cause, Some(cause));
@@ -199,7 +199,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
     async fn it_roundtrips_via_file() {
-        let artifacts = test_artifacts();
+        let facts = test_facts();
 
         // Export to a temp file
         let dir = tempfile::tempdir().unwrap();
@@ -207,23 +207,23 @@ mod tests {
 
         let file = tokio::fs::File::create(&path).await.unwrap();
         let mut exporter = CsvExporter::from(file);
-        for artifact in &artifacts {
-            exporter.write(artifact).await.unwrap();
+        for fact in &facts {
+            exporter.write(fact).await.unwrap();
         }
         exporter.close().await.unwrap();
 
         // Import from the file
         let file = tokio::fs::File::open(&path).await.unwrap();
         let importer = CsvImporter::from(file);
-        let imported: Vec<Artifact> = importer
+        let imported: Vec<Fact> = importer
             .collect::<Vec<_>>()
             .await
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
 
-        assert_eq!(artifacts.len(), imported.len());
-        for (original, imported) in artifacts.iter().zip(imported.iter()) {
+        assert_eq!(facts.len(), imported.len());
+        for (original, imported) in facts.iter().zip(imported.iter()) {
             assert_eq!(original.the, imported.the);
             assert_eq!(original.of, imported.of);
             assert_eq!(original.is, imported.is);

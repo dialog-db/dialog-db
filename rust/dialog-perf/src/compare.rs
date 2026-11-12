@@ -898,7 +898,7 @@ mod tests {
 mod counted {
     use crate::counters::{Counters, since};
     use crate::env::{Env, assert_all, attribute, entity, fact, text};
-    use dialog_artifacts::Pick;
+    use dialog_corpus::Pick;
     use std::sync::OnceLock;
 
     /// The counting subscriber, installed once for the test process.

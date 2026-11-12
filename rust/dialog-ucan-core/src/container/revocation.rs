@@ -33,7 +33,7 @@ use thiserror::Error;
 /// A revocation with the delegations its arguments name resolved from the
 /// container.
 ///
-/// Constructing one proves the artifact is *shaped* like a revocation and
+/// Constructing one proves the fact is *shaped* like a revocation and
 /// that every CID it names is present. [`validate`](Self::validate) proves
 /// the revoker was entitled to withdraw what it names.
 #[derive(Debug, Clone)]
@@ -52,7 +52,7 @@ impl<S: Signature> RevocationChain<S> {
         &self.chain
     }
 
-    /// The revocation artifact.
+    /// The revocation fact.
     #[must_use]
     pub const fn revocation(&self) -> &Revocation<S> {
         &self.revocation
@@ -288,7 +288,7 @@ where
     /// Wraps the underlying [`CheckError`] rather than rendering it, so a
     /// caller can match on *which* way the invocation failed rather than
     /// re-parsing prose. Distinct from [`Denied`](Self::Denied) because the
-    /// two are different findings: this one says the artifact is not a valid
+    /// two are different findings: this one says the fact is not a valid
     /// invocation at all, before any question of revocation authority arises.
     ///
     /// Boxed because it is much larger than the other variants, and an
@@ -345,7 +345,7 @@ pub enum Denial {
 
 /// Why an invocation chain is not a well-formed revocation chain.
 ///
-/// Distinct from [`Denial`]: these say the artifact could not be read, not
+/// Distinct from [`Denial`]: these say the fact could not be read, not
 /// that its author lacked authority.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum MalformedRevocationChain {

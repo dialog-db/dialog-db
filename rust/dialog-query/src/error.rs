@@ -5,8 +5,8 @@ use std::convert::Infallible;
 use std::error;
 use std::fmt;
 
-use crate::artifact::{ArtifactTypeError, DialogArtifactsError, Type, Value};
 use crate::attribute::Keyed;
+use crate::corpus::{CorpusTypeError, DialogCorpusError, Type, Value};
 pub use crate::environment::Environment;
 pub use crate::proposition::Proposition;
 use crate::reduce::Aggregator;
@@ -627,12 +627,12 @@ pub enum EvaluationError {
         expected: Box<Term<Any>>,
     },
 
-    /// A value has the wrong artifact type.
+    /// A value has the wrong fact type.
     #[error("Type mismatch: expected {expected}, got {actual}")]
     TypeMismatch {
-        /// Expected artifact type.
+        /// Expected fact type.
         expected: Type,
-        /// Actual artifact type.
+        /// Actual fact type.
         actual: Type,
     },
 
@@ -801,8 +801,8 @@ impl From<serde_json::Error> for EvaluationError {
     }
 }
 
-impl From<DialogArtifactsError> for EvaluationError {
-    fn from(value: DialogArtifactsError) -> Self {
+impl From<DialogCorpusError> for EvaluationError {
+    fn from(value: DialogCorpusError) -> Self {
         EvaluationError::Store(format!("{value}"))
     }
 }
@@ -813,9 +813,9 @@ impl From<Infallible> for EvaluationError {
     }
 }
 
-impl From<ArtifactTypeError> for EvaluationError {
-    fn from(error: ArtifactTypeError) -> Self {
-        let ArtifactTypeError::TypeMismatch(expected, actual) = error;
+impl From<CorpusTypeError> for EvaluationError {
+    fn from(error: CorpusTypeError) -> Self {
+        let CorpusTypeError::TypeMismatch(expected, actual) = error;
         EvaluationError::TypeMismatch { expected, actual }
     }
 }
@@ -916,9 +916,9 @@ impl fmt::Display for OwnedInvalidIdentifier {
 
 impl error::Error for OwnedInvalidIdentifier {}
 
-impl From<OwnedInvalidIdentifier> for DialogArtifactsError {
+impl From<OwnedInvalidIdentifier> for DialogCorpusError {
     fn from(e: OwnedInvalidIdentifier) -> Self {
-        DialogArtifactsError::InvalidRelation(e.to_string())
+        DialogCorpusError::InvalidRelation(e.to_string())
     }
 }
 

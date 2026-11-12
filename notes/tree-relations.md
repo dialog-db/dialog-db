@@ -38,7 +38,7 @@ planner and evaluator are never involved. Four operators:
 Since the M3 (variable-length key) adaptation in tonk#635, rows also
 carry pre-decoded `bound-parts`/`key-parts`: lists of
 `{ kind, text, hex }` chips produced server-side via the
-`dialog_artifacts` key views (`EntityKey`/`AttributeKey`/`ValueKey`),
+`dialog_corpus` key views (`EntityKey`/`AttributeKey`/`ValueKey`),
 with a distinct lenient path for link separators (front-coded *prefixes*
 of keys, which do not parse under the full-key schema).
 
@@ -84,11 +84,11 @@ subscriptions:
    `Node(<hash>)`'s kind, size, links, and entries can never change — a
    different tree is a different hash. This now includes novelty: a
    node's hash covers its buffered ops
-   (`rust/dialog-artifacts/src/buffered.rs` module doc), so "this
+   (`rust/dialog-corpus/src/buffered.rs` module doc), so "this
    node's pending novelty" is as immutable as its entries. Rows derived
    from a node hash are permanent; they can become unnecessary, never
    wrong. (This is the same argument that makes `CausalityCache` in
-   `dialog-artifacts` require no invalidation.) In effect terms:
+   `dialog-corpus` require no invalidation.) In effect terms:
    `archive` reads (`dialog_effects::archive::Get` — content-addressed
    catalog fetch) are **idempotent**.
 2. **The only mutable fact in the domain is "what is the current
@@ -229,7 +229,7 @@ difference is the whole design. (Rejected names: "operation"/
 application in datalog; "procedure" — used during development —
 overstates effectfulness and reads as SQL stored procedures; "probe"
 reads as investigation rather than retrieval.) Open, for PR review:
-the artifacts-side module carrying the `Load` effect is named
+the facts-side module carrying the `Load` effect is named
 `inspect` after its first use case — `resolver`-flavored naming
 (e.g. a `resolve` module) may fit better now; decide on the PR.
 
@@ -373,7 +373,7 @@ registered in `define_formulas!` beside `dialog/revision`):
    (`EntityKey`/`AttributeKey`/`ValueKey` over `key/varkey.rs`),
    dispatching on the tag byte — entity(0), attribute(1), value(2),
    history(3), blob(4), coverage(5), from
-   `dialog-artifacts/src/constants.rs` — exactly as tonk's `key_parts`
+   `dialog-corpus/src/constants.rs` — exactly as tonk's `key_parts`
    does, including the spilled-value arm and the history/coverage
    `origin ‖ edition ‖ fact-tail` shape. Unparseable under its tag's
    schema → a single `kind: "opaque"` row (never zero rows for
@@ -578,7 +578,7 @@ revision-projection and subscription tests):
 - [ ] `cargo test --workspace` green (existing suites untouched).
 - [ ] `cargo test -p dialog-repository --features integration-tests` green.
 - [ ] `cargo clippy --workspace --all-targets --all-features` clean.
-- [ ] `cargo check --target wasm32-unknown-unknown -p dialog-query -p dialog-repository -p dialog-artifacts`
+- [ ] `cargo check --target wasm32-unknown-unknown -p dialog-query -p dialog-repository -p dialog-corpus`
       compiles (the inspector's whole point is running against
       IndexedDB-backed wasm builds; resolvers must not introduce
       native-only bounds — use `ConditionalSend`/`ConditionalSync`).

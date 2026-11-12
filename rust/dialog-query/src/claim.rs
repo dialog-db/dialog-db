@@ -1,8 +1,8 @@
 //! Read-side claim type representing a stored EAV datum.
 
-pub use crate::artifact::{Artifact, ArtifactsRelation, Cause, Entity, Value};
 use crate::attribute::Relation;
 use crate::concept::Conclusion;
+pub use crate::corpus::{Cause, CorpusRelation, Entity, Fact, Value};
 use serde::{Deserialize, Serialize};
 
 /// A claim represents a stored EAV datum with full metadata.
@@ -62,24 +62,24 @@ impl Conclusion for Claim {
     }
 }
 
-impl From<Artifact> for Claim {
-    fn from(artifact: Artifact) -> Self {
+impl From<Fact> for Claim {
+    fn from(fact: Fact) -> Self {
         Claim {
-            the: Relation::from(artifact.the),
-            of: artifact.of,
-            is: artifact.is,
-            cause: artifact.cause.unwrap_or(Cause([0; 32])),
+            the: Relation::from(fact.the),
+            of: fact.of,
+            is: fact.is,
+            cause: fact.cause.unwrap_or(Cause([0; 32])),
         }
     }
 }
 
-impl From<&Artifact> for Claim {
-    fn from(artifact: &Artifact) -> Self {
+impl From<&Fact> for Claim {
+    fn from(fact: &Fact) -> Self {
         Claim {
-            the: Relation::from(artifact.the.clone()),
-            of: artifact.of.clone(),
-            is: artifact.is.clone(),
-            cause: artifact.cause.clone().unwrap_or(Cause([0; 32])),
+            the: Relation::from(fact.the.clone()),
+            of: fact.of.clone(),
+            is: fact.is.clone(),
+            cause: fact.cause.clone().unwrap_or(Cause([0; 32])),
         }
     }
 }

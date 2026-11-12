@@ -112,12 +112,12 @@ three are correctness-equivalent: they represent the same fact set and
 
 The core hitchhiker mechanism is generic over the base tree
 (`dialog-search-tree`): node buffers, the per-node flush primitive, and
-`canonicalize` know about keys and ordering but not about artifacts.
+`canonicalize` know about keys and ordering but not about facts.
 
-The artifact specifics (one logical fact derives EAV/AEV/VAE index keys via
+The fact specifics (one logical fact derives EAV/AEV/VAE index keys via
 `FromKey`; an `Instruction` becomes buffered ops; the read merge yields
-`Artifact`s; cardinality-one / `Replace` supersession) live in the
-`dialog-artifacts` consumer, exactly as `ArtifactTreeExt::apply` / `scan` do
+`Fact`s; cardinality-one / `Replace` supersession) live in the
+`dialog-corpus` consumer, exactly as `CorpusExt::apply` / `scan` do
 today. The consumer drives the core's flush primitives and supplies the
 index-derivation and merge semantics.
 
@@ -150,10 +150,10 @@ index-derivation and merge semantics.
 - **Read merge** (done): `HitchhikerTree::get` descends the spine; at each index
   node the highest covering buffered op wins (`novelty_lookup`, last-op-wins
   within a key), a `Retract` hides and an `Assert` shadows; with no covering op
-  the stored leaf value stands, read through `PersistentTree::get`. The artifact
-  layer will reuse `merge_grouped` / `SortKey` / tombstones for `Artifact`s.
+  the stored leaf value stands, read through `PersistentTree::get`. The fact
+  layer will reuse `merge_grouped` / `SortKey` / tombstones for `Fact`s.
 
-## Open questions (artifact consumer and sync)
+## Open questions (fact consumer and sync)
 
 - **`canonicalize` cadence**: when callers invoke it (every commit, on a
   threshold, only at sync/publish). The Recursive policy keeps the tree close to
@@ -161,5 +161,5 @@ index-derivation and merge semantics.
 - **Sync reconcile** over buffered trees: same-base union vs different-base merge,
   and whether reconciliation operates on canonicalized forms or on buffered
   forms with buffer union.
-- **Artifact consumer**: EAV-only novelty deriving AEV/VAE; `Instruction` to
+- **Fact consumer**: EAV-only novelty deriving AEV/VAE; `Instruction` to
   buffered ops; commit-path wiring; cardinality-one / `Replace` supersession.

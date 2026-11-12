@@ -23,7 +23,7 @@ mod tests {
 
     use crate::Attribute;
     use crate::Match;
-    use crate::artifact::{Entity, Value};
+    use crate::corpus::{Entity, Value};
     use crate::formula::Like;
     use crate::query::Output;
     use crate::rule::When;

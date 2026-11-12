@@ -7,7 +7,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use anyhow::Result;
-use dialog_artifacts::{Artifact, Entity, Pick, Value};
+use dialog_corpus::{Entity, Fact, Pick, Value};
 use dialog_query::{ConceptDescriptor, DeductiveRule};
 
 use dialog_query::query::Output as _;
@@ -212,7 +212,7 @@ pub fn status_rules() -> Vec<DeductiveRule> {
 
 /// The flags account `index` carries: every fourth account is active,
 /// every second registered, three in four invited, all have an email.
-pub fn account_facts(index: usize) -> Vec<Artifact> {
+pub fn account_facts(index: usize) -> Vec<Fact> {
     let this = entity("account", index);
     let mut facts = vec![fact(&this, "account/email", text(format!("{index}@mail")))];
     if index % 4 < 3 {

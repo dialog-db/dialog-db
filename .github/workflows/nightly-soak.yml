@@ -2,7 +2,7 @@ name: 'Nightly Soak'
 
 # The standing convergence soak: the same tests CI runs at bounded scale,
 # nightly at the heavy knobs — many-seed adversarial manifests, the
-# artifacts-level fuzz, and a deep SE-log convergence replay. Every arm
+# facts-level fuzz, and a deep SE-log convergence replay. Every arm
 # runs the canonical-form validator at its checkpoints, so a red night
 # localizes to a level and node (see rust/dialog-search-tree/src/
 # validate.rs); an ignored minimizer test in tests/adversarial.rs shrinks
@@ -27,7 +27,7 @@ on:
         required: false
         default: '200'
       fuzz_seeds:
-        description: 'Artifact fuzz seed count'
+        description: 'Fact fuzz seed count'
         required: false
         default: '200'
       subscription_seeds:
@@ -67,9 +67,9 @@ jobs:
             command: 'soak:program'
             env_name: ''
             env_value_input: ''
-          - name: 'artifact fuzz'
-            command: 'soak:artifacts'
-            env_name: 'DIALOG_ARTIFACT_FUZZ_SEEDS'
+          - name: 'fact fuzz'
+            command: 'soak:facts'
+            env_name: 'DIALOG_FACT_FUZZ_SEEDS'
             env_value_input: 'fuzz_seeds'
           - name: 'SE convergence deep'
             command: 'soak:converge'

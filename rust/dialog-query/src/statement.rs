@@ -1,6 +1,6 @@
 use std::ops::Not;
 
-pub use dialog_artifacts::{Changes, Statement, Update};
+pub use dialog_corpus::{Changes, Statement, Update};
 
 /// Extension trait adding `revert()` to all [`Statement`] implementors.
 pub trait StatementExt: Statement {

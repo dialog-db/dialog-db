@@ -227,7 +227,7 @@ mod tests {
 
 /// Conversions to and from JavaScript values.
 ///
-/// These live beside [`Entity`] rather than with the artifact web
+/// These live beside [`Entity`] rather than with the fact web
 /// bindings because both `Entity` and `JsValue` are foreign to that
 /// crate now, and the orphan rule forbids the impls there.
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]

@@ -50,7 +50,7 @@ The order of premises in a rule body does not matter. The query planner reorders
 Rules are installed into a `Session` with `.install()`, which compiles and validates the rule:
 
 ```rs
-let session = Session::open(artifacts)
+let session = Session::open(facts)
     .install(employee_from_contractor)?;
 
 // Now querying Employee will also find conclusions derived from Contractor

@@ -6,11 +6,11 @@ wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
 use crate::repository::branch::context::head_context;
 use anyhow::Result;
-use dialog_artifacts::history::{History as _, Version};
-use dialog_artifacts::tree::CorpusNode;
-use dialog_artifacts::{Artifact, ArtifactSelector, Changes, Entity, Instruction, Value};
 use dialog_capability::{Fork, Provider};
 use dialog_common::{ConditionalSync, Holds};
+use dialog_corpus::history::{History as _, Version};
+use dialog_corpus::tree::CorpusNode;
+use dialog_corpus::{Changes, Entity, Fact, Instruction, Selector, Value};
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::Identify;
@@ -26,14 +26,14 @@ use dialog_storage::provider::storage::VolatileSpace;
 use futures_util::StreamExt as _;
 
 use crate::helpers::test_repo;
-use crate::repository::source::SourceRef;
+use crate::repository::source::Live;
 use crate::{
     Branch, CommitError, Item, PublishError, RemoteSite, Repository, Select, Snapshot,
     TreeReference, schema,
 };
 
 /// Every `user/name` value on a line, sorted.
-async fn names<'a, Env>(source: impl Into<SourceRef<'a>>, env: &Env) -> Result<Vec<String>>
+async fn names<'a, Env>(line: impl Into<Live<'a>>, env: &Env) -> Result<Vec<String>>
 where
     Env: Provider<BlobRead>
         + Provider<Get>
@@ -46,14 +46,14 @@ where
         + Provider<nodes::Preload<CorpusNode>>
         + ConditionalSync
         + Provider<BlobLoad>
-        + Provider<dialog_artifacts::Preload>
-        + Provider<dialog_artifacts::Speculation>
+        + Provider<dialog_corpus::Preload>
+        + Provider<dialog_corpus::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
         + dialog_common::Holds
         + ConditionalSync
         + 'static,
 {
-    let mut names: Vec<String> = values(source, env, "user/name", None)
+    let mut names: Vec<String> = values(line, env, "user/name", None)
         .await?
         .into_iter()
         .filter_map(|value| match value {
@@ -67,7 +67,7 @@ where
 
 /// The values under `the` on a line, narrowed to `of` when given.
 async fn values<'a, Env>(
-    source: impl Into<SourceRef<'a>>,
+    line: impl Into<Live<'a>>,
     env: &Env,
     the: &str,
     of: Option<&Entity>,
@@ -84,18 +84,18 @@ where
         + Provider<nodes::Preload<CorpusNode>>
         + ConditionalSync
         + Provider<BlobLoad>
-        + Provider<dialog_artifacts::Preload>
-        + Provider<dialog_artifacts::Speculation>
+        + Provider<dialog_corpus::Preload>
+        + Provider<dialog_corpus::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
         + dialog_common::Holds
         + ConditionalSync
         + 'static,
 {
-    let mut selector = ArtifactSelector::new().the(the.parse()?);
+    let mut selector = Selector::new().the(the.parse()?);
     if let Some(of) = of {
         selector = selector.of(of.clone());
     }
-    let rows: Vec<Artifact> = Select::from_source(source.into(), selector)
+    let rows: Vec<Fact> = Select::from_view(line.into().pin(), selector)
         .to_owned()
         .perform(env)
         .await?
@@ -122,8 +122,8 @@ where
         + Provider<nodes::Preload<CorpusNode>>
         + ConditionalSync
         + Provider<BlobLoad>
-        + Provider<dialog_artifacts::Preload>
-        + Provider<dialog_artifacts::Speculation>
+        + Provider<dialog_corpus::Preload>
+        + Provider<dialog_corpus::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
         + Holds
         + ConditionalSync
@@ -149,15 +149,15 @@ where
 }
 
 /// A `user/name` statement, for transactions.
-fn name(of: &str, is: &str) -> impl dialog_artifacts::Statement {
+fn name(of: &str, is: &str) -> impl dialog_corpus::Statement {
     the!("user/name")
         .of(of.parse::<Entity>().expect("entity parses"))
         .is(is.to_string())
 }
 
-/// A `user/name` artifact, for raw commits.
-fn fact(of: &str, is: &str) -> Artifact {
-    Artifact {
+/// A `user/name` fact, for raw commits.
+fn fact(of: &str, is: &str) -> Fact {
+    Fact {
         the: "user/name".parse().expect("attribute parses"),
         of: of.parse().expect("entity parses"),
         is: Value::String(is.to_string()),
@@ -564,7 +564,7 @@ async fn it_signs_the_minted_revision() -> Result<()> {
 async fn it_rejects_writes_to_the_reserved_namespace() -> Result<()> {
     let (operator, _, _, _, snapshot) = staged().await?;
     let base = snapshot.revision();
-    let forged = Artifact {
+    let forged = Fact {
         the: "dialog.db/revision".parse()?,
         of: "forged:revision".parse()?,
         is: Value::String("lies".to_string()),
@@ -573,7 +573,7 @@ async fn it_rejects_writes_to_the_reserved_namespace() -> Result<()> {
     let result = snapshot
         .transaction()
         .integrate(
-            [Instruction::Assert(forged, dialog_artifacts::Pick::All)]
+            [Instruction::Assert(forged, dialog_corpus::Pick::All)]
                 .into_iter()
                 .collect(),
         )
@@ -583,8 +583,8 @@ async fn it_rejects_writes_to_the_reserved_namespace() -> Result<()> {
     assert!(
         matches!(
             result,
-            Err(CommitError::Artifact(
-                dialog_artifacts::DialogArtifactsError::ReservedRelation(_)
+            Err(CommitError::Fact(
+                dialog_corpus::DialogCorpusError::ReservedRelation(_)
             ))
         ),
         "writes to the reserved namespace must be refused: {result:?}"
@@ -870,7 +870,7 @@ async fn it_commits_through_a_cold_handle() -> Result<()> {
         .integrate(
             [Instruction::Assert(
                 fact("user:bob", "Bob"),
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             )]
             .into_iter()
             .collect(),
