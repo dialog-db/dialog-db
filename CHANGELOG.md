@@ -78,6 +78,71 @@ the two that exist, so how much a pull fetches stays the caller's
 decision. A pull is retried by the pull because a replica that keeps
 writing while it syncs would otherwise have every caller write the same
 loop.
+### `wbg-pool` gives every test's tab focus
+
+[#774](https://github.com/dialog-db/dialog-db/pull/774).
+
+`wbg-pool` runs each test in a tab of its own, many at once, and Chrome
+shows only the latest tab of a window. The rest are hidden: their
+`visibilityState` is `hidden`, `hasFocus()` is false, and animation frames
+and `ResizeObserver` deliveries are held back. `wbg-pool` now turns on
+focus emulation for a tab as it opens it, so each page acts as the focused,
+active one.
+
+What this changes for you:
+
+- A wasm test that waits on an animation frame, a `ResizeObserver`, focus
+  or visibility passes beside other tests as it does alone. Run eight at
+  once in headless Chromium and 15 of 24 tabs passed before; all 24 do now.
+- A tab that cannot be given focus is closed and its run fails with
+  `failed to give a test's tab focus`, where the tab would have run without
+  it.
+- A dependent that carries this as a patch against `wbg-pool` (tonk's
+  `wbg-pool-focus-tabs.patch`) drops it when it builds `wbg-pool` from this
+  release.
+
+Why: a test that depended on rendering failed or hung only in a full run,
+with nothing in its output to say its tab was in the background. Chrome's
+flags against backgrounding (`--disable-renderer-backgrounding` and its
+kin) do not change it; focus emulation does.
+
+### A provisioned wasm test is given its address when it runs
+
+[#774](https://github.com/dialog-db/dialog-db/pull/774).
+
+A test that takes a provisioned address (`#[dialog_common::test]` with a
+parameter) runs under `web-integration-tests` as a native test that starts
+the service and a wasm test that uses it. The wasm test read the address
+from `option_env!`, so it was compiled into the test binary. It now reads
+it when it runs: the native test names the variable in `WBG_POOL_PASS_ENV`,
+and `wbg-pool` defines the variables named there on
+`globalThis.__wbg_pool_env` in the page or worker the suite runs in.
+
+What this changes for you:
+
+- A package's wasm test binary is built once for all of its provisioned
+  tests, where every test rebuilt and relinked it. Nothing in a test
+  changes.
+- The wasm side needs the `wbg-pool` of this release as its runner. Under
+  an older `wbg-pool`, or `wasm-bindgen-test-runner`, a provisioned wasm
+  test fails with `Missing PROVISIONED_SERVICE_ADDRESS environment
+  variable`. A dependent that builds `wbg-pool` from this repository takes
+  both together; patches it carries against `wbg-pool`'s `shim.rs`,
+  `daemon/harness.rs`, `daemon/server.rs` or the scripts under `daemon/js`
+  may need rebasing.
+- `dialog_common::helpers::address` reads the passed variable on
+  `wasm32-unknown-unknown` and the process environment elsewhere.
+  `dialog_common::helpers::PASSED_VARIABLES` is the name of the variable
+  that lists what to pass.
+- `wbg-pool` passes any variable named in `WBG_POOL_PASS_ENV`, not only
+  this one (see its README).
+
+Why: cargo tracks a variable read with `option_env!` as a build input, and
+every provisioned test has its own address. Each test of
+`dialog-repository` therefore rebuilt and relinked the crate's wasm test
+binary, 82 seconds a test on a CI runner, and the cross-target job spent
+over an hour of its 79 minutes of tests there. Two tests of one package
+could also build over each other's binary.
 
 ### A read reads one revision, and a transaction reads and commits against the one it opened at
 
