@@ -325,3 +325,18 @@ Not examined yet. They are columns, not recommendations.
 - "One concept per name and signature" is a rule about definitions, and replicas define apart and then sync. So it cannot be kept where a definition is made (H7), only noticed where a name is used.
 
 **Decided.** By the maintainer: a name resolves to a concept's entity, as in tonk; several concepts may share a name. Not decided: what an application does where it fits two (H8), and where field names live (H9). The agent's reading is Unison's: keep both, refuse, list the candidates.
+
+## 2026-11-11, Designing: replace, add, or conflict
+
+**Asked.** Irakli gave the case: two concepts named `todo` with the same labels and types over two domains, and a rule that reads and writes through `todo`. Which does the rule mean? Then: perhaps both get asserted, which is not unreasonable, but it has to be clear.
+
+**Learned.**
+
+- The agent had proposed refusing, not asserting both. There are three behaviours and they had not been set side by side.
+- Which applies turns on something the question left out: whether the second definition was written after the first or apart from it. Dialog tells these apart already. Under `last`, a referent written after another replaces it; two written in one round both stand, one elected on a `last` read and both shown with no pick.
+- Two top-level `assert!` in one document are in order, not concurrent: the later replaces. Two rules fired in one round are concurrent. So the example, in one document, is a replacement under tonk's rule: `todo` means `io.gozala.task`.
+- Replacing everywhere loses his nuance, two `todo`s of different labels. Adding everywhere loses correcting a definition by evaluating it again. Naming a name with its labels keeps both (H10).
+- Adding has costs that can be counted: his one rule is four, a write lands in both domains, and a query reports each todo twice, since a report shows relations.
+
+**Decided.** Not decided: what a conflict does. The agent's reading: replace per name and labels, refuse a conflict with its candidates, and say which by writing the relation. Refusing is the one that can later become either other.
+

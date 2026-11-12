@@ -408,6 +408,50 @@ async fn it_elects_one_of_two_writes_of_one_round_whatever_their_order() -> Resu
     Ok(())
 }
 
+/// What a name with two referents can be read as today. Written under
+/// `last`, a referent written after another replaces it, and two written
+/// in one round, which is what two replicas writing apart come to, both
+/// stand. Read with no pick, the first is one row and the second is two.
+/// So a name that was re-pointed and a name two definitions claim at
+/// once are told apart by what is already stored.
+#[dialog_common::test]
+async fn it_tells_a_name_that_was_repointed_from_one_claimed_twice() -> Result<()> {
+    let rules = "(rule (assert! (xyz.name ?n referent: (:last (:entity concept:a))))
+                   (when (first (xyz.name ?n))))
+                 (rule (assert! (xyz.name ?n referent: (:last (:entity concept:b))))
+                   (when (second (xyz.name ?n))))";
+    let first = "(first (xyz.name name:todo))";
+    let second = "(second (xyz.name name:todo))";
+    let every = "(query (xyz.name ?n referent: ?r))";
+
+    let mut repointed = Notebook::open().await?;
+    repointed.submit(rules).await?;
+    repointed.submit(first).await?;
+    repointed.submit(second).await?;
+    assert_eq!(
+        report(&mut repointed, every).await?,
+        vec!["(xyz.name name:todo referent: concept:b)"]
+    );
+
+    let mut twice = Notebook::open().await?;
+    twice.submit(rules).await?;
+    twice.submit(&format!("{first}\n{second}")).await?;
+    assert_eq!(
+        report(&mut twice, every).await?,
+        vec![
+            "(xyz.name name:todo referent: concept:a)",
+            "(xyz.name name:todo referent: concept:b)",
+        ]
+    );
+    assert_eq!(
+        report(&mut twice, "(query (xyz.name ?n referent: (:last ?r)))")
+            .await?
+            .len(),
+        1
+    );
+    Ok(())
+}
+
 /// One call, two ways to write it: the primary with no label, and under
 /// `of:`. A concept and a relation read the same through each, and a
 /// write lands the same. A struct in the primary's place is the primary,

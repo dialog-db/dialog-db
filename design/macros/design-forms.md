@@ -325,10 +325,39 @@ The agent's hypotheses, to decide on:
 | **H8.** A name's referents are all kept, and an application that fits several is refused with the candidates. Electing one moves a name's meaning for one of two authors with nobody deciding. | An agent given the refusal and the candidates rewrites the application and goes on; an agent given the elected concept writes to the wrong one and is told nothing. | A case where a refused application is worse than a wrong one. |
 | **H9.** A concept's field names belong to the name, not to the concept. | Two definitions that differ only in what a field is called give one entity with both names on it in tonk, and a write through either then has to say which names are its own. | Reading such a concept back in tonk gives the field names of the definition that was asked for. Not run. |
 
-Open, and one of them next:
+### Replace, add, or conflict
 
-- **What a name with two referents does where an application fits both.** Tonk elects by `last`. Unison keeps both and refuses.
-- How an entity is written where a name stands, `name#hash` in Unison. An entity alone has no field names (H9).
+Irakli's example, 2026-11-11: two concepts named `todo`, each with `title:` and `author:` of the same types, one over `xyz.tonk.todo` and one over `io.gozala.task`, and a rule that reads `(create (todo title: ?t author: ?a))` and asserts `(todo ?todo title: ?t author: ?a)`. Which does the rule mean? Perhaps both are asserted, which is not unreasonable, but it has to be said clearly.
+
+It depends on how the second definition stands to the first, and dialog already tells the two cases apart (`it_tells_a_name_that_was_repointed_from_one_claimed_twice`):
+
+```
+ written after the first       name ──▶ b          one referent stands; a was replaced
+ (one document is in order)
+
+ written apart from the first  name ──▶ a          both stand; read under `last` one is elected
+ (two replicas, or one round)       ──▶ b          by the hash of the value, read with no pick both show
+```
+
+| | the second definition replaces | every definition adds | the agent's: replace per name and labels, refuse a conflict |
+|---|---|---|---|
+| the example, one document | the rule means `io.gozala.task`; `xyz.tonk.todo` is no longer `todo` | the rule means both | the same as replace: one name, one set of labels, the later stands |
+| two `todo`s of different labels | 🔴 the second replaces the first, as in tonk today | both stand, told apart by labels | 🟢 both stand: they are two names, `todo` with these labels and `todo` with those |
+| a definition corrected and evaluated again | 🟢 the correction stands | 🔴 the mistake stays `todo` until its name is retracted, and is written to meanwhile | 🟢 the correction stands |
+| two replicas define apart | one is elected, by hash, and nobody is told | both | 🟡 an application is refused, with both candidates |
+| what one rule with two applications becomes | one rule | four: each application is either | one rule, or none |
+| what a write through the name does | one concept's facts | facts in both domains, on the one entity | one concept's facts |
+| what a query through the name reports | one row a todo | two rows a todo, a relation each | one row a todo |
+| saying which | not needed | not possible by name | write the relation: `(io.gozala.task ?task name: ?t issuer: ?a)` |
+
+**H10.** What is named is a name and a set of labels. Kept under `last`, a later definition of it replaces, definitions with other labels stand beside it, and the only way to two referents is two written apart. Confirmed in part: `last` replaces in order and keeps both of one round. Not run across two replicas, and no name is keyed by its labels yet.
+
+Refusing a conflict is the one choice that can become either other later without changing what anything already accepted means. Electing and adding both cannot be taken back.
+
+Open:
+
+- Whether a conflict is refused, elected or read as both.
+- How an entity is written where a name stands, `name#hash` in Unison. An entity alone has no field names (H9). Writing the relation always says which.
 - Which of the proof of concept's concepts are dialog's. `todo` and `author` are: every field is one attribute of the one entity. `list-item` is not: its entity is the value of the attribute it reads. It is a derived concept, a rule that concludes one.
 
 ## What to store, and how

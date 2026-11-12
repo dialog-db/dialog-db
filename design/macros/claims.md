@@ -64,6 +64,9 @@
 | one concept per name and signature can be kept as a rule about definitions | hypothesis | H7 of [design-forms.md](design-forms.md): refuted by two replicas defining apart and syncing | open; nothing in dialog refuses a merge |
 | an application that fits two concepts is refused with the candidates, and none is elected | hypothesis | H8 | open; tonk elects by `last` |
 | a concept's field names belong to the name and not to the concept | hypothesis | H9: two definitions that differ only in field names, read back in tonk | open; not run |
+| a name re-pointed and a name claimed twice at once are told apart by what is stored | fact | `it_tells_a_name_that_was_repointed_from_one_claimed_twice` | holds on one replica: `last` replaces in order and keeps both of one round. Not run across two replicas |
+| two top-level writes in one document are in order, and two rules fired in one round are concurrent | fact | the same test, and `it_elects_one_of_two_writes_of_one_round_whatever_their_order` | holds |
+| what is named is a name and a set of labels | hypothesis | H10: a later definition with the same labels replaces, one with other labels stands beside it | open; no name is keyed by labels yet |
 | the syntax tree of what dialog runs exists in Rust, as maps, named by reference and versioned | fact | `Premise`, `Proposition`, `Parameters`, `Term` in `rust/dialog-query/src`; `rule/canonical.rs`; `FORMAT` in `rule/body.rs` | holds |
 | a rule's identity ignores the order of its premises and the names of its variables | fact | `rust/dialog-query/src/rule/canonical.rs` | holds |
 | tonk parses an application by name and resolves it inline in a later pass | fact | `rust/tonk-analyzer/src/analyzer.rs` in tonk: resolve, then expand | holds |
