@@ -55,6 +55,11 @@ Backtracking moves a topic to an earlier phase and says so in its journal.
 
 ## Topics
 
+- [A read follows the head it should have pinned](query-isolation.md):
+  **Building.** Every unit of isolation (a query, a select, a poll, a
+  transaction) reads one revision, and the types make a live read
+  unwritable; the [journal](query-isolation/journal.md) records what the
+  harness found on main.
 - [The search tree's concerns are not expressed as capabilities](tree-node-reads.md):
   **Building.** The tree talks in nodes through capabilities it performs on
   the environment; caching, decoding and storage form belong to providers.
@@ -64,3 +69,7 @@ Backtracking moves a topic to an earlier phase and says so in its journal.
   that is a rule. The [core forms](macros/kernel.md) are defined and
   [run on Dialog-DB](macros/poc.md) as a proof of concept; syntax is not
   stored yet.
+- [A parameter holds one variable or one constant](patterns.md):
+  **Building.** A pattern in place of a term, over a composite value kept
+  as a versioned record. The [plan](patterns/plan.md) is for whoever builds
+  it, and the [journal](patterns/journal.md) says how far the build is.

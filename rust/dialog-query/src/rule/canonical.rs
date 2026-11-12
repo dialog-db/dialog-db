@@ -46,11 +46,11 @@ use crate::concept::descriptor::{ConceptDescriptor, ConceptFieldDescriptor};
 use crate::concept::query::ConceptQuery;
 use crate::error::TypeError;
 use crate::negation::Negation;
-use crate::parameters::Parameters;
 use crate::premise::Premise;
 use crate::proposition::Proposition;
 use crate::reduce::ReduceSpec;
 use crate::rule::deductive::rename::{Rename, rename_premises, rename_term, variables};
+use crate::rule::reference;
 use crate::term::Term;
 use crate::types::Any;
 
@@ -174,9 +174,14 @@ pub(crate) fn canonicalize(
         let Some(shape) = encode_premise(shape) else {
             return Ok(None);
         };
+        // A variable inside a map, a list or a tuple of terms occurs
+        // in the premise as any other does, at its place in the
+        // pattern.
+        let parameters = premise.parameters();
+        let addressed = parameters.addressed();
         atoms.push(Atom {
             shape,
-            slots: slots(premise.parameters().iter(), &locals),
+            slots: slots(addressed.iter().map(|(key, term)| (key, *term)), &locals),
         });
     }
     for (field, spec) in reduce {
@@ -489,11 +494,9 @@ fn unnamed(premise: &Premise) -> Result<Premise, TypeError> {
             moved.insert(The::key_operand(name), The::key_operand(&key));
             renamed.push((key, (*field).clone()));
         }
-        let mut terms = Parameters::new();
-        for (key, term) in query.terms.iter() {
-            let key = moved.get(key).cloned().unwrap_or_else(|| key.clone());
-            terms.insert(key, term.clone());
-        }
+        let terms = query
+            .terms
+            .rekeyed(|key| moved.get(key).cloned().unwrap_or_else(|| key.to_string()));
         Ok(ConceptQuery {
             predicate: ConceptDescriptor::try_from(renamed)?,
             terms,
@@ -529,11 +532,23 @@ fn without_descriptions(premise: &Premise) -> Premise {
 
 /// A premise's encoding: its polarity, then its proposition. `None`
 /// for a premise the formal notation cannot express.
+///
+/// A premise that holds a map, a list or a tuple of terms has no wire
+/// form to encode. It has a reference (see
+/// [`reference`](crate::rule::reference)), which is a function of the
+/// premise and of nothing else, and that orders it and tells it apart
+/// here. Its polarity is tagged apart from an encoded premise's, so the
+/// two never read as one another.
 fn encode_premise(premise: &Premise) -> Option<Vec<u8>> {
     let (tag, proposition) = match premise {
         Premise::Assert(proposition) => (0u8, proposition),
         Premise::Unless(negation) => (1u8, &negation.0),
     };
+    if proposition.parameters().has_shapes() {
+        let mut bytes = vec![tag + 2];
+        bytes.extend(reference::proposition(proposition)?.as_bytes());
+        return Some(bytes);
+    }
     let mut bytes = vec![tag];
     bytes.extend(serde_ipld_dagcbor::to_vec(proposition).ok()?);
     Some(bytes)

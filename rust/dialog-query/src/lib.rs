@@ -57,6 +57,8 @@ pub mod negation;
 pub mod optional;
 /// Named parameter bindings for rule and formula applications.
 pub mod parameters;
+/// Patterns: what a parameter holds, a term or a shape of terms.
+pub mod pattern;
 /// Query planner that compiles premises into execution plans.
 pub mod planner;
 /// Predicate trait and type aliases for type-safe queries.
@@ -125,6 +127,7 @@ pub use formula::*;
 pub use negation::*;
 pub use optional::OptionalAttributeQuery;
 pub use parameters::*;
+pub use pattern::{ListPattern, MapPattern, Pattern, Shape};
 pub use planner::*;
 pub use predicate::*;
 pub use premise::*;

@@ -21,11 +21,14 @@
 
 use super::induce::induce;
 use super::succession;
-use super::{Transaction, TransactionCommit, carry_footprint, touches_rule_facts, touches_rules};
+use super::{
+    Line, Transaction, TransactionCommit, carry_footprint, touches_rule_facts, touches_rules,
+};
 use crate::Ephemeral;
 use crate::repository::branch::asset::store_assets;
 use crate::repository::branch::commit::{Amended, Mint, Minted, Outcome};
-use crate::repository::source::{Caches, SourceRef};
+use crate::repository::branch::session::shared_metadata;
+use crate::repository::source::{Caches, Live, View};
 use crate::{
     Branch, Cell, Checkpoint, CommitError, PublishError, QueryLayer, RemoteSite, Revision,
     SelectQuery, Snapshot, SnapshotClaims, Staged, TransactionQuery, origin_of,
@@ -48,6 +51,7 @@ use dialog_effects::memory::{Current, Publish, Resolve, Version as MemoryVersion
 use dialog_query::query::Application;
 use dialog_search_tree::Cache;
 use dialog_search_tree::nodes;
+use std::slice::from_ref;
 use std::sync::Arc;
 
 /// A staged chain of commits on a branch: minted, persisted, invisible.
@@ -375,8 +379,8 @@ where
 /// publishing in one step — created by [`TransactionCommit::publish`],
 /// executed with `.perform(&env)`. The one-shot form: equivalent to
 /// staging the batch and immediately publishing it.
-pub struct TransactionPublish<Line> {
-    commit: TransactionCommit<Line>,
+pub struct TransactionPublish<L: Line> {
+    commit: TransactionCommit<L>,
 }
 
 impl<'a> TransactionCommit<&'a Branch> {
@@ -485,7 +489,9 @@ impl Transaction<TransactionBatch> {
     /// Run queries against this transaction's "as-if committed" view of
     /// the staged chain. See [`Transaction::<&Branch>::query`].
     pub fn query(&self) -> TransactionQuery<'_> {
-        TransactionQuery::new(SourceRef::Snapshot(&self.line.snapshot), self.layers())
+        // The batch owns its snapshot, so nothing else moves it: pinning
+        // it per query reads the chain tip.
+        TransactionQuery::new(Live::Snapshot(&self.line.snapshot).pin(), self.layers())
     }
 }
 
@@ -527,14 +533,28 @@ impl TransactionCommit<&Branch> {
     {
         let branch = self.line;
 
-        // The publish CAS target, captured before the mint reads the
-        // head it builds on: if anything advances the cell from here,
-        // publish fails rather than silently adopting a chain built on
-        // a superseded head.
-        let head = branch.revision.checkpoint();
+        // The head the transaction pinned when it opened: what its
+        // queries read, what the mint builds on, and the publish CAS
+        // target. If anything advanced the cell since, publish fails
+        // rather than silently adopting a chain built on a superseded
+        // head.
+        let base_version = self.pinned.as_ref().map(|edition| edition.version.clone());
+        let head = branch.revision.checkpoint_at(base_version.clone());
         let cell = branch.revision.clone();
-        let base_version = branch.revision.edition().map(|edition| edition.version);
-        let base = branch.revision();
+        let base = self.pinned.map(|edition| edition.content);
+
+        // A head that moved since the transaction opened makes the chain
+        // stale before it is staged: its publish would lose the CAS, so
+        // refuse here, before settling, inducing and minting a link
+        // nobody can publish. The CAS at publish stays the guarantee;
+        // this is only the early word.
+        if !branch.revision.is_at(base_version.as_ref()) {
+            return Err(PublishError::VersionMismatch {
+                expected: base_version,
+                current: Current::Unknown,
+            }
+            .into());
+        }
 
         // The line staged commits mint on: the branch's own identity,
         // derived once here (memoized) so the batch's snapshot can carry
@@ -545,8 +565,7 @@ impl TransactionCommit<&Branch> {
         let retractions = overlay_retractions(&self.changes, &overlay);
 
         let (outcome, induced) = Box::pin(mint_link(
-            SourceRef::Branch(branch),
-            base,
+            View::at(Live::Branch(branch), base.as_ref()),
             |profile, issuer| branch.commit_identity(profile, issuer),
             self.changes,
             self.transients,
@@ -664,8 +683,7 @@ impl TransactionCommit<TransactionBatch> {
         let retractions = overlay_retractions(&self.changes, &batch.overlay);
 
         let (outcome, induced) = Box::pin(mint_link(
-            SourceRef::Snapshot(&batch.snapshot),
-            Some(base.clone()),
+            View::at(Live::Snapshot(&batch.snapshot), Some(&base)),
             |_, issuer| (line.clone(), origin_of(&line, issuer)),
             self.changes,
             self.transients,
@@ -726,15 +744,15 @@ fn refuse_nan<'a>(changes: impl Iterator<Item = &'a Change>) -> Result<(), Commi
     Ok(())
 }
 
-/// Mint one staged link: run commit-time induction over the batch, then
-/// [`Mint`] the settled changes on the line `line` names, carrying the
-/// trigger footprint forward. Nothing is published or adopted — the
-/// caller owns what happens to the [`Outcome`] and to the transients
-/// induction emitted, returned alongside it.
+/// Mint one staged link on `view`, the line at the revision the link
+/// builds on: run commit-time induction over the batch, then [`Mint`]
+/// the settled changes on the line `line` names, carrying the trigger
+/// footprint forward. Nothing is published or adopted — the caller owns
+/// what happens to the [`Outcome`] and to the transients induction
+/// emitted, returned alongside it.
 #[allow(clippy::too_many_arguments)]
 async fn mint_link<Env>(
-    source: SourceRef<'_>,
-    base: Option<Revision>,
+    view: View<'_>,
     line: impl FnOnce(&Did, &Did) -> (Entity, Origin),
     changes: Staged,
     transients: Changes,
@@ -772,20 +790,20 @@ where
     refuse_nan(changes.log().iter().map(|(_, _, change)| change))?;
     let operator = Identify.perform(env).await?;
     let mut changes = Box::pin(succession::settle(
-        vec![source.to_source()],
-        QueryLayer::from(source).overlay(&operator),
+        vec![view.to_source()],
+        shared_metadata(from_ref(&view), &operator),
         &changes,
         env,
     ))
     .await?;
-    let induced = induce(source, &mut changes, transients, env).await?;
+    let induced = induce(&view, &mut changes, transients, env).await?;
     let touches = touches_rules(&changes);
     let touches_rule_facts = touches_rule_facts(&changes);
-    let previous = base.clone();
-    let machinery = store_assets(source, changes.take_assets(), env).await?;
+    let previous = view.revision().cloned();
+    let machinery = store_assets(&view, changes.take_assets(), env).await?;
+    let rule_cache = view.rule_cache();
     let outcome = Mint {
-        source,
-        base,
+        view,
         changes: changes.into_stream(),
         entries: Vec::new(),
         machinery,
@@ -799,10 +817,10 @@ where
     .await?;
     if let Outcome::Minted(minted) = &outcome {
         if !touches {
-            carry_footprint(&source.rule_cache(), previous.as_ref(), &minted.revision);
+            carry_footprint(&rule_cache, previous.as_ref(), &minted.revision);
         }
         if !touches_rule_facts {
-            source.rule_cache().carry_rules_root(
+            rule_cache.carry_rules_root(
                 previous.as_ref().map(|revision| *revision.tree.hash()),
                 Some(*minted.revision.tree.hash()),
             );

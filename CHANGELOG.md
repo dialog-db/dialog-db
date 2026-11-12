@@ -45,6 +45,189 @@ Its two cells are a stand-in, and this entry is not to be released as it
 reads: the formula is to take one record once a rule can build one, and
 the entities it names will change with it.
 
+### A parameter holds a pattern: a term, or a map, a list or a tuple of terms
+
+[#778](https://github.com/dialog-db/dialog-db/pull/778),
+[design/patterns.md](./design/patterns.md),
+[design/patterns/design-parameters.md](./design/patterns/design-parameters.md),
+[design/patterns/design-pattern-meaning.md](./design/patterns/design-pattern-meaning.md),
+[design/patterns/design-feasibility.md](./design/patterns/design-feasibility.md),
+[design/patterns/design-typing.md](./design/patterns/design-typing.md)
+
+A premise was applied to parameters that each held one variable or one
+constant, so a rule could not say a value by its shape. A parameter now
+holds a `Pattern`: a term, or a map, a list or a tuple of patterns.
+Where the value is bound the pattern takes it apart and binds the
+variables inside it, and a value that does not match drops the row.
+Where every variable inside it is bound the pattern is the value, a
+composite kept as a record. A rule's body runs it whichever way the
+plan puts first.
+
+What this changes for you:
+
+- `Pattern`, `MapPattern` and `ListPattern` build one. A map pattern
+  with no rest is the map of exactly its entries; `with_rest` binds the
+  entries it did not name, as a map, and a blank rest takes them and
+  binds nothing. A list pattern with no run is the list of exactly its
+  items; `with_run` binds the ones after them, as a list. A tuple
+  pattern is the tuple of exactly its items.
+- `Parameters::set` binds a name to a pattern, and `shape`, `pattern`,
+  `shapes`, `leaves` and `map_terms` look inside. `insert`, `get` and
+  `iter` take and give terms as before: for a name that holds a map, a
+  list or a tuple, `get` gives the variable that stands for the whole
+  value. Code that collects the variables a premise mentions from
+  `iter` should collect them from `leaves`.
+- `Equality`'s `this` and `is` are `Pattern`s, were `Term<Any>`.
+  `Equality::new` still takes two terms, `Equality::between` takes two
+  patterns, and `Pattern::is` writes one as a premise. A `Pattern`
+  compares with a `Term<Any>` and answers `name` and `is_constant`, so
+  reading the sides of an equality between terms compiles as before;
+  matching on them as `Term::Variable` does not.
+- A concept premise that holds a pattern is planned as the concept over
+  a variable and an equality between that variable and the pattern, so
+  `DeductiveRule::analysis().premises()` lists one premise more than
+  was written.
+- A pattern has no wire form. Serializing `Parameters`, a
+  `ConceptQuery`, an `Equality` or a rule that holds a map, a list or a
+  tuple of terms is an error that says so. A pattern with no variable
+  is the constant it builds and is written as one.
+- A rule that holds a pattern has an identity and runs registered, and
+  cannot be stored: `DeductiveRule::storable` and
+  `InductiveRule::storable` return `TypeError::UnstorablePattern`,
+  `try_encode` returns `None`, and asserting the rule into a
+  transaction panics with that reason, as asserting a rule whose body
+  reads an attribute through a raw scan already did.
+- A premise is feasible by the variables inside its patterns: a
+  parameter that holds a map, a list or a tuple is bound when every
+  variable inside it is, and a premise that binds it binds each of them.
+  A rule whose pattern can never be bound fails to compile with
+  `TypeError::RequiredBindings`, which names the variables inside the
+  pattern that nothing binds. A negated premise may hold a pattern, and
+  a blank inside it stands for any value.
+- A pattern's type follows from its shape and its leaves. A variable
+  inside one keeps the type it was written with, so a rule that binds a
+  text inside a map and adds a number to it fails to compile with
+  `TypeError::TypeInference`, as one that adds a number to a text field
+  does. A map, a list or a tuple under a field that reads only text, and
+  a rest or a run another premise needs to be a number, fail the same
+  way. A variable written with no type inside a pattern is any present
+  value.
+- Matching a pattern against a record under a version this release
+  does not read is `EvaluationError::RecordVersion`, not a dropped row.
+- A rule's identity names a record constant that holds a composite by
+  its parts, as `Value::reference` does.
+
+Why: a rule that issues a command, derives an entity from a row or
+takes a form apart needs a value made of values where a term stands.
+One pattern that both builds and takes apart lets the planner order the
+premises, as it does for every other premise.
+
+### A record can hold a map, a list or a tuple of values
+
+[#778](https://github.com/dialog-db/dialog-db/pull/778),
+[design/patterns.md](./design/patterns.md),
+[design/patterns/design-composite-bytes.md](./design/patterns/design-composite-bytes.md)
+
+A value was a scalar or a `Record`, bytes dialog did not look into. A
+`Composite` is a value made of values: a map from a value to a value
+that holds no key twice, a list, or a tuple, nested as deep as it is
+written. It is kept whole as a `Value::Record`: one version byte,
+`0x01`, then the dag-cbor of its parts. So a composite is a claim's
+value like any other: it is stored, keyed, compared, spilled and synced
+as the bytes it is. Its name is not a hash of those bytes. A composite
+is named by the merkle reference of its parts, a map under `map:`, a
+list under `list:` and a tuple under `tuple:`, each part by its own
+reference, so a later layout of the bytes moves no name.
+
+What this changes for you:
+
+- `dialog_corpus::Composite`, `CompositeMap` and `CompositeItems` build
+  one, and `Value::from` keeps it as a record. `Value::composite` reads
+  one back: `Ok(None)` for a scalar and for a record that starts with
+  no version byte, the composite for a record this release wrote, and
+  `Err(CompositeError::UnknownVersion { version })` for a record under a
+  version this release does not read.
+- One value has one byte string. A map's entries are written in one
+  order whatever order they were given in, a key given twice is refused
+  (`CompositeError::DuplicateKey`), and a number is kept under the
+  narrowest type that holds it, as a tree under the number band reads
+  one back: the natural `3`, the integer `3` and the float `3.0` are
+  one part, and read back as the natural `3`.
+- `Value::reference` of a record that holds a composite is the
+  reference of its parts. Of any other record it is what it was,
+  `RECORD.reference_of(bytes)`.
+- `dialog_corpus::identity::TUPLE` is the type tuples are named under.
+- Equality, ordering, `Value::to_bytes`, `Value::to_reference` (the
+  address a spilled value is stored under) and the key encoding treat a
+  record as its bytes, as before.
+
+Why: a rule could not hold a value made of other values, and everything
+that needed one waited on the layout of a record's bytes. A name that is
+a function of the parts does not depend on that layout, and the version
+byte leaves the layout free to change.
+
+### A read reads one revision, and a transaction reads and commits against the one it opened at
+
+[#757](https://github.com/dialog-db/dialog-db/issues/757),
+[#758](https://github.com/dialog-db/dialog-db/pull/758),
+[design/query-isolation.md](./design/query-isolation.md)
+
+A query performs many selects on its environment: a conjunction looks
+its second premise up per row of the first, a resolver re-reads a
+reference per outer row. A transaction performs many queries, and a
+commit's settlement and induction read the line many times over. Each
+of those reads took its tree root from the branch's head cell as it
+stood at that moment, and that cell is shared by every handle of the
+branch, so a commit made through another handle while a read ran moved
+the root under it: the read saw some of the line at one revision and
+the rest at another, and could yield rows no revision held. Every unit
+of isolation now pins its line when it begins (a query, a select, one
+poll of a subscription, a transaction from open to commit), and every
+scan it performs reads that revision. Inside the crate a read source is
+a pinned `View` and the live `&Branch` or `&Snapshot` is reachable only
+by what needs the current head (a commit's CAS, a subscription deciding
+whether to re-evaluate), so a read that follows the head cannot be
+written. A query over a `Snapshot` was already pinned, and is
+unchanged.
+
+What this changes for you:
+
+- A `Branch::query()`, `Branch::select()`, `Branch::claims().select()`,
+  a subscription's poll, and the induction and succession reads a
+  commit makes each see one revision throughout. A commit that lands on
+  the branch while one of them runs is seen by the next read, not by
+  the rest of this one.
+- A `Transaction` reads the revision its line stood at when it was
+  opened, in every query it runs, and its commit builds on that
+  revision. If the head moved meanwhile (a commit through another
+  handle of the branch, a pull, a commit through the same handle of a
+  snapshot), `commit().perform()` and `commit().publish().perform()`
+  are refused with `CommitError::Publish(PublishError::VersionMismatch)`
+  and nothing of the transaction lands: open a new transaction on the
+  fresh head. Before, such a transaction silently built on the moved
+  head, reading one revision and committing against another. The
+  publish still CAS's the head cell against the version the transaction
+  read, so the refusal holds under a race too; the check at commit is
+  only the early word.
+- `Transaction<L>` requires `L: Line`, a new sealed trait implemented
+  for `&Branch`, `&Snapshot` and `TransactionBatch`. Code generic over
+  the line (`fn f<L>(t: Transaction<L>)`) adds the bound. The lifetime of
+  `Transaction::query()`'s `TransactionQuery` is now that of the borrow
+  of the transaction, not of the branch.
+- The heads a read settlement records (`ReadObservation`) are the
+  revisions the transaction pinned, and the edition its writes stand at
+  is that head's successor, whatever the head is by the time it commits.
+- A line's session overlay (`Branch::overlay`) is not pinned: it is
+  read live, as before.
+- `SourceRef`, the crate's internal borrowed line, is gone; `View` and
+  `Live` replace it. It was never public.
+
+Why: a read's answer should be a function of one state of the branch,
+and a transaction's commit should apply what the transaction read.
+Reading each scan against whatever the head happened to be made both
+depend on the timing of unrelated commits, which no caller can reason
+about.
+
 ### The corpus crate is `dialog-corpus`, and it asks its environment for everything it reads
 
 [#768](https://github.com/dialog-db/dialog-db/pull/768), decided in
@@ -52,7 +235,7 @@ the entities it names will change with it.
 read is argued in
 [design-spilled-values.md](./design/tree-node-reads/design-spilled-values.md).
 
-The crate that held the data model and its indexes, `dialog-artifacts`, is
+The crate that held the data model and its indexes, `dialog-corpus`, is
 `dialog-corpus`: the corpus is the body of claims a branch holds, in the
 search tree. Its storage side is named after it, and the crate
 no longer depends on a store crate. What it reads beside its nodes, a
@@ -64,17 +247,17 @@ cause.
 
 What this changes for you:
 
-- The crate is `dialog-corpus`; paths that began `dialog_artifacts::`
-  begin `dialog_corpus::`. `tree::ArtifactTree` is `tree::Corpus`,
-  `ArtifactTreeExt` is `CorpusExt`, `ArtifactNodeCache` is `CorpusCache`,
-  `BufferedArtifactTree` is `BufferedCorpus`, `ArtifactWriter` is
-  `CorpusWriter` and `DialogArtifactsError` is `DialogCorpusError`.
-- The model side is renamed the same way. `Artifact` is `Fact`,
-  `ArtifactView` is `FactView`, `ArtifactViewStream` is `FactViewStream`,
-  `ArtifactSelector` is `Selector`, `artifact_index_keys` and
-  `artifact_index_keys_with` are `fact_index_keys` and
-  `fact_index_keys_with`, and every `from_artifact`, `to_artifact` and
-  `for_artifact` is `from_fact`, `to_fact` and `for_fact`. The module that
+- The crate is `dialog-corpus`; paths that began `dialog_corpus::`
+  begin `dialog_corpus::`. `tree::Corpus` is `tree::Corpus`,
+  `CorpusExt` is `CorpusExt`, `CorpusCache` is `CorpusCache`,
+  `BufferedCorpus` is `BufferedCorpus`, `CorpusWriter` is
+  `CorpusWriter` and `DialogCorpusError` is `DialogCorpusError`.
+- The model side is renamed the same way. `Fact` is `Fact`,
+  `FactView` is `FactView`, `FactViewStream` is `FactViewStream`,
+  `Selector` is `Selector`, `fact_index_keys` and
+  `fact_index_keys_with` are `fact_index_keys` and
+  `fact_index_keys_with`, and every `from_fact`, `to_fact` and
+  `for_fact` is `from_fact`, `to_fact` and `for_fact`. The module that
   held them, `artifacts`, is `model`. In `dialog-query` the re-export
   module `artifact` is `corpus`, and its aliases `ArtifactsRelation` and
   `ArtifactTypeError` are `CorpusRelation` and `CorpusTypeError`. `Fact`
@@ -144,14 +327,14 @@ What this changes for you:
   with no alias trait in between, instead of `Provider<archive::Load> + Holds + ConditionalSync` (and `+
   Provider<archive::Get>` where a difference was computed). `Holds`, `Load`
   and `Get` are no longer asked of a tree's environment.
-- `dialog_artifacts::tree::CorpusNode` names the node of the corpus, the
+- `dialog_corpus::tree::CorpusNode` names the node of the corpus, the
   tree over claims (`PersistentNode<Key, State<Datum>>`), and an
   environment a corpus is read through is bounded as
   `Provider<nodes::Read<CorpusNode>> + Provider<nodes::Preload<CorpusNode>>`,
   one that is written through as `Provider<nodes::Write<CorpusNode>>`.
   There is no alias trait for either: a signature says which requests it
   performs. "Corpus" is the name the crate's storage side will carry when
-  `dialog-artifacts` is renamed; everything new here uses it.
+  `dialog-corpus` is renamed; everything new here uses it.
 - `TransientTree::persist(delta)`, `HitchhikerTree::persist(delta)`,
   `HitchhikerTree::persist_mut(delta)` and `Node::into_link(delta,
   manifest)` take no environment and no cache, and the delta they fill is
@@ -496,12 +679,12 @@ What this changes for you:
   write `ConditionalSend + ConditionalSync`.
 - These traits now name both bounds as supertraits, so what implements
   them and what a bound on them implies is unchanged:
-  `dialog_artifacts::{ValueType, History}`, `dialog_did_web::Fetch`,
+  `dialog_corpus::{ValueType, History}`, `dialog_did_web::Fetch`,
   `dialog_remote_ucan::Presented`, `dialog_peer_iroh::{Channel, Connect}`
   and the `dialog_peer` helpers' `Meter`.
 - A store a tree reads through by value asks for `ConditionalSend` as
   well, since it is moved into the read's future: the `S` of the
-  `dialog_artifacts::ArtifactTreeExt` and `BlobIndexExt` methods,
+  `dialog_corpus::CorpusExt` and `BlobIndexExt` methods,
   `TreeHistory`, `blob_changes` and `spilled_refs`, and of the query
   builder's `execute`, `execute_owned` and `estimate` in
   `dialog_repository`. An env passed by reference (`perform(&env)`)
@@ -554,7 +737,7 @@ BLAKE3 digest.
 What this changes for you:
 
 - `Bias::derive` returns a different bias for the same identity, so
-  `dialog_artifacts::position::insert` and the `dialog/position` formula
+  `dialog_corpus::position::insert` and the `dialog/position` formula
   derive different positions than before for the same member and
   neighbours. Derivation is still deterministic: every replica on this
   release derives the same position for the same insert.
@@ -730,7 +913,7 @@ What this changes for you:
 - A store that keeps nothing skips the range scan's sibling read-ahead
   and an integration's open-ahead pass, which would only read each node
   twice.
-- `dialog_artifacts::ArchiveReader` requires `ArtifactNodes`
+- `dialog_corpus::ArchiveReader` requires `ArtifactNodes`
   (`Nodes<Key, State<Datum>>`). `DeltaOverlay` keeps what its
   environment keeps.
 - `TreeHistory::from_root_with_cache` and `TreeHistory::empty_with_cache`
@@ -850,7 +1033,7 @@ What this changes for you:
   version then value, so a merge that closes such a cycle leaves every
   query answerable. Before, the same pair also fell to value order,
   but so did every rewrite.
-- `dialog_artifacts::Standing` carries a `succession`, zero for every
+- `dialog_corpus::Standing` carries a `succession`, zero for every
   claim, and `Standing::new` builds a claim's standing. Code building a
   `Standing` by its fields names the new one. Nothing stored or synced
   changes: a rank is computed when a component is read.
@@ -1561,7 +1744,7 @@ What this changes for you:
   pull refuses a head whose region holds no entry for the head's own
   origin, holds it above the head, holds an entry outside the watermark
   bounds, or derives a count other than the one the head signed, as
-  `DialogArtifactsError::InvalidKey`, and keeps its own head.
+  `DialogCorpusError::InvalidKey`, and keeps its own head.
 - A commit no longer remembers the new head's whole context in the
   branch's memo unless it had the parent's there already. The first
   reader that needs the whole map reads the region then.
@@ -1746,14 +1929,14 @@ say. `PreparedPull::upstream` is the head the prepare fetched and verified,
 the one revision the commit adopts. `PreparedPull::novelty` lists the
 revisions the commit brings into the branch, ancestors first, each as a
 `NewRevision` with its record and its claims. `history::novelty` in
-`dialog-artifacts` is the walk underneath it.
+`dialog-corpus` is the walk underneath it.
 
 What this changes for you:
 
 - `PreparedPull::upstream`, `PreparedPull::novelty`, `NewRevision` and
-  `dialog_artifacts::history::novelty` are new.
+  `dialog_corpus::history::novelty` are new.
 - A revision whose record neither the upstream nor the branch holds fails
-  the walk with `DialogArtifactsError::IncompleteHistory`, where
+  the walk with `DialogCorpusError::IncompleteHistory`, where
   `history::log` skips it.
 - A no-op pull names nothing new, and neither does one whose commit keeps the
   branch's head and advances only its sync base.
@@ -2009,10 +2192,10 @@ The facts a query folds in beside its lines, the injected `db:session` metadata 
 What this changes for you:
 
 - `QueryLayer::overlay` returns an `Ephemeral` instead of an `Arc<Changes>`.
-- `Changes::select` and `impl Provider<Select> for Changes` are removed from `dialog-artifacts`. To read facts held in memory beside a tree, hold them in an `Ephemeral` (`Ephemeral::apply` takes the batch) and read it with `Ephemeral::select`.
+- `Changes::select` and `impl Provider<Select> for Changes` are removed from `dialog-corpus`. To read facts held in memory beside a tree, hold them in an `Ephemeral` (`Ephemeral::apply` takes the batch) and read it with `Ephemeral::select`.
 - A query or subscription whose `.with(..)` carries a rule no longer rebuilds the rule set and re-decodes each rule body on every evaluation. Results are unchanged.
 - Asset changes in a `.with(..)` batch are dropped from the query's overlay, as they were before: a query reads facts only.
-- `EntityKey::from_artifact`, `AttributeKey::from_artifact` and `ValueKey::from_artifact` build the key from its parts in one pass instead of parsing and re-encoding it once per field. The bytes are unchanged. `dialog_artifacts::artifact_index_keys`, which builds all three at once, is now public.
+- `EntityKey::from_fact`, `AttributeKey::from_fact` and `ValueKey::from_fact` build the key from its parts in one pass instead of parsing and re-encoding it once per field. The bytes are unchanged. `dialog_corpus::fact_index_keys`, which builds all three at once, is now public.
 
 Why: a query fell off the cache whenever its overlay held a rule. A performance report on Sapling, which hands rules to each query in its overlay, measured rule decoding and assembly at about 60% of instructions on that path. Reading the per-query batch as a separate kind of store is what let that path skip the cache, so the batch now goes through the store and the cache key every other overlay goes through.
 
@@ -2139,7 +2322,7 @@ What this changes for you:
 - `AuthorizationFailure::authorization_failure(&self) ->
   Option<&AuthorizeError>` on `ArchiveError`, `BlobError`, `MemoryError`,
   `BranchError`, `PeerError`, `ForkError`, `DialogStorageError`,
-  `DialogArtifactsError`, `ResolveError`, `PublishError`,
+  `DialogCorpusError`, `ResolveError`, `PublishError`,
   `RetractError`, `S3Error` and `AuthorizeError` itself.
 - The UCAN test service (`dialog-remote-ucan-s3`'s `helpers`) accepts
   `POST /revocations/<cid>` and refuses that certificate from then on.
@@ -2383,6 +2566,32 @@ thread multiplies whatever it holds by the size of the thread pool.
   is, and a release without the formula cannot read that rule's body, as
   it cannot read any formula it does not know. Nothing for an embedder to
   run.
+
+- Nothing stored or synced changes for patterns: the stored rule format
+  is format 3 as before and has no way to write a pattern, so a rule
+  that holds one is never stored, and an older replica never meets one.
+  Nothing is rewritten on upgrade and an embedder runs nothing. One
+  rule changes identity between releases: a rule whose body holds a
+  record constant that is a composite is named by the composite's parts
+  here and by its bytes in an older release, so each release finds the
+  body the other stored under an entity it does not derive and leaves
+  it inert. No release before this one could write such a constant.
+- A composite is a new kind of bytes under the existing `record:` value
+  type, so nothing is rewritten on upgrade and no tree, key or wire
+  format changes. What an older replica holds under `record:` is a
+  revision's record, a bare dag-cbor map whose first byte is `0xa7`, and
+  whatever bytes an embedder stored. This release reads a record as a
+  composite only when its first byte is `0x01` and the rest is exactly
+  the bytes a composite is written in; every other record reads,
+  compares, verifies and is named as before. An older release makes of a
+  versioned record what it makes of any record: bytes it stores, syncs
+  and compares, and names by a hash of the bytes, which is not the name
+  this release gives it. It cannot look inside. A record under a later
+  version than `0x01` is carried the same way by this release and refused
+  by its number when something looks into it. An embedder runs nothing.
+  One that stored records of its own starting with a byte from `0x01` to
+  `0x17` should say so before upgrading
+  ([design/patterns/design-version-byte.md](./design/patterns/design-version-byte.md)).
 - Nothing stored or synced changes for the file store's lock; only the
   lock files beside its cells do. A lock file the previous release left
   behind holds a bare PID, which this release reads as a holder: one
@@ -2495,14 +2704,14 @@ What this changes for you:
   `Branch::migrate` (or `migrate_storage`) first; `Branch::needs_migration`
   says whether a branch is in that state, and `storage_encoding` which
   layout its head has.
-- A number read back raw (an `ArtifactSelector` select, a `Value` match)
+- A number read back raw (an `Selector` select, a `Value` match)
   comes back as the narrowest type that holds it: a natural when it is
   whole and not negative, an integer when whole and negative, a float
   otherwise. Code matching `Value::UnsignedInt` on counts and timestamps
   still sees them; code matching `Value::Float(5.0)` on a stored `5.0`
   now sees `UnsignedInt(5)`. A typed read (a concept field, a derived
   struct) views the number as the type it declares, unchanged.
-- An `ArtifactSelector` range bound reads each number through the lens
+- An `Selector` range bound reads each number through the lens
   its type names before comparing, as a field declared with that type
   reads it: an integer bound sees `34.5` as `34`, a natural bound does not
   see `-3`, a float bound sees every number as it is, and
@@ -2652,7 +2861,7 @@ What this changes for you:
   bare or tagged (`{"float:": NaN}` in dag-cbor), as does parsing the
   string `float:NaN` into a `Value`. No type `holds` a NaN, so a typed
   write refuses it, and a commit that would write one by a raw assertion
-  fails with `CommitError::Artifact(InvalidValue("NaN is not a value"))`
+  fails with `CommitError::Fact(InvalidValue("NaN is not a value"))`
   before anything lands.
 - `float/parse` of `NaN` is no row.
 - A float formula whose result would be NaN (`0.0 / 0.0`,
@@ -2769,7 +2978,7 @@ What this changes for you:
   The value index still keeps naturals, integers and floats apart, so
   until it moves to one band, two attributes that differ only by
   listing `5` or `5.0` share an identity but read different claims.
-- `dialog_artifacts::identity` and `dialog_query::identity` hold the
+- `dialog_corpus::identity` and `dialog_query::identity` hold the
   types dialog hashes under.
 
 Why: identity should be a function of what a definition means, cheap
@@ -2891,8 +3100,8 @@ written in.
 
 What this changes for you:
 
-- `dialog_artifacts::Attribute` is `dialog_artifacts::Relation`.
-  `DialogArtifactsError::InvalidAttribute` and `ReservedAttribute` are
+- `dialog_corpus::Attribute` is `dialog_corpus::Relation`.
+  `DialogCorpusError::InvalidAttribute` and `ReservedAttribute` are
   `InvalidRelation` and `ReservedRelation`, and `ATTRIBUTE_LENGTH` is
   `RELATION_LENGTH`.
 - In `dialog_query`, the validated relation name the `the!` macro
@@ -2901,8 +3110,8 @@ What this changes for you:
   (`The::Relation(..)`, `The::Collection { .. }`; it was `Relation`,
   with an `Attribute` variant). `dialog_query::ArtifactsAttribute` is
   `ArtifactsRelation`, and `Reach::Attribute` is `Reach::Relation`.
-- One type, `dialog_artifacts::Pick` (`Last`, `All`, `Top(..)`, `Max`,
-  `Min`), replaces both `dialog_artifacts::Policy` and
+- One type, `dialog_corpus::Pick` (`Last`, `All`, `Top(..)`, `Max`,
+  `Min`), replaces both `dialog_corpus::Policy` and
   `dialog_query::Select`. `AttributeDescriptor::select()` and
   `with_select(..)` are `pick()` and `with_pick(..)`;
   `without_select()` and `select_error()` are `without_pick()` and
@@ -2967,9 +3176,9 @@ What this changes for you:
   it. Under `last` the write is the newest fact of the cell, as a
   last-writer-wins write is.
 - Every write carries its pick. `Change::Assert(Value, Pick)` and
-  `Instruction::Assert(Artifact, Pick)` are the one write form, beside
+  `Instruction::Assert(Fact, Pick)` are the one write form, beside
   `Retract`; `Change::Replace`, `Instruction::Replace`, `Change::Succeed`
-  and `Instruction::Succeed` are gone. `dialog_artifacts::Pick` is the
+  and `Instruction::Succeed` are gone. `dialog_corpus::Pick` is the
   pick an attribute is read under (`Last`, `All`, `Top(..)`, `Max`,
   `Min`); `Update::associate` takes it as its fourth argument, and
   `associate_unique` and `succeed` are gone with the variants they

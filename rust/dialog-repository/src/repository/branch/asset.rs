@@ -42,7 +42,7 @@
 
 use crate::repository::archive::erased;
 use crate::repository::archive::write_blob;
-use crate::repository::source::SourceRef;
+use crate::repository::source::{Live, View};
 use crate::{Branch, CommitError, Index, Snapshot};
 use dialog_capability::Provider;
 use dialog_common::{Blake3Hash, Blake3Hash as NodeHash, ConditionalSend, ConditionalSync};
@@ -63,7 +63,7 @@ impl Branch {
     /// stream of byte chunks. See [`AssetStream::import`].
     pub fn asset<S>(&self, chunks: S) -> AssetStream<'_, S> {
         AssetStream {
-            source: SourceRef::from(self),
+            line: Live::from(self),
             chunks,
         }
     }
@@ -74,7 +74,7 @@ impl Snapshot {
     /// stream of byte chunks. See [`AssetStream::import`].
     pub fn asset<S>(&self, chunks: S) -> AssetStream<'_, S> {
         AssetStream {
-            source: SourceRef::from(self),
+            line: Live::from(self),
             chunks,
         }
     }
@@ -83,7 +83,7 @@ impl Snapshot {
 /// A stream of byte chunks bound to a line's blob store, ready to import as
 /// an asset. Created by [`Branch::asset`] or [`Snapshot::asset`].
 pub struct AssetStream<'a, S> {
-    source: SourceRef<'a>,
+    line: Live<'a>,
     chunks: S,
 }
 
@@ -96,7 +96,7 @@ impl<'a, S> AssetStream<'a, S> {
     /// pointing at its entity.
     pub fn import(self) -> ImportAsset<'a, S> {
         ImportAsset {
-            source: self.source,
+            line: self.line,
             chunks: self.chunks,
         }
     }
@@ -105,7 +105,7 @@ impl<'a, S> AssetStream<'a, S> {
 /// Stream bytes into a line's blob store as an [`Asset`]. Created by
 /// [`AssetStream::import`].
 pub struct ImportAsset<'a, S> {
-    source: SourceRef<'a>,
+    line: Live<'a>,
     chunks: S,
 }
 
@@ -121,7 +121,7 @@ where
     where
         Env: Provider<BlobWrite> + ConditionalSync + 'static,
     {
-        let mut sink = self.source.archive().blob().write().perform(env).await?;
+        let mut sink = self.line.archive().blob().write().perform(env).await?;
         let mut size: u64 = 0;
         while let Some(chunk) = self.chunks.next().await {
             let chunk = chunk?;
@@ -150,7 +150,7 @@ where
 /// records for that hash, whatever size the discarded asset names, and
 /// yields nothing when the line records none.
 pub(crate) async fn store_assets<Env>(
-    source: SourceRef<'_>,
+    view: &View<'_>,
     changes: Vec<AssetChange>,
     env: &Env,
 ) -> Result<Vec<Instruction>, CommitError>
@@ -177,8 +177,8 @@ where
         match change {
             AssetChange::Import(asset) => {
                 match asset.content() {
-                    Some(content) => write_asset(source, &asset, content, env).await?,
-                    None => check_stored_asset(source, &asset, env).await?,
+                    Some(content) => write_asset(view, &asset, content, env).await?,
+                    None => check_stored_asset(view, &asset, env).await?,
                 }
                 // A replace, not an assert: an asset has one size, and
                 // replacing a fact with the value it already has is a no-op,
@@ -189,7 +189,7 @@ where
                 ));
             }
             AssetChange::Discard(asset) => {
-                if let Some(size) = recorded_size(source, asset.hash(), env).await? {
+                if let Some(size) = recorded_size(view, asset.hash(), env).await? {
                     instructions.push(Instruction::Retract(
                         Asset::stored(*asset.hash(), size).fact()?,
                     ));
@@ -203,7 +203,7 @@ where
 /// The size `source`'s current tree records for the asset `hash`, if it
 /// records that asset.
 pub(crate) async fn recorded_size<Env>(
-    source: SourceRef<'_>,
+    view: &View<'_>,
     hash: &dialog_storage::Blake3Hash,
     env: &Env,
 ) -> Result<Option<u64>, CommitError>
@@ -223,12 +223,12 @@ where
         + ConditionalSync
         + 'static,
 {
-    let Some(revision) = source.revision() else {
+    let Some(revision) = view.revision() else {
         return Ok(None);
     };
     let store = erased(env);
     Ok(
-        Index::at(source.catalog(), NodeHash::from(*revision.tree.hash()))
+        Index::at(view.catalog(), NodeHash::from(*revision.tree.hash()))
             .asset_size(&store, hash)
             .await?,
     )
@@ -238,7 +238,7 @@ where
 /// size. The store verifies the bytes as they land and keeps nothing when
 /// they hash to anything else.
 async fn write_asset<Env>(
-    source: SourceRef<'_>,
+    view: &View<'_>,
     asset: &Asset,
     content: &[u8],
     env: &Env,
@@ -248,7 +248,7 @@ where
 {
     write_blob(
         env,
-        &source.archive().index(),
+        &view.archive().index(),
         &Blake3Hash::from(*asset.hash()),
         content,
     )
@@ -268,7 +268,7 @@ where
 /// for an asset its line never recorded, fails the commit rather than
 /// recording content nobody here can read.
 async fn check_stored_asset<Env>(
-    source: SourceRef<'_>,
+    view: &View<'_>,
     asset: &Asset,
     env: &Env,
 ) -> Result<(), CommitError>
@@ -290,7 +290,7 @@ where
         + 'static,
 {
     let digest = Blake3Hash::from(*asset.hash());
-    let local = source
+    let local = view
         .archive()
         .blob()
         .size(digest.clone())
@@ -298,7 +298,7 @@ where
         .await?;
     let held = match local {
         Some(size) => size,
-        None => match recorded_size(source, asset.hash(), env).await? {
+        None => match recorded_size(view, asset.hash(), env).await? {
             Some(size) => size,
             None => return Err(BlobError::NotFound(digest.to_string()).into()),
         },
@@ -321,7 +321,7 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use crate::helpers::{Counting, test_repo};
-    use crate::repository::source::SourceRef;
+    use crate::repository::source::Live;
     use crate::{Blob, Branch, CommitError};
     use anyhow::Result;
     use dialog_corpus::{
@@ -564,7 +564,7 @@ mod tests {
         let declared = Asset::from(b"the declared bytes".to_vec());
         let carried = b"some other bytes".to_vec();
         let refused =
-            super::write_asset(SourceRef::from(&branch), &declared, &carried, &operator).await;
+            super::write_asset(&Live::from(&branch).pin(), &declared, &carried, &operator).await;
 
         assert!(
             matches!(

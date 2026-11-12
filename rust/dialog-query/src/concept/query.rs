@@ -19,6 +19,7 @@ use std::fmt;
 use crate::attribute::The;
 use crate::concept::descriptor::{ConceptDescriptor, ConceptFieldDescriptor};
 use crate::corpus::{CorpusRelation, Type, Value};
+use crate::pattern::{self, Shape};
 use crate::planner::{Disjunction, Plan};
 use crate::rule::deductive::DeductiveRule;
 use crate::schema::CONCEPT_OVERHEAD;
@@ -32,6 +33,7 @@ use crate::{
 };
 use dialog_capability::Provider;
 use dialog_corpus::{Pick, encode_value_owned};
+use futures_util::future::Either;
 use futures_util::{StreamExt, TryStreamExt, stream};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -169,6 +171,16 @@ struct ConceptQueryIn {
 
 impl Serialize for ConceptQuery {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::Error as _;
+        // A map, a list or a tuple of terms has no wire form. Written
+        // as the variable standing for the whole it would read back as
+        // another query.
+        if let Some((name, pattern)) = self.terms.shapes().next() {
+            return Err(S::Error::custom(format!(
+                "the parameter `{name}` holds the pattern {pattern}, which has no wire form: \
+                 only a variable or a constant is written"
+            )));
+        }
         let mut terms: BTreeMap<&str, Bound> = BTreeMap::new();
         let mut keys: BTreeMap<String, &str> = BTreeMap::new();
         for (name, _) in self.predicate.collections() {
@@ -464,7 +476,29 @@ impl ConceptQuery {
         // generic over the stream handed the next level a type that held
         // this level's, and the compiler unrolled the recursion forty
         // levels deep (a 50 KB type term) in a workload's binary.
-        self.conformed().evaluate_erased(Box::pin(selection), env)
+        if !self.terms.has_shapes() {
+            return Either::Left(self.conformed().evaluate_erased(Box::pin(selection), env));
+        }
+        // A parameter that is a map, a list or a tuple of terms: the
+        // concept is read with a variable standing for the whole value
+        // in its place. Where the pattern's variables are bound the
+        // whole is built first and the concept is read by it. What the
+        // concept binds the whole to is then taken apart by the
+        // pattern, and a row that does not match is dropped. A rule's
+        // body has this done by its plan (see `pattern::lower`); a
+        // query run by itself, and a negated premise, come here.
+        let (terms, shapes) = self.terms.lowered();
+        let shapes: Arc<[Shape]> = shapes.into();
+        let lowered = ConceptQuery {
+            predicate: self.predicate,
+            terms,
+        };
+        let built: Pin<Box<dyn Selection + 'a>> =
+            Box::pin(pattern::build(shapes.clone(), selection));
+        Either::Right(pattern::take_apart(
+            shapes,
+            lowered.conformed().evaluate_erased(built, env),
+        ))
     }
 
     fn evaluate_erased<'a, Env>(
@@ -1095,17 +1129,15 @@ impl ConceptQuery {
         }
         let key = The::key_operand(name);
         let canonical_key = The::key_operand(ConceptDescriptor::VALUE);
-        let mut terms = Parameters::new();
-        for (param, term) in self.terms.iter() {
-            let param = if param == name {
+        let terms = self.terms.rekeyed(|param| {
+            if param == name {
                 ConceptDescriptor::VALUE.to_string()
             } else if *param == key {
                 canonical_key.clone()
             } else {
-                param.clone()
-            };
-            terms.insert(param, term.clone());
-        }
+                param.to_string()
+            }
+        });
         ConceptQuery {
             predicate: ConceptDescriptor::of_attribute(field),
             terms,
@@ -1510,7 +1542,10 @@ impl Display for ConceptQuery {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{} {{", self.predicate.this())?;
         for (name, term) in self.terms.iter() {
-            write!(f, "{}: {},", name, term)?;
+            match self.terms.shape(name) {
+                Some(pattern) => write!(f, "{}: {},", name, pattern)?,
+                None => write!(f, "{}: {},", name, term)?,
+            }
         }
 
         write!(f, "}}")
