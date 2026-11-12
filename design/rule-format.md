@@ -27,7 +27,8 @@ Where it shows today:
 
 What a format has cost before, from the code and the changelog:
 
-- A rule's entity is made of its canonical spelling, and since format 3 the body is that spelling. So a format that spells a rule another way would name it another entity, unless a rule format 3 can write keeps the spelling it has. Not checked: whether the format's number is in the name.
+- A rule's entity is made of its canonical spelling, and since format 3 the body is that spelling. So a format that spells a rule another way would name it another entity, unless a rule format 3 can write keeps the spelling it has.
+- The format's number is not in the name. A rule's entity is the reference of its canonical conclusion, premises and reduce (`DeductiveRule::try_this`, `rule/reference.rs`); the number is only on the envelope the body is stored in (`rule/body.rs`).
 - `Branch::upgrade_rules` rewrote every body of an earlier format into format 3. Until an embedder runs it, an earlier body is read as before.
 - A release refuses a format later than its own, so a rule written in a new format is inert on an older replica until it upgrades.
 
@@ -39,5 +40,7 @@ What each of the four would ask of a body, as read so far and not as a plan:
 | records | nothing new where a composite is a constant, which format 3 writes as a record's bytes; a layout the bytes will not leave (#748) | no |
 | rule heads | several heads where there is one, a polarity a head | ? it depends on how one head is spelled among several |
 | macros | a head that is not a concept, and a premise that takes a form apart | ? |
+
+A hypothesis this opens, the agent's, 2026-11-11: **a format that only adds leaves every rule it does not touch where it is.** If a rule that holds no pattern, one head and no syntax keeps its canonical parts, it keeps its entity, and its body can go on being written as format 3. Then each of the four can be added when it is ready, a rule is written in the lowest format that can say it, and nothing is migrated. Confirmed by a test that a rule of terms alone has one entity and one body before and after a pattern can be written. Refuted if the canonical spelling of an old rule has to change to make room, as it might for several heads.
 
 A stored format changes here, so whatever is built is a breaking change with a compatibility note (`.claude/rules/versioning-and-changelog.md`).
