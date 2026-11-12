@@ -393,3 +393,16 @@ Not examined yet. They are columns, not recommendations.
 
 **Decided.** By the maintainer: build on patterns now. Built: a struct as a value and as a pattern in a query of one read, `it_keeps_a_struct_and_takes_it_apart_by_a_pattern`.
 
+## 2026-11-11, Designing: a struct in a rule, and what stops it
+
+**Asked.** Irakli: get structs and macros and the rest.
+
+**Learned.**
+
+- The compiler no longer needs dialog's forms built wholly in Rust to put a pattern in a rule. It reads the rule's descriptor from JSON as before and adds one premise a pattern, an equality between the pattern and the variable written in its place. Dialog builds the value where the pattern's variables are bound and takes it apart where the variable is.
+- Such a rule compiles. It cannot be installed, which was known, and it cannot be laid over a branch for one query either, which was not: `Branch::with` names a rule by its stored form and panics where that form cannot be written. So a struct works in a write and in a query of one read, and nowhere a rule is.
+- **`entity/derive` over a record was built and taken back out.** With it, every rule that derives an entity from what it binds holds a pattern, so none can be installed, and two things that ran stopped: a rule and a top-level write naming one entity, and a rule issuing a command another rule reads. It cannot be done by halves, since a rule and a top-level write have to name the same entity by the same function.
+- The notebook asks dialog whether a rule can be stored before installing it, since an assertion panics where it cannot.
+
+**Decided.** Not decided, and now the only thing between structs and rules: whether a stored rule may hold a pattern, which is a new rule body format. Asked of the patterns work: that a rule holding a pattern can be laid over a branch without one.
+
