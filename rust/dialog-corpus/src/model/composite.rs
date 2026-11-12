@@ -424,7 +424,7 @@ impl<'a> Naming<'a> {
         match self.composite.as_ref() {
             Composite::Map(map) => {
                 let entry = map.entries.get(at / 2)?;
-                Some(if at % 2 == 0 {
+                Some(if at.is_multiple_of(2) {
                     &entry.key
                 } else {
                     &entry.value
