@@ -1163,7 +1163,8 @@ pub enum DownloadError {
     Snapshot(#[from] SnapshotError),
 
     /// A node the replica holds a leaf under could not be read: the walk
-    /// of an [overlapping](crate::Download::overlapping) download.
+    /// of a [`Download::QueriedRanges`](crate::Download::QueriedRanges)
+    /// download.
     #[error("Download could not follow the tree: {0}")]
     Tree(DialogSearchTreeError),
 }

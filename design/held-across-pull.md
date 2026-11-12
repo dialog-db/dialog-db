@@ -43,16 +43,17 @@ Decided 2026-11-11, column E of the [matrix](held-across-pull/direction.md):
 how much a pull fetches is the caller's decision, and there is an extent
 that fetches what the replica holds and nothing else.
 
-- `Download::overlapping()` and `PullDownload::overlapping()` bring local
-  only what the replica holds of its head, as the revision about to be
-  adopted has it. The walk is `PersistentTree::follow`: the held tree and
-  the adopted tree in step, a node of the adopted one read only where its
-  keys meet a leaf the replica holds.
-- A pull download fetches before the head moves, so the replica reads and
-  writes on the head it holds for as long as the fetch takes.
+- `Branch::pull` takes a `Download`, with no default, so every pull says
+  how much it fetches. `Download::QueriedRanges` brings local only what
+  the replica holds of its head, as the head about to be adopted has it.
+  The walk is `PersistentTree::follow`: the held tree and the adopted
+  tree in step, a node of the adopted one read only where its keys meet a
+  leaf the replica holds. `MinimalRanges`, `Operational`, `Ranges` and
+  `Everything` are what a bare pull and the old pull download did.
+- Whatever is named is fetched before the head moves, so the replica
+  reads and writes on the head it holds for as long as the fetch takes.
 - `Pull::retry(Limit)` makes a pull that a commit overtook again, on the
   head the commit left.
-- A pull that is asked for nothing adopts by reference, as before.
 
 Not covered, and open: a replica's first write to a key it only read; a
 spilled value or blob a changed leaf newly references; a replica already

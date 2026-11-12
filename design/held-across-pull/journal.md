@@ -4,8 +4,8 @@
 
 |  | Understanding | Activity |
 |---|---|---|
-| **Status** | A head adopted by root leaves every changed leaf by reference; reads and writes of keys the replica held then fetch. Measured in dialog for reads and for repeat writes. An overlapping download removes both, and leaves a first write to a key only read fetching as before. | Building. Column E is decided and built: `Download::overlapping`, `Pull::retry`, with tests over a remote. |
-| **Agenda** | Whether the reported slow load, the slow edits and the pulsing dot in tonk are this problem (two open hypotheses). What an overlapping download costs on the Perf and Replication scenarios, which do not ask for it yet. Whether a spilled value a changed leaf references should come along. | The pull request's gates. Tonk moves to this dialog, asks for the overlapping download and the retry in its space pulls, and the two tonk hypotheses are tested in the browser. |
+| **Status** | A head adopted by root leaves every changed leaf by reference; reads and writes of keys the replica held then fetch. Measured in dialog for reads and for repeat writes. `Download::QueriedRanges` removes both, and leaves a first write to a key only read fetching as before. | Building. Column E is decided and built: `pull(Download::QueriedRanges)`, `Pull::retry`, with tests over a remote. |
+| **Agenda** | Whether the reported slow load, the slow edits and the pulsing dot in tonk are this problem (two open hypotheses). What `Download::QueriedRanges` costs on the Perf and Replication scenarios, which do not ask for it yet. Whether a spilled value a changed leaf references should come along. | The pull request's gates. Tonk moves to this dialog, pulls its spaces with `Download::QueriedRanges` and a retry, and the two tonk hypotheses are tested in the browser. |
 
 ## 2026-11-10, Diagnosing: from a slow load to what a pull leaves behind
 
@@ -89,3 +89,23 @@ nothing.
 row "can be forgotten by a caller" is the cost accepted: tonk has to ask
 in each place it pulls a space, and it forgot once for the account
 branch. Rests on the two open tonk hypotheses.
+
+## 2026-11-12, Building: the extent is the pull's argument
+
+**Asked.** Is a modifier on a pull download (`pull().download().overlapping()`)
+explicit enough?
+
+**Learned.** The maintainer: no. A modifier is easy to miss, and missing
+it is how the cheap answer became the one callers got. The decision should
+be forced: `pull(Download::…)`, with the old pull download removed.
+
+**Decided.** `Branch::pull`, `Branch::download` and `Branch::replicate`
+take a `Download`; `Pull::download` and `PullDownload` are removed. The
+download runs between the merge and the publish inside `perform` and
+`prepare`, outside `land`, so the second prepare `land` makes under the
+write lock still fetches nothing. This answers the matrix row "can be
+forgotten by a caller" for column E: a caller cannot leave it out, only
+choose wrongly.
+
+The variant names are the maintainer's. `QueriedRanges` also covers the
+ranges a replica wrote, which the name does not say; left as named.

@@ -5,7 +5,7 @@ root, and who asks for it. For: a partial replica loses the ability to
 read and write, from its own blocks, each key whose leaf another replica
 changed, every time it adopts that replica's head by root.
 
-Decided 2026-11-11: column E, by the maintainer (journal). Column D was built first and is replaced by E on the topic's branch; its cells stay as measured.
+Decided 2026-11-11: column E, by the maintainer (journal). On 2026-11-12 its form became `pull(Download::QueriedRanges)`, an argument every pull must give. Column D was built first and is replaced by E on the topic's branch; its cells stay as measured.
 
 | criterion \ approach | A. Status quo: adopt by root, fetch on demand | B. Subscriptions first: the embedder evaluates its live queries against the prepared head, then commits | C. Download the difference: fetch every node by which the two heads differ before the head moves | D. Follow what is held, in every pull: walk both trees in step, fetch an adopted node only where its keys meet a held leaf | E. Follow what is held, asked for: the same walk as a `Download` scope the embedder runs between `prepare` and `commit` |
 |---|---|---|---|---|---|

@@ -353,7 +353,7 @@ async fn replay(seed: u64, steps: usize) -> Result<()> {
             }
             history.push(format!("{} pulls from {}", names[at], names[from]));
             branches[at]
-                .pull()
+                .pull(crate::Download::MinimalRanges)
                 .from(&branches[from])
                 .perform(&operator)
                 .await?;
@@ -370,7 +370,7 @@ async fn replay(seed: u64, steps: usize) -> Result<()> {
             for from in 0..branches.len() {
                 if at != from && branches[from].revision().is_some() {
                     changed |= branches[at]
-                        .pull()
+                        .pull(crate::Download::MinimalRanges)
                         .from(&branches[from])
                         .perform(&operator)
                         .await?

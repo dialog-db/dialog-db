@@ -551,7 +551,10 @@ mod tests {
         // A shared base, so the pulls below are merges.
         assert_relation!(main, &operator, filler, Entity::new()?, "base".to_string());
         feature.set_upstream(&main).perform(&operator).await?;
-        feature.pull().perform(&operator).await?;
+        feature
+            .pull(dialog_repository::Download::MinimalRanges)
+            .perform(&operator)
+            .await?;
 
         // main goes one revision deeper before installing its seed;
         // feature installs its own straight away.
@@ -565,7 +568,10 @@ mod tests {
         );
         install!(main, first, "main");
         install!(feature, first, "feature");
-        feature.pull().perform(&operator).await?;
+        feature
+            .pull(dialog_repository::Download::MinimalRanges)
+            .perform(&operator)
+            .await?;
 
         let (by_entity, by_attribute) = winners!(feature, first);
         assert_eq!(
@@ -586,7 +592,10 @@ mod tests {
         );
         install!(feature, second, "feature");
         install!(main, second, "main");
-        feature.pull().perform(&operator).await?;
+        feature
+            .pull(dialog_repository::Download::MinimalRanges)
+            .perform(&operator)
+            .await?;
 
         let (by_entity, by_attribute) = winners!(feature, second);
         assert_eq!(
@@ -619,7 +628,10 @@ mod tests {
                 );
         }
         revision.commit().publish().perform(&operator).await?;
-        feature.pull().perform(&operator).await?;
+        feature
+            .pull(dialog_repository::Download::MinimalRanges)
+            .perform(&operator)
+            .await?;
 
         let (by_entity, by_attribute) = winners!(feature, first);
         assert_eq!(

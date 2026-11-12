@@ -162,14 +162,25 @@ async fn replicas_installing_a_cycle_concurrently_set_aside_the_same_rule() -> R
     let a = repo.branch("a").open().perform(&operator).await?;
     let b = repo.branch("b").open().perform(&operator).await?;
     let alice = seeded(&a, &operator).await?;
-    b.pull().from(&a).perform(&operator).await?;
+    b.pull(crate::Download::MinimalRanges)
+        .from(&a)
+        .perform(&operator)
+        .await?;
 
     install(&a, &operator, negating()?).await?;
     install(&b, &operator, closing()?).await?;
     let mut quiesced = false;
     for _ in 0..4 {
-        let pulled_a = a.pull().from(&b).perform(&operator).await?;
-        let pulled_b = b.pull().from(&a).perform(&operator).await?;
+        let pulled_a = a
+            .pull(crate::Download::MinimalRanges)
+            .from(&b)
+            .perform(&operator)
+            .await?;
+        let pulled_b = b
+            .pull(crate::Download::MinimalRanges)
+            .from(&a)
+            .perform(&operator)
+            .await?;
         if pulled_a.is_none() && pulled_b.is_none() {
             quiesced = true;
             break;
