@@ -10,6 +10,8 @@ use super::*;
 use crate::attribute::{AttributeStatement, Relation};
 use crate::corpus::{Composite, Entity};
 use crate::error::TypeError;
+use crate::formula::Formula;
+use crate::formula::math::Sum;
 use crate::planner::{Plan, Planner};
 use crate::premise::reading;
 use crate::query::Application as _;
@@ -17,7 +19,7 @@ use crate::rule::body;
 use crate::session::RuleRegistry;
 use crate::source::test::TestEnv;
 use crate::the;
-use crate::{ConceptDescriptor, DeductiveRule, Parameters};
+use crate::{ConceptDescriptor, DeductiveRule, FormulaQuery, Parameters};
 use dialog_peer::helpers::{test_repo, test_session_with_peer};
 use dialog_repository::Branch;
 use dialog_storage::provider::storage::VolatileSpace;
@@ -586,6 +588,83 @@ async fn it_takes_a_stored_record_apart_by_a_map_pattern() -> anyhow::Result<()>
     Ok(())
 }
 
+/// A value of no shape does not match and is not an error: under a
+/// field that declares no type, text, a number and a record of before
+/// stored beside a map are passed over, by a query run by itself and by
+/// a rule's body alike.
+#[dialog_common::test]
+async fn it_passes_over_a_value_of_no_shape() -> anyhow::Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    store(
+        &branch,
+        &operator,
+        &[
+            (
+                the!("mixed/value"),
+                &entity("id:map"),
+                map(&[("title", text("Buy milk"))]),
+            ),
+            (the!("mixed/value"), &entity("id:text"), text("Buy milk")),
+            (
+                the!("mixed/value"),
+                &entity("id:number"),
+                Value::UnsignedInt(7),
+            ),
+            (
+                the!("mixed/value"),
+                &entity("id:before"),
+                Value::Record(vec![0xa1, 0x61, 0x61, 0x01]),
+            ),
+        ],
+    )
+    .await?;
+    let untyped: ConceptDescriptor = serde_json::from_value(serde_json::json!({
+        "with": { "is": { "the": "mixed/value", "pick": "all:" } }
+    }))?;
+    let reading = || {
+        let mut terms = Parameters::new();
+        terms.insert("this".into(), Term::var("this"));
+        terms.set("is".into(), shape(&[("title", var("title"))]));
+        ConceptQuery {
+            predicate: untyped.clone(),
+            terms,
+        }
+    };
+    let expected = vec![vec![
+        Some(Value::Entity(entity("id:map"))),
+        Some(text("Buy milk")),
+    ]];
+
+    let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+    let rows = reading()
+        .evaluate(Match::new().seed(), &source)
+        .try_vec()
+        .await?;
+    let rows: Vec<Vec<Option<Value>>> = rows
+        .iter()
+        .map(|row| {
+            vec![
+                row.value_of("this").cloned(),
+                row.value_of("title").cloned(),
+            ]
+        })
+        .collect();
+    assert_eq!(rows, expected, "run by itself");
+
+    let (rows, _) = solve(
+        &source,
+        vec![Premise::Assert(Proposition::Concept(reading()))],
+        &Environment::new(),
+        Match::new(),
+        &["this", "title"],
+    )
+    .await?;
+    assert_eq!(rows, expected, "planned, as a rule's body is");
+    Ok(())
+}
+
 /// A pattern with no variable is a value, like any constant: a query
 /// by it finds the fact that holds that value.
 #[dialog_common::test]
@@ -1054,6 +1133,126 @@ fn it_refuses_a_rule_whose_pattern_can_never_be_bound() {
         .expect_err("nothing binds the variable inside the negated pattern");
     assert!(
         matches!(&refused, TypeError::RequiredBindings { required } if required.contains("unbound")),
+        "{refused:?}"
+    );
+}
+
+/// `total == of + 1`, as a premise.
+fn add_one(of: Term<Any>) -> Premise {
+    let mut terms = Parameters::new();
+    terms.insert("of".into(), of);
+    terms.insert("with".into(), Term::constant(1u32));
+    terms.insert("is".into(), Term::var("total"));
+    Premise::from(FormulaQuery::from(
+        Sum::apply(terms).expect("a sum applies"),
+    ))
+}
+
+/// A pattern's type follows from its shape and its leaves' types. A
+/// rule that binds a text from inside a map and adds a number to it is
+/// refused, as one that adds a number to a text read from a text field
+/// is: by inference, naming the variable.
+#[dialog_common::test]
+fn it_refuses_adding_a_number_to_a_text_bound_inside_a_map() {
+    let total = concept("total", "note/total", "number:");
+
+    let today = DeductiveRule::new(
+        total.clone(),
+        vec![
+            read("note/title", "text:", var("title")),
+            add_one(Term::var("title")),
+        ],
+    )
+    .expect_err("a number is not added to a text");
+    assert!(
+        matches!(&today, TypeError::TypeInference { reason } if reason.contains("title")),
+        "{today:?}"
+    );
+
+    let title: Term<Any> = Term::<String>::var("title").into();
+    let inside = DeductiveRule::new(
+        total.clone(),
+        vec![
+            read(
+                "note/payload",
+                "record:",
+                shape(&[("title", Pattern::Term(title))]).with_rest(Term::blank()),
+            ),
+            add_one(Term::var("title")),
+        ],
+    )
+    .expect_err("a number is not added to a text bound inside a map");
+    assert!(
+        matches!(&inside, TypeError::TypeInference { reason } if reason.contains("title")),
+        "{inside:?}"
+    );
+
+    // A leaf written with no type is any present value, so the same
+    // rule over a number inside the map compiles.
+    let count: Term<Any> = Term::<u32>::var("count").into();
+    DeductiveRule::new(
+        total,
+        vec![
+            read(
+                "note/payload",
+                "record:",
+                shape(&[("count", Pattern::Term(count))]).with_rest(Term::blank()),
+            ),
+            add_one(Term::var("count")),
+        ],
+    )
+    .expect("a number is added to a number bound inside a map");
+}
+
+/// A map, a list or a tuple stands only where a record can be read:
+/// under a field that reads text it is refused, and so is a rest that
+/// another premise needs to be a number.
+#[dialog_common::test]
+fn it_types_a_pattern_by_its_shape() {
+    let heading = concept("heading", "note/heading", "text:");
+    let refused = DeductiveRule::new(
+        heading.clone(),
+        vec![
+            read("note/title", "text:", var("heading")),
+            read("note/title", "text:", shape(&[("title", var("x"))])),
+        ],
+    )
+    .expect_err("a text field holds no map");
+    assert!(
+        matches!(refused, TypeError::TypeInference { .. }),
+        "{refused:?}"
+    );
+
+    // What an equality sets equal to a map is not narrowed to a
+    // record, and neither is a rest: either may still be read from a
+    // field that declares no type, where a value of another type is a
+    // row to drop.
+    card_rule([0, 1, 2]).expect("compiles");
+    DeductiveRule::new(
+        card(),
+        vec![read(
+            "note/payload",
+            "record:",
+            shape(&[("title", var("title"))]).with_rest(Term::var("card")),
+        )],
+    )
+    .expect("compiles");
+
+    // A rest is a map, so it is not added to.
+    let refused = DeductiveRule::new(
+        concept("total", "note/total", "number:"),
+        vec![
+            read(
+                "note/payload",
+                "record:",
+                shape(&[("title", var("title"))]).with_rest(Term::var("rest")),
+            ),
+            add_one(Term::var("rest")),
+        ],
+    )
+    .expect_err("a number is not added to a map");
+    assert!(
+        matches!(&refused, TypeError::TypeInference { reason } if reason.contains("rest")),
         "{refused:?}"
     );
 }

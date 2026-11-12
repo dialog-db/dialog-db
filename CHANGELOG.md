@@ -20,7 +20,8 @@ says how to cut a release.
 [design/patterns.md](./design/patterns.md),
 [design/patterns/design-parameters.md](./design/patterns/design-parameters.md),
 [design/patterns/design-pattern-meaning.md](./design/patterns/design-pattern-meaning.md),
-[design/patterns/design-feasibility.md](./design/patterns/design-feasibility.md)
+[design/patterns/design-feasibility.md](./design/patterns/design-feasibility.md),
+[design/patterns/design-typing.md](./design/patterns/design-typing.md)
 
 A premise was applied to parameters that each held one variable or one
 constant, so a rule could not say a value by its shape. A parameter now
@@ -72,6 +73,14 @@ What this changes for you:
   `TypeError::RequiredBindings`, which names the variables inside the
   pattern that nothing binds. A negated premise may hold a pattern, and
   a blank inside it stands for any value.
+- A pattern's type follows from its shape and its leaves. A variable
+  inside one keeps the type it was written with, so a rule that binds a
+  text inside a map and adds a number to it fails to compile with
+  `TypeError::TypeInference`, as one that adds a number to a text field
+  does. A map, a list or a tuple under a field that reads only text, and
+  a rest or a run another premise needs to be a number, fail the same
+  way. A variable written with no type inside a pattern is any present
+  value.
 - Matching a pattern against a record under a version this release
   does not read is `EvaluationError::RecordVersion`, not a dropped row.
 - A rule's identity names a record constant that holds a composite by
