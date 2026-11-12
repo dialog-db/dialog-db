@@ -258,6 +258,10 @@ pub fn head_entities(concept: &crate::ConceptDescriptor) -> BTreeSet<Entity> {
 /// carries that reason, as it already is for a rule whose body reads an
 /// attribute through a raw scan. Ask
 /// [`storable`](DeductiveRule::storable) first to be told without one.
+///
+/// Asserting a deductive rule does not come here: a target that is
+/// never stored may hold such a rule as it is (see
+/// [`Update::hold`]). Retracting one, and an inductive rule, do.
 fn stored(storable: Result<(), TypeError>, entity: impl FnOnce() -> Entity) -> Entity {
     storable
         .map_err(|refusal| refusal.to_string())
@@ -273,6 +277,13 @@ fn stored(storable: Result<(), TypeError>, entity: impl FnOnce() -> Entity) -> E
 /// trigger footprint over derivation. Retracting the same rule erases
 /// those facts, uninstalling it.
 ///
+/// A rule the stored format cannot write (one that holds a map, a list
+/// or a tuple of terms) has no `source` to assert. A target that is
+/// never stored, the changes a query lays over a line, is asked to
+/// hold the rule itself ([`Update::hold`]) and is given the other
+/// facts, which name it. A target that is committed refuses, and the
+/// assertion panics with the reason before it asserts anything.
+///
 /// ```no_run
 /// # use dialog_query::DeductiveRule;
 /// # use dialog_query::Changes;
@@ -283,19 +294,38 @@ fn stored(storable: Result<(), TypeError>, entity: impl FnOnce() -> Entity) -> E
 /// ```
 impl Statement for &DeductiveRule {
     fn assert(self, update: &mut impl Update) {
-        let rule_entity = stored(self.storable(), || self.this());
+        // A rule the stored format writes is asserted with its body.
+        // One it cannot write (see [`DeductiveRule::storable`]) has a
+        // name and no bytes: a target that keeps the rule as it is,
+        // the changes laid over a line for one query, holds it under
+        // that name, and the facts it is found by are asserted without
+        // a body. A target that is committed gives it back, and the
+        // rule is refused before anything is asserted.
+        let (rule_entity, body) = match self.storable() {
+            Ok(()) => (self.this(), Some(self.encode())),
+            Err(refusal) => {
+                let rule_entity = self.this();
+                update
+                    .hold(&rule_entity, Box::new(self.clone()))
+                    .map_err(|_| refusal.to_string())
+                    .expect("a rule its stored body cannot write is not installed");
+                (rule_entity, None)
+            }
+        };
         update.associate(
             conclusion_attr(),
             rule_entity.clone(),
             Value::Entity(self.conclusion().this()),
             dialog_corpus::Pick::All,
         );
-        update.associate(
-            source_attr(),
-            rule_entity.clone(),
-            Value::Bytes(self.encode()),
-            dialog_corpus::Pick::All,
-        );
+        if let Some(body) = body {
+            update.associate(
+                source_attr(),
+                rule_entity.clone(),
+                Value::Bytes(body),
+                dialog_corpus::Pick::All,
+            );
+        }
         for reads in reads_entities(self) {
             update.associate(
                 reads_attr(),
