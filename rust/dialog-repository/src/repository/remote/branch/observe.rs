@@ -181,7 +181,10 @@ mod tests {
             .perform(&operator)
             .await?;
         assert_eq!(observed, Observation::Advanced(second.clone()));
-        main.pull().assuming_upstream().perform(&operator).await?;
+        main.pull(crate::Download::MinimalRanges)
+            .assuming_upstream()
+            .perform(&operator)
+            .await?;
         assert_eq!(
             main.revision().map(|head| head.tree),
             Some(second.tree.clone())
@@ -194,7 +197,10 @@ mod tests {
             .perform(&operator)
             .await?;
 
-        main.pull().assuming_upstream().perform(&operator).await?;
+        main.pull(crate::Download::MinimalRanges)
+            .assuming_upstream()
+            .perform(&operator)
+            .await?;
         let pushed = main.push().assuming_upstream().perform(&operator).await?;
         assert_eq!(
             pushed.map(|head| head.tree),

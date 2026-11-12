@@ -114,7 +114,7 @@ pub async fn sibling(size: usize) -> Result<Box<dyn Prepared>> {
     seed_stuff(&env, size, Pick::Last).await?;
     let sibling = env.branch("sibling").await?;
     sibling
-        .pull()
+        .pull(dialog_repository::Download::MinimalRanges)
         .from(&env.branch)
         .perform(&env.operator)
         .await?;

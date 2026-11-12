@@ -48,6 +48,94 @@ async fn async_tests_work() {
     assert_eq!(value.as_f64(), Some(42.0));
 }
 
+/// Resolves after `millis`.
+async fn sleep(millis: i32) {
+    let promise = js_sys::Promise::new(&mut |resolve, _| {
+        web_sys::window()
+            .expect("no window")
+            .set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, millis)
+            .expect("setTimeout errored");
+    });
+    wasm_bindgen_futures::JsFuture::from(promise).await.unwrap();
+}
+
+/// Whether `promise` settles within `millis`.
+async fn settles_within(promise: js_sys::Promise, millis: i32) -> bool {
+    let late = wasm_bindgen::JsValue::from_str("late");
+    let timeout = js_sys::Promise::new(&mut |resolve, _| {
+        web_sys::window()
+            .expect("no window")
+            .set_timeout_with_callback_and_timeout_and_arguments_1(&resolve, millis, &late)
+            .expect("setTimeout errored");
+    });
+    let first = js_sys::Promise::race(&js_sys::Array::of2(&promise, &timeout));
+    wasm_bindgen_futures::JsFuture::from(first).await.unwrap() != late
+}
+
+/// Every test has a tab of its own, and Chrome shows only the latest one.
+/// The others it hides: `visibilityState` is `hidden`, `hasFocus()` is
+/// false, and animation frames and `ResizeObserver` deliveries are held
+/// back. Run this test several times at once, one runner invocation each
+/// as nextest does, and all of them pass only when the runner makes every
+/// tab act as the focused one; without that most of them fail.
+#[wasm_bindgen_test]
+async fn a_tab_among_many_renders() {
+    use wasm_bindgen::prelude::*;
+
+    // Long enough for the sibling invocations to open their tabs.
+    sleep(1500).await;
+
+    let window = web_sys::window().expect("no window");
+    let document = window.document().expect("no document");
+
+    let frame = js_sys::Promise::new(&mut |resolve, _| {
+        window
+            .request_animation_frame(&resolve)
+            .expect("requestAnimationFrame errored");
+    });
+
+    let target: web_sys::HtmlElement = document.create_element("div").unwrap().dyn_into().unwrap();
+    target.style().set_property("width", "10px").unwrap();
+    target.style().set_property("height", "10px").unwrap();
+    document
+        .body()
+        .expect("no body")
+        .append_child(&target)
+        .unwrap();
+
+    // The first delivery reports the size the element starts with; the
+    // second can only follow the resize below.
+    let resized = js_sys::Promise::new(&mut |resolve, _| {
+        let mut deliveries = 0;
+        let delivered = Closure::<dyn FnMut()>::new(move || {
+            deliveries += 1;
+            if deliveries == 2 {
+                resolve.call0(&JsValue::NULL).unwrap();
+            }
+        });
+        web_sys::ResizeObserver::new(delivered.as_ref().unchecked_ref())
+            .expect("ResizeObserver errored")
+            .observe(&target);
+        delivered.forget();
+    });
+    sleep(200).await;
+    target.style().set_property("width", "50px").unwrap();
+
+    let frame = settles_within(frame, 8000).await;
+    let resized = settles_within(resized, 8000).await;
+
+    assert!(
+        document.visibility_state() == web_sys::VisibilityState::Visible
+            && document.has_focus().unwrap()
+            && frame
+            && resized,
+        "this tab was put behind a sibling test's: visibility {:?}, focus {}, \
+         animation frame {frame}, resize delivery {resized}",
+        document.visibility_state(),
+        document.has_focus().unwrap(),
+    );
+}
+
 #[wasm_bindgen_test]
 fn console_output_is_captured() {
     web_sys::console::log_1(&"console output from a passing test".into());

@@ -95,10 +95,23 @@ serialization, not shared memory:
 
 1. The native outer test provisions the service and gets the `Address`.
 2. It `serde_json`-serializes the `Address` into the `PROVISIONED_SERVICE_ADDRESS`
-   environment variable (`dialog_common::helpers::PROVISIONED_SERVICE_ADDRESS`).
-3. It spawns the wasm test subprocess.
-4. The wasm inner test reads that env var and `serde_json`-deserializes the
+   environment variable (`dialog_common::helpers::PROVISIONED_SERVICE_ADDRESS`),
+   and names that variable in `WBG_POOL_PASS_ENV`.
+3. It spawns the wasm test subprocess (`cargo test --target
+   wasm32-unknown-unknown` for the one inner test).
+4. The wasm test runner, `wbg-pool`, defines the variables `WBG_POOL_PASS_ENV`
+   names on `globalThis.__wbg_pool_env` in the page or worker the test runs
+   in. A wasm test in a browser has no process environment of its own.
+5. The wasm inner test reads the variable from there when it runs
+   (`dialog_common::helpers::address`) and `serde_json`-deserializes the
    `Address` back, then runs the client against it.
+
+The address is read when the test **runs**. It must never be compiled into
+the wasm test binary (`env!`, `option_env!`, a build script): cargo tracks
+such a variable as a build input, so every test, each with its own address,
+rebuilds and relinks its package's whole wasm test binary. That is what the
+macro did before, and it took over a minute per test in `dialog-repository`
+and more than an hour of the cross-target CI job.
 
 Consequences to respect:
 
@@ -115,31 +128,43 @@ Consequences to respect:
 
 ## How CI runs it (verified against `nix/rust.nix` + `flake.nix`)
 
-CI drives `cargo nextest archive` **workspace-wide**, passing the feature flag,
-then runs the archived tests. Your crate's `integration-tests` /
+CI builds a nextest archive of each configuration in the nix sandbox
+(`buildTestArchive` in `nix/rust.nix`, with the arguments in `testArguments`
+in `flake.nix`) and runs the archived tests. Each archive has a dependency
+derivation built by the same command, so the archive itself compiles the
+workspace's crates only. Your crate's `integration-tests` /
 `web-integration-tests` features delegate to `dialog-common`'s, so they hook
-into these flags automatically — no CI config change is needed to pick up a new
-integration test:
+into these flags automatically — no CI config change is needed to pick up a
+new integration test:
 
 - `test:native:debug` / `test:native:release`:
-  `cargo nextest archive --workspace ... --features integration-tests`
+  `cargo nextest archive [--release] --features integration-tests`
   → provider starts natively, test body runs native, provider stops.
+- `test:web:debug` / `test:web:release`:
+  `cargo nextest archive --workspace --exclude wbg-pool --exclude dialog-baseline --target wasm32-unknown-unknown [--release]`
+  → the unit tests in a headless browser. **Every crate's test targets must
+  build for wasm** here, with the `helpers` feature on.
 - `test:cross:integration`:
-  `cargo nextest archive --workspace ... --features web-integration-tests --target wasm32-unknown-unknown`
+  `cargo nextest archive --package <each crate with the feature> --features web-integration-tests`
   → native outer test starts the provider, serializes the address to an env
-  var, spawns the wasm inner test which deserializes it and runs the client in
-  a headless browser.
+  var, spawns the wasm inner test which reads it back from the test runner
+  and runs the client in a headless browser. Only the crates that declare
+  `web-integration-tests` are built, so **a crate with cross-target tests
+  must declare the feature** or its tests do not run here. The wasm side is
+  built by cargo when the tests run, not in the sandbox.
 - The `cargoChecks.clippy` gate runs `clippy --all-targets --all-features -D
   warnings`, so **the `helpers` feature and its server must be clippy-clean and
   must not break the wasm build** even though the server itself is native-only.
 
-Before pushing, reproduce all three locally:
+Before pushing, reproduce them locally, in the dev shell:
 
 ```
-# native archive (integration tests)
-cargo nextest archive --workspace --exclude wbg-pool --exclude dialog-baseline   --features integration-tests --archive-file /tmp/native.tar.zst
-# wasm archive (cross integration) — this is where server deps leaking to wasm bite
-cargo nextest archive --workspace --exclude wbg-pool --exclude dialog-baseline   --features web-integration-tests --target wasm32-unknown-unknown   --archive-file /tmp/wasm.tar.zst
+# native (integration tests)
+test:native:debug
+# wasm unit tests — this is where server deps leaking to wasm bite
+test:web:debug
+# cross-target (native provider, wasm client); narrow it with nextest's filter
+test:cross:integration -E 'package(<crate>)'
 # the CI clippy gate
 cargo clippy -p <crate> --all-targets --all-features -- -D warnings
 ```

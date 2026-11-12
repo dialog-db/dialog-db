@@ -101,6 +101,11 @@ mod memo;
 #[cfg(test)]
 mod number_tests;
 
+/// A typed variable over a field that declares no type, pinned as
+/// tests.
+#[cfg(test)]
+mod typed_read_tests;
+
 mod sort_order;
 pub use sort_order::*;
 

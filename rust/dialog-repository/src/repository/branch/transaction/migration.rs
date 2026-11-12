@@ -267,15 +267,26 @@ async fn concurrent_upgrades_converge() -> Result<()> {
     install(&a, &operator, installed_by_main("salary_from_bonus")).await?;
     commit(&a, &operator, unsigned("org/bonus", &alice, 500, Pick::All)).await?;
     let b = repo.branch("b").open().perform(&operator).await?;
-    b.pull().from(&a).perform(&operator).await?;
+    b.pull(crate::Download::MinimalRanges)
+        .from(&a)
+        .perform(&operator)
+        .await?;
     b.refresh(&operator).await?;
 
     upgrade(&a, &operator).await?;
     upgrade(&b, &operator).await?;
     let mut quiesced = false;
     for _ in 0..4 {
-        let pulled_a = a.pull().from(&b).perform(&operator).await?;
-        let pulled_b = b.pull().from(&a).perform(&operator).await?;
+        let pulled_a = a
+            .pull(crate::Download::MinimalRanges)
+            .from(&b)
+            .perform(&operator)
+            .await?;
+        let pulled_b = b
+            .pull(crate::Download::MinimalRanges)
+            .from(&a)
+            .perform(&operator)
+            .await?;
         if pulled_a.is_none() && pulled_b.is_none() {
             quiesced = true;
             break;

@@ -1,18 +1,13 @@
-//! Materialize a branch's content locally.
+//! Bring a branch's content local.
 //!
-//! A pull adopts an upstream head by reference: subtrees the local
-//! replica never changed stay remote and hydrate lazily as reads touch
-//! them, and blob bytes replicate on first read. That laziness is the
-//! right default for sync cost, but sometimes the caller wants the
-//! opposite guarantee — everything the head references present locally,
-//! before going offline or before latency-sensitive reads (the
-//! authorization walk over an access branch is the motivating case).
-//!
-//! [`Branch::download`] provides it: one walk of the current revision
-//! through the snapshot export machinery with download reach, fetching
-//! every block and blob the revision references that the local store
-//! does not hold, caching each as it lands. [`Pull::download`] chains
-//! the two acts — adopt the upstream head, then materialize it.
+//! A replica holds what its reads reached and its writes minted, and the
+//! rest of its head by reference: a block it lacks is fetched from the
+//! branch's upstream when a read first asks for it. How much of a
+//! revision is brought local ahead of that is a decision, and
+//! [`Download`] is its vocabulary. A pull is asked it every time
+//! ([`Branch::pull`] takes one) and fetches what it names before the head
+//! moves; [`Branch::download`] asks it of the head a branch already
+//! stands on, or of a revision it is about to adopt.
 
 use core::ops::RangeInclusive;
 use dialog_corpus::tree::CorpusNode;
@@ -21,20 +16,19 @@ use dialog_effects::blob::Load as BlobLoad;
 use dialog_search_tree::nodes;
 
 use dialog_capability::{Fork, Provider};
+use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::ConditionalSync;
+use dialog_corpus::Index;
 use dialog_corpus::merge::data_scope;
-use dialog_effects::archive::{Get, Import, Put};
-use dialog_effects::authority::{Attest, Identify};
+use dialog_effects::archive::{Get, Put};
 use dialog_effects::blob::{Import as BlobImport, Read as BlobRead};
-use dialog_effects::memory::{Publish, Resolve};
-use dialog_effects::peer::Connect;
+use dialog_effects::memory::Resolve;
 use futures_util::StreamExt as _;
 
 use crate::HeldCaches;
+use crate::repository::archive::routes;
 use crate::repository::snapshot::Snapshot;
-use crate::{
-    Branch, DownloadError, Pull, PullError, RemoteFallback, RemoteSite, Revision, Upstream,
-};
+use crate::{Branch, DownloadError, RemoteFallback, RemoteSite, Revision, TreeReference, Upstream};
 
 /// [`data_scope`] as the byte ranges the traversal takes: the operational
 /// indexes and the blob index, with history and coverage left out.
@@ -47,67 +41,117 @@ fn operational_scope() -> Vec<RangeInclusive<Vec<u8>>> {
         .to_vec()
 }
 
-/// Command struct for materializing a branch's content locally. Created
-/// by [`Branch::download`].
-pub struct Download<'a> {
+/// How much of a revision is brought local, beyond what the replica
+/// already holds.
+///
+/// Every pull names one, so that how much a pull fetches is decided where
+/// the pull is written. There is no default: the right answer differs by
+/// branch, and a wrong one is either a replica that waits on the network
+/// for what it showed a moment ago, or one that pays for a space it never
+/// looked at.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Download {
+    /// Nothing. A head is adopted by reference, and a block is fetched
+    /// when a read first asks for it.
+    ///
+    /// The cheapest pull, and the one for a replica that is always
+    /// connected or does not mind a read waiting. After it, a read or a
+    /// write the replica answered from its own blocks can wait on the
+    /// remote, wherever the upstream changed a leaf it holds.
+    MinimalRanges,
+    /// What this replica holds of its head, as the revision has it: the
+    /// key ranges its queries read and its commits wrote.
+    ///
+    /// The pull for a replica that works offline. A replica holds the
+    /// leaves its reads reached and its writes minted. A head adopted by
+    /// reference leaves every leaf the upstream changed on the remote,
+    /// held before or not, so a read or a write that was answered at once
+    /// waits the next time, and fails without a network. This fetches
+    /// those leaves first, and only those: the head's tree and the
+    /// revision's are walked in step
+    /// ([`PersistentTree::follow`](dialog_search_tree::PersistentTree::follow)),
+    /// and a node of the revision is fetched only where its keys meet a
+    /// leaf the replica holds. A range the replica never read stays by
+    /// reference however much of it changed, so the cost follows what
+    /// changed in what this replica uses.
+    ///
+    /// It brings tree nodes, not what they point at: a spilled value or
+    /// a blob a changed leaf newly references is fetched when it is
+    /// read. Of the head a branch already stands on it fetches nothing,
+    /// and a branch with no head holds nothing to bring along.
+    QueriedRanges,
+    /// What reads and authorization touch: the entity, attribute and
+    /// value orders and the blob index, with their spilled values and
+    /// referenced blobs.
+    ///
+    /// The download a profile wants. What it leaves by reference is
+    /// history and coverage, which no read path can reach, and which are
+    /// the only regions that grow with every edit ever made and not with
+    /// the live fact count. The revision DAG is not among them: revision
+    /// records are ordinary facts in the data orders, so ancestry, `log`
+    /// and skip tables keep working. A history record that turns out to
+    /// be needed is fetched on demand.
+    Operational,
+    /// The key ranges given, with their spilled values and referenced
+    /// blobs, the rest left by reference. See
+    /// [`SnapshotExport::within`](crate::SnapshotExport::within).
+    Ranges(Vec<RangeInclusive<Vec<u8>>>),
+    /// Every block and blob the revision references.
+    Everything,
+}
+
+/// Command struct for bringing a branch's content local. Created by
+/// [`Branch::download`].
+pub struct DownloadBranch<'a> {
     branch: &'a Branch,
     from: Option<Upstream>,
     revision: Option<Revision>,
-    scope: Option<Vec<RangeInclusive<Vec<u8>>>>,
+    extent: Download,
 }
 
 impl Branch {
-    /// Fetch every block and blob the current revision references that
-    /// the local store does not hold, from the branch's upstream.
+    /// Fetch what `extent` names of the current revision that the local
+    /// store does not hold, from the branch's upstream.
     ///
     /// A no-op without a remote upstream (a local upstream shares the
     /// store, so there is nothing to fetch) or before the first
     /// revision.
-    pub fn download(&self) -> Download<'_> {
-        Download {
+    pub fn download(&self, extent: Download) -> DownloadBranch<'_> {
+        DownloadBranch {
             branch: self,
             from: None,
             revision: None,
-            scope: None,
+            extent,
         }
     }
 }
 
-impl Download<'_> {
-    /// Materialize `revision` instead of the branch's current head —
-    /// how a caller downloads a prepared-but-not-yet-adopted revision
+impl<'a> DownloadBranch<'a> {
+    /// The download of `revision` from `from`, as a pull makes it of the
+    /// head it prepared.
+    pub(crate) fn prepared(
+        branch: &'a Branch,
+        from: Upstream,
+        revision: Revision,
+        extent: Download,
+    ) -> Self {
+        Self {
+            branch,
+            from: Some(from),
+            revision: Some(revision),
+            extent,
+        }
+    }
+
+    /// Download `revision` instead of the branch's current head: how a
+    /// caller brings local a revision it prepared and has not adopted,
     /// so the head never advances past the blocks the store holds.
     pub fn of(mut self, revision: Revision) -> Self {
         self.revision = Some(revision);
         self
     }
 
-    /// Materialize only the key regions in `scope`, leaving the rest of
-    /// the tree by reference. See [`SnapshotExport::within`].
-    pub fn within(mut self, scope: impl Into<Vec<RangeInclusive<Vec<u8>>>>) -> Self {
-        self.scope = Some(scope.into());
-        self
-    }
-
-    /// Materialize only what reads and authorization touch: the
-    /// entity/attribute/value indexes and the blob index, with their
-    /// spilled values and referenced blobs.
-    ///
-    /// This is the download a profile wants. The regions it skips are
-    /// history and coverage, which no read path can reach — a selector
-    /// only ever ranges over the three data orderings — while they are
-    /// also the only regions that grow with every edit ever made rather
-    /// than with the live fact count.
-    ///
-    /// The revision DAG is *not* in what it skips: revision records are
-    /// ordinary facts in the data indexes, so ancestry, `log`, and skip
-    /// tables keep working. And a history record that turns out to be
-    /// needed hydrates from the upstream on demand rather than failing.
-    pub fn operational(self) -> Self {
-        self.within(operational_scope())
-    }
-
-    /// Materialize the branch's current revision locally.
+    /// Fetch what the extent names.
     pub async fn perform<Env>(self, env: &Env) -> Result<(), DownloadError>
     where
         Env: Provider<Get>
@@ -130,6 +174,36 @@ impl Download<'_> {
             + 'static,
     {
         let branch = self.branch;
+        let scope = match self.extent {
+            Download::MinimalRanges => return Ok(()),
+            Download::Everything => None,
+            Download::Operational => Some(operational_scope()),
+            Download::Ranges(scope) => Some(scope),
+            Download::QueriedRanges => {
+                let (Some(held), Some(revision)) = (branch.revision(), self.revision) else {
+                    return Ok(());
+                };
+                if held.tree == revision.tree {
+                    return Ok(());
+                }
+                // The revision may come from an upstream the branch does
+                // not track: lend its route, so what the walk misses is
+                // fetched from the peer that holds it.
+                let fallback = match self.from {
+                    Some(upstream) => upstream.fallback(),
+                    None => branch.fallback(),
+                };
+                let _loan = routes::lend(branch.routes(), branch.of(), &fallback);
+                let catalog = branch.archive().index();
+                let at =
+                    |tree: &TreeReference| Index::at(catalog.clone(), NodeHash::from(*tree.hash()));
+                at(&revision.tree)
+                    .follow(&at(&held.tree), env)
+                    .await
+                    .map_err(DownloadError::Tree)?;
+                return Ok(());
+            }
+        };
         let Some(revision) = self.revision.or_else(|| branch.revision()) else {
             return Ok(());
         };
@@ -157,7 +231,7 @@ impl Download<'_> {
         let export = Snapshot::cold(branch.subject(), revision, &HeldCaches::of(env))
             .export()
             .download(remote);
-        let export = match self.scope {
+        let export = match scope {
             Some(scope) => export.within(scope),
             None => export,
         };
@@ -167,92 +241,6 @@ impl Download<'_> {
             item.map_err(DownloadError::Snapshot)?;
         }
         Ok(())
-    }
-}
-
-/// Command struct for a pull followed by a download of the adopted head.
-/// Created by [`Pull::download`].
-pub struct PullDownload<'a>(Pull<'a>, Option<Vec<RangeInclusive<Vec<u8>>>>);
-
-impl<'a> Pull<'a> {
-    /// After the pull, fetch every block and blob the adopted head
-    /// references that the local store does not hold.
-    ///
-    /// The pull itself stays byte-frugal — it adopts by reference — and
-    /// this chains the materialization the caller opted into. The login
-    /// flow is the motivating case: pull the account's access branch,
-    /// download it, and proofs read entirely locally.
-    pub fn download(self) -> PullDownload<'a> {
-        PullDownload(self, None)
-    }
-}
-
-impl<'a> PullDownload<'a> {
-    /// Materialize only the key regions in `scope`. See
-    /// [`Download::within`].
-    pub fn within(mut self, scope: impl Into<Vec<RangeInclusive<Vec<u8>>>>) -> Self {
-        self.1 = Some(scope.into());
-        self
-    }
-
-    /// Materialize only the operational regions. See
-    /// [`Download::operational`].
-    pub fn operational(self) -> Self {
-        self.within(operational_scope())
-    }
-
-    /// Pull with the materialization ORDERED BEFORE the head advance:
-    /// prepare the merge, download every block and blob the prepared
-    /// revision references, and only then commit the cell advance. A
-    /// failed download — offline included — leaves the local revision
-    /// untouched, so the branch can never point at blocks the store
-    /// lacks: there is no window in which a crash or a lost connection
-    /// strands a by-reference head. Returns what the pull returned.
-    pub async fn perform<Env>(self, env: &Env) -> Result<Option<Revision>, PullError>
-    where
-        Env: Provider<Get>
-            + Provider<Put>
-            + Provider<Import>
-            + Provider<nodes::Write<CorpusNode>>
-            + ConditionalSync
-            + Provider<Resolve>
-            + Provider<Publish>
-            + Provider<Identify>
-            + Provider<Attest>
-            + Provider<BlobRead>
-            + Provider<BlobImport>
-            + Provider<ArchiveLoad>
-            + Provider<nodes::Write<CorpusNode>>
-            + ConditionalSync
-            + Provider<nodes::Read<CorpusNode>>
-            + Provider<nodes::Preload<CorpusNode>>
-            + ConditionalSync
-            + Provider<BlobLoad>
-            + Provider<dialog_corpus::Preload>
-            + Provider<dialog_corpus::Speculation>
-            + Provider<Fork<RemoteSite, Resolve>>
-            + Provider<Fork<RemoteSite, BlobRead>>
-            + Provider<Connect>
-            + dialog_common::Holds
-            + ConditionalSync
-            + 'static,
-    {
-        let branch = self.0.branch();
-        let from = self.0.source().cloned();
-        // Boxed: the prepare future carries the whole pull machinery and
-        // trips the large-futures lint inline.
-        let prepared = Box::pin(self.0.prepare(env)).await?;
-        if let Some(revision) = prepared.revision().cloned() {
-            Download {
-                branch,
-                from,
-                revision: Some(revision),
-                scope: self.1,
-            }
-            .perform(env)
-            .await?;
-        }
-        prepared.commit(env).await
     }
 }
 
@@ -324,7 +312,7 @@ mod tests {
         let writer = writing.writer();
         let held = writer.lock().await;
 
-        let mut pulling = Box::pin(syncing.pull().download().perform(&session));
+        let mut pulling = Box::pin(syncing.pull(crate::Download::Everything).perform(&session));
         for _ in 0..1000 {
             let landed = poll_fn(|context| {
                 Poll::Ready(match pulling.as_mut().poll(context) {
