@@ -9,6 +9,11 @@
 //! concept queries, deductive and inductive rules, facts and dispatched
 //! commands.
 //!
+//! What a form says, apart from how it was written, is its syntax tree
+//! ([`syntax`]), which is kept as data ([`data`]). Expanding and
+//! compiling still read the notation as parsed, and are to read the
+//! tree.
+//!
 //! ```no_run
 //! # fn main() -> Result<(), dialog_notation::Error> {
 //! use dialog_notation::{Expander, compile};
@@ -32,10 +37,13 @@ pub mod expand;
 pub mod form;
 pub mod kernel;
 pub mod pattern;
+pub mod syntax;
 
 pub use compile::{Query, Step, compile};
+pub use data::Data;
 pub use expand::{Diagnostic, Expander, Position};
 pub use form::{Form, Part, read};
+pub use syntax::{Parameters, Syntax};
 
 /// Why a document was not read, expanded or compiled.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]

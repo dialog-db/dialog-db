@@ -7,7 +7,7 @@
 
 use anyhow::Result;
 use dialog_corpus::Value;
-use dialog_notation::{Error, Form, read};
+use dialog_notation::{Error, Syntax, read};
 use dialog_query::concept::descriptor::ConceptStatement;
 use dialog_query::query::Output as _;
 use dialog_query::{Any, AttributeDescriptor, ConceptConclusion, ConceptQuery, Term};
@@ -408,9 +408,10 @@ async fn it_elects_one_of_two_writes_of_one_round_whatever_their_order() -> Resu
     Ok(())
 }
 
-/// One call, three ways to write it: the primary with no label, under
-/// `of:`, and as the record the labelled parts are. A concept and a
-/// relation read the same through each, and a write lands the same.
+/// One call, two ways to write it: the primary with no label, and under
+/// `of:`. A concept and a relation read the same through each, and a
+/// write lands the same. A struct in the primary's place is the primary,
+/// a value, and not the labelled parts written another way.
 #[dialog_common::test]
 async fn it_reads_a_call_the_same_however_its_primary_is_written() -> Result<()> {
     let mut notebook = Notebook::open().await?;
@@ -419,7 +420,7 @@ async fn it_reads_a_call_the_same_however_its_primary_is_written() -> Result<()>
         .submit(
             r#"(add (todo todo:1 list: list:home text: "Buy milk"))
                (assert! (xyz.note text: (:text "by label") of: note:1))
-               (assert! (xyz.note {of: note:2 text: (:text "by record")}))"#,
+               (assert! (xyz.note note:2 text: (:text "by position")))"#,
         )
         .await?;
 
@@ -427,7 +428,6 @@ async fn it_reads_a_call_the_same_however_its_primary_is_written() -> Result<()>
     for query in [
         "(query (todo ?t text: ?x))",
         "(query (todo text: ?x of: ?t))",
-        "(query (todo {of: ?t text: ?x}))",
     ] {
         assert_eq!(report(&mut notebook, query).await?, milk, "{query}");
     }
@@ -435,8 +435,17 @@ async fn it_reads_a_call_the_same_however_its_primary_is_written() -> Result<()>
         report(&mut notebook, "(query (xyz.note of: ?n text: ?x))").await?,
         vec![
             r#"(xyz.note note:1 text: "by label")"#,
-            r#"(xyz.note note:2 text: "by record")"#,
+            r#"(xyz.note note:2 text: "by position")"#,
         ]
+    );
+
+    let record = notebook
+        .submit(r#"(assert! (xyz.note {of: note:3 text: (:text "by record")}))"#)
+        .await
+        .map_err(|error| error.downcast::<Error>());
+    assert!(
+        matches!(record, Err(Ok(Error::Unsupported(_)))),
+        "{record:?}"
     );
 
     // Beside a part with no label, `of:` would be the primary twice.
@@ -455,7 +464,8 @@ async fn it_reads_a_call_the_same_however_its_primary_is_written() -> Result<()>
 async fn it_keeps_a_form_on_a_branch_under_the_entity_that_names_it() -> Result<()> {
     let notebook = Notebook::open().await?;
     let form = read(TODO)?.remove(0);
-    let entity = form.entity()?;
+    let syntax = Syntax::try_from(&form)?;
+    let entity = syntax.entity()?;
 
     let is: AttributeDescriptor =
         serde_json::from_value(json!({ "the": "syntax.form/is", "as": "record:" }))?;
@@ -464,7 +474,7 @@ async fn it_keeps_a_form_on_a_branch_under_the_entity_that_names_it() -> Result<
         .transaction()
         .assert(ConceptStatement {
             this: entity.clone(),
-            with: vec![is.resolve(Value::Record(form.encode()?))?],
+            with: vec![is.resolve(Value::Record(syntax.encode()?))?],
         })
         .commit()
         .publish()
@@ -491,9 +501,10 @@ async fn it_keeps_a_form_on_a_branch_under_the_entity_that_names_it() -> Result<
     else {
         panic!("a record");
     };
-    let kept = Form::decode(&bytes)?;
+    let kept = Syntax::decode(&bytes)?;
+    assert_eq!(kept, syntax);
     assert_eq!(kept.entity()?, entity);
-    assert_eq!(kept.reference()?, form.reference()?);
+    assert_eq!(read(&kept.to_string())?[0].reference()?, form.reference()?);
     Ok(())
 }
 

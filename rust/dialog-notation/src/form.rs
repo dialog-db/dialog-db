@@ -66,26 +66,7 @@ const OPERATOR: &str = "+-*/<>=";
 
 impl Form {
     /// An application of `head` to `parts`.
-    ///
-    /// Its labelled parts are one record at its end, so a record written
-    /// out there is the same thing: `(todo {of: ?t state: :open})` is
-    /// `(todo of: ?t state: :open)`.
-    pub fn application(head: Form, mut parts: Vec<Part>) -> Self {
-        let labelled = parts.iter().any(|part| matches!(part, Part::Labelled(..)));
-        if !labelled
-            && let Some(Part::Bare(Form::Map(entries))) = parts.last()
-            && !entries.is_empty()
-            && entries.iter().all(|(key, _)| key.label().is_some())
-        {
-            let Some(Part::Bare(Form::Map(entries))) = parts.pop() else {
-                unreachable!("the last part is a record");
-            };
-            parts.extend(
-                entries.into_iter().filter_map(|(key, value)| {
-                    Some(Part::Labelled(key.label()?.to_string(), value))
-                }),
-            );
-        }
+    pub fn application(head: Form, parts: Vec<Part>) -> Self {
         Form::Application(Box::new(head), parts)
     }
 
@@ -463,15 +444,12 @@ mod tests {
         assert_eq!(Form::symbol("xyz.todo/text").kind(), Some(Kind::Attribute));
     }
 
-    /// One call, three ways to write it. The last two read as the same
-    /// form, and the first has the same primary and the same labels.
+    /// One call, two ways to write it: the part with no label is `of:`.
     #[test]
     fn it_reads_the_primary_with_or_without_its_label() {
         let bare = &read("(todo ?t state: :open)").unwrap()[0];
         let labelled = &read("(todo state: :open of: ?t)").unwrap()[0];
-        let record = &read("(todo {state: :open of: ?t})").unwrap()[0];
-        assert_eq!(labelled, record);
-        for form in [bare, labelled, record] {
+        for form in [bare, labelled] {
             assert_eq!(form.bare(), vec![&Form::Variable("t".into())]);
             assert_eq!(
                 form.labelled(),
@@ -482,6 +460,20 @@ mod tests {
         let twice = &read("(fam.parent ?a of: ?b)").unwrap()[0];
         assert_eq!(twice.bare(), vec![&Form::Variable("a".into())]);
         assert_eq!(twice.labelled().len(), 1);
+    }
+
+    /// A struct is a value like 5: written as the one part with no
+    /// label it is that part, and its entries are not the labelled
+    /// parts of what it is passed to.
+    #[test]
+    fn it_reads_a_struct_as_the_part_it_is() {
+        let form = &read("(expand {note: ?n})").unwrap()[0];
+        let Form::Map(entries) = form.bare()[0] else {
+            panic!("a struct");
+        };
+        assert_eq!(entries.len(), 1);
+        assert!(form.labelled().is_empty());
+        assert_ne!(form, &read("(expand note: ?n)").unwrap()[0]);
     }
 
     #[test]
