@@ -27,7 +27,8 @@ Where it shows today:
 
 What a format has cost before, from the code and the changelog:
 
-- A rule's entity is made of its canonical spelling. Format 3 changed the spelling, so it changed the entity of every rule, and `upgrade_rules` moves each body to the entity its new spelling names.
+- A rule's entity is made of its canonical spelling, and since format 3 the body is that spelling. So a format that spells a rule another way would name it another entity, unless a rule format 3 can write keeps the spelling it has. Not checked: whether the format's number is in the name.
+- `Branch::upgrade_rules` rewrote every body of an earlier format into format 3. Until an embedder runs it, an earlier body is read as before.
 - A release refuses a format later than its own, so a rule written in a new format is inert on an older replica until it upgrades.
 
 What each of the four would ask of a body, as read so far and not as a plan:
