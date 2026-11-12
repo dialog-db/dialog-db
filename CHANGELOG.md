@@ -14,6 +14,37 @@ says how to cut a release.
 
 ## Unreleased
 
+### A read's warm walk picks children by the read's own routing, and decodes no buffer
+
+Refs [#762](https://github.com/dialog-db/dialog-db/issues/762).
+
+A query on a branch whose repository tracks a remote warms the ranges it
+is about to read with a scoped walk of the tree
+(`Traversable::traverse_available_within`). At each index node the walk
+decoded the write buffer of every link to see whether a buffered op fell
+in its scope. It now keeps exactly the children a read of the scope
+descends into, found by binary search on the node's separators
+(`ArchivedIndex::route` and `children_within`), with no buffer decoded and
+no separator rebuilt. A write buffers each op on the link that same rule
+picks, so the children kept are the ones that can hold in-scope content,
+buffered or stored.
+
+What this changes for you:
+
+- A view read on a member that tracks a remote and holds every block
+  costs a third fewer instructions (the `query-member` perf scenario:
+  181.8 M to 120.2 M), and no longer grows with how many links hold
+  buffered ops.
+- A scoped walk (a warm walk, or a download `within` a scope) may keep
+  child 0 of a node for a scope below its first separator, one path to the
+  leftmost leaf it did not keep before, because a read of that scope
+  descends there too.
+- `dialog_search_tree::helpers::buffer_decodes()` counts the novelty
+  buffers the calling thread has decoded, for tests.
+
+Why: on a member whose blocks are all local, the walk was most of a view
+read, and its cost rose with every change that left more ops buffered.
+
 ### A typed variable reads the values of its type through a concept, as it does through a scan
 
 [#782](https://github.com/dialog-db/dialog-db/pull/782),
@@ -391,6 +422,7 @@ that embodies the model should not depend on a store. #755 made the tree
 ask its environment for nodes; this makes the layer above it ask for
 everything else the same way, so what a store is and where it is stay the
 environment's business.
+
 ### A tree asks its environment for nodes, and the environment keeps them
 
 [design/tree-node-reads.md](./design/tree-node-reads.md), planned in

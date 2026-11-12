@@ -138,6 +138,13 @@ where
         }
     }
 
+    /// Whether nothing is queued for this driver and none of its jobs is
+    /// in flight: every hint it took has been walked to the end.
+    #[cfg(test)]
+    fn is_idle(&self) -> bool {
+        self.inflight.is_empty() && self.queue.pending() == 0
+    }
+
     /// Reap completed jobs without blocking, freeing budget capacity.
     fn reap(&mut self, context: &mut Context<'_>) {
         while let Poll::Ready(Some(likelihood)) = self.inflight.poll_next_unpin(context) {
@@ -205,6 +212,9 @@ async fn warm_source(
     if !routes.fetches(view.subject().did()) {
         return Ok(());
     }
+    // Counted by whoever subscribes (the perf harness counts spans by
+    // name): a walk started, and below, each node it visited.
+    drop(tracing::trace_span!("warm_walk"));
     let catalog = view.catalog();
     let storage: &dyn TreeEnv = env;
     // Every load the walk performs is ranked at the hint's likelihood.
@@ -223,6 +233,7 @@ async fn warm_source(
         if visit.is_err() {
             break;
         }
+        drop(tracing::trace_span!("warm_node"));
     }
     Ok(())
 }
@@ -236,6 +247,7 @@ mod tests {
     use dialog_query::{AttributeQuery, Term, the};
 
     use super::*;
+    use crate::Download;
     use crate::RepositoryExt as _;
     use crate::helpers::{Counting, connect};
     use dialog_capability::Provider;
@@ -250,9 +262,10 @@ mod tests {
     use dialog_effects::archive::Get;
     use dialog_effects::archive::prelude::ArchiveScope;
     use dialog_query::query::Output as _;
-    use dialog_search_tree::helpers::Blocks;
+    use dialog_search_tree::helpers::{Blocks, buffer_decodes};
     use dialog_storage::DialogStorageError;
     use dialog_varsig::did;
+    use futures_util::future::poll_fn;
     use futures_util::stream;
 
     #[cfg(target_arch = "wasm32")]
@@ -587,6 +600,333 @@ mod tests {
             bare,
             "four warm-ups add no fallback loads: {:?}",
             env.snapshot()
+        );
+        Ok(())
+    }
+
+    /// `rounds` batches of `per` entities' `a/name` and `b/name`. Each
+    /// committed on its own leaves the index nodes above the leaves
+    /// holding ops in their links' buffers.
+    fn rounds(rounds: usize, per: usize) -> Result<Vec<dialog_corpus::Changes>> {
+        use dialog_corpus::Statement as _;
+        let mut batches = Vec::with_capacity(rounds);
+        for round in 0..rounds {
+            let mut changes = dialog_corpus::Changes::new();
+            for index in 0..per {
+                let entity: dialog_corpus::Entity = format!("id:{round}-{index}").parse()?;
+                the!("a/name")
+                    .of(entity.clone())
+                    .is(format!("a {round} {index}"))
+                    .assert(&mut changes);
+                the!("b/name")
+                    .of(entity)
+                    .is(format!("b {round} {index}"))
+                    .assert(&mut changes);
+            }
+            batches.push(changes);
+        }
+        Ok(batches)
+    }
+
+    fn attribute_query(attribute: &str) -> AttributeQuery {
+        AttributeQuery::new(
+            Term::from(
+                attribute
+                    .parse::<dialog_query::Relation>()
+                    .expect("an attribute"),
+            ),
+            Term::blank(),
+            Term::blank(),
+            Term::blank(),
+            None,
+        )
+    }
+
+    /// A member that tracks a remote and holds every block warms a hinted
+    /// range without reading a block, fetching one, or decoding a buffer:
+    /// the walk picks the children a read of the range descends into from
+    /// the separators alone, and finds each of them in the line's cache.
+    ///
+    /// "Reads no block" holds because the read before it left every node
+    /// of both ranges in the node cache, and the cache keeps them: its
+    /// budget is `NODE_CACHE_BUDGET` (128 MiB) on every target and profile,
+    /// against a tree of a few hundred kilobytes here. A cache small enough
+    /// to evict them would make the walk read them back from the local
+    /// archive, which is still no fetch and no decode.
+    #[dialog_common::test]
+    async fn it_warms_a_local_member_without_reading_fetching_or_decoding() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let env = Counting::new(operator);
+        let repo = profile
+            .space(unique_name("local-member"))
+            .create()
+            .perform(&env)
+            .await?;
+        let branch = repo.branch("main").open().perform(&env).await?;
+        for batch in rounds(24, 12)? {
+            branch
+                .transaction()
+                .integrate(batch)
+                .commit()
+                .publish()
+                .perform(&env)
+                .await?;
+        }
+
+        // Track a remote nothing here reaches: every block is local.
+        let site = dialog_remote_s3::Address::builder("https://s3.us-east-1.amazonaws.com")
+            .region("us-east-1")
+            .bucket("bucket")
+            .build()?;
+        let origin = connect("origin", site, repo.did(), &env).await?;
+        let remote_branch = origin.branch("main").open().perform(&env).await?;
+        branch.set_upstream(remote_branch).perform(&env).await?;
+        let branch = repo.branch("main").open().perform(&env).await?;
+        assert!(
+            branch.routes().fetches(branch.of()),
+            "a member tracking a remote has reads warm ahead"
+        );
+
+        // Both ranges read once: what a view's reads touch is cached.
+        for attribute in ["a/name", "b/name"] {
+            branch
+                .query()
+                .select(attribute_query(attribute))
+                .perform(&env)
+                .try_vec()
+                .await?;
+        }
+
+        // The nodes a walk of `b/name` passes hold buffered links it could
+        // decode: without them this pins nothing.
+        let source = Source::from(branch.clone());
+        let view = source.as_view();
+        let root = view.root().expect("the branch has a head");
+        let tree = Index::at(view.catalog(), NodeHash::from(root));
+        let manifest = tree.manifest(&env).await?;
+        let range = selector_range(&selector("b/name"), &manifest);
+        let scope = [range.start().as_ref().to_vec()..=range.end().as_ref().to_vec()];
+        let mut buffered = 0usize;
+        {
+            let visits = tree.traverse_available_within(&env, &scope);
+            futures_util::pin_mut!(visits);
+            while let Some(visit) = visits.next().await {
+                if let Some(node) = visit?.node()
+                    && let dialog_search_tree::NodeBody::Index(index) = node.body()
+                {
+                    buffered += index.novelty_len();
+                }
+            }
+        }
+        assert!(
+            buffered > 0,
+            "fixture: the walk's nodes must hold buffered ops it could decode"
+        );
+
+        // What the read of `a/name` costs with nothing to warm.
+        let decodes = buffer_decodes();
+        let rows = branch
+            .query()
+            .select(attribute_query("a/name"))
+            .perform(&env)
+            .try_vec()
+            .await?;
+        let bare = buffer_decodes() - decodes;
+        assert_eq!(rows.len(), 24 * 12);
+
+        let listening = Provider::<Preload>::execute(
+            &env,
+            PreloadRequest {
+                selector: selector("b/name"),
+                likelihood: Likelihood::Likely,
+            },
+        )
+        .await;
+        assert!(listening, "the default budget accepts hints");
+
+        let gets = env.count("archive::Get");
+        let hydrations = env.count("hydrate::Hydrate");
+        let decodes = buffer_decodes();
+        let rows = branch
+            .query()
+            .select(attribute_query("a/name"))
+            .perform(&env)
+            .try_vec()
+            .await?;
+        let warmed = buffer_decodes() - decodes;
+        assert_eq!(rows.len(), 24 * 12);
+        let queue = Provider::<Speculation>::execute(&env, ()).await;
+        assert_eq!(queue.pending(), 0, "the driven query executed the hint");
+
+        assert_eq!(
+            env.count("archive::Get") - gets,
+            0,
+            "the walk reads no block"
+        );
+        assert_eq!(
+            env.count("hydrate::Hydrate") - hydrations,
+            0,
+            "the walk fetches nothing"
+        );
+        assert_eq!(
+            warmed, bare,
+            "the walk decodes no buffer: the query decoded what it decodes alone"
+        );
+        Ok(())
+    }
+
+    /// A replica that adopted a head by reference still warms ahead of
+    /// demand: a walk of a hinted range the replica does not hold fetches
+    /// the whole range, so the range's own read then fetches nothing.
+    ///
+    /// A query drives the walks it takes only while it runs: they are
+    /// dropped with its stream, finished or not, so whether a walk ends
+    /// inside some query depends on how fast the remote answers. This test
+    /// drives the walk itself, with a driver over a stream that never
+    /// yields, until the driver is idle, so it pins what a walk fetches
+    /// rather than how long a query happens to last.
+    #[dialog_common::test]
+    async fn it_fetches_a_hinted_range_a_partial_replica_lacks() -> Result<()> {
+        use crate::SiteAddress;
+        use dialog_effects::credential::prelude::*;
+        use dialog_effects::storage::{Directory, Location};
+        use dialog_remote_fs::FsAddress;
+        use dialog_storage::provider::FileSystem;
+        use dialog_storage::resource::Resource as _;
+
+        // The origin: a repository that commits and pushes to a directory
+        // a remote serves.
+        let (operator, profile) = test_session_with_peer().await;
+        let source_repo = profile
+            .space(unique_name("partial-source"))
+            .create()
+            .perform(&operator)
+            .await?;
+        let location = Location::new(Directory::Temp, unique_name("partial-remote"));
+        let site = FileSystem::open(&location).await?;
+        source_repo
+            .did()
+            .credential()
+            .key("self")
+            .save(dialog_credentials::Credential::Signer(
+                source_repo.credential().clone(),
+            ))
+            .perform(&site)
+            .await?;
+        let address = SiteAddress::Fs(FsAddress::new(location));
+        let origin = connect("origin", address.clone(), source_repo.did(), &operator).await?;
+        let source = source_repo.branch("main").open().perform(&operator).await?;
+        let remote = origin.branch("main").open().perform(&operator).await?;
+        source.set_upstream(remote).perform(&operator).await?;
+        for batch in rounds(4, 40)? {
+            source
+                .transaction()
+                .integrate(batch)
+                .commit()
+                .publish()
+                .perform(&operator)
+                .await?;
+        }
+        assert!(source.push().perform(&operator).await?.is_some());
+
+        // A replica on its own profile and storage, adopting the head by
+        // reference: it holds none of the tree.
+        let (replica_operator, replica_profile) = test_session_with_peer().await;
+        replica_profile
+            .access()
+            .save(
+                source_repo
+                    .access()
+                    .claim(&source_repo)
+                    .delegate(replica_profile.did())
+                    .perform(&operator)
+                    .await?,
+            )
+            .perform(&replica_operator)
+            .await?;
+        let replica_repo = replica_profile
+            .space(unique_name("partial-replica"))
+            .open()
+            .perform(&replica_operator)
+            .await?;
+        let origin = connect("origin", address, source_repo.did(), &replica_operator).await?;
+        let replica = replica_repo
+            .branch("main")
+            .open()
+            .perform(&replica_operator)
+            .await?;
+        let remote = origin
+            .branch("main")
+            .open()
+            .perform(&replica_operator)
+            .await?;
+        replica
+            .set_upstream(remote)
+            .perform(&replica_operator)
+            .await?;
+        replica
+            .pull(Download::MinimalRanges)
+            .perform(&replica_operator)
+            .await?
+            .expect("the replica adopts the upstream head");
+        let replica = replica_repo
+            .branch("main")
+            .open()
+            .perform(&replica_operator)
+            .await?;
+
+        let env = Counting::new(replica_operator);
+        let listening = Provider::<Preload>::execute(
+            &env,
+            PreloadRequest {
+                selector: selector("b/name"),
+                likelihood: Likelihood::Likely,
+            },
+        )
+        .await;
+        assert!(listening, "the default budget accepts hints");
+
+        let queue = Provider::<Speculation>::execute(&env, ()).await;
+        let erased: &Erased = &env;
+        let mut driver = Driven::new(
+            stream::pending::<()>(),
+            vec![Source::from(replica.clone())],
+            erased,
+            queue.clone(),
+        );
+        poll_fn(|context| {
+            let _ = driver.poll_next_unpin(context);
+            if driver.is_idle() {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        })
+        .await;
+        assert_eq!(queue.pending(), 0, "the driver took the hint");
+        assert!(
+            env.count("hydrate::Hydrate") > 0,
+            "the replica held none of the range, so the walk fetched it"
+        );
+
+        let hydrations = env.count("hydrate::Hydrate");
+        let gets = env.count("archive::Get");
+        let rows = replica
+            .query()
+            .select(attribute_query("b/name"))
+            .perform(&env)
+            .try_vec()
+            .await?;
+        assert_eq!(rows.len(), 4 * 40);
+        assert_eq!(
+            env.count("hydrate::Hydrate") - hydrations,
+            0,
+            "the walk fetched the hinted range, so its own read fetches nothing"
+        );
+        assert_eq!(
+            env.count("archive::Get") - gets,
+            0,
+            "and the walk left every node it fetched in the line's cache"
         );
         Ok(())
     }
