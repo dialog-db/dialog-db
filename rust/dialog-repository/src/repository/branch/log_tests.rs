@@ -1996,3 +1996,51 @@ async fn it_reads_a_rule_whose_entry_has_a_blank_key_and_a_blank_value() -> Resu
     assert_eq!(held, [1, 1, 1, 0]);
     Ok(())
 }
+
+/// A scan reads an exact number as the range of the numbers that its type
+/// reads as it. A rule gives each holder of 7 in a collection of naturals, and
+/// the field reads 7.5 as 7. So a second board with an entry of 7.5 is a
+/// holder of 7. The live query watches each write that the scan reads, so it
+/// sees that entry as a first read does.
+#[dialog_common::test]
+async fn it_sees_a_new_entry_that_its_field_reads_as_the_number_of_the_rule() -> Result<()> {
+    let (branch, operator, board) = board().await?;
+    let other: Entity = "board:2".parse()?;
+    branch
+        .transaction()
+        .assert(
+            dialog_query::the!("test.board/name")
+                .of(other.clone())
+                .is("other".to_string()),
+        )
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    let (rule, head) = holder_of_seven("natural:")?;
+    let mut live = branch
+        .query()
+        .with(rule.clone())
+        .subscribe(each_field(&head)?);
+    live.poll(&operator).await?;
+
+    let mut held = Vec::new();
+    for (exists, holder, number) in [
+        (true, &board, Value::UnsignedInt(7)),
+        (true, &other, Value::Float(7.5)),
+        (false, &other, Value::Float(7.5)),
+        (false, &board, Value::UnsignedInt(7)),
+    ] {
+        let entry = fact("test.scores/a", holder, number)?;
+        let transaction = branch.transaction();
+        let transaction = if exists {
+            transaction.assert(entry)
+        } else {
+            transaction.retract(entry)
+        };
+        transaction.commit().publish().perform(&operator).await?;
+        held.push(rows_of_both(&branch, &operator, &rule, &head, &mut live).await?);
+    }
+    assert_eq!(held, [1, 2, 1, 0]);
+    Ok(())
+}
