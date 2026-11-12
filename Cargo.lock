@@ -1930,6 +1930,7 @@ dependencies = [
  "ed25519-dalek 2.2.0",
  "futures-util",
  "getrandom 0.2.16",
+ "hashbrown 0.16.1",
  "ipld-core",
  "parking_lot",
  "reqwest 0.12.22",

@@ -71,6 +71,6 @@ Backtracking moves a topic to an earlier phase and says so in its journal.
   pull can retry when a commit overtakes it.
 - [A typed variable over a field of no declared type fails the query](typed-read-of-untyped-field.md):
   **Building.** A value of another type than the variable's failed a
-  plain concept read and was passed over by every other read. The plain
-  read now passes over it too. What a variable that may be absent reads
-  of such a value is open.
+  plain concept read and was passed over by every other read. Every read
+  now takes it for a fact of another attribute: passed over, not elected
+  among, and absent to a variable that may be.

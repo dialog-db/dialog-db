@@ -1,6 +1,6 @@
 # A typed variable over a field of no declared type fails the query
 
-**Phase: Building.** Reproduced on main, decided, and fixed in #782. One question about a variable that may be absent is left open below.
+**Phase: Building.** Reproduced on main, decided, and fixed in #782.
 
 ## Description
 
@@ -29,20 +29,32 @@ Which of a concept's rows a caller's terms match depends on which way the read i
 
 ## Approach
 
-Decided by the maintainer, 2026-11-11: a variable of a type reads the values of that type, so only those are selected.
+Decided by the maintainer:
 
-`Match::bind` already says so: a value a type does not read is a mismatch, "and callers that filter rows treat it as a non-match". `merge_parameters` was the one caller that did not filter. It now gives no row for a result the caller's terms do not match, by type or because one variable written twice would have to hold two values, and each of its three callers passes over such a row.
+- 2026-11-11: a variable of a type reads the values of that type, so only those are selected.
+- 2026-11-12: an attribute's type is part of which attribute it is. An attribute of the same name and another type is another attribute. So an entity that holds a number, read into a variable that is a text or nothing, is the same as an entity that holds nothing: one row, with the variable absent.
 
-## Open: a variable that may be absent
+`Match::bind` already says the first: a value a type does not read is a mismatch, "and callers that filter rows treat it as a non-match". `merge_parameters` was the one caller that did not filter. It now gives no row for a result the caller's terms do not match, and each of its three callers passes over such a row.
 
-A set-widened read binds its variable absent for an entity nothing matched. For an entity whose value is of another type than the variable reads, the paths differ, by reading the code:
+The second is one check, made before anything is decided about an entity (`lens`, `Type::reads`): a value the caller's variable does not read is dropped as it arrives. It is then not elected among, and it does not make the entity one a set-widened read matched.
 
-| path | an entity with a value the variable does not read |
-|---|---|
-| plain concept read, as fixed here | no row: a result arrived, so the entity has a fact |
-| concept read a rule derives (`relation`) | no row: survivors that do not merge are dropped |
-| recursive concept read | a row with the variable absent: `matched` is set only when a row joins |
+```
+ an entity's values, read into ?x: text?
 
-The scan's tests say what absent means: "no fact for this attribute", so a value that disagrees is no row (`it_does_not_emit_absent_on_optional_value_mismatch`). The fix follows that, and pins it in `it_gives_no_row_for_a_value_an_optional_variable_does_not_read`. The recursive path is left as it is and is not pinned.
+   "hello"          ──▶  ?x = "hello"
+   7                ──▶  ?x absent        a number is a fact of another attribute
+   "hello" and 7    ──▶  ?x = "hello"     under max: too, where 7 would win of all
+   nothing          ──▶  ?x absent
+```
 
-Not decided: whether "the entity has no text" should read as absent instead, which is the other thing a typed optional variable could mean. Whichever it is, the recursive path and the others should agree.
+What stays as it was: a value of the variable's type that disagrees with what the variable is already bound to is no row, and not absent, as a scan has it (`it_does_not_emit_absent_on_optional_value_mismatch`). The entity has a fact of the attribute; it is not the one asked for.
+
+| path | a value the variable does not read | pinned by |
+|---|---|---|
+| attribute scan | passed over | `it_reads_the_values_of_its_type_through_an_untyped_field` |
+| plain concept read | passed over; absent when it may be | the same, and `it_reads_a_value_of_another_type_as_absent_when_it_may_be` |
+| plain concept read under an electing pick | not elected among; absent when it may be | `it_reads_a_value_of_another_type_as_absent_when_it_may_be` (`max:`) |
+| concept read a rule derives | not elected among; absent when it may be | `it_elects_among_the_values_of_its_type_in_a_derived_field` |
+| recursive concept read | passed over; absent when it may be | `it_reads_the_values_of_its_type_through_a_recursive_untyped_field`, and the fixpoint case of the absent test |
+
+Not looked at: a recursive concept read whose optional variable an earlier premise bound to another value of its own type. By reading `fixpoint::join` and `widened`, it would try to bind the bound variable absent. No test here reaches it.
