@@ -73,7 +73,7 @@ pub(crate) mod source;
 // without linking `dialog-query` or the storage/transport stack.
 // Re-exported here at their historical
 // `dialog_repository::{Revision, TreeReference}` paths.
-pub use dialog_artifacts::{Revision, TreeReference};
+pub use dialog_corpus::{Revision, TreeReference};
 pub use dialog_search_tree::LEGACY_EMPTY_ROOT;
 
 /// A repository scoped to a specific subject.
@@ -224,7 +224,7 @@ mod tests {
     use crate::helpers::connect;
     use crate::helpers::test_repo;
     use anyhow::Result;
-    use dialog_artifacts::{Artifact, ArtifactSelector, Instruction, Value};
+    use dialog_corpus::{Fact, Instruction, Selector, Value};
     use dialog_credentials::Extractable;
     use dialog_credentials::key::ExtractableKey;
     use dialog_peer::helpers::{test_session_with_peer, unique_name};
@@ -323,13 +323,13 @@ mod tests {
         // leaves no revision for load to find.
         let main = repo.branch("main").open().perform(&operator).await?;
         main.commit(stream::iter(vec![Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "user/name".parse()?,
                 of: "user:1".parse()?,
                 is: Value::String("Alice".into()),
                 cause: None,
             },
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -346,7 +346,7 @@ mod tests {
         let repo = test_repo(&operator, &profile).await;
 
         let branch = repo.branch("main").open().perform(&operator).await?;
-        let artifact = Artifact {
+        let fact = Fact {
             the: "user/name".parse()?,
             of: "user:123".parse()?,
             is: Value::String("Alice".to_string()),
@@ -354,8 +354,8 @@ mod tests {
         };
         let _hash = branch
             .commit(stream::iter(vec![Instruction::Assert(
-                artifact,
-                dialog_artifacts::Pick::All,
+                fact,
+                dialog_corpus::Pick::All,
             )]))
             .perform(&operator)
             .await?;
@@ -461,44 +461,44 @@ mod tests {
 
         let branch = repo.branch("main").open().perform(&operator).await?;
 
-        let artifacts = vec![
+        let facts = vec![
             Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "user/name".parse()?,
                     of: "user:1".parse()?,
                     is: Value::String("Alice".into()),
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             ),
             Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "user/email".parse()?,
                     of: "user:1".parse()?,
                     is: Value::String("alice@example.com".into()),
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             ),
             Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "user/name".parse()?,
                     of: "user:2".parse()?,
                     is: Value::String("Bob".into()),
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             ),
         ];
 
         branch
-            .commit(stream::iter(artifacts))
+            .commit(stream::iter(facts))
             .perform(&operator)
             .await?;
 
         let results: Vec<_> = branch
             .claims()
-            .select(ArtifactSelector::new().the("user/name".parse()?))
+            .select(Selector::new().the("user/name".parse()?))
             .to_owned()
             .perform(&operator)
             .await?
@@ -507,7 +507,7 @@ mod tests {
             .into_iter()
             .collect::<Result<Vec<_>, _>>()?;
 
-        assert_eq!(results.len(), 2, "should find 2 user/name artifacts");
+        assert_eq!(results.len(), 2, "should find 2 user/name facts");
         let names: Vec<_> = results.iter().map(|a| &a.is).collect();
         assert!(
             names.contains(&&Value::String("Alice".into())),
@@ -528,44 +528,44 @@ mod tests {
 
         let branch = repo.branch("main").open().perform(&operator).await?;
 
-        let artifacts = vec![
+        let facts = vec![
             Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "user/name".parse()?,
                     of: "user:alice".parse()?,
                     is: Value::String("Alice".into()),
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             ),
             Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "user/name".parse()?,
                     of: "user:bob".parse()?,
                     is: Value::String("Bob".into()),
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             ),
             Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "user/email".parse()?,
                     of: "user:alice".parse()?,
                     is: Value::String("alice@example.com".into()),
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             ),
         ];
 
         branch
-            .commit(stream::iter(artifacts))
+            .commit(stream::iter(facts))
             .perform(&operator)
             .await?;
 
         let results: Vec<_> = branch
             .claims()
-            .select(ArtifactSelector::new().of("user:alice".parse()?))
+            .select(Selector::new().of("user:alice".parse()?))
             .to_owned()
             .perform(&operator)
             .await?
@@ -574,7 +574,7 @@ mod tests {
             .into_iter()
             .collect::<Result<Vec<_>, _>>()?;
 
-        assert_eq!(results.len(), 2, "should find 2 artifacts for user:alice");
+        assert_eq!(results.len(), 2, "should find 2 facts for user:alice");
 
         Ok(())
     }
@@ -588,7 +588,7 @@ mod tests {
 
         let results: Vec<_> = branch
             .claims()
-            .select(ArtifactSelector::new().the("user/name".parse()?))
+            .select(Selector::new().the("user/name".parse()?))
             .to_owned()
             .perform(&operator)
             .await?
@@ -597,19 +597,19 @@ mod tests {
             .into_iter()
             .collect::<Result<Vec<_>, _>>()?;
 
-        assert_eq!(results.len(), 0, "empty branch should have no artifacts");
+        assert_eq!(results.len(), 0, "empty branch should have no facts");
 
         Ok(())
     }
 
     #[dialog_common::test]
-    async fn it_retracts_artifact() -> Result<()> {
+    async fn it_retracts_fact() -> Result<()> {
         let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let branch = repo.branch("main").open().perform(&operator).await?;
 
-        let artifact = Artifact {
+        let fact = Fact {
             the: "user/name".parse()?,
             of: "user:1".parse()?,
             is: Value::String("Alice".into()),
@@ -618,8 +618,8 @@ mod tests {
 
         branch
             .commit(stream::iter(vec![Instruction::Assert(
-                artifact.clone(),
-                dialog_artifacts::Pick::All,
+                fact.clone(),
+                dialog_corpus::Pick::All,
             )]))
             .perform(&operator)
             .await?;
@@ -627,7 +627,7 @@ mod tests {
         // Verify it's there
         let before: Vec<_> = branch
             .claims()
-            .select(ArtifactSelector::new().the("user/name".parse()?))
+            .select(Selector::new().the("user/name".parse()?))
             .to_owned()
             .perform(&operator)
             .await?
@@ -635,17 +635,17 @@ mod tests {
             .await
             .into_iter()
             .collect::<Result<Vec<_>, _>>()?;
-        assert_eq!(before.len(), 1, "should have 1 artifact before retract");
+        assert_eq!(before.len(), 1, "should have 1 fact before retract");
 
         // Retract it
         branch
-            .commit(stream::iter(vec![Instruction::Retract(artifact)]))
+            .commit(stream::iter(vec![Instruction::Retract(fact)]))
             .perform(&operator)
             .await?;
 
         let after: Vec<_> = branch
             .claims()
-            .select(ArtifactSelector::new().the("user/name".parse()?))
+            .select(Selector::new().the("user/name".parse()?))
             .to_owned()
             .perform(&operator)
             .await?
@@ -653,7 +653,7 @@ mod tests {
             .await
             .into_iter()
             .collect::<Result<Vec<_>, _>>()?;
-        assert_eq!(after.len(), 0, "should have 0 artifacts after retract");
+        assert_eq!(after.len(), 0, "should have 0 facts after retract");
 
         Ok(())
     }
@@ -1801,7 +1801,7 @@ mod tests {
         -> anyhow::Result<()> {
             // `dialog.session/branch` is cardinality-many — one per
             // branch in the session's scope (primary + joined). Query
-            // it directly via the schema attribute as an artifact
+            // it directly via the schema attribute as a fact
             // search.
             use crate::schema;
 
@@ -1811,7 +1811,7 @@ mod tests {
             let feature = repo.branch("feature").open().perform(&operator).await?;
 
             // Query both branches in scope by raw attribute lookup
-            // via the artifact selector.
+            // via the fact selector.
             let session_entity = schema::Session::entity();
 
             // Build the expected branch entities for the two in-scope branches.
@@ -1889,8 +1889,8 @@ mod tests {
             // into a per-query overlay; nothing is written to the
             // branch's tree. Reading the branch's claims directly
             // (bypassing the QuerySession overlay) should return no
-            // dialog.branch/* artifacts.
-            use dialog_artifacts::ArtifactSelector;
+            // dialog.branch/* facts.
+            use dialog_corpus::Selector;
             use futures_util::StreamExt as _;
 
             let (operator, profile) = test_session_with_peer().await;
@@ -1911,14 +1911,14 @@ mod tests {
             // overlay so any hit would mean facts leaked into the tree.
             let select = branch
                 .claims()
-                .select(ArtifactSelector::new().the("dialog.branch/name".parse()?));
+                .select(Selector::new().the("dialog.branch/name".parse()?));
             let store = &operator;
             let stream = select.execute(store).await?;
             let leaked: Vec<_> = stream.collect::<Vec<_>>().await;
 
             assert!(
                 leaked.is_empty(),
-                "schema metadata must not leak into the branch tree; found {} artifact(s)",
+                "schema metadata must not leak into the branch tree; found {} fact(s)",
                 leaked.len()
             );
             Ok(())
@@ -2055,7 +2055,7 @@ mod tests {
         async fn it_orders_an_overlay_consistently_with_branch_scans_in_every_mode()
         -> anyhow::Result<()> {
             // Load-bearing invariant for `merge_grouped`: an overlay
-            // ([`Ephemeral::select`]) must yield artifacts in the same
+            // ([`Ephemeral::select`]) must yield facts in the same
             // order the tree would for the same selector. If it doesn't,
             // cross-source unions interleave incorrectly within a
             // `(the, of)` group.
@@ -2063,11 +2063,11 @@ mod tests {
             // For each scan mode we commit the same facts to a real
             // branch and hold them in an overlay, then compare the
             // ordered `sort_key` sequence. `Cause` differs (real commit
-            // vs `None`) so we don't compare full artifacts.
-            use dialog_artifacts::selector::Constrained;
-            use dialog_artifacts::{
-                ArtifactSelector, ArtifactStream, Changes, DialogArtifactsError, SortKey,
-                Update as _, Value, sort_key,
+            // vs `None`) so we don't compare full facts.
+            use dialog_corpus::selector::Constrained;
+            use dialog_corpus::{
+                Changes, DialogCorpusError, FactStream, Selector, SortKey, Update as _, Value,
+                sort_key,
             };
             use futures_util::StreamExt as _;
 
@@ -2078,8 +2078,8 @@ mod tests {
             let alice: Entity = "id:alice".parse()?;
             let bob: Entity = "id:bob".parse()?;
             let charlie: Entity = "id:charlie".parse()?;
-            let name_attr = "test/name".parse::<dialog_artifacts::Relation>()?;
-            let role_attr = "test/role".parse::<dialog_artifacts::Relation>()?;
+            let name_attr = "test/name".parse::<dialog_corpus::Relation>()?;
+            let role_attr = "test/role".parse::<dialog_corpus::Relation>()?;
 
             // Mix of:
             //   - same entity, multiple attrs
@@ -2093,7 +2093,7 @@ mod tests {
             //     (alice, role). If `sort_key` mistakenly ordered VAE
             //     output by entity it would flip these two, and this
             //     test would catch it.
-            let facts: Vec<(Entity, dialog_artifacts::Relation, Value)> = vec![
+            let facts: Vec<(Entity, dialog_corpus::Relation, Value)> = vec![
                 (
                     alice.clone(),
                     name_attr.clone(),
@@ -2138,7 +2138,7 @@ mod tests {
             // both the branch commit and the overlay from clones.
             let mut changes = Changes::new();
             for (e, a, v) in &facts {
-                changes.associate(a.clone(), e.clone(), v.clone(), dialog_artifacts::Pick::All);
+                changes.associate(a.clone(), e.clone(), v.clone(), dialog_corpus::Pick::All);
             }
 
             // Commit a clone to the branch (Changes itself is a Statement now).
@@ -2154,15 +2154,15 @@ mod tests {
 
             // Compare per scan mode: collect sort_keys from a raw
             // branch scan and from the overlay; they must
-            // match exactly. (Full Artifact equality would fail
+            // match exactly. (Full Fact equality would fail
             // because cause is None on the overlay and Some on the
             // committed branch entry.)
-            async fn keys_from_stream(s: ArtifactStream<'_>) -> anyhow::Result<Vec<SortKey>> {
+            async fn keys_from_stream(s: FactStream<'_>) -> anyhow::Result<Vec<SortKey>> {
                 let items: Vec<_> = s
                     .collect::<Vec<_>>()
                     .await
                     .into_iter()
-                    .collect::<Result<Vec<_>, DialogArtifactsError>>()?;
+                    .collect::<Result<Vec<_>, DialogCorpusError>>()?;
                 // The branch was created here, so its tree takes the format
                 // a new tree takes; the overlay is keyed under the same one.
                 let manifest = dialog_search_tree::Manifest::default();
@@ -2172,16 +2172,16 @@ mod tests {
                     .collect::<Result<Vec<_>, _>>()?)
             }
 
-            let scan_modes: &[(&str, ArtifactSelector<Constrained>)] = &[
-                ("EAV (.of)", ArtifactSelector::new().of(alice.clone())),
-                ("AEV (.the)", ArtifactSelector::new().the(name_attr.clone())),
+            let scan_modes: &[(&str, Selector<Constrained>)] = &[
+                ("EAV (.of)", Selector::new().of(alice.clone())),
+                ("AEV (.the)", Selector::new().the(name_attr.clone())),
                 // VAE: "Shared" lives under two different attributes
                 // (name on charlie, role on alice) — exercises the
                 // (attribute, entity) residual ordering, not just
                 // (entity) within one attribute.
                 (
                     "VAE (.is)",
-                    ArtifactSelector::new().is(Value::String("Shared".into())),
+                    Selector::new().is(Value::String("Shared".into())),
                 ),
             ];
 
@@ -2191,14 +2191,14 @@ mod tests {
                 // The branch's search tree is the order ground truth.
                 let select = branch.claims().select(sel.clone());
                 let store = &operator;
-                let branch_stream: ArtifactStream<'_> = Box::pin(select.execute(store).await?);
+                let branch_stream: FactStream<'_> = Box::pin(select.execute(store).await?);
                 let branch_order = keys_from_stream(branch_stream).await?;
 
                 let manifest = dialog_search_tree::Manifest::default();
                 let changes_order: Vec<SortKey> = overlay
                     .select(sel, &manifest)
                     .iter()
-                    .map(|artifact| sort_key(artifact, &manifest))
+                    .map(|fact| sort_key(fact, &manifest))
                     .collect();
 
                 assert!(
@@ -2274,7 +2274,7 @@ mod tests {
 
             let results: Vec<_> = r_branch
                 .claims()
-                .select(ArtifactSelector::new().the("user/name".parse()?))
+                .select(Selector::new().the("user/name".parse()?))
                 .to_owned()
                 .perform(&operator)
                 .await?
@@ -2325,7 +2325,7 @@ mod tests {
             let named_branch = named_repo.branch("main").open().perform(&operator).await?;
             let results: Vec<_> = named_branch
                 .claims()
-                .select(ArtifactSelector::new().the("item/tag".parse()?))
+                .select(Selector::new().the("item/tag".parse()?))
                 .to_owned()
                 .perform(&operator)
                 .await?
@@ -2337,7 +2337,7 @@ mod tests {
             assert_eq!(
                 results.len(),
                 0,
-                "named repo must not see artifacts written through the profile-DID repo"
+                "named repo must not see facts written through the profile-DID repo"
             );
             Ok(())
         }

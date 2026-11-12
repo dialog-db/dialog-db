@@ -294,7 +294,7 @@ mod tests {
     /// first, whose fact was then deleted as a "superseded prior".
     #[dialog_common::test]
     async fn it_selects_both_after_two_typed_commits() -> anyhow::Result<()> {
-        use dialog_artifacts::ArtifactSelector;
+        use dialog_corpus::Selector;
         use futures_util::StreamExt as _;
 
         let (operator, profile) = test_session_with_peer().await;
@@ -323,7 +323,7 @@ mod tests {
 
         let results: Vec<_> = branch
             .claims()
-            .select(ArtifactSelector::new().the("person/name".parse()?))
+            .select(Selector::new().the("person/name".parse()?))
             .to_owned()
             .perform(&operator)
             .await?

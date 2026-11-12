@@ -17,8 +17,8 @@
 /// Serializable inductive-rule descriptor.
 pub mod descriptor;
 
-use crate::artifact::Entity;
 use crate::concept::descriptor::ConceptDescriptor;
+use crate::corpus::Entity;
 use crate::error::TypeError;
 use crate::identity;
 use crate::negation::Negation;
@@ -297,9 +297,9 @@ mod tests {
 
     use super::*;
     use crate::Term;
-    use crate::artifact::{Entity, Type, Value};
     use crate::attribute::query::AttributeQuery;
     use crate::attribute::{AttributeDescriptor, Cardinality};
+    use crate::corpus::{Entity, Type, Value};
     use crate::formula::Formula;
     use crate::formula::math::Sum;
     use crate::parameters::Parameters;

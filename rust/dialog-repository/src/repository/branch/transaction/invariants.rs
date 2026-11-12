@@ -11,7 +11,7 @@ wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 use crate::Branch;
 use crate::helpers::test_repo;
 use anyhow::Result;
-use dialog_artifacts::{Entity, Pick, Relation as ArtifactsRelation, Value};
+use dialog_corpus::{Entity, Pick, Relation as CorpusRelation, Value};
 use dialog_peer::helpers::test_session_with_peer;
 use dialog_query::attribute::Relation;
 use dialog_query::query::Output as _;
@@ -30,7 +30,7 @@ fn salary(of: &Entity, value: u32, policy: Pick) -> AttributeStatement {
     AttributeStatement {
         the: Relation::from(
             "org/salary"
-                .parse::<ArtifactsRelation>()
+                .parse::<CorpusRelation>()
                 .expect("an attribute"),
         ),
         of: of.clone(),
@@ -257,12 +257,12 @@ async fn a_transaction_reads_back_its_own_last_write_of_a_held_value() -> Result
 /// the `all` write, so the stored 100 is never succeeded on that path.
 #[dialog_common::test]
 async fn an_integrated_batch_lands_as_the_same_writes_asserted_in_order() -> Result<()> {
-    use dialog_artifacts::{Changes, Update as _};
+    use dialog_corpus::{Changes, Update as _};
 
     let (operator, profile) = test_session_with_peer().await;
     let repo = test_repo(&operator, &profile).await;
     let alice: Entity = "id:alice".parse()?;
-    let the: ArtifactsRelation = "org/salary".parse()?;
+    let the: CorpusRelation = "org/salary".parse()?;
     let mut lines = Vec::new();
     for by_batch in [false, true] {
         let branch = repo
@@ -333,7 +333,7 @@ async fn an_integrated_batch_lands_as_the_same_writes_asserted_in_order() -> Res
 /// A write of `the` under `policy`.
 fn write(the: &str, of: &Entity, value: u32, policy: Pick) -> AttributeStatement {
     AttributeStatement {
-        the: Relation::from(the.parse::<ArtifactsRelation>().expect("an attribute")),
+        the: Relation::from(the.parse::<CorpusRelation>().expect("an attribute")),
         of: of.clone(),
         is: Value::UnsignedInt(value.into()),
         cause: None,
@@ -664,7 +664,10 @@ async fn concurrent_last_writes_settle_by_commit_across_every_cell() -> Result<(
         base = base.assert(salary(person, 1, Pick::Last));
     }
     base.commit().publish().perform(&operator).await?;
-    b.pull().from(&a).perform(&operator).await?;
+    b.pull(crate::Download::MinimalRanges)
+        .from(&a)
+        .perform(&operator)
+        .await?;
 
     // Concurrent: values chosen so that neither the value order nor the
     // fact hashes agree with one side across every cell.
@@ -683,8 +686,16 @@ async fn concurrent_last_writes_settle_by_commit_across_every_cell() -> Result<(
     theirs.commit().publish().perform(&operator).await?;
     let mut quiesced = false;
     for _ in 0..4 {
-        let pulled_a = a.pull().from(&b).perform(&operator).await?;
-        let pulled_b = b.pull().from(&a).perform(&operator).await?;
+        let pulled_a = a
+            .pull(crate::Download::MinimalRanges)
+            .from(&b)
+            .perform(&operator)
+            .await?;
+        let pulled_b = b
+            .pull(crate::Download::MinimalRanges)
+            .from(&a)
+            .perform(&operator)
+            .await?;
         if pulled_a.is_none() && pulled_b.is_none() {
             quiesced = true;
             break;

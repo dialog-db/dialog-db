@@ -4,7 +4,7 @@
 //! carries the position as its predicate — `todo.item/<position>` of
 //! the collection entity, valued by the member — so one EAV range scan
 //! yields the members already sorted (see
-//! `notes/ordered-relations.md` and `dialog_artifacts::position`).
+//! `notes/ordered-relations.md` and `dialog_corpus::position`).
 //! These formulas are the query-side surface:
 //!
 //! - [`Position`] (`dialog/position`) derives the position for a
@@ -23,13 +23,13 @@
 //! Both are pure per-row computation — ordinary [`Formula`]s, sound
 //! under differential subscriptions with no extra machinery.
 
-use dialog_artifacts::position as fractional;
-use dialog_artifacts::position::Bias;
+use dialog_corpus::position as fractional;
+use dialog_corpus::position::Bias;
 
-use dialog_artifacts::Relation as ArtifactsRelation;
+use dialog_corpus::Relation as CorpusRelation;
 
 use crate::Formula;
-use crate::artifact::Entity;
+use crate::corpus::Entity;
 use crate::formula::Input;
 
 /// Resolve an optional bound: empty means open, anything else must
@@ -98,7 +98,7 @@ impl Position {
 #[derive(Debug, Clone, Formula)]
 pub struct PositionParts {
     /// The attribute, as bound by a scan's `the` slot.
-    pub of: ArtifactsRelation,
+    pub of: CorpusRelation,
     /// The attribute's namespace (the ordered relation's name).
     #[output]
     pub namespace: String,
@@ -113,7 +113,7 @@ impl PositionParts {
     /// projects nothing.
     pub fn compute(input: Input<Self>) -> Vec<Self> {
         match input.of.split() {
-            Ok((domain, dialog_artifacts::Name::Position(position))) => vec![PositionParts {
+            Ok((domain, dialog_corpus::Name::Position(position))) => vec![PositionParts {
                 of: input.of.clone(),
                 namespace: domain.to_string(),
                 position: position.as_str().to_string(),
@@ -183,7 +183,7 @@ mod tests {
     #[dialog_common::test]
     fn it_decomposes_position_attributes() {
         let position = derive(&member("m"), "", "").expect("derives");
-        let attribute: ArtifactsRelation = format!("todo.item/{position}")
+        let attribute: CorpusRelation = format!("todo.item/{position}")
             .try_into()
             .expect("attribute parses");
         let rows = PositionParts::compute(PositionPartsInput {
@@ -193,12 +193,12 @@ mod tests {
         assert_eq!(rows[0].namespace, "todo.item");
         assert_eq!(rows[0].position, position);
 
-        let plain: ArtifactsRelation = "person/display_name".parse().expect("attribute parses");
+        let plain: CorpusRelation = "person/display_name".parse().expect("attribute parses");
         assert!(
             PositionParts::compute(PositionPartsInput { of: plain }).is_empty(),
             "predicates with non-position characters project nothing"
         );
-        let wordlike: ArtifactsRelation = "person/name".parse().expect("attribute parses");
+        let wordlike: CorpusRelation = "person/name".parse().expect("attribute parses");
         assert!(
             PositionParts::compute(PositionPartsInput { of: wordlike }).is_empty(),
             "word predicates start lowercase and are never positions"

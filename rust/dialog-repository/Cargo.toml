@@ -18,7 +18,7 @@ web-integration-tests = ["dialog-common/web-integration-tests"]
 
 [dependencies]
 tracing = { workspace = true }
-dialog-artifacts = { workspace = true }
+dialog-corpus = { workspace = true }
 dialog-capability = { workspace = true }
 dialog-common = { workspace = true }
 dialog-did-web = { workspace = true }
@@ -53,7 +53,7 @@ tokio = { workspace = true, features = ["sync", "macros", "io-util"] }
 url = { workspace = true, features = ["serde"] }
 
 [dev-dependencies]
-dialog-artifacts = { workspace = true, features = ["helpers"] }
+dialog-corpus = { workspace = true, features = ["helpers"] }
 dialog-peer = { workspace = true, features = ["helpers"] }
 dialog-peer-iroh = { workspace = true }
 dialog-ucan-core = { workspace = true, features = ["helpers"] }

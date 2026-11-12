@@ -4,7 +4,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use anyhow::Result;
-use dialog_artifacts::{Entity, Pick};
+use dialog_corpus::{Entity, Pick};
 use dialog_query::query::Output as _;
 use dialog_query::{ConceptConclusion, ConceptDescriptor};
 use dialog_repository::Branch;
@@ -114,7 +114,7 @@ pub async fn sibling(size: usize) -> Result<Box<dyn Prepared>> {
     seed_stuff(&env, size, Pick::Last).await?;
     let sibling = env.branch("sibling").await?;
     sibling
-        .pull()
+        .pull(dialog_repository::Download::MinimalRanges)
         .from(&env.branch)
         .perform(&env.operator)
         .await?;

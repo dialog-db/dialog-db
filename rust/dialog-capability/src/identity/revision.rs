@@ -228,7 +228,7 @@ impl Revision {
     /// region, the shape every head is minted in, with `count`, how many
     /// of its own origin's revisions its ancestry holds (itself included).
     /// The caller writes the region entries the head needs (see
-    /// `history::region_writes` in `dialog-artifacts`).
+    /// `history::region_writes` in `dialog-corpus`).
     pub fn publish_region(&mut self, count: u64) {
         self.context = None;
         self.region = true;
@@ -538,7 +538,7 @@ fn leb128(bytes: &mut Vec<u8>, mut value: u64) {
 
 /// The domain tag opening every head signing payload. Signing payload
 /// kinds sharing one key (heads here, in-tree revision records in
-/// `dialog-artifacts`) each open with their own tag, so the payload
+/// `dialog-corpus`) each open with their own tag, so the payload
 /// spaces are disjoint by construction and a signature can never be
 /// replayed across kinds. The trailing newline keeps any future tag
 /// from being a prefix of another.

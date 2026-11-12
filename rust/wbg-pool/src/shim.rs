@@ -5,10 +5,11 @@
 
 use crate::cli::RunnerCli;
 use crate::daemon::default_state_dir;
-use crate::protocol::{DaemonState, RunReport, RunRequest};
+use crate::protocol::{DaemonState, RunReport, RunRequest, PASS_ENV};
 use crate::suite::{self, TestMode};
 use anyhow::{bail, Context, Result};
 use clap::Parser;
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -85,6 +86,7 @@ pub fn main(args: Vec<OsString>) -> Result<()> {
         args: cli.filter_args(),
         nocapture: cli.nocapture,
         timeout_secs,
+        env: passed_env(|name| std::env::var(name).ok()),
     };
 
     let response = ureq::post(&format!("{daemon_url}/api/run"))
@@ -114,6 +116,20 @@ pub fn main(args: Vec<OsString>) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// The variables [`PASS_ENV`] names, read through `lookup`. A name that is
+/// not set is left out, so the test sees it as absent.
+fn passed_env(lookup: impl Fn(&str) -> Option<String>) -> BTreeMap<String, String> {
+    let Some(names) = lookup(PASS_ENV) else {
+        return BTreeMap::new();
+    };
+    names
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .filter_map(|name| lookup(name).map(|value| (name.to_string(), value)))
+        .collect()
 }
 
 /// Hands the invocation to the stock `wasm-bindgen-test-runner`, preserving
@@ -267,6 +283,37 @@ fn spawn_daemon(state_dir: &PathBuf) -> Result<()> {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    #[test]
+    fn it_passes_only_the_named_variables_that_are_set() {
+        let lookup = |name: &str| match name {
+            PASS_ENV => Some("ADDRESS, MISSING,,TOKEN".to_string()),
+            "ADDRESS" => Some("{\"url\":\"http://127.0.0.1:1\"}".to_string()),
+            "TOKEN" => Some(String::new()),
+            "UNNAMED" => Some("left behind".to_string()),
+            _ => None,
+        };
+
+        let env = passed_env(lookup);
+
+        assert_eq!(
+            env,
+            BTreeMap::from([
+                (
+                    "ADDRESS".to_string(),
+                    "{\"url\":\"http://127.0.0.1:1\"}".to_string()
+                ),
+                ("TOKEN".to_string(), String::new()),
+            ])
+        );
+    }
+
+    #[test]
+    fn it_passes_nothing_when_no_variable_is_named() {
+        let lookup = |name: &str| (name == "ADDRESS").then(|| "value".to_string());
+
+        assert!(passed_env(lookup).is_empty());
+    }
 
     #[test]
     fn it_recognizes_a_recorded_live_daemon_process() {

@@ -1,9 +1,9 @@
 use std::fmt;
 use std::str::{self, FromStr};
 
-use crate::artifact::ArtifactsRelation;
-use crate::artifact::{ArtifactTypeError, Entity, Value};
 use crate::attribute::expression::dynamic::DynamicAttributeExpressionBuilder;
+use crate::corpus::CorpusRelation;
+use crate::corpus::{CorpusTypeError, Entity, Value};
 use crate::error::{InvalidIdentifier, OwnedInvalidIdentifier};
 use crate::term::Term;
 use serde::de;
@@ -17,7 +17,7 @@ pub const MAX_RELATION_LENGTH: usize = 64;
 /// being established. The domain scopes the relation to a specific problem
 /// area; the name identifies the specific association within that domain.
 ///
-/// This is a transparent wrapper over [`ArtifactsRelation`] that adds
+/// This is a transparent wrapper over [`CorpusRelation`] that adds
 /// stricter validation (lowercase, kebab-case, etc.) on construction.
 ///
 /// Validates on construction:
@@ -31,7 +31,7 @@ pub const MAX_RELATION_LENGTH: usize = 64;
 ///   At least one character.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[repr(transparent)]
-pub struct Relation(ArtifactsRelation);
+pub struct Relation(CorpusRelation);
 
 impl Relation {
     /// Validates a relation literal as raw bytes.
@@ -148,7 +148,7 @@ impl Relation {
     ///
     /// ```
     /// use dialog_query::the;
-    /// use dialog_query::artifact::Entity;
+    /// use dialog_query::corpus::Entity;
     ///
     /// let alice = Entity::try_from("urn:alice".to_string()).unwrap();
     ///
@@ -173,7 +173,7 @@ impl Term<Relation> {
     /// ```
     /// use dialog_query::{Term, Premise};
     /// use dialog_query::attribute::Relation;
-    /// use dialog_query::artifact::Entity;
+    /// use dialog_query::corpus::Entity;
     ///
     /// let alice = Entity::try_from("urn:alice".to_string()).unwrap();
     /// let bob = Entity::try_from("urn:bob".to_string()).unwrap();
@@ -209,19 +209,19 @@ impl FromStr for Relation {
             reason: e.reason,
         })?;
 
-        let attr: ArtifactsRelation = s.parse().expect("already validated format and length");
+        let attr: CorpusRelation = s.parse().expect("already validated format and length");
 
         Ok(Self(attr))
     }
 }
 
-impl From<Relation> for ArtifactsRelation {
+impl From<Relation> for CorpusRelation {
     fn from(the: Relation) -> Self {
         the.0
     }
 }
 
-impl From<&Relation> for ArtifactsRelation {
+impl From<&Relation> for CorpusRelation {
     fn from(the: &Relation) -> Self {
         the.0.clone()
     }
@@ -229,27 +229,27 @@ impl From<&Relation> for ArtifactsRelation {
 
 impl From<Relation> for Value {
     fn from(the: Relation) -> Self {
-        Value::from(ArtifactsRelation::from(the))
+        Value::from(CorpusRelation::from(the))
     }
 }
 
 impl From<&Relation> for Value {
     fn from(the: &Relation) -> Self {
-        Value::from(ArtifactsRelation::from(the))
+        Value::from(CorpusRelation::from(the))
     }
 }
 
-impl From<ArtifactsRelation> for Relation {
-    fn from(attr: ArtifactsRelation) -> Self {
+impl From<CorpusRelation> for Relation {
+    fn from(attr: CorpusRelation) -> Self {
         Self(attr)
     }
 }
 
 impl TryFrom<Value> for Relation {
-    type Error = ArtifactTypeError;
+    type Error = CorpusTypeError;
 
     fn try_from(value: Value) -> Result<Self, Self::Error> {
-        let attr = ArtifactsRelation::try_from(value)?;
+        let attr = CorpusRelation::try_from(value)?;
         Ok(Self(attr))
     }
 }
@@ -301,11 +301,11 @@ macro_rules! the {
         };
         // SAFETY: compile-time validation above guarantees the literal is valid.
         <$crate::attribute::Relation as ::std::convert::From<
-            $crate::attribute::ArtifactsRelation,
-        >>::from(
-            <$crate::attribute::ArtifactsRelation as ::std::str::FromStr>::from_str($source)
-                .unwrap(),
-        )
+                    $crate::attribute::CorpusRelation,
+                >>::from(
+                    <$crate::attribute::CorpusRelation as ::std::str::FromStr>::from_str($source)
+                        .unwrap(),
+                )
     }};
 }
 
@@ -387,15 +387,15 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn it_converts_to_artifacts_attribute() {
+    fn it_converts_to_facts_attribute() {
         let the = parse("person/name").unwrap();
-        let attr: ArtifactsRelation = the.into();
+        let attr: CorpusRelation = the.into();
         assert_eq!(attr.to_string(), "person/name");
     }
 
     #[dialog_common::test]
-    fn it_converts_from_artifacts_attribute() {
-        let attr: ArtifactsRelation = "person/name".parse().unwrap();
+    fn it_converts_from_facts_attribute() {
+        let attr: CorpusRelation = "person/name".parse().unwrap();
         let the = Relation::from(attr);
         assert_eq!(the.to_string(), "person/name");
     }

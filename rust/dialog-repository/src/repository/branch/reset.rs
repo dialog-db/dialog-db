@@ -1,6 +1,6 @@
-use dialog_artifacts::tree::CorpusNode;
 use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
+use dialog_corpus::tree::CorpusNode;
 use dialog_effects::Rejection;
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::{Get as ArchiveGet, Put as ArchivePut};
@@ -150,7 +150,7 @@ where
     let version = head.version();
     let store = erased(env);
     let catalog = branch.archive().index();
-    let unreadable = |error: dialog_artifacts::DialogArtifactsError| {
+    let unreadable = |error: dialog_corpus::DialogCorpusError| {
         PublishError::Storage(format!(
             "could not tell whether the revision holds branch {}'s head: {error}",
             branch.name()
@@ -184,8 +184,8 @@ mod tests {
 
     use anyhow::Result;
 
-    use dialog_artifacts::history::Edition;
     use dialog_capability::Subject;
+    use dialog_corpus::history::Edition;
     use dialog_storage::provider::Volatile;
     use dialog_varsig::did;
 

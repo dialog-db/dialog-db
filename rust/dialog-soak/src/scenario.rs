@@ -369,8 +369,8 @@ impl Site {
 /// overlap is a latency behavior only the shaped profiles measure.
 async fn speculate_nothing(operator: &Operator) {
     use dialog_capability::Provider;
-    let queue = Provider::<dialog_artifacts::Speculation>::execute(operator, ()).await;
-    queue.set_budget(dialog_artifacts::FetchBudget::ZERO);
+    let queue = Provider::<dialog_corpus::Speculation>::execute(operator, ()).await;
+    queue.set_budget(dialog_corpus::FetchBudget::ZERO);
 }
 
 /// Files and bytes under `dir`, recursively.

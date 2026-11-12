@@ -1,6 +1,6 @@
 //! Recording what a branch pulls from and pushes to.
 
-use dialog_artifacts::Changes;
+use dialog_corpus::Changes;
 use dialog_effects::authority::{Identify, OperatorExt as _};
 use dialog_query::Statement as _;
 

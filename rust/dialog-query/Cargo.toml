@@ -27,7 +27,7 @@ sieve-cache = { workspace = true }
 thiserror = { workspace = true }
 
 # Dialog-DB dependencies
-dialog-artifacts = { workspace = true }
+dialog-corpus = { workspace = true }
 dialog-capability = { workspace = true }
 dialog-common = { workspace = true }
 dialog-effects = { workspace = true }
@@ -61,7 +61,7 @@ wasm-bindgen-futures = { workspace = true }
 dialog-common = { workspace = true, features = ["helpers"] }
 ed25519-dalek = { workspace = true }
 tokio-test = { workspace = true }
-dialog-artifacts = { workspace = true }
+dialog-corpus = { workspace = true }
 dialog-peer = { workspace = true }
 dialog-repository = { workspace = true, features = ["helpers"] }
 dialog-storage = { workspace = true, features = ["helpers", "audit"] }

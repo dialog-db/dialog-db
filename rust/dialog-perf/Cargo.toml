@@ -23,7 +23,7 @@ dialog-common = { workspace = true }
 anyhow = { workspace = true }
 blake3 = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
-dialog-artifacts = { workspace = true }
+dialog-corpus = { workspace = true }
 dialog-capability = { workspace = true }
 dialog-credentials = { workspace = true }
 dialog-effects = { workspace = true }

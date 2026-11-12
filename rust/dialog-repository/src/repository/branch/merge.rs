@@ -13,7 +13,7 @@
 //! racing itself on one branch mints the same edition twice, and the
 //! loser's version is already taken; that race is refused instead.
 
-use dialog_artifacts::tree::CorpusNode;
+use dialog_corpus::tree::CorpusNode;
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::blob::Import as BlobImport;
 use dialog_effects::blob::Load as BlobLoad;
@@ -23,13 +23,13 @@ use std::collections::BTreeSet;
 use std::mem;
 use std::sync::{Arc, Mutex};
 
-use dialog_artifacts::ArchiveDelta;
-use dialog_artifacts::history::{Context, RevisionRecord, region_writes};
-use dialog_artifacts::merge;
-use dialog_artifacts::tree::ArtifactTreeExt as _;
 use dialog_capability::Provider;
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::ConditionalSync;
+use dialog_corpus::ArchiveDelta;
+use dialog_corpus::history::{Context, RevisionRecord, region_writes};
+use dialog_corpus::merge;
+use dialog_corpus::tree::CorpusExt as _;
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify, OperatorExt as _};
 use dialog_effects::memory::{Publish, Resolve};
@@ -254,20 +254,20 @@ mod tests {
     use crate::registry::RegistryEnv;
     use crate::{Branch, CommitError, PublishError, PullError};
     use anyhow::Result;
-    use dialog_artifacts::history::History as _;
-    use dialog_artifacts::{Artifact, ArtifactSelector, Instruction, Value};
+    use dialog_corpus::history::History as _;
+    use dialog_corpus::{Fact, Instruction, Selector, Value};
     use dialog_peer::helpers::test_session_with_peer;
     use futures_util::{StreamExt, stream};
 
     fn name(of: &str, is: &str) -> Result<Instruction> {
         Ok(Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "user/name".parse()?,
                 of: of.parse()?,
                 is: Value::String(is.to_string()),
                 cause: None,
             },
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         ))
     }
 
@@ -277,14 +277,14 @@ mod tests {
     {
         let mut values: Vec<Value> = branch
             .claims()
-            .select(ArtifactSelector::new().the("user/name".parse()?))
+            .select(Selector::new().the("user/name".parse()?))
             .to_owned()
             .perform(env)
             .await?
             .collect::<Vec<_>>()
             .await
             .into_iter()
-            .map(|artifact| artifact.map(|artifact| artifact.is))
+            .map(|fact| fact.map(|fact| fact.is))
             .collect::<Result<_, _>>()?;
         values.sort_by_key(|value| format!("{value:?}"));
         Ok(values)
@@ -406,7 +406,7 @@ mod tests {
         let writing = repo.branch("feature").open().perform(&session).await?;
         syncing.pull_from(&main).perform(&session).await?;
         let adopted = syncing
-            .pull()
+            .pull(crate::Download::MinimalRanges)
             .perform(&session)
             .await?
             .expect("the pull adopts main's head");
@@ -451,14 +451,19 @@ mod tests {
 
         let syncing = repo.branch("feature").open().perform(&session).await?;
         syncing.pull_from(&main).perform(&session).await?;
-        syncing.pull().perform(&session).await?;
+        syncing
+            .pull(crate::Download::MinimalRanges)
+            .perform(&session)
+            .await?;
         let writing = repo.branch("feature").open().perform(&session).await?;
 
         main.commit(stream::iter(vec![name("user:b", "Bob")?]))
             .perform(&session)
             .await?;
         let (pulled, committed) = futures_util::join!(
-            syncing.pull().perform(&session),
+            syncing
+                .pull(crate::Download::MinimalRanges)
+                .perform(&session),
             writing
                 .commit(stream::iter(vec![name("user:c", "Carol")?]))
                 .merge()
@@ -476,7 +481,10 @@ mod tests {
                 "{error:?}"
             );
             syncing.refresh(&session).await?;
-            syncing.pull().perform(&session).await?;
+            syncing
+                .pull(crate::Download::MinimalRanges)
+                .perform(&session)
+                .await?;
         }
 
         let fresh = repo.branch("feature").open().perform(&session).await?;

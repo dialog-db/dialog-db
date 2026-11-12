@@ -8,12 +8,12 @@ pub(crate) mod rename;
 pub use head::Head;
 
 use crate::Formula;
-use crate::artifact::Entity;
 use crate::attribute::query::AttributeQuery;
 use crate::attribute::{AttributeDescriptor, Relation, The};
 pub use crate::concept::descriptor::ConceptDescriptor;
 use crate::concept::descriptor::ConceptFieldDescriptor;
 use crate::concept::query::ConceptQuery;
+use crate::corpus::Entity;
 use crate::error::TypeError;
 use crate::formula::attribute::AttributeParts;
 use crate::identity;
@@ -932,11 +932,11 @@ pub(crate) fn same_attribute(a: &ConceptFieldDescriptor, b: &ConceptFieldDescrip
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::artifact::{Cause, Entity, Type};
     use crate::attribute::AttributeDescriptor;
     use crate::attribute::Relation;
     use crate::attribute::query::AttributeQuery;
     use crate::constraint::{Coalesce, Constraint};
+    use crate::corpus::{Cause, Entity, Type};
     use crate::proposition::Proposition;
     use crate::rule::analyzer::DependencyGraph;
     use crate::the;

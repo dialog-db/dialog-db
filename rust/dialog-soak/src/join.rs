@@ -37,11 +37,11 @@
 //!     run cold. The yardstick for binding-aware rule-join speculation
 //!     (bead dialog-db-80).
 //! 13. **download** — a second fresh client materializes the entire space
-//!     (`pull().download()`): the eager-replication cost the lazy join
+//!     (`pull(Download::Everything)`): the eager-replication cost the lazy join
 //!     avoids up front but pays incrementally.
 
 use anyhow::{Context as _, Result};
-use dialog_artifacts::{Artifact, ArtifactSelector, Instruction, Value};
+use dialog_corpus::{Fact, Instruction, Selector, Value};
 use dialog_credentials::{Credential, SignerCredential};
 use dialog_effects::credential::prelude::*;
 use dialog_effects::storage::Location;
@@ -139,7 +139,7 @@ pub struct Listing {
 /// row (short fields plus one few-hundred-byte body), the shape tonk
 /// spaces carry.
 pub(crate) fn entity_facts(index: usize) -> Result<Vec<Instruction>> {
-    let of: dialog_artifacts::Entity = format!("bug:{index}").parse()?;
+    let of: dialog_corpus::Entity = format!("bug:{index}").parse()?;
     let title = format!(
         "Bug #{index}: the {} widget misbehaves on load",
         index * 7 % 100
@@ -172,13 +172,13 @@ pub(crate) fn entity_facts(index: usize) -> Result<Vec<Instruction>> {
         .into_iter()
         .map(|(the, is)| {
             Ok(Instruction::Assert(
-                Artifact {
+                Fact {
                     the: the.parse()?,
                     of: of.clone(),
                     is,
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             ))
         })
         .collect()
@@ -187,33 +187,33 @@ pub(crate) fn entity_facts(index: usize) -> Result<Vec<Instruction>> {
 /// The space's metadata and membership facts (what a join probes).
 pub(crate) fn meta_facts(members: usize) -> Result<Vec<Instruction>> {
     let mut facts = vec![Instruction::Assert(
-        Artifact {
+        Fact {
             the: "db/name".parse()?,
             of: "id:space".parse()?,
             is: Value::String("soak space".into()),
             cause: None,
         },
-        dialog_artifacts::Pick::All,
+        dialog_corpus::Pick::All,
     )];
     for member in 0..members {
-        let of: dialog_artifacts::Entity = format!("member:{member}").parse()?;
+        let of: dialog_corpus::Entity = format!("member:{member}").parse()?;
         facts.push(Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "member/name".parse()?,
                 of: of.clone(),
                 is: Value::String(format!("Member {member}")),
                 cause: None,
             },
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         ));
         facts.push(Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "member/role".parse()?,
                 of,
                 is: Value::String(if member == 0 { "owner" } else { "editor" }.into()),
                 cause: None,
             },
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         ));
     }
     Ok(facts)
@@ -266,34 +266,34 @@ pub(crate) fn open_card_rule() -> Result<DeductiveRule> {
 
 /// The joiner's claim: the membership facts a join commits.
 fn claim_facts() -> Result<Vec<Instruction>> {
-    let of: dialog_artifacts::Entity = "member:joiner".parse()?;
+    let of: dialog_corpus::Entity = "member:joiner".parse()?;
     Ok(vec![
         Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "member/name".parse()?,
                 of: of.clone(),
                 is: Value::String("The Joiner".into()),
                 cause: None,
             },
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         ),
         Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "member/role".parse()?,
                 of: of.clone(),
                 is: Value::String("editor".into()),
                 cause: None,
             },
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         ),
         Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "member/joined".parse()?,
                 of,
                 is: Value::String("2026-09-01".into()),
                 cause: None,
             },
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         ),
     ])
 }
@@ -364,7 +364,7 @@ pub(crate) async fn mount_client(
 async fn select_count(
     branch: &Branch,
     operator: &Peer<VolatileSpace, dialog_peer::Session>,
-    selector: ArtifactSelector<dialog_artifacts::selector::Constrained>,
+    selector: Selector<dialog_corpus::selector::Constrained>,
 ) -> Result<usize> {
     let rows = branch
         .claims()
@@ -391,7 +391,10 @@ pub(crate) async fn phases(
     let (client, client_operator) = site.mount("soak-client").await?;
 
     measured("pull", phases, async {
-        client.pull().perform(&client_operator).await?;
+        client
+            .pull(dialog_repository::Download::MinimalRanges)
+            .perform(&client_operator)
+            .await?;
         Ok(())
     })
     .await?;
@@ -400,7 +403,7 @@ pub(crate) async fn phases(
         let named = select_count(
             &client,
             &client_operator,
-            ArtifactSelector::new().the("db/name".parse()?),
+            Selector::new().the("db/name".parse()?),
         )
         .await?;
         anyhow::ensure!(named == 1, "probe should find the space name");
@@ -412,19 +415,19 @@ pub(crate) async fn phases(
         let names = select_count(
             &client,
             &client_operator,
-            ArtifactSelector::new().the("member/name".parse()?),
+            Selector::new().the("member/name".parse()?),
         )
         .await?;
         let roles = select_count(
             &client,
             &client_operator,
-            ArtifactSelector::new().the("member/role".parse()?),
+            Selector::new().the("member/role".parse()?),
         )
         .await?;
         let joined = select_count(
             &client,
             &client_operator,
-            ArtifactSelector::new().the("member/joined".parse()?),
+            Selector::new().the("member/joined".parse()?),
         )
         .await?;
         anyhow::ensure!(
@@ -457,7 +460,7 @@ pub(crate) async fn phases(
         let titles = select_count(
             &client,
             &client_operator,
-            ArtifactSelector::new().the("bug/title".parse()?),
+            Selector::new().the("bug/title".parse()?),
         )
         .await?;
         anyhow::ensure!(titles == expected, "render should see every title");
@@ -469,7 +472,7 @@ pub(crate) async fn phases(
         let details = select_count(
             &client,
             &client_operator,
-            ArtifactSelector::new()
+            Selector::new()
                 .the("bug/detail".parse()?)
                 .of(format!("bug:{}", expected / 2).parse()?),
         )
@@ -483,7 +486,7 @@ pub(crate) async fn phases(
         let titles = select_count(
             &client,
             &client_operator,
-            ArtifactSelector::new().the("bug/title".parse()?),
+            Selector::new().the("bug/title".parse()?),
         )
         .await?;
         anyhow::ensure!(titles == expected, "requery should see every title");
@@ -500,7 +503,7 @@ pub(crate) async fn phases(
     // the measured window.
     let (concept_client, concept_client_operator) = site.mount("soak-concept").await?;
     concept_client
-        .pull()
+        .pull(dialog_repository::Download::MinimalRanges)
         .perform(&concept_client_operator)
         .await?;
     measured("concept", phases, async {
@@ -528,7 +531,7 @@ pub(crate) async fn phases(
     // round-trip tradeoff the merge-versus-fold decision weighs.
     let (filtered_client, filtered_client_operator) = site.mount("soak-filtered").await?;
     filtered_client
-        .pull()
+        .pull(dialog_repository::Download::MinimalRanges)
         .perform(&filtered_client_operator)
         .await?;
     let closed = (0..scenario.entities)
@@ -559,7 +562,7 @@ pub(crate) async fn phases(
     // subscription parity.
     let (subscribe_client, subscribe_client_operator) = site.mount("soak-subscribe").await?;
     subscribe_client
-        .pull()
+        .pull(dialog_repository::Download::MinimalRanges)
         .perform(&subscribe_client_operator)
         .await?;
     measured("subscribe", phases, async {
@@ -592,7 +595,7 @@ pub(crate) async fn phases(
     // rounds read as overlapped work, not the sum of two sequential runs.
     let (overlap_client, overlap_client_operator) = site.mount("soak-overlap").await?;
     overlap_client
-        .pull()
+        .pull(dialog_repository::Download::MinimalRanges)
         .perform(&overlap_client_operator)
         .await?;
     measured("overlap", phases, async {
@@ -631,7 +634,10 @@ pub(crate) async fn phases(
     // cold. The general rule-join speculation of bead dialog-db-80 is
     // measured against this phase.
     let (rule_client, rule_client_operator) = site.mount("soak-rule").await?;
-    rule_client.pull().perform(&rule_client_operator).await?;
+    rule_client
+        .pull(dialog_repository::Download::MinimalRanges)
+        .perform(&rule_client_operator)
+        .await?;
     let open = (0..scenario.entities)
         .filter(|index| index % 3 == 0)
         .count();
@@ -658,8 +664,7 @@ pub(crate) async fn phases(
     let (downloader, downloader_operator) = site.mount("soak-download").await?;
     measured("download", phases, async {
         downloader
-            .pull()
-            .download()
+            .pull(dialog_repository::Download::Everything)
             .perform(&downloader_operator)
             .await?;
         Ok(())
@@ -688,7 +693,10 @@ pub(crate) async fn phases(
         .perform(&seeded_operator)
         .await?;
     measured("seeded", phases, async {
-        seeded.pull().perform(&seeded_operator).await?;
+        seeded
+            .pull(dialog_repository::Download::MinimalRanges)
+            .perform(&seeded_operator)
+            .await?;
         Ok(())
     })
     .await?;

@@ -1,4 +1,4 @@
-# `/ucan/revoke`: artifact, witness path, and what validates what
+# `/ucan/revoke`: fact, witness path, and what validates what
 
 ## The division of labour
 
@@ -8,7 +8,7 @@ For a revocation that means exactly one thing: *whoever signed this was authoriz
 
 Everything else is `/ucan/revoke`-specific and lives on `RevocationChain`. The failure mode to avoid is re-deriving what `verify` already does: hand-rolled reimplementations of the generic path are where holes come from, each one missing something the shared code already handled.
 
-**Deliberately out of scope:** whether the service holds the subject. That is deployment policy, not artifact validity — the same artifact gets a different answer per deployment.
+**Deliberately out of scope:** whether the service holds the subject. That is deployment policy, not fact validity — the same fact gets a different answer per deployment.
 
 ## `prf` and `pth` answer different questions
 
@@ -39,7 +39,7 @@ type RevocationArguments struct {
 Two shape decisions worth naming:
 
 - **A bare link is not a path.** `pth` is `[&Delegation]`; accepting a single link would make the one-hop case shaped differently from every other, which is the sort of special case that later grows a bug.
-- **An empty `pth` is shape-valid.** An empty list is a list. Whether it *justifies* anything is `validate`'s question, and it cannot — `rev` is not in an empty path — so this splits cleanly into "well-formed artifact" versus "artifact that proves its authority".
+- **An empty `pth` is shape-valid.** An empty list is a list. Whether it *justifies* anything is `validate`'s question, and it cannot — `rev` is not in an empty path — so this splits cleanly into "well-formed fact" versus "fact that proves its authority".
 
 ## `RevocationBuilder`: the revoker is the subject
 
@@ -98,9 +98,9 @@ pub enum Denial {
 }
 ```
 
-`RevocationChain::verify` runs both halves and returns this: `InvocationChain::verify` first (yielding `Invalid` on failure), then `validate`. Keeping `Invalid` distinct from `Denied` matters because they are different findings — one says the artifact is not a valid invocation before any question of revocation authority arises.
+`RevocationChain::verify` runs both halves and returns this: `InvocationChain::verify` first (yielding `Invalid` on failure), then `validate`. Keeping `Invalid` distinct from `Denied` matters because they are different findings — one says the fact is not a valid invocation before any question of revocation authority arises.
 
-Separately, `MalformedRevocationChain` says the artifact could not be *read* (bad shape, or a named block absent from the container).
+Separately, `MalformedRevocationChain` says the fact could not be *read* (bad shape, or a named block absent from the container).
 
 ### Why `pth` hops are not screened for revocation
 

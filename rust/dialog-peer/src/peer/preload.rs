@@ -12,9 +12,9 @@
 
 use std::sync::Arc;
 
-use dialog_artifacts::{Preload, PreloadQueue, PreloadRequest, Speculation};
 use dialog_capability::Provider;
 use dialog_common::{ConditionalSend, ConditionalSync};
+use dialog_corpus::{Preload, PreloadQueue, PreloadRequest, Speculation};
 
 use super::{Mode, Peer};
 

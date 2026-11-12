@@ -5,7 +5,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use anyhow::{Result, anyhow};
-use dialog_artifacts::Pick;
+use dialog_corpus::Pick;
 use futures_util::TryStreamExt as _;
 
 use super::{Outcome, Prepared, seed_stuff};

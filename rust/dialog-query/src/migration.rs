@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 use std::ops::Not;
 
 use base58::ToBase58;
-use dialog_artifacts::Entity;
+use dialog_corpus::Entity;
 use serde::Serialize;
 
 use crate::Cardinality;

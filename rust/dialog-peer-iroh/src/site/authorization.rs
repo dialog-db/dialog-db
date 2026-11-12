@@ -3,7 +3,7 @@
 /// A `ctn-v1` container: the signed invocation, its proofs, and the
 /// blocks its arguments name.
 ///
-/// One opaque artifact rather than a struct of parts, because parts
+/// One opaque fact rather than a struct of parts, because parts
 /// invite disagreement. The command, the subject and the arguments are
 /// all inside the signed invocation, and the payload is addressed by a
 /// hash the invocation commits to, so there is nothing here for a second

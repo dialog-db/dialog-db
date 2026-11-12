@@ -7,7 +7,7 @@
 //! `separator`/`until`), and get one row per component — its position, kind,
 //! human rendering, and raw bytes. Pure per-row computation over the
 //! self-describing variable-length key encoding
-//! (`dialog_artifacts::key::varkey`) — the legitimate `Formula` kind,
+//! (`dialog_corpus::key::varkey`) — the legitimate `Formula` kind,
 //! exactly like `dialog/revision-parent`.
 //!
 //! The two stay separate because their contracts differ: a full key
@@ -18,7 +18,7 @@
 //! the prefix bytes as one component. This mirrors the
 //! `key_parts`/`separator_parts` split tonk's inspector proved out.
 
-use dialog_artifacts::inspect::{key_components, separator_components};
+use dialog_corpus::inspect::{key_components, separator_components};
 
 use crate::Formula;
 use crate::formula::Input;
@@ -111,13 +111,13 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-    use dialog_artifacts::{Artifact, Entity, EntityKey, KeyType as _, Value};
+    use dialog_corpus::{Entity, EntityKey, Fact, KeyType as _, Value};
     use dialog_search_tree::Manifest;
 
     use super::*;
 
-    fn fact() -> Artifact {
-        Artifact {
+    fn fact() -> Fact {
+        Fact {
             the: "test/name".parse().expect("attribute parses"),
             of: Entity::new().expect("entity mints"),
             is: Value::String("Alice".into()),
@@ -125,8 +125,8 @@ mod tests {
         }
     }
 
-    fn entity_key(fact: &Artifact) -> Vec<u8> {
-        EntityKey::from_artifact(fact, &Manifest::default())
+    fn entity_key(fact: &Fact) -> Vec<u8> {
+        EntityKey::from_fact(fact, &Manifest::default())
             .into_key()
             .bytes()
             .to_vec()
