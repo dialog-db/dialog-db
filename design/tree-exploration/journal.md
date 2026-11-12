@@ -4,8 +4,8 @@
 
 |  | Understanding | Activity |
 |---|---|---|
-| **Status** | *What do we know?* The problem, accepted. What idempotent means here. That every branch has an ephemeral line: facts in memory, folded into every read, never committed, each change an instant with a sequence a query pins and a poll reads the delta of. That a poll re-runs only when the head or that line moved. That a fetched block is written back locally in one place. That no effect removes a block. A matrix for "how a query learns whether a block is held" with four columns ([design-held](design-held.md)). | *Where are we at?* Directing, with one implementation decision opened early because the maintainer asked for a concrete proposal on it. Not decided. |
-| **Agenda** | *What do we need to know?* Where the two handlers live: in each embedding, or as two operations dialog offers that an embedding's handler calls (asked). Whether a fact that says "not local" may stand after the block landed another way. Still open from before: the strategy matrix itself (how a node's children come back with their details together), which this decision does not touch. | *Where are we going?* The maintainer's reading of the matrix; then use cases and the strategy matrix. |
+| **Status** | *What do we know?* The problem, accepted. What is held is decided: two commands with handlers built into dialog, asserting into the overlay. That dialog dispatches commands as transient facts and reacts with inductive rules at commit, and has no built-in reaction that performs an effect. Use cases are drafted (nine). A strategy matrix exists with six columns, the sixth born from the decision on what is held. | *Where are we at?* Directing. The matrix is written and not read by the maintainer. |
+| **Agenda** | *What do we need to know?* Whether the use cases are right. For column 6 and for the held decision alike: how dialog reacts to a command with an effect and writes the overlay. For column 5: whether a record reaches a page whole. For column 4: what a decoding formula's rows would be, which the maintainer has not said. Which rows the maintainer weighs most. | *Where are we going?* The maintainer reads the use cases and the matrix; the open cells are checked; a direction is chosen. |
 
 ## 2026-11-12, Describing: what was tried and what was seen
 
@@ -280,3 +280,38 @@ It opens one cell and worsens one:
   something asks again.
 
 **Decided.** Not decided.
+
+## 2026-11-12, Directing: what is held is decided; a strategy matrix is written
+
+**Asked.** Should each embedding write the two handlers, or should
+dialog provide them? The maintainer: "Dialog has built-in handlers for
+the commands, and it asserts and does this job for you." And: "I don't
+want it to assert a permanent fact. I want it actually to assert it in
+the overlay when you probe for something. So that way it can disappear."
+
+**Learned.** *Is that a fact, a hypothesis, or an opinion?* "Dialog has
+built-in handlers" was checked as a fact and is not one yet: dialog
+dispatches a command as a transient fact (`Transaction::dispatch`) and
+reacts to it at commit with inductive rules, which derive facts and
+perform no effect; nothing built in reads a block or writes the overlay
+in response to a command. It is entered as the maintainer's decision
+about what dialog will have, and what it needs is entered as a
+hypothesis.
+
+"In the overlay" is the ephemeral line the fourth and fifth columns
+already named. Nothing changes there; it is now said by the maintainer.
+
+Writing the strategy matrix after that decision gave it a sixth column.
+If a command with a built-in handler can say whether a block is local by
+asserting session facts, the same thing can say what a node holds: its
+spans and its entries, each an entity with ordinary facts. Queries then
+read facts and never a block, so the questions that occupied the earlier
+sittings (how a rule is given its node, why only `this` reaches a body,
+how a child's details stay paired) do not arise in that column. It pays
+for that in a command before every query and in memory held for the
+session.
+
+**Decided.** What is held: the fifth column of
+[design-held](design-held.md), handlers in dialog, facts in the overlay.
+It rests on an open hypothesis (dialog reacting to a command with an
+effect). The strategy is not decided.

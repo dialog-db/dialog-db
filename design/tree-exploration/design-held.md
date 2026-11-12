@@ -6,10 +6,13 @@ the [top story](../tree-exploration.md), under the maintainer's
 constraint that a tree read stays idempotent (see the
 [glossary](glossary.md)).
 
-Not decided. The fourth column was born from the contrast and is the
-agent's; the fifth is the maintainer's simplification of it, which drops
-the hook in the hydration path and with it two of the fourth's `?`
-cells. One row was added for it, at the bottom: where a handler lives.
+**Decided by the maintainer, 2026-11-12: the fifth column, with the
+handlers built into dialog and the facts asserted in the overlay, not
+committed, so they can disappear.** The fourth column was born from the
+contrast and was the agent's; the fifth is the maintainer's
+simplification of it. The decision rests on one open hypothesis, in the
+last row: that dialog can react to a dispatched command with an effect
+and write the overlay.
 
 | criterion \ approach | Status quo: tonk's reader probes the local archive while answering | A resolver that takes a time (the maintainer's) | A scan that probes the archive when the query runs (the agent's earlier) | Recorded answers: a command probes, the answer is a fact in the branch's ephemeral line | Two commands whose handlers assert (the maintainer's): one asks whether a block is local and asserts the answer; one fetches a block and asserts it is local |
 |---|---|---|---|---|---|
@@ -21,4 +24,4 @@ cells. One row was added for it, at the bottom: where a handler lives.
 | what has to be built | exists, in the embedder | a clock fact, commands that move it, an arrival record per block, the resolver | a new kind of scan, and a way for a poll to notice the archive changed | a probe command; a hook where a hydrated block is written back; one reserved attribute | two commands and their handlers; nothing in the hydration path |
 | where the fact lives | - | - | - | ? the ephemeral line is per branch and a block belongs to a space's archive, shared by its branches; which lines a hydration writes to is not worked out | 🟢 a command is issued against a branch, so its handler writes to that branch's line |
 | a replica drops a block | - | ? | ? | ? no effect that removes a block from an archive was found (`Get`, `Put`, `Import`, `Load`); if one exists it needs the same hook | the fact stands until something asks again |
-| where the probing and fetching code lives | 🔴 in the embedder, woven into its worker | in dialog | in dialog | ? a command and its handler are the embedder's mechanism in tonk (`impl Provider<C> for CommandEnv`); the hook is dialog's | ? the handlers are the embedder's unless dialog offers the two operations for a handler to call; every embedding writing its own is what the problem statement names |
+| where the probing and fetching code lives | 🔴 in the embedder, woven into its worker | in dialog | in dialog | ? a command and its handler are the embedder's mechanism in tonk (`impl Provider<C> for CommandEnv`); the hook is dialog's | in dialog, built in (the maintainer). ? dialog dispatches a command as a transient fact and reacts to it with inductive rules at commit (`Transaction::dispatch`, `transaction/induce.rs`); a built-in reaction that performs an effect and writes the overlay was not found and would be new |
