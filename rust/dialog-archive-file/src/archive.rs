@@ -4102,6 +4102,82 @@ mod tests {
         ));
         Ok(())
     }
+
+    /// Appends `node`, a tree node that is not byte-canonical, to an archive
+    /// with `verify` off, and checks it reads back as appended: through
+    /// `get`, and through the node a tree is served, whose block is the
+    /// one its hash names.
+    fn non_canonical_node_reads_back_without_verify(node: Buffer) -> anyhow::Result<()> {
+        assert!(
+            crate::node::tree_node(&node).is_some(),
+            "the block parses as a tree node"
+        );
+        let directory = tempfile::tempdir()?;
+        let archive = FileArchive::open_with(
+            directory.path().join("archive"),
+            Options {
+                verify: false,
+                ..Options::default()
+            },
+        )?;
+        archive.append("index", std::slice::from_ref(&node))?;
+        let framed = archive.is_frame("index", node.blake3_hash());
+        let mut wrong = Vec::new();
+        let read = archive
+            .get("index", node.blake3_hash())?
+            .expect("the block is held");
+        if Blake3Hash::hash(&read) != *node.blake3_hash() {
+            wrong.push(format!(
+                "`get` returns {} bytes that do not hash to the name asked for, {} appended",
+                read.len(),
+                node.as_ref().len()
+            ));
+        }
+        if let Some(served) = archive.served("index", node.blake3_hash()) {
+            let tree = crate::node::TreeNode::from_rows(Arc::new(served))
+                .expect("rows of the artifact tree");
+            match tree.buffer() {
+                Ok(block) if block.as_ref() == node.as_ref() => {}
+                Ok(_) => wrong.push("the served node's block is other bytes".into()),
+                Err(error) => wrong.push(format!("the served node has no block: {error}")),
+            }
+        }
+        assert!(wrong.is_empty(), "framed: {framed}; {}", wrong.join("; "));
+        Ok(())
+    }
+
+    /// A block reads back as the very bytes appended under its hash, with
+    /// `verify` off (the release default) as with it on, even when it
+    /// parses as a tree node with padding between its prelude and its
+    /// body. Today, without verify, it is kept as a frame whose rows
+    /// rebuild other bytes, which are served under the block's hash.
+    #[test]
+    fn it_reads_back_a_padded_node_as_appended_without_verify() -> anyhow::Result<()> {
+        use crate::node::tests::entity_segment;
+        use dialog_search_tree::Manifest;
+
+        let canonical = entity_segment("alice", &Manifest::default())?;
+        let mut bytes = canonical.as_ref()[..16].to_vec();
+        bytes.extend_from_slice(&[0u8; 16]);
+        bytes.extend_from_slice(&canonical.as_ref()[16..]);
+        non_canonical_node_reads_back_without_verify(Buffer::from(bytes))
+    }
+
+    /// A segment whose keys share one layout but are encoded whole under
+    /// the mixed layout (as `PersistentSegment::from_columns` allows) reads
+    /// back as appended with `verify` off. Today its rows are re-encoded
+    /// under the layout the keys imply, so `get` returns other bytes and
+    /// the served node's `buffer()` fails ("Rows built a block other than
+    /// the one they stand for"), which any write of that node meets.
+    #[test]
+    fn it_reads_back_a_mixed_layout_segment_as_appended_without_verify() -> anyhow::Result<()> {
+        use crate::node::tests::{mixed_entity_segment, segment_manifest};
+
+        non_canonical_node_reads_back_without_verify(mixed_entity_segment(
+            "alice",
+            &segment_manifest(),
+        )?)
+    }
 }
 
 #[cfg(test)]

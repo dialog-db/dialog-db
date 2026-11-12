@@ -788,11 +788,19 @@ pub(crate) mod tests {
     }
 
     /// The block of a segment holding `keys`, each with a datum.
-    fn segment_block(mut keys: Vec<Key>, manifest: &Manifest) -> anyhow::Result<Vec<u8>> {
+    fn segment_block(keys: Vec<Key>, manifest: &Manifest) -> anyhow::Result<Vec<u8>> {
+        let body = PersistentNodeBody::from_segment(
+            PersistentSegment::from_entries::<Key>(segment_entries(keys))?,
+            manifest.clone(),
+        );
+        Ok(body.as_bytes()?.to_vec())
+    }
+
+    /// The entries of a segment holding `keys`, each with a datum.
+    fn segment_entries(mut keys: Vec<Key>) -> Vec<Entry<Key, State<Datum>>> {
         keys.sort();
         keys.dedup();
-        let entries = keys
-            .into_iter()
+        keys.into_iter()
             .enumerate()
             .map(|(at, key)| Entry {
                 key,
@@ -805,12 +813,7 @@ pub(crate) mod tests {
                     retraction: false,
                 }),
             })
-            .collect::<Vec<_>>();
-        let body = PersistentNodeBody::from_segment(
-            PersistentSegment::from_entries::<Key>(entries)?,
-            manifest.clone(),
-        );
-        Ok(body.as_bytes()?.to_vec())
+            .collect()
     }
 
     /// The manifest test segments are written under.
@@ -829,6 +832,26 @@ pub(crate) mod tests {
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
         Ok(Buffer::from(segment_block(keys, manifest)?))
+    }
+
+    /// The block of the same segment as [`entity_segment`], its keys (all
+    /// of one layout) encoded whole under [`MIXED_LAYOUT`] instead of split
+    /// by their layout: a valid tree node, but not the bytes the tree
+    /// itself would write for those entries.
+    pub(crate) fn mixed_entity_segment(name: &str, manifest: &Manifest) -> anyhow::Result<Buffer> {
+        let keys = facts()?
+            .into_iter()
+            .map(|mut fact| {
+                fact.of = Entity::from_str(&format!("test:{name}"))?;
+                Ok(EntityKey::from_fact(&fact, manifest).0)
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let entries = segment_entries(keys);
+        let whole: Vec<&[u8]> = entries.iter().map(|entry| entry.key.as_ref()).collect();
+        let values = entries.iter().map(|entry| entry.value.clone()).collect();
+        let segment = PersistentSegment::from_columns::<Key>(MIXED_LAYOUT, &[whole], values)?;
+        let body = PersistentNodeBody::from_segment(segment, manifest.clone());
+        Ok(Buffer::from(body.as_bytes()?.to_vec()))
     }
 
     /// The block of an index node linking to `children` (segments, in key

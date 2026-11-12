@@ -218,7 +218,10 @@ fn check(image: &[u8], at: usize, done: &Done, path: &Path) -> anyhow::Result<Ve
 /// Plays every power loss on the workload and reports what `keep` says
 /// went wrong, grouped. See the module docs. `DIALOG_POWER_SEED` and
 /// `DIALOG_POWER_TRIALS` replay a failure or search further.
-fn play(keep: fn(&Wrong) -> Option<&str>) -> anyhow::Result<()> {
+fn play(
+    workload: fn(&Path, &disk::Watch) -> anyhow::Result<Done>,
+    keep: fn(&Wrong) -> Option<&str>,
+) -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("archive");
     std::fs::write(&path, b"")?;
@@ -279,7 +282,124 @@ fn play(keep: fn(&Wrong) -> Option<&str>) -> anyhow::Result<()> {
 /// which is in the file.
 #[test]
 fn every_power_loss_recovers_to_what_was_synced() -> anyhow::Result<()> {
-    play(|wrong| match wrong {
+    play(workload, |wrong| match wrong {
         Wrong::File(wrong) | Wrong::Cell(wrong) | Wrong::Names(wrong) => Some(wrong),
     })
+}
+
+/// A workload whose slots each take more than a sector: blocks in four
+/// catalogs with long names, then rounds of blocks with a sync point after
+/// each. Its durable slot, written over in place at each sync point,
+/// spans two sectors, so a power loss can keep one of them only.
+fn wide_slots(path: &Path, watch: &disk::Watch) -> anyhow::Result<Done> {
+    let archive = FileArchive::open_with(
+        path,
+        Options {
+            extent: 4096,
+            ..Options::default()
+        },
+    )?;
+    let catalog = |n: usize| format!("{n}{}", "c".repeat(200));
+    for n in 0..4 {
+        archive.append(&catalog(n), &[block(&format!("catalog {n}"))])?;
+    }
+    let mut done = Done::default();
+    archive.sync()?;
+    done.synced.push(watch.len());
+    for round in 0..3 {
+        for n in 0..4 {
+            let name = format!("round {round} block {n}");
+            archive.append("index", &[block(&name)])?;
+            archive.append(&catalog(n), &[block(&format!("{name} beside"))])?;
+            done.blocks.push((name, watch.len()));
+        }
+        archive.sync()?;
+        done.synced.push(watch.len());
+    }
+    archive
+        .inner
+        .dies
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    Ok(done)
+}
+
+/// Every power loss leaves a file that opens and keeps every block synced,
+/// also when a slot takes more than one sector. Today the durable slot is
+/// one copy written over in place, so a power loss during a sync point that
+/// keeps one of its sectors and not the other leaves no whole durable slot,
+/// and the file does not open.
+#[test]
+fn it_recovers_from_every_power_loss_with_slots_over_a_sector() -> anyhow::Result<()> {
+    play(wide_slots, |wrong| match wrong {
+        Wrong::File(wrong) | Wrong::Cell(wrong) | Wrong::Names(wrong) => Some(wrong),
+    })
+}
+
+/// A sync point cut off by a power loss after it wrote the first sector of
+/// the durable slot and before it wrote the rest, or the other way round,
+/// leaves a file that opens and keeps every block synced before it. Today
+/// the durable slot is one copy written over in place, so either tear
+/// leaves no whole durable slot and the file does not open.
+#[test]
+fn it_opens_after_a_durable_slot_torn_at_a_sector() -> anyhow::Result<()> {
+    use super::slot::SLOT;
+    use crate::file::MAGIC;
+
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("archive");
+    let archive = FileArchive::open(&path)?;
+    let catalog = |n: usize| format!("{n}{}", "c".repeat(200));
+    let mut synced = Vec::new();
+    for n in 0..4 {
+        let name = format!("first {n}");
+        archive.append(&catalog(n), &[block(&name)])?;
+        synced.push((catalog(n), name));
+    }
+    archive.sync()?;
+    for n in 0..40 {
+        archive.append(&catalog(n % 4), &[block(&format!("later {n}"))])?;
+    }
+    let before = std::fs::read(&path)?;
+    archive.sync()?;
+    let after = std::fs::read(&path)?;
+    archive
+        .inner
+        .dies
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    drop(archive);
+
+    let durable = MAGIC.len() + 2 * SLOT as usize;
+    let sector = (durable / 512 + 1) * 512;
+    let length = |bytes: &[u8]| u32::from_le_bytes(bytes[durable..durable + 4].try_into().unwrap());
+    assert!(
+        durable + 8 + length(&before) as usize > sector,
+        "the durable slot spans a sector boundary"
+    );
+    for (kept, torn) in [(&before, &after), (&after, &before)] {
+        let mut image = kept.clone();
+        image[durable..sector].copy_from_slice(&torn[durable..sector]);
+        let image_path = directory.path().join("torn");
+        std::fs::write(&image_path, &image)?;
+        as_if_rebooted(&image_path)?;
+        let reopened = FileArchive::open_with(
+            &image_path,
+            Options {
+                leave_extent: false,
+                ..Options::default()
+            },
+        )
+        .map_err(|error| anyhow::anyhow!("the torn image does not open: {error}"))?;
+        for (catalog, name) in &synced {
+            assert_eq!(
+                reopened.get(catalog, block(name).blake3_hash())?.as_deref(),
+                Some(name.as_bytes()),
+                "{name}, synced, reads back"
+            );
+        }
+        reopened
+            .inner
+            .dies
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    Ok(())
 }
