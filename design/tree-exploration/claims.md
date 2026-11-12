@@ -46,4 +46,6 @@
 | No effect removes a block from an archive | fact | `rust/dialog-effects/src/archive.rs` defines `Get`, `Put`, `Import`; `archive/load.rs` defines `Load`; storage providers were not read for compaction | holds for the effects |
 | Whether a block is held should be a fact in the branch's ephemeral line, written by a probe command and corrected where a hydrated block is written back | opinion | the agent, 2026-11-12; [design-held](design-held.md) | - |
 | Dialog can assert a reserved fact into the right branches' ephemeral lines from the hydration path | hypothesis | confirmed by a test in which a block is hydrated with no commit and a subscription over the fact re-runs; refuted if the hydration path cannot reach a line | open |
+| Whether a block is local should be asked by a command whose handler asserts the answer, and a block fetched by a command whose handler asserts that it is local | opinion | the maintainer, 2026-11-12; fifth column of [design-held](design-held.md) | - |
+| A command with a handler is tonk's mechanism, not dialog's: a transient concept and a provider in tonk's worker, whose outcomes are durable or overlay facts | fact | tonk `.claude/skills/commands-not-routes/SKILL.md` at `125ab4c` | holds |
 

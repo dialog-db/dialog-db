@@ -5,7 +5,7 @@
 |  | Understanding | Activity |
 |---|---|---|
 | **Status** | *What do we know?* The problem, accepted. What idempotent means here. That every branch has an ephemeral line: facts in memory, folded into every read, never committed, each change an instant with a sequence a query pins and a poll reads the delta of. That a poll re-runs only when the head or that line moved. That a fetched block is written back locally in one place. That no effect removes a block. A matrix for "how a query learns whether a block is held" with four columns ([design-held](design-held.md)). | *Where are we at?* Directing, with one implementation decision opened early because the maintainer asked for a concrete proposal on it. Not decided. |
-| **Agenda** | *What do we need to know?* For the proposed column: which lines a hydration writes to, given a line is per branch and an archive per space; whether dialog may assert a reserved fact into a line from the hydration path; whether a "not known" state is acceptable to the maintainer. Still open from before: the strategy matrix itself (how a node's children come back with their details together), which this decision does not touch. | *Where are we going?* The maintainer's reading of the matrix; then use cases and the strategy matrix. |
+| **Agenda** | *What do we need to know?* Where the two handlers live: in each embedding, or as two operations dialog offers that an embedding's handler calls (asked). Whether a fact that says "not local" may stand after the block landed another way. Still open from before: the strategy matrix itself (how a node's children come back with their details together), which this decision does not touch. | *Where are we going?* The maintainer's reading of the matrix; then use cases and the strategy matrix. |
 
 ## 2026-11-12, Describing: what was tried and what was seen
 
@@ -249,3 +249,34 @@ fact.
 
 **Decided.** Not decided. The matrix has three `?` cells in the
 proposed column.
+
+## 2026-11-12, Directing: the maintainer simplifies the proposal
+
+**Asked.** Is "not known until probed" acceptable? Not answered
+directly. The maintainer generalized the proposal instead: a command
+asks whether a block is local, and its handler checks and asserts a fact
+saying it is or is not; a command fetches a block, and its handler
+fetches and then asserts that it is local. "That way you actually model
+it, without complicating things that we were complicating before."
+
+**Learned.** This is the fourth column with the hook in the hydration
+path taken out: the fetch command's own handler says the block arrived.
+It is entered as a fifth column in [design-held](design-held.md). It
+settles two of the fourth's open cells (nothing is built in the
+hydration path; a command is issued against a branch, so there is no
+question of which line to write) and it accepts "not known" by
+construction, since only a command produces a fact.
+
+It opens one cell and worsens one:
+
+- A command with a handler is tonk's mechanism (a transient concept and
+  an `impl Provider<C> for CommandEnv` in its worker), not dialog's. As
+  given, each embedding would write the two handlers, and "any embedding
+  should be able to inspect the tree where now it's done through custom
+  machinery" is the maintainer's own addition to the problem statement.
+  Whether two small handlers through an embedding's ordinary command
+  mechanism count as that machinery is the maintainer's to say.
+- A block that lands some other way leaves "not local" standing until
+  something asks again.
+
+**Decided.** Not decided.
