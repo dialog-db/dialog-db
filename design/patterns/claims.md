@@ -2,7 +2,7 @@
 
 | claim | kind | backing | status |
 |---|---|---|---|
-| a parameter holds a variable or a constant | fact | `Term`, `rust/dialog-query/src/term.rs`; `Parameters`, `parameters.rs` | holds |
+| a parameter holds a variable or a constant | fact | `Term`, `rust/dialog-query/src/term.rs`; `Parameters`, `parameters.rs` | held until step 2; a parameter now holds a `Pattern`, of which a term is the leaf (`rust/dialog-query/src/pattern.rs`) |
 | a record is bytes dialog does not look into, named by a hash of those bytes | fact | `Value::Record(Vec<u8>)`; `RECORD.reference_of(bytes)`, `rust/dialog-corpus/src/identity.rs` | held until step 1; holds now for a record of before only (`Value::scalar_reference`) |
 | a revision's record is a bare dag-cbor map | fact | `RevisionRecord::to_bytes`, `rust/dialog-corpus/src/history/revision_record.rs` | holds |
 | a version byte in front tells a new record from one of before | hypothesis | confirmed if no dag-cbor a release has written under `Value::Record` starts with that byte; a map starts with `0xa0` to `0xbf` | split in three, below: confirmed for what dialog writes and for any dag-cbor, open for bytes an embedder gave |
@@ -14,7 +14,16 @@
 | a composite round-trips through a branch as a claim's value, spilled or inline | fact | `it_round_trips_a_composite_as_a_claims_value`, `rust/dialog-repository/src/repository/branch/composite_tests.rs` | holds |
 | a number in a composite should be kept under the narrowest type that holds it | opinion | the builder, 2026-11-11, in [design-composite-bytes.md](design-composite-bytes.md): without it a record built from a bound number misses a stored one that holds the number under another type | decides until the maintainer says otherwise; on the agenda |
 | a tuple is named under a type of its own, `tuple:` | opinion | the builder, 2026-11-11: a tuple and a list of the same items have two byte strings, so one name for both would be one name for two values | decides until the maintainer says otherwise; on the agenda |
-| a rule's identity names a record constant as `Value::reference` does | fact | `constant`, `rust/dialog-query/src/rule/reference.rs`, says so in its doc and hashed a record's bytes | to keep true in step 2: a rule holding a composite constant would otherwise name it by its bytes |
+| a rule's identity names a record constant as `Value::reference` does | fact | `constant`, `rust/dialog-query/src/rule/reference.rs`, now calls `Value::reference` for a record | holds |
+| a pattern with no rest should be the map of exactly its entries | opinion | the builder, 2026-11-11, in [design-pattern-meaning.md](design-pattern-meaning.md): open, a rule would find one set of facts when a record is scanned and another when it is looked up by the built value | decides until the maintainer says otherwise; on the agenda |
+| only a concept premise stores a `Parameters`; every other premise is a struct of typed terms | fact | `ConceptQuery::terms`; `Equality::parameters`, a formula's `From` for `Parameters`, `AttributeQueryAll::parameters` | holds, and is why a formula's slot cannot hold a shape |
+| a rule's body is evaluated by more than its plan | fact | `bind_occurrence` joins `occurrence.terms` from a table, `rust/dialog-query/src/concept/query/fixpoint.rs`; `rust/dialog-repository/src/repository/branch/transaction/induce.rs` reads `query.terms` | holds, and is why a pattern is lowered to an equality and not applied by each plan step |
+| a rule runs only with an identity, and an identity is a reference of the rule's wire form | fact | `RuleRegistry::register` returns `RuleWithoutIdentity`; `rust/dialog-query/src/rule/reference.rs` | holds; the plan did not say a rule holding a pattern needs an identity to run, and it does |
+| a pattern can be named by its parts with no wire form | fact | `pattern_reference`, `rust/dialog-query/src/rule/reference.rs`; `it_refuses_to_store_a_rule_that_holds_a_pattern` (an identity, no body, two patterns two identities); `it_has_no_wire_form_above_a_leaf` | holds |
+| installing a rule that holds a pattern is refused with the reason | fact | `DeductiveRule::storable`, `TypeError::UnstorablePattern`; `it_refuses_to_install_a_rule_that_holds_a_pattern` | holds, as a panic: `Statement::assert` returns nothing. What it should do is on the agenda |
+| a query takes a stored record apart by a map pattern, with and without the rest | fact | `it_takes_a_stored_record_apart_by_a_map_pattern`, `rust/dialog-query/src/pattern/tests.rs` | holds |
+| a rule builds a record from two bound variables and concludes a fact holding it | fact | `it_builds_a_record_from_two_bound_variables_and_concludes_a_fact_holding_it` | holds |
+| steps 2 and 3 of the plan can land one after the other | hypothesis | refuted: a rule that holds a pattern does not compile until feasibility looks inside it (`categorize`), since nothing else binds the variables the head needs | refuted; step 2 lands the planner's reading of a pattern, and step 3 its tests in either order and the refusal |
 | a parameter should hold a pattern, of which a term is the leaf | opinion | Irakli, 2026-11-11 | decides |
 | a composite is dag-cbor under a version byte now, another layout later | opinion | Irakli, 2026-11-11 | decides |
 | no stored format changes for patterns now | opinion | Irakli, 2026-11-11 | decides |

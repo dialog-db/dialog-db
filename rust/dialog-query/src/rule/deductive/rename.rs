@@ -25,7 +25,10 @@ pub type Rename = BTreeMap<String, String>;
 pub fn variables(premises: &[Premise]) -> BTreeSet<String> {
     let mut names = BTreeSet::new();
     for premise in premises {
-        for (_, term) in premise.parameters().iter() {
+        // The variables inside a map, a list or a tuple of terms are
+        // the premise's own; the variable standing for the whole is not
+        // one anybody wrote.
+        for term in premise.parameters().leaves() {
             if let Some(name) = term.name() {
                 names.insert(name.to_string());
             }
@@ -108,11 +111,7 @@ fn rename_proposition(proposition: &Proposition, map: &Rename) -> Result<Proposi
 }
 
 fn rename_parameters(parameters: &Parameters, map: &Rename) -> Parameters {
-    let mut renamed = Parameters::new();
-    for (key, term) in parameters.iter() {
-        renamed.insert(key.clone(), rename_term(term, map));
-    }
-    renamed
+    parameters.map_terms(|term| rename_term(term, map))
 }
 
 pub(crate) fn rename_term<T>(term: &Term<T>, map: &Rename) -> Term<T>

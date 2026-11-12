@@ -2,8 +2,8 @@
 
 |  | Understanding | Activity |
 |---|---|---|
-| **Status** | Dialog has a value made of values: a map, a list or a tuple, kept as a record under a version byte and named by its parts ([design-version-byte.md](design-version-byte.md), [design-composite-bytes.md](design-composite-bytes.md)). A parameter still holds a variable or a constant. | **Building.** Step 1 of [the plan](plan.md) is built and tested. Steps 2 to 4 are not. |
-| **Agenda** | For the maintainer: whether a composite keeps a number under the narrowest type that holds it, as built, or under the type it was given in. Whether a tuple's name is its own type, `tuple:`, as built. Whether any embedder has stored a record that starts with `0x01` to `0x17`. Then: how the planner judges a pattern feasible. How a pattern is typed. What installing a rule that holds one does. | Step 2: a pattern in place of a term in `Parameters`. One implementation decision at a time, each written down. |
+| **Status** | Dialog has a value made of values, kept as a record under a version byte and named by its parts. A parameter holds a pattern: a term, or a map, a list or a tuple of terms. A concept premise that holds one is planned as the concept over the whole value and an equality between the whole and the pattern, and the equality runs both ways ([design-parameters.md](design-parameters.md)). A rule that holds one has an identity, runs, and cannot be stored ([design-rule-identity.md](design-rule-identity.md)). | **Building.** Steps 1 and 2 of [the plan](plan.md) are built and tested. Step 2 took the planner's reading of a pattern with it. Steps 3 and 4 are not landed. |
+| **Agenda** | For the maintainer: what installing a rule that holds a pattern should do; today it is refused by a panic that says why, since an assertion returns nothing. Whether a pattern with no rest is the map of exactly its entries, as built. Whether a composite keeps a number under the narrowest type that holds it, as built. Whether a tuple's name is its own type, `tuple:`, as built. Whether any embedder has stored a record that starts with `0x01` to `0x17`. Then: how a pattern is typed. | Step 3: the tests in either order of premises and the refusal that names the variable. Then step 4. |
 
 ## 2026-11-11, Directing: a pattern in place of a term
 
@@ -42,3 +42,24 @@
 - A tuple is named under `tuple:`.
 
 Two of these rest on the builder's opinion and are on the agenda: the number's type, and the tuple's name.
+
+## 2026-11-11, Building: a pattern in a parameter
+
+**Asked.** What `Parameters::get` answers for a name that holds a map. Where a premise that reads terms meets a pattern. What a pattern with nothing left over means. Whether a rule that holds a pattern can run without a stored form.
+
+**Learned.**
+
+- `Parameters` is read as terms at about four hundred places, and only a concept premise stores one. So a reader gets a term whatever the parameter holds, and the few that must look inside ask for the shape.
+- A rule's body is evaluated by more than its plan: a recursive component joins its occurrences from tables, and induction reads a premise's terms. A pattern applied by each plan step would be dropped by those, with no error. Lowered to an equality, they meet a premise they already run.
+- The planner, not the author, picks which premise runs first. So a pattern has to say one thing built and taken apart, and `{title: ?t}` is the map of a title alone.
+- A rule runs only when registered, and is registered only with an identity, which is a reference of its wire form. So step 2's rule could not be tested until a pattern had a reference. It has one by its parts, as the value it builds has, and still no wire form.
+- A rule that holds a pattern does not compile until feasibility looks inside the pattern. The plan's step 3 starts there, so step 2 took that much of it.
+- Asserting a rule returns nothing, so a refusal to install can only be a panic or a check the caller runs first. Both are there.
+
+**Decided.** By the builder, each in its file:
+
+- `Parameters` holds a term and, for a shape, the pattern beside it; a concept premise is lowered to the concept over a whole and an equality; `Equality`'s sides are patterns ([design-parameters.md](design-parameters.md)).
+- A pattern with no rest is the map of exactly its entries, a list pattern with no run the list of exactly its items ([design-pattern-meaning.md](design-pattern-meaning.md)).
+- A pattern is named by its parts and has no wire form. A rule that holds one has an identity and no stored body, and installing it is refused with that reason ([design-rule-identity.md](design-rule-identity.md)).
+
+The first rests on facts in the code. The second and the manner of the third's refusal are the builder's opinion, and on the agenda.

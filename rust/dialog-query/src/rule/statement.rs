@@ -24,6 +24,7 @@ use std::collections::BTreeSet;
 
 use crate::attribute::The;
 use crate::corpus::{Entity, Value};
+use crate::error::TypeError;
 use crate::rule::{DeductiveRule, InductiveRule, Rule};
 use crate::{Proposition, Statement, Update, the};
 use dialog_corpus::{NameShape, Relation as CorpusRelation, Symbol};
@@ -247,6 +248,23 @@ pub fn head_entities(concept: &crate::ConceptDescriptor) -> BTreeSet<Entity> {
         .collect()
 }
 
+/// The entity a rule is installed under, once the rule is known to have
+/// a stored form.
+///
+/// A rule the stored rule format cannot write is refused here, with the
+/// reason [`DeductiveRule::storable`] gives: one that holds a map, a
+/// list or a tuple of terms, which format 3 has no way to write. An
+/// assertion has no error to return, so the refusal is a panic that
+/// carries that reason, as it already is for a rule whose body reads an
+/// attribute through a raw scan. Ask
+/// [`storable`](DeductiveRule::storable) first to be told without one.
+fn stored(storable: Result<(), TypeError>, entity: impl FnOnce() -> Entity) -> Entity {
+    storable
+        .map_err(|refusal| refusal.to_string())
+        .expect("a rule its stored body cannot write is not installed");
+    entity()
+}
+
 /// Asserting a [`DeductiveRule`] installs it as `dialog.rule/*` facts:
 /// the `derives` head index over the conclusion's attributes, which
 /// resolution looks the rule up by, the `conclusion` concept it was
@@ -265,7 +283,7 @@ pub fn head_entities(concept: &crate::ConceptDescriptor) -> BTreeSet<Entity> {
 /// ```
 impl Statement for &DeductiveRule {
     fn assert(self, update: &mut impl Update) {
-        let rule_entity = self.this();
+        let rule_entity = stored(self.storable(), || self.this());
         update.associate(
             conclusion_attr(),
             rule_entity.clone(),
@@ -297,7 +315,7 @@ impl Statement for &DeductiveRule {
     }
 
     fn retract(self, update: &mut impl Update) {
-        let rule_entity = self.this();
+        let rule_entity = stored(self.storable(), || self.this());
         update.dissociate(
             conclusion_attr(),
             rule_entity.clone(),
@@ -334,7 +352,7 @@ impl Statement for DeductiveRule {
 /// the same rule erases those facts, uninstalling it.
 impl Statement for &InductiveRule {
     fn assert(self, update: &mut impl Update) {
-        let rule_entity = self.this();
+        let rule_entity = stored(self.storable(), || self.this());
         update.associate(
             source_attr(),
             rule_entity.clone(),
@@ -358,7 +376,7 @@ impl Statement for &InductiveRule {
     }
 
     fn retract(self, update: &mut impl Update) {
-        let rule_entity = self.this();
+        let rule_entity = stored(self.storable(), || self.this());
         update.dissociate(
             source_attr(),
             rule_entity.clone(),
