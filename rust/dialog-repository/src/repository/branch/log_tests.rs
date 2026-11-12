@@ -2044,3 +2044,109 @@ async fn it_sees_a_new_entry_that_its_field_reads_as_the_number_of_the_rule() ->
     assert_eq!(held, [1, 2, 1, 0]);
     Ok(())
 }
+
+/// Under `max:`, `min:`, and `top:`, a read elects one claim among each claim
+/// of a holder, and compares the key after that. A rule gives each item whose
+/// name is the key of the claim that board:1 elects. Item x shows while the
+/// claim under `x` wins. It leaves when a claim under `y` wins, and item y
+/// shows. It shows again when the claim under `y` leaves, though no claim of
+/// `x` changed. After each change the live query holds the rows of a first
+/// read.
+#[dialog_common::test]
+async fn it_follows_the_claim_that_a_pick_elects_for_a_key_that_another_premise_binds() -> Result<()>
+{
+    let entity = |name: &str| Value::Entity(name.parse().expect("an entity"));
+    for (kind, pick, first, second) in [
+        (
+            json!("natural:"),
+            "max:",
+            Value::UnsignedInt(7),
+            Value::UnsignedInt(9),
+        ),
+        (
+            json!("natural:"),
+            "min:",
+            Value::UnsignedInt(7),
+            Value::UnsignedInt(3),
+        ),
+        (
+            json!(["rank:gold", "rank:silver"]),
+            "top:",
+            entity("rank:silver"),
+            entity("rank:gold"),
+        ),
+    ] {
+        let (branch, operator, board) = board().await?;
+        let mut transaction = branch.transaction();
+        for (item, name) in [("item:x", "x"), ("item:y", "y")] {
+            transaction = transaction.assert(fact(
+                "test.item/name",
+                &item.parse()?,
+                Value::String(name.into()),
+            )?);
+        }
+        transaction.commit().publish().perform(&operator).await?;
+
+        let head = json!({ "with": { "name": { "the": "test.named/name", "as": "text:" } } });
+        let rule: DeductiveRuleDescriptor = serde_json::from_value(json!({
+            "deduce": head,
+            "when": [
+                {
+                    "assert": { "with": { "name": { "the": "test.item/name", "as": "text:" } } },
+                    "where": { "this": { "?": { "name": "this" } }, "name": { "?": { "name": "name" } } }
+                },
+                {
+                    "assert": { "with": { "settings": {
+                        "the": { "domain": "test.settings", "keyed": "dictionary" },
+                        "as": kind,
+                        "pick": pick,
+                    } } },
+                    "where": {
+                        "this": { "entity:": "board:1" },
+                        "settings": { "the": { "?": { "name": "name" } }, "is": { "?": {} } }
+                    }
+                }
+            ]
+        }))?;
+        let rule = rule.compile()?;
+        let mut live = branch
+            .query()
+            .with(rule.clone())
+            .subscribe(each_field(&head)?);
+        live.poll(&operator).await?;
+
+        let mut held = Vec::new();
+        for (exists, key, value) in [
+            (true, "x", &first),
+            (true, "y", &second),
+            (false, "y", &second),
+            (true, "y", &second),
+            (false, "x", &first),
+            (true, "x", &first),
+            (false, "y", &second),
+        ] {
+            claim(&branch, &operator, &board, exists, key, value.clone()).await?;
+            rows_of_both(&branch, &operator, &rule, &head, &mut live).await?;
+            let names: Vec<String> = live
+                .results()
+                .iter()
+                .map(|row| row.entity().to_string())
+                .collect();
+            held.push(names);
+        }
+        assert_eq!(
+            held,
+            [
+                vec!["item:x"],
+                vec!["item:y"],
+                vec!["item:x"],
+                vec!["item:y"],
+                vec!["item:y"],
+                vec!["item:y"],
+                vec!["item:x"],
+            ],
+            "under {pick}"
+        );
+    }
+    Ok(())
+}

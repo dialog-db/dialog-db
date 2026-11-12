@@ -45,6 +45,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
+use dialog_corpus::Pick;
 use futures_util::TryStreamExt as _;
 
 use crate::attribute::{Cardinality, Relation, The};
@@ -326,6 +327,9 @@ where
     // binds into a premise that reads it as a fact binds into an attribute
     // premise (see `collection_premise`).
     let mut stored: BTreeSet<Entity> = BTreeSet::new();
+    // The concepts that are one keyed collection under a pick that elects
+    // by value or by rank (see `elects_across`).
+    let mut across: BTreeSet<Entity> = BTreeSet::new();
     let mut queue = vec![concept.clone()];
     while let Some(descriptor) = queue.pop() {
         let entity = descriptor.this();
@@ -347,6 +351,9 @@ where
         }
         if bundle.installed().is_empty() && collection_of(&descriptor).is_some() {
             stored.insert(entity.clone());
+        }
+        if elects_across(&descriptor) {
+            across.insert(entity.clone());
         }
         let rules: Vec<DeductiveRule> = bundle.rules().cloned().collect();
         let mut targets = BTreeSet::new();
@@ -408,6 +415,18 @@ where
                     }
                     None => return Ok(None),
                 }
+            }
+            // A change to one claim of a holder can change which claim
+            // such a concept elects for it, on either side: a new claim
+            // can win over the old winner, and a retracted winner leaves
+            // the place to another claim. So the row of each holder that
+            // a change touches may change on both sides.
+            if across.contains(entity) {
+                let holders = heads.into_union();
+                heads = Heads {
+                    before: holders.clone(),
+                    after: holders,
+                };
             }
             affected.insert(entity.clone(), heads);
         }
@@ -519,6 +538,21 @@ fn collection_of(concept: &ConceptDescriptor) -> Option<(&str, &ConceptFieldDesc
         return None;
     }
     matches!(field.the(), The::Collection { .. }).then_some((name, field))
+}
+
+/// Whether `concept` is one keyed collection under `max`, `min`, or `top`.
+/// A read of such a concept elects one claim among every claim of the
+/// holder, of each key, and compares the key of the premise after that. So
+/// its row for a holder is the claim that wins, and a change to any claim of
+/// the holder can change it.
+fn elects_across(concept: &ConceptDescriptor) -> bool {
+    concept.attribute_field().is_some_and(|(_, field)| {
+        matches!(field.the(), The::Collection { .. })
+            && matches!(
+                field.descriptor().pick(),
+                Pick::Max | Pick::Min | Pick::Top(_)
+            )
+    })
 }
 
 /// The terms of a premise that reads a concept of one keyed collection,
