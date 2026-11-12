@@ -4,8 +4,8 @@
 
 |  | Understanding | Activity |
 |---|---|---|
-| **Status** | *What do we know?* The problem, accepted. What is held is decided: two commands with handlers built into dialog, asserting into the overlay. That dialog dispatches commands as transient facts and reacts with inductive rules at commit, and has no built-in reaction that performs an effect. Use cases are drafted (nine). A strategy matrix exists with six columns, the sixth born from the decision on what is held. | *Where are we at?* Directing. The matrix is written and not read by the maintainer. |
-| **Agenda** | *What do we need to know?* Whether the use cases are right. For column 6 and for the held decision alike: how dialog reacts to a command with an effect and writes the overlay. For column 5: whether a record reaches a page whole. For column 4: what a decoding formula's rows would be, which the maintainer has not said. Which rows the maintainer weighs most. | *Where are we going?* The maintainer reads the use cases and the matrix; the open cells are checked; a direction is chosen. |
+| **Status** | *What do we know?* The problem, accepted. What is held is decided: two commands with handlers built into dialog, each answering with a second command that a rule in the space places. That a rule's head is committed or transient today, never the overlay. That dialog dispatches commands as transient facts and reacts with inductive rules at commit, and has no built-in reaction that performs an effect. Use cases are drafted (nine). A strategy matrix exists with six columns, the sixth born from the decision on what is held. | *Where are we at?* Directing. The matrix is written and not read by the maintainer. |
+| **Agenda** | *What do we need to know?* Whether a rule head that writes to the overlay is wanted in dialog (asked): without it the answer can only be committed, which the maintainer does not want. Whether the use cases are right (asked, not answered). For column 6 of the strategy and for the held decision alike: how dialog reacts to a command with an effect and answers with a command. For column 5: whether a record reaches a page whole. For column 4: what a decoding formula's rows would be, which the maintainer has not said. Which rows the maintainer weighs most. | *Where are we going?* The maintainer reads the use cases and the matrix; the open cells are checked; a direction is chosen. |
 
 ## 2026-11-12, Describing: what was tried and what was seen
 
@@ -315,3 +315,38 @@ session.
 [design-held](design-held.md), handlers in dialog, facts in the overlay.
 It rests on an open hypothesis (dialog reacting to a command with an
 effect). The strategy is not decided.
+
+## 2026-11-12, Directing: the held decision is revised by the maintainer
+
+**Asked.** Is anything in the use cases wrong or missing? Not answered.
+The maintainer improved the held decision instead: "it might even be
+better if dialog doesn't even assert anything. It just dispatches
+another command that then your system can react to and take a response
+if it needs to, or ignore it. That way [a space] can have a rule that
+puts it in overlay or puts wherever it wants to put it."
+
+**Learned.** This takes the last policy out of dialog: what the fact is
+called and where it is kept. It fits what dialog already does with
+commands, which is to dispatch them as transient facts and let inductive
+rules react.
+
+*Those two cannot both be true*, as dialog stands: the maintainer wants
+the answer not to be a permanent fact, and wants a rule to decide where
+it goes. A rule's head is committed, or transient and passed to the next
+round (`transaction/induce.rs`); nothing routes a head to the branch's
+ephemeral line. So today a rule can keep the answer only by committing
+it. A committed fact about what a replica holds is also wrong in a
+second way: it syncs to replicas that hold something else. The two wishes
+agree once a head can be marked for the overlay, as one can be marked
+transient.
+
+A transient is visible only inside the commit that carries it, so a
+query never sees the answer unless a rule kept it. A space with no such
+rule gets nothing, without an error, which is the "or ignore it" the
+maintainer names.
+
+**Decided.** The sixth column of [design-held](design-held.md), by the
+maintainer, replacing the fifth. It rests on two open hypotheses.
+
+**Backtracked.** Not a phase: one decision, made and revised in the same
+day, both entries kept.
