@@ -375,10 +375,16 @@ fn child() -> anyhow::Result<()> {
                 .read(true)
                 .write(true)
                 .open(args[1])?;
-            assert!(locks::lock(&file, args[2].parse()?, args[3] == "1", true)?);
+            let byte = args[2].parse()?;
+            assert!(locks::lock(&file, byte, args[3] == "1", true)?);
             say(READY);
             let mut rest = Vec::new();
             std::io::stdin().read_to_end(&mut rest)?;
+            // Let go before exiting: Windows lets go of a closed handle's
+            // or an ended process's locks only when it gets to it, so a
+            // test that goes on once this exits could find the byte still
+            // held.
+            locks::unlock(&file, byte)?;
         }
         // append <path> <prefix> <count> <extent> <close|die>
         "append" => {
@@ -482,11 +488,13 @@ fn child() -> anyhow::Result<()> {
                 .read(true)
                 .write(true)
                 .open(args[1])?;
-            say(if locks::lock(&file, args[2].parse()?, true, false)? {
-                WON
-            } else {
-                LOST
-            });
+            let byte = args[2].parse()?;
+            let won = locks::lock(&file, byte, true, false)?;
+            say(if won { WON } else { LOST });
+            if won {
+                // Let go before exiting, as `hold` does.
+                locks::unlock(&file, byte)?;
+            }
             say(DONE);
         }
         // read <path>: then, for each line of names separated by the
