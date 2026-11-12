@@ -12,7 +12,7 @@ no history with `main`.
   `svg.py`. The values in it (offsets, ids, hashes, bytes) are copied from
   `run.txt`.
 - `run.txt` is the saved output of the run the chapter shows:
-  `cargo run -p dialog-archive-file --example guide_bytes` on the dialog
+  `cargo run -p dialog-chronicle --example guide_bytes` on the dialog
   branch the chapter was written on. Hashes, keys and offsets differ from
   run to run, so a new run means updating the values in `figs.py` to match.
 - `check.js` opens the built book in Chromium and reports figure text that

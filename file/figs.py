@@ -481,7 +481,7 @@ def sync_point():
         f.text(56, y + 12, a, "label small")
         f.text(56, y + 28, b, "small muted")
         y += 44
-    f.text(16, 210, "One follows every 64 appends, 2 seconds, or 2,048 freed index pages, and FileArchive::sync. It is made after the turn is let go.", "label small muted")
+    f.text(16, 210, "One follows every 64 appends, 2 seconds, or 2,048 freed index pages, and Chronicle::sync. It is made after the turn is let go.", "label small muted")
     return f
 
 
