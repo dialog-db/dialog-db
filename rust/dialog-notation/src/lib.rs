@@ -43,7 +43,7 @@ pub use compile::{Query, Step, compile};
 pub use data::Data;
 pub use expand::{Diagnostic, Expander, Position};
 pub use form::{Form, Part, read};
-pub use syntax::{Parameters, Syntax};
+pub use syntax::{Parameters, Signature, Syntax};
 
 /// Why a document was not read, expanded or compiled.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]

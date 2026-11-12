@@ -26,6 +26,7 @@ use std::collections::BTreeSet;
 use crate::Error;
 use crate::form::{Form, Kind, Part, read};
 use crate::pattern::{Binding, Bindings, fill, matches, variables};
+use crate::syntax::{Signature, Syntax as Tree};
 
 /// The core forms, written in the kernel.
 pub const PRELUDE: &str = include_str!("prelude.clj");
@@ -66,6 +67,18 @@ struct Syntax {
     position: Option<Position>,
     when: Vec<Form>,
     unless: Vec<Form>,
+    /// What the rule defines, where it defines a concept: a name
+    /// applied with labels, standing for reads and nothing else.
+    signature: Option<Signature>,
+}
+
+/// One form that several definitions take, and which of them stands
+/// for it in the rule being expanded.
+#[derive(Clone, Debug)]
+struct Choice {
+    form: Form,
+    taken: usize,
+    of: usize,
 }
 
 /// The words that make a rule's head a write or an answer.
@@ -146,6 +159,50 @@ fn members(form: Form) -> Vec<Form> {
     }
 }
 
+/// `form` with the variables an expansion at `site` named for itself
+/// renamed by where each first occurs, so two answers that differ only
+/// in what a definition called its own variables are equal.
+fn unnamed(form: &Form, site: &str) -> Form {
+    fn walk(form: &Form, suffix: &str, seen: &mut Vec<String>) -> Form {
+        match form {
+            Form::Variable(name) if name.ends_with(suffix) => {
+                let at = seen
+                    .iter()
+                    .position(|other| other == name)
+                    .unwrap_or_else(|| {
+                        seen.push(name.clone());
+                        seen.len() - 1
+                    });
+                Form::Variable(format!("{at}{suffix}"))
+            }
+            Form::Vector(items) => {
+                Form::Vector(items.iter().map(|item| walk(item, suffix, seen)).collect())
+            }
+            Form::Map(entries) => Form::Map(
+                entries
+                    .iter()
+                    .map(|(key, value)| (walk(key, suffix, seen), walk(value, suffix, seen)))
+                    .collect(),
+            ),
+            Form::Application(head, parts) => {
+                let head = walk(head, suffix, seen);
+                let parts = parts
+                    .iter()
+                    .map(|part| match part {
+                        Part::Bare(form) => Part::Bare(walk(form, suffix, seen)),
+                        Part::Labelled(label, form) => {
+                            Part::Labelled(label.clone(), walk(form, suffix, seen))
+                        }
+                    })
+                    .collect();
+                Form::application(head, parts)
+            }
+            other => other.clone(),
+        }
+    }
+    walk(form, &format!(".{site}"), &mut Vec::new())
+}
+
 /// Several reads of one entity as one read, so that their absence is
 /// the absence of all of them together. Dialog negates one proposition,
 /// and a read of one entity may span domains.
@@ -194,6 +251,12 @@ pub struct Expander {
     reads: BTreeSet<String>,
     /// Every form the rules were asked about since the last report.
     asked: Vec<(Form, Position)>,
+    /// The forms several definitions take in the rule being expanded.
+    choices: Vec<Choice>,
+    /// Whether the head being expanded reports, and writes nothing.
+    reporting: bool,
+    /// Whether the premise being expanded is one that must not hold.
+    negating: bool,
 }
 
 impl Expander {
@@ -211,9 +274,30 @@ impl Expander {
         self.asked.clear();
         let mut kernel = Vec::new();
         for form in read(text)? {
-            let rule = self.top(form)?;
-            if let Some(rule) = self.install(rule)? {
-                kernel.push(rule);
+            // Where several definitions take a form that is read, the
+            // rule is expanded once a definition: what is read is what
+            // any of them reads. Within one rule a form that recurs is
+            // the same definition's each time.
+            let mut choices = Vec::new();
+            loop {
+                self.choices = choices;
+                let rule = self.top(form.clone())?;
+                choices = std::mem::take(&mut self.choices);
+                if let Some(rule) = self.install(rule)?
+                    && !kernel.contains(&rule)
+                {
+                    kernel.push(rule);
+                }
+                while let Some(last) = choices.last_mut() {
+                    if last.taken + 1 < last.of {
+                        last.taken += 1;
+                        break;
+                    }
+                    choices.pop();
+                }
+                if choices.is_empty() {
+                    break;
+                }
             }
         }
         Ok((kernel, self.diagnose()))
@@ -269,12 +353,30 @@ impl Expander {
         if let Some(name) = pattern.head() {
             self.names.insert(name.to_string());
         }
+        // A definition under a signature replaces the one before it
+        // under the same: the last write wins. Under another signature
+        // it stands beside it.
+        let signature = match &answer {
+            Answer::Syntax(template)
+                if position.is_none()
+                    && when.is_empty()
+                    && clauses.unless.is_empty()
+                    && members(template.clone()).iter().all(Form::is_read) =>
+            {
+                Signature::of(&Tree::try_from(&pattern)?, "concept")
+            }
+            _ => None,
+        };
+        if signature.is_some() {
+            self.syntax.retain(|rule| rule.signature != signature);
+        }
         self.syntax.push(Syntax {
             answer,
             pattern,
             position,
             when,
             unless: clauses.unless,
+            signature,
         });
         Ok(None)
     }
@@ -384,8 +486,18 @@ impl Expander {
         }
     }
 
-    /// What the rules say `form` expands to in `position`. No answer and
-    /// two different answers are both refused.
+    /// What the rules say `form` expands to in `position`. No answer is
+    /// refused. Of several:
+    ///
+    /// - Answers that differ only in the names of their own variables
+    ///   are one answer.
+    /// - A write takes the definition whose signature is the labels
+    ///   written, since a write says every field. None or several such
+    ///   is refused.
+    /// - A read takes each in turn, the rule expanded once for each.
+    /// - What must not hold is refused: its absence under any of the
+    ///   definitions would be a rule of several negations, not several
+    ///   rules.
     fn ask(&mut self, form: &Form, position: Position) -> Result<Form, Error> {
         // What the template's own variables are named apart by: the form
         // being expanded and where it stands, by reference, so the names
@@ -403,29 +515,64 @@ impl Expander {
         .reference()?
         .to_string()[..4]
             .to_string();
-        let mut found: Vec<Form> = Vec::new();
+        let mut found: Vec<(Form, Option<Signature>)> = Vec::new();
         for rule in &self.syntax {
             if let (Answer::Syntax(template), Some(bindings)) =
                 (&rule.answer, self.applies(rule, form, position))
             {
                 let answer = fill(template, &bindings, &site);
-                if !found.contains(&answer) {
-                    found.push(answer);
+                let same = unnamed(&answer, &site);
+                if !found.iter().any(|(other, _)| unnamed(other, &site) == same) {
+                    found.push((answer, rule.signature.clone()));
                 }
             }
         }
         self.asked.push((form.clone(), position));
-        match found.len() {
-            0 => Err(Error::Unknown(form.to_string())),
-            1 => Ok(found.remove(0)),
-            _ => Err(Error::Ambiguous(
+        let ambiguous = |found: &[(Form, Option<Signature>)]| {
+            Error::Ambiguous(
                 form.to_string(),
                 found
                     .iter()
-                    .map(Form::to_string)
+                    .map(|(answer, _)| answer.to_string())
                     .collect::<Vec<_>>()
                     .join(" | "),
-            )),
+            )
+        };
+        match found.len() {
+            0 => Err(Error::Unknown(form.to_string())),
+            1 => Ok(found.remove(0).0),
+            _ if self.negating => Err(ambiguous(&found)),
+            _ if position == Position::Head && !self.reporting => {
+                let written = Tree::try_from(form)
+                    .ok()
+                    .and_then(|tree| Signature::of(&tree, "concept"));
+                let mut exact = found.iter().filter(|(_, signature)| {
+                    signature.is_some()
+                        && signature.as_ref().map(|signature| &signature.parameters)
+                            == written.as_ref().map(|written| &written.parameters)
+                });
+                match (exact.next(), exact.next()) {
+                    (Some((answer, _)), None) => Ok(answer.clone()),
+                    _ => Err(ambiguous(&found)),
+                }
+            }
+            of => {
+                let taken = match self.choices.iter().find(|choice| choice.form == *form) {
+                    Some(choice) => choice.taken,
+                    None => {
+                        self.choices.push(Choice {
+                            form: form.clone(),
+                            taken: 0,
+                            of,
+                        });
+                        0
+                    }
+                };
+                found
+                    .get(taken)
+                    .map(|(answer, _)| answer.clone())
+                    .ok_or_else(|| ambiguous(&found))
+            }
         }
     }
 
@@ -477,7 +624,10 @@ impl Expander {
                     [inner] => (*inner).clone(),
                     _ => return Err(Error::Refused(format!("{form} takes one application"))),
                 };
-                let mut each: Vec<Part> = members(self.application(inner, Position::Head)?)
+                let reporting = std::mem::replace(&mut self.reporting, word == "report");
+                let stands = self.application(inner, Position::Head);
+                self.reporting = reporting;
+                let mut each: Vec<Part> = members(stands?)
                     .into_iter()
                     .map(|member| {
                         Part::Bare(Form::application(
@@ -537,8 +687,10 @@ impl Expander {
                 .extend(members(self.application(premise, Position::Premise)?));
         }
         for premise in written.unless {
-            let stands = members(self.application(premise.clone(), Position::Premise)?);
-            walked.unless.push(together(stands, &premise)?);
+            self.negating = true;
+            let stands = self.application(premise.clone(), Position::Premise);
+            self.negating = false;
+            walked.unless.push(together(members(stands?), &premise)?);
         }
         Ok(walked.into_rule())
     }
@@ -674,20 +826,20 @@ mod tests {
             expanded(TODO, "(query (todo ?t) (when (frobnicate ?t)))"),
             Err(Error::Unknown(_))
         ));
+        // A write that says the fields of neither definition.
         assert!(matches!(
             expanded(
                 TODO,
-                "(concept (todo ?t title: ?x) (xyz.note ?t title: ?x)) (query (todo ?t))"
+                "(concept (todo ?t title: ?x) (xyz.note ?t title: ?x)) (assert! (todo todo:1))"
             ),
             Err(Error::Ambiguous(..))
         ));
     }
 
-    /// Two concepts under one name are told apart by the labels an
-    /// application writes, and by nothing else. Where the labels fit
-    /// both, the application is refused and neither is picked.
+    /// Two definitions under one name and other labels stand side by
+    /// side, and the labels an application writes say which it is.
     #[test]
-    fn it_tells_two_concepts_of_one_name_apart_by_the_labels_written() {
+    fn it_resolves_a_name_by_the_labels_written() {
         let note = "(concept (todo ?t title: ?x) (xyz.note ?t title: ?x))";
         assert_eq!(
             expanded(TODO, &format!("{note} (query (todo ?t title: ?x))")).unwrap(),
@@ -697,15 +849,83 @@ mod tests {
             expanded(TODO, &format!("{note} (query (todo ?t text: ?x))")).unwrap(),
             expanded(TODO, "(query (todo ?t text: ?x))").unwrap()
         );
+    }
 
-        // The same labels over other attributes: nothing written says
-        // which.
+    /// A definition under the signature of an earlier one replaces it:
+    /// the last write wins.
+    #[test]
+    fn it_replaces_a_definition_by_a_later_one_of_the_same_signature() {
         let task = "(concept (todo ?t list: ?l text: ?x state: ?s)
                       (abc.task ?t list: ?l text: ?x state: ?s))";
+        // The order the labels are written in is not another signature.
+        let reordered = "(concept (todo ?t state: ?s text: ?x list: ?l)
+                           (abc.task ?t list: ?l text: ?x state: ?s))";
+        for later in [task, reordered] {
+            let rules = expanded(TODO, &format!("{later} (query (todo ?t text: ?x))")).unwrap();
+            assert_eq!(rules.len(), 1, "{rules:?}");
+            assert!(rules[0].contains("(when (abc.task ?t "), "{rules:?}");
+            assert!(!rules[0].contains("xyz.todo"), "{rules:?}");
+        }
+    }
+
+    /// Where the labels written fit several definitions, a read is of
+    /// every one of them: the rule is expanded once a definition, and a
+    /// form that recurs in it is the same definition's each time.
+    #[test]
+    fn it_reads_through_every_definition_the_labels_fit() {
+        let both = "(concept (todo ?t title: ?x done: ?d) (xyz.todo ?t title: ?x done: ?d))
+                    (concept (todo ?t title: ?x pinned: ?p) (xyz.note ?t title: ?x pinned: ?p))";
+        let rules = expanded(both, "(query (todo ?t title: ?x))").unwrap();
+        assert_eq!(rules.len(), 2, "{rules:?}");
+        for (rule, domain) in rules.iter().zip(["xyz.todo", "xyz.note"]) {
+            assert!(
+                rule.starts_with(&format!("(rule (report ({domain} ?t title: ?x ")),
+                "{rule}"
+            );
+            assert!(
+                rule.contains(&format!("(when ({domain} ?t title: ?x ")),
+                "{rule}"
+            );
+        }
+        // A write says every field, so the labels written are one
+        // definition's signature.
+        assert_eq!(
+            expanded(both, r#"(assert! (todo todo:1 title: "x" pinned: true))"#).unwrap(),
+            vec![r#"(rule (assert! (xyz.note todo:1 title: "x" pinned: true)))"#]
+        );
+        // A write that fits both and is neither is refused, and so is
+        // the absence of what several definitions take.
         assert!(matches!(
-            expanded(TODO, &format!("{task} (query (todo ?t text: ?x))")),
+            expanded(both, r#"(assert! (todo todo:1 title: "x"))"#),
             Err(Error::Ambiguous(..))
         ));
+        assert!(matches!(
+            expanded(
+                both,
+                "(query (xyz.tag ?t name: ?n) (when (xyz.tag ?t name: ?n)) (unless (todo ?t title: _)))"
+            ),
+            Err(Error::Ambiguous(..))
+        ));
+    }
+
+    /// Two definitions of one concept, which call its field by other
+    /// names. An application that writes no label is the same read
+    /// through either, so nothing is chosen and the rule is one.
+    #[test]
+    fn it_reads_one_concept_once_however_many_names_its_fields_have() {
+        let both = "(concept (todo ?t title: ?a) (xyz.todo ?t text: ?a))
+                    (concept (todo ?t name: ?b) (xyz.todo ?t text: ?b))";
+        let rules = expanded(
+            both,
+            "(query (xyz.tag ?t name: ?n) (when (xyz.tag ?t name: ?n) (todo ?t)))",
+        )
+        .unwrap();
+        assert_eq!(rules.len(), 1, "{rules:?}");
+        // Each name for the field reads the same attribute.
+        assert_eq!(
+            expanded(both, "(query (todo ?t title: ?x))").unwrap(),
+            expanded(both, "(query (todo ?t name: ?x))").unwrap()
+        );
     }
 
     #[test]

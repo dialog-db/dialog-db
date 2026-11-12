@@ -7,7 +7,7 @@
 
 use anyhow::Result;
 use dialog_corpus::Value;
-use dialog_notation::{Error, Syntax, read};
+use dialog_notation::{Error, Signature, Syntax, read};
 use dialog_query::concept::descriptor::ConceptStatement;
 use dialog_query::query::Output as _;
 use dialog_query::{Any, AttributeDescriptor, ConceptConclusion, ConceptQuery, Term};
@@ -405,6 +405,120 @@ async fn it_elects_one_of_two_writes_of_one_round_whatever_their_order() -> Resu
         elected.push(last);
     }
     assert_eq!(elected[0], elected[1]);
+    Ok(())
+}
+
+/// Two definitions under one name, whose labels both fit what a query
+/// writes: the query reports through each, and a row says which relation
+/// it is of. A write says every field, so it is one definition's.
+#[dialog_common::test]
+async fn it_reports_through_every_definition_a_query_fits() -> Result<()> {
+    let mut notebook = Notebook::open().await?;
+    notebook
+        .submit(
+            r#"(concept (todo ?t title: ?x done: ?d)
+                 (xyz.todo ?t title: (:last (:text ?x)) done: (:last ?d)))
+               (concept (todo ?t title: ?x pinned: ?p)
+                 (xyz.note ?t title: (:last (:text ?x)) pinned: (:last ?p)))
+               (assert! (todo todo:1 title: "Buy milk" done: false))
+               (assert! (todo note:1 title: "Call Ada" pinned: true))"#,
+        )
+        .await?;
+    assert_eq!(
+        report(&mut notebook, "(query (todo ?t title: ?x))").await?,
+        vec![
+            r#"(xyz.note note:1 title: "Call Ada")"#,
+            r#"(xyz.todo todo:1 title: "Buy milk")"#,
+        ]
+    );
+    assert_eq!(
+        report(&mut notebook, "(query (todo ?t pinned: ?p))").await?,
+        vec!["(xyz.note note:1 pinned: true)"]
+    );
+    Ok(())
+}
+
+/// What a name is kept as: not a name and an entity only, but a name,
+/// what is named, and the parameters it is applied with. A definition is
+/// kept under the entity its signature names, with `last`, so two
+/// definitions of other parameters stand side by side under one name and
+/// a later one of the same parameters replaces. Each definition holds
+/// its own names for the fields, whatever attributes they are of.
+#[dialog_common::test]
+async fn it_keeps_definitions_on_a_branch_under_their_signatures() -> Result<()> {
+    let notebook = Notebook::open().await?;
+    let definitions = [
+        "(concept (todo ?t title: ?x) (xyz.todo ?t text: (:last (:text ?x))))",
+        "(concept (todo ?t name: ?x) (xyz.todo ?t text: (:last (:text ?x))))",
+        // The first, corrected: the same signature.
+        "(concept (todo ?t title: ?x) (xyz.todo ?t title: (:last (:text ?x))))",
+    ];
+    let name: AttributeDescriptor =
+        serde_json::from_value(json!({ "the": "syntax.name/is", "as": "text:" }))?;
+    let definition: AttributeDescriptor =
+        serde_json::from_value(json!({ "the": "syntax.name/definition", "as": "record:" }))?;
+
+    for text in definitions {
+        let syntax = Syntax::try_from(&read(text)?[0])?;
+        let Syntax::Application(_, operand) = &syntax else {
+            panic!("an application");
+        };
+        let signature = Signature::of(&operand.items[0], "concept").expect("a signature");
+        notebook
+            .branch
+            .transaction()
+            .assert(ConceptStatement {
+                this: signature.entity()?,
+                with: vec![
+                    name.resolve(Value::String(signature.name.clone()))?,
+                    definition.resolve(Value::Record(syntax.encode()?))?,
+                ],
+            })
+            .commit()
+            .publish()
+            .perform(&notebook.operator)
+            .await?;
+    }
+    notebook.branch.refresh(&notebook.operator).await?;
+
+    // Everything named `todo`, by the name alone.
+    let select: ConceptQuery = serde_json::from_value(json!({
+        "assert": { "with": {
+            "is": { "the": "syntax.name/is", "as": "text:" },
+            "definition": { "the": "syntax.name/definition", "as": "record:" }
+        } },
+        "where": {
+            "this": { "?": { "name": "this" } },
+            "is": "todo",
+            "definition": { "?": { "name": "definition" } }
+        }
+    }))?;
+    let found: Vec<ConceptConclusion> = notebook
+        .branch
+        .query()
+        .select(select)
+        .perform(&notebook.operator)
+        .try_vec()
+        .await?;
+    let mut kept = Vec::new();
+    for conclusion in &found {
+        let Value::Record(bytes) = conclusion
+            .source()
+            .lookup(&Term::<Any>::var("definition"))?
+            .content()?
+        else {
+            panic!("a record");
+        };
+        kept.push(Syntax::decode(&bytes)?.to_string());
+    }
+    kept.sort();
+    assert_eq!(
+        kept,
+        vec![
+            "(concept (todo ?t name: ?x) (xyz.todo ?t text: (:last (:text ?x))))",
+            "(concept (todo ?t title: ?x) (xyz.todo ?t title: (:last (:text ?x))))",
+        ]
+    );
     Ok(())
 }
 

@@ -41,7 +41,7 @@
 //! first item, and `(todo ?t state: :open)` and
 //! `(todo state: :open of: ?t)` are one tree.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Display, Formatter};
 use std::str::FromStr;
 
@@ -506,6 +506,72 @@ impl TryFrom<&Data> for Syntax {
     }
 }
 
+/// What a name is given under: the name, what kind of thing is named,
+/// and the parameters it is applied with.
+///
+/// A concept's entity is made of its attributes and does not say what
+/// its fields are called, so two names over the same attributes share
+/// it. The parameter names are therefore kept here, with the name.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Signature {
+    /// The name.
+    pub name: String,
+    /// What is named: `concept` for a concept.
+    pub subject: String,
+    /// The labels it is applied with.
+    pub parameters: BTreeSet<String>,
+}
+
+impl Signature {
+    /// The signature an application is written with: the name applied
+    /// and the labels written. `None` where the operator is not a name.
+    pub fn of(application: &Syntax, subject: &str) -> Option<Self> {
+        match application {
+            Syntax::Application(operator, operand) => match &**operator {
+                Syntax::Reference(name) => Some(Signature {
+                    name: name.clone(),
+                    subject: subject.to_string(),
+                    parameters: operand.terms.keys().cloned().collect(),
+                }),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Whether an application written with `written` may be an
+    /// application of this: the same name and kind, and no label this
+    /// does not have. A read may leave labels out.
+    pub fn takes(&self, written: &Signature) -> bool {
+        self.name == written.name
+            && self.subject == written.subject
+            && written.parameters.is_subset(&self.parameters)
+    }
+
+    /// The signature as data.
+    pub fn data(&self) -> Result<Data, Error> {
+        Data::record([
+            ("name", Data::text(&self.name)),
+            ("subject", Data::entity(&format!("{}:", self.subject))?),
+            (
+                "parameters",
+                Data::List(self.parameters.iter().map(Data::text).collect()),
+            ),
+        ])
+    }
+
+    /// The entity a definition is kept under: `name:` and the reference
+    /// of the signature. A later definition under the same signature
+    /// is kept under the same entity, and so replaces the earlier.
+    pub fn entity(&self) -> Result<Entity, Error> {
+        Entity::from_str(&format!(
+            "name:{}",
+            self.data()?.reference().as_bytes().to_base58()
+        ))
+        .map_err(|error| refused("not an entity", error))
+    }
+}
+
 impl Form {
     /// What names what the form says: the reference of its
     /// [`Syntax`].
@@ -737,6 +803,41 @@ mod tests {
     #[test]
     fn it_refuses_a_key_twice_where_the_tree_becomes_data() {
         assert!(matches!(one("{a: 1 a: 2}").data(), Err(Error::Refused(_))));
+    }
+
+    /// Two definitions over the same attributes, with other names for
+    /// the fields: what each calls its fields is in its signature, and
+    /// each is kept under an entity of its own.
+    #[test]
+    fn it_keeps_the_parameter_names_with_the_name() -> Result<(), Error> {
+        let signature = |text: &str| Signature::of(&one(text), "concept").unwrap();
+        let todo = signature("(todo ?t title: ?x author: ?a)");
+        let task = signature("(todo ?t name: ?x issuer: ?a)");
+        assert_eq!(
+            todo.parameters.iter().collect::<Vec<_>>(),
+            vec!["author", "title"]
+        );
+        assert_ne!(todo.entity()?, task.entity()?);
+        // The order the labels were written in does not make another.
+        assert_eq!(
+            todo.entity()?,
+            signature("(todo author: ?a of: ?t title: ?x)").entity()?
+        );
+        // Nor does what is named being of another kind share an entity.
+        assert_ne!(
+            todo.entity()?,
+            Signature::of(&one("(todo ?t title: ?x author: ?a)"), "command")
+                .unwrap()
+                .entity()?
+        );
+
+        // A read may leave a label out; no application may add one.
+        assert!(todo.takes(&signature("(todo ?t title: ?x)")));
+        assert!(todo.takes(&signature("(todo ?t)")));
+        assert!(!todo.takes(&signature("(todo ?t name: ?x)")));
+        assert!(!todo.takes(&signature("(task ?t title: ?x)")));
+        assert_eq!(Signature::of(&one("(?name ?t)"), "concept"), None);
+        Ok(())
     }
 
     #[test]
