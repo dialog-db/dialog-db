@@ -518,6 +518,94 @@ mod tests {
             "After replanning back to empty env, cost should return to FULL"
         );
     }
+
+    /// A query reaches a scan with a prefix of the value beside an exact
+    /// attribute: a premise with a constant attribute, a free entity, and a
+    /// value that a sibling `starts-with` constrains. The planner stamps the
+    /// prefix onto the value of the scan, and the selector of the scan holds
+    /// the attribute and the prefix. With the cardinality many, the scan
+    /// reads that range of the value index. With the cardinality one, the
+    /// scan reads each fact of the attribute, to find the winner of each
+    /// entity, and then filters by the prefix. Either way the query finds
+    /// each name that starts with the prefix. A name such as `Alice` sorts
+    /// below the prefix `Al` with the attribute `person/name` after it, so a
+    /// range that held the attribute after the prefix would start above it.
+    #[dialog_common::test]
+    async fn it_finds_each_value_of_an_attribute_that_starts_with_a_prefix() -> anyhow::Result<()> {
+        use crate::corpus::{Constrained, Selector};
+        use crate::types::Any;
+        use crate::{Environment, Premise};
+
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let mut transaction = branch.transaction();
+        for name in ["Al", "Alice", "Albert", "Alzzzz", "Bob"] {
+            transaction =
+                transaction.assert(the!("person/name").of(Entity::new()?).is(name.to_string()));
+        }
+        transaction
+            .assert(
+                the!("person/nickname")
+                    .of(Entity::new()?)
+                    .is("Alice".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        for cardinality in [Some(Cardinality::One), Some(Cardinality::Many)] {
+            let plan = Planner::from(vec![
+                Premise::Assert(Proposition::Attribute(Box::new(AttributeQuery::new(
+                    Term::from(the!("person/name")),
+                    Term::var("person"),
+                    Term::<String>::var("name").into(),
+                    Term::blank(),
+                    cardinality,
+                )))),
+                Term::<Any>::var("name").starts_with("Al"),
+            ])
+            .plan(&Environment::new())?;
+
+            let selector = plan
+                .steps
+                .iter()
+                .find_map(|step| match step.as_premise() {
+                    Premise::Assert(Proposition::Attribute(scan)) => {
+                        Some(Selector::<Constrained>::try_from(scan.as_ref()))
+                    }
+                    _ => None,
+                })
+                .expect("the plan holds the scan")?;
+            assert_eq!(
+                selector,
+                Selector::new()
+                    .the(the!("person/name").into())
+                    .is_starting_with("Al"),
+                "the scan reads by the prefix of the value beside the attribute"
+            );
+
+            let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+            let rows = futures_util::TryStreamExt::try_collect::<Vec<_>>(
+                plan.evaluate(Match::new().seed(), &source),
+            )
+            .await?;
+            let mut names = rows
+                .iter()
+                .map(|row| row.lookup(&Term::var("name"))?.content())
+                .collect::<Result<Vec<Value>, _>>()?;
+            names.sort_by_key(|name| format!("{name:?}"));
+            assert_eq!(
+                names,
+                ["Al", "Albert", "Alice", "Alzzzz"]
+                    .map(|name| Value::String(name.to_string()))
+                    .to_vec(),
+                "each name that starts with the prefix, with {cardinality:?}"
+            );
+        }
+        Ok(())
+    }
 }
 
 /// Coarse plan-ordering characterization: pins the *observable* output
