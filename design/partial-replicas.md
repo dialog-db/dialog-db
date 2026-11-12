@@ -88,6 +88,12 @@ because any action or query may require part not yet available", and what
 is wanted is to "operate what can be operated in that mode and gracefully
 degrade or disable functions that can not be executed".
 
+Later the same day the maintainer named the unit: what is wanted is to
+know the ranges that need replicating "to offer a full functionality on
+specific screen". That is a remedy, and the objective in it is that every
+control on a screen a person is looking at works. The draft above does not
+yet say "screen".
+
 Not yet settled in it: what "degrade" means for a query and for an action
 (the journal's agenda), and whether the two remedies the request arrived
 with, answers with holes and writes made without their read, are inside

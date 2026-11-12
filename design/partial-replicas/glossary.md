@@ -21,6 +21,15 @@ Terms this topic needs. Each is used one way throughout.
 - **Demand cover.** The set of index key ranges an evaluation of a query
   read, as a subscription records it (`branch/subscription.rs`). A scan
   that came back empty is in it.
+- **Footprint.** Of an operation at a revision: the index key ranges it
+  reads there. A query's footprint is its demand cover. A commit's is the
+  cells it scans, what the rules it triggers read, and its bookkeeping. Of
+  a screen: the union over its queries and over the commits its controls
+  would make. Coined here; "screen" is the application's word, and dialog
+  knows only queries and transactions.
+- **Frontier.** The part of a footprint the replica does not hold, as far
+  as one local evaluation can find it: the ranges of the first absent
+  blocks it reached. Coined here.
 - **Cell.** One `(entity, attribute)` pair and the claims stored for it.
   The term is the code's (`transaction/succession.rs`).
 - **Blind write.** A write minted without reading the cell it writes to.

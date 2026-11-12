@@ -5,7 +5,7 @@
 |  | Understanding | Activity |
 |---|---|---|
 | **Status** | *What do we know?* A replica holds what its reads reached and never what the next interaction will read; a space may be too large to hold whole (the maintainer). An evaluation that reads only held blocks is exact, and whether an operation is such an evaluation cannot be known without running it. Nothing tells a caller that an operation needs the network: a local read exists only at the tree, and its miss is a string error. What a commit reads (the cell scan in the entity ordering above all), and that the same cell is held in the attribute ordering. That a write which did not observe its cell has a defined meaning and a read with holes has none. | *Where are we at?* Delimiting. The maintainer named the cause: nothing recognizes what can run on a partial replica. A problem statement is drafted in the top story, not accepted. |
-| **Agenda** | *What do we need to know?* (1) From the maintainer, asked and not yet answered: offline, a person marks done a to-do they can see, and the replica does not hold the cell. Is "degrade gracefully" that the control was already disabled, that the click is accepted and held until the block arrives, or that the write is made now without its read? (2) The same for a query: is a list that shows the rows it holds, marked as not all, a degraded answer or a wrong one? (3) Whether the wait or the silence is the complaint online. (4) Whether the draft problem statement is accepted. Carried over, now for Direction and not blocking: where a stalled click's time goes (the template below); whether a cell reads the same from the attribute ordering; how many of tonk's queries and rules read absence. | *Where are we going?* Accept or cut the problem statement, then Direction: use cases (what a person and an application could do were the verdict known), then approaches. What others do with a tree held by reference (git's partial clone and sparse index, Datomic peers, Zero's `unknown`/`complete` results, certain answers over incomplete databases) is still to be read. |
+| **Agenda** | *What do we need to know?* (1) From the maintainer, asked and not yet answered: if the aim is that a screen's footprint is replicated so its controls work, are answers with holes and writes made without their read now outside the problem, so that a control whose footprint is not held, with no network, is disabled and nothing else? (The earlier form of this question, disabled, held or written blind, was not answered directly.) (1b) How much larger a tonk screen's footprint is than what its queries already fetched: the number that says to what degree this is viable. (2) The same for a query: is a list that shows the rows it holds, marked as not all, a degraded answer or a wrong one? (3) Whether the wait or the silence is the complaint online. (4) Whether the draft problem statement is accepted. Carried over, now for Direction and not blocking: where a stalled click's time goes (the template below); whether a cell reads the same from the attribute ordering; how many of tonk's queries and rules read absence. | *Where are we going?* Accept or cut the problem statement, then Direction: use cases (what a person and an application could do were the verdict known), then approaches. What others do with a tree held by reference (git's partial clone and sparse index, Datomic peers, Zero's `unknown`/`complete` results, certain answers over incomplete databases) is still to be read. |
 
 ### Result template for agenda (2)
 
@@ -184,3 +184,50 @@ maintainer's naming of the cause; the problem statement is a draft.
 
 **Backtracked.** No. The first sitting's opinion that holding the head
 back would spare the warm case partial answers is narrowed, not reversed.
+
+## 2026-11-12, Delimiting: the screen as the unit
+
+**Asked.** The maintainer, in place of an answer to the agenda's first
+question: "what we actually need is ability to know ranges that need
+replicating to offer a full functionality on specific screen. Not sure how
+and to what degree that is viable but that seems like ideally what one
+would want."
+
+**Learned.**
+
+- *That is a feature, not a problem*, and the third remedy of the day
+  (answers with holes and blind writes; recognizing and disabling; knowing
+  the ranges to replicate). What stays the same under all three is an
+  objective: a person looking at a screen expects every control on it to
+  work. The unit is the screen, which is the application's word. Dialog
+  can speak of a query's and a would-be transaction's footprint; the
+  glossary defines footprint and frontier.
+- For a screen's queries the ranges are already recorded (`Demand`), and
+  are held by the time they are known. The whole question is the controls.
+- A control's reads are of three kinds. The cells it would write have
+  ranges computable when it is rendered, with nothing read. What the rules
+  it triggers read is found only by evaluating them against the batch,
+  which could be done ahead by staging the would-be transaction when its
+  values are fixed, and cannot when they are typed later or an entity is
+  minted at the click. What tonk's command providers do is outside
+  dialog's sight.
+- "Know the ranges" has a limit that follows from reads depending on
+  data: what can be known is the frontier now, perhaps with a size, and
+  when it is empty. Not the whole set before fetching any of it.
+- The cost has a shape worth measuring before anything else: one
+  entity-ordering leaf for each actionable row. Answering a commit's scan
+  from the attribute ordering would put the cell of a shown attribute
+  inside the list's own footprint, so the narrow change from the second
+  sitting and this remedy are not alternatives; one shrinks the other.
+- Pieces that exist: the cover of a query, preloading a range below
+  demand, staging without publishing, the diff-against-cover check after a
+  pull, a size on each link. Pieces that do not: a cover for a commit, a
+  commit or query made local, a typed miss, and any way for an application
+  to say which transactions a screen's controls would make.
+- Where this works, nothing incomplete is ever used as an answer, so the
+  two remedies the request arrived with would have nothing left to do
+  except offline with a frontier that is not empty. Whether they are
+  wanted there is the scope question now first in the agenda.
+
+**Decided.** Not decided. The draft problem statement stands unaccepted
+and does not yet name the screen.
