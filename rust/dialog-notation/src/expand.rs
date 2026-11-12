@@ -683,6 +683,31 @@ mod tests {
         ));
     }
 
+    /// Two concepts under one name are told apart by the labels an
+    /// application writes, and by nothing else. Where the labels fit
+    /// both, the application is refused and neither is picked.
+    #[test]
+    fn it_tells_two_concepts_of_one_name_apart_by_the_labels_written() {
+        let note = "(concept (todo ?t title: ?x) (xyz.note ?t title: ?x))";
+        assert_eq!(
+            expanded(TODO, &format!("{note} (query (todo ?t title: ?x))")).unwrap(),
+            vec!["(rule (report (xyz.note ?t title: ?x)) (when (xyz.note ?t title: ?x)))"]
+        );
+        assert_eq!(
+            expanded(TODO, &format!("{note} (query (todo ?t text: ?x))")).unwrap(),
+            expanded(TODO, "(query (todo ?t text: ?x))").unwrap()
+        );
+
+        // The same labels over other attributes: nothing written says
+        // which.
+        let task = "(concept (todo ?t list: ?l text: ?x state: ?s)
+                      (abc.task ?t list: ?l text: ?x state: ?s))";
+        assert!(matches!(
+            expanded(TODO, &format!("{task} (query (todo ?t text: ?x))")),
+            Err(Error::Ambiguous(..))
+        ));
+    }
+
     #[test]
     fn it_refuses_a_concept_that_cannot_map_both_ways() {
         assert!(matches!(

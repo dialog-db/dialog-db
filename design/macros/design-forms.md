@@ -290,28 +290,46 @@ What the tree forgets of the notation: the order labelled parts were written in,
 
 Expanding and compiling still read the notation as parsed. They are to read the tree, and that waits on the question below.
 
-### Open: what a name resolves to
+### Decided: a name resolves to a concept
 
-Tonk resolves a name to the concept it names, and then expands. Here a concept is not a thing a name points at. `(concept (todo ?t text: ?x) …)` expands to a rule about syntax whose pattern is the signature, `(todo ?t text: ?x)`, and `(todo …)` means something because that pattern meets it.
+Irakli, 2026-11-11: `(concept (todo ?t text: ?x) …)` mirrors tonk's `concept! &todo`. It defines a concept and a name: `id:todo` is associated with the concept's entity, and an application of `todo` resolves to that entity. Two concepts may be named `todo` with different signatures, and either should resolve. Two with one signature he expects not to exist: an editor could ask which, an agent would trip. Unison is the prior art to learn from.
 
 ```
- tonk     todo ──resolve──▶ the concept ──expand──▶ what dialog runs
+ (concept (todo ?t text: ?x) …)  ──▶  concept:9f…   { text: xyz.todo/text, last, text }
+                                      id:todo ── referent ──▶ concept:9f…
 
- here     (todo ?t text: ?x) ──▶ every rule about syntax whose pattern meets it ──▶ (xyz.todo ?t text: ?x)
-          no step names anything
+ (todo ?t text: ?x)  ──resolve──▶  (concept:9f… ?t text: ?x)  ──▶  ConceptQuery { predicate, terms }
 ```
 
-After expansion nothing is left to resolve: a relation is its domain, a formula is built in, an entity is itself. So resolving can only be about which rules about syntax are in force for a name, and there are two readings:
+So `concept` is not a rule about syntax, which is how the proof of concept has it. Checked against what exists:
 
-| | a name is a fact, and patterns meet the resolved thing | a pattern meets a name |
+- **Dialog.** A concept's entity is made of its attributes and each field's options. The names of its fields and its description are not in it (`ConceptDescriptor::identify`; `notes/notation.md`: "two concepts with the same attributes but different names are the same concept").
+- **Tonk.** `id:<name>` carries `db.name/referent`, cardinality one, so a second concept under a name supersedes the first. Field names are facts on the concept's entity, `db.concept.with/<field>` (`rust/tonk-core/src/meta.rs`, `rust/tonk-schema/src/concept.rs`). A stored rule holds the concept itself, not its name.
+- **Unison.** A definition may have several names. A name with two definitions is a conflict: both are kept, it arises by merge as well as by hand, and someone resolves it. A name that fits several definitions resolves if exactly one has the expected type, and is an error otherwise. `name#hash` says which.
+
+What "the same signature" comes to, given dialog's identity:
+
+| two concepts named `todo` | told apart by | so |
 |---|---|---|
-| what `todo` resolves to | the entity of a definition, `form:…`, through a fact that gives it the name | nothing; `todo` is matched as written |
-| a pattern with a variable or a struct for its operator | has no name; asked of every form, as now | the same |
-| renaming, and two spaces that use one name | the definition does not move; what is stored refers to it by entity | every rule and every use says the name |
-| candidate problem 3, a meaning that moves after it is written | closed for what is stored unexpanded | open for anything stored unexpanded; closed for what was expanded before it was stored |
-| what has to exist first | what a definition is: one rule, or the set of rules that came out of one `concept` | nothing |
+| the same attributes, whatever the fields are called | nothing: they are one entity | there is nothing to pick. But the entity has two sets of field names, and tonk writes both onto it |
+| different labels | the labels an application writes | a write says every field, so a write always resolves. A read that names only labels both have does not |
+| the same labels, different attributes | nothing an application writes | only the entity says which |
 
-Not decided. It decides what the pass between the tree and the expander does, which is why that pass is not built.
+The proof of concept already behaves as the second and third rows say, by pattern: `it_tells_two_concepts_of_one_name_apart_by_the_labels_written`.
+
+The agent's hypotheses, to decide on:
+
+| hypothesis | confirmed by | refuted by |
+|---|---|---|
+| **H7.** One concept per name and signature cannot be kept as a rule about definitions. | Two replicas each define `todo` over the same labels and different attributes, offline, and sync. Both definitions exist and nobody installed a conflict. | Something that refuses the merge, which dialog does not have. |
+| **H8.** A name's referents are all kept, and an application that fits several is refused with the candidates. Electing one moves a name's meaning for one of two authors with nobody deciding. | An agent given the refusal and the candidates rewrites the application and goes on; an agent given the elected concept writes to the wrong one and is told nothing. | A case where a refused application is worse than a wrong one. |
+| **H9.** A concept's field names belong to the name, not to the concept. | Two definitions that differ only in what a field is called give one entity with both names on it in tonk, and a write through either then has to say which names are its own. | Reading such a concept back in tonk gives the field names of the definition that was asked for. Not run. |
+
+Open, and one of them next:
+
+- **What a name with two referents does where an application fits both.** Tonk elects by `last`. Unison keeps both and refuses.
+- How an entity is written where a name stands, `name#hash` in Unison. An entity alone has no field names (H9).
+- Which of the proof of concept's concepts are dialog's. `todo` and `author` are: every field is one attribute of the one entity. `list-item` is not: its entity is the value of the attribute it reads. It is a derived concept, a rule that concludes one.
 
 ## What to store, and how
 
@@ -378,7 +396,7 @@ H2 is now a requirement in the table above, not a hypothesis. H3 and H4 stand.
 
 ## Next
 
-1. What a name resolves to, above. Then the expander and the compiler read the tree, and `kernel.rs` gives way to dialog's own forms.
+1. What a name with two referents does, above. Then `concept` defines a concept and a name, an application resolves to it, the expander and the compiler read the tree, and `kernel.rs` gives way to dialog's own forms.
 2. A struct as a term and `entity/derive` over a record: with [patterns](../patterns/plan.md).
 3. Syntax kept on the branch as trees, and the walker asking the branch.
 4. H3, measured, as a research topic.
