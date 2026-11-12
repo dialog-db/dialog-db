@@ -9,6 +9,9 @@ The bench, report and chart scripts this journal names (`bench/…`) are on
 the [`research-data`](https://github.com/dialog-db/dialog-db/tree/research-data/research/single-file-format/bench)
 branch, under `research/single-file-format/bench/`; the reports and their
 charts are here, in [results](results/).
+Whether the format can serve dialog in a browser is a study of its own:
+its [report](browser/README.md) and [journal](browser/journal.md), with
+the survey it started from, [web-opfs.md](web-opfs.md).
 
 ## Where things stand
 

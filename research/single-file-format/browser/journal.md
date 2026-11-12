@@ -1,14 +1,14 @@
-# Web spike: journal
+# The single-file format in a browser: journal
 
 What was tried, measured and decided, newest last. The questions come from
 the "What applies to us" and "Open questions" sections of
-[web-opfs.md](../single-file-format/web-opfs.md); the native design they
-port is [design/file-writers.md](../../design/file-writers.md) and the end
-of its [journal](../../design/file-writers/journal.md). The outcome is the
+[web-opfs.md](../web-opfs.md); the native design they
+port is [design/file-writers.md](../../../design/file-writers.md) and the end
+of its [journal](../../../design/file-writers/journal.md). The outcome is the
 report, [README.md](README.md). The harness, the scripts this journal names
 (`run.js`, `round3.js`, `round4.js`, `harness/…`, the report and chart
 scripts), their runbook and every run's raw JSON are on the
-[`research-data`](https://github.com/dialog-db/dialog-db/tree/research-data/research/web-spike)
+[`research-data`](https://github.com/dialog-db/dialog-db/tree/research-data/research/single-file-format/browser)
 branch, at the same paths; the charts are here, in `results/`.
 
 ## Where things stand
@@ -1057,7 +1057,7 @@ profile per run, variants interleaved:
   presence, recovery, extent owners) taken as Web Locks of those names;
   writes go to the handle, a native sync is `flush()`. Chromium only:
   `readwrite-unsafe` ships in Chrome and Edge 121+ and not in Firefox or
-  Safari ([web-opfs.md](../single-file-format/web-opfs.md)), where tabs
+  Safari ([web-opfs.md](../web-opfs.md)), where tabs
   would have to hand the exclusive handle over per turn or use an owner.
   Round one measured this design on a toy log: an owner committed
   1.7–3.6x faster, `readwrite-unsafe` readers read 12–29x faster.
@@ -1121,7 +1121,7 @@ space's), 25,146 pages caught, 197.7 MiB (most of it the blocks' bytes, for
 A; not committed). `round3.js` replays it in headless Chromium 153 on this
 4-CPU VM: one sitting of three rounds of A, B (16 KiB slices), C, D at one
 tab and at three, B at 64 KiB slices and C without a page cache
-([`2026-11-11T1555-chromium-153-round3.json`](https://github.com/dialog-db/dialog-db/blob/research-data/research/web-spike/results/2026-11-11T1555-chromium-153-round3.json), on the `research-data` branch), and a second sitting
+([`2026-11-11T1555-chromium-153-round3.json`](https://github.com/dialog-db/dialog-db/blob/research-data/research/single-file-format/browser/results/2026-11-11T1555-chromium-153-round3.json), on the `research-data` branch), and a second sitting
 of three rounds of A and D with the owner's cache kept warm across tabs
 (`…T1600…`). A fresh profile per run; B, C and D rebuild both files byte
 for byte (checked against the native files in every run). Page caches of
@@ -1393,7 +1393,7 @@ requests; writes there are impossible. Reported, not judged.
 member 1: 236 operations; sha256 of the dataset `ce012eb67af6c628…`; not
 committed) in headless Chromium 153 on the same 4-CPU VM, one sitting of
 three rounds of A, E, Ek, Ed at one tab and at three, then the failovers
-([`2026-11-11T1733-chromium-153-round4.json`](https://github.com/dialog-db/dialog-db/blob/research-data/research/web-spike/results/2026-11-11T1733-chromium-153-round4.json), on the `research-data` branch). Every request is a
+([`2026-11-11T1733-chromium-153-round4.json`](https://github.com/dialog-db/dialog-db/blob/research-data/research/single-file-format/browser/results/2026-11-11T1733-chromium-153-round4.json), on the `research-data` branch). Every request is a
 `fetch` of `/api/op` from the page (Ed: a message on a port), timed in the
 page, which is cross-origin isolated (5 µs timer). A fresh profile per run,
 a service worker registered in each. In E the host rebuilds both native

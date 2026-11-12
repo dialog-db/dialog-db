@@ -1,6 +1,7 @@
 //! Traces what opening archive files reads and writes, for the browser
-//! spike's failover (`research/web-spike`, round four): a replacement
-//! worker opens the file another left and replays this to recover it.
+//! spike's failover (`research/single-file-format/browser`, round four): a
+//! replacement worker opens the file another left and replays this to
+//! recover it.
 //!
 //! ```sh
 //! cargo run -p dialog-archive-file --features trace --example trace_open -- \

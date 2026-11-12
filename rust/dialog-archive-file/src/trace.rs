@@ -1,5 +1,6 @@
 //! A trace of what the archive does to its files, for replaying the file
-//! format's pattern elsewhere (the browser spike in `research/web-spike`).
+//! format's pattern elsewhere (the browser spike in
+//! `research/single-file-format/browser`).
 //!
 //! Built with the `trace` feature, on Unix, and inert until [`start`] names
 //! a directory: every archive file opened under it is traced from then on.

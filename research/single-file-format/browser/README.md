@@ -1,13 +1,13 @@
-# Web spike: a space file in the browser
+# The single-file format in a browser
 
 **Status: Exploring** (a spike in four rounds; nothing here is built into
 the archive).
 
-Whether the single-file archive ([`research/single-file-format`](../single-file-format/journal.md),
-[`design/file-writers.md`](../../design/file-writers.md)) can serve dialog
+Whether the single-file archive ([the format's journal](../journal.md),
+[`design/file-writers.md`](../../../design/file-writers.md)) can serve dialog
 in a browser, and whether that is worth it against what dialog uses there
 today, an IndexedDB store: "space savings without becoming slow". The
-background is [web-opfs.md](../single-file-format/web-opfs.md). What was
+background is [web-opfs.md](../web-opfs.md). What was
 tried, measured and decided, with every number, is in the
 [journal](journal.md); this page is its outcome.
 
@@ -44,6 +44,6 @@ request today), and the hosting rules.
 
 The harness, the run, report and chart scripts, the runbook and every
 run's raw JSON are on the
-[`research-data`](https://github.com/dialog-db/dialog-db/tree/research-data/research/web-spike)
-branch, under `research/web-spike/`. The charts the journal shows are
+[`research-data`](https://github.com/dialog-db/dialog-db/tree/research-data/research/single-file-format/browser)
+branch, under `research/single-file-format/browser/`. The charts the journal shows are
 here, in `results/`.

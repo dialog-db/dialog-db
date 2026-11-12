@@ -25,7 +25,7 @@
 //! files (the `file` and `file-cells` stores) into `path`: every page and
 //! byte its operations read and write, and its blocks and cells (see
 //! `dialog_archive_file::trace`), each operation of member 1 named. The
-//! browser spike (`research/web-spike`) replays it.
+//! browser spike (`research/single-file-format/browser`) replays it.
 //!
 //! It uses only what main and this branch share, so the same file builds
 //! in a worktree of `origin/main` for the baseline (`--cfg dialog_main`
