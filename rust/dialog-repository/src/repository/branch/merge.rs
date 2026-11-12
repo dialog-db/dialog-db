@@ -406,7 +406,7 @@ mod tests {
         let writing = repo.branch("feature").open().perform(&session).await?;
         syncing.pull_from(&main).perform(&session).await?;
         let adopted = syncing
-            .pull()
+            .pull(crate::Download::MinimalRanges)
             .perform(&session)
             .await?
             .expect("the pull adopts main's head");
@@ -451,14 +451,19 @@ mod tests {
 
         let syncing = repo.branch("feature").open().perform(&session).await?;
         syncing.pull_from(&main).perform(&session).await?;
-        syncing.pull().perform(&session).await?;
+        syncing
+            .pull(crate::Download::MinimalRanges)
+            .perform(&session)
+            .await?;
         let writing = repo.branch("feature").open().perform(&session).await?;
 
         main.commit(stream::iter(vec![name("user:b", "Bob")?]))
             .perform(&session)
             .await?;
         let (pulled, committed) = futures_util::join!(
-            syncing.pull().perform(&session),
+            syncing
+                .pull(crate::Download::MinimalRanges)
+                .perform(&session),
             writing
                 .commit(stream::iter(vec![name("user:c", "Carol")?]))
                 .merge()
@@ -476,7 +481,10 @@ mod tests {
                 "{error:?}"
             );
             syncing.refresh(&session).await?;
-            syncing.pull().perform(&session).await?;
+            syncing
+                .pull(crate::Download::MinimalRanges)
+                .perform(&session)
+                .await?;
         }
 
         let fresh = repo.branch("feature").open().perform(&session).await?;

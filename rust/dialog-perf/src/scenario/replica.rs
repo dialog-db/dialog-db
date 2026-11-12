@@ -58,7 +58,11 @@ pub async fn first_query(size: usize) -> Result<Box<dyn Prepared>> {
     let mut previous = env.branch.clone();
     for index in 0..size {
         let writer = env.branch(&format!("writer-{index}")).await?;
-        writer.pull().from(&previous).perform(&env.operator).await?;
+        writer
+            .pull(dialog_repository::Download::MinimalRanges)
+            .from(&previous)
+            .perform(&env.operator)
+            .await?;
         let facts = [fact(
             &entity("origin", index),
             "origin/mark",
@@ -74,7 +78,7 @@ pub async fn first_query(size: usize) -> Result<Box<dyn Prepared>> {
         previous = writer;
     }
     env.branch
-        .pull()
+        .pull(dialog_repository::Download::MinimalRanges)
         .from(&previous)
         .perform(&env.operator)
         .await?;

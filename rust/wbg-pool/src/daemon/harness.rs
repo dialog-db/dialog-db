@@ -2,8 +2,10 @@
 //! browser. Browser-mode suites run on the page's main thread; worker-mode
 //! suites get a page-side relay plus a worker-side harness script.
 
+use crate::protocol::ENV_GLOBAL;
 use crate::suite::TestMode;
 use anyhow::Result;
+use std::collections::BTreeMap;
 
 const RUN_BROWSER: &str = include_str!("js/run-browser.js");
 const RUN_WORKER_PAGE: &str = include_str!("js/run-worker-page.js");
@@ -73,6 +75,22 @@ pub struct RunConfig<'a> {
     pub include_ignored: bool,
     pub filtered_count: usize,
     pub nocapture: bool,
+    /// Variables the shim passed, defined on [`ENV_GLOBAL`] in the scope
+    /// the suite runs in.
+    pub env: &'a BTreeMap<String, String>,
+}
+
+/// The statement that defines the passed variables, placed ahead of the
+/// suite. JSON is a subset of a JavaScript expression but for U+2028 and
+/// U+2029, and `<` is escaped so no value can close a script element.
+fn env_statement(env: &BTreeMap<String, String>) -> Result<String> {
+    let literal = serde_json::to_string(env)?
+        .replace('<', "\\u003c")
+        .replace('\u{2028}', "\\u2028")
+        .replace('\u{2029}', "\\u2029");
+    Ok(format!(
+        "globalThis.{ENV_GLOBAL} = Object.freeze({literal});"
+    ))
 }
 
 pub fn generate(config: &RunConfig<'_>) -> Result<RunScripts> {
@@ -84,6 +102,7 @@ pub fn generate(config: &RunConfig<'_>) -> Result<RunScripts> {
     };
     let nocapture = if config.nocapture { "true" } else { "false" };
     let filtered = config.filtered_count.to_string();
+    let env = env_statement(config.env)?;
 
     let scripts = match config.mode {
         TestMode::Browser => RunScripts {
@@ -92,7 +111,8 @@ pub fn generate(config: &RunConfig<'_>) -> Result<RunScripts> {
                 .replace("{MODULE_WASM}", config.module_wasm)
                 .replace("{INCLUDE_IGNORED}", include_ignored)
                 .replace("{FILTERED_COUNT}", &filtered)
-                .replace("{TESTS}", &tests_json),
+                .replace("{TESTS}", &tests_json)
+                .replace("{ENV}", &env),
             worker_js: None,
         },
         TestMode::DedicatedWorker | TestMode::SharedWorker | TestMode::ServiceWorker => {
@@ -112,7 +132,8 @@ pub fn generate(config: &RunConfig<'_>) -> Result<RunScripts> {
                         .replace("{INCLUDE_IGNORED}", include_ignored)
                         .replace("{FILTERED_COUNT}", &filtered)
                         .replace("{NOCAPTURE}", nocapture)
-                        .replace("{PORT_PROLOGUE}", prologue),
+                        .replace("{PORT_PROLOGUE}", prologue)
+                        .replace("{ENV}", &env),
                 ),
             }
         }
@@ -140,6 +161,7 @@ mod test {
             include_ignored: false,
             filtered_count: 0,
             nocapture: false,
+            env: &BTreeMap::new(),
         })
         .unwrap();
 
@@ -154,5 +176,79 @@ mod test {
         assert!(capture < test_run);
         assert!(scripts.run_js.contains("await daemonFetch('report'"));
         assert!(!scripts.run_js.contains("await fetch('report'"));
+    }
+
+    fn scripts_with(mode: TestMode, env: &BTreeMap<String, String>) -> RunScripts {
+        generate(&RunConfig {
+            mode,
+            module_js: "/module.js",
+            module_wasm: "/module.wasm",
+            exports: &["__wbgt_test"],
+            include_ignored: false,
+            filtered_count: 0,
+            nocapture: false,
+            env,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn it_defines_passed_variables_where_a_browser_suite_runs() {
+        let env = BTreeMap::from([("ADDRESS".to_string(), "{\"port\":1}".to_string())]);
+
+        let scripts = scripts_with(TestMode::Browser, &env);
+
+        let defined = scripts
+            .run_js
+            .find(r#"globalThis.__wbg_pool_env = Object.freeze({"ADDRESS":"{\"port\":1}"});"#)
+            .expect("the page should define the passed variables");
+        let test_run = scripts.run_js.find("const ok = await cx.run").unwrap();
+        assert!(defined < test_run);
+    }
+
+    #[test]
+    fn it_defines_passed_variables_where_a_worker_suite_runs() {
+        let env = BTreeMap::from([("ADDRESS".to_string(), "value".to_string())]);
+
+        for mode in [
+            TestMode::DedicatedWorker,
+            TestMode::SharedWorker,
+            TestMode::ServiceWorker,
+        ] {
+            let scripts = scripts_with(mode, &env);
+            let worker = scripts
+                .worker_js
+                .expect("a worker suite has a worker script");
+
+            let defined = worker
+                .find(r#"globalThis.__wbg_pool_env = Object.freeze({"ADDRESS":"value"});"#)
+                .expect("the worker should define the passed variables");
+            let test_run = worker.find("const ok = await cx.run").unwrap();
+            assert!(defined < test_run);
+            assert!(!scripts.run_js.contains("{ENV}"));
+        }
+    }
+
+    #[test]
+    fn it_defines_an_empty_environment_when_nothing_is_passed() {
+        let scripts = scripts_with(TestMode::Browser, &BTreeMap::new());
+
+        assert!(scripts
+            .run_js
+            .contains("globalThis.__wbg_pool_env = Object.freeze({});"));
+    }
+
+    #[test]
+    fn it_keeps_a_passed_value_from_closing_the_script() {
+        let env = BTreeMap::from([(
+            "ADDRESS".to_string(),
+            "</script>\u{2028}{TESTS}".to_string(),
+        )]);
+
+        let scripts = scripts_with(TestMode::Browser, &env);
+
+        assert!(scripts
+            .run_js
+            .contains(r#"Object.freeze({"ADDRESS":"\u003c/script>\u2028{TESTS}"});"#));
     }
 }

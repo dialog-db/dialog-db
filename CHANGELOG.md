@@ -149,6 +149,316 @@ that needed one waited on the layout of a record's bytes. A name that is
 a function of the parts does not depend on that layout, and the version
 byte leaves the layout free to change.
 
+### A prefetch hint a query took but did not finish is resumed by the next query
+
+[#770](https://github.com/dialog-db/dialog-db/pull/770), argued in
+[notes/fetch-scheduler.md](./notes/fetch-scheduler.md) ("A hint outlives
+the driver that took it").
+
+Every evaluation (a query, a subscription, a query inside a transaction)
+drives the env's queue of prefetch hints while it is polled, walking each
+hinted range so its blocks are local before a read asks for them. A hint
+it took lived only in that evaluation: when its stream ended or was
+dropped, an unfinished walk was dropped with it and no later evaluation
+saw the hint again. Now an evaluation that ends with walks unfinished
+hands their hints back to the queue, and whichever evaluation runs next
+resumes them. A resumed walk starts again from the root, but what earlier
+attempts fetched is already local, so it gets further each time.
+
+What this changes for you:
+
+- On a replica whose remote is slow relative to its queries, a hinted
+  range is fetched in full across the queries that follow, where before
+  it stayed partly remote and the range's own read fetched the rest.
+- `PreloadQueue::pending()` counts a hint a dropped evaluation handed
+  back; it no longer drops to zero the moment a driver takes a hint whose
+  walk never ends inside that evaluation.
+- A hint handed back goes through the same path as a new one: refused
+  with a zero `FetchBudget`, not enqueued twice while the same selector is
+  pending, and behind fresher hints under the same 1,024-per-rank bound.
+
+Why: speculation should be driven by whichever consumer is running, not
+lost with the one that popped it; on wasm a query regularly ended before
+its walk did, so the hint it existed for was wasted.
+
+### A read's warm walk picks children by the read's own routing, and decodes no buffer
+
+Refs [#762](https://github.com/dialog-db/dialog-db/issues/762).
+
+A query on a branch whose repository tracks a remote warms the ranges it
+is about to read with a scoped walk of the tree
+(`Traversable::traverse_available_within`). At each index node the walk
+decoded the write buffer of every link to see whether a buffered op fell
+in its scope. It now keeps exactly the children a read of the scope
+descends into, found by binary search on the node's separators
+(`ArchivedIndex::route` and `children_within`), with no buffer decoded and
+no separator rebuilt. A write buffers each op on the link that same rule
+picks, so the children kept are the ones that can hold in-scope content,
+buffered or stored.
+
+What this changes for you:
+
+- A view read on a member that tracks a remote and holds every block
+  costs a third fewer instructions (the `query-member` perf scenario:
+  181.8 M to 120.2 M), and no longer grows with how many links hold
+  buffered ops.
+- A scoped walk (a warm walk, or a download `within` a scope) may keep
+  child 0 of a node for a scope below its first separator, one path to the
+  leftmost leaf it did not keep before, because a read of that scope
+  descends there too.
+- `dialog_search_tree::helpers::buffer_decodes()` counts the novelty
+  buffers the calling thread has decoded, for tests.
+
+Why: on a member whose blocks are all local, the walk was most of a view
+read, and its cost rose with every change that left more ops buffered.
+
+### A typed variable reads the values of its type through a concept, as it does through a scan
+
+[#782](https://github.com/dialog-db/dialog-db/pull/782),
+[design/typed-read-of-untyped-field.md](./design/typed-read-of-untyped-field.md).
+
+A variable's type says which values it reads, and an attribute's type is
+part of which attribute it is. A scan of an attribute into a variable
+typed as text passes over a number stored under it, and so does a read of
+a recursive concept. A read of a concept that is not recursive did not: a
+value of another type under a field that declares no type failed the
+whole query with `Variable ?x of kind String cannot bind UnsignedInt(7)`.
+It now takes such a value for a fact of another attribute, so every way
+a concept is read agrees.
+
+What this changes for you:
+
+- A query that reads a concept field into a typed variable no longer
+  fails when the field holds a value of another type for some entity. It
+  yields the rows whose value the variable reads.
+- A variable that reads a type or nothing (`Option<T>`) is bound absent
+  for an entity whose only values are of another type, as it is for an
+  entity with no value. A value of the variable's type that disagrees
+  with what the variable is already bound to is still no row.
+- Where a pick elects one of an entity's values (`max:`, `top:`, a field
+  a rule derives), a typed variable elects among the values of its type.
+  A greater value of another type no longer takes the place of the one
+  the variable reads.
+
+Why: which of a concept's rows a caller's terms match should not depend
+on whether a rule makes the concept recursive, which the caller cannot
+see. `Match::bind` already says a value a type does not read is a
+mismatch that "callers that filter rows treat as a non-match"; the plain
+concept read was the one caller that did not.
+
+### A rule seeded by several rows of one entity is evaluated once when they agree
+
+[#763](https://github.com/dialog-db/dialog-db/pull/763), [#762](https://github.com/dialog-db/dialog-db/issues/762)
+
+Commit-time induction evaluated a seeded rule once per changed row a
+premise names. Rows of one entity that each bind one distinct field of
+the premise, a single attribute read under `last`, are now bound into
+one evaluation first. When it finds any match, it finds every match the
+rows find one by one: a seeded read yields a row's value only when the
+round view elects it, so every field then reads its row's value either
+way. When it finds none (an overlay row, a derived candidate or another
+claim stands above one of the rows, or the rest of the body fails), the
+rows are seeded one by one, as before. Every other row seeds alone.
+
+What this changes for you:
+
+- What induction writes is unchanged. The matches of one firing keep
+  the order seeding the rows one by one finds them in, so when two of
+  them write one transient cell under `last`, the same one wins. In
+  this crate's tests every seeded firing also seeds its rows one by one,
+  writes those matches the same way, and checks that the novelty and
+  transients are the same.
+- A command whose event names several fields of a premise evaluates the
+  rule once. On a tonk-shaped replica, a warm command's median fell from
+  6.9–8.7 ms to 4.7–5.9 ms; 1,861 of 1,900 groups found their match
+  together while building and pulling, 200 of 220 in warm commands.
+
+Why: an event's fields are one binding; evaluating it once per field
+repeated the same joins.
+
+### A rule seeded by several rows of one change writes its head once
+
+[#761](https://github.com/dialog-db/dialog-db/pull/761)
+
+Commit-time induction evaluates a rule once for each changed row a
+premise names, with that row bound. A command whose event carries
+several of a premise's fields seeds the rule once per field, and every
+evaluation finds the same binding. Each wrote the rule's head again: a
+`set assignee` event of eight fields wrote its assignee and its activity
+record eight times over, and each copy seeded the next round's rules
+again. A firing now writes each distinct head once.
+
+What this changes for you:
+
+- What a commit stores is unchanged: the copies were the same claims,
+  and a set holds a claim once.
+- A commit that fires rules writes fewer ops into the tree. On a
+  tonk-shaped replica, a warm command wrote 177–198 ops before and 26–33
+  now, and its median time fell from 12.7–14.1 ms to 7.1–9.2 ms.
+
+Why: the copies were most of what a warm command wrote, so they filled
+the tree's root buffer on nearly every commit, and each overflow
+rewrote the leaves it sheds into.
+
+### A pull says how much it downloads, and can bring along only what the replica holds
+
+[#775](https://github.com/dialog-db/dialog-db/pull/775),
+[design/held-across-pull.md](./design/held-across-pull.md).
+
+A pull that adopts an upstream head by root (a fast-forward, a rival
+merge settled, a reset brought forward) reads none of the head's tree, so
+every leaf the upstream changed is held by reference once the head lands,
+whether the replica held it before or not. A read or a write the replica
+had answered from its own blocks then waits on the peer that holds the
+block, and fails without one: a page rendered from a device's own store
+did not render offline after a sync it had no part in, and an edit that
+had been answered at once took a round trip after every pull. Whether a
+pull did that was decided by a modifier (`pull().download()`) that was
+easy to leave out, and was left out.
+
+How much a pull brings local is now an argument of the pull, with no
+default: `branch.pull(Download::…)`. `Download` is an enum:
+
+- `Download::MinimalRanges`: nothing. The head is adopted by reference,
+  as a bare `pull()` did.
+- `Download::QueriedRanges`: what the replica holds of its head, as the
+  head it would adopt has it. New. `PersistentTree::follow(held, env)`
+  walks the two trees in step and reads a node of the adopted one,
+  fetching what the replica lacks, only where the keys it is routed meet
+  those of a leaf the replica holds.
+- `Download::Operational`: the entity, attribute and value orders and the
+  blob index, as `pull().download().operational()` did.
+- `Download::Ranges(scope)`: the key ranges given, as
+  `pull().download().within(scope)` did.
+- `Download::Everything`: as `pull().download()` did.
+
+Whatever it names is fetched before the head moves, by `perform` and by
+`prepare` alike, and a download that fails leaves the head where it was.
+
+A pull can also be made again when a commit overtakes it.
+`Pull::retry(Limit)` makes a pull that lost its publish merge onto the
+head the commit left and publish that, `Limit::Times(n)` more times or
+`Limit::Unlimited`.
+
+What this changes for you:
+
+- `Branch::pull` takes a `Download`. Write `pull(Download::MinimalRanges)`
+  where you wrote `pull()`, to keep what it did.
+- `Pull::download`, `PullDownload` and its `within` and `operational` are
+  gone: the extent is the pull's argument. `PreparedPull` is already
+  downloaded when `prepare` hands it back, so a caller that ran a
+  download between `prepare` and `commit` drops it.
+- `Branch::download` takes a `Download` too, and its command struct is
+  `DownloadBranch` (it was `Download`, the name the enum now has).
+  `download().operational()` is `download(Download::Operational)`,
+  `download().within(scope)` is `download(Download::Ranges(scope))`, a
+  bare `download()` is `download(Download::Everything)`, and `.of(revision)`
+  is unchanged.
+- `Branch::replicate` takes a `Download`, which every pull it makes uses.
+- `Pull::perform` and `Pull::prepare` are bounded by `PullEnv`, which is
+  `ResolveEnv` and `Provider<Fork<RemoteSite, blob::Read>>`: a download
+  that brings blobs along reads them from the upstream's site. Every
+  environment that could run a pull download satisfies it.
+- With `Download::QueriedRanges`, every key a replica reads or writes
+  from its own blocks before a pull it reads or writes from them after
+  it. A replica that holds every leaf of its head ends holding every leaf
+  of the head it adopts. A range it never read stays by reference however
+  much of it changed, and a replica with no head, or one that holds none
+  of its head's leaves, fetches nothing.
+- `Download::QueriedRanges` brings tree nodes, not what they point at: a
+  spilled value or a blob that a changed leaf newly references is fetched
+  when it is read.
+- A replica's first write to a key it only read still fetches the leaves
+  of the orders it never read that key through. A write reads the leaves
+  it writes to, in the entity and attribute orders and in history.
+- The head stays where it was while a download runs, and reads and
+  commits go on against it. A commit that lands meanwhile makes the pull
+  lose its publish, as before. `Pull::retry` makes it again; without it
+  the pull fails with `PublishError::VersionMismatch`, the head where the
+  commit put it.
+- A `Download::QueriedRanges` that cannot fetch a node fails with
+  `DownloadError::Tree`, a new variant.
+- New: `PersistentTree::follow` in `dialog-search-tree`; `Download`,
+  `DownloadBranch`, `PullEnv`, `Pull::retry`, `Limit` and
+  `DownloadError::Tree` in `dialog-repository`.
+
+Why: a partial replica's promise is that what it read it can read again
+without the network. Adopting by root keeps the cost of a pull independent
+of what the upstream changed, and breaks that promise each time the
+upstream changes something the replica read. Bounding the fetch by what
+the replica holds keeps both. Which of the two a branch wants is not
+something a library can guess, and a modifier that is easy to miss made
+the cheap answer the one a caller got by not deciding: an argument makes
+every pull say. A pull is retried by the pull because a replica that keeps
+writing while it syncs would otherwise have every caller write the same
+loop.
+
+### `wbg-pool` gives every test's tab focus
+
+[#774](https://github.com/dialog-db/dialog-db/pull/774).
+
+`wbg-pool` runs each test in a tab of its own, many at once, and Chrome
+shows only the latest tab of a window. The rest are hidden: their
+`visibilityState` is `hidden`, `hasFocus()` is false, and animation frames
+and `ResizeObserver` deliveries are held back. `wbg-pool` now turns on
+focus emulation for a tab as it opens it, so each page acts as the focused,
+active one.
+
+What this changes for you:
+
+- A wasm test that waits on an animation frame, a `ResizeObserver`, focus
+  or visibility passes beside other tests as it does alone. Run eight at
+  once in headless Chromium and 15 of 24 tabs passed before; all 24 do now.
+- A tab that cannot be given focus is closed and its run fails with
+  `failed to give a test's tab focus`, where the tab would have run without
+  it.
+- A dependent that carries this as a patch against `wbg-pool` (tonk's
+  `wbg-pool-focus-tabs.patch`) drops it when it builds `wbg-pool` from this
+  release.
+
+Why: a test that depended on rendering failed or hung only in a full run,
+with nothing in its output to say its tab was in the background. Chrome's
+flags against backgrounding (`--disable-renderer-backgrounding` and its
+kin) do not change it; focus emulation does.
+
+### A provisioned wasm test is given its address when it runs
+
+[#774](https://github.com/dialog-db/dialog-db/pull/774).
+
+A test that takes a provisioned address (`#[dialog_common::test]` with a
+parameter) runs under `web-integration-tests` as a native test that starts
+the service and a wasm test that uses it. The wasm test read the address
+from `option_env!`, so it was compiled into the test binary. It now reads
+it when it runs: the native test names the variable in `WBG_POOL_PASS_ENV`,
+and `wbg-pool` defines the variables named there on
+`globalThis.__wbg_pool_env` in the page or worker the suite runs in.
+
+What this changes for you:
+
+- A package's wasm test binary is built once for all of its provisioned
+  tests, where every test rebuilt and relinked it. Nothing in a test
+  changes.
+- The wasm side needs the `wbg-pool` of this release as its runner. Under
+  an older `wbg-pool`, or `wasm-bindgen-test-runner`, a provisioned wasm
+  test fails with `Missing PROVISIONED_SERVICE_ADDRESS environment
+  variable`. A dependent that builds `wbg-pool` from this repository takes
+  both together; patches it carries against `wbg-pool`'s `shim.rs`,
+  `daemon/harness.rs`, `daemon/server.rs` or the scripts under `daemon/js`
+  may need rebasing.
+- `dialog_common::helpers::address` reads the passed variable on
+  `wasm32-unknown-unknown` and the process environment elsewhere.
+  `dialog_common::helpers::PASSED_VARIABLES` is the name of the variable
+  that lists what to pass.
+- `wbg-pool` passes any variable named in `WBG_POOL_PASS_ENV`, not only
+  this one (see its README).
+
+Why: cargo tracks a variable read with `option_env!` as a build input, and
+every provisioned test has its own address. Each test of
+`dialog-repository` therefore rebuilt and relinked the crate's wasm test
+binary, 82 seconds a test on a CI runner, and the cross-target job spent
+over an hour of its 79 minutes of tests there. Two tests of one package
+could also build over each other's binary.
+
 ### A read reads one revision, and a transaction reads and commits against the one it opened at
 
 [#757](https://github.com/dialog-db/dialog-db/issues/757),
@@ -1576,6 +1886,10 @@ has a tree to canonicalize even when the link itself wrote nothing.
   the same bytes, nothing is rewritten on upgrade, and an older release
   reads everything this one writes. Only Rust names and the crate graph
   move.
+- `Download::QueriedRanges` changes nothing stored or synced: the blocks
+  it fetches are blocks the replica would have fetched at its next read
+  of them, nothing is rewritten on upgrade, and releases on either side
+  read what the other writes. Nothing for an embedder to run.
 - Bounding the caches changes nothing stored or synced: caches hold only
   what a replica can read again, nothing is rewritten on upgrade, and
   releases on either side read what the other writes. Nothing for an

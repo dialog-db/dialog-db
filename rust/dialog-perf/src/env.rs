@@ -211,7 +211,11 @@ impl Env {
         let repository = self.profile.space("perf").open().perform(&reader).await?;
         let upstream = repository.branch(upstream).open().perform(&reader).await?;
         let branch = repository.branch(name).open().perform(&reader).await?;
-        branch.pull().from(&upstream).perform(&reader).await?;
+        branch
+            .pull(dialog_repository::Download::MinimalRanges)
+            .from(&upstream)
+            .perform(&reader)
+            .await?;
         self.forget();
         Ok(Adopter {
             reader,
