@@ -2196,6 +2196,121 @@ async fn it_reads_each_holder_of_a_collection_that_another_premise_joins() -> Re
     Ok(())
 }
 
+/// A join of two numbers depends on the read that starts it: a read bound
+/// with the natural 7 finds a stored 7.5, and a read bound with 7.5 does not
+/// find a stored 7. A rule gives each item whose rank is the value of an entry
+/// of board:1, and the items have the ranks 7, 8, -3, and 7.5. A live query
+/// that starts from an item could give other rows than a first read, so it
+/// reads such a rule again in full. The steps write and take back entries of
+/// numbers of each type, in commits of one change and of two. After each step
+/// the live query holds the rows of a first read, for a collection and a rank
+/// with no type under `all:` and under `last:`, and for a collection and a
+/// rank of `float:32` under `last:`.
+#[dialog_common::test]
+async fn it_holds_the_rows_of_a_first_read_where_a_join_meets_numbers_of_two_types() -> Result<()> {
+    let one = |exists: bool, key: &'static str, value: Value| vec![(exists, key, value)];
+    let steps: Vec<Vec<(bool, &str, Value)>> = vec![
+        one(true, "a", Value::UnsignedInt(7)),
+        one(true, "c", Value::Float(7.5)),
+        one(false, "a", Value::UnsignedInt(7)),
+        one(false, "c", Value::Float(7.5)),
+        one(true, "b", Value::Float(8.0)),
+        one(true, "n", Value::SignedInt(-3)),
+        one(false, "b", Value::Float(8.0)),
+        one(false, "n", Value::SignedInt(-3)),
+        vec![
+            (true, "x", Value::UnsignedInt(7)),
+            (true, "x", Value::Float(7.5)),
+        ],
+        one(false, "x", Value::UnsignedInt(7)),
+        vec![
+            (true, "x", Value::UnsignedInt(7)),
+            (false, "x", Value::Float(7.5)),
+        ],
+        vec![
+            (false, "x", Value::UnsignedInt(7)),
+            (true, "y", Value::UnsignedInt(7)),
+        ],
+        vec![
+            (false, "y", Value::UnsignedInt(7)),
+            (true, "y", Value::Float(7.9)),
+        ],
+        one(false, "y", Value::Float(7.9)),
+    ];
+    for (kind, pick, expected) in [
+        ("", "all:", [2, 2, 1, 0, 1, 2, 1, 0, 2, 1, 2, 2, 0, 0]),
+        (
+            "float:32",
+            "last:",
+            [1, 2, 1, 0, 1, 2, 1, 0, 1, 1, 1, 1, 0, 0],
+        ),
+        ("", "last:", [2, 2, 1, 0, 1, 2, 1, 0, 1, 1, 2, 2, 0, 0]),
+    ] {
+        let (branch, operator, board) = board().await?;
+        let mut transaction = branch.transaction();
+        for (item, rank) in [
+            ("item:1", Value::UnsignedInt(7)),
+            ("item:2", Value::UnsignedInt(8)),
+            ("item:3", Value::SignedInt(-3)),
+            ("item:4", Value::Float(7.5)),
+        ] {
+            transaction = transaction.assert(fact("test.item/rank", &item.parse()?, rank)?);
+        }
+        transaction.commit().publish().perform(&operator).await?;
+
+        let typed = |the: &str| {
+            let mut field = json!({ "the": the });
+            if !kind.is_empty() {
+                field["as"] = json!(kind);
+            }
+            field
+        };
+        let mut collection = typed("test.scores");
+        collection["the"] = json!({ "domain": "test.scores", "keyed": "dictionary" });
+        collection["pick"] = json!(pick);
+        let head = json!({ "with": { "rank": typed("test.ranked/rank") } });
+        let rule: DeductiveRuleDescriptor = serde_json::from_value(json!({
+            "deduce": head,
+            "when": [
+                {
+                    "assert": { "with": { "scores": collection } },
+                    "where": {
+                        "this": { "entity:": "board:1" },
+                        "scores": { "the": { "?": { "name": "key" } }, "is": { "?": { "name": "rank" } } }
+                    }
+                },
+                {
+                    "assert": { "with": { "rank": typed("test.item/rank") } },
+                    "where": { "this": { "?": { "name": "this" } }, "rank": { "?": { "name": "rank" } } }
+                }
+            ]
+        }))?;
+        let rule = rule.compile()?;
+        let mut live = branch
+            .query()
+            .with(rule.clone())
+            .subscribe(each_field(&head)?);
+        live.poll(&operator).await?;
+
+        let mut held = Vec::new();
+        for changes in &steps {
+            let mut transaction = branch.transaction();
+            for (exists, key, value) in changes {
+                let entry = fact(&format!("test.scores/{key}"), &board, value.clone())?;
+                transaction = if *exists {
+                    transaction.assert(entry)
+                } else {
+                    transaction.retract(entry)
+                };
+            }
+            transaction.commit().publish().perform(&operator).await?;
+            held.push(rows_of_both(&branch, &operator, &rule, &head, &mut live).await?);
+        }
+        assert_eq!(held, expected, "a field of {kind:?} under {pick}");
+    }
+    Ok(())
+}
+
 /// A log with no type can hold an entry of text. A rule reads each message
 /// that the log of channel 0 holds, takes the message as the entity of
 /// another premise, and gives the topic of the channel of the message. An
@@ -2342,5 +2457,371 @@ async fn it_reads_an_entry_that_is_no_entity_where_only_a_negated_premise_takes_
             1
         );
     }
+    Ok(())
+}
+
+/// Polls `live`, and compares the rows that it holds with the rows that a
+/// new query of the same `rules` reads. Gives the number of rows.
+async fn rows_of_rules(
+    branch: &Branch,
+    operator: &Operator,
+    rules: &[DeductiveRule],
+    head: &Json,
+    live: &mut Subscription<ConceptQuery>,
+) -> Result<usize> {
+    live.poll(operator).await?;
+    let mut query = branch.query();
+    for rule in rules {
+        query = query.with(rule.clone());
+    }
+    let read = query
+        .subscribe(each_field(head)?)
+        .poll(operator)
+        .await?
+        .map_or(Vec::new(), |delta| delta.asserted);
+    let held = live.results();
+    assert_eq!(held.len(), read.len(), "the live query and a first read");
+    assert!(held.iter().all(|row| read.contains(row)));
+    Ok(held.len())
+}
+
+/// The rows of a live query of `head` under `rules`, which join the entries
+/// of the collection `test.scores` of board:1 with the ranks of items, after
+/// each step of a list. The items have the ranks 7, 8, -3, and 7.5 at the
+/// start. With `items` the collection holds 7 and 7.5, and the steps write
+/// and take back the ranks of items. Without it, the steps write and take back
+/// entries of numbers of each type, in commits of one change and of two.
+/// After each step the live query holds the rows of a first read.
+async fn ranked_rows(rules: &[DeductiveRule], head: &Json, items: bool) -> Result<Vec<usize>> {
+    let (branch, operator, board) = board().await?;
+    let mut transaction = branch.transaction();
+    for (item, rank) in [
+        ("item:1", Value::UnsignedInt(7)),
+        ("item:2", Value::UnsignedInt(8)),
+        ("item:3", Value::SignedInt(-3)),
+        ("item:4", Value::Float(7.5)),
+    ] {
+        transaction = transaction.assert(fact("test.item/rank", &item.parse()?, rank)?);
+    }
+    if items {
+        transaction = transaction
+            .assert(fact("test.scores/a", &board, Value::UnsignedInt(7))?)
+            .assert(fact("test.scores/c", &board, Value::Float(7.5))?);
+    }
+    transaction.commit().publish().perform(&operator).await?;
+    let mut query = branch.query();
+    for rule in rules {
+        query = query.with(rule.clone());
+    }
+    let mut live = query.subscribe(each_field(head)?);
+    live.poll(&operator).await?;
+
+    let one = |exists: bool, key: &'static str, value: Value| vec![(exists, key, value)];
+    let steps: Vec<Vec<(bool, &str, Value)>> = if items {
+        vec![
+            one(true, "item:5", Value::Float(7.5)),
+            one(true, "item:6", Value::UnsignedInt(7)),
+            one(false, "item:1", Value::UnsignedInt(7)),
+            one(false, "item:4", Value::Float(7.5)),
+            one(true, "item:7", Value::SignedInt(7)),
+            one(false, "item:6", Value::UnsignedInt(7)),
+            one(true, "item:1", Value::Float(7.0)),
+        ]
+    } else {
+        vec![
+            one(true, "a", Value::UnsignedInt(7)),
+            one(true, "c", Value::Float(7.5)),
+            one(false, "a", Value::UnsignedInt(7)),
+            one(false, "c", Value::Float(7.5)),
+            one(true, "b", Value::Float(8.0)),
+            one(true, "n", Value::SignedInt(-3)),
+            one(false, "b", Value::Float(8.0)),
+            one(false, "n", Value::SignedInt(-3)),
+            vec![
+                (true, "x", Value::UnsignedInt(7)),
+                (true, "x", Value::Float(7.5)),
+            ],
+            one(false, "x", Value::UnsignedInt(7)),
+            vec![
+                (true, "x", Value::UnsignedInt(7)),
+                (false, "x", Value::Float(7.5)),
+            ],
+            vec![
+                (false, "x", Value::UnsignedInt(7)),
+                (true, "y", Value::UnsignedInt(7)),
+            ],
+            vec![
+                (false, "y", Value::UnsignedInt(7)),
+                (true, "y", Value::Float(7.9)),
+            ],
+            one(false, "y", Value::Float(7.9)),
+        ]
+    };
+    let mut held = Vec::new();
+    for changes in steps {
+        let mut transaction = branch.transaction();
+        for (exists, name, value) in changes {
+            let change = if items {
+                fact("test.item/rank", &name.parse()?, value)?
+            } else {
+                fact(&format!("test.scores/{name}"), &board, value)?
+            };
+            transaction = if exists {
+                transaction.assert(change)
+            } else {
+                transaction.retract(change)
+            };
+        }
+        transaction.commit().publish().perform(&operator).await?;
+        held.push(rows_of_rules(&branch, &operator, rules, head, &mut live).await?);
+    }
+    Ok(held)
+}
+
+/// A rule can join two numbers through a premise that binds one variable from
+/// another: an equality (`==`), or `coalesce`. A rule gives each item whose
+/// rank is the value of an entry of board:1, where the entry and the rank are
+/// two variables that such a premise links. Neither has a type, so the join
+/// depends on the side it starts from, as a join through one variable does.
+/// After each step the live query holds the rows of a first read, under
+/// `all:` and under `last:`.
+#[dialog_common::test]
+async fn it_holds_the_rows_of_a_first_read_where_a_join_of_two_numbers_passes_through_a_link()
+-> Result<()> {
+    let head = json!({ "with": { "rank": { "the": "test.ranked/rank" } } });
+    let links = [
+        json!({ "assert": "==", "where": {
+            "this": { "?": { "name": "value" } },
+            "is": { "?": { "name": "rank" } }
+        } }),
+        json!({ "assert": "coalesce", "where": {
+            "source": { "?": { "name": "value" } },
+            "fallback": 0,
+            "is": { "?": { "name": "rank" } }
+        } }),
+    ];
+    for link in links {
+        for pick in ["all:", "last:"] {
+            let rule: DeductiveRuleDescriptor = serde_json::from_value(json!({
+                "deduce": head,
+                "when": [
+                    {
+                        "assert": { "with": { "scores": {
+                            "the": { "domain": "test.scores", "keyed": "dictionary" },
+                            "pick": pick,
+                        } } },
+                        "where": {
+                            "this": { "entity:": "board:1" },
+                            "scores": { "the": { "?": { "name": "key" } }, "is": { "?": { "name": "value" } } }
+                        }
+                    },
+                    link,
+                    {
+                        "assert": { "with": { "rank": { "the": "test.item/rank" } } },
+                        "where": { "this": { "?": { "name": "this" } }, "rank": { "?": { "name": "rank" } } }
+                    }
+                ]
+            }))?;
+            let rules = [rule.compile()?];
+            let entries = match pick {
+                "all:" => [2, 2, 1, 0, 1, 2, 1, 0, 2, 1, 2, 2, 0, 0],
+                _ => [2, 2, 1, 0, 1, 2, 1, 0, 1, 1, 2, 2, 0, 0],
+            };
+            let what = format!("{} under {pick}", link["assert"]);
+            assert_eq!(ranked_rows(&rules, &head, false).await?, entries, "{what}");
+            assert_eq!(
+                ranked_rows(&rules, &head, true).await?,
+                [3, 4, 3, 2, 3, 2, 3],
+                "{what}, as the ranks change"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// A change of one fact: whether it is asserted, its attribute, its entity,
+/// and its value.
+type Write = (bool, &'static str, &'static str, Value);
+
+/// Commits `writes` to `branch` in one transaction.
+async fn commit_writes(branch: &Branch, operator: &Operator, writes: &[Write]) -> Result<()> {
+    let mut transaction = branch.transaction();
+    for (exists, the, of, value) in writes {
+        let change = fact(the, &of.parse()?, value.clone())?;
+        transaction = if *exists {
+            transaction.assert(change)
+        } else {
+            transaction.retract(change)
+        };
+    }
+    transaction.commit().publish().perform(operator).await?;
+    Ok(())
+}
+
+/// Opens a live query of `head` under `rule` over the facts of `setup`, and
+/// then commits each step. After each step the live query holds the rows of
+/// a first read. Gives how many times the live query evaluated its rule in
+/// full, the first poll included.
+async fn evaluations_in_full(
+    rule: &DeductiveRule,
+    head: &Json,
+    setup: &[Write],
+    steps: &[Vec<Write>],
+) -> Result<usize> {
+    let (branch, operator) = empty().await?;
+    commit_writes(&branch, &operator, setup).await?;
+    let mut live = branch
+        .query()
+        .with(rule.clone())
+        .subscribe(each_field(head)?);
+    live.poll(&operator).await?;
+    for step in steps {
+        commit_writes(&branch, &operator, step).await?;
+        rows_of_both(&branch, &operator, rule, head, &mut live).await?;
+    }
+    Ok(live.recomputes())
+}
+
+/// A list of a model with a filter on one field, as the renderer writes it
+/// (`segmentBody`): each entity of the model, with its fields, whose `score`
+/// equals `constant`, and whose name is at least `a`. With `owner`, the rule
+/// reads the model of the item that an owner names instead, so a change to an
+/// item reaches the owner through a join.
+fn filtered(kind: &str, constant: Json, owner: bool) -> Result<(DeductiveRule, Json)> {
+    let variable = |name: &str| json!({ "?": { "name": name } });
+    let model = json!({ "with": {
+        "name": { "the": "rv.m/name", "as": "Text", "cardinality": "one" },
+        "score": { "the": "rv.m/score", "as": kind, "cardinality": "one" },
+    } });
+    let mut head = Map::new();
+    if owner {
+        head.insert(
+            "item".into(),
+            json!({ "the": "rv.out/item", "as": "Entity" }),
+        );
+    }
+    for (field, descriptor) in model["with"].as_object().expect("the fields") {
+        head.insert(
+            field.clone(),
+            json!({ "the": format!("rv.out/{field}"), "as": descriptor["as"] }),
+        );
+    }
+    let item = if owner { "item" } else { "this" };
+    let mut when = vec![
+        json!({ "assert": model, "where": {
+            "this": variable(item), "name": variable("name"), "score": variable("score"),
+        } }),
+        json!({ "assert": "==", "where": { "this": variable("score"), "is": constant } }),
+        json!({ "assert": ">=", "where": { "of": variable("name"), "with": { "text:": "a" } } }),
+    ];
+    if owner {
+        when.push(json!({
+            "assert": { "with": { "item": { "the": "rv.o/item", "as": "Entity" } } },
+            "where": { "this": variable("this"), "item": variable("item") },
+        }));
+    }
+    let head = json!({ "with": head });
+    let rule: DeductiveRuleDescriptor =
+        serde_json::from_value(json!({ "deduce": head, "when": when }))?;
+    Ok((rule.compile()?, head))
+}
+
+/// The renderer writes a filter of a number as bare digits, so `?score == 3`
+/// on a field of integers compares the field with the natural 3. A natural
+/// and an integer read each number alike where both see it, so the filter
+/// finds the same items from either side, and the live query keeps its
+/// incremental path. A filter of a float on a field of integers, or of a
+/// natural on a field of floats, reads a fraction in two ways, so that live
+/// query evaluates its rule in full at each poll. Items arrive with scores of
+/// each number type, and scores change and leave. After each step the live
+/// query holds the rows of a first read, for a list of the model and for a
+/// list that reaches the model through an owner.
+#[dialog_common::test]
+async fn it_keeps_a_filter_of_a_whole_number_on_the_incremental_path() -> Result<()> {
+    let item = |name: &'static str, n: &'static str, score: Value| {
+        vec![
+            (true, "rv.m/name", name, Value::String(n.into())),
+            (true, "rv.m/score", name, score),
+        ]
+    };
+    let mut setup = item("item:1", "a1", Value::SignedInt(3));
+    setup.extend(item("item:2", "a2", Value::SignedInt(-3)));
+    for (owner, item) in [
+        ("owner:1", "item:1"),
+        ("owner:2", "item:2"),
+        ("owner:3", "item:3"),
+        ("owner:4", "item:4"),
+        ("owner:5", "item:5"),
+        ("owner:6", "item:6"),
+    ] {
+        setup.push((true, "rv.o/item", owner, Value::Entity(item.parse()?)));
+    }
+    let steps = vec![
+        item("item:3", "a3", Value::SignedInt(3)),
+        item("item:4", "a4", Value::UnsignedInt(3)),
+        item("item:5", "a5", Value::Float(3.0)),
+        item("item:6", "a6", Value::Float(3.5)),
+        vec![(false, "rv.m/score", "item:1", Value::SignedInt(3))],
+        vec![(true, "rv.m/name", "item:3", Value::String("b3".into()))],
+        vec![(true, "rv.m/score", "item:2", Value::SignedInt(3))],
+        vec![(false, "rv.m/score", "item:4", Value::UnsignedInt(3))],
+        vec![(true, "rv.m/score", "item:4", Value::SignedInt(-3))],
+        vec![(true, "rv.m/score", "item:1", Value::Float(3.5))],
+    ];
+    let float = |text: &str| -> Result<Json> { Ok(serde_json::from_str(text)?) };
+    for owner in [false, true] {
+        for (kind, constant, incremental) in [
+            ("SignedInteger", json!(3), true),
+            ("SignedInteger", json!(-3), true),
+            ("UnsignedInteger", json!(3), true),
+            ("Float", float("3.0")?, true),
+            ("SignedInteger", float("3.0")?, false),
+            ("UnsignedInteger", float("3.0")?, false),
+            ("Float", json!(3), false),
+        ] {
+            let what = format!("{kind} == {constant}, through an owner: {owner}");
+            let (rule, head) = filtered(kind, constant, owner)?;
+            let full = evaluations_in_full(&rule, &head, &setup, &steps).await?;
+            if incremental {
+                assert_eq!(full, 1, "{what}");
+            } else {
+                assert!(full > 1, "{what}");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A constant that is no number is never equal to a number. A filter of text
+/// on a field with no type, whose items hold text and numbers, keeps its
+/// incremental path, and after each step the live query holds the rows of a
+/// first read.
+#[dialog_common::test]
+async fn it_keeps_a_filter_of_text_on_a_field_with_no_type_on_the_incremental_path() -> Result<()> {
+    let variable = |name: &str| json!({ "?": { "name": name } });
+    let head = json!({ "with": { "tag": { "the": "rv.out/tag" } } });
+    let rule: DeductiveRuleDescriptor = serde_json::from_value(json!({
+        "deduce": head,
+        "when": [
+            {
+                "assert": { "with": { "tag": { "the": "rv.m/tag" } } },
+                "where": { "this": variable("this"), "tag": variable("tag") },
+            },
+            { "assert": "==", "where": { "this": variable("tag"), "is": "x" } },
+        ]
+    }))?;
+    let tag = |exists: bool, item: &'static str, value: Value| (exists, "rv.m/tag", item, value);
+    let setup = vec![tag(true, "item:1", Value::String("x".into()))];
+    let steps = vec![
+        vec![tag(true, "item:2", Value::UnsignedInt(3))],
+        vec![tag(true, "item:3", Value::String("x".into()))],
+        vec![tag(true, "item:4", Value::Float(3.5))],
+        vec![tag(false, "item:1", Value::String("x".into()))],
+        vec![tag(true, "item:2", Value::String("x".into()))],
+    ];
+    assert_eq!(
+        evaluations_in_full(&rule.compile()?, &head, &setup, &steps).await?,
+        1
+    );
     Ok(())
 }

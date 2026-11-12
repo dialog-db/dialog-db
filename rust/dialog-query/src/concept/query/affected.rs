@@ -51,9 +51,12 @@ use futures_util::TryStreamExt as _;
 use crate::attribute::{Cardinality, Relation, The};
 use crate::concept::descriptor::{ConceptDescriptor, ConceptFieldDescriptor};
 use crate::concept::query::ConceptQuery;
-use crate::corpus::Fact;
+use crate::constraint::Constraint;
+use crate::corpus::{Fact, Type as ValueType};
 use crate::error::EvaluationError;
+use crate::formula::cell::Cells;
 use crate::negation::Negation;
+use crate::parameters::Parameters;
 use crate::planner::Planner;
 use crate::premise::Premise;
 use crate::proposition::Proposition;
@@ -61,7 +64,7 @@ use crate::rule::deductive::DeductiveRule;
 use crate::selection::{Binding, Match};
 use crate::source::SelectRules;
 use crate::term::Term;
-use crate::type_system::Type as Kind;
+use crate::type_system::{Primitive, Type as Kind};
 use crate::types::{Any, Typed};
 use crate::{Entity, Environment, Value};
 
@@ -349,6 +352,14 @@ where
         if bundle.rules().any(|rule| !rule.reduce().is_empty()) {
             return Ok(None);
         }
+        // A join of two numbers depends on the side it starts from (see
+        // `joins_numbers_unevenly`). A goal-directed read of one head can
+        // start from the other side than a read of the whole query, so
+        // it can give other rows. The caller recomputes, which reads the
+        // query as a first read does.
+        if bundle.rules().any(joins_numbers_unevenly) {
+            return Ok(None);
+        }
         if bundle.installed().is_empty() && collection_of(&descriptor).is_some() {
             stored.insert(entity.clone());
         }
@@ -538,6 +549,245 @@ fn collection_of(concept: &ConceptDescriptor) -> Option<(&str, &ConceptFieldDesc
         return None;
     }
     matches!(field.the(), The::Collection { .. }).then_some((name, field))
+}
+
+/// Whether `rule` joins a variable whose numbers a scan can compare in two
+/// ways.
+///
+/// A scan does not compare two numbers by equality. A read that is bound with
+/// a number reads each stored number through the type of that number: a read
+/// of the natural 7 finds a stored 7.5, and a read of 7.5 does not find a
+/// stored 7. So where two premises bind one value, the rows of the join can
+/// depend on the premise that binds it first. Both orders give the same rows
+/// when each premise takes the value through one and the same number type of
+/// full width, since each read then sees each number through that type. They
+/// can differ when a premise has no type, when a type holds more than one
+/// number type, when a sized type rounds or narrows a number, and when two
+/// premises have two number types.
+///
+/// A value can pass from one variable to another. An equality (`==`) binds
+/// one side from the other, and `coalesce` binds its result from its source
+/// or its fallback. So the check takes each variable together with each
+/// variable that such a premise links it to, as one value. A premise that
+/// binds that value is a read of an attribute or of a field of a concept, a
+/// constant that an equality or `coalesce` gives it, or the result of a
+/// formula or a resolver. Where two such premises bind one value and one of
+/// them can hold numbers of more than one type, or two of them hold two
+/// number types, the rule joins numbers unevenly. The check is a fallback to
+/// a full evaluation, which is always sound, so it counts a premise whose
+/// type it cannot prove as a premise of more than one type.
+///
+/// A constant that an equality compares with the value is a filter, such as
+/// `?score == 3`. A constant that is no number is never equal to a number, so
+/// it counts for nothing. A natural and an integer read a number alike where
+/// both see it: each reads a number with a fraction as its floor. So where
+/// each other premise of the value reads it as naturals alone, or as integers
+/// alone, at full width, a constant of either type that this type reads as
+/// the same number finds the same numbers from either side. Such a constant
+/// counts as a premise of the type of the value. Any other constant counts as
+/// a premise of its own type: a float sees 3.5 as itself, and a natural or an
+/// integer sees it as 3.
+///
+/// A value that a positive premise takes as its entity is an entity in each
+/// row, and a scan compares an entity by equality, so such a value joins
+/// evenly. A value that passes through `coalesce` is left out of that: the
+/// result of `coalesce` can be the entity while its source or its fallback
+/// holds a number.
+fn joins_numbers_unevenly(rule: &DeductiveRule) -> bool {
+    /// What the premises of one value of the rule take it as.
+    #[derive(Default)]
+    struct Reads {
+        /// Whether some positive premise takes the value as its entity.
+        entity: bool,
+        /// Whether the value passes through `coalesce`.
+        coalesced: bool,
+        /// How many premises bind the value.
+        values: usize,
+        /// Whether some premise binds the value through no one number type
+        /// of full width while it can hold a number.
+        uneven: bool,
+        /// The one number type of each other premise that can bind a number.
+        numbers: Vec<ValueType>,
+    }
+    impl Reads {
+        fn value(&mut self, kind: Option<Kind>) {
+            self.values += 1;
+            let Some(kind) = kind else {
+                self.uneven = true;
+                return;
+            };
+            let Some(numbers) = kind.primitive_part().intersect(Primitive::NUMERIC) else {
+                return;
+            };
+            let sized = kind
+                .refinement()
+                .is_some_and(|refinement| !refinement.views.is_empty());
+            match numbers.as_singleton() {
+                Some(number) if !sized => {
+                    if !self.numbers.contains(&number) {
+                        self.numbers.push(number);
+                    }
+                }
+                _ => self.uneven = true,
+            }
+        }
+
+        /// A constant that an equality compares with the value (see
+        /// `joins_numbers_unevenly`).
+        fn compared(&mut self, constant: &Value) {
+            if !constant.data_type().is_number() {
+                return;
+            }
+            let whole = |number: &ValueType| {
+                matches!(number, ValueType::UnsignedInt | ValueType::SignedInt)
+            };
+            if let [number] = self.numbers.as_slice()
+                && !self.uneven
+                && whole(number)
+                && whole(&constant.data_type())
+                && constant
+                    .clone()
+                    .viewed_as(*number)
+                    .is_some_and(|viewed| viewed.same_number(constant))
+            {
+                self.values += 1;
+                return;
+            }
+            self.value(Some(Kind::from(constant.data_type())));
+        }
+
+        fn uneven(&self) -> bool {
+            !(self.entity && !self.coalesced)
+                && self.values >= 2
+                && (self.uneven || self.numbers.len() > 1)
+        }
+    }
+
+    /// The terms of a premise that links the values of its variables: an
+    /// equality or `coalesce`.
+    fn links(premise: &Premise) -> Option<(Vec<&Term<Any>>, bool)> {
+        match premise {
+            Premise::Assert(Proposition::Constraint(Constraint::Equality(equality))) => {
+                Some((vec![&equality.this, &equality.is], false))
+            }
+            Premise::Assert(Proposition::Constraint(Constraint::Coalesce(coalesce))) => Some((
+                vec![&coalesce.source, &coalesce.fallback, &coalesce.is],
+                true,
+            )),
+            _ => None,
+        }
+    }
+
+    // A variable that a link joins to another names that other variable
+    // here. The names lead to one variable, which stands for the value.
+    let mut linked: HashMap<&str, &str> = HashMap::new();
+    fn value_of<'r>(linked: &HashMap<&'r str, &'r str>, mut name: &'r str) -> &'r str {
+        while let Some(next) = linked.get(name).filter(|next| **next != name) {
+            name = next;
+        }
+        name
+    }
+    let premises: Vec<&Premise> = rule.analysis().premises().collect();
+    for premise in &premises {
+        let Some((terms, _)) = links(premise) else {
+            continue;
+        };
+        let mut names = terms.iter().filter_map(|term| term.name());
+        let Some(first) = names.next() else {
+            continue;
+        };
+        for name in names {
+            let (one, other) = (value_of(&linked, first), value_of(&linked, name));
+            if one != other {
+                linked.insert(other, one);
+            }
+        }
+    }
+
+    let mut reads: HashMap<String, Reads> = HashMap::new();
+    /// The reads of the value of the variable `name`.
+    fn read<'m>(
+        reads: &'m mut HashMap<String, Reads>,
+        linked: &HashMap<&str, &str>,
+        name: &str,
+    ) -> &'m mut Reads {
+        reads.entry(value_of(linked, name).to_owned()).or_default()
+    }
+    // A formula or a resolver binds each of its cells that is not required:
+    // its results.
+    let results = |cells: &Cells, terms: Parameters| -> Vec<(String, Option<Kind>)> {
+        cells
+            .iter()
+            .filter(|(_, cell)| !cell.requirement().is_required())
+            .filter_map(|(cell, spec)| {
+                let name = terms.get(cell)?.name()?.to_owned();
+                Some((name, spec.content_type().clone()))
+            })
+            .collect()
+    };
+    // The constants that an equality compares with a value, by a variable of
+    // that value.
+    let mut compared: Vec<(&str, &Value)> = Vec::new();
+    for premise in &premises {
+        if let Some(name) = entity_of(premise) {
+            read(&mut reads, &linked, name).entity = true;
+        }
+        if let Some(Slots { is, .. }) = attribute_premise(premise) {
+            if let Some(name) = is.name() {
+                read(&mut reads, &linked, name).value(is.kind());
+            }
+            continue;
+        }
+        if let Some((terms, coalesce)) = links(premise) {
+            let names: Vec<&str> = terms.iter().filter_map(|term| term.name()).collect();
+            let Some(first) = names.first() else {
+                continue;
+            };
+            read(&mut reads, &linked, first).coalesced |= coalesce;
+            for term in terms {
+                match term.as_constant() {
+                    Some(constant) if !coalesce => compared.push((first, constant)),
+                    Some(_) => read(&mut reads, &linked, first).value(term.kind()),
+                    None => {}
+                }
+            }
+            continue;
+        }
+        let bound = match premise {
+            Premise::Assert(Proposition::Formula(formula)) => {
+                results(formula.cells(), formula.parameters())
+            }
+            Premise::Assert(Proposition::Resolver(resolver)) => {
+                results(resolver.cells(), resolver.parameters())
+            }
+            _ => Vec::new(),
+        };
+        for (name, kind) in bound {
+            read(&mut reads, &linked, &name).value(kind);
+        }
+        let Some((query, _)) = concept_premise(premise) else {
+            continue;
+        };
+        for (slot, term) in query.terms.iter() {
+            let Some(name) = term.name() else {
+                continue;
+            };
+            if let Some((_, field)) = query
+                .predicate
+                .with()
+                .iter()
+                .find(|(field, _)| field == slot)
+            {
+                read(&mut reads, &linked, name).value(field.content_type().map(Kind::from));
+            }
+        }
+    }
+    // A constant of an equality counts once each other premise of its value
+    // is known.
+    for (name, constant) in compared {
+        read(&mut reads, &linked, name).compared(constant);
+    }
+    reads.values().any(Reads::uneven)
 }
 
 /// Whether `concept` is one keyed collection under `max`, `min`, or `top`.
@@ -888,6 +1138,7 @@ mod tests {
     use crate::concept::descriptor::ConceptFieldDescriptor;
     use crate::constraint::{Coalesce, Constraint, LessThan};
     use crate::parameters::Parameters;
+    use crate::rule::DeductiveRuleDescriptor;
     use crate::session::RuleRegistry;
     use crate::source::test::TestEnv;
     use crate::the;
@@ -1391,6 +1642,73 @@ mod tests {
             Some(BTreeSet::from([doc])),
             "a tag change reaches the document linking to it"
         );
+        Ok(())
+    }
+
+    /// A rule of the JSON form, compiled.
+    fn compiled(rule: serde_json::Value) -> anyhow::Result<DeductiveRule> {
+        let descriptor: DeductiveRuleDescriptor = serde_json::from_value(rule)?;
+        Ok(descriptor.compile()?)
+    }
+
+    /// The check takes a value together with each variable that an equality
+    /// or `coalesce` links it to. Each of these joins an entry of a
+    /// collection with no type and the rank of an item, and the check flags
+    /// it. The same join over two typed reads of naturals is not flagged.
+    #[dialog_common::test]
+    async fn it_flags_a_join_of_numbers_through_a_link() -> anyhow::Result<()> {
+        let variable = |name: &str| serde_json::json!({ "?": { "name": name } });
+        let entries = |kind: &str, value: &str| {
+            let mut scores = serde_json::json!({
+                "the": { "domain": "test.scores", "keyed": "dictionary" },
+                "pick": "all:",
+            });
+            if !kind.is_empty() {
+                scores["as"] = serde_json::json!(kind);
+            }
+            serde_json::json!({
+                "assert": { "with": { "scores": scores } },
+                "where": {
+                    "this": { "entity:": "board:1" },
+                    "scores": { "the": variable("key"), "is": variable(value) },
+                },
+            })
+        };
+        let rank = |kind: &str| {
+            let mut rank = serde_json::json!({ "the": "test.item/rank" });
+            if !kind.is_empty() {
+                rank["as"] = serde_json::json!(kind);
+            }
+            serde_json::json!({
+                "assert": { "with": { "rank": rank } },
+                "where": { "this": variable("this"), "rank": variable("rank") },
+            })
+        };
+        let head = serde_json::json!({ "with": { "rank": { "the": "test.ranked/rank" } } });
+        let rule = |when: Vec<serde_json::Value>| {
+            compiled(serde_json::json!({ "deduce": head, "when": when }))
+        };
+        let equal = serde_json::json!({ "assert": "==", "where": {
+            "this": variable("value"), "is": variable("rank"),
+        } });
+        assert!(joins_numbers_unevenly(&rule(vec![
+            entries("", "value"),
+            equal.clone(),
+            rank("")
+        ])?));
+        let coalesce = serde_json::json!({ "assert": "coalesce", "where": {
+            "source": variable("value"), "fallback": 0, "is": variable("rank"),
+        } });
+        assert!(joins_numbers_unevenly(&rule(vec![
+            entries("", "value"),
+            coalesce,
+            rank("")
+        ])?));
+        assert!(!joins_numbers_unevenly(&rule(vec![
+            entries("natural:", "value"),
+            equal,
+            rank("natural:")
+        ])?));
         Ok(())
     }
 }
