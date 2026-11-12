@@ -25,6 +25,7 @@ use crate::schema::CONCEPT_OVERHEAD;
 use crate::selection::{Selection, Standing};
 use crate::source::SelectRules;
 use crate::stream::{fork_stream, stream_select};
+use crate::type_system::Type as Kind;
 use crate::types::Any;
 use crate::{
     Binding, Cardinality, Environment, EvaluationError, Match, Parameters, Requirement, Schema,
@@ -36,6 +37,7 @@ use futures_util::{StreamExt, TryStreamExt, stream};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Display;
+use std::future;
 use std::mem;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -79,14 +81,39 @@ fn extract_parameters(source: &Match, terms: &Parameters) -> Result<Match, Evalu
     Ok(matched)
 }
 
+/// The type the caller's value term reads through, when it is a typed
+/// variable. An attribute's type is part of which attribute it is, so
+/// to a variable of a type a value of another type is a fact of
+/// another attribute: it takes no part in an election and does not
+/// make the entity one that has a value. `None` reads every value.
+fn lens(terms: &Parameters) -> Option<Kind> {
+    match terms.get(ConceptDescriptor::VALUE) {
+        Some(term @ Term::Variable { name: Some(_), .. }) => term.kind(),
+        _ => None,
+    }
+}
+
+/// Whether a bind took. A value the term's type does not read, and one
+/// that disagrees with what the term is already bound to, make the row
+/// one the caller's terms do not match: it is passed over, as a scan
+/// into the same term passes over it. Any other failure is an error.
+fn took(bound: Result<(), EvaluationError>) -> Result<bool, EvaluationError> {
+    match bound {
+        Ok(()) => Ok(true),
+        Err(EvaluationError::KindMismatch { .. } | EvaluationError::Assignment { .. }) => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
 /// Merge a Match with parameter names back into a Match with user
 /// variable names after evaluation. Both Present and Absent
-/// bindings are propagated.
+/// bindings are propagated. `None` when the caller's terms do not
+/// match the result (see [`took`]).
 fn merge_parameters(
     base: &Match,
     result: &Match,
     terms: &Parameters,
-) -> Result<Match, EvaluationError> {
+) -> Result<Option<Match>, EvaluationError> {
     let mut merged = base.clone();
 
     for (param_name, user_param) in terms.iter() {
@@ -96,7 +123,9 @@ fn merge_parameters(
 
         match result.get(param_name) {
             Some(Binding::Present(value)) => {
-                merged.bind(user_param, value.clone())?;
+                if !took(merged.bind(user_param, value.clone()))? {
+                    return Ok(None);
+                }
                 if let Some(name) = user_param.shared_name()
                     && let Some(standing) = result.standing_of(param_name)
                 {
@@ -104,7 +133,10 @@ fn merge_parameters(
                 }
             }
             Some(Binding::Absent) => {
-                merged.bind_absent(user_param)?;
+                let absent = took(merged.bind_absent(user_param))?;
+                if !absent {
+                    return Ok(None);
+                }
             }
             // Unbound is expected: not every parameter survives the
             // concept evaluation (e.g. a blank slot the rule never
@@ -115,7 +147,7 @@ fn merge_parameters(
     }
     merged.adopt_citations(result);
 
-    Ok(merged)
+    Ok(Some(merged))
 }
 
 /// Represents an application of a concept with specific term bindings.
@@ -748,15 +780,17 @@ impl ConceptQuery {
         });
         let results = plan.clone().evaluate(scoped, env);
         if elect.is_none() && !widen {
-            return Box::pin(results.map(move |result| {
-                let mut result = result?;
-                let caller = result.take_caller().ok_or_else(|| {
-                    EvaluationError::Store(
-                        "a concept's result lost the row it was evaluated for".to_string(),
-                    )
-                })?;
-                merge_parameters(&caller, &result, &back)
-                    .map_err(|e| EvaluationError::Store(e.to_string()))
+            return Box::pin(results.filter_map(move |result| {
+                let merged = result.and_then(|mut result| {
+                    let caller = result.take_caller().ok_or_else(|| {
+                        EvaluationError::Store(
+                            "a concept's result lost the row it was evaluated for".to_string(),
+                        )
+                    })?;
+                    merge_parameters(&caller, &result, &back)
+                        .map_err(|e| EvaluationError::Store(e.to_string()))
+                });
+                future::ready(merged.transpose())
             }));
         }
         // An attribute concept read under a pick: what the pick
@@ -764,6 +798,7 @@ impl ConceptQuery {
         // stored row and every derived candidate alike. The candidates
         // for an entity arrive in no particular order, so the election
         // buffers the results of the whole input.
+        let lens = lens(&back);
         Box::pin(try_stream! {
             let mut groups: Groups = BTreeMap::new();
             let mut matched: HashSet<usize> = HashSet::new();
@@ -775,10 +810,22 @@ impl ConceptQuery {
                     )
                 })?;
                 let caller_id = Arc::as_ptr(&caller) as usize;
+                // A value the caller's variable does not read is no fact
+                // of the attribute it asks for: it is not elected among,
+                // and the entity is not one a set-widened read matched.
+                if let Some(kind) = &lens
+                    && let Some(Binding::Present(value)) = result.get(ConceptDescriptor::VALUE)
+                    && !kind.reads(value)
+                {
+                    continue;
+                }
                 matched.insert(caller_id);
                 if elect.is_none() {
-                    yield merge_parameters(&caller, &result, &back)
+                    let merged = merge_parameters(&caller, &result, &back)
                         .map_err(|e| EvaluationError::Store(e.to_string()))?;
+                    if let Some(merged) = merged {
+                        yield merged;
+                    }
                     continue;
                 }
                 let this = match result.lookup(&Term::<Any>::var("this")) {
@@ -810,8 +857,11 @@ impl ConceptQuery {
                         if !agrees(&result, &caller, &back, &[ConceptDescriptor::VALUE, &key_operand])? {
                             continue;
                         }
-                        yield merge_parameters(&caller, &result, &back)
+                        let merged = merge_parameters(&caller, &result, &back)
                             .map_err(|e| EvaluationError::Store(e.to_string()))?;
+                        if let Some(merged) = merged {
+                            yield merged;
+                        }
                     }
                 }
             }
@@ -855,6 +905,7 @@ impl ConceptQuery {
             let first = first?;
             let plan = rules.plan(&app.terms, &first);
             let widen = app.widens();
+            let lens = lens(&app.terms);
             let (election, ranks) = match app.predicate.attribute_field() {
                 Some((_, field)) => (Election::of(field), rules.ranks(field)),
                 None => (Election::plain(Pick::Last), Vec::new()),
@@ -974,6 +1025,12 @@ impl ConceptQuery {
                             }
                         }
                     }
+                    // Before the next relation is asked whether an
+                    // earlier one settled it: a value the caller's
+                    // variable does not read settles nothing.
+                    if let Some(kind) = &lens {
+                        candidates.retain(|candidate| kind.reads(&candidate.value));
+                    }
                 }
                 for row in &reduced {
                     let (Some(this), Some(value)) = (row.get("this"), row.get(ConceptDescriptor::VALUE)) else {
@@ -993,6 +1050,9 @@ impl ConceptQuery {
                         standing: None,
                         source: Source::Folded,
                     });
+                }
+                if let Some(kind) = &lens {
+                    candidates.retain(|candidate| kind.reads(&candidate.value));
                 }
 
                 let survivors = elect(candidates, &election)?;
