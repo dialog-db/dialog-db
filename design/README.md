@@ -64,3 +64,8 @@ Backtracking moves a topic to an earlier phase and says so in its journal.
   **Building.** The tree talks in nodes through capabilities it performs on
   the environment; caching, decoding and storage form belong to providers.
   The [plan](tree-node-reads/plan.md) is for whoever builds it.
+- [A query or a click waits on blocks the replica does not hold](partial-replicas.md):
+  **Diagnosing.** The request is for partial answers and for writes
+  against a tree held by reference; the cause it assumes for a stalled
+  click is not measured, and the [journal](partial-replicas/journal.md)
+  has the table that would settle it.
