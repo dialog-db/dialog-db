@@ -315,7 +315,7 @@ What "the same signature" comes to, given dialog's identity:
 | different labels | the labels an application writes | a write says every field, so a write always resolves. A read that names only labels both have does not |
 | the same labels, different attributes | nothing an application writes | only the entity says which |
 
-The proof of concept already behaves as the second and third rows say, by pattern: `it_tells_two_concepts_of_one_name_apart_by_the_labels_written`.
+The proof of concept told the second row apart by pattern before anything was decided (`it_resolves_a_name_by_the_labels_written`), and refused the third as ambiguous.
 
 The agent's hypotheses, to decide on:
 
@@ -352,38 +352,36 @@ It depends on how the second definition stands to the first, and dialog already 
 
 **H10.** What is named is a name and a set of labels. Kept under `last`, a later definition of it replaces, definitions with other labels stand beside it, and the only way to two referents is two written apart. Confirmed in part: `last` replaces in order and keeps both of one round. Not run across two replicas, and no name is keyed by its labels yet.
 
-**Decided 2026-11-11, by the maintainer: the last write wins, and a name is not overloaded.** A name has one referent, read under `last`, as in tonk. A second `todo` replaces the first whatever its labels. Two written apart elect one, by the hash of the value. Commands already give what overloads would: a command is defined by the rules that read it, and several rules read one command by different shapes.
-
-So the first column of the table stands, and H7, H8 and H10 are closed by the decision and not by evidence. What it accepts: two replicas that each define `todo` come to one of them after a sync and nothing says so. A stored rule holds the concept and not the name, so nothing installed moves; only text read afterwards does. A warning where a name has two standing referents costs one read with no pick, and refuses nothing.
-
-The proof of concept does not do this yet. Its concepts are rules about syntax, so two of one name are told apart by labels or refused as ambiguous, which is the overloading just decided against.
-
-### Open: what a name refers to
-
-Tonk's referent is the concept's entity, and a concept's field names are facts on that entity. A concept's entity does not say its field names, so two names over the same attributes share one:
+**Decided 2026-11-11, by the maintainer, in two steps.** First: the last write wins, and overloads need not be had, since several rules already read one command by different shapes. Then, on where field names live: several definitions may stand and an application resolves by signature; where the signature is not enough, by the authority of the definition, or to start with by showing all. That means a name is not a name and an entity only. It is a name, what the named subject is, and a signature with its parameter names.
 
 ```
- (concept (todo ?t title: ?x)  (xyz.todo ?t text: …))  ─┐
-                                                        ├─▶ concept:9f…  with/title ─▶ xyz.todo/text
- (concept (task ?t name: ?x)   (xyz.todo ?t text: …))  ─┘                with/name  ─▶ xyz.todo/text
+ name:7Qk…  = name "todo" + subject :concept + parameters [title]      the entity the signature names
+   syntax.name/is          "todo"                                      found by the name alone
+   syntax.name/definition  (last) the tree of the `concept` form       a later one of this signature replaces
+
+ name:2Fc…  = name "todo" + subject :concept + parameters [name]       stands beside it
 ```
 
-Tonk reads a concept back by collecting every `db.concept.with/*` claim on the entity (`rust/tonk-schema/src/concept.rs`), so either name gives a concept with both fields, or none if two names for one attribute are refused. Read from the code, not run (H9).
+Built in the proof of concept, and what each case does:
 
-| | the referent is the concept's entity, as in tonk | the referent is the definition |
+| an application of `todo` | does | test |
 |---|---|---|
-| what `id:todo` points at | `concept:…` | `form:…`, the tree of the `concept` form, kept on the branch as the proof of concept already keeps one |
-| where `title:` is found | on the concept's entity, shared with every other name for it | in the definition |
-| two names over the same attributes | 🔴 one entity with both sets of field names | each name has its own |
-| the concept's entity | the referent | worked out from the definition, as now |
-| what else the definition holds | nothing; a description is a fact beside it | whatever the form says: a description, and a body that is not one attribute a field, such as `list-item` |
-| needs | nothing new | a tree read from the branch when a name is resolved, which is H3's cost |
+| writes labels one definition has | is that definition's | `it_resolves_a_name_by_the_labels_written` |
+| a definition under the signature of an earlier one | replaces it, whatever order its labels are written in | `it_replaces_a_definition_by_a_later_one_of_the_same_signature` |
+| a read whose labels fit several | is of every one: the rule is expanded once a definition, and a form that recurs in it is the same definition's each time | `it_reads_through_every_definition_the_labels_fit`, and on a branch `it_reports_through_every_definition_a_query_fits` |
+| a write whose labels fit several | is the definition whose signature is exactly the labels written, since a write says every field; none or several such is refused | the same |
+| what must not hold, fitting several | is refused: it would be one rule of several negations, not several rules | the same |
+| fits several that read the same attributes | is one read, and nothing is chosen | `it_reads_one_concept_once_however_many_names_its_fields_have` |
 
-Not decided.
+Kept on a real branch as the diagram has it: three definitions of `todo`, the third a correction of the first, come back by the name alone as two, each with its own names for the field (`it_keeps_definitions_on_a_branch_under_their_signatures`). So H9 is taken: the field names are with the name. H10 holds as built: what is named is a name, a kind and a set of labels.
 
-Also open:
+What "showing all" costs, measured on the cases above: one more kernel rule a definition that fits, and only where a read's labels fit several. A form that recurs takes one definition for the whole rule, so `(query (todo ?t title: ?x))`, which the prelude copies into a head and a premise, is two rules and not four.
 
-- Which of the proof of concept's concepts are dialog's. `todo` and `author` are: every field is one attribute of the one entity. `list-item` is not: its entity is the value of the attribute it reads. It is a derived concept, a rule that concludes one.
+Not built:
+
+- **Authority.** Nothing here knows who wrote a definition. Two definitions of one signature written apart both stand in the cell and `last` elects one by the hash of the value.
+- **The walker reading the branch.** The definitions the expander resolves against are the ones it holds in memory. The branch holds the same thing, and is not asked (H3).
+- **A concept's entity.** Nothing ties a definition to the `concept:` entity its attributes make. `list-item` has none: its entity is the value of the attribute it reads, so it is a rule that concludes a concept.
 
 ## What to store, and how
 
@@ -450,7 +448,8 @@ H2 is now a requirement in the table above, not a hypothesis. H3 and H4 stand.
 
 ## Next
 
-1. What a name refers to, above. Then `concept` defines a concept and a name under `last`, an application resolves to it, the expander and the compiler read the tree, and `kernel.rs` gives way to dialog's own forms.
-2. A struct as a term and `entity/derive` over a record: with [patterns](../patterns/plan.md).
-3. Syntax kept on the branch as trees, and the walker asking the branch.
-4. H3, measured, as a research topic.
+1. What decides between two definitions of one signature written apart: authority, and what authority is read from.
+2. The expander and the compiler read the tree, an application lowers to a `ConceptQuery` of the definition's concept, and `kernel.rs` gives way to dialog's own forms.
+3. A struct as a term and `entity/derive` over a record: with [patterns](../patterns/plan.md).
+4. Syntax kept on the branch as trees, and the walker asking the branch.
+5. H3, measured, as a research topic.

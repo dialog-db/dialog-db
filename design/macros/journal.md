@@ -4,8 +4,8 @@
 
 |  | Understanding | Activity |
 |---|---|---|
-| **Status** | The kernel and the core forms run on a real branch through `rust/dialog-notation` ([poc.md](poc.md)); the prelude is rules only. The syntax tree is built, apart from the notation as parsed, and kept as data: maps that say their `type` ([design-forms.md](design-forms.md#the-syntax-tree)). A struct is a value and, with a variable in it, a pattern, which is a topic of its own with an agent on it (#777). Rules of several heads are #776. Expanding and compiling still read the notation as parsed, and `kernel.rs` still copies dialog's forms. | **Designing.** Direction decided by the maintainer. A proof of concept runs. A name resolves to a concept, one referent under `last` and no overloads, by the maintainer; the pass that does it is not built. |
-| **Agenda** | What a name refers to: the concept's entity, as in tonk, or the definition (H9). How a query reports. Whether dialog can be asked for an expansion a form at a time (H3). What a read with no pick reads. | Next: that answer, then `concept` defines a dialog concept and a name under `last`, and an application resolves to it; the expander and the compiler read the tree; dialog's own forms replace `kernel.rs` once a parameter holds a pattern. Not waiting: a helper rule for a negated conjunction. Waiting on patterns (#777, #778): a struct as a term, `entity/derive` over a record, syntax kept on the branch. Waiting on #776: a rule of several heads. |
+| **Status** | The kernel and the core forms run on a real branch through `rust/dialog-notation` ([poc.md](poc.md)); the prelude is rules only. The syntax tree is built, apart from the notation as parsed, and kept as data: maps that say their `type` ([design-forms.md](design-forms.md#the-syntax-tree)). A struct is a value and, with a variable in it, a pattern, which is a topic of its own with an agent on it (#777). Rules of several heads are #776. Expanding and compiling still read the notation as parsed, and `kernel.rs` still copies dialog's forms. | **Designing.** Direction decided by the maintainer. A proof of concept runs. A name is kept as a name, what is named and a signature; a definition under it is read `last`; an application resolves by the labels written and a read that fits several is of all. Built and tested, by pattern, in the expander. |
+| **Agenda** | What decides between two definitions of one signature written apart: authority, and what it is read from. How a query reports. Whether dialog can be asked for an expansion a form at a time (H3). What a read with no pick reads. | Next: the expander and the compiler read the tree, an application lowers to a `ConceptQuery` of the definition's concept, and dialog's own forms replace `kernel.rs` once a parameter holds a pattern. Not waiting: a helper rule for a negated conjunction. Waiting on patterns (#777, #778): a struct as a term, `entity/derive` over a record, syntax kept on the branch. Waiting on #776: a rule of several heads. |
 
 ## Candidate problems
 
@@ -319,7 +319,7 @@ Not examined yet. They are columns, not recommendations.
 
 - The case he could not choose in does not exist. A concept's entity is its attributes; field names are not in it. The same parameters over the same attributes are one concept.
 - The case that does exist is the same labels over different attributes. Nothing an application writes tells those apart.
-- Different labels are told apart by the labels written. A write says every field, so it always resolves; a read naming only shared labels does not. The proof of concept does this today, by pattern, and refuses what fits both (`it_tells_two_concepts_of_one_name_apart_by_the_labels_written`).
+- Different labels are told apart by the labels written. A write says every field, so it always resolves; a read naming only shared labels does not. The proof of concept does this today, by pattern, and refuses what fits both (the test since renamed `it_resolves_a_name_by_the_labels_written`).
 - Tonk cannot hold two concepts under one name: `db.name/referent` has cardinality one, so the second supersedes. Its field names are facts on the concept's entity, which two definitions over the same attributes share.
 - Unison keeps a name's two definitions as a conflict and elects neither. It arises by merge. A name that fits several resolves when exactly one has the expected type and is an error otherwise; `name#hash` says which.
 - "One concept per name and signature" is a rule about definitions, and replicas define apart and then sync. So it cannot be kept where a definition is made (H7), only noticed where a name is used.
@@ -351,4 +351,19 @@ Not examined yet. They are columns, not recommendations.
 - What the decision leaves is where field names live. A concept's entity does not say them, and tonk reads a concept back from every `db.concept.with/*` claim on its entity, so two names over the same attributes get each other's field names (H9, read from the code, not run).
 
 **Decided.** By the maintainer: a name has one referent under `last`; no overloads. Not decided: whether the referent is the concept's entity or the definition. The patterns agent, which had stopped for lack of usage credits in its second step, was restarted at his word.
+
+## 2026-11-11, Designing: a name, what is named, and a signature
+
+**Asked.** Whether a name points at the concept's entity or at the definition. Irakli: he is fine testing several definitions resolved by signature; where the signature is not enough, by the authority of the definition, or to start with by showing all. It means signatures have to be captured with their parameter names. And then: so maybe it is not a name to an entity only, but also what the named subject is, and a signature.
+
+**Learned.**
+
+- This is H10 with a kind added, and it takes H9: the field names are kept with the name. A definition is kept under the entity that the name, the kind and the parameter names make, read `last`. So the last write wins where a definition is corrected, and definitions of other parameters stand side by side, which the decision an hour before had given up.
+- Showing all has to choose once a written form, not once a place the form ends up. The prelude copies a query's head into a premise, and choosing in each place gave four rules for two definitions, two of them reading one relation and reporting the other. One choice a form in a rule gives two.
+- A write never needs showing all: it says every field, so the labels written are a signature. A write that fits several and is none of them is a mistake, and is refused.
+- What must not hold cannot be shown all by expanding the rule several times. Not any of them is one rule with several negations. Refused for now.
+- Two definitions of one concept that call its field by other names give answers that differ only in the names of their own variables. Told as one answer, nothing is chosen.
+- On a branch a read by the name alone finds every signature of it, and a corrected definition has replaced the one it corrects.
+
+**Decided.** By the maintainer: a name is a name, what is named, and a signature with parameter names; several definitions may stand; an application resolves by signature, then by authority, and to start with shows all. Built to "shows all". Not decided: what authority is and where it is read from.
 
