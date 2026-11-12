@@ -1,12 +1,38 @@
 //! What a read or a commit needs from the line it works on, whether
-//! that line is a [`Branch`] or a [`Snapshot`].
+//! that line is a [`Branch`] or a [`Snapshot`], split by what each may
+//! know of the line's head.
 //!
-//! The two differ in one thing only: where the head lives. A branch keeps
-//! it in a memory cell that advances under CAS and that every handle to
-//! the branch shares; a snapshot keeps its own, which moves only through
-//! commits on that very handle. Everything a query or a commit does
-//! downstream of "which root, which store, which caches" is identical,
-//! so it is written once against [`SourceRef`] and both kinds plug in.
+//! The two kinds of line differ in one thing only: where the head
+//! lives. A branch keeps it in a memory cell that advances under CAS
+//! and that every handle to the branch shares; a snapshot keeps its
+//! own, which moves only through commits on that very handle.
+//! Everything a query or a commit does downstream of "which root, which
+//! store, which caches" is identical, so it is written once and both
+//! kinds plug in.
+//!
+//! What is not identical between a read and a commit is whether the
+//! head may be read live. A read is a unit of isolation (a query, a
+//! select, one poll of a subscription, a transaction from open to
+//! commit) and performs many tree scans; every one must read the
+//! revision the unit began with, however a commit through another
+//! handle of the branch moves the head meanwhile
+//! (dialog-db/dialog-db#757). So the types here are two:
+//!
+//! - A [`Live`] is the live handle: `&Branch` or `&Snapshot`, where the
+//!   head is now. It reaches the line's identity, its caches and its
+//!   session overlay (all shared between every handle, and read live by
+//!   design), but no tree root. What needs the current head (a commit's
+//!   CAS, a subscription deciding whether to re-evaluate) asks the
+//!   branch itself.
+//! - A [`View`] is a line pinned at a revision: a `Live` and the head it
+//!   stood at when the view was taken. Every read API takes a view, so a
+//!   read that follows the head cannot be written. A view is taken from
+//!   a live line by [`Live::pin`], the one place a revision is read from
+//!   a live head, or built on a revision the caller already holds (a
+//!   transaction's, a staged chain's).
+//!
+//! [`Source`] is a view that owns its line, for the query environments,
+//! whose only lifetime is the capability environment's.
 
 use dialog_capability::{Capability, Provider, Subject};
 use dialog_common::{Blake3Hash as NodeHash, ConditionalSync, Holds};
@@ -24,91 +50,84 @@ use dialog_query::concept::query::PlanCache;
 use dialog_search_tree::Cache;
 use dialog_search_tree::nodes;
 use dialog_storage::Blake3Hash;
+use std::borrow::Cow;
 use std::sync::Arc;
 
+use crate::repository::branch::BranchMetadata;
 use crate::repository::branch::LayerMetadataMemo;
 use crate::repository::caches::CacheBudget;
 use crate::rules::{RuleCache, RuleContent, SharedRuleCache};
 use crate::schema::Replica;
 use crate::{Branch, Ephemeral, Index, Revision, Snapshot};
 
-/// An owned line to read from: a branch or a snapshot. Query
-/// environments hold these so the only lifetime they carry is the
-/// capability environment's. The line sits behind an [`Arc`]: a query
-/// hands one to every scan it runs, and cloning the line itself copies
-/// its identifiers and cell handles each time.
-#[derive(Debug, Clone)]
-pub(crate) enum Source {
-    /// A named line whose head lives in a memory cell.
-    Branch(Arc<Branch>),
-    /// A detached line whose head is held by value.
-    Snapshot(Arc<Snapshot>),
-}
-
-impl Source {
-    /// Borrow this line.
-    pub(crate) fn as_ref(&self) -> SourceRef<'_> {
-        match self {
-            Source::Branch(branch) => SourceRef::Branch(branch),
-            Source::Snapshot(snapshot) => SourceRef::Snapshot(snapshot),
-        }
-    }
-}
-
-impl From<Branch> for Source {
-    fn from(branch: Branch) -> Self {
-        Source::Branch(Arc::new(branch))
-    }
-}
-
-impl From<Snapshot> for Source {
-    fn from(snapshot: Snapshot) -> Self {
-        Source::Snapshot(Arc::new(snapshot))
-    }
-}
-
-/// A borrowed line to read from. `Copy`, so builders that hold one stay
-/// as cheap to pass around as the `&Branch` they used to hold.
+/// The live handle of a line: a branch or a snapshot, where its head is
+/// now. `Copy`, so builders that hold one stay as cheap to pass around
+/// as the `&Branch` they used to hold.
+///
+/// A live line reaches what every handle of the line shares and reads
+/// live by design: its identity, its caches, its session overlay. It
+/// reaches no tree root: a read takes a [`View`] with [`pin`](Self::pin)
+/// first, and reads that.
 #[derive(Debug, Clone, Copy)]
-pub(crate) enum SourceRef<'a> {
+pub(crate) enum Live<'a> {
     /// A named line whose head lives in a memory cell.
     Branch(&'a Branch),
     /// A detached line whose head is held by value.
     Snapshot(&'a Snapshot),
 }
 
-impl<'a> From<&'a Branch> for SourceRef<'a> {
+impl<'a> From<&'a Branch> for Live<'a> {
     fn from(branch: &'a Branch) -> Self {
-        SourceRef::Branch(branch)
+        Live::Branch(branch)
     }
 }
 
-impl<'a> From<&'a Snapshot> for SourceRef<'a> {
+impl<'a> From<&'a Snapshot> for Live<'a> {
     fn from(snapshot: &'a Snapshot) -> Self {
-        SourceRef::Snapshot(snapshot)
+        Live::Snapshot(snapshot)
     }
 }
 
-impl<'a> From<&'a Source> for SourceRef<'a> {
-    fn from(source: &'a Source) -> Self {
-        source.as_ref()
+impl<'a> Live<'a> {
+    /// Pin this line: a view of it at the head it stands at now.
+    ///
+    /// This is the one place a read source takes a revision from a live
+    /// head. Everything the view then reads names that revision, however
+    /// the head moves afterwards. A branch with no commits yet pins to
+    /// no revision, and reads as the empty tree.
+    pub(crate) fn pin(self) -> View<'a> {
+        let revision = match self {
+            Live::Branch(branch) => branch.revision(),
+            Live::Snapshot(snapshot) => Some(snapshot.revision()),
+        };
+        View {
+            live: self,
+            revision: revision.map(Cow::Owned),
+        }
     }
-}
 
-impl<'a> SourceRef<'a> {
-    /// An owned handle to the same line.
-    pub(crate) fn to_source(self) -> Source {
+    /// The branch behind this line, for what only a branch has: its
+    /// tracking, its induction watermark, the head cell a commit CAS's.
+    pub(crate) fn branch(self) -> Option<&'a Branch> {
         match self {
-            SourceRef::Branch(branch) => Source::Branch(Arc::new(branch.clone())),
-            SourceRef::Snapshot(snapshot) => Source::Snapshot(Arc::new(snapshot.clone())),
+            Live::Branch(branch) => Some(branch),
+            Live::Snapshot(_) => None,
+        }
+    }
+
+    /// The snapshot behind this line, when it is one.
+    pub(crate) fn snapshot(self) -> Option<&'a Snapshot> {
+        match self {
+            Live::Branch(_) => None,
+            Live::Snapshot(snapshot) => Some(snapshot),
         }
     }
 
     /// The repository this line lives in.
     pub(crate) fn subject(self) -> Subject {
         match self {
-            SourceRef::Branch(branch) => branch.subject(),
-            SourceRef::Snapshot(snapshot) => snapshot.subject(),
+            Live::Branch(branch) => branch.subject(),
+            Live::Snapshot(snapshot) => snapshot.subject(),
         }
     }
 
@@ -117,90 +136,202 @@ impl<'a> SourceRef<'a> {
         ArchiveScope::new(self.subject())
     }
 
-    /// The revision this line currently names, or `None` for a branch
-    /// with no commits yet. A snapshot always has one.
-    pub(crate) fn revision(self) -> Option<Revision> {
-        match self {
-            SourceRef::Branch(branch) => branch.revision(),
-            SourceRef::Snapshot(snapshot) => Some(snapshot.revision()),
-        }
-    }
-
-    /// The tree root to read: the revision's, or `None` for a branch with
-    /// no commits yet, which has no tree at all.
-    pub(crate) fn root(self) -> Option<Blake3Hash> {
-        self.revision().map(|revision| *revision.tree.hash())
-    }
-
     /// The catalog this line's tree keeps its blocks in: its repository's
     /// archive index.
     pub(crate) fn catalog(self) -> CatalogScope {
         self.archive().index()
     }
 
-    /// This line's tree, in its catalog: the revision's, or the empty tree
-    /// for a branch with no commits yet.
-    pub(crate) fn tree(self) -> Index {
-        match self.root() {
-            Some(root) => Index::at(self.catalog(), NodeHash::from(root)),
-            None => Index::empty_in(self.catalog()),
+    /// The transient session overlay every read of this line folds in.
+    /// Read live, as between any two handles of the line: it is a line
+    /// of its own, named by its revision.
+    pub(crate) fn overlay(self) -> &'a Ephemeral {
+        match self {
+            Live::Branch(branch) => branch.overlay(),
+            Live::Snapshot(snapshot) => snapshot.overlay(),
         }
     }
 
     /// The shared spilled-value block cache.
     pub(crate) fn spill_cache(self) -> SpillCache {
         match self {
-            SourceRef::Branch(branch) => branch.spill_cache(),
-            SourceRef::Snapshot(snapshot) => snapshot.caches().spills.clone(),
+            Live::Branch(branch) => branch.spill_cache(),
+            Live::Snapshot(snapshot) => snapshot.caches().spills.clone(),
         }
     }
 
     /// The shared deductive-rule cache.
     pub(crate) fn rule_cache(self) -> SharedRuleCache {
         match self {
-            SourceRef::Branch(branch) => branch.rule_cache(),
-            SourceRef::Snapshot(snapshot) => snapshot.caches().rules.clone(),
+            Live::Branch(branch) => branch.rule_cache(),
+            Live::Snapshot(snapshot) => snapshot.caches().rules.clone(),
         }
     }
 
     /// The shared query-plan cache.
     pub(crate) fn plan_cache(self) -> PlanCache {
         match self {
-            SourceRef::Branch(branch) => branch.plan_cache(),
-            SourceRef::Snapshot(snapshot) => snapshot.caches().plans.clone(),
+            Live::Branch(branch) => branch.plan_cache(),
+            Live::Snapshot(snapshot) => snapshot.caches().plans.clone(),
         }
     }
 
     /// The shared verified-record memo.
     pub(crate) fn records(self) -> Cache<Version, RevisionRecord> {
         match self {
-            SourceRef::Branch(branch) => branch.records(),
-            SourceRef::Snapshot(snapshot) => snapshot.caches().records.clone(),
+            Live::Branch(branch) => branch.records(),
+            Live::Snapshot(snapshot) => snapshot.caches().records.clone(),
         }
     }
 
     /// The shared causal-context memo.
     pub(crate) fn contexts(self) -> ContextCache {
         match self {
-            SourceRef::Branch(branch) => branch.contexts(),
-            SourceRef::Snapshot(snapshot) => snapshot.caches().contexts.clone(),
+            Live::Branch(branch) => branch.contexts(),
+            Live::Snapshot(snapshot) => snapshot.caches().contexts.clone(),
         }
     }
 
     /// The live-spine slot commits on this line reuse.
     pub(crate) fn spine(self) -> &'a SpineSlot {
         match self {
-            SourceRef::Branch(branch) => branch.spine(),
-            SourceRef::Snapshot(snapshot) => &snapshot.caches().spine,
+            Live::Branch(branch) => branch.spine(),
+            Live::Snapshot(snapshot) => &snapshot.caches().spine,
         }
     }
 
-    /// The transient session overlay every read of this line folds in.
-    pub(crate) fn overlay(self) -> &'a Ephemeral {
+    /// This line held by value, for a [`Source`].
+    fn to_owned(self) -> Held {
         match self {
-            SourceRef::Branch(branch) => branch.overlay(),
-            SourceRef::Snapshot(snapshot) => snapshot.overlay(),
+            Live::Branch(branch) => Held::Branch(Arc::new(branch.clone())),
+            Live::Snapshot(snapshot) => Held::Snapshot(Arc::new(snapshot.clone())),
         }
+    }
+}
+
+/// A line pinned at a revision: what every read reads.
+///
+/// Holds the [`Live`] line, for its caches, its session overlay and its
+/// tracking (shared and live, as between any two handles), and the
+/// revision the line stood at when the view was taken (`None` for a
+/// branch with no commits yet, whose tree is the empty one). Every scan
+/// through the view reads that revision's tree, however a commit
+/// through another handle of the branch moves the head meanwhile.
+///
+/// The revision is borrowed when whoever took the view holds it (a
+/// transaction, a [`Source`]) and owned when the view was taken from the
+/// live head, so a view borrowed from a source costs nothing per scan.
+#[derive(Debug, Clone)]
+pub(crate) struct View<'a> {
+    live: Live<'a>,
+    revision: Option<Cow<'a, Revision>>,
+}
+
+impl<'a> View<'a> {
+    /// A view of `live` at `revision`, which the caller holds: what a
+    /// transaction reads throughout, at the head it pinned when it
+    /// opened. `None` is a branch with no commits yet; a snapshot always
+    /// has a revision.
+    pub(crate) fn at(live: Live<'a>, revision: Option<&'a Revision>) -> Self {
+        Self {
+            live,
+            revision: revision.map(Cow::Borrowed),
+        }
+    }
+
+    /// The branch behind this view, when its line is one.
+    pub(crate) fn branch(&self) -> Option<&'a Branch> {
+        self.live.branch()
+    }
+
+    /// The revision this view names: `None` for a branch with no
+    /// commits yet.
+    pub(crate) fn revision(&self) -> Option<&Revision> {
+        self.revision.as_deref()
+    }
+
+    /// This view owning its line: the branch or snapshot is cloned once,
+    /// and the revision is moved when the view owns it.
+    pub(crate) fn into_source(self) -> Source {
+        Source {
+            held: self.live.to_owned(),
+            revision: self.revision.map(Cow::into_owned),
+        }
+    }
+
+    /// This view owning its line, the revision copied.
+    pub(crate) fn to_source(&self) -> Source {
+        self.clone().into_source()
+    }
+
+    /// The repository this line lives in.
+    pub(crate) fn subject(&self) -> Subject {
+        self.live.subject()
+    }
+
+    /// The archive capability for this line's repository.
+    pub(crate) fn archive(&self) -> ArchiveScope {
+        self.live.archive()
+    }
+
+    /// The catalog this line's tree keeps its blocks in.
+    pub(crate) fn catalog(&self) -> CatalogScope {
+        self.live.catalog()
+    }
+
+    /// The tree root to read: the revision's, or `None` for a branch with
+    /// no commits yet, which has no tree at all.
+    pub(crate) fn root(&self) -> Option<Blake3Hash> {
+        self.revision().map(|revision| *revision.tree.hash())
+    }
+
+    /// This line's tree, in its catalog: the revision's, or the empty tree
+    /// for a branch with no commits yet.
+    pub(crate) fn tree(&self) -> Index {
+        match self.root() {
+            Some(root) => Index::at(self.catalog(), NodeHash::from(root)),
+            None => Index::empty_in(self.catalog()),
+        }
+    }
+
+    /// The branch's metadata as of the revision this view names, for a
+    /// line that is a branch; a snapshot has none.
+    pub(crate) fn branch_metadata(
+        &self,
+        operator: &Capability<Operator>,
+    ) -> Option<BranchMetadata> {
+        self.branch()
+            .map(|branch| branch.metadata_at(operator, self.revision()))
+    }
+
+    /// The shared spilled-value block cache.
+    pub(crate) fn spill_cache(&self) -> SpillCache {
+        self.live.spill_cache()
+    }
+
+    /// The shared deductive-rule cache.
+    pub(crate) fn rule_cache(&self) -> SharedRuleCache {
+        self.live.rule_cache()
+    }
+
+    /// The shared query-plan cache.
+    pub(crate) fn plan_cache(&self) -> PlanCache {
+        self.live.plan_cache()
+    }
+
+    /// The shared verified-record memo.
+    pub(crate) fn records(&self) -> Cache<Version, RevisionRecord> {
+        self.live.records()
+    }
+
+    /// The shared causal-context memo.
+    pub(crate) fn contexts(&self) -> ContextCache {
+        self.live.contexts()
+    }
+
+    /// The live-spine slot commits on this line reuse.
+    pub(crate) fn spine(&self) -> &'a SpineSlot {
+        self.live.spine()
     }
 
     /// Fold this line's schema metadata into `changes`, returning the
@@ -209,22 +340,21 @@ impl<'a> SourceRef<'a> {
     /// per branch in scope; a snapshot is not a branch and gets none).
     ///
     /// A branch contributes its full
-    /// [`BranchMetadata`](crate::BranchMetadata), with the
-    /// [`BranchRevision`](crate::BranchRevision) (the only part that
-    /// moves with the head) folded into `heads`; a snapshot contributes
-    /// the [`Replica`] it is a view of. Its revision is already
-    /// queryable through the derived
+    /// [`BranchMetadata`](crate::BranchMetadata) as of the revision this
+    /// view names, with the [`BranchRevision`](crate::BranchRevision)
+    /// (the only part that moves with the head) folded into `heads`; a
+    /// snapshot contributes the [`Replica`] it is a view of. Its
+    /// revision is already queryable through the derived
     /// [`Revision`](crate::schema::Revision) concepts, concluded from
     /// the signed record in the tree.
     pub(crate) fn metadata(
-        self,
+        &self,
         operator: &Capability<Operator>,
         changes: &mut Changes,
         heads: &mut Changes,
     ) -> Option<Entity> {
-        match self {
-            SourceRef::Branch(branch) => {
-                let metadata = branch.metadata(operator);
+        match self.branch_metadata(operator) {
+            Some(metadata) => {
                 let entity = metadata.branch.this.clone();
                 metadata.replica.assert(changes);
                 metadata.branch.assert(changes);
@@ -233,14 +363,15 @@ impl<'a> SourceRef<'a> {
                 }
                 Some(entity)
             }
-            SourceRef::Snapshot(snapshot) => {
-                Replica::new(operator.profile().clone(), snapshot.of().clone()).assert(changes);
+            None => {
+                let subject = self.subject();
+                Replica::new(operator.profile().clone(), subject.did().clone()).assert(changes);
                 None
             }
         }
     }
 
-    /// The recorded claim lineage at this line's revision. History
+    /// The recorded claim lineage at this view's revision. History
     /// records live in the same tree as the data, so this reads the
     /// history region of the revision's tree.
     ///
@@ -250,7 +381,7 @@ impl<'a> SourceRef<'a> {
     /// hydrates the history it turns out to need instead of failing with
     /// `IncompleteHistory`. A line tracking no remote reads purely
     /// locally, so an offline replica behaves as it always did.
-    pub(crate) fn history<Env>(self, env: &Env) -> TreeHistory<&Env>
+    pub(crate) fn history<'e, Env>(&self, env: &'e Env) -> TreeHistory<&'e Env>
     where
         Env: Provider<ArchiveLoad>
             + Provider<nodes::Write<CorpusNode>>
@@ -271,10 +402,10 @@ impl<'a> SourceRef<'a> {
         history.with_record_cache(self.records())
     }
 
-    /// This line's committed history, newest first — at most `limit`
+    /// This view's committed history, newest first — at most `limit`
     /// entries of `(version, record)`. See [`Branch::log`].
     pub(crate) async fn log<Env>(
-        self,
+        &self,
         env: &Env,
         limit: usize,
     ) -> Result<Vec<(Version, RevisionRecord)>, DialogCorpusError>
@@ -294,6 +425,78 @@ impl<'a> SourceRef<'a> {
             return Ok(Vec::new());
         };
         log(&head.version(), &self.history(env), limit).await
+    }
+}
+
+/// A line held by value, behind a [`Source`].
+#[derive(Debug, Clone)]
+enum Held {
+    Branch(Arc<Branch>),
+    Snapshot(Arc<Snapshot>),
+}
+
+/// A pinned line that owns its branch or snapshot: a [`View`] whose only
+/// lifetime is the capability environment's. Query environments hold
+/// these; a query hands one to every scan it runs through
+/// [`as_view`](Self::as_view), which borrows the revision rather than
+/// copying it.
+///
+/// Pinned like every view: the revision is taken when the source is
+/// made (from the live head by [`From<Branch>`] and [`From<Snapshot>`],
+/// or carried over from a view), and every read through the source
+/// names it. The line's caches, session overlay and tracking are read
+/// live, as between any two clones.
+#[derive(Debug, Clone)]
+pub(crate) struct Source {
+    held: Held,
+    revision: Option<Revision>,
+}
+
+impl Source {
+    /// The line held, borrowed.
+    fn live(&self) -> Live<'_> {
+        match &self.held {
+            Held::Branch(branch) => Live::Branch(branch),
+            Held::Snapshot(snapshot) => Live::Snapshot(snapshot),
+        }
+    }
+
+    /// Borrow this source as a view, its revision borrowed.
+    pub(crate) fn as_view(&self) -> View<'_> {
+        View::at(self.live(), self.revision.as_ref())
+    }
+
+    /// The revision this source names: `None` for a branch with no
+    /// commits yet.
+    pub(crate) fn revision(&self) -> Option<&Revision> {
+        self.revision.as_ref()
+    }
+
+    /// The line's session overlay, read live (see [`Live::overlay`]).
+    pub(crate) fn overlay(&self) -> &Ephemeral {
+        self.live().overlay()
+    }
+}
+
+impl From<Branch> for Source {
+    /// Pin `branch` at the head it stands at now (see [`Live::pin`]).
+    fn from(branch: Branch) -> Self {
+        let revision = branch.revision();
+        Source {
+            held: Held::Branch(Arc::new(branch)),
+            revision,
+        }
+    }
+}
+
+impl From<Snapshot> for Source {
+    /// Pin `snapshot` at the revision it holds now.
+    fn from(snapshot: Snapshot) -> Self {
+        let revision = Some(snapshot.revision());
+        Source {
+            held: Held::Snapshot(Arc::new(snapshot)),
+            revision,
+        }
     }
 }
 

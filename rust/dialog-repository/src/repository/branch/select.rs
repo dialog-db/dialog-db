@@ -17,34 +17,39 @@ use futures_util::Stream;
 use dialog_effects::archive::prelude::CatalogScope;
 
 use crate::repository::archive::erased;
-use crate::repository::source::SourceRef;
+use crate::repository::source::{Live, View};
 use crate::{Branch, Index};
 
-/// Command struct for selecting facts from a branch or a snapshot.
+/// Command struct for selecting artifacts from a branch or a snapshot.
+///
+/// A select reads one revision: the one its line stood at when the
+/// select was made (see [`View`]). A commit that lands on the branch
+/// afterwards is read by the next select, not by this one.
 pub struct Select<'a> {
-    source: SourceRef<'a>,
+    view: View<'a>,
     selector: Selector<Constrained>,
 }
 
 impl<'a> Select<'a> {
-    /// Create a select command for the given branch and fact selector.
+    /// Create a select command for the given branch and artifact
+    /// selector, over the branch as it stands now.
     pub fn new(branch: &'a Branch, selector: Selector<Constrained>) -> Self {
-        Self::from_source(SourceRef::from(branch), selector)
+        Self::from_view(Live::from(branch).pin(), selector)
     }
 
-    /// Create a select command for the given line (branch or snapshot)
-    /// and fact selector.
-    pub(crate) fn from_source(source: SourceRef<'a>, selector: Selector<Constrained>) -> Self {
-        Self { source, selector }
+    /// Create a select command for the given pinned line (branch or
+    /// snapshot) and artifact selector.
+    pub(crate) fn from_view(view: View<'a>, selector: Selector<Constrained>) -> Self {
+        Self { view, selector }
     }
 
     fn tree_hash(&self) -> Option<Blake3Hash> {
-        self.source.root()
+        self.view.root()
     }
 
     /// The catalog (archive index) scoped to this line's subject.
     pub fn catalog(&self) -> CatalogScope {
-        self.source.catalog()
+        self.view.catalog()
     }
 }
 
@@ -54,7 +59,7 @@ impl<'a> Select<'a> {
 /// the line are keyed under it, so anything compared against them — an
 /// overlay row, a retracted fact, a demanded range — is keyed under it too.
 pub(crate) async fn line_manifest<Env>(
-    source: SourceRef<'_>,
+    view: &View<'_>,
     env: &Env,
 ) -> Result<Manifest, DialogCorpusError>
 where
@@ -68,7 +73,7 @@ where
         + ConditionalSync
         + ?Sized,
 {
-    Ok(source.tree().manifest(&env).await?)
+    Ok(view.tree().manifest(&env).await?)
 }
 
 impl<'a> Select<'a> {
@@ -196,7 +201,7 @@ impl Select<'_> {
         // `CorpusExt::scan` so branch scans and Changes-overlay
         // scans agree on key order — that adjacency invariant is what
         // the cardinality-one sliding window relies on.
-        Ok(tree.scan(store, self.source.spill_cache(), self.selector))
+        Ok(tree.scan(store, self.view.spill_cache(), self.selector))
     }
 
     /// [`execute`](Self::execute), with the scan stream built directly in
@@ -224,7 +229,7 @@ impl Select<'_> {
         let tree = self.probed_tree(&store).await?;
         Ok(Box::pin(tree.scan(
             store,
-            self.source.spill_cache(),
+            self.view.spill_cache(),
             self.selector,
         )))
     }
@@ -301,7 +306,7 @@ impl Select<'_> {
             + 's,
     {
         let tree = self.probed_tree(&store).await?;
-        Ok(tree.scan_owned(store, self.source.spill_cache(), self.selector))
+        Ok(tree.scan_owned(store, self.view.spill_cache(), self.selector))
     }
 }
 
