@@ -1,5 +1,5 @@
 // Round three: a trace of the native file archive (see
-// rust/dialog-archive-file/src/trace.rs) replayed against each design.
+// rust/dialog-chronicle/src/trace.rs) replayed against each design.
 // Loaded with importScripts after common.js and store.js (for base58,
 // sum32, idbOpen, idbRequest, idbDone, openExclusive).
 //

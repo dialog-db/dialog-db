@@ -8,7 +8,7 @@
 //
 // `<trace>` and `<open-trace>` are files in `dir`: the trace of the
 // workload, and the trace of the native archive opening the files it left
-// (`cargo run -p dialog-archive-file --features trace --example trace_open`).
+// (`cargo run -p dialog-chronicle --features trace --example trace_open`).
 // Each `<native-file>` is a traced file as the native run left it, to check
 // the replay rebuilt it byte for byte. Writes
 // results/<date>T<time>-chromium-<major>-round4.json.

@@ -40,7 +40,7 @@ node report.js results/<file>.json   # the tables of a run, as Markdown
 
 
 Round three replays a trace the native archive writes (the `trace`
-feature of `dialog-archive-file`, run through `tonk_bench`); make it
+feature of `dialog-chronicle`, run through `tonk_bench`); make it
 outside the repository, then point `SPIKE_TRACES` at its directory:
 
 ```sh
@@ -62,7 +62,7 @@ opening the files it left (what a replacement host reads to recover them),
 made from copies of those files:
 
 ```sh
-cargo run -p dialog-archive-file --features trace --example trace_open -- \
+cargo run -p dialog-chronicle --features trace --example trace_open -- \
   traces/open.trace copies copies/peer/archive.dialog copies/space-1/archive.dialog
 SPIKE_TRACES=traces node round4.js tonk-1x.trace open.trace \
   scratch/file-cells/member-1/peer/archive.dialog \

@@ -11,7 +11,7 @@ on:
     paths:
       - '.github/workflows/file-archive-bench.yml'
       - 'research/single-file-format/bench/**'
-      - 'rust/dialog-archive-file/**'
+      - 'rust/dialog-chronicle/**'
       - 'rust/dialog-baseline/examples/tonk_bench.rs'
       - 'rust/dialog-baseline/examples/tonk/**'
 

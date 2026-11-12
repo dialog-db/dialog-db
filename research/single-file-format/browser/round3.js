@@ -1,4 +1,4 @@
-// Round three: the native file archive's trace (rust/dialog-archive-file's
+// Round three: the native file archive's trace (rust/dialog-chronicle's
 // `trace` feature, written by tonk_bench) replayed against each design in
 // headless Chromium, every design in one sitting, a fresh profile per run,
 // the designs interleaved round by round. See the journal's round three.
