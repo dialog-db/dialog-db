@@ -4937,6 +4937,133 @@ mod resolver_tests {
         Ok(())
     }
 
+    /// A node's children are read through the node: a rule over
+    /// `tree/span` keyed by its parent as `this` lists the children of a
+    /// given node from that node's block alone.
+    ///
+    /// The same rows keyed the other way (the child as `this`, the parent
+    /// a field) walk when asked for one parent's children: a concept is
+    /// read attribute by attribute, and only `this` reaches a rule's
+    /// body, so the body runs with its node open. Asked that way the rows
+    /// are right and every block is read, which the second half pins so a
+    /// change to either shows.
+    #[dialog_common::test]
+    async fn it_lists_the_children_of_a_given_node_without_walking() -> anyhow::Result<()> {
+        use crate::helpers::Counting;
+        use dialog_query::concept::query::ConceptQuery;
+        use dialog_query::rule::DeductiveRuleDescriptor;
+        use dialog_query::{ConceptConclusion, Parameters};
+
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let (branch, _) = committed_wide_branch(&repo, &operator, 800).await?;
+
+        let by_parent: DeductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
+            "deduce": { "with": {
+                "child": { "the": "probe/node-child", "as": "entity:", "pick": "all:" }
+            }},
+            "when": [
+                {
+                    "assert": "tree/span",
+                    "where": {
+                        "of": { "?": { "name": "this" } },
+                        "node": { "?": { "name": "child" } }
+                    }
+                }
+            ]
+        }))?;
+        let by_child: DeductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
+            "deduce": { "with": {
+                "parent": { "the": "probe/child-parent", "as": "entity:" }
+            }},
+            "when": [
+                {
+                    "assert": "tree/span",
+                    "where": {
+                        "of": { "?": { "name": "parent" } },
+                        "node": { "?": { "name": "this" } }
+                    }
+                }
+            ]
+        }))?;
+        let by_parent = by_parent
+            .compile()
+            .expect("a rule keyed by the parent compiles");
+        let by_child = by_child
+            .compile()
+            .expect("a rule keyed by the child compiles");
+        branch
+            .transaction()
+            .assert(&by_parent)
+            .assert(&by_child)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let revision = branch.revision().expect("branch has a revision");
+        let root = ToBase58::to_base58(&revision.tree.hash()[..]);
+        let root_entity = Entity::from_node(revision.tree.hash())?;
+        let spans: Vec<ResolverConclusion> = branch
+            .query()
+            .select(tree_span(&root))
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        let expected: BTreeSet<String> = spans.iter().map(|span| reference(span, "node")).collect();
+        assert!(expected.len() > 1, "the root is an index: {spans:?}");
+        let nodes = reachable(&branch, &operator, &root).await?.len() as u64;
+
+        let mut terms = Parameters::new();
+        terms.insert("this".into(), Term::from(root_entity.clone()).into());
+        terms.insert("child".into(), Term::var("child"));
+        let env = Counting::new(operator.clone());
+        let rows: Vec<ConceptConclusion> = branch
+            .query()
+            .select(ConceptQuery {
+                predicate: by_parent.conclusion().clone(),
+                terms,
+            })
+            .perform(&env)
+            .try_vec()
+            .await?;
+        let mut children = BTreeSet::new();
+        for row in &rows {
+            let child: Entity = row.get("child")?;
+            children.insert(child.node_hash().expect("a node entity").to_base58());
+        }
+        assert_eq!(children, expected, "every child of the node, and no other");
+        assert_eq!(env.block_reads(), 1, "only the node's own block is read");
+
+        let mut terms = Parameters::new();
+        terms.insert("this".into(), Term::var("this"));
+        terms.insert("parent".into(), Term::from(root_entity).into());
+        let env = Counting::new(operator.clone());
+        let rows: Vec<ConceptConclusion> = branch
+            .query()
+            .select(ConceptQuery {
+                predicate: by_child.conclusion().clone(),
+                terms,
+            })
+            .perform(&env)
+            .try_vec()
+            .await?;
+        let children: BTreeSet<String> = rows
+            .iter()
+            .map(|row| row.entity().node_hash().expect("a node entity").to_base58())
+            .collect();
+        assert_eq!(
+            children, expected,
+            "keyed by the child, the rows are the same"
+        );
+        assert!(
+            env.block_reads() >= nodes,
+            "keyed by the child, a given parent does not reach the body: {} reads of {nodes} nodes",
+            env.block_reads()
+        );
+        Ok(())
+    }
+
     /// `tree/key` and `tree/entry` name an entry by the same entity, and
     /// no two entries of a segment share one.
     #[dialog_common::test]
