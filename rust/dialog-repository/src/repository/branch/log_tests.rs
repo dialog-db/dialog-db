@@ -2150,3 +2150,48 @@ async fn it_follows_the_claim_that_a_pick_elects_for_a_key_that_another_premise_
     }
     Ok(())
 }
+
+/// A read of a collection with its holder free reads the entries in the
+/// order of their keys, and not in the order of the holders. A rule gives
+/// each holder of 7 with its name, and the two boards hold 7 under the keys
+/// `c` and `a`. A first read gives both boards, as the live query does.
+#[dialog_common::test]
+async fn it_reads_each_holder_of_a_collection_that_another_premise_joins() -> Result<()> {
+    let (branch, operator, board) = board().await?;
+    let other: Entity = "board:2".parse()?;
+    branch
+        .transaction()
+        .assert(
+            dialog_query::the!("test.board/name")
+                .of(other.clone())
+                .is("other".to_string()),
+        )
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    let (rule, head) = holder_of_seven("natural:")?;
+    let mut live = branch
+        .query()
+        .with(rule.clone())
+        .subscribe(each_field(&head)?);
+    live.poll(&operator).await?;
+
+    let mut held = Vec::new();
+    for (holder, key) in [(&board, "c"), (&other, "a")] {
+        branch
+            .transaction()
+            .assert(fact(
+                &format!("test.scores/{key}"),
+                holder,
+                Value::UnsignedInt(7),
+            )?)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        held.push(rows_of_both(&branch, &operator, &rule, &head, &mut live).await?);
+    }
+    assert_eq!(held, [1, 2]);
+    Ok(())
+}
