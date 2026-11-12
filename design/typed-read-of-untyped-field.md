@@ -47,6 +47,13 @@ The second is one check, made before anything is decided about an entity (`lens`
    nothing          ──▶  ?x absent
 ```
 
+A variable that contradicts itself is refused before any row is read, and already was (maintainer, 2026-11-12: "if variables contradict, that should be an error at the compile time"). Inference meets the types of every slot a variable stands in and the planner refuses an empty meet with `TypeError::TypeInference` (`it_rejects_planning_when_variable_kinds_disagree` for two attribute reads, `it_refuses_one_variable_read_through_fields_of_two_types` for two fields of a concept, added here). So the two cases divide by what the field declares:
+
+| the field | a variable of another type |
+|---|---|
+| declares a type | refused when the query is planned |
+| declares no type | reads the values of its type as rows arrive |
+
 What stays as it was: a value of the variable's type that disagrees with what the variable is already bound to is no row, and not absent, as a scan has it (`it_does_not_emit_absent_on_optional_value_mismatch`). The entity has a fact of the attribute; it is not the one asked for.
 
 | path | a value the variable does not read | pinned by |

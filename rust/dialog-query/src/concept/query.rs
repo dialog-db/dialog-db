@@ -25,6 +25,7 @@ use crate::schema::CONCEPT_OVERHEAD;
 use crate::selection::{Selection, Standing};
 use crate::source::SelectRules;
 use crate::stream::{fork_stream, stream_select};
+use crate::type_system::Type as Kind;
 use crate::types::Any;
 use crate::{
     Binding, Cardinality, Environment, EvaluationError, Match, Parameters, Requirement, Schema,
@@ -85,7 +86,7 @@ fn extract_parameters(source: &Match, terms: &Parameters) -> Result<Match, Evalu
 /// to a variable of a type a value of another type is a fact of
 /// another attribute: it takes no part in an election and does not
 /// make the entity one that has a value. `None` reads every value.
-fn lens(terms: &Parameters) -> Option<crate::type_system::Type> {
+fn lens(terms: &Parameters) -> Option<Kind> {
     match terms.get(ConceptDescriptor::VALUE) {
         Some(term @ Term::Variable { name: Some(_), .. }) => term.kind(),
         _ => None,
