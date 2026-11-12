@@ -19,26 +19,25 @@ use std::fmt;
 use crate::attribute::The;
 use crate::concept::descriptor::{ConceptDescriptor, ConceptFieldDescriptor};
 use crate::corpus::{CorpusRelation, Type, Value};
+use crate::pattern::{self, Shape};
 use crate::planner::{Disjunction, Plan};
 use crate::rule::deductive::DeductiveRule;
 use crate::schema::CONCEPT_OVERHEAD;
 use crate::selection::{Selection, Standing};
-use crate::selective::Ranking;
 use crate::source::SelectRules;
 use crate::stream::{fork_stream, stream_select};
-use crate::type_system::Type as Kind;
 use crate::types::Any;
 use crate::{
     Binding, Cardinality, Environment, EvaluationError, Match, Parameters, Requirement, Schema,
     Term, try_stream,
 };
 use dialog_capability::Provider;
-use dialog_corpus::encode_value_owned;
+use dialog_corpus::{Pick, encode_value_owned};
+use futures_util::future::Either;
 use futures_util::{StreamExt, TryStreamExt, stream};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Display;
-use std::future;
 use std::mem;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -52,21 +51,26 @@ use std::sync::Mutex;
 /// Parameters are bound by name: a concept's parameter variables are
 /// untyped (`Term::var`), so no kind check applies to them.
 fn extract_parameters(source: &Match, terms: &Parameters) -> Result<Match, EvaluationError> {
-    let mut matched = Match::for_scope_of(source);
+    let mut matched = Match::new();
 
     for (param_name, user_param) in terms.iter() {
         match user_param {
-            // The slot moves in as it is: a value the caller's row holds in
-            // place is not hydrated to enter the scope. Unbound is expected
-            // here: the user supplied a placeholder term (e.g.
-            // `Term::var("alice")` in `Query<Person> { this: ..., ... }`)
-            // that the concept query is about to bind; downstream
-            // evaluation fills it in.
             Term::Variable {
                 name: Some(name), ..
-            } => {
-                matched.bind_slot_of(&Term::<Any>::var(param_name.as_str()), source, name)?;
-            }
+            } => match source.get(name) {
+                Some(Binding::Present(value)) => {
+                    matched.bind_variable(param_name, None, value.clone())?;
+                }
+                Some(Binding::Absent) => {
+                    matched.bind_absent_variable(param_name)?;
+                }
+                // Unbound is expected here: the user supplied a
+                // placeholder term (e.g. `Term::var("alice")` in
+                // `Query<Person> { this: ..., ... }`) that the
+                // concept query is about to bind. Skip it:
+                // downstream evaluation fills it in.
+                None => {}
+            },
             Term::Constant(value) => {
                 matched.bind_variable(param_name, None, value.clone())?;
             }
@@ -77,39 +81,14 @@ fn extract_parameters(source: &Match, terms: &Parameters) -> Result<Match, Evalu
     Ok(matched)
 }
 
-/// The type the caller's value term reads through, when it is a typed
-/// variable. An attribute's type is part of which attribute it is, so
-/// to a variable of a type a value of another type is a fact of
-/// another attribute: it takes no part in an election and does not
-/// make the entity one that has a value. `None` reads every value.
-fn lens(terms: &Parameters) -> Option<Kind> {
-    match terms.get(ConceptDescriptor::VALUE) {
-        Some(term @ Term::Variable { name: Some(_), .. }) => term.kind(),
-        _ => None,
-    }
-}
-
-/// Whether a bind took. A value the term's type does not read, and one
-/// that disagrees with what the term is already bound to, make the row
-/// one the caller's terms do not match: it is passed over, as a scan
-/// into the same term passes over it. Any other failure is an error.
-fn took(bound: Result<(), EvaluationError>) -> Result<bool, EvaluationError> {
-    match bound {
-        Ok(()) => Ok(true),
-        Err(EvaluationError::KindMismatch { .. } | EvaluationError::Assignment { .. }) => Ok(false),
-        Err(error) => Err(error),
-    }
-}
-
 /// Merge a Match with parameter names back into a Match with user
 /// variable names after evaluation. Both Present and Absent
-/// bindings are propagated. `None` when the caller's terms do not
-/// match the result (see [`took`]).
+/// bindings are propagated.
 fn merge_parameters(
     base: &Match,
     result: &Match,
     terms: &Parameters,
-) -> Result<Option<Match>, EvaluationError> {
+) -> Result<Match, EvaluationError> {
     let mut merged = base.clone();
 
     for (param_name, user_param) in terms.iter() {
@@ -117,31 +96,28 @@ fn merge_parameters(
             continue;
         }
 
-        // The slot moves over as it is: a binding a scan made in place
-        // stays in place in the caller's row.
-        match merged.bind_slot_of(user_param, result, param_name) {
-            // Unbound is expected: not every parameter survives the
-            // concept evaluation (e.g. a blank slot the rule never
-            // touched). Skip and let the user variable stay
-            // un-extended.
-            Ok(None) | Ok(Some(false)) => {}
-            Ok(Some(true)) => {
+        match result.get(param_name) {
+            Some(Binding::Present(value)) => {
+                merged.bind(user_param, value.clone())?;
                 if let Some(name) = user_param.shared_name()
                     && let Some(standing) = result.standing_of(param_name)
                 {
                     merged.cite_variable_standing(name, standing);
                 }
             }
-            Err(error) => {
-                if !took(Err(error))? {
-                    return Ok(None);
-                }
+            Some(Binding::Absent) => {
+                merged.bind_absent(user_param)?;
             }
+            // Unbound is expected: not every parameter survives the
+            // concept evaluation (e.g. a blank slot the rule never
+            // touched). Skip and let the user variable stay
+            // un-extended.
+            None => {}
         }
     }
     merged.adopt_citations(result);
 
-    Ok(Some(merged))
+    Ok(merged)
 }
 
 /// Represents an application of a concept with specific term bindings.
@@ -195,6 +171,16 @@ struct ConceptQueryIn {
 
 impl Serialize for ConceptQuery {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::Error as _;
+        // A map, a list or a tuple of terms has no wire form. Written
+        // as the variable standing for the whole it would read back as
+        // another query.
+        if let Some((name, pattern)) = self.terms.shapes().next() {
+            return Err(S::Error::custom(format!(
+                "the parameter `{name}` holds the pattern {pattern}, which has no wire form: \
+                 only a variable or a constant is written"
+            )));
+        }
         let mut terms: BTreeMap<&str, Bound> = BTreeMap::new();
         let mut keys: BTreeMap<String, &str> = BTreeMap::new();
         for (name, _) in self.predicate.collections() {
@@ -490,7 +476,29 @@ impl ConceptQuery {
         // generic over the stream handed the next level a type that held
         // this level's, and the compiler unrolled the recursion forty
         // levels deep (a 50 KB type term) in a workload's binary.
-        self.conformed().evaluate_erased(Box::pin(selection), env)
+        if !self.terms.has_shapes() {
+            return Either::Left(self.conformed().evaluate_erased(Box::pin(selection), env));
+        }
+        // A parameter that is a map, a list or a tuple of terms: the
+        // concept is read with a variable standing for the whole value
+        // in its place. Where the pattern's variables are bound the
+        // whole is built first and the concept is read by it. What the
+        // concept binds the whole to is then taken apart by the
+        // pattern, and a row that does not match is dropped. A rule's
+        // body has this done by its plan (see `pattern::lower`); a
+        // query run by itself, and a negated premise, come here.
+        let (terms, shapes) = self.terms.lowered();
+        let shapes: Arc<[Shape]> = shapes.into();
+        let lowered = ConceptQuery {
+            predicate: self.predicate,
+            terms,
+        };
+        let built: Pin<Box<dyn Selection + 'a>> =
+            Box::pin(pattern::build(shapes.clone(), selection));
+        Either::Right(pattern::take_apart(
+            shapes,
+            lowered.conformed().evaluate_erased(built, env),
+        ))
     }
 
     fn evaluate_erased<'a, Env>(
@@ -501,27 +509,11 @@ impl ConceptQuery {
     where
         Env: crate::Scope<'a>,
     {
-        // The read of a concept of one field that picks is its own boxed
-        // stream, entered through a pointer: held inline, its state would
-        // be part of every concept read's, picking or not.
-        let picking = self.predicate.picked_relation().is_some();
-        let asked = picking.then(|| self.clone());
         let app = self.canonical();
         let this = app.terms.get("this").cloned();
 
         try_stream! {
             let mut selection = selection;
-            if let Some(asked) = asked {
-                match Box::pin(asked.picked(selection, env)).await? {
-                    Picked::Answered(mut rows) => {
-                        while let Some(row) = rows.next().await {
-                            yield row?;
-                        }
-                        return;
-                    }
-                    Picked::Declined(rows) => selection = rows,
-                }
-            }
             let Some(first) = selection.next().await else {
                 return;
             };
@@ -603,16 +595,16 @@ impl ConceptQuery {
                     None => fixpoint::evaluate(&app.predicate, analysis, env).await?,
                 };
                 // The component yields its candidates as a set; a read
-                // under cardinality one elects one of them at the exit,
+                // under a choosing pick elects one of them at the exit,
                 // so a reader outside the component sees one value. Each
                 // row stands as the newest fact any of its derivations
                 // consumed, ranked past the values of its cell it
-                // displaced, so it competes as it would had its relation
-                // not been recursive.
+                // displaced, so under `last` it competes as it would had
+                // its relation not been recursive.
                 let mut table: Vec<fixpoint::Answer> = table.to_vec();
                 if let Some((name, field)) = app.predicate.attribute_field() {
                     let election = Election::of(field);
-                    if election.elects() {
+                    if election.pick.elects() {
                         fixpoint::rank_successions(&mut table, name);
                         table = election.elect_rows(table, name)?;
                     }
@@ -637,16 +629,14 @@ impl ConceptQuery {
                 return;
             }
 
-            // A reducing rule's fold reads every row of a group, so a
-            // caller's bindings must never restrict the rows within one:
-            // each reducing rule's folded rows are computed once and the
+            // A reducing rule's fold reads its whole body relation, so caller
+            // bindings must never restrict the body: each reducing rule's
+            // folded rows are computed once, over the full relation, and the
             // caller's bindings join against the output (the fixpoint-table
-            // shape). A constant the query names for a grouping field
-            // restricts which groups are folded, never a group's rows, so
-            // it seeds the body. The plain rules plan as usual.
-            let mut reduced: Vec<fixpoint::Answer> = Vec::new();
+            // shape). The plain rules plan as usual.
+            let mut reduced: Vec<fixpoint::Row> = Vec::new();
             for rule in rules.reducing() {
-                reduced.extend(reduce_rows(rule, &app.terms, env).await?);
+                reduced.extend(reduce_rows(rule, env).await?);
             }
             // All matches in the selection share the first one's binding
             // pattern (same variables bound), only the values differ.
@@ -662,8 +652,7 @@ impl ConceptQuery {
             if let Some(exact) = rules.exact()
                 && (app.predicate.attribute_field().is_some() || exact.rule.single_valued())
                 && stored_absent(&exact.attributes, env).await?
-                && let Some(plan) =
-                    rules.plan_exact(&app.seeds(app.election(&rules).is_some()), &first)
+                && let Some(plan) = rules.plan_exact(&app.terms, &first)
             {
                 let elect = app.election(&rules);
                 let rows = stream::iter([Ok(first)]).chain(selection);
@@ -678,14 +667,14 @@ impl ConceptQuery {
             // entity and one row is built per winner.
             if app.predicate.attribute_field().is_some() && !rules.installed().is_empty() {
                 let rows = stream::iter([Ok(first)]).chain(selection);
-                for await row in app.relation(rules, reduced, None, rows, env) {
+                for await row in app.relation(rules, reduced, rows, env) {
                     yield row?;
                 }
                 return;
             }
 
             let elect = app.election(&rules);
-            let plan = rules.plan(&app.seeds(elect.is_some()), &first);
+            let plan = rules.plan(&app.terms, &first);
             let rows = stream::iter([Ok(first)]).chain(selection);
 
             if reduced.is_empty() {
@@ -700,7 +689,7 @@ impl ConceptQuery {
                     let input = each?;
                     let mut matched = false;
                     for row in reduced.iter() {
-                        if let Some(merged) = fixpoint::join(&input, &app.terms, &row.row)? {
+                        if let Some(merged) = fixpoint::join(&input, &app.terms, row)? {
                             matched = true;
                             yield merged;
                         }
@@ -721,7 +710,7 @@ impl ConceptQuery {
                 let joined = joining.map_ok(move |input| {
                     let rows: Vec<Result<Match, EvaluationError>> = reduced
                         .iter()
-                        .filter_map(|row| fixpoint::join(&input, &terms, &row.row).transpose())
+                        .filter_map(|row| fixpoint::join(&input, &terms, row).transpose())
                         .collect();
                     stream::iter(rows)
                 })
@@ -764,7 +753,15 @@ impl ConceptQuery {
         Env: crate::Scope<'a>,
     {
         let key_operand = The::key_operand(ConceptDescriptor::VALUE);
-        let into = self.seeds(elect.is_some());
+        // Under an election the caller's value, bound or constant, is
+        // tested against what the election yields, never used to seed
+        // the body: seeding would elect among the candidates that happen
+        // to equal it, or sum only those.
+        let mut into = self.terms.clone();
+        if elect.is_some() {
+            into.remove(ConceptDescriptor::VALUE);
+            into.remove(&key_operand);
+        }
         let back = self.terms.clone();
         // A set-widened read keeps every caller to tell, once the plan
         // has run, which of them nothing matched.
@@ -785,26 +782,22 @@ impl ConceptQuery {
         });
         let results = plan.clone().evaluate(scoped, env);
         if elect.is_none() && !widen {
-            return Box::pin(results.filter_map(move |result| {
-                let merged = result.and_then(|mut result| {
-                    let caller = result.take_caller().ok_or_else(|| {
-                        EvaluationError::Store(
-                            "a concept's result lost the row it was evaluated for".to_string(),
-                        )
-                    })?;
-                    merge_parameters(&caller, &result, &back)
-                        .map_err(|e| EvaluationError::Store(e.to_string()))
-                });
-                future::ready(merged.transpose())
+            return Box::pin(results.map(move |result| {
+                let mut result = result?;
+                let caller = result.take_caller().ok_or_else(|| {
+                    EvaluationError::Store(
+                        "a concept's result lost the row it was evaluated for".to_string(),
+                    )
+                })?;
+                merge_parameters(&caller, &result, &back)
+                    .map_err(|e| EvaluationError::Store(e.to_string()))
             }));
         }
-        // An attribute concept read under its cardinality: what the
-        // cardinality
+        // An attribute concept read under a pick: what the pick
         // keeps of an entity's candidates leaves here, elected from the
         // stored row and every derived candidate alike. The candidates
         // for an entity arrive in no particular order, so the election
         // buffers the results of the whole input.
-        let lens = lens(&back);
         Box::pin(try_stream! {
             let mut groups: Groups = BTreeMap::new();
             let mut matched: HashSet<usize> = HashSet::new();
@@ -816,22 +809,10 @@ impl ConceptQuery {
                     )
                 })?;
                 let caller_id = Arc::as_ptr(&caller) as usize;
-                // A value the caller's variable does not read is no fact
-                // of the attribute it asks for: it is not elected among,
-                // and the entity is not one a set-widened read matched.
-                if let Some(kind) = &lens
-                    && let Some(Binding::Present(value)) = result.get(ConceptDescriptor::VALUE)
-                    && !kind.reads(value)
-                {
-                    continue;
-                }
                 matched.insert(caller_id);
                 if elect.is_none() {
-                    let merged = merge_parameters(&caller, &result, &back)
+                    yield merge_parameters(&caller, &result, &back)
                         .map_err(|e| EvaluationError::Store(e.to_string()))?;
-                    if let Some(merged) = merged {
-                        yield merged;
-                    }
                     continue;
                 }
                 let this = match result.lookup(&Term::<Any>::var("this")) {
@@ -847,26 +828,13 @@ impl ConceptQuery {
                     _ => Vec::new(),
                 };
                 let key = (caller_id, entity_key(&this)?);
-                // A derived value stands as the newest fact its
-                // derivation consumed. It is cited on the value, so the
-                // caller's variable carries it out with the row: a read
-                // further up that picks the newest of these candidates
-                // has their standings to pick by.
-                let standing = result
-                    .standing_of(ConceptDescriptor::VALUE)
-                    .or_else(|| result.standing());
-                if result.standing_of(ConceptDescriptor::VALUE).is_none()
-                    && let Some(standing) = &standing
-                {
-                    result.cite_variable_standing(
-                        &Arc::from(ConceptDescriptor::VALUE),
-                        standing.clone(),
-                    );
-                }
                 groups.entry(key).or_default().push(Entry {
-                    standing,
+                    standing: result
+                        .standing_of(ConceptDescriptor::VALUE)
+                        .or_else(|| result.standing()),
                     value,
                     identity,
+                    rank: 0,
                     carrier: (result, caller),
                 });
             }
@@ -876,11 +844,8 @@ impl ConceptQuery {
                         if !agrees(&result, &caller, &back, &[ConceptDescriptor::VALUE, &key_operand])? {
                             continue;
                         }
-                        let merged = merge_parameters(&caller, &result, &back)
+                        yield merge_parameters(&caller, &result, &back)
                             .map_err(|e| EvaluationError::Store(e.to_string()))?;
-                        if let Some(merged) = merged {
-                            yield merged;
-                        }
                     }
                 }
             }
@@ -908,8 +873,7 @@ impl ConceptQuery {
     fn relation<'a, Env, M: Selection + 'a>(
         self,
         rules: ConceptRules,
-        reduced: Vec<fixpoint::Answer>,
-        ranking: Option<Ranking>,
+        reduced: Vec<fixpoint::Row>,
         rows: M,
         env: &'a Env,
     ) -> impl Selection + 'a
@@ -923,12 +887,11 @@ impl ConceptQuery {
                 return;
             };
             let first = first?;
-            let plan = rules.plan(&app.seeds(true), &first);
+            let plan = rules.plan(&app.terms, &first);
             let widen = app.widens();
-            let lens = lens(&app.terms);
-            let election = match app.predicate.attribute_field() {
-                Some((_, field)) => Election::of(field),
-                None => Election::plain(Cardinality::One),
+            let (election, ranks) = match app.predicate.attribute_field() {
+                Some((_, field)) => (Election::of(field), rules.ranks(field)),
+                None => (Election::plain(Pick::Last), Vec::new()),
             };
             let this_term = app.terms.get("this").cloned();
             let key_operand = The::key_operand(ConceptDescriptor::VALUE);
@@ -967,9 +930,24 @@ impl ConceptQuery {
                     _ => None,
                 };
 
+                // A `top` over listed relations with the entity bound
+                // reads the relations best first and stops at the first
+                // that offers a candidate: nothing a later relation
+                // offers can outrank it. Ranked by value, or with the
+                // entity free, every relation is read.
                 let conjunctions = plan.conjunctions();
+                let mut order: Vec<(usize, usize)> = (0..conjunctions.len())
+                    .map(|index| (ranks.get(index).copied().unwrap_or(0), index))
+                    .collect();
+                order.sort_unstable();
+                let settles = entity.is_some()
+                    && matches!(&election.pick, Pick::Top(ranked) if ranked.is_empty());
                 let mut candidates: Vec<Candidate> = Vec::new();
-                for conjunction in conjunctions {
+                for (rank, index) in order {
+                    if settles && candidates.iter().any(|candidate| candidate.rank < rank) {
+                        break;
+                    }
+                    let conjunction = conjunctions[index];
                     match conjunction.steps.as_slice() {
                         [Plan::Recall(_, recall)] => {
                             let shared = recall.rows_for(entity.as_ref(), env).await?;
@@ -988,6 +966,7 @@ impl ConceptQuery {
                                     this,
                                     value,
                                     key,
+                                    rank,
                                     standing: row
                                         .standing_of(&recall.value)
                                         .or_else(|| row.standing()),
@@ -998,7 +977,9 @@ impl ConceptQuery {
                         _ => {
                             // Seeded with the caller's entity only: its
                             // value is tested after the election.
-                            let seed = app.seeds(true);
+                            let mut seed = app.terms.clone();
+                            seed.remove(ConceptDescriptor::VALUE);
+                            seed.remove(&key_operand);
                             let mut scoped = extract_parameters(&input, &seed)
                                 .map_err(|e| EvaluationError::Store(e.to_string()))?;
                             scoped.share();
@@ -1018,6 +999,7 @@ impl ConceptQuery {
                                     this,
                                     value,
                                     key,
+                                    rank,
                                     standing: row
                                         .standing_of(ConceptDescriptor::VALUE)
                                         .or_else(|| row.standing()),
@@ -1027,8 +1009,7 @@ impl ConceptQuery {
                         }
                     }
                 }
-                for folded in &reduced {
-                    let row = &folded.row;
+                for row in &reduced {
                     let (Some(this), Some(value)) = (row.get("this"), row.get(ConceptDescriptor::VALUE)) else {
                         continue;
                     };
@@ -1042,25 +1023,13 @@ impl ConceptQuery {
                         this: this.clone(),
                         value: value.clone(),
                         key: row.get(&key_operand).cloned(),
-                        // A fold that chose one of its inputs stands
-                        // as the fact it chose; one that computed a
-                        // value cites none, and stands below every
-                        // claim.
-                        standing: folded.standing.clone(),
+                        rank: 0,
+                        standing: None,
                         source: Source::Folded,
                     });
                 }
-                if let Some(kind) = &lens {
-                    candidates.retain(|candidate| kind.reads(&candidate.value));
-                }
 
-                // A field's pick keeps one candidate per entity, chosen
-                // among all of them; a plain read keeps what the
-                // cardinality keeps.
-                let survivors = match &ranking {
-                    Some(ranking) => pick(candidates, ranking),
-                    None => elect(candidates, &election)?,
-                };
+                let survivors = elect(candidates, &election)?;
                 if independent {
                     unconditional = Some(survivors.clone());
                 }
@@ -1077,22 +1046,6 @@ impl ConceptQuery {
         }
     }
 
-    /// The terms that seed a rule's body, and so the terms its plan is
-    /// made for. Under an election the caller's value and key, bound or
-    /// constant, are tested against what the election yields and never
-    /// seed the body: seeding would elect among the candidates that
-    /// happen to equal them, or sum only those. A plan made for the
-    /// caller's terms as they are would take the value as bound and
-    /// order a premise that reads it ahead of the one that binds it.
-    fn seeds(&self, elected: bool) -> Parameters {
-        let mut seeds = self.terms.clone();
-        if elected {
-            seeds.remove(ConceptDescriptor::VALUE);
-            seeds.remove(&The::key_operand(ConceptDescriptor::VALUE));
-        }
-        seeds
-    }
-
     /// Whether this query reads its attribute concept set-widened: the
     /// caller's value term admits `Nothing`, so an entity no row
     /// matched yields one row with the value `Absent` instead of none.
@@ -1103,17 +1056,20 @@ impl ConceptQuery {
     }
 
     /// How this query's rows are elected on their way out, if they
-    /// are: the query reads an attribute concept some rule contributes
-    /// rows to, so several candidates per entity may arrive and the
-    /// cardinality decides what leaves: the newest under one, each
-    /// distinct value once under many. A read of a relation nothing
-    /// derives is the stored rows as they are, so it elects nothing here.
+    /// are: the query reads an attribute concept, and either some rule
+    /// contributes rows or the pick is not a plain stored read, so
+    /// several candidates per entity may arrive and the pick decides
+    /// what leaves: one value under a choosing pick, each distinct
+    /// value once under `all`. A `last` or `all` read of a relation
+    /// nothing derives is the stored rows as they are, so neither
+    /// elects here.
     fn election(&self, rules: &ConceptRules) -> Option<Election> {
         let (_, field) = self.predicate.attribute_field()?;
-        if rules.installed().is_empty() {
+        let election = Election::of(field);
+        if rules.installed().is_empty() && matches!(election.pick, Pick::Last | Pick::All) {
             return None;
         }
-        Some(Election::of(field))
+        Some(election)
     }
 
     /// This query over the concept narrowed to the fields it binds:
@@ -1160,68 +1116,6 @@ impl ConceptQuery {
         }
     }
 
-    /// The read of a concept of one field that picks, over a relation
-    /// rules derive outside any cycle: the relation's candidates are
-    /// gathered as a read of it gathers them, and the pick chooses
-    /// among them per entity. The selecting rule that folds the field
-    /// answers the same, through a rule and a fold more. Declined, the
-    /// rows are handed back for the concept's own rules to answer.
-    async fn picked<'a, Env>(
-        self,
-        selection: Pin<Box<dyn Selection + 'a>>,
-        env: &'a Env,
-    ) -> Result<Picked<'a>, EvaluationError>
-    where
-        Env: crate::Scope<'a>,
-    {
-        let Some((relation, ranking)) = self.picking() else {
-            return Ok(Picked::Declined(selection));
-        };
-        let rules = Provider::<SelectRules>::execute(env, relation.predicate.clone()).await?;
-        if rules.installed().is_empty()
-            || rules.recursion().is_some()
-            || rules.reducing().next().is_some()
-        {
-            return Ok(Picked::Declined(selection));
-        }
-        Ok(Picked::Answered(Box::pin(relation.relation(
-            rules,
-            Vec::new(),
-            Some(ranking),
-            selection,
-            env,
-        ))))
-    }
-
-    /// When this query reads a concept of one required field that
-    /// picks: the read of the field's relation, every claim of it, with
-    /// the caller's terms re-keyed onto the relation's operands, and
-    /// the ranking the pick chooses by.
-    fn picking(&self) -> Option<(ConceptQuery, Ranking)> {
-        let mut fields = self.predicate.with().iter();
-        let (name, field) = fields.next()?;
-        if fields.next().is_some() || field.is_optional() || field.conforms().is_some() {
-            return None;
-        }
-        let ranking = field.ranking()?;
-        let mut terms = Parameters::new();
-        for (param, term) in self.terms.iter() {
-            let param = if param == name {
-                ConceptDescriptor::VALUE.to_string()
-            } else {
-                param.clone()
-            };
-            terms.insert(param, term.clone());
-        }
-        Some((
-            ConceptQuery {
-                predicate: ConceptDescriptor::of_attribute(field),
-                terms,
-            },
-            ranking,
-        ))
-    }
-
     /// This query over the canonical spelling of its concept: an
     /// attribute concept under a field name of the caller's choosing
     /// is the attribute concept, and its rules bind the attribute's
@@ -1235,17 +1129,15 @@ impl ConceptQuery {
         }
         let key = The::key_operand(name);
         let canonical_key = The::key_operand(ConceptDescriptor::VALUE);
-        let mut terms = Parameters::new();
-        for (param, term) in self.terms.iter() {
-            let param = if param == name {
+        let terms = self.terms.rekeyed(|param| {
+            if param == name {
                 ConceptDescriptor::VALUE.to_string()
             } else if *param == key {
                 canonical_key.clone()
             } else {
-                param.clone()
-            };
-            terms.insert(param, term.clone());
-        }
+                param.to_string()
+            }
+        });
         ConceptQuery {
             predicate: ConceptDescriptor::of_attribute(field),
             terms,
@@ -1312,26 +1204,7 @@ fn merge_candidate(
         Source::Shared(rows, index) => merged.adopt_citations(&rows[*index]),
         Source::Folded => {}
     }
-    // The value stands as the claim it was elected as, stored or derived,
-    // so a fold over the caller's variable ranks it as that claim, as it
-    // ranks a value a scan bound.
-    if let (Some(standing), Some(name)) = (
-        candidate.standing,
-        terms
-            .get(ConceptDescriptor::VALUE)
-            .and_then(|term| term.shared_name()),
-    ) {
-        merged.cite_variable_standing(name, standing);
-    }
     Ok(Some(merged))
-}
-
-/// What became of a read of a concept of one field that picks.
-enum Picked<'a> {
-    /// The relation's candidates answer it: the rows.
-    Answered(Pin<Box<dyn Selection + 'a>>),
-    /// The concept's own rules answer it: the input, as it came.
-    Declined(Pin<Box<dyn Selection + 'a>>),
 }
 
 /// One value a source offers for an attribute of an entity.
@@ -1342,6 +1215,9 @@ struct Candidate {
     this: Value,
     value: Value,
     key: Option<Value>,
+    /// Where the relation it came from stands among the field's, first
+    /// best: what `top` ranks by when the field lists relations.
+    rank: usize,
     standing: Option<Standing>,
     source: Source,
 }
@@ -1357,13 +1233,21 @@ enum Source {
     Folded,
 }
 
-/// How an attribute concept read elects: under the field's
-/// cardinality, the newest candidate of each entity under one, every
-/// distinct value under many. The newest is decided by the order every
-/// cardinality-one read and write shares ([`Cardinality::newer`]).
+/// How an attribute concept read elects: the field's pick and, for
+/// `top`, the values it ranks among, best first. A `top` over listed
+/// relations ranks each candidate by the relation it came from
+/// instead, which the candidate carries. A write under a choosing
+/// pick runs the same election over the live claims of its cell to
+/// find the one it succeeds ([`Election::elect_claims`]).
 #[derive(Clone, Debug)]
 pub struct Election {
-    cardinality: Cardinality,
+    pick: Pick,
+}
+
+impl From<&Pick> for Election {
+    fn from(pick: &Pick) -> Self {
+        Election::plain(pick.clone())
+    }
 }
 
 /// The candidates of `through`, grouped by caller and entity: each
@@ -1372,39 +1256,95 @@ type Groups = BTreeMap<(usize, Vec<u8>), Vec<Entry<(Match, Arc<Match>)>>>;
 
 /// One candidate under election: its standing and value, the key that
 /// makes it a distinct fact when the relation is a keyed collection,
-/// and whatever the caller keeps of it.
+/// where its relation stands among the field's, and whatever the
+/// caller keeps of it.
 struct Entry<T> {
     standing: Option<Standing>,
     value: Value,
     identity: Vec<u8>,
+    rank: usize,
     carrier: T,
 }
 
-/// What an election leaves of one entity's candidates: one under
-/// cardinality one, every distinct value under many.
+/// What an election leaves of one entity's candidates: one for a
+/// choosing pick, every distinct value for `all`.
 struct Resolved<T>(Vec<T>);
 
 impl Election {
     /// The election a concept field declares.
     pub(crate) fn of(field: &ConceptFieldDescriptor) -> Self {
-        Election::plain(field.cardinality())
+        Election::plain(field.descriptor().pick().clone())
     }
 
-    /// An election under `cardinality`.
-    fn plain(cardinality: Cardinality) -> Self {
-        Election { cardinality }
+    /// An election under `pick`.
+    fn plain(pick: Pick) -> Self {
+        Election { pick }
     }
 
-    /// Whether the election keeps one candidate of each entity.
-    fn elects(&self) -> bool {
-        self.cardinality == Cardinality::One
+    /// Where an entry stands under `top`: among the listed values when
+    /// the field lists any, first best and an unlisted value last; then
+    /// by the relation it came from, in the order the field lists them.
+    fn rank<T>(&self, entry: &Entry<T>) -> (usize, usize) {
+        (
+            Pick::rank_among(self.pick.ranked(), &entry.value),
+            entry.rank,
+        )
     }
 
-    /// Resolve one entity's candidates. Under many every distinct value
-    /// is kept, a keyed collection every distinct (value, key) pair;
-    /// under one the newest.
+    /// Whether `candidate` displaces `incumbent` under a choosing
+    /// pick. `last` takes the newer standing, then the greater
+    /// value; `top` the better rank, then as `last`; `max` and `min`
+    /// the greater or lesser value, then the newer standing.
+    fn beats<T>(
+        &self,
+        candidate: &Entry<T>,
+        incumbent: &Entry<T>,
+    ) -> Result<bool, EvaluationError> {
+        // One ordering decides every election, here and in the tree:
+        // the succession's. A `top` over listed relations adds the
+        // relation's rank between the listed rank and the standing.
+        let mine = (&candidate.value, candidate.standing.as_ref());
+        let theirs = (&incumbent.value, incumbent.standing.as_ref());
+        match &self.pick {
+            pick @ (Pick::Last | Pick::Max | Pick::Min) => Ok(pick.prefers(mine, theirs)),
+            Pick::Top(_) => {
+                let (mine_rank, theirs_rank) = (self.rank(candidate), self.rank(incumbent));
+                Ok(mine_rank < theirs_rank
+                    || (mine_rank == theirs_rank && Pick::newer(mine, theirs)))
+            }
+            Pick::All => Err(EvaluationError::Store(format!(
+                "`{}` does not choose among candidates",
+                self.pick
+            ))),
+        }
+    }
+
+    /// The claim a write under this election succeeds: of the live
+    /// claims of one cell, each as its value, its standing and whatever
+    /// the caller keeps of it, the one a read returns. `None` over no
+    /// claims.
+    pub fn elect_claims<T>(
+        &self,
+        claims: Vec<(Value, Option<Standing>, T)>,
+    ) -> Result<Option<T>, EvaluationError> {
+        let entries = claims
+            .into_iter()
+            .map(|(value, standing, carrier)| Entry {
+                standing,
+                value,
+                identity: Vec::new(),
+                rank: 0,
+                carrier,
+            })
+            .collect();
+        Ok(self.resolve(entries)?.0.into_iter().next())
+    }
+
+    /// Resolve one entity's candidates under the pick. `all` keeps
+    /// every distinct value, a keyed collection every distinct (value,
+    /// key) pair; a choosing pick keeps the one that beats the rest.
     fn resolve<T>(&self, entries: Vec<Entry<T>>) -> Result<Resolved<T>, EvaluationError> {
-        if !self.elects() {
+        if self.pick.is_set() {
             let mut seen: HashSet<Vec<u8>> = HashSet::new();
             let mut chosen = Vec::new();
             for entry in entries {
@@ -1418,14 +1358,7 @@ impl Election {
         let mut best: Option<Entry<T>> = None;
         for entry in entries {
             best = Some(match best {
-                Some(incumbent)
-                    if !Cardinality::newer(
-                        (&entry.value, entry.standing.as_ref()),
-                        (&incumbent.value, incumbent.standing.as_ref()),
-                    ) =>
-                {
-                    incumbent
-                }
+                Some(incumbent) if !self.beats(&entry, &incumbent)? => incumbent,
                 _ => entry,
             });
         }
@@ -1472,7 +1405,7 @@ fn agrees(
 
 impl Election {
     /// The rows a recursive component yields, elected per entity under
-    /// this cardinality at the component's exit. The rows are keyed by the
+    /// this pick at the component's exit. The rows are keyed by the
     /// query's field name, `field`, as the fixpoint projects them.
     fn elect_rows(
         &self,
@@ -1500,6 +1433,7 @@ impl Election {
                 standing: answer.standing.clone(),
                 value,
                 identity,
+                rank: 0,
                 carrier: answer,
             };
             groups.entry(key).or_default().push(entry);
@@ -1513,35 +1447,9 @@ impl Election {
     }
 }
 
-/// The candidate each entity's pick chooses among all of its
-/// candidates, in the order the entities were first seen.
-fn pick(candidates: Vec<Candidate>, ranking: &Ranking) -> Vec<Candidate> {
-    let mut picked: Vec<Candidate> = Vec::new();
-    let mut at: HashMap<Vec<u8>, usize> = HashMap::new();
-    for candidate in candidates {
-        match at.get(&candidate.entity) {
-            Some(&index) => {
-                let incumbent = &picked[index];
-                if ranking.aggregate.prefers(
-                    &ranking.listed,
-                    (&candidate.value, candidate.standing.as_ref()),
-                    (&incumbent.value, incumbent.standing.as_ref()),
-                ) {
-                    picked[index] = candidate;
-                }
-            }
-            None => {
-                at.insert(candidate.entity.clone(), picked.len());
-                picked.push(candidate);
-            }
-        }
-    }
-    picked
-}
-
 /// The candidates that survive the attribute's election under the
-/// field's cardinality: one per entity under one, every distinct value
-/// per entity under many.
+/// field's pick: one per entity for a choosing pick, every
+/// distinct value per entity for `all`.
 fn elect(
     candidates: Vec<Candidate>,
     election: &Election,
@@ -1564,6 +1472,7 @@ fn elect(
             standing: candidate.standing.clone(),
             value: candidate.value.clone(),
             identity,
+            rank: candidate.rank,
             carrier: candidate,
         });
     }
@@ -1611,42 +1520,21 @@ fn entity_key(value: &Value) -> Result<Vec<u8>, EvaluationError> {
 /// [`Reduce`]: crate::reduce::Reduce
 async fn reduce_rows<'a, Env>(
     rule: &DeductiveRule,
-    terms: &Parameters,
     env: &'a Env,
-) -> Result<Vec<fixpoint::Answer>, EvaluationError>
+) -> Result<Vec<fixpoint::Row>, EvaluationError>
 where
     Env: crate::Scope<'a>,
 {
     let reducer = rule
         .reducer()
         .expect("only rules with a reduce clause reach reduce_rows");
-    // The groups the query names: a constant for the entity or for a
-    // head field the rule does not reduce is part of every wanted
-    // group's key, so the body is evaluated with it bound and only
-    // those groups are read. A constant for a reduced field restricts
-    // nothing here: it is compared with the fold's result, by the join.
-    let mut seed = Match::new();
-    for group in &reducer.groups {
-        if let Some(Term::Constant(value)) = terms.get(group) {
-            seed.bind(&Term::var(group.as_str()), value.clone())?;
-        }
-    }
-    let body = rule.plan(&seed.environment()).evaluate(seed.seed(), env);
+    let body = rule
+        .plan(&Environment::new())
+        .evaluate(Match::new().seed(), env);
     let folded = reducer.fold(body).await?;
-    // A folded row cites a standing only for a field a selective fold
-    // bound, from the fact it chose.
-    let chosen = |matched: &Match| {
-        rule.reduce()
-            .iter()
-            .filter_map(|entry| matched.standing_of(&entry.field))
-            .max()
-    };
     Ok(folded
         .iter()
-        .filter_map(|matched| {
-            let row = fixpoint::project_complete(rule.conclusion(), matched)?;
-            Some(fixpoint::Answer::new(row, chosen(matched)))
-        })
+        .filter_map(|matched| fixpoint::project_complete(rule.conclusion(), matched))
         .collect())
 }
 
@@ -1654,7 +1542,10 @@ impl Display for ConceptQuery {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{} {{", self.predicate.this())?;
         for (name, term) in self.terms.iter() {
-            write!(f, "{}: {},", name, term)?;
+            match self.terms.shape(name) {
+                Some(pattern) => write!(f, "{}: {},", name, pattern)?,
+                None => write!(f, "{}: {},", name, term)?,
+            }
         }
 
         write!(f, "}}")
@@ -3011,11 +2902,13 @@ mod tests {
         Ok(pairs)
     }
 
-    /// A cardinality-one read returns the newest claim of a cell, and a
-    /// cardinality-many read every claim: with `org/salary` holding 300
-    /// and then 200, one reads 200 and many reads both.
+    /// A pick elects among every stored claim of a cell, not among
+    /// what a `last` scan would keep: with `org/salary` holding 300 and
+    /// then 200, `max` reads 300 and `min` 200 whichever is newer, and
+    /// `last` reads the newer, 200. A scan that kept one claim per
+    /// entity before the election would hand `max` the newest alone.
     #[dialog_common::test]
-    async fn it_reads_a_cell_under_its_cardinality() -> anyhow::Result<()> {
+    async fn it_elects_among_every_stored_claim() -> anyhow::Result<()> {
         let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
@@ -3023,12 +2916,7 @@ mod tests {
         for salary in [300u64, 200] {
             branch
                 .transaction()
-                .assert(
-                    the!("org/salary")
-                        .of(alice.clone())
-                        .is(salary)
-                        .cardinality(Cardinality::Many),
-                )
+                .assert(the!("org/salary").of(alice.clone()).is(salary))
                 .commit()
                 .publish()
                 .perform(&operator)
@@ -3036,14 +2924,15 @@ mod tests {
         }
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
-        let read = async |cardinality: Cardinality| -> anyhow::Result<Vec<u64>> {
+        let read = async |pick: Pick| -> anyhow::Result<Vec<u64>> {
             let predicate = ConceptDescriptor::of_attribute(&ConceptFieldDescriptor::required(
                 AttributeDescriptor::new(
                     "org/salary".parse().expect("a selector"),
                     "",
-                    cardinality,
+                    Cardinality::One,
                     Some(Type::UnsignedInt),
-                ),
+                )
+                .with_pick(pick),
             ));
             let mut terms = Parameters::new();
             terms.insert("this".into(), Term::<Any>::constant(alice.clone()));
@@ -3064,8 +2953,10 @@ mod tests {
             values.sort();
             Ok(values)
         };
-        assert_eq!(read(Cardinality::One).await?, vec![200]);
-        assert_eq!(read(Cardinality::Many).await?, vec![200, 300]);
+        assert_eq!(read(Pick::Max).await?, vec![300]);
+        assert_eq!(read(Pick::Min).await?, vec![200]);
+        assert_eq!(read(Pick::Last).await?, vec![200]);
+        assert_eq!(read(Pick::All).await?, vec![200, 300]);
         Ok(())
     }
 
@@ -3186,10 +3077,9 @@ mod tests {
 
         /// A rule offers one candidate per employee salary under the
         /// department's `org.dept/salary`, and a field reading that
-        /// relation picks among them: the greatest under `max`, the
-        /// least under `min`, every distinct value under `all`. A
-        /// candidate is a fact, so two employees on one salary are one
-        /// value of the relation.
+        /// relation chooses among them: the greatest, the least, or
+        /// every distinct value. A candidate is a fact, so two employees
+        /// on one salary are one value of the relation.
         #[dialog_common::test]
         async fn it_chooses_among_the_candidates_a_rule_offers() -> anyhow::Result<()> {
             let (operator, profile) = test_session_with_peer().await;
@@ -3234,9 +3124,9 @@ mod tests {
             registry.register(rule)?;
             let source = TestEnv::new(&branch, &operator, registry);
 
-            let read = |pick: &str| -> ConceptDescriptor {
+            let read = |select: &str| -> ConceptDescriptor {
                 serde_json::from_value(serde_json::json!({ "with": {
-                    "n": { "the": "org.dept/salary", "as": "natural:", "pick": pick }
+                    "n": { "the": "org.dept/salary", "as": "natural:", "cardinality": "many", "pick": select }
                 }}))
                 .expect("a concept over the relation")
             };
@@ -3274,6 +3164,221 @@ mod tests {
                     "`{select}` over the department's candidates"
                 );
             }
+            Ok(())
+        }
+
+        /// `top` ranks an entity's candidates among the field's listed
+        /// values: two rules offer `case:registered` and `case:active`
+        /// for one account, and the field lists active first, so
+        /// active is read whatever order the candidates arrive in. An
+        /// account only one rule speaks for reads that one.
+        #[dialog_common::test]
+        async fn it_ranks_candidates_among_listed_values() -> anyhow::Result<()> {
+            let (operator, profile) = test_session_with_peer().await;
+            let repo = test_repo(&operator, &profile).await;
+            let branch = repo.branch("main").open().perform(&operator).await?;
+
+            let alice: Entity = "id:alice".parse()?;
+            let bob: Entity = "id:bob".parse()?;
+            branch
+                .transaction()
+                .assert(the!("account/registered-at").of(alice.clone()).is(1u32))
+                .assert(the!("account/activated-at").of(alice.clone()).is(2u32))
+                .assert(the!("account/registered-at").of(bob.clone()).is(3u32))
+                .commit()
+                .publish()
+                .perform(&operator)
+                .await?;
+
+            let status = |the: &str, case: &str| {
+                compile(serde_json::json!({
+                    "deduce": { "with": {
+                        "status": { "the": "account/status", "as": "entity:" }
+                    }},
+                    "when": [
+                        { "assert": { "with": { "at": { "the": the, "as": "natural:" } } },
+                          "where": { "this": { "?": { "name": "this" } }, "at": { "?": { "name": "at" } } } },
+                        { "assert": "==", "where": { "this": { "?": { "name": "status" } }, "is": case } }
+                    ]
+                }))
+            };
+            let mut registry = RuleRegistry::new();
+            registry.register(status("account/registered-at", "case:registered"))?;
+            registry.register(status("account/activated-at", "case:active"))?;
+            let source = TestEnv::new(&branch, &operator, registry);
+
+            // A listed value domain is a ranked choice, `top` implied.
+            let read: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
+                "status": { "the": "account/status", "as": ["case:active", "case:registered"] }
+            }}))?;
+            let mut terms = Parameters::new();
+            terms.insert("this".into(), Term::var("who"));
+            terms.insert("status".into(), Term::var("status"));
+            let rows = ConceptQuery {
+                terms,
+                predicate: read,
+            }
+            .evaluate(Match::new().seed(), &source)
+            .try_vec()
+            .await?;
+            let mut statuses: Vec<(Value, Value)> = rows
+                .iter()
+                .map(|row| {
+                    Ok((
+                        row.lookup(&Term::var("who"))?.content()?,
+                        row.lookup(&Term::var("status"))?.content()?,
+                    ))
+                })
+                .collect::<Result<_, EvaluationError>>()?;
+            statuses.sort_by_key(|pair| format!("{pair:?}"));
+            let case = |case: &str| -> anyhow::Result<Value> { Ok(Value::Entity(case.parse()?)) };
+            let mut expected = vec![
+                (Value::Entity(alice.clone()), case("case:active")?),
+                (Value::Entity(bob.clone()), case("case:registered")?),
+            ];
+            expected.sort_by_key(|pair| format!("{pair:?}"));
+            assert_eq!(statuses, expected);
+            Ok(())
+        }
+
+        /// A field listing several relations reads them as a ranked
+        /// choice: an entity's handle is its email where it has one,
+        /// stored or derived, and its phone otherwise. The ranking is
+        /// by the relation a candidate came from, whichever rule or
+        /// scan offered it, and a concept selecting the field beside
+        /// others reads the same choice.
+        #[dialog_common::test]
+        async fn it_ranks_candidates_by_relation() -> anyhow::Result<()> {
+            let (operator, profile) = test_session_with_peer().await;
+            let repo = test_repo(&operator, &profile).await;
+            let branch = repo.branch("main").open().perform(&operator).await?;
+
+            let alice: Entity = "id:alice".parse()?;
+            let bob: Entity = "id:bob".parse()?;
+            let carol: Entity = "id:carol".parse()?;
+            branch
+                .transaction()
+                .assert(the!("user/name").of(alice.clone()).is("Alice".to_string()))
+                .assert(
+                    the!("user/email")
+                        .of(alice.clone())
+                        .is("alice@example.com".to_string()),
+                )
+                .assert(the!("user/phone").of(alice.clone()).is("111".to_string()))
+                .assert(the!("user/name").of(bob.clone()).is("Bob".to_string()))
+                .assert(the!("user/phone").of(bob.clone()).is("222".to_string()))
+                .assert(the!("user/name").of(carol.clone()).is("Carol".to_string()))
+                .assert(
+                    the!("user/legacy-email")
+                        .of(carol.clone())
+                        .is("carol@old.example".to_string()),
+                )
+                .assert(the!("user/phone").of(carol.clone()).is("333".to_string()))
+                .commit()
+                .publish()
+                .perform(&operator)
+                .await?;
+
+            // Carol's email is derived, not stored: it still outranks
+            // her stored phone.
+            let legacy = compile(serde_json::json!({
+                "deduce": { "with": { "email": { "the": "user/email", "as": "text:" } } },
+                "when": [
+                    { "assert": { "with": { "email": { "the": "user/legacy-email", "as": "text:" } } },
+                      "where": { "this": { "?": { "name": "this" } }, "email": { "?": { "name": "email" } } } }
+                ]
+            }));
+            let mut registry = RuleRegistry::new();
+            registry.register(legacy)?;
+            let source = TestEnv::new(&branch, &operator, registry);
+
+            let handles = |rows: &[Match]| -> Result<Vec<(Value, Value)>, EvaluationError> {
+                let mut handles: Vec<(Value, Value)> = rows
+                    .iter()
+                    .map(|row| {
+                        Ok((
+                            row.lookup(&Term::var("who"))?.content()?,
+                            row.lookup(&Term::var("handle"))?.content()?,
+                        ))
+                    })
+                    .collect::<Result<_, EvaluationError>>()?;
+                handles.sort_by_key(|pair| format!("{pair:?}"));
+                Ok(handles)
+            };
+            let mut expected = vec![
+                (
+                    Value::Entity(alice.clone()),
+                    Value::String("alice@example.com".into()),
+                ),
+                (Value::Entity(bob.clone()), Value::String("222".into())),
+                (
+                    Value::Entity(carol.clone()),
+                    Value::String("carol@old.example".into()),
+                ),
+            ];
+            expected.sort_by_key(|pair| format!("{pair:?}"));
+
+            // The chain read on its own.
+            let read: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
+                "handle": { "the": ["user/email", "user/phone"], "as": "text:" }
+            }}))?;
+            let mut terms = Parameters::new();
+            terms.insert("this".into(), Term::var("who"));
+            terms.insert("handle".into(), Term::var("handle"));
+            let rows = ConceptQuery {
+                terms,
+                predicate: read,
+            }
+            .evaluate(Match::new().seed(), &source)
+            .try_vec()
+            .await?;
+            assert_eq!(
+                handles(&rows)?,
+                expected,
+                "the attribute concept ranks by relation"
+            );
+
+            // The chain selected beside another field.
+            let contact: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
+                "name": { "the": "user/name", "as": "text:" },
+                "handle": { "the": ["user/email", "user/phone"], "as": "text:" }
+            }}))?;
+            let mut terms = Parameters::new();
+            terms.insert("this".into(), Term::var("who"));
+            terms.insert("name".into(), Term::var("name"));
+            terms.insert("handle".into(), Term::var("handle"));
+            let rows = ConceptQuery {
+                terms,
+                predicate: contact,
+            }
+            .evaluate(Match::new().seed(), &source)
+            .try_vec()
+            .await?;
+            assert_eq!(
+                handles(&rows)?,
+                expected,
+                "a concept selecting the chain reads the same choice"
+            );
+
+            // The caller's value is a filter on the choice, not a seed
+            // of it: Alice's phone is not her handle.
+            let read: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
+                "handle": { "the": ["user/email", "user/phone"], "as": "text:" }
+            }}))?;
+            let mut terms = Parameters::new();
+            terms.insert("this".into(), Term::var("who"));
+            terms.insert("handle".into(), Term::Constant(Value::String("111".into())));
+            let rows = ConceptQuery {
+                terms,
+                predicate: read,
+            }
+            .evaluate(Match::new().seed(), &source)
+            .try_vec()
+            .await?;
+            assert!(
+                rows.is_empty(),
+                "a phone an email outranks is nobody's handle"
+            );
             Ok(())
         }
     }

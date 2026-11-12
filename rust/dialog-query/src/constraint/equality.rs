@@ -3,14 +3,23 @@
 //! Enforces that two terms must have equal values during query evaluation.
 //! Supports bidirectional inference: if one term is bound, the other will be
 //! inferred to have the same value.
+//!
+//! Either side may be a [`Pattern`]. A map, a list or a tuple of terms is
+//! bound when every variable inside it is, and is then the value it
+//! builds. Where the other side is bound instead, the pattern takes that
+//! value apart and binds the variables inside it.
 
 use std::fmt;
 
+use crate::pattern::Pattern;
+use crate::selection::Match;
+use crate::type_system::Type as Kind;
 use crate::types::Any;
 pub use crate::{
     Binding, Cardinality, Environment, EvaluationError, Field, Parameters, Requirement, Schema,
     Selection, Term, Value, try_stream,
 };
+use dialog_corpus::ValueDataType;
 use std::fmt::Display;
 
 /// Cost for evaluating an equality constraint (simple comparison operation)
@@ -30,6 +39,11 @@ const EQUALITY_COST: usize = 1;
 /// 3. **Error on Unbound**: When neither term is bound, the constraint cannot be evaluated
 ///    and raises a `ConstraintViolation` error.
 ///
+/// A side that is a map, a list or a tuple of terms ([`Equality::between`])
+/// is bound when every variable inside it is. Inferring it from the other
+/// side takes the other side's value apart, and a value that is not of the
+/// pattern's shape filters the match.
+///
 /// # Example
 /// ```no_run
 /// # use dialog_query::constraint::equality::Equality;
@@ -40,15 +54,37 @@ const EQUALITY_COST: usize = 1;
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Equality {
     /// The left-hand parameter of the equality constraint
-    pub this: Term<Any>,
+    pub this: Pattern,
     /// The right-hand parameter of the equality constraint
-    pub is: Term<Any>,
+    pub is: Pattern,
+}
+
+/// The kind a side of an equality has: a leaf's own, and a record for a
+/// map, a list or a tuple, which is what a value of that shape is kept
+/// as.
+fn kind_of(side: &Pattern) -> Option<Kind> {
+    match side {
+        Pattern::Term(term) => term.kind(),
+        _ => Some(Kind::from(ValueDataType::Record)),
+    }
 }
 
 impl Equality {
     /// Creates a new equality constraint between two parameters.
     pub fn new(this: Term<Any>, is: Term<Any>) -> Self {
-        Self { this, is }
+        Self {
+            this: Pattern::Term(this),
+            is: Pattern::Term(is),
+        }
+    }
+
+    /// Creates an equality constraint between two patterns: a term, or a
+    /// map, a list or a tuple of terms.
+    pub fn between(this: impl Into<Pattern>, is: impl Into<Pattern>) -> Self {
+        Self {
+            this: this.into(),
+            is: is.into(),
+        }
     }
 
     /// Returns the schema for this constraint.
@@ -61,7 +97,7 @@ impl Equality {
             "this".into(),
             Field {
                 description: "Term that must be equal to the \"is\" term.".into(),
-                content_type: self.this.kind(),
+                content_type: kind_of(&self.this),
                 requirement: requirement.required(),
                 cardinality: Cardinality::One,
             },
@@ -70,7 +106,7 @@ impl Equality {
             "is".into(),
             Field {
                 description: "Term that must be equal to the \"this\" term.".into(),
-                content_type: self.is.kind(),
+                content_type: kind_of(&self.is),
                 requirement: requirement.required(),
                 cardinality: Cardinality::One,
             },
@@ -93,8 +129,8 @@ impl Equality {
     /// Returns the parameters for this constraint.
     pub fn parameters(&self) -> Parameters {
         let mut params = Parameters::new();
-        params.insert("this".to_string(), self.this.clone());
-        params.insert("is".to_string(), self.is.clone());
+        params.set("this".to_string(), self.this.clone());
+        params.set("is".to_string(), self.is.clone());
         params
     }
 
@@ -109,73 +145,132 @@ impl Equality {
     /// A stream of matches that satisfy the constraint, with any necessary
     /// variable bindings added through inference.
     pub fn evaluate<M: Selection>(self, selection: M) -> impl Selection {
-        let this = self.this;
-        let is = self.is;
         try_stream! {
             for await candidate in selection {
                 let base = candidate?;
-
-                match (base.lookup(&this), base.lookup(&is)) {
-                    // Both Present: yield iff values match.
-                    (Ok(Binding::Present(this_val)), Ok(Binding::Present(is_val))) => {
-                        if this_val == is_val {
-                            yield base;
-                        }
-                    }
-                    // Both Absent: Nothing == Nothing, yield.
-                    (Ok(Binding::Absent), Ok(Binding::Absent)) => {
-                        yield base;
-                    }
-                    // One side Absent, other Present: disjoint kinds
-                    // (Nothing vs primitive), can never be equal: filter.
-                    (Ok(Binding::Absent), Ok(Binding::Present(_)))
-                    | (Ok(Binding::Present(_)), Ok(Binding::Absent)) => {}
-                    // One side Present, other unbound: propagate the value.
-                    (Err(_), Ok(Binding::Present(is_val))) => {
-                        let mut extension = base.clone();
-                        extension.bind(&this, is_val)?;
-                        yield extension;
-                    }
-                    (Ok(Binding::Present(this_val)), Err(_)) => {
-                        let mut extension = base.clone();
-                        extension.bind(&is, this_val)?;
-                        yield extension;
-                    }
-                    // One side Absent, other unbound: propagate Absent
-                    // iff the unbound term's kind explicitly admits
-                    // Nothing. Types are checked, not assumed:
-                    // carrying a claimed absence into a term requires
-                    // the term to have opted into absence, so an
-                    // untyped term filters.
-                    (Ok(Binding::Absent), Err(_)) => {
-                        if is.is_optional() {
-                            let mut extension = base.clone();
-                            extension.bind_absent(&is)?;
+                match (&self.this, &self.is) {
+                    (Pattern::Term(this), Pattern::Term(is)) => {
+                        if let Some(extension) = Self::equate(base, this, is)? {
                             yield extension;
                         }
                     }
-                    (Err(_), Ok(Binding::Absent)) => {
-                        if this.is_optional() {
-                            let mut extension = base.clone();
-                            extension.bind_absent(&this)?;
+                    (this, is) => {
+                        if let Some(extension) = Self::unify(base, this, is)? {
                             yield extension;
                         }
                     }
-                    // Neither bound: equality has nothing to work with.
-                    (Err(_), Err(_)) => {
-                        Err(EvaluationError::ConstraintViolation {
-                            constraint: format!("{} == {}", this, is)
-                        })?;
-                    }
-                };
+                }
             }
         }
+    }
+
+    /// One row of an equality between two terms: the row when it
+    /// satisfies the equality, extended with what the equality infers,
+    /// or nothing when it does not.
+    fn equate(
+        base: Match,
+        this: &Term<Any>,
+        is: &Term<Any>,
+    ) -> Result<Option<Match>, EvaluationError> {
+        Ok(match (base.lookup(this), base.lookup(is)) {
+            // Both Present: yield iff values match.
+            (Ok(Binding::Present(this_val)), Ok(Binding::Present(is_val))) => {
+                (this_val == is_val).then_some(base)
+            }
+            // Both Absent: Nothing == Nothing, yield.
+            (Ok(Binding::Absent), Ok(Binding::Absent)) => Some(base),
+            // One side Absent, other Present: disjoint kinds
+            // (Nothing vs primitive), can never be equal: filter.
+            (Ok(Binding::Absent), Ok(Binding::Present(_)))
+            | (Ok(Binding::Present(_)), Ok(Binding::Absent)) => None,
+            // One side Present, other unbound: propagate the value.
+            (Err(_), Ok(Binding::Present(is_val))) => {
+                let mut extension = base.clone();
+                extension.bind(this, is_val)?;
+                Some(extension)
+            }
+            (Ok(Binding::Present(this_val)), Err(_)) => {
+                let mut extension = base.clone();
+                extension.bind(is, this_val)?;
+                Some(extension)
+            }
+            // One side Absent, other unbound: propagate Absent
+            // iff the unbound term's kind explicitly admits
+            // Nothing. Types are checked, not assumed:
+            // carrying a claimed absence into a term requires
+            // the term to have opted into absence, so an
+            // untyped term filters.
+            (Ok(Binding::Absent), Err(_)) => {
+                if is.is_optional() {
+                    let mut extension = base.clone();
+                    extension.bind_absent(is)?;
+                    Some(extension)
+                } else {
+                    None
+                }
+            }
+            (Err(_), Ok(Binding::Absent)) => {
+                if this.is_optional() {
+                    let mut extension = base.clone();
+                    extension.bind_absent(this)?;
+                    Some(extension)
+                } else {
+                    None
+                }
+            }
+            // Neither bound: equality has nothing to work with.
+            (Err(_), Err(_)) => {
+                return Err(EvaluationError::ConstraintViolation {
+                    constraint: format!("{} == {}", this, is),
+                });
+            }
+        })
+    }
+
+    /// One row of an equality a side of which is a map, a list or a
+    /// tuple of terms. A side every variable of which has a value is
+    /// that value: with both, the row passes when they are one value;
+    /// with one, the other side takes it apart, binding its variables,
+    /// and a value it does not match filters the row. A side that is
+    /// bound to nothing has no value of any shape, so the row is
+    /// filtered. With neither, the equality has nothing to work with.
+    fn unify(base: Match, this: &Pattern, is: &Pattern) -> Result<Option<Match>, EvaluationError> {
+        let absent = |side: &Pattern| {
+            side.terms()
+                .into_iter()
+                .any(|term| matches!(base.lookup(term), Ok(Binding::Absent)))
+        };
+        if absent(this) || absent(is) {
+            return Ok(None);
+        }
+        let (value, other) = match (this.build(&base), is.build(&base)) {
+            (Some(this_val), Some(is_val)) => return Ok((this_val == is_val).then_some(base)),
+            (Some(value), None) => (value, is),
+            (None, Some(value)) => (value, this),
+            (None, None) => {
+                // A side whose variables all have values and which
+                // still is no value (a rest that is not a map) equals
+                // nothing.
+                let environment = base.environment();
+                if this.is_bound(&environment) || is.is_bound(&environment) {
+                    return Ok(None);
+                }
+                return Err(EvaluationError::ConstraintViolation {
+                    constraint: format!("{} == {}", this, is),
+                });
+            }
+        };
+        let mut extension = base.clone();
+        Ok(other.unify(&value, &mut extension)?.then_some(extension))
     }
 }
 
 impl Display for Equality {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} == {}", self.this, self.is)
+        match (&self.this, &self.is) {
+            (Pattern::Term(this), Pattern::Term(is)) => write!(f, "{} == {}", this, is),
+            (this, is) => write!(f, "{} == {}", this, is),
+        }
     }
 }
 
@@ -183,7 +278,6 @@ impl Display for Equality {
 mod tests {
     use super::*;
     use crate::corpus::Type as ValueType;
-    use crate::selection::Match;
     use futures_util::TryStreamExt;
 
     #[dialog_common::test]
