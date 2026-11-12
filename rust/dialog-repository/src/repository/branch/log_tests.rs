@@ -1627,8 +1627,7 @@ fn holder_of_seven(kind: &str) -> Result<(DeductiveRule, Json)> {
 
 /// A rule that gives each holder whose `collection`, a concept of the one
 /// field `field`, holds an entry of `value` under `key`, with the name of the
-/// holder. The key and the value are each a constant of the rule or a blank,
-/// and one of the two is a constant.
+/// holder. The key and the value are each a constant of the rule or a blank.
 fn holder_with(
     collection: Json,
     field: &str,
@@ -1957,5 +1956,43 @@ async fn it_follows_a_claim_of_another_key_that_a_pick_elects() -> Result<()> {
         held.push(rows_of_both(&branch, &operator, &rule, &head, &mut live).await?);
     }
     assert_eq!(held, [1, 0]);
+    Ok(())
+}
+
+/// A rule can read any entry of a collection: the key and the value of its
+/// entry are both blank. Such an entry is written as an empty object, and the
+/// live query reads the rule back from that form. The holder shows while it
+/// holds an entry of any key and any value.
+#[dialog_common::test]
+async fn it_reads_a_rule_whose_entry_has_a_blank_key_and_a_blank_value() -> Result<()> {
+    let (branch, operator, board) = board().await?;
+    let (rule, head) = holder_with(scores(""), "scores", json!({ "?": {} }), json!({ "?": {} }))?;
+    let mut live = branch
+        .query()
+        .with(rule.clone())
+        .subscribe(each_field(&head)?);
+    assert_eq!(
+        rows_of_both(&branch, &operator, &rule, &head, &mut live).await?,
+        0
+    );
+
+    let mut held = Vec::new();
+    for (exists, key, value) in [
+        (true, "a", Value::UnsignedInt(7)),
+        (true, "b", Value::String("seven".into())),
+        (false, "a", Value::UnsignedInt(7)),
+        (false, "b", Value::String("seven".into())),
+    ] {
+        let entry = fact(&format!("test.scores/{key}"), &board, value)?;
+        let transaction = branch.transaction();
+        let transaction = if exists {
+            transaction.assert(entry)
+        } else {
+            transaction.retract(entry)
+        };
+        transaction.commit().publish().perform(&operator).await?;
+        held.push(rows_of_both(&branch, &operator, &rule, &head, &mut live).await?);
+    }
+    assert_eq!(held, [1, 1, 1, 0]);
     Ok(())
 }

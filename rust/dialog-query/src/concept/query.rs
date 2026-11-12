@@ -298,10 +298,15 @@ impl<'de> Deserialize<'de> for ConceptQuery {
             let collection = raw.assert.collections().any(|(field, _)| field == name);
             // An entry object carries `the`/`is` and no `?`; anything
             // else under a collection field is a bare value term,
-            // which binds every entry (`{_: ?value}`).
+            // which binds every entry (`{_: ?value}`). An entry whose
+            // key and value are both blank writes as an empty object,
+            // since a blank half is left out, so an empty object is an
+            // entry too.
             let entry = collection
                 && value.as_object().is_some_and(|map| {
-                    !map.contains_key("?") && (map.contains_key("the") || map.contains_key("is"))
+                    map.is_empty()
+                        || (!map.contains_key("?")
+                            && (map.contains_key("the") || map.contains_key("is")))
                 });
             let bound: Bound = if entry {
                 serde_json::from_value(value).map_err(D::Error::custom)?
@@ -1917,6 +1922,24 @@ mod tests {
             }))
             .expect("parses");
             assert_eq!(operands.terms.get("member/key"), Some(&Term::var("k")));
+        }
+
+        /// An entry whose key and value are both blank writes as an empty
+        /// object, and reads back as the same entry.
+        #[dialog_common::test]
+        fn it_reads_back_an_entry_whose_key_and_value_are_both_blank() {
+            let wire = serde_json::json!({
+                "assert": ordered(),
+                "where": {
+                    "this": {"?": {"name": "list"}},
+                    "member": {"the": {"?": {}}, "is": {"?": {}}}
+                }
+            });
+            let query: ConceptQuery = serde_json::from_value(wire).expect("parses");
+            let written = serde_json::to_value(&query).expect("serializes");
+            assert_eq!(written["where"]["member"], serde_json::json!({}));
+            let read: ConceptQuery = serde_json::from_value(written).expect("reads back");
+            assert_eq!(read, query);
         }
     }
 
