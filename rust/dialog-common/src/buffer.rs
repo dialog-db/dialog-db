@@ -10,9 +10,9 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use crate::Blake3Hash;
 
 /// A type-erased value memoized on a [`Buffer`]. A consumer decodes the
-/// buffer's bytes once into some owned artifact and caches it here, keyed by
+/// buffer's bytes once into some owned value and caches it here, keyed by
 /// nothing but the buffer's identity; because a buffer is content-addressed and
-/// immutable, that artifact never goes stale.
+/// immutable, that fact never goes stale.
 ///
 /// The `Send + Sync` are real (not `ConditionalSend`/`ConditionalSync`): a
 /// type-erased trait object cannot combine the non-auto conditional markers,
@@ -93,7 +93,7 @@ impl Buffer {
     /// the buffer: every clone of the buffer shares one `Arc` interior, so a
     /// value cached here is reused by every reader that holds the buffer — for
     /// instance every scan served the same node from a shared node cache — and
-    /// never needs invalidation. `T` identifies the artifact (a buffer holds at
+    /// never needs invalidation. `T` identifies the fact (a buffer holds at
     /// most one memoized decode); returns `None` only if a different `T` was
     /// already memoized, which callers avoid by using one `T` per buffer role.
     pub fn memoize_decode<T, E>(

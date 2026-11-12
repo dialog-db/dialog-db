@@ -324,7 +324,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
         impl ::std::convert::From<#struct_name> for dialog_query::Term<#wrapped_type> {
             fn from(attr: #struct_name) -> Self {
                 dialog_query::Term::Constant(
-                    <#wrapped_type as ::std::convert::Into<dialog_query::artifact::Value>>::into(
+                    <#wrapped_type as ::std::convert::Into<dialog_query::corpus::Value>>::into(
                         attr.0
                     )
                 )

@@ -502,8 +502,8 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
-    use crate::artifact::Entity;
-    use crate::artifact::Type as ValueType;
+    use crate::corpus::Entity;
+    use crate::corpus::Type as ValueType;
     use crate::error::TypeError;
     use crate::optional::OptionalAttributeQuery;
     use crate::the;
@@ -590,7 +590,7 @@ mod tests {
 
     /// The same prefix pipeline pushes a `starts-with` on the scan's *value*
     /// variable down to the scan's value term, so the VAE value-range bound
-    /// (`ArtifactSelector::is_starting_with`) is driven by the constraint.
+    /// (`Selector::is_starting_with`) is driven by the constraint.
     #[dialog_common::test]
     fn it_stamps_prefix_refinements_onto_scan_values() {
         let scan: Premise = AttributeQuery::new(
@@ -622,7 +622,7 @@ mod tests {
     /// The same pipeline pushes a comparison's interval down to the
     /// scan's value term: the typed variable narrows the NUMERIC bound
     /// to one type and the constant side's interval rides along, so
-    /// the VAE range bound (`ArtifactSelector::is_at_least`) is driven
+    /// the VAE range bound (`Selector::is_at_least`) is driven
     /// by the predicate.
     #[dialog_common::test]
     fn it_stamps_interval_refinements_onto_scan_values() {

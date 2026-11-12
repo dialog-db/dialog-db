@@ -2,8 +2,8 @@
 
 use crate::schema::{DidExt as _, Replica};
 use crate::{PublishError, RemoteAddress, ResolveError, SiteAddress, site_address};
-use dialog_artifacts::Entity;
 use dialog_capability::{Did, Subject};
+use dialog_corpus::Entity;
 use dialog_effects::Rejection;
 use dialog_effects::archive::ArchiveError;
 use dialog_effects::blob::BlobError;
@@ -318,8 +318,8 @@ mod tests {
     use super::{ConnectedReplica, Step};
     use crate::PublishError;
     use crate::SiteAddress;
-    use dialog_artifacts::Entity;
     use dialog_capability::Subject;
+    use dialog_corpus::Entity;
     use dialog_effects::Rejection;
     use dialog_effects::memory::{Current, MemoryError};
     use dialog_remote_s3::Address as S3Address;

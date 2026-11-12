@@ -23,7 +23,7 @@
 use base58::ToBase58;
 use merkle_reference::{Reference, Type};
 
-use crate::artifact::Entity;
+use crate::corpus::Entity;
 
 /// The type of attributes.
 pub const ATTRIBUTE: Type = Type::from_reference(Reference::from_hex(
@@ -89,7 +89,7 @@ pub(crate) fn parse(scheme: &str, uri: &str) -> Option<Reference> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dialog_artifacts::identity::{BOOLEAN, TEXT};
+    use dialog_corpus::identity::{BOOLEAN, TEXT};
 
     #[dialog_common::test]
     fn it_names_the_definition_types() {

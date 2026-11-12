@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use dialog_artifacts::PreloadQueue;
+use dialog_corpus::PreloadQueue;
 use dialog_network::HydrationScheduler;
 
 /// The shared runtime: cheap to clone, every clone is the same state.

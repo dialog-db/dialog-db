@@ -19,8 +19,8 @@
 //! leaves the row; handing a principal over moves the row.
 
 use base58::ToBase58 as _;
-use dialog_artifacts::{Changes, Entity};
 use dialog_common::Blake3Hash;
+use dialog_corpus::{Changes, Entity};
 use dialog_query::{EvaluationError, Output as _, Query, Statement as _, Term};
 use dialog_varsig::Did;
 

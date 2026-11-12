@@ -6,7 +6,7 @@
 #[cfg(target_arch = "wasm32")]
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 #[cfg(not(feature = "web-integration-tests"))]
-use dialog_artifacts::tree::CorpusNode;
+use dialog_corpus::tree::CorpusNode;
 #[cfg(not(feature = "web-integration-tests"))]
 use dialog_effects::archive::Load as ArchiveLoad;
 #[cfg(not(feature = "web-integration-tests"))]
@@ -21,25 +21,25 @@ use dialog_effects::MethodExt as _;
 use dialog_effects::archive::prelude::{ArchiveExt as _, ArchiveScope};
 use dialog_effects::blob::prelude::{ArchiveBlobExt as _, ReadBlobExt as _};
 use std::collections::HashSet;
+use std::ops::Range;
 
 use crate::contact;
-use crate::helpers::connect;
+use crate::helpers::{Counting, connect};
 use crate::schema::DidExt as _;
 use crate::{
     Blob, Branch, Index, Item, Repository, RepositoryExt as _, Revision, SiteAddress,
     SnapshotError, peer_did,
 };
 use anyhow::{Context as _, Result};
-use dialog_artifacts::Asset;
-use dialog_artifacts::{
-    Artifact, ArtifactSelector, Datum, ENTITY_KEY_TAG, HISTORY_KEY_TAG, Instruction, Key, State,
-    Value,
-};
-#[cfg(not(feature = "web-integration-tests"))]
-use dialog_artifacts::{Changes, Entity, Update as _};
 use dialog_capability::Subject;
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::Buffer;
+use dialog_corpus::Asset;
+#[cfg(not(feature = "web-integration-tests"))]
+use dialog_corpus::{Changes, Entity, Update as _};
+use dialog_corpus::{
+    Datum, ENTITY_KEY_TAG, Fact, HISTORY_KEY_TAG, Instruction, Key, Selector, State, Value,
+};
 use dialog_credentials::SignerCredential;
 use dialog_effects::blob::BlobError;
 use dialog_effects::peer::prelude::*;
@@ -56,9 +56,9 @@ use dialog_storage::NativeTempSpace;
 #[cfg(not(feature = "web-integration-tests"))]
 use crate::{CommitError, ConnectedReplica, RemoteSite};
 #[cfg(not(feature = "web-integration-tests"))]
-use dialog_artifacts::{ShipmentRef, shipment_ref};
-#[cfg(not(feature = "web-integration-tests"))]
 use dialog_capability::{Fork, Provider};
+#[cfg(not(feature = "web-integration-tests"))]
+use dialog_corpus::{ShipmentRef, shipment_ref};
 #[cfg(not(feature = "web-integration-tests"))]
 use dialog_effects::archive::prelude::{CatalogExt as _, GetBlockExt as _};
 #[cfg(not(feature = "web-integration-tests"))]
@@ -127,7 +127,7 @@ async fn it_pushes_to_s3_remote(s3: S3Address) -> Result<()> {
     let (operator, profile) = test_session_with_peer().await;
     let (_repo, branch) = setup_repo_with_s3_remote(&operator, &profile, &s3, "push").await?;
 
-    let artifact = Artifact {
+    let fact = Fact {
         the: "user/name".parse()?,
         of: "user:1".parse()?,
         is: Value::String("Alice".into()),
@@ -135,8 +135,8 @@ async fn it_pushes_to_s3_remote(s3: S3Address) -> Result<()> {
     };
     branch
         .commit(stream::iter(vec![Instruction::Assert(
-            artifact,
-            dialog_artifacts::Pick::All,
+            fact,
+            dialog_corpus::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -152,7 +152,7 @@ async fn it_fetches_from_s3_remote(s3: S3Address) -> Result<()> {
     let (operator, profile) = test_session_with_peer().await;
     let (_repo, branch) = setup_repo_with_s3_remote(&operator, &profile, &s3, "fetch").await?;
 
-    let artifact = Artifact {
+    let fact = Fact {
         the: "user/name".parse()?,
         of: "user:1".parse()?,
         is: Value::String("Alice".into()),
@@ -160,8 +160,8 @@ async fn it_fetches_from_s3_remote(s3: S3Address) -> Result<()> {
     };
     branch
         .commit(stream::iter(vec![Instruction::Assert(
-            artifact,
-            dialog_artifacts::Pick::All,
+            fact,
+            dialog_corpus::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -185,7 +185,7 @@ async fn it_push_and_pull_roundtrip(s3: S3Address) -> Result<()> {
     let (operator, profile) = test_session_with_peer().await;
     let (_repo, branch) = setup_repo_with_s3_remote(&operator, &profile, &s3, "roundtrip").await?;
 
-    let artifact = Artifact {
+    let fact = Fact {
         the: "user/name".parse()?,
         of: "user:1".parse()?,
         is: Value::String("Alice".into()),
@@ -193,8 +193,8 @@ async fn it_push_and_pull_roundtrip(s3: S3Address) -> Result<()> {
     };
     branch
         .commit(stream::iter(vec![Instruction::Assert(
-            artifact,
-            dialog_artifacts::Pick::All,
+            fact,
+            dialog_corpus::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -265,13 +265,13 @@ async fn it_fails_over_to_an_address_that_answers(s3: S3Address) -> Result<()> {
 
     branch
         .commit(stream::iter(vec![Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "user/name".parse()?,
                 of: "user:1".parse()?,
                 is: Value::String("Alice".into()),
                 cause: None,
             },
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -363,13 +363,13 @@ async fn it_ships_blobs_and_spilled_values_concurrently_on_push(s3: S3Address) -
     let facts: Vec<_> = (0..SPILLED)
         .map(|i| {
             Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "doc/body".parse().expect("valid attribute"),
                     of: format!("doc:{i}").parse().expect("valid entity"),
                     is: Value::String(format!("{i:04}{}", "x".repeat(inline_n))),
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             )
         })
         .collect();
@@ -514,7 +514,10 @@ async fn it_ships_blobs_on_push_and_hydrates_on_read(s3: S3Address) -> Result<()
         .perform(&operator_b)
         .await?;
 
-    branch_b.pull().perform(&operator_b).await?;
+    branch_b
+        .pull(crate::Download::MinimalRanges)
+        .perform(&operator_b)
+        .await?;
 
     assert_eq!(
         Blob::from(blob.clone())
@@ -593,7 +596,7 @@ async fn it_ships_an_imported_asset_on_push_and_hydrates_on_read(s3: S3Address) 
         attachment,
         document.clone(),
         Value::Entity(content.clone()),
-        dialog_artifacts::Pick::Last,
+        dialog_corpus::Pick::Last,
     );
     branch_a
         .transaction()
@@ -643,11 +646,14 @@ async fn it_ships_an_imported_asset_on_push_and_hydrates_on_read(s3: S3Address) 
         .set_upstream(remote_branch_b)
         .perform(&operator_b)
         .await?;
-    branch_b.pull().perform(&operator_b).await?;
+    branch_b
+        .pull(crate::Download::MinimalRanges)
+        .perform(&operator_b)
+        .await?;
 
     let facts: Vec<_> = branch_b
         .claims()
-        .select(ArtifactSelector::new().of(document))
+        .select(Selector::new().of(document))
         .to_owned()
         .perform(&operator_b)
         .await?
@@ -669,7 +675,7 @@ async fn it_ships_an_imported_asset_on_push_and_hydrates_on_read(s3: S3Address) 
         "doc/cover".parse()?,
         "doc:2".parse::<Entity>()?,
         Value::Entity(content.clone()),
-        dialog_artifacts::Pick::Last,
+        dialog_corpus::Pick::Last,
     );
     branch_b
         .transaction()
@@ -777,7 +783,7 @@ async fn it_ships_a_spill_of_a_retracted_assets_bytes(s3: S3Address) -> Result<(
         body,
         document.clone(),
         Value::Bytes(payload.clone()),
-        dialog_artifacts::Pick::Last,
+        dialog_corpus::Pick::Last,
     );
 
     branch_a
@@ -836,11 +842,14 @@ async fn it_ships_a_spill_of_a_retracted_assets_bytes(s3: S3Address) -> Result<(
         .set_upstream(remote_branch_b)
         .perform(&operator_b)
         .await?;
-    branch_b.pull().perform(&operator_b).await?;
+    branch_b
+        .pull(crate::Download::MinimalRanges)
+        .perform(&operator_b)
+        .await?;
 
     let facts: Vec<_> = branch_b
         .claims()
-        .select(ArtifactSelector::new().of(document))
+        .select(Selector::new().of(document))
         .to_owned()
         .perform(&operator_b)
         .await?
@@ -952,7 +961,10 @@ async fn it_replicates_a_blob_retraction_on_pull(s3: S3Address) -> Result<()> {
         .perform(&operator_b)
         .await?;
 
-    branch_b.pull().perform(&operator_b).await?;
+    branch_b
+        .pull(crate::Download::MinimalRanges)
+        .perform(&operator_b)
+        .await?;
     let mut reader = Blob::from(blob.clone())
         .read((&branch_b).into())
         .perform(&operator_b)
@@ -972,7 +984,10 @@ async fn it_replicates_a_blob_retraction_on_pull(s3: S3Address) -> Result<()> {
 
     // --- Site B pulls the retraction: the reference is gone, the hydrated
     // bytes are not. ---
-    branch_b.pull().perform(&operator_b).await?;
+    branch_b
+        .pull(crate::Download::MinimalRanges)
+        .perform(&operator_b)
+        .await?;
     assert_eq!(
         Blob::from(blob.clone())
             .size((&branch_b).into())
@@ -1027,7 +1042,10 @@ async fn it_replicates_a_blob_retraction_on_pull(s3: S3Address) -> Result<()> {
         .perform(&operator_c)
         .await?;
 
-    branch_c.pull().perform(&operator_c).await?;
+    branch_c
+        .pull(crate::Download::MinimalRanges)
+        .perform(&operator_c)
+        .await?;
     assert_eq!(
         Blob::from(blob.clone())
             .size((&branch_c).into())
@@ -1156,7 +1174,10 @@ async fn it_replicates_retained_delegations(s3: S3Address) -> Result<()> {
         .perform(&operator_b)
         .await?;
 
-    branch_b.pull().perform(&operator_b).await?;
+    branch_b
+        .pull(crate::Download::MinimalRanges)
+        .perform(&operator_b)
+        .await?;
 
     // Value-bound query on the audience: the shape a prover's candidate
     // lookup takes, over facts site B never wrote.
@@ -1164,7 +1185,7 @@ async fn it_replicates_retained_delegations(s3: S3Address) -> Result<()> {
     let found: Vec<_> = branch_b
         .claims()
         .select(
-            ArtifactSelector::new()
+            Selector::new()
                 .the(DELEGATION_AUDIENCE.parse()?)
                 .is(Value::String(holder_did.clone())),
         )
@@ -1196,12 +1217,15 @@ async fn it_replicates_retained_delegations(s3: S3Address) -> Result<()> {
         .perform(&operator_a)
         .await?;
     assert!(branch_a.push().perform(&operator_a).await?.is_some());
-    branch_b.pull().perform(&operator_b).await?;
+    branch_b
+        .pull(crate::Download::MinimalRanges)
+        .perform(&operator_b)
+        .await?;
 
     let after: Vec<_> = branch_b
         .claims()
         .select(
-            ArtifactSelector::new()
+            Selector::new()
                 .the(DELEGATION_AUDIENCE.parse()?)
                 .is(Value::String(holder_did)),
         )
@@ -1292,7 +1316,7 @@ async fn it_ships_spilled_values_on_push_and_hydrates_on_read(s3: S3Address) -> 
         .perform(&operator_a)
         .await?;
 
-    let artifact = Artifact {
+    let fact = Fact {
         the: "doc/body".parse()?,
         of: "doc:1".parse()?,
         is: value.clone(),
@@ -1300,8 +1324,8 @@ async fn it_ships_spilled_values_on_push_and_hydrates_on_read(s3: S3Address) -> 
     };
     branch_a
         .commit(stream::iter(vec![Instruction::Assert(
-            artifact,
-            dialog_artifacts::Pick::All,
+            fact,
+            dialog_corpus::Pick::All,
         )]))
         .perform(&operator_a)
         .await?;
@@ -1311,7 +1335,7 @@ async fn it_ships_spilled_values_on_push_and_hydrates_on_read(s3: S3Address) -> 
     // A same-store local select reconstructs the spilled value.
     let local: Vec<_> = branch_a
         .claims()
-        .select(ArtifactSelector::new().the("doc/body".parse()?))
+        .select(Selector::new().the("doc/body".parse()?))
         .to_owned()
         .perform(&operator_a)
         .await?
@@ -1387,13 +1411,16 @@ async fn it_ships_spilled_values_on_push_and_hydrates_on_read(s3: S3Address) -> 
         .perform(&operator_b)
         .await?;
 
-    branch_b.pull().perform(&operator_b).await?;
+    branch_b
+        .pull(crate::Download::MinimalRanges)
+        .perform(&operator_b)
+        .await?;
 
     // Site B never wrote the value locally; reconstructing it from its own store
     // proves the spilled block was shipped to the remote and hydrated on pull.
     let remote_side: Vec<_> = branch_b
         .claims()
-        .select(ArtifactSelector::new().the("doc/body".parse()?))
+        .select(Selector::new().the("doc/body".parse()?))
         .to_owned()
         .perform(&operator_b)
         .await?
@@ -1428,7 +1455,7 @@ async fn it_ships_spilled_values_on_push_and_hydrates_on_read(s3: S3Address) -> 
 #[dialog_common::test]
 async fn it_pushes_a_retraction_of_a_pulled_spilled_fact(s3: S3Address) -> Result<()> {
     let inline_n = dialog_search_tree::Manifest::default().inline_n as usize;
-    let artifact = Artifact {
+    let fact = Fact {
         the: "doc/body".parse()?,
         of: "doc:1".parse()?,
         is: Value::String("x".repeat(inline_n + 1)),
@@ -1468,8 +1495,8 @@ async fn it_pushes_a_retraction_of_a_pulled_spilled_fact(s3: S3Address) -> Resul
         .await?;
     branch_a
         .commit(stream::iter(vec![Instruction::Assert(
-            artifact.clone(),
-            dialog_artifacts::Pick::All,
+            fact.clone(),
+            dialog_corpus::Pick::All,
         )]))
         .perform(&operator_a)
         .await?;
@@ -1506,12 +1533,15 @@ async fn it_pushes_a_retraction_of_a_pulled_spilled_fact(s3: S3Address) -> Resul
         .set_upstream(remote_branch_b)
         .perform(&operator_b)
         .await?;
-    branch_b.pull().perform(&operator_b).await?;
+    branch_b
+        .pull(crate::Download::MinimalRanges)
+        .perform(&operator_b)
+        .await?;
 
     // The retraction is constructed from application state; site B never
     // selected the fact, so its local archive has no spilled block.
     branch_b
-        .commit(stream::iter(vec![Instruction::Retract(artifact.clone())]))
+        .commit(stream::iter(vec![Instruction::Retract(fact.clone())]))
         .perform(&operator_b)
         .await?;
     assert!(
@@ -1520,10 +1550,13 @@ async fn it_pushes_a_retraction_of_a_pulled_spilled_fact(s3: S3Address) -> Resul
     );
 
     // --- Site A observes the retraction. ---
-    branch_a.pull().perform(&operator_a).await?;
+    branch_a
+        .pull(crate::Download::MinimalRanges)
+        .perform(&operator_a)
+        .await?;
     let remaining: Vec<_> = branch_a
         .claims()
-        .select(ArtifactSelector::new().the("doc/body".parse()?))
+        .select(Selector::new().the("doc/body".parse()?))
         .to_owned()
         .perform(&operator_a)
         .await?
@@ -1626,7 +1659,7 @@ async fn it_polls_subscriptions_over_pulled_spilled_facts(s3: S3Address) -> Resu
 
     let query = AttributeQuery::from(
         Term::<Relation>::from(the!("doc/body"))
-            .of(Term::<dialog_artifacts::Entity>::var("e"))
+            .of(Term::<dialog_corpus::Entity>::var("e"))
             .is(Term::<String>::var("v")),
     );
     let mut subscription = branch_b.subscribe(query);
@@ -1639,19 +1672,22 @@ async fn it_polls_subscriptions_over_pulled_spilled_facts(s3: S3Address) -> Resu
     // --- Site A publishes a spilled fact; B pulls and polls. ---
     branch_a
         .commit(stream::iter(vec![Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "doc/body".parse()?,
                 of: "doc:1".parse()?,
                 is: Value::String(body.clone()),
                 cause: None,
             },
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         )]))
         .perform(&operator_a)
         .await?;
     assert!(branch_a.push().perform(&operator_a).await?.is_some());
 
-    branch_b.pull().perform(&operator_b).await?;
+    branch_b
+        .pull(crate::Download::MinimalRanges)
+        .perform(&operator_b)
+        .await?;
 
     let delta = subscription
         .poll(&operator_b)
@@ -1672,7 +1708,7 @@ async fn it_pull_returns_none_when_no_changes(s3: S3Address) -> Result<()> {
     let (operator, profile) = test_session_with_peer().await;
     let (_repo, branch) = setup_repo_with_s3_remote(&operator, &profile, &s3, "no-change").await?;
 
-    let artifact = Artifact {
+    let fact = Fact {
         the: "user/name".parse()?,
         of: "user:1".parse()?,
         is: Value::String("Alice".into()),
@@ -1680,8 +1716,8 @@ async fn it_pull_returns_none_when_no_changes(s3: S3Address) -> Result<()> {
     };
     branch
         .commit(stream::iter(vec![Instruction::Assert(
-            artifact,
-            dialog_artifacts::Pick::All,
+            fact,
+            dialog_corpus::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -1689,7 +1725,10 @@ async fn it_pull_returns_none_when_no_changes(s3: S3Address) -> Result<()> {
     branch.push().perform(&operator).await?;
 
     // Pull immediately after push — no new changes
-    let pull_result = branch.pull().perform(&operator).await?;
+    let pull_result = branch
+        .pull(crate::Download::MinimalRanges)
+        .perform(&operator)
+        .await?;
     assert!(
         pull_result.is_none(),
         "pull with no changes should return None"
@@ -1706,7 +1745,7 @@ async fn it_pushes_and_pulls_data_between_repos(s3: S3Address) -> Result<()> {
     let (alice_repo, alice_branch) =
         setup_repo_with_s3_remote(&operator, &profile, &s3, "alice").await?;
 
-    let artifact = Artifact {
+    let fact = Fact {
         the: "user/name".parse()?,
         of: "user:alice".parse()?,
         is: Value::String("Alice".into()),
@@ -1714,8 +1753,8 @@ async fn it_pushes_and_pulls_data_between_repos(s3: S3Address) -> Result<()> {
     };
     alice_branch
         .commit(stream::iter(vec![Instruction::Assert(
-            artifact,
-            dialog_artifacts::Pick::All,
+            fact,
+            dialog_corpus::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -1738,13 +1777,16 @@ async fn it_pushes_and_pulls_data_between_repos(s3: S3Address) -> Result<()> {
         .perform(&operator)
         .await?;
 
-    let pull_result = bob_branch.pull().perform(&operator).await?;
+    let pull_result = bob_branch
+        .pull(crate::Download::MinimalRanges)
+        .perform(&operator)
+        .await?;
     assert!(pull_result.is_some(), "Bob's pull should find Alice's data");
 
-    // Verify Bob can query Alice's artifact
+    // Verify Bob can query Alice's fact
     let results: Vec<_> = bob_branch
         .claims()
-        .select(ArtifactSelector::new().the("user/name".parse()?))
+        .select(Selector::new().the("user/name".parse()?))
         .to_owned()
         .perform(&operator)
         .await?
@@ -1753,11 +1795,11 @@ async fn it_pushes_and_pulls_data_between_repos(s3: S3Address) -> Result<()> {
         .into_iter()
         .collect::<Result<Vec<_>, _>>()?;
 
-    assert_eq!(results.len(), 1, "Bob should have Alice's artifact");
+    assert_eq!(results.len(), 1, "Bob should have Alice's fact");
     assert_eq!(
         results[0].is,
         Value::String("Alice".into()),
-        "artifact value should match"
+        "fact value should match"
     );
 
     Ok(())
@@ -1774,13 +1816,13 @@ async fn it_does_not_rewind_a_remote_with_a_head_a_reset_left_behind(s3: S3Addre
     let (alice_repo, alice) = setup_repo_with_s3_remote(&operator, &profile, &s3, "alice").await?;
     let fact = |of: &str| {
         Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "user/name".parse().expect("attribute parses"),
                 of: of.parse().expect("entity parses"),
                 is: Value::String("x".into()),
                 cause: None,
             },
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         )
     };
     alice
@@ -1798,7 +1840,9 @@ async fn it_does_not_rewind_a_remote_with_a_head_a_reset_left_behind(s3: S3Addre
     let bob = bob_repo.branch("main").open().perform(&operator).await?;
     let remote_branch = origin.branch("main").open().perform(&operator).await?;
     bob.set_upstream(remote_branch).perform(&operator).await?;
-    bob.pull().perform(&operator).await?;
+    bob.pull(crate::Download::MinimalRanges)
+        .perform(&operator)
+        .await?;
     bob.commit(stream::iter(vec![fact("user:b")]))
         .perform(&operator)
         .await?;
@@ -1810,7 +1854,10 @@ async fn it_does_not_rewind_a_remote_with_a_head_a_reset_left_behind(s3: S3Addre
     bob.push().perform(&operator).await?;
     let c = bob.revision().context("bob has a head")?;
 
-    alice.pull().perform(&operator).await?;
+    alice
+        .pull(crate::Download::MinimalRanges)
+        .perform(&operator)
+        .await?;
     assert_eq!(
         alice.revision().as_ref(),
         Some(&c),
@@ -1855,13 +1902,13 @@ async fn it_refuses_a_push_it_cannot_confirm_while_the_remote_is_unreachable(
     let (alice_repo, alice) = setup_repo_with_s3_remote(&operator, &profile, &s3, "alice").await?;
     let fact = |of: &str| {
         Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "user/name".parse().expect("attribute parses"),
                 of: of.parse().expect("entity parses"),
                 is: Value::String("x".into()),
                 cause: None,
             },
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         )
     };
     let side = alice_repo.branch("side").open().perform(&operator).await?;
@@ -1869,7 +1916,11 @@ async fn it_refuses_a_push_it_cannot_confirm_while_the_remote_is_unreachable(
         .perform(&operator)
         .await?;
     let s = side.revision().context("S")?;
-    alice.pull().from(&side).perform(&operator).await?;
+    alice
+        .pull(crate::Download::MinimalRanges)
+        .from(&side)
+        .perform(&operator)
+        .await?;
     alice
         .commit(stream::iter(vec![fact("user:h")]))
         .perform(&operator)
@@ -1888,7 +1939,10 @@ async fn it_refuses_a_push_it_cannot_confirm_while_the_remote_is_unreachable(
     bob.set_upstream(remote_branch).perform(&operator).await?;
     let staging = bob_repo.branch("staging").open().perform(&operator).await?;
     staging.reset(s.clone()).perform(&operator).await?;
-    bob.pull().from(&staging).perform(&operator).await?;
+    bob.pull(crate::Download::MinimalRanges)
+        .from(&staging)
+        .perform(&operator)
+        .await?;
     assert_eq!(bob.revision().as_ref(), Some(&s), "bob adopts S by root");
     // Forward to H without reading it, as a release before #682 resets
     // (`perform_unchecked`): this release's reset reads H's region to check
@@ -1945,13 +1999,13 @@ async fn it_reads_what_a_one_off_pull_brought(s3: S3Address) -> Result<()> {
         setup_repo_with_s3_remote(&operator, &profile, &s3, "alice").await?;
     alice_branch
         .commit(stream::iter(vec![Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "user/name".parse()?,
                 of: "user:alice".parse()?,
                 is: Value::String("Alice".into()),
                 cause: None,
             },
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -1967,7 +2021,7 @@ async fn it_reads_what_a_one_off_pull_brought(s3: S3Address) -> Result<()> {
     let remote_branch = origin.branch("main").open().perform(&operator).await?;
 
     let pulled = bob_branch
-        .pull()
+        .pull(crate::Download::MinimalRanges)
         .from(remote_branch)
         .perform(&operator)
         .await?;
@@ -1975,7 +2029,7 @@ async fn it_reads_what_a_one_off_pull_brought(s3: S3Address) -> Result<()> {
 
     let results: Vec<_> = bob_branch
         .claims()
-        .select(ArtifactSelector::new().the("user/name".parse()?))
+        .select(Selector::new().the("user/name".parse()?))
         .to_owned()
         .perform(&operator)
         .await?
@@ -1983,7 +2037,7 @@ async fn it_reads_what_a_one_off_pull_brought(s3: S3Address) -> Result<()> {
         .await
         .into_iter()
         .collect::<Result<Vec<_>, _>>()?;
-    assert_eq!(results.len(), 1, "Bob reads Alice's artifact");
+    assert_eq!(results.len(), 1, "Bob reads Alice's fact");
     Ok(())
 }
 
@@ -1998,13 +2052,13 @@ async fn it_merges_over_a_tree_adopted_from_a_peer(s3: S3Address) -> Result<()> 
         setup_repo_with_s3_remote(&operator, &profile, &s3, "alice").await?;
     alice_branch
         .commit(stream::iter(vec![Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "user/name".parse()?,
                 of: "user:alice".parse()?,
                 is: Value::String("Alice".into()),
                 cause: None,
             },
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -2019,31 +2073,34 @@ async fn it_merges_over_a_tree_adopted_from_a_peer(s3: S3Address) -> Result<()> 
     let first = bob_repo.branch("main").open().perform(&operator).await?;
     let remote_branch = origin.branch("main").open().perform(&operator).await?;
     first.set_upstream(remote_branch).perform(&operator).await?;
-    first.pull().perform(&operator).await?;
+    first
+        .pull(crate::Download::MinimalRanges)
+        .perform(&operator)
+        .await?;
 
     // Two writers on the adopted tree: the session and its peer.
     let second = bob_repo.branch("main").open().perform(&profile).await?;
     first
         .commit(stream::iter(vec![Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "user/name".parse()?,
                 of: "user:bob".parse()?,
                 is: Value::String("Bob".into()),
                 cause: None,
             },
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         )]))
         .perform(&operator)
         .await?;
     second
         .commit(stream::iter(vec![Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "user/name".parse()?,
                 of: "user:carol".parse()?,
                 is: Value::String("Carol".into()),
                 cause: None,
             },
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         )]))
         .merge()
         .perform(&profile)
@@ -2051,7 +2108,7 @@ async fn it_merges_over_a_tree_adopted_from_a_peer(s3: S3Address) -> Result<()> 
 
     let results: Vec<_> = second
         .claims()
-        .select(ArtifactSelector::new().the("user/name".parse()?))
+        .select(Selector::new().the("user/name".parse()?))
         .to_owned()
         .perform(&profile)
         .await?
@@ -2081,7 +2138,7 @@ async fn it_keeps_a_retraction_through_a_concurrent_pull(s3: S3Address) -> Resul
     // Alice creates the shared branch with fact F and pushes.
     let (alice_repo, alice_branch) =
         setup_repo_with_s3_remote(&operator, &profile, &s3, "retract-alice").await?;
-    let fact = Artifact {
+    let fact = Fact {
         the: "user/name".parse()?,
         of: "user:alice".parse()?,
         is: Value::String("Alice".into()),
@@ -2090,7 +2147,7 @@ async fn it_keeps_a_retraction_through_a_concurrent_pull(s3: S3Address) -> Resul
     alice_branch
         .commit(stream::iter(vec![Instruction::Assert(
             fact.clone(),
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -2109,10 +2166,13 @@ async fn it_keeps_a_retraction_through_a_concurrent_pull(s3: S3Address) -> Resul
         .set_upstream(remote_branch)
         .perform(&operator)
         .await?;
-    bob_branch.pull().perform(&operator).await?;
+    bob_branch
+        .pull(crate::Download::MinimalRanges)
+        .perform(&operator)
+        .await?;
 
     // Alice moves the upstream past Bob's sync base with an unrelated fact.
-    let unrelated = Artifact {
+    let unrelated = Fact {
         the: "user/name".parse()?,
         of: "user:carol".parse()?,
         is: Value::String("Carol".into()),
@@ -2121,7 +2181,7 @@ async fn it_keeps_a_retraction_through_a_concurrent_pull(s3: S3Address) -> Resul
     alice_branch
         .commit(stream::iter(vec![Instruction::Assert(
             unrelated,
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -2134,7 +2194,7 @@ async fn it_keeps_a_retraction_through_a_concurrent_pull(s3: S3Address) -> Resul
         .await?;
     let after_retract: Vec<_> = bob_branch
         .claims()
-        .select(ArtifactSelector::new().of("user:alice".parse()?))
+        .select(Selector::new().of("user:alice".parse()?))
         .to_owned()
         .perform(&operator)
         .await?
@@ -2148,11 +2208,14 @@ async fn it_keeps_a_retraction_through_a_concurrent_pull(s3: S3Address) -> Resul
     );
 
     // Bob pulls: a real three-way merge (ours moved, theirs moved).
-    bob_branch.pull().perform(&operator).await?;
+    bob_branch
+        .pull(crate::Download::MinimalRanges)
+        .perform(&operator)
+        .await?;
 
     let after_pull: Vec<_> = bob_branch
         .claims()
-        .select(ArtifactSelector::new().of("user:alice".parse()?))
+        .select(Selector::new().of("user:alice".parse()?))
         .to_owned()
         .perform(&operator)
         .await?
@@ -2168,7 +2231,7 @@ async fn it_keeps_a_retraction_through_a_concurrent_pull(s3: S3Address) -> Resul
     // And the unrelated novelty must have arrived.
     let carol: Vec<_> = bob_branch
         .claims()
-        .select(ArtifactSelector::new().of("user:carol".parse()?))
+        .select(Selector::new().of("user:carol".parse()?))
         .to_owned()
         .perform(&operator)
         .await?
@@ -2211,13 +2274,13 @@ async fn it_pushes_novelty_after_adopting_the_upstream_head_by_reference(
         let facts: Vec<_> = (0..75)
             .map(|i| {
                 Instruction::Assert(
-                    Artifact {
+                    Fact {
                         the: "user/name".parse().expect("valid attribute"),
                         of: format!("user:{batch}-{i}").parse().expect("valid entity"),
                         is: Value::String(format!("resident-{batch}-{i}")),
                         cause: None,
                     },
-                    dialog_artifacts::Pick::All,
+                    dialog_corpus::Pick::All,
                 )
             })
             .collect();
@@ -2242,7 +2305,7 @@ async fn it_pushes_novelty_after_adopting_the_upstream_head_by_reference(
 
     env.reset();
     bob_branch
-        .pull()
+        .pull(crate::Download::MinimalRanges)
         .perform(&env)
         .await?
         .expect("head adopted");
@@ -2257,13 +2320,13 @@ async fn it_pushes_novelty_after_adopting_the_upstream_head_by_reference(
     // B's own novelty, then the push every device's sync drain performs.
     bob_branch
         .commit(stream::iter(vec![Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "user/name".parse()?,
                 of: "user:bob".parse()?,
                 is: Value::String("Bob".into()),
                 cause: None,
             },
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         )]))
         .perform(&env)
         .await?;
@@ -2274,6 +2337,427 @@ async fn it_pushes_novelty_after_adopting_the_upstream_head_by_reference(
         "a device that adopted the upstream head by reference pushes its \
          own novelty back to that same upstream"
     );
+
+    Ok(())
+}
+
+/// One fact naming `entity`, appended.
+fn named(entity: &str, name: &str) -> Instruction {
+    Instruction::Assert(
+        Fact {
+            the: "user/name".parse().expect("valid attribute"),
+            of: entity.parse().expect("valid entity"),
+            is: Value::String(name.into()),
+            cause: None,
+        },
+        dialog_corpus::Pick::All,
+    )
+}
+
+/// Seventy-five residents of `batch`, enough of them over a few batches
+/// that the tree has leaves a replica can hold some of and not others.
+fn residents(batch: usize) -> Vec<Instruction> {
+    (0..75)
+        .map(|i| {
+            named(
+                &format!("user:{batch}-{i}"),
+                &format!("resident-{batch}-{i}"),
+            )
+        })
+        .collect()
+}
+
+/// A device that authored a subject and published it, and a second device
+/// that adopted its head and holds none of its tree: the two ends of the
+/// tests of what a replica holds once it adopts a head another moved.
+struct Followed {
+    /// The authoring device's branch, and what it performs through.
+    alice: Branch,
+    operator: Peer<VolatileSpace, dialog_peer::Session>,
+    /// The following device's branch, and the counting env it performs
+    /// through.
+    bob: Branch,
+    env: Counting<Peer<VolatileSpace, dialog_peer::Session>>,
+}
+
+/// [`Followed`] over `s3`: four batches of residents published, and
+/// adopted by a follower that has read none of them.
+async fn followed(s3: &S3Address, name: &str) -> Result<Followed> {
+    let (operator, profile) = test_session_with_peer().await;
+    let (alice_repo, alice) =
+        setup_repo_with_s3_remote(&operator, &profile, s3, &format!("{name}-a")).await?;
+    for batch in 0..4 {
+        alice
+            .commit(stream::iter(residents(batch)))
+            .perform(&operator)
+            .await?;
+    }
+    alice.push().perform(&operator).await?;
+
+    let env = Counting::new(operator.clone());
+    let bob_repo = profile
+        .space(unique_name(&format!("{name}-b")))
+        .open()
+        .perform(&env)
+        .await?;
+    let origin = connect("origin", s3_site_address(s3), alice_repo.did(), &env).await?;
+    let bob = bob_repo.branch("main").open().perform(&env).await?;
+    let remote = origin.branch("main").open().perform(&env).await?;
+    bob.set_upstream(remote).perform(&env).await?;
+    bob.pull(crate::Download::MinimalRanges)
+        .perform(&env)
+        .await?
+        .expect("head adopted");
+    Ok(Followed {
+        alice,
+        operator,
+        bob,
+        env,
+    })
+}
+
+impl Followed {
+    /// The names the follower reads of `entity`, and how many blocks it
+    /// fetched from the remote to read them.
+    async fn names_of(&self, entity: &str) -> Result<(Vec<Value>, u64)> {
+        self.env.reset();
+        let facts: Vec<_> = self
+            .bob
+            .claims()
+            .select(
+                Selector::new()
+                    .the("user/name".parse()?)
+                    .of(entity.parse()?),
+            )
+            .to_owned()
+            .perform(&self.env)
+            .await?
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((
+            facts.into_iter().map(|fact| fact.is).collect(),
+            self.env.count("Hydrate"),
+        ))
+    }
+
+    /// The follower names `entity`, and how many blocks it fetched from
+    /// the remote to write that.
+    async fn name(&self, entity: &str, name: &str) -> Result<u64> {
+        self.env.reset();
+        self.bob
+            .commit(stream::iter(vec![named(entity, name)]))
+            .perform(&self.env)
+            .await?;
+        Ok(self.env.count("Hydrate"))
+    }
+
+    /// The author renames `entity`, settles `batches` more residents where
+    /// the follower never read, and publishes.
+    async fn move_upstream(&self, entity: &str, name: &str, batches: Range<usize>) -> Result<()> {
+        self.alice
+            .commit(stream::iter(vec![named(entity, name)]))
+            .perform(&self.operator)
+            .await?;
+        for batch in batches {
+            self.alice
+                .commit(stream::iter(residents(batch)))
+                .perform(&self.operator)
+                .await?;
+        }
+        self.alice.push().perform(&self.operator).await?;
+        Ok(())
+    }
+
+    /// The follower pulls, bringing along the ranges it holds, and the
+    /// head it lands on is the author's by root: the pull that reads none
+    /// of the tree it adopts but what its download names.
+    async fn adopt(&self) -> Result<()> {
+        let adopted = self
+            .bob
+            .pull(crate::Download::QueriedRanges)
+            .perform(&self.env)
+            .await?
+            .expect("head adopted");
+        assert_eq!(
+            Some(adopted.tree),
+            self.alice.revision().map(|revision| revision.tree),
+            "the fixture must adopt the author's head by root, or it no \
+             longer covers the head a merge would have read"
+        );
+        Ok(())
+    }
+}
+
+/// A replica reads from its own blocks, once it adopted a head another
+/// device moved, the fact it read from them before.
+///
+/// A fast-forward adopts the upstream head by root and reads none of its
+/// tree, so everything the other device changed was left on the remote,
+/// wherever it was. The next read of a fact this replica had just read
+/// then waited on the remote, and failed without one: a page rendered
+/// from the device's own store a moment before did not render offline.
+/// A pull asked for `Download::QueriedRanges`
+/// reads what changed along the paths this replica holds a leaf of before
+/// the head moves, and leaves what the replica never read by reference.
+#[dialog_common::test]
+async fn it_reads_what_it_held_after_adopting_a_head_another_device_moved(
+    s3: S3Address,
+) -> Result<()> {
+    let devices = followed(&s3, "follow-read").await?;
+
+    let (names, fetched) = devices.names_of("user:0-0").await?;
+    assert_eq!(names, vec![Value::String("resident-0-0".into())]);
+    assert!(
+        fetched > 0,
+        "the follower holds none of the tree until it reads"
+    );
+    let (_, fetched) = devices.names_of("user:0-0").await?;
+    assert_eq!(fetched, 0, "the follower holds what it read");
+
+    devices.move_upstream("user:0-0", "renamed", 4..12).await?;
+    devices.adopt().await?;
+
+    let (names, fetched) = devices.names_of("user:0-0").await?;
+    assert!(
+        names.contains(&Value::String("renamed".into())),
+        "the follower reads the adopted head: {names:?}"
+    );
+    assert_eq!(
+        fetched, 0,
+        "what the follower read from its own blocks before the pull, it \
+         reads from them after"
+    );
+
+    let (names, fetched) = devices.names_of("user:9-9").await?;
+    assert_eq!(names, vec![Value::String("resident-9-9".into())]);
+    assert!(
+        fetched > 0,
+        "what the follower never read was left by reference, and is \
+         fetched on demand"
+    );
+
+    Ok(())
+}
+
+/// A replica writes where it wrote before, once it adopted a head another
+/// device moved, without fetching a block.
+///
+/// A write reads the leaves it writes to: the fact's in each index, and
+/// its history's. A replica holds those once it has written there. A head
+/// adopted by root left them on the remote wherever the other device had
+/// changed them, so every pull made the next write to the same fact wait
+/// on the remote again: an editor that had just answered a keystroke at
+/// once took a round trip to answer the next. `Download::QueriedRanges`
+/// keeps the leaves a replica wrote to as it keeps the ones it read.
+///
+/// A replica's first write to a fact it only read still fetches the
+/// leaves of the indexes it never read that fact through. That is not
+/// pinned here: it is a write to a region the replica does not hold.
+#[dialog_common::test]
+async fn it_writes_where_it_wrote_after_adopting_a_head_another_device_moved(
+    s3: S3Address,
+) -> Result<()> {
+    let devices = followed(&s3, "follow-write").await?;
+
+    // The follower writes, which fetches the leaves it writes to, and
+    // publishes. The author builds on that, so its next head is one the
+    // follower adopts by root.
+    devices.name("user:0-0", "first").await?;
+    assert_eq!(
+        devices.name("user:0-0", "second").await?,
+        0,
+        "the follower holds the leaves it wrote to"
+    );
+    devices.bob.push().perform(&devices.env).await?;
+    devices
+        .alice
+        .pull(crate::Download::MinimalRanges)
+        .perform(&devices.operator)
+        .await?;
+    devices.move_upstream("user:0-0", "renamed", 4..12).await?;
+    devices.adopt().await?;
+
+    assert_eq!(
+        devices.name("user:0-0", "third").await?,
+        0,
+        "where the follower wrote from its own blocks before the pull, it \
+         writes from them after"
+    );
+    let (names, _) = devices.names_of("user:0-0").await?;
+    for name in ["first", "second", "renamed", "third"] {
+        assert!(
+            names.contains(&Value::String(name.into())),
+            "the follower's writes and the author's are all there: {names:?}"
+        );
+    }
+
+    Ok(())
+}
+
+/// A commit that lands after a pull was prepared is kept: the pull loses
+/// its publish and leaves the head where the commit put it, and the pull
+/// made again merges the two.
+///
+/// The network half of a pull runs before any cell is written, so a
+/// replica reads and writes on the head it holds for as long as the fetch
+/// takes. This pins that a write made in that time is neither lost nor
+/// overwritten.
+#[dialog_common::test]
+async fn it_keeps_a_commit_made_while_a_pull_followed_a_moved_head(s3: S3Address) -> Result<()> {
+    let devices = followed(&s3, "follow-commit").await?;
+    devices.names_of("user:0-0").await?;
+    devices.move_upstream("user:0-0", "renamed", 4..12).await?;
+
+    // The pull fetches and merges, and writes no cell.
+    let before = devices.bob.revision();
+    let prepared = devices
+        .bob
+        .pull(crate::Download::MinimalRanges)
+        .prepare(&devices.env)
+        .await?;
+    assert_eq!(
+        devices.bob.revision(),
+        before,
+        "a prepared pull leaves the head where it was"
+    );
+
+    // The follower writes meanwhile, on the head it still holds.
+    devices.name("user:local", "written meanwhile").await?;
+    let written = devices.bob.revision();
+
+    let landed = prepared.commit(&devices.env).await;
+    assert!(
+        matches!(
+            landed,
+            Err(crate::PullError::Publish(
+                crate::PublishError::VersionMismatch { .. }
+            ))
+        ),
+        "the pull prepared on the head the commit replaced loses its \
+         publish: {landed:?}"
+    );
+    assert_eq!(
+        devices.bob.revision(),
+        written,
+        "the lost publish leaves the head where the commit put it"
+    );
+
+    devices
+        .bob
+        .pull(crate::Download::MinimalRanges)
+        .perform(&devices.env)
+        .await?;
+    let (names, fetched) = devices.names_of("user:0-0").await?;
+    assert!(
+        names.contains(&Value::String("renamed".into())),
+        "the pull made again brings the author's write: {names:?}"
+    );
+    assert_eq!(
+        fetched, 0,
+        "what the follower read before, it reads from its own blocks"
+    );
+    let (names, _) = devices.names_of("user:local").await?;
+    assert_eq!(
+        names,
+        vec![Value::String("written meanwhile".into())],
+        "the commit made meanwhile is kept"
+    );
+
+    Ok(())
+}
+
+/// A pull asked to retry lands although a commit moved the head while it
+/// was downloading: it is made again on the head the commit left, and
+/// both the commit and the upstream's change are there. Without a retry
+/// the same pull fails, the head where the commit put it.
+///
+/// The commit is made the moment the pull's download first fetches a
+/// block, which is after the pull read the head it merges onto and before
+/// it publishes.
+///
+/// Native only: the test drives the pull's future by hand to place the
+/// commit, which needs an executor that polls a future that woke itself.
+/// The retry is the same code on both targets, and what it is made of, a
+/// pull losing its publish to a commit and the next pull merging both, is
+/// covered on wasm by
+/// `it_keeps_a_commit_made_while_a_pull_followed_a_moved_head`.
+#[cfg(not(feature = "web-integration-tests"))]
+#[dialog_common::test]
+async fn it_retries_a_pull_that_a_commit_overtook(s3: S3Address) -> Result<()> {
+    use std::future::{Future as _, poll_fn};
+    use std::task::Poll;
+
+    let devices = followed(&s3, "follow-retry").await?;
+    devices.names_of("user:0-0").await?;
+
+    // The follower pulls with `limit`, and commits `entity` once the
+    // pull's download has fetched its first block.
+    let pull_and_commit = |limit: crate::Limit, entity: &'static str| {
+        let devices = &devices;
+        async move {
+            devices.env.reset();
+            let mut pulling = Box::pin(
+                devices
+                    .bob
+                    .pull(crate::Download::QueriedRanges)
+                    .retry(limit)
+                    .perform(&devices.env),
+            );
+            let mut committed = false;
+            loop {
+                if let Poll::Ready(pulled) =
+                    poll_fn(|context| Poll::Ready(pulling.as_mut().poll(context))).await
+                {
+                    assert!(committed, "the commit was made while the pull ran");
+                    return anyhow::Ok(pulled);
+                }
+                if !committed && devices.env.count("Hydrate") > 0 {
+                    devices
+                        .bob
+                        .commit(stream::iter(vec![named(entity, "written meanwhile")]))
+                        .perform(&devices.env)
+                        .await?;
+                    committed = true;
+                }
+                tokio::task::yield_now().await;
+            }
+        }
+    };
+
+    devices.move_upstream("user:0-0", "renamed", 4..8).await?;
+    let pulled = pull_and_commit(crate::Limit::default(), "user:first").await?;
+    assert!(
+        matches!(
+            pulled,
+            Err(crate::PullError::Publish(
+                crate::PublishError::VersionMismatch { .. }
+            ))
+        ),
+        "a pull that is not retried loses its publish to the commit: {pulled:?}"
+    );
+
+    devices
+        .move_upstream("user:0-0", "renamed again", 8..12)
+        .await?;
+    pull_and_commit(crate::Limit::Unlimited, "user:second")
+        .await?
+        .map_err(|error| anyhow::anyhow!("a retried pull lands: {error}"))?;
+
+    let (names, _) = devices.names_of("user:0-0").await?;
+    assert!(
+        names.contains(&Value::String("renamed again".into())),
+        "the retried pull brought the author's write: {names:?}"
+    );
+    for entity in ["user:first", "user:second"] {
+        let (names, _) = devices.names_of(entity).await?;
+        assert_eq!(
+            names,
+            vec![Value::String("written meanwhile".into())],
+            "the commit made meanwhile is kept"
+        );
+    }
 
     Ok(())
 }
@@ -2305,25 +2789,25 @@ async fn it_bridges_foreign_bulk_to_a_second_remote(s3: S3Address) -> Result<()>
         let mut facts: Vec<_> = (0..75)
             .map(|i| {
                 Instruction::Assert(
-                    Artifact {
+                    Fact {
                         the: "user/name".parse().expect("valid attribute"),
                         of: format!("user:{batch}-{i}").parse().expect("valid entity"),
                         is: Value::String(format!("resident-{batch}-{i}")),
                         cause: None,
                     },
-                    dialog_artifacts::Pick::All,
+                    dialog_corpus::Pick::All,
                 )
             })
             .collect();
         if batch == 0 {
             facts.push(Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "doc/body".parse()?,
                     of: "doc:big".parse()?,
                     is: Value::String(big.clone()),
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             ));
         }
         alice_branch
@@ -2365,7 +2849,7 @@ async fn it_bridges_foreign_bulk_to_a_second_remote(s3: S3Address) -> Result<()>
         .perform(&operator)
         .await?;
     bridge_branch
-        .pull()
+        .pull(crate::Download::MinimalRanges)
         .perform(&operator)
         .await?
         .expect("head adopted from A");
@@ -2406,13 +2890,13 @@ async fn it_bridges_foreign_bulk_to_a_second_remote(s3: S3Address) -> Result<()>
         .perform(&operator)
         .await?;
     reader_branch
-        .pull()
+        .pull(crate::Download::MinimalRanges)
         .perform(&operator)
         .await?
         .expect("reader adopts from B");
     let names: Vec<_> = reader_branch
         .claims()
-        .select(ArtifactSelector::new().the("user/name".parse()?))
+        .select(Selector::new().the("user/name".parse()?))
         .to_owned()
         .perform(&operator)
         .await?
@@ -2423,7 +2907,7 @@ async fn it_bridges_foreign_bulk_to_a_second_remote(s3: S3Address) -> Result<()>
     assert_eq!(names.len(), 300, "every bridged fact reads from B");
     let bodies: Vec<_> = reader_branch
         .claims()
-        .select(ArtifactSelector::new().the("doc/body".parse()?))
+        .select(Selector::new().the("doc/body".parse()?))
         .to_owned()
         .perform(&operator)
         .await?
@@ -2446,13 +2930,13 @@ async fn it_bridges_foreign_bulk_to_a_second_remote(s3: S3Address) -> Result<()>
     // the ordinary novelty path, no bridging left to do.
     bridge_branch
         .commit(stream::iter(vec![Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "user/name".parse()?,
                 of: "user:bridge".parse()?,
                 is: Value::String("Bridge".into()),
                 cause: None,
             },
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -2524,8 +3008,8 @@ delegate_provider!(
     dialog_effects::authority::Identify,
     dialog_effects::peer::Connect,
     dialog_effects::authority::Attest,
-    dialog_artifacts::Preload,
-    dialog_artifacts::Speculation,
+    dialog_corpus::Preload,
+    dialog_corpus::Speculation,
     dialog_effects::memory::Resolve,
     dialog_effects::memory::Publish,
     dialog_effects::blob::Read,
@@ -2731,13 +3215,13 @@ async fn it_leaves_an_aborted_push_closure_complete(s3: S3Address) -> Result<()>
     let facts: Vec<_> = (0..60)
         .map(|i| {
             Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "user/name".parse().expect("valid attribute"),
                     of: format!("user:{i}").parse().expect("valid entity"),
                     is: Value::String(format!("resident-{i}")),
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             )
         })
         .collect();
@@ -2796,13 +3280,13 @@ async fn it_leaves_an_aborted_bridge_push_closure_complete(s3: S3Address) -> Res
         let facts: Vec<_> = (0..60)
             .map(|i| {
                 Instruction::Assert(
-                    Artifact {
+                    Fact {
                         the: "user/name".parse().expect("valid attribute"),
                         of: format!("user:{batch}-{i}").parse().expect("valid entity"),
                         is: Value::String(format!("resident-{batch}-{i}")),
                         cause: None,
                     },
-                    dialog_artifacts::Pick::All,
+                    dialog_corpus::Pick::All,
                 )
             })
             .collect();
@@ -2850,19 +3334,19 @@ async fn it_leaves_an_aborted_bridge_push_closure_complete(s3: S3Address) -> Res
         .perform(&operator)
         .await?;
     bridge_branch
-        .pull()
+        .pull(crate::Download::MinimalRanges)
         .perform(&operator)
         .await?
         .expect("head adopted from A");
     bridge_branch
         .commit(stream::iter(vec![Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "user/name".parse()?,
                 of: "user:bridge".parse()?,
                 is: Value::String("Bridge".into()),
                 cause: None,
             },
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -2909,13 +3393,13 @@ async fn it_forwards_content_adopted_through_a_local_upstream(s3: S3Address) -> 
         let facts: Vec<_> = (0..60)
             .map(|i| {
                 Instruction::Assert(
-                    Artifact {
+                    Fact {
                         the: "user/name".parse().expect("valid attribute"),
                         of: format!("user:{batch}-{i}").parse().expect("valid entity"),
                         is: Value::String(format!("resident-{batch}-{i}")),
                         cause: None,
                     },
-                    dialog_artifacts::Pick::All,
+                    dialog_corpus::Pick::All,
                 )
             })
             .collect();
@@ -2961,12 +3445,12 @@ async fn it_forwards_content_adopted_through_a_local_upstream(s3: S3Address) -> 
     let remote_a = origin_a.branch("main").open().perform(&operator).await?;
     backup.set_upstream(remote_a).perform(&operator).await?;
     backup
-        .pull()
+        .pull(crate::Download::MinimalRanges)
         .perform(&operator)
         .await?
         .expect("backup adopts from A");
     let main = device_repo.branch("main").open().perform(&operator).await?;
-    main.pull()
+    main.pull(crate::Download::MinimalRanges)
         .from(&backup)
         .perform(&operator)
         .await?
@@ -3005,13 +3489,13 @@ async fn it_forwards_content_adopted_through_a_local_upstream(s3: S3Address) -> 
         .perform(&operator)
         .await?;
     reader_branch
-        .pull()
+        .pull(crate::Download::MinimalRanges)
         .perform(&operator)
         .await?
         .expect("reader adopts from B");
     let names: Vec<_> = reader_branch
         .claims()
-        .select(ArtifactSelector::new().the("user/name".parse()?))
+        .select(Selector::new().the("user/name".parse()?))
         .to_owned()
         .perform(&operator)
         .await?
@@ -3038,13 +3522,13 @@ async fn it_two_party_convergence(s3: S3Address) -> Result<()> {
 
     alice_branch
         .commit(stream::iter(vec![Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "user/name".parse()?,
                 of: "user:alice".parse()?,
                 is: Value::String("Alice".into()),
                 cause: None,
             },
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -3068,18 +3552,21 @@ async fn it_two_party_convergence(s3: S3Address) -> Result<()> {
         .await?;
 
     // Bob pulls Alice's changes
-    bob_branch.pull().perform(&operator).await?;
+    bob_branch
+        .pull(crate::Download::MinimalRanges)
+        .perform(&operator)
+        .await?;
 
-    // Bob commits his own artifact
+    // Bob commits his own fact
     bob_branch
         .commit(stream::iter(vec![Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "user/name".parse()?,
                 of: "user:bob".parse()?,
                 is: Value::String("Bob".into()),
                 cause: None,
             },
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -3088,12 +3575,15 @@ async fn it_two_party_convergence(s3: S3Address) -> Result<()> {
     bob_branch.push().perform(&operator).await?;
 
     // Alice pulls Bob's changes
-    alice_branch.pull().perform(&operator).await?;
+    alice_branch
+        .pull(crate::Download::MinimalRanges)
+        .perform(&operator)
+        .await?;
 
-    // Both should have both artifacts
+    // Both should have both facts
     let alice_results: Vec<_> = alice_branch
         .claims()
-        .select(ArtifactSelector::new().the("user/name".parse()?))
+        .select(Selector::new().the("user/name".parse()?))
         .to_owned()
         .perform(&operator)
         .await?
@@ -3104,7 +3594,7 @@ async fn it_two_party_convergence(s3: S3Address) -> Result<()> {
 
     let bob_results: Vec<_> = bob_branch
         .claims()
-        .select(ArtifactSelector::new().the("user/name".parse()?))
+        .select(Selector::new().the("user/name".parse()?))
         .to_owned()
         .perform(&operator)
         .await?
@@ -3116,12 +3606,12 @@ async fn it_two_party_convergence(s3: S3Address) -> Result<()> {
     assert_eq!(
         alice_results.len(),
         2,
-        "Alice should have both artifacts after pull"
+        "Alice should have both facts after pull"
     );
     assert_eq!(
         bob_results.len(),
         2,
-        "Bob should have both artifacts after push"
+        "Bob should have both facts after push"
     );
 
     Ok(())
@@ -3295,7 +3785,7 @@ async fn it_regains_access_by_pulling_the_account(ucan: UcanS3Address) -> Result
     // delegation records and hydrates their envelopes.
     assert!(
         device_branch
-            .pull()
+            .pull(crate::Download::MinimalRanges)
             .perform(&device_operator)
             .await?
             .is_some(),
@@ -3328,7 +3818,7 @@ async fn it_regains_access_by_pulling_the_account(ucan: UcanS3Address) -> Result
     Ok(())
 }
 
-/// The embedder's eager form of the login pull: `pull().download()`
+/// The embedder's eager form of the login pull: `pull(Download::Everything)`
 /// materializes the adopted head locally — every delegation record
 /// block and envelope blob — before any prove runs. Pinned by reading
 /// an envelope's bytes straight from the device's local blob provider,
@@ -3470,8 +3960,7 @@ async fn it_downloads_the_account_branch_on_login(ucan: UcanS3Address) -> Result
         .await?;
     assert!(
         device_branch
-            .pull()
-            .download()
+            .pull(crate::Download::Everything)
             .perform(&device_operator)
             .await?
             .is_some(),
@@ -3480,11 +3969,11 @@ async fn it_downloads_the_account_branch_on_login(ucan: UcanS3Address) -> Result
 
     // Every retained delegation's envelope must now be readable from the
     // device's LOCAL blob provider — no remote reach in this env.
-    use dialog_artifacts::ArtifactSelector;
+    use dialog_corpus::Selector;
     let store = &device_operator;
     let facts: Vec<_> = crate::Select::new(
         &device_branch,
-        ArtifactSelector::new().the(crate::DELEGATION_AUDIENCE.parse().unwrap()),
+        Selector::new().the(crate::DELEGATION_AUDIENCE.parse().unwrap()),
     )
     .execute(store)
     .await?
@@ -3496,8 +3985,8 @@ async fn it_downloads_the_account_branch_on_login(ucan: UcanS3Address) -> Result
         "the device's own onboarding delegation, the powerline and the space grant"
     );
     for fact in facts {
-        let artifact = fact?.to_owned()?;
-        let digest = artifact
+        let fact = fact?.to_owned()?;
+        let digest = fact
             .of
             .blob_hash()
             .expect("delegation entities are blob entities");
@@ -3577,13 +4066,13 @@ async fn it_authorizes_via_migrated_credentials(ucan: UcanS3Address) -> Result<(
         .await?;
     alice_branch
         .commit(stream::iter(vec![Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "user/name".parse()?,
                 of: "user:alice".parse()?,
                 is: Value::String("Alice".into()),
                 cause: None,
             },
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         )]))
         .perform(&alice_operator)
         .await?;
@@ -3681,10 +4170,13 @@ async fn it_authorizes_via_migrated_credentials(ucan: UcanS3Address) -> Result<(
     );
 
     // And the full pull works: Bob reads Alice's data.
-    bob_branch.pull().perform(&bob_operator).await?;
+    bob_branch
+        .pull(crate::Download::MinimalRanges)
+        .perform(&bob_operator)
+        .await?;
     let facts: Vec<_> = bob_branch
         .claims()
-        .select(ArtifactSelector::new().the("user/name".parse()?))
+        .select(Selector::new().the("user/name".parse()?))
         .to_owned()
         .perform(&bob_operator)
         .await?
@@ -3748,13 +4240,13 @@ async fn it_collaborates_via_ucan_delegation(ucan: UcanS3Address) -> Result<()> 
     // Alice commits and pushes initial data
     alice_branch
         .commit(stream::iter(vec![Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "user/name".parse()?,
                 of: "user:alice".parse()?,
                 is: Value::String("Alice".into()),
                 cause: None,
             },
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         )]))
         .perform(&alice_operator)
         .await?;
@@ -3804,13 +4296,16 @@ async fn it_collaborates_via_ucan_delegation(ucan: UcanS3Address) -> Result<()> 
         .await?;
 
     // Bob pulls Alice's data
-    let pull_result = bob_branch.pull().perform(&bob_operator).await?;
+    let pull_result = bob_branch
+        .pull(crate::Download::MinimalRanges)
+        .perform(&bob_operator)
+        .await?;
     assert!(pull_result.is_some(), "Bob should pull Alice's data");
 
-    // Verify Bob has Alice's artifact
+    // Verify Bob has Alice's fact
     let bob_results: Vec<_> = bob_branch
         .claims()
-        .select(ArtifactSelector::new().the("user/name".parse()?))
+        .select(Selector::new().the("user/name".parse()?))
         .to_owned()
         .perform(&bob_operator)
         .await?
@@ -3818,18 +4313,18 @@ async fn it_collaborates_via_ucan_delegation(ucan: UcanS3Address) -> Result<()> 
         .await
         .into_iter()
         .collect::<Result<Vec<_>, _>>()?;
-    assert_eq!(bob_results.len(), 1, "Bob should have Alice's artifact");
+    assert_eq!(bob_results.len(), 1, "Bob should have Alice's fact");
 
     // Bob commits his own change
     bob_branch
         .commit(stream::iter(vec![Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "user/name".parse()?,
                 of: "user:bob".parse()?,
                 is: Value::String("Bob".into()),
                 cause: None,
             },
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         )]))
         .perform(&bob_operator)
         .await?;
@@ -3839,13 +4334,16 @@ async fn it_collaborates_via_ucan_delegation(ucan: UcanS3Address) -> Result<()> 
     assert!(push_result.is_some(), "Bob should push successfully");
 
     // Alice pulls Bob's changes
-    let alice_pull = alice_branch.pull().perform(&alice_operator).await?;
+    let alice_pull = alice_branch
+        .pull(crate::Download::MinimalRanges)
+        .perform(&alice_operator)
+        .await?;
     assert!(alice_pull.is_some(), "Alice should pull Bob's changes");
 
-    // Alice should have both artifacts
+    // Alice should have both facts
     let alice_results: Vec<_> = alice_branch
         .claims()
-        .select(ArtifactSelector::new().the("user/name".parse()?))
+        .select(Selector::new().the("user/name".parse()?))
         .to_owned()
         .perform(&alice_operator)
         .await?
@@ -3856,7 +4354,7 @@ async fn it_collaborates_via_ucan_delegation(ucan: UcanS3Address) -> Result<()> 
     assert_eq!(
         alice_results.len(),
         2,
-        "Alice should have both artifacts after pulling Bob's changes"
+        "Alice should have both facts after pulling Bob's changes"
     );
 
     Ok(())
@@ -3901,13 +4399,13 @@ async fn it_pushes_and_pulls_via_ucan(ucan: UcanS3Address) -> Result<()> {
     // Commit and push via UCAN
     branch
         .commit(stream::iter(vec![Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "user/name".parse()?,
                 of: "user:ucan-test".parse()?,
                 is: Value::String("UCAN User".into()),
                 cause: None,
             },
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -3916,13 +4414,16 @@ async fn it_pushes_and_pulls_via_ucan(ucan: UcanS3Address) -> Result<()> {
     assert!(push_result.is_some(), "UCAN push should succeed");
 
     // Pull should find no changes (just pushed)
-    let pull_result = branch.pull().perform(&operator).await?;
+    let pull_result = branch
+        .pull(crate::Download::MinimalRanges)
+        .perform(&operator)
+        .await?;
     assert!(pull_result.is_none(), "pull after push should return None");
 
     // Verify data survives select
     let results: Vec<_> = branch
         .claims()
-        .select(ArtifactSelector::new().the("user/name".parse()?))
+        .select(Selector::new().the("user/name".parse()?))
         .to_owned()
         .perform(&operator)
         .await?
@@ -3931,7 +4432,7 @@ async fn it_pushes_and_pulls_via_ucan(ucan: UcanS3Address) -> Result<()> {
         .into_iter()
         .collect::<Result<Vec<_>, _>>()?;
 
-    assert_eq!(results.len(), 1, "should have the pushed artifact");
+    assert_eq!(results.len(), 1, "should have the pushed fact");
     assert_eq!(results[0].is, Value::String("UCAN User".into()));
 
     Ok(())
@@ -3949,13 +4450,13 @@ async fn it_replicates_on_demand_and_caches_locally(s3: S3Address) -> Result<()>
 
     alice_branch
         .commit(stream::iter(vec![Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "user/name".parse()?,
                 of: "user:alice".parse()?,
                 is: Value::String("Alice".into()),
                 cause: None,
             },
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -3982,7 +4483,7 @@ async fn it_replicates_on_demand_and_caches_locally(s3: S3Address) -> Result<()>
     // so this check must run before the remote is ever tracked.)
     let no_remote_result = bob_branch
         .claims()
-        .select(ArtifactSelector::new().the("user/name".parse()?))
+        .select(Selector::new().the("user/name".parse()?))
         .to_owned()
         .perform(&operator)
         .await;
@@ -4001,7 +4502,7 @@ async fn it_replicates_on_demand_and_caches_locally(s3: S3Address) -> Result<()>
     // Now query replicates tree blocks on demand from the remote
     let results: Vec<_> = bob_branch
         .claims()
-        .select(ArtifactSelector::new().the("user/name".parse()?))
+        .select(Selector::new().the("user/name".parse()?))
         .to_owned()
         .perform(&operator)
         .await?
@@ -4021,7 +4522,7 @@ async fn it_replicates_on_demand_and_caches_locally(s3: S3Address) -> Result<()>
     // Query again with no remote. Data should be cached locally.
     let cached_results: Vec<_> = bob_branch
         .claims()
-        .select(ArtifactSelector::new().the("user/name".parse()?))
+        .select(Selector::new().the("user/name".parse()?))
         .to_owned()
         .perform(&operator)
         .await?
@@ -4081,13 +4582,13 @@ async fn it_delegates_and_pushes_to_s3(s3: S3Address) -> Result<()> {
     // Commit and push
     branch
         .commit(stream::iter(vec![Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "user/name".parse()?,
                 of: "user:delegated".parse()?,
                 is: Value::String("Delegated Push".into()),
                 cause: None,
             },
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -4150,13 +4651,13 @@ async fn it_delegates_pushes_and_pulls_via_s3(s3: S3Address) -> Result<()> {
 
     alice_branch
         .commit(stream::iter(vec![Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "user/name".parse()?,
                 of: "user:alice".parse()?,
                 is: Value::String("Alice Delegated".into()),
                 cause: None,
             },
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         )]))
         .perform(&alice_operator)
         .await?;
@@ -4199,12 +4700,15 @@ async fn it_delegates_pushes_and_pulls_via_s3(s3: S3Address) -> Result<()> {
         .perform(&bob_operator)
         .await?;
 
-    let pull_result = bob_branch.pull().perform(&bob_operator).await?;
+    let pull_result = bob_branch
+        .pull(crate::Download::MinimalRanges)
+        .perform(&bob_operator)
+        .await?;
     assert!(pull_result.is_some(), "pull should find Alice's data");
 
     let results: Vec<_> = bob_branch
         .claims()
-        .select(ArtifactSelector::new().the("user/name".parse()?))
+        .select(Selector::new().the("user/name".parse()?))
         .to_owned()
         .perform(&bob_operator)
         .await?
@@ -4213,7 +4717,7 @@ async fn it_delegates_pushes_and_pulls_via_s3(s3: S3Address) -> Result<()> {
         .into_iter()
         .collect::<Result<Vec<_>, _>>()?;
 
-    assert_eq!(results.len(), 1, "should have Alice's artifact");
+    assert_eq!(results.len(), 1, "should have Alice's fact");
     assert_eq!(results[0].is, Value::String("Alice Delegated".into()));
 
     Ok(())
@@ -4256,13 +4760,13 @@ async fn it_downloads_missing_content_when_the_reach_asks_for_it(s3: S3Address) 
         setup_repo_with_s3_remote(&operator_a, &profile_a, &s3, "reach-a").await?;
 
     let facts = vec![Instruction::Assert(
-        Artifact {
+        Fact {
             the: "document/body".parse()?,
             of: "document:one".parse()?,
             is: Value::String("downloaded on demand".repeat(64)),
             cause: None,
         },
-        dialog_artifacts::Pick::All,
+        dialog_corpus::Pick::All,
     )];
     branch_a
         .commit(stream::iter(facts))
@@ -4435,7 +4939,7 @@ async fn it_downloads_spilled_values_a_pull_never_shipped(s3: S3Address) -> Resu
     let (repo_a, branch_a) =
         setup_repo_with_s3_remote(&operator_a, &profile_a, &s3, "retire-a").await?;
 
-    let retracted = Artifact {
+    let retracted = Fact {
         the: "document/body".parse()?,
         of: "document:retired".parse()?,
         is: Value::String(
@@ -4446,7 +4950,7 @@ async fn it_downloads_spilled_values_a_pull_never_shipped(s3: S3Address) -> Resu
     branch_a
         .commit(stream::iter(vec![Instruction::Assert(
             retracted.clone(),
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         )]))
         .perform(&operator_a)
         .await?;
@@ -4483,16 +4987,19 @@ async fn it_downloads_spilled_values_a_pull_never_shipped(s3: S3Address) -> Resu
         .set_upstream(remote_branch_b)
         .perform(&operator_b)
         .await?;
-    branch_b.pull().perform(&operator_b).await?;
+    branch_b
+        .pull(crate::Download::MinimalRanges)
+        .perform(&operator_b)
+        .await?;
     branch_b
         .commit(stream::iter(vec![Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "note/text".parse()?,
                 of: "note:local".parse()?,
                 is: Value::String("site B novelty".into()),
                 cause: None,
             },
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         )]))
         .perform(&operator_b)
         .await?;
@@ -4503,7 +5010,10 @@ async fn it_downloads_spilled_values_a_pull_never_shipped(s3: S3Address) -> Resu
         .perform(&operator_a)
         .await?;
     assert!(branch_a.push().perform(&operator_a).await?.is_some());
-    branch_b.pull().perform(&operator_b).await?;
+    branch_b
+        .pull(crate::Download::MinimalRanges)
+        .perform(&operator_b)
+        .await?;
     let revision = branch_b.revision().expect("site B has a merged revision");
 
     // The fixture holds: the merged tree still references the spilled
@@ -4726,7 +5236,9 @@ async fn it_never_waits_on_its_own_fetch_when_the_access_head_ran_ahead_of_the_a
 
     let outcome = timeout(
         Duration::from_secs(30),
-        device_branch.pull().perform(&device_operator),
+        device_branch
+            .pull(crate::Download::MinimalRanges)
+            .perform(&device_operator),
     )
     .await;
     assert!(
@@ -4736,7 +5248,7 @@ async fn it_never_waits_on_its_own_fetch_when_the_access_head_ran_ahead_of_the_a
     Ok(())
 }
 
-/// `download().operational()` materializes what reads need and skips the
+/// `download(Download::Operational)` materializes what reads need and skips the
 /// history region.
 ///
 /// Device A commits enough revisions that history is a real share of the
@@ -4765,7 +5277,7 @@ async fn it_downloads_only_the_operational_regions(s3: S3Address) -> Result<()> 
         let facts: Vec<_> = (0..120)
             .map(|i| {
                 Instruction::Assert(
-                    Artifact {
+                    Fact {
                         the: "user/name".parse().expect("valid attribute"),
                         of: format!("user:{round}-{i}").parse().expect("valid entity"),
                         // Wide enough that the fixture fills real leaves: a
@@ -4774,7 +5286,7 @@ async fn it_downloads_only_the_operational_regions(s3: S3Address) -> Result<()> 
                         is: Value::String(format!("resident-{round}-{i}").repeat(24)),
                         cause: None,
                     },
-                    dialog_artifacts::Pick::All,
+                    dialog_corpus::Pick::All,
                 )
             })
             .collect();
@@ -4802,17 +5314,33 @@ async fn it_downloads_only_the_operational_regions(s3: S3Address) -> Result<()> 
 
     let scoped = open_replica("operational-b").await?;
     let scoped_env = Counting::new(operator.clone());
-    assert!(scoped.pull().perform(&scoped_env).await?.is_some());
+    assert!(
+        scoped
+            .pull(crate::Download::MinimalRanges)
+            .perform(&scoped_env)
+            .await?
+            .is_some()
+    );
     scoped_env.reset();
-    scoped.download().operational().perform(&scoped_env).await?;
+    scoped
+        .download(crate::Download::Operational)
+        .perform(&scoped_env)
+        .await?;
     let scoped_reads = scoped_env.block_reads();
 
     // The same revision, materialized in full, for the comparison.
     let full = open_replica("operational-c").await?;
     let full_env = Counting::new(operator.clone());
-    assert!(full.pull().perform(&full_env).await?.is_some());
+    assert!(
+        full.pull(crate::Download::MinimalRanges)
+            .perform(&full_env)
+            .await?
+            .is_some()
+    );
     full_env.reset();
-    full.download().perform(&full_env).await?;
+    full.download(crate::Download::Everything)
+        .perform(&full_env)
+        .await?;
     let full_reads = full_env.block_reads();
 
     assert!(
@@ -4831,7 +5359,7 @@ async fn it_downloads_only_the_operational_regions(s3: S3Address) -> Result<()> 
     scoped_env.reset();
     let facts: Vec<_> = scoped
         .claims()
-        .select(ArtifactSelector::new().the("user/name".parse()?))
+        .select(Selector::new().the("user/name".parse()?))
         .to_owned()
         .perform(&scoped_env)
         .await?
@@ -4864,7 +5392,7 @@ async fn it_downloads_only_the_operational_regions(s3: S3Address) -> Result<()> 
 ///
 /// The scenario is a space join: create a database, put facts in it, add
 /// a remote upstream, and materialize it with
-/// `pull().download().operational()`. Over a remote archive every block
+/// `pull(Download::Operational)`. Over a remote archive every block
 /// that misses locally is a network round trip, so the number that
 /// decides whether this takes a second or a minute is how many of those
 /// round trips are in flight AT ONCE, not how many there are.
@@ -4874,7 +5402,7 @@ async fn it_downloads_only_the_operational_regions(s3: S3Address) -> Result<()> 
 /// the count and would pass while the app crawled. This measures the
 /// overlap, over bare S3: the download's level-order walk
 /// (`traverse`, `buffer_unordered(FETCH_CONCURRENCY)`) drained one item
-/// per poll by `Download::perform`, which is the shape the app runs.
+/// per poll by `DownloadBranch::perform`, which is the shape the app runs.
 #[dialog_common::test]
 async fn it_downloads_one_block_at_a_time(s3: S3Address) -> Result<()> {
     use crate::helpers::Counting;
@@ -4890,13 +5418,13 @@ async fn it_downloads_one_block_at_a_time(s3: S3Address) -> Result<()> {
         let facts: Vec<_> = (0..120)
             .map(|i| {
                 Instruction::Assert(
-                    Artifact {
+                    Fact {
                         the: "user/name".parse().expect("valid attribute"),
                         of: format!("user:{round}-{i}").parse().expect("valid entity"),
                         is: Value::String(format!("resident-{round}-{i}").repeat(24)),
                         cause: None,
                     },
-                    dialog_artifacts::Pick::All,
+                    dialog_corpus::Pick::All,
                 )
             })
             .collect();
@@ -4938,13 +5466,13 @@ async fn it_downloads_one_block_at_a_time(s3: S3Address) -> Result<()> {
     let local: Vec<_> = (0..80)
         .map(|i| {
             Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "post/title".parse().expect("valid attribute"),
                     of: format!("post:{i}").parse().expect("valid entity"),
                     is: Value::String(format!("ours-{i}").repeat(24)),
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             )
         })
         .collect();
@@ -4962,9 +5490,7 @@ async fn it_downloads_one_block_at_a_time(s3: S3Address) -> Result<()> {
     // The call under test, measured from cold.
     let env = Counting::new(operator.clone());
     replica
-        .pull()
-        .download()
-        .operational()
+        .pull(crate::Download::Operational)
         .perform(&env)
         .await?
         .expect("the replica adopts the upstream head");
@@ -4981,7 +5507,7 @@ async fn it_downloads_one_block_at_a_time(s3: S3Address) -> Result<()> {
     );
     assert!(
         peak > 1,
-        "pull().download().operational() fetched {reads} blocks but never \
+        "pull(Download::Operational) fetched {reads} blocks but never \
          had more than {peak} in flight at once, so each cost its own \
          round trip.",
     );
@@ -5031,13 +5557,13 @@ async fn it_downloads_one_block_at_a_time_over_ucan(ucan: UcanS3Address) -> Resu
         let facts: Vec<_> = (0..120)
             .map(|i| {
                 Instruction::Assert(
-                    Artifact {
+                    Fact {
                         the: "user/name".parse().expect("valid attribute"),
                         of: format!("user:{round}-{i}").parse().expect("valid entity"),
                         is: Value::String(format!("resident-{round}-{i}").repeat(24)),
                         cause: None,
                     },
-                    dialog_artifacts::Pick::All,
+                    dialog_corpus::Pick::All,
                 )
             })
             .collect();
@@ -5068,9 +5594,7 @@ async fn it_downloads_one_block_at_a_time_over_ucan(ucan: UcanS3Address) -> Resu
 
     let env = Counting::new(operator.clone());
     replica
-        .pull()
-        .download()
-        .operational()
+        .pull(crate::Download::Operational)
         .perform(&env)
         .await?
         .expect("the replica adopts the upstream head");
@@ -5147,13 +5671,13 @@ async fn it_downloads_serially_while_pushing_concurrently(ucan: UcanS3Address) -
         let facts: Vec<_> = (0..120)
             .map(|i| {
                 Instruction::Assert(
-                    Artifact {
+                    Fact {
                         the: "user/name".parse().expect("valid attribute"),
                         of: format!("user:{round}-{i}").parse().expect("valid entity"),
                         is: Value::String(format!("resident-{round}-{i}").repeat(24)),
                         cause: None,
                     },
-                    dialog_artifacts::Pick::All,
+                    dialog_corpus::Pick::All,
                 )
             })
             .collect();
@@ -5208,13 +5732,13 @@ async fn it_downloads_serially_while_pushing_concurrently(ucan: UcanS3Address) -
     let local: Vec<_> = (0..80)
         .map(|i| {
             Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "post/title".parse().expect("valid attribute"),
                     of: format!("post:{i}").parse().expect("valid entity"),
                     is: Value::String(format!("ours-{i}").repeat(24)),
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             )
         })
         .collect();
@@ -5245,9 +5769,7 @@ async fn it_downloads_serially_while_pushing_concurrently(ucan: UcanS3Address) -
     // not collapse to one request at a time, which is the symptom.
     let pull_env = Counting::new(replica_operator.clone());
     replica
-        .pull()
-        .download()
-        .operational()
+        .pull(crate::Download::Operational)
         .perform(&pull_env)
         .await?
         .expect("the replica adopts the upstream head");
@@ -5352,7 +5874,7 @@ async fn it_downloads_serially_while_pushing_concurrently(ucan: UcanS3Address) -
 /// Modelled on `hydrate_untrusted` in tonk's
 /// `router/account_state.rs`, which is what runs when a device signs in:
 /// point the profile's main branch at the account remote, then
-/// `pull().download().operational()` so the authorization walk afterwards
+/// `pull(Download::Operational)` so the authorization walk afterwards
 /// reads entirely locally.
 ///
 /// The content matters as much as the call. A tonk profile branch is not
@@ -5370,7 +5892,7 @@ async fn it_downloads_serially_while_pushing_concurrently(ucan: UcanS3Address) -
 ///
 /// The call is chained exactly as the app chains it, rather than split
 /// into a pull and a separate download: the ordering is part of what is
-/// under test. `PullDownload` materializes BEFORE advancing the head, so
+/// under test. A pull's download runs BEFORE the head advances, so
 /// the measurement covers the download the login actually performs.
 ///
 /// Peak overlap is the assertion for the usual reason: it is
@@ -5439,13 +5961,13 @@ async fn it_downloads_delegation_blobs_concurrently(ucan: UcanS3Address) -> Resu
     let rows: Vec<_> = (0..480)
         .map(|i| {
             Instruction::Assert(
-                Artifact {
+                Fact {
                     the: "device/link".parse().expect("valid attribute"),
                     of: format!("device:{i}").parse().expect("valid entity"),
                     is: Value::String(format!("device-{i}").repeat(24)),
                     cause: None,
                 },
-                dialog_artifacts::Pick::All,
+                dialog_corpus::Pick::All,
             )
         })
         .collect();
@@ -5500,9 +6022,7 @@ async fn it_downloads_delegation_blobs_concurrently(ucan: UcanS3Address) -> Resu
     // channel specifically, whose reads no differential issues.
     let env = Counting::new(replica_operator.clone());
     replica
-        .pull()
-        .download()
-        .operational()
+        .pull(crate::Download::Operational)
         .perform(&env)
         .await?
         .expect("the replica adopts the upstream head");
@@ -5647,13 +6167,13 @@ async fn it_integrates_a_first_contact_unscreened(s3: S3Address) -> Result<()> {
             .iter()
             .map(|i| {
                 Instruction::Assert(
-                    Artifact {
+                    Fact {
                         the: "user/name".parse().expect("valid attribute"),
                         of: format!("user:{i}").parse().expect("valid entity"),
                         is: Value::String(format!("resident-{i:04}").repeat(16)),
                         cause: None,
                     },
-                    dialog_artifacts::Pick::All,
+                    dialog_corpus::Pick::All,
                 )
             })
             .collect();
@@ -5674,7 +6194,7 @@ async fn it_integrates_a_first_contact_unscreened(s3: S3Address) -> Result<()> {
     ) -> Result<(u64, Vec<&'static str>)> {
         let (operator, _profile, repo) = site(s3, name).await?;
         let branch = repo.branch("main").open().perform(&operator).await?;
-        let facts = |i: usize| Artifact {
+        let facts = |i: usize| Fact {
             the: "post/title".parse().expect("valid attribute"),
             of: format!("post:{i}").parse().expect("valid entity"),
             is: Value::String("ours".into()),
@@ -5683,7 +6203,7 @@ async fn it_integrates_a_first_contact_unscreened(s3: S3Address) -> Result<()> {
         const OWN_FACTS: usize = 16;
         branch
             .commit(stream::iter((0..OWN_FACTS).map(|i| {
-                Instruction::Assert(facts(i), dialog_artifacts::Pick::All)
+                Instruction::Assert(facts(i), dialog_corpus::Pick::All)
             })))
             .perform(&operator)
             .await?;
@@ -5704,13 +6224,17 @@ async fn it_integrates_a_first_contact_unscreened(s3: S3Address) -> Result<()> {
             .await?;
 
         let env = Counting::new(operator.clone());
-        branch.pull().perform(&env).await?.expect("merged");
+        branch
+            .pull(crate::Download::MinimalRanges)
+            .perform(&env)
+            .await?
+            .expect("merged");
         let reads = env.block_reads();
         let run = env.longest_serial_fetch_run_effects();
 
         let adopted: Vec<_> = branch
             .claims()
-            .select(ArtifactSelector::new().the("user/name".parse()?))
+            .select(Selector::new().the("user/name".parse()?))
             .to_owned()
             .perform(&operator)
             .await?
@@ -5721,7 +6245,7 @@ async fn it_integrates_a_first_contact_unscreened(s3: S3Address) -> Result<()> {
         assert_eq!(adopted.len(), 4000, "the upstream's facts are all adopted");
         let ours: Vec<_> = branch
             .claims()
-            .select(ArtifactSelector::new().the("post/title".parse()?))
+            .select(Selector::new().the("post/title".parse()?))
             .to_owned()
             .perform(&operator)
             .await?
@@ -5930,7 +6454,10 @@ async fn it_joins_an_account_from_a_seeded_device(ucan: UcanS3Address) -> Result
         .await?;
 
     let env = Counting::new(device_operator.clone());
-    device.pull().download().perform(&env).await?;
+    device
+        .pull(crate::Download::Everything)
+        .perform(&env)
+        .await?;
 
     let hydrations = env.count("hydrate::Hydrate");
     let remote_peak = env.peak_forks_in_flight();
@@ -6006,13 +6533,13 @@ async fn it_refuses_a_push_whose_cached_upstream_went_stale(s3: S3Address) -> Re
         setup_repo_with_s3_remote(&operator, &profile, &s3, "stale-alice").await?;
     alice_branch
         .commit(stream::iter(vec![Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "user/name".parse()?,
                 of: "user:alice".parse()?,
                 is: Value::String("Alice".into()),
                 cause: None,
             },
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -6032,19 +6559,22 @@ async fn it_refuses_a_push_whose_cached_upstream_went_stale(s3: S3Address) -> Re
         .set_upstream(remote_branch)
         .perform(&operator)
         .await?;
-    bob_branch.pull().perform(&operator).await?;
+    bob_branch
+        .pull(crate::Download::MinimalRanges)
+        .perform(&operator)
+        .await?;
 
     // Alice advances upstream behind Bob's back. Bob's cache now names
     // a revision that is no longer the remote's head.
     alice_branch
         .commit(stream::iter(vec![Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "user/name".parse()?,
                 of: "user:alice-again".parse()?,
                 is: Value::String("Alice again".into()),
                 cause: None,
             },
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -6059,13 +6589,13 @@ async fn it_refuses_a_push_whose_cached_upstream_went_stale(s3: S3Address) -> Re
     // Bob commits on his stale base and pushes.
     bob_branch
         .commit(stream::iter(vec![Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "user/name".parse()?,
                 of: "user:bob".parse()?,
                 is: Value::String("Bob".into()),
                 cause: None,
             },
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -6094,7 +6624,10 @@ async fn it_refuses_a_push_whose_cached_upstream_went_stale(s3: S3Address) -> Re
     );
 
     // Bob converges the ordinary way: pull, then push.
-    bob_branch.pull().perform(&operator).await?;
+    bob_branch
+        .pull(crate::Download::MinimalRanges)
+        .perform(&operator)
+        .await?;
     bob_branch.push().perform(&operator).await?;
 
     Ok(())
@@ -6118,13 +6651,13 @@ async fn it_does_not_take_a_refused_record_for_the_remote_head(s3: S3Address) ->
         setup_repo_with_s3_remote(&operator, &profile, &s3, "record-conflict").await?;
     branch
         .commit(stream::iter(vec![Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "user/name".parse()?,
                 of: "user:alice".parse()?,
                 is: Value::String("Alice".into()),
                 cause: None,
             },
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -6150,13 +6683,13 @@ async fn it_does_not_take_a_refused_record_for_the_remote_head(s3: S3Address) ->
 
     branch
         .commit(stream::iter(vec![Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "user/name".parse()?,
                 of: "user:alice-again".parse()?,
                 is: Value::String("Alice again".into()),
                 cause: None,
             },
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -6205,13 +6738,13 @@ async fn it_refuses_an_assumed_push_whose_upstream_moved(s3: S3Address) -> Resul
         setup_repo_with_s3_remote(&operator, &profile, &s3, "assumed-alice").await?;
     alice_branch
         .commit(stream::iter(vec![Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "user/name".parse()?,
                 of: "user:alice".parse()?,
                 is: Value::String("Alice".into()),
                 cause: None,
             },
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -6229,17 +6762,20 @@ async fn it_refuses_an_assumed_push_whose_upstream_moved(s3: S3Address) -> Resul
         .set_upstream(remote_branch)
         .perform(&operator)
         .await?;
-    bob_branch.pull().perform(&operator).await?;
+    bob_branch
+        .pull(crate::Download::MinimalRanges)
+        .perform(&operator)
+        .await?;
 
     alice_branch
         .commit(stream::iter(vec![Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "user/name".parse()?,
                 of: "user:alice-again".parse()?,
                 is: Value::String("Alice again".into()),
                 cause: None,
             },
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -6253,13 +6789,13 @@ async fn it_refuses_an_assumed_push_whose_upstream_moved(s3: S3Address) -> Resul
 
     bob_branch
         .commit(stream::iter(vec![Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "user/name".parse()?,
                 of: "user:bob".parse()?,
                 is: Value::String("Bob".into()),
                 cause: None,
             },
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -6296,7 +6832,10 @@ async fn it_refuses_an_assumed_push_whose_upstream_moved(s3: S3Address) -> Resul
     );
 
     // And the ordinary route still converges.
-    bob_branch.pull().perform(&operator).await?;
+    bob_branch
+        .pull(crate::Download::MinimalRanges)
+        .perform(&operator)
+        .await?;
     bob_branch.push().perform(&operator).await?;
 
     Ok(())
@@ -6317,13 +6856,13 @@ async fn it_hydrates_a_spill_a_legacy_remote_holds_as_a_block(s3: S3Address) -> 
     let spilled = NodeHash::from(value.to_reference());
     branch_a
         .commit(stream::iter(vec![Instruction::Assert(
-            Artifact {
+            Fact {
                 the: "doc/body".parse()?,
                 of: "doc:1".parse()?,
                 is: value.clone(),
                 cause: None,
             },
-            dialog_artifacts::Pick::All,
+            dialog_corpus::Pick::All,
         )]))
         .perform(&operator_a)
         .await?;
@@ -6410,11 +6949,14 @@ async fn it_hydrates_a_spill_a_legacy_remote_holds_as_a_block(s3: S3Address) -> 
         .set_upstream(remote_branch_b)
         .perform(&operator_b)
         .await?;
-    branch_b.pull().perform(&operator_b).await?;
+    branch_b
+        .pull(crate::Download::MinimalRanges)
+        .perform(&operator_b)
+        .await?;
 
     let rows: Vec<_> = branch_b
         .claims()
-        .select(ArtifactSelector::new().the("doc/body".parse()?))
+        .select(Selector::new().the("doc/body".parse()?))
         .to_owned()
         .perform(&operator_b)
         .await?
@@ -6588,19 +7130,22 @@ async fn remote_reader(
         .set_upstream(origin.branch("main").open().perform(&operator).await?)
         .perform(&operator)
         .await?;
-    reader.pull().perform(&operator).await?;
+    reader
+        .pull(crate::Download::MinimalRanges)
+        .perform(&operator)
+        .await?;
     Ok((operator, reader))
 }
 
 fn note(of: &str, body: &str) -> Instruction {
     Instruction::Assert(
-        Artifact {
+        Fact {
             the: "note/body".parse().expect("attribute parses"),
             of: of.parse().expect("entity parses"),
             is: Value::String(body.into()),
             cause: None,
         },
-        dialog_artifacts::Pick::All,
+        dialog_corpus::Pick::All,
     )
 }
 
@@ -6611,14 +7156,14 @@ async fn notes(
 ) -> Result<Vec<String>> {
     let mut notes = branch
         .claims()
-        .select(ArtifactSelector::new().the("note/body".parse()?))
+        .select(Selector::new().the("note/body".parse()?))
         .to_owned()
         .perform(env)
         .await?
         .collect::<Vec<_>>()
         .await
         .into_iter()
-        .map(|artifact| artifact.map(|artifact| artifact.of.to_string()))
+        .map(|fact| fact.map(|fact| fact.of.to_string()))
         .collect::<Result<Vec<_>, _>>()?;
     notes.sort();
     Ok(notes)
@@ -6635,7 +7180,10 @@ async fn sync(
         match branch.push().perform(operator).await {
             Ok(_) => return Ok(refused),
             Err(crate::PushError::NonFastForward { .. }) => {
-                branch.pull().perform(operator).await?;
+                branch
+                    .pull(crate::Download::MinimalRanges)
+                    .perform(operator)
+                    .await?;
             }
             Err(error) => return Err(error.into()),
         }
@@ -6671,7 +7219,10 @@ async fn it_refuses_a_write_racing_a_replica_sharing_its_key(s3: S3Address) -> R
     // The remote's head at edition N, which both replicas build on.
     a.write("note:base", "base").await?;
     a.branch.push().perform(&a.operator).await?;
-    b.branch.pull().perform(&b.operator).await?;
+    b.branch
+        .pull(crate::Download::MinimalRanges)
+        .perform(&b.operator)
+        .await?;
     assert_eq!(
         a.branch.revision(),
         b.branch.revision(),
@@ -6700,7 +7251,11 @@ async fn it_refuses_a_write_racing_a_replica_sharing_its_key(s3: S3Address) -> R
         ),
         "B's push over A's head of its own version is refused: {pushed:?}"
     );
-    let pulled = b.branch.pull().perform(&b.operator).await;
+    let pulled = b
+        .branch
+        .pull(crate::Download::MinimalRanges)
+        .perform(&b.operator)
+        .await;
     assert!(
         matches!(
             &pulled,
@@ -6740,7 +7295,11 @@ async fn it_refuses_a_write_racing_a_replica_sharing_its_key(s3: S3Address) -> R
     // B's write, made again on a replica of the same key that has not
     // written, builds on A's head and lands.
     let retry = same_key_replica(&seed, &s3).await?;
-    retry.branch.pull().perform(&retry.operator).await?;
+    retry
+        .branch
+        .pull(crate::Download::MinimalRanges)
+        .perform(&retry.operator)
+        .await?;
     assert_eq!(retry.branch.revision().as_ref(), Some(&a_head));
     retry.write("note:b", "from B").await?;
     assert_eq!(
@@ -6748,7 +7307,9 @@ async fn it_refuses_a_write_racing_a_replica_sharing_its_key(s3: S3Address) -> R
         0,
         "the write made again lands"
     );
-    c.pull().perform(&operator_c).await?;
+    c.pull(crate::Download::MinimalRanges)
+        .perform(&operator_c)
+        .await?;
     assert_eq!(
         notes(&c, &operator_c).await?,
         vec![
@@ -6781,7 +7342,10 @@ async fn it_does_not_take_a_rival_head_of_one_version_as_seen(s3: S3Address) -> 
 
     a.write("note:base", "base").await?;
     a.branch.push().perform(&a.operator).await?;
-    b.branch.pull().perform(&b.operator).await?;
+    b.branch
+        .pull(crate::Download::MinimalRanges)
+        .perform(&b.operator)
+        .await?;
     let a_head = a.write("note:a", "from A").await?;
     let b_head = b.write("note:b", "from B").await?;
     assert_eq!(a_head.version(), b_head.version());
@@ -6791,7 +7355,11 @@ async fn it_does_not_take_a_rival_head_of_one_version_as_seen(s3: S3Address) -> 
     a.branch.push().perform(&a.operator).await?;
 
     let tracked = b.branch.tracked();
-    let pulled = b.branch.pull().perform(&b.operator).await;
+    let pulled = b
+        .branch
+        .pull(crate::Download::MinimalRanges)
+        .perform(&b.operator)
+        .await;
     assert!(
         matches!(
             &pulled,

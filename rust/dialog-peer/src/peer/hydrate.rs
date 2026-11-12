@@ -42,7 +42,7 @@ use dialog_repository::{
 };
 
 use super::{Mode, Peer};
-use dialog_artifacts::tree::CorpusNode;
+use dialog_corpus::tree::CorpusNode;
 use dialog_search_tree::DialogSearchTreeError;
 use dialog_storage::provider::storage::Storage;
 

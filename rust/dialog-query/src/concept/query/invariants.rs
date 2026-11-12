@@ -16,7 +16,7 @@ use crate::source::test::TestEnv;
 use crate::the;
 use crate::types::Any;
 use crate::{ConceptDescriptor, ConceptQuery, DeductiveRule, Match, Parameters, Term, Value};
-use dialog_artifacts::Entity;
+use dialog_corpus::Entity;
 use dialog_peer::helpers::{test_repo, test_session_with_peer};
 use dialog_storage::provider::storage::VolatileSpace;
 

@@ -23,9 +23,9 @@ pub use routes::{Routes, Routing};
 mod persist;
 pub(crate) use persist::persist;
 
-use dialog_artifacts::tree::CorpusNode;
 use dialog_capability::Provider;
 use dialog_common::{ConditionalSync, Holds};
+use dialog_corpus::tree::CorpusNode;
 use dialog_effects::archive::{Get, Load};
 use dialog_effects::blob::Load as BlobLoad;
 use dialog_search_tree::nodes;

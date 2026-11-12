@@ -1,3 +1,5 @@
+use dialog_capability::access::{AuthorizationFailure, AuthorizeError};
+use dialog_effects::Rejection;
 use dialog_storage::DialogStorageError;
 use thiserror::Error;
 
@@ -23,6 +25,29 @@ pub enum DialogSearchTreeError {
     /// An error that occurs when interpreting bytes.
     #[error("Failed to interpret bytes: {0}")]
     Encoding(String),
+}
+
+impl DialogSearchTreeError {
+    /// The rejection this error carries, when the storage beneath the tree
+    /// refused the request for a reason that is not an access decision.
+    pub fn rejection(&self) -> Option<&Rejection> {
+        match self {
+            Self::Storage(DialogStorageError::Rejected(rejection)) => Some(rejection),
+            _ => None,
+        }
+    }
+}
+
+/// An access decision the storage beneath the tree made survives the hop
+/// through the tree's error, so a caller can tell a withdrawn authority
+/// from a store that failed.
+impl AuthorizationFailure for DialogSearchTreeError {
+    fn authorization_failure(&self) -> Option<&AuthorizeError> {
+        match self {
+            Self::Storage(error) => error.authorization_failure(),
+            _ => None,
+        }
+    }
 }
 
 impl From<DialogStorageError> for DialogSearchTreeError {

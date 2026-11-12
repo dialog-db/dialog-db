@@ -19,7 +19,7 @@ wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 use crate::helpers::test_repo;
 use crate::{Branch, Transient};
 use anyhow::Result;
-use dialog_artifacts::{ArtifactSelector, Entity, Pick, Relation as ArtifactsRelation, Value};
+use dialog_corpus::{Entity, Pick, Relation as CorpusRelation, Selector, Value};
 use dialog_peer::helpers::test_session_with_peer;
 use dialog_query::attribute::Relation;
 use dialog_query::query::Output as _;
@@ -59,7 +59,7 @@ fn value(json: &Json) -> Value {
 /// A fact as a statement this release writes as stored, under `all`.
 fn statement(the: &str, of: &Entity, is: Value) -> AttributeStatement {
     AttributeStatement {
-        the: Relation::from(the.parse::<ArtifactsRelation>().expect("an attribute")),
+        the: Relation::from(the.parse::<CorpusRelation>().expect("an attribute")),
         of: of.clone(),
         is,
         cause: None,
@@ -151,7 +151,7 @@ async fn stored(
     the: &str,
     of: &Entity,
 ) -> Result<Vec<Value>> {
-    let selector = ArtifactSelector::new().the(the.parse()?).of(of.clone());
+    let selector = Selector::new().the(the.parse()?).of(of.clone());
     let stream = branch.claims().select(selector).perform(operator).await?;
     let mut values: Vec<Value> = stream
         .collect::<Vec<_>>()
@@ -160,7 +160,7 @@ async fn stored(
         .map(|item| item.and_then(|view| view.to_owned()))
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
-        .map(|artifact| artifact.is)
+        .map(|fact| fact.is)
         .collect();
     values.sort_by_key(|value| format!("{value:?}"));
     Ok(values)
@@ -267,15 +267,26 @@ async fn concurrent_upgrades_converge() -> Result<()> {
     install(&a, &operator, installed_by_main("salary_from_bonus")).await?;
     commit(&a, &operator, unsigned("org/bonus", &alice, 500, Pick::All)).await?;
     let b = repo.branch("b").open().perform(&operator).await?;
-    b.pull().from(&a).perform(&operator).await?;
+    b.pull(crate::Download::MinimalRanges)
+        .from(&a)
+        .perform(&operator)
+        .await?;
     b.refresh(&operator).await?;
 
     upgrade(&a, &operator).await?;
     upgrade(&b, &operator).await?;
     let mut quiesced = false;
     for _ in 0..4 {
-        let pulled_a = a.pull().from(&b).perform(&operator).await?;
-        let pulled_b = b.pull().from(&a).perform(&operator).await?;
+        let pulled_a = a
+            .pull(crate::Download::MinimalRanges)
+            .from(&b)
+            .perform(&operator)
+            .await?;
+        let pulled_b = b
+            .pull(crate::Download::MinimalRanges)
+            .from(&a)
+            .perform(&operator)
+            .await?;
         if pulled_a.is_none() && pulled_b.is_none() {
             quiesced = true;
             break;
@@ -615,7 +626,7 @@ fn the_previous_release_identities_are_reproduced_for_migration() -> Result<()> 
 /// path, as on the commit path.
 #[dialog_common::test]
 async fn rule_facts_under_an_entity_that_is_not_their_address_derive_nothing() -> Result<()> {
-    use dialog_artifacts::{Change, Changes};
+    use dialog_corpus::{Change, Changes};
     use dialog_query::Statement as _;
 
     let (operator, profile) = test_session_with_peer().await;

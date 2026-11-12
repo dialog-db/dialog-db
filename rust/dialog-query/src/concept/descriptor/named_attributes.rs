@@ -1,8 +1,8 @@
 use crate::Cardinality;
-use crate::artifact::Type;
 use crate::attribute::AttributeDescriptor;
 use crate::attribute::The;
 use crate::concept::descriptor::ConceptDescriptor;
+use crate::corpus::Type;
 use crate::error::TypeError;
 use crate::memo::Memo;
 use serde::de::Error as _;

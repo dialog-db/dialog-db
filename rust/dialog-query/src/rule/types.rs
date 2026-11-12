@@ -26,7 +26,7 @@ use crate::FormulaQuery;
 use crate::Premise;
 use crate::Proposition;
 use crate::Term;
-use crate::artifact::Type as ValueType;
+use crate::corpus::Type as ValueType;
 use crate::error::InferenceError;
 use crate::formula::number::Numeric;
 use crate::type_system::Primitive;
@@ -563,9 +563,9 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
-    use crate::artifact::{Entity, Type as ValueType};
     use crate::attribute::Relation;
     use crate::attribute::query::AttributeQuery;
+    use crate::corpus::{Entity, Type as ValueType};
     use crate::error::TypeError;
     use crate::formula::Formula;
     use crate::formula::math::Sum;

@@ -196,13 +196,50 @@ let
 
   # The wasm test runner. A native workspace binary that nextest invokes once
   # per test via the wasm32 target runner; it keeps one headless Chrome alive
-  # and hands each test a fresh origin. Built from the workspace source so it
-  # tracks the same wasm-bindgen pin as the crates under test.
-  wbg-pool = buildCrate {
+  # and hands each test a fresh origin. Built from the workspace manifests so
+  # it tracks the same wasm-bindgen pin as the crates under test.
+  #
+  # It is in the dev shell, so every CI job waits for it. Built from the
+  # workspace source it was rebuilt, with the dependencies of the whole
+  # workspace under it, whenever any crate changed: several minutes at the
+  # start of every job. Its source here is its own crate and the manifests
+  # of the others (their sources are the stubs crane builds dependencies
+  # against), so it is rebuilt when it, a manifest or the lock file changes
+  # and is otherwise fetched from the binary cache.
+  wbgPoolAttributes = commonAttributes // {
     pname = "wbg-pool";
+    version = "0.1.0";
     cargoExtraArgs = "--locked -p wbg-pool";
-    doCheck = false;
+    # Named here because the source below is a derivation: read from it,
+    # the lock file would have to be built before the flake evaluates.
+    cargoVendorDir = craneLib.vendorCargoDeps { src = rustSource; };
   };
+
+  wbgPoolSource = craneLib.mkDummySrc {
+    src = rustSource;
+    extraDummyScript = ''
+      rm -rf $out/rust/wbg-pool
+      cp -r ${
+        filter {
+          root = workspaceRoot + "/rust/wbg-pool";
+          exclude = [ "fixtures" ];
+        }
+      } $out/rust/wbg-pool
+    '';
+  };
+
+  wbg-pool = craneLib.buildPackage (
+    wbgPoolAttributes
+    // {
+      src = wbgPoolSource;
+      cargoArtifacts = craneLib.buildDepsOnly (
+        wbgPoolAttributes
+        // {
+          pname = "wbg-pool-deps";
+        }
+      );
+    }
+  );
 
   buildWasmCrate =
     attributes:
@@ -236,6 +273,29 @@ let
       // attributes
     );
 
+  # How the test archives are built, where it differs from the workspace's
+  # profiles. Each setting costs build time and changes no test's result:
+  #
+  # - No incremental state: a sandbox build has none to reuse.
+  # - No debug info in debug builds. Every test binary links the whole
+  #   dependency graph, and with debug info the target directory of one
+  #   debug configuration is over 27GB against 2.7GB without, and its
+  #   archive 2.3GB. A panic still names its file and line.
+  # - Release builds without link-time optimization, in 16 codegen units.
+  #   The release profile (thin LTO, one unit) optimizes the whole graph
+  #   again for each of the 65 test binaries. What the release
+  #   configurations are for, the tests under opt-level 3 with debug
+  #   assertions and overflow checks off, is unchanged.
+  #
+  # The cross-target tests build their wasm side with cargo when they run
+  # (see the `test:*` commands in nix/menu.nix), under the same settings.
+  testProfile = {
+    CARGO_INCREMENTAL = "0";
+    CARGO_PROFILE_DEV_DEBUG = "0";
+    CARGO_PROFILE_RELEASE_LTO = "off";
+    CARGO_PROFILE_RELEASE_CODEGEN_UNITS = "16";
+  };
+
   # Build cargo-nextest test archive
   buildTestArchive =
     {
@@ -246,28 +306,47 @@ let
     let
       isWasm = target == "wasm32-unknown-unknown";
 
-      targetAttributes = if isWasm then wasmAttributes else commonAttributes;
+      targetAttributes =
+        (if isWasm then wasmAttributes else commonAttributes)
+        // testProfile
+        // {
+          nativeBuildInputs = nativeBuildInputs ++ [ pkgs.cargo-nextest ];
+        };
 
-      targetArtifacts = if isWasm then wasmArtifacts else nativeArtifacts;
+      archive = file: ''
+        cargo nextest archive \
+          ${args} \
+          --archive-file ${file}
+      '';
 
-      # wbg-pool is a native host binary and dialog-baseline is a native-only
-      # dev measurement crate (its examples pull native-only symbols); neither
-      # builds for wasm32, so keep them out of the wasm test archive.
-      excludeArgs =
-        if isWasm then "--workspace --exclude wbg-pool --exclude dialog-baseline" else "";
+      # The dependencies as this archive builds them: the same command,
+      # so the same profile, features, target and dev-dependencies, run
+      # over the stubs crane puts in place of the workspace's sources.
+      # The archive below then compiles the workspace's crates only.
+      #
+      # The shared dependency builds (`nativeArtifacts`, `wasmArtifacts`)
+      # do not serve here. They build the release profile without the
+      # test features or the dev-dependencies, which no archive asks for,
+      # so each archive rebuilt every dependency on top of them.
+      #
+      # This derivation depends on the manifests and the lock file, not
+      # on the sources, so the binary cache serves it to every pull
+      # request that leaves those alone.
+      dependencies = craneLib.buildDepsOnly (
+        targetAttributes
+        // {
+          pname = "tests-${name}";
+          buildPhaseCargoCommand = archive "$TMPDIR/tests-${name}-deps.tar.zst";
+        }
+      );
     in
     craneLib.mkCargoDerivation (
       targetAttributes
       // {
         pname = "tests-${name}";
-        cargoArtifacts = targetArtifacts;
+        cargoArtifacts = dependencies;
 
-        buildPhaseCargoCommand = ''
-          cargo nextest archive \
-            ${excludeArgs} \
-            ${args} \
-            --archive-file ./tests-${name}.tar.zst
-        '';
+        buildPhaseCargoCommand = archive "./tests-${name}.tar.zst";
 
         installPhaseCommand = ''
           mkdir -p $out
@@ -275,7 +354,6 @@ let
         '';
 
         doInstallCargoArtifacts = false;
-        nativeBuildInputs = (targetAttributes.nativeBuildInputs or [ ]) ++ [ pkgs.cargo-nextest ];
       }
     );
 
@@ -359,5 +437,6 @@ in
     wasm-bindgen-cli
     wbg-pool
     wasmCcEnv
+    testProfile
     ;
 }
