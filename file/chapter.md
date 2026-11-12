@@ -293,7 +293,7 @@ Whether this works is tested, not argued. The tests record every write the archi
 
 <div class="aside caveat">
 
-- **Native only.** The crate compiles to nothing on the web. Its tests run on Linux, macOS and Windows. Whether the same file can live in a browser's file system, served by one worker a tab hosts, is being measured in [`research/web-spike`](https://github.com/dialog-db/dialog-db/tree/main/research/web-spike), not built.
+- **Native only.** The crate compiles to nothing on the web. Its tests run on Linux, macOS and Windows. Whether the same file can live in a browser's file system, served by one worker a tab hosts, is being measured in [`research/single-file-format/browser`](https://github.com/dialog-db/dialog-db/tree/main/research/single-file-format/browser), not built.
 - **Opt-in.** Nothing switches a replica to it. A replica the file system store wrote can be moved in with the `archive-file` migration of the `dialog-migration` crate.
 - **Nothing is collected.** A node no head reaches any more, such as a losing try's, stays in the file.
 - **The format is still changing.** A file written now may not open in a later release.
