@@ -2618,7 +2618,7 @@ mod kept_hash_tests {
 
         let again = seal(entries_of(0..8))?;
         assert_eq!(again.hash(), held.hash());
-        crate::nodes::Write::new(crate::helpers::test_catalog(), vec![again])
+        crate::nodes::Write::new(crate::helpers::test_subject(), vec![again])
             .through_blocks(&blocks, Some(&cache))
             .await?;
 

@@ -588,7 +588,7 @@ where
 }
 
 // Node reads for the scans and resolver premises, through the same
-// counting store, in the branch's catalog.
+// counting store, of the branch's subject.
 #[dialog_capability::provider]
 impl<Env> Provider<nodes::Read<CorpusNode>> for JoinEnv<'_, Env>
 where
@@ -600,7 +600,7 @@ where
     ) -> Result<Option<CorpusNode>, DialogSearchTreeError> {
         let counting = CountingStore::new(self.operator, self.journal.clone());
         let mut line = read;
-        line.catalog = self.branch.archive().index();
+        line.subject = self.branch.subject();
         line.perform(&counting).await
     }
 }
@@ -613,7 +613,7 @@ where
     async fn execute(&self, preload: nodes::Preload<CorpusNode>) {
         let counting = CountingStore::new(self.operator, self.journal.clone());
         let mut line = preload;
-        line.catalog = self.branch.archive().index();
+        line.subject = self.branch.subject();
         line.perform(&counting).await
     }
 }
@@ -2174,12 +2174,8 @@ mod test {
             return Ok(());
         };
         let root = *revision.tree.hash();
-        // Any constrained selector works here; the catalog it names is the
-        // branch's archive index, which is where the tree nodes live.
-        let the: CorpusRelation = "se.post/title".parse()?;
-        let select = branch.claims().select(Selector::new().the(the)).to_owned();
         let store = env.operator();
-        let stats = distribution::capture(&select.catalog(), &root, store).await?;
+        let stats = distribution::capture(&branch.subject(), &root, store).await?;
         distribution::report(&format!("se-replay-{limit}"), &stats);
         Ok(())
     }

@@ -872,16 +872,16 @@ where
         // branch tracks. A remote that failed to load fails only a read
         // that misses, with the load failure as its cause.
         let archive = ArchiveScope::new(self.branch.subject());
-        let catalog = archive.index();
+        let subject = self.branch.subject();
         let store = erased(env);
         // Keep the raw backend to fetch spilled value blocks by reference.
         let raw_store = store;
         let storage = store;
         let index_at = |hash: Option<Blake3Hash>| match hash {
-            Some(hash) => Index::at(catalog.clone(), NodeHash::from(hash)),
+            Some(hash) => Index::at(subject.clone(), NodeHash::from(hash)),
             // An unborn side of the diff has no tree; the differential
             // runs against the empty index.
-            None => Index::empty_in(catalog.clone()),
+            None => Index::empty_in(subject.clone()),
         };
         let previous = index_at(pinned);
         let next = index_at(target);

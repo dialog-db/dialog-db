@@ -32,8 +32,8 @@ use rkyv::{
 
 use crate::nodes::{Preload, Read};
 use crate::{
-    Accessor, ArchivedIndex, DialogSearchTreeError, Distribution, Key, NodeBody, PersistentNode,
-    PersistentTree, Value,
+    ArchivedIndex, DialogSearchTreeError, Distribution, Key, NodeBody, PersistentNode,
+    PersistentTree, Reading, Value,
 };
 
 /// The keys a node is routed: `lower` and above, below `upper`, which is
@@ -109,8 +109,11 @@ enum Standing {
 /// The tree a replica holds, read from the replica alone and only as far
 /// as it has been asked about.
 struct Held<'a, Key, Value, Env: ?Sized> {
-    /// Reads that see only what the replica holds.
-    local: Accessor<'a, Key, Value, Env>,
+    /// The environment the held tree is read through.
+    env: &'a Env,
+    /// How it is read: seeing only what the replica holds.
+    local: Reading,
+    nodes_of: std::marker::PhantomData<fn() -> PersistentNode<Key, Value>>,
     /// The deepest nodes read so far, in key order: together they are
     /// routed every key.
     nodes: Vec<(Span, Blake3Hash, Standing)>,
@@ -147,7 +150,9 @@ where
                 Standing::Leaf => return Ok(true),
                 Standing::Absent => at += 1,
                 Standing::Unread => {
-                    let Some(read) = self.local.load_node(hash).await? else {
+                    let Some(read): Option<PersistentNode<Key, Value>> =
+                        self.local.read(hash).perform(self.env).await?
+                    else {
                         self.nodes[at].2 = Standing::Absent;
                         at += 1;
                         continue;
@@ -222,10 +227,12 @@ where
         if root == held_root {
             return Ok(0);
         }
-        let reader = self.accessor(env);
-        let local = reader.local();
+        let reader = self.reading();
+        let local = reader.clone().locally();
         let mut held = Held {
-            local: held.accessor(env).local(),
+            env,
+            local: held.reading().clone().locally(),
+            nodes_of: std::marker::PhantomData,
             nodes: vec![(Span::all(), held_root.clone(), Standing::Unread)],
             linked: HashSet::from([held_root.clone()]),
         };
@@ -238,12 +245,20 @@ where
                 // tree down to this span, which is what lists a node the
                 // two trees share.
                 if held.holds_within(&span).await? && !held.linked.contains(&hash) {
-                    let absent = local.load_node(&hash).await?.is_none();
+                    let absent = local
+                        .read::<PersistentNode<Key, Value>>(&hash)
+                        .perform(env)
+                        .await?
+                        .is_none();
                     wanted.push((hash, span, absent));
                 }
             }
-            let nodes =
-                try_join_all(wanted.iter().map(|(hash, _, _)| reader.get_node(hash))).await?;
+            let nodes = try_join_all(
+                wanted
+                    .iter()
+                    .map(|(hash, _, _)| reader.node::<PersistentNode<Key, Value>, _>(env, hash)),
+            )
+            .await?;
             for (node, (_, span, absent)) in nodes.iter().zip(&wanted) {
                 fetched += usize::from(*absent);
                 if let NodeBody::Index(index) = node.body() {
@@ -377,7 +392,7 @@ mod tests {
     async fn it_brings_along_what_the_replica_read_and_nothing_else() -> Result<()> {
         let origin = Blocks::new();
         let base = write(
-            Tree::empty_in(crate::helpers::test_catalog()),
+            Tree::empty_in(crate::helpers::test_subject()),
             0..2000,
             1,
             &origin,
@@ -437,7 +452,7 @@ mod tests {
     async fn it_keeps_a_whole_replica_whole() -> Result<()> {
         let origin = Blocks::new();
         let base = write(
-            Tree::empty_in(crate::helpers::test_catalog()),
+            Tree::empty_in(crate::helpers::test_subject()),
             (1000..3000).filter(|index| index % 2 == 0),
             1,
             &origin,
@@ -476,7 +491,7 @@ mod tests {
     async fn it_fetches_nothing_for_a_replica_that_holds_nothing() -> Result<()> {
         let origin = Blocks::new();
         let base = write(
-            Tree::empty_in(crate::helpers::test_catalog()),
+            Tree::empty_in(crate::helpers::test_subject()),
             0..500,
             1,
             &origin,
@@ -497,7 +512,7 @@ mod tests {
     async fn it_fails_on_a_node_it_cannot_reach() -> Result<()> {
         let origin = Blocks::new();
         let base = write(
-            Tree::empty_in(crate::helpers::test_catalog()),
+            Tree::empty_in(crate::helpers::test_subject()),
             0..500,
             1,
             &origin,

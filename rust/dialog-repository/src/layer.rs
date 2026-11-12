@@ -407,7 +407,7 @@ mod tests {
 
         let store = Blocks::new();
         let mut delta = ArchiveDelta::zero();
-        let mut tree = Corpus::empty_with_manifest(store.catalog().clone(), manifest);
+        let mut tree = Corpus::empty_with_manifest(store.subject(), manifest);
         tree.apply(
             &store,
             &mut delta,

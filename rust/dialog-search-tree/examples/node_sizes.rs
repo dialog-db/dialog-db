@@ -41,7 +41,7 @@ async fn build<D: Distribution>(size: usize) -> (PersistentTree<[u8; 16], Vec<u8
     let values = data.random_buffers::<32>(size);
     let storage = Blocks::new();
     let mut tree = PersistentTree::<[u8; 16], Vec<u8>, D>::empty_in(
-        dialog_search_tree::helpers::test_catalog(),
+        dialog_search_tree::helpers::test_subject(),
     );
     let mut delta = Delta::zero();
     for (k, v) in keys.iter().zip(values.iter()) {

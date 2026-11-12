@@ -19,7 +19,7 @@ fn bench_delete(c: &mut Criterion) {
                     let blocks = Blocks::new();
                     let storage = dialog_search_tree::helpers::Holding::new(&blocks);
                     let mut tree = PersistentTree::<[u8; 16], Vec<u8>>::empty_in(
-                        dialog_search_tree::helpers::test_catalog(),
+                        dialog_search_tree::helpers::test_subject(),
                     );
                     let mut delta = Delta::zero();
 

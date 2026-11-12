@@ -629,7 +629,7 @@ where
         // blocks can hydrate from, so the failure surfaces — with its
         // cause — on the first read that needed it, while a commit every
         // block of which is local proceeds untouched.
-        let catalog = source.catalog();
+        let subject = source.subject();
         let store = erased(env);
 
         // Discover who we are up front: the revision is attributed to the
@@ -680,7 +680,7 @@ where
         let mut tree = match (self.rebuild, base_revision.as_ref()) {
             (Some(rebuilt), _) => rebuilt,
             (None, Some(base)) => {
-                let tree = Index::at(catalog.clone(), NodeHash::from(*base.tree.hash()));
+                let tree = Index::at(subject.clone(), NodeHash::from(*base.tree.hash()));
                 // A tree written the way an earlier release laid values out
                 // is read, never extended: it is rewritten first (see
                 // `Branch::migrate_storage`), and every write after that
@@ -698,7 +698,7 @@ where
                 }
                 tree
             }
-            (None, None) => Index::empty_in(catalog.clone()),
+            (None, None) => Index::empty_in(subject.clone()),
         };
 
         // Drain the change stream into the tree. EAV/AEV/VAE writes,
@@ -811,7 +811,7 @@ where
             if !changed && *tree.root().as_bytes() == *revision.tree.hash() {
                 return Ok(Outcome::Unchanged(revision));
             }
-            persist(&catalog, &mut delta, env).await?;
+            persist(&subject, &mut delta, env).await?;
             revision.tree = TreeReference::from(*tree.root().as_bytes());
             revision.signature = Attest::new(revision.payload()).perform(env).await?;
             return Ok(Outcome::Minted(Box::new(Minted {
@@ -834,7 +834,7 @@ where
         let parent = base_revision.as_ref().map(Revision::version);
         let skips = match base_revision.as_ref() {
             Some(base) => {
-                let history = TreeHistory::from_root(catalog.clone(), base.tree.hash(), store)
+                let history = TreeHistory::from_root(subject.clone(), base.tree.hash(), store)
                     .with_record_cache(source.records());
                 extend_skips(&history, &base.version()).await?
             }
@@ -858,13 +858,13 @@ where
             base_revision.as_ref(),
             version,
             &source.contexts(),
-            &catalog,
+            &subject,
             &store,
             || {
                 let base = base_revision
                     .as_ref()
                     .expect("only a commit with a parent walks its history");
-                TreeHistory::from_root(catalog.clone(), base.tree.hash(), store)
+                TreeHistory::from_root(subject.clone(), base.tree.hash(), store)
                     .with_record_cache(source.records())
             },
         )
@@ -921,7 +921,7 @@ where
         // reference-counted, so nothing is copied on the way in, and
         // providers with native batching persist it in a single round trip
         // (one IndexedDB transaction).
-        persist(&catalog, &mut delta, env).await?;
+        persist(&subject, &mut delta, env).await?;
 
         revision.tree = TreeReference::from(*tree.root().as_bytes());
         revision.publish_region(count);
@@ -1537,10 +1537,7 @@ mod history_tests {
         use dialog_corpus::tree::CorpusExt as _;
 
         let store = &operator;
-        let tree = Index::at(
-            branch.archive().index(),
-            NodeHash::from(*revision.tree.hash()),
-        );
+        let tree = Index::at(branch.subject(), NodeHash::from(*revision.tree.hash()));
         let data = tree
             .select_data(store, &"post:1".parse()?, &"post/title".parse()?)
             .await?;

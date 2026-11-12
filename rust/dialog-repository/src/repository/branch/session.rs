@@ -1142,11 +1142,11 @@ impl<'a> Provider<ArchiveLoad> for QueryEnv<'a> {
     }
 }
 
-// A node read anywhere the query reads is tried line by line, each line's
-// catalog in turn, through the env: the env answers from the node cache it
+// A node read anywhere the query reads (the wildcard subject) is tried line
+// by line, each line's subject in turn, through the env: the env answers from the node cache it
 // holds for the line's repository, its store, or a hydration, so a resolver
 // join that re-resolves the same reference once per outer row reads the
-// node once. A read of one catalog's node is that catalog's.
+// node once. A read of one subject's node is that subject's.
 /// A node is its hash, whichever line holds it, so the lines the env
 /// answers at once are taken first and the rest waited on only when none
 /// of those had it.
@@ -1155,13 +1155,13 @@ impl<'a> Provider<nodes::Read<CorpusNode>> for QueryEnv<'a> {
         &self,
         read: nodes::Read<CorpusNode>,
     ) -> Resume<'_, Result<Option<CorpusNode>, DialogSearchTreeError>> {
-        if !anywhere(read.catalog.subject()) {
+        if !anywhere(read.subject.did()) {
             return read.perform(self.env);
         }
         let mut pending = Vec::new();
         for source in &self.sources {
             let mut line = read.clone();
-            line.catalog = source.as_view().catalog();
+            line.subject = source.as_view().subject();
             match line.perform(self.env).into_now() {
                 Ok(Ok(Some(node))) => return Resume::now(Ok(Some(node))),
                 Ok(Ok(None)) => {}
@@ -1185,13 +1185,13 @@ impl<'a> Provider<nodes::Read<CorpusNode>> for QueryEnv<'a> {
 
 impl<'a> Provider<nodes::Preload<CorpusNode>> for QueryEnv<'a> {
     fn execute(&self, preload: nodes::Preload<CorpusNode>) -> Resume<'_, ()> {
-        if !anywhere(preload.catalog.subject()) {
+        if !anywhere(preload.subject.did()) {
             return preload.perform(self.env);
         }
         let mut pending = Vec::new();
         for source in &self.sources {
             let mut line = preload.clone();
-            line.catalog = source.as_view().catalog();
+            line.subject = source.as_view().subject();
             if let Err(preloading) = line.perform(self.env).into_now() {
                 pending.push(preloading);
             }

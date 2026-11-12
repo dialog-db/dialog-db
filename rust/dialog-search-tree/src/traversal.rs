@@ -123,7 +123,12 @@ where
             + Provider<Preload<PersistentNode<Key, Value>>>
             + ConditionalSync,
     {
-        traverse::<Key, Value, Env>(self.stored_root().cloned(), self.accessor(storage), None)
+        traverse::<Key, Value, Env>(
+            self.stored_root().cloned(),
+            storage,
+            self.reading().clone(),
+            None,
+        )
     }
 
     fn traverse_available_within<'a, Env>(
@@ -138,7 +143,8 @@ where
     {
         traverse::<Key, Value, Env>(
             self.stored_root().cloned(),
-            self.accessor(storage),
+            storage,
+            self.reading().clone(),
             Some(scope),
         )
     }
@@ -170,7 +176,8 @@ fn span_intersects(
 /// every child.
 fn traverse<'a, Key, Value, Env>(
     root: Option<Blake3Hash>,
-    accessor: crate::Accessor<'a, Key, Value, Env>,
+    env: &'a Env,
+    reading: crate::Reading,
     scope: Option<&'a [core::ops::RangeInclusive<Vec<u8>>]>,
 ) -> impl Stream<Item = Result<Visit<Key, Value>, DialogSearchTreeError>> + 'a
 where
@@ -215,14 +222,14 @@ where
             let mut reads = FuturesUnordered::new();
             loop {
                 while let Some(hash) = queue.pop_front() {
-                    let accessor = &accessor;
+                    let reading = &reading;
                     reads.push(async move {
                         // Read through the node cache, so a node it holds
                         // is answered from memory. A load verifies the bytes
                         // against the hash it was asked for, so `None`
                         // here is genuinely "not stored" -- a corrupt
                         // block raises instead, and still fails the walk.
-                        let node = accessor.load_node(&hash).await;
+                        let node = reading.read(&hash).perform(env).await;
                         (hash, node)
                     });
                 }
@@ -321,7 +328,7 @@ mod tests {
         tags: &[u8],
         per_tag: u32,
     ) -> Result<PersistentTree<[u8; 5], Vec<u8>>> {
-        let mut tree = PersistentTree::<[u8; 5], Vec<u8>>::empty_in(crate::helpers::test_catalog());
+        let mut tree = PersistentTree::<[u8; 5], Vec<u8>>::empty_in(crate::helpers::test_subject());
         let mut delta = Delta::zero();
         for tag in tags {
             for i in 0..per_tag {
@@ -347,7 +354,7 @@ mod tests {
         tags: &[u8],
         per_tag: u32,
     ) -> Result<PersistentTree<[u8; 5], Vec<u8>>> {
-        let mut tree = PersistentTree::<[u8; 5], Vec<u8>>::empty_in(crate::helpers::test_catalog());
+        let mut tree = PersistentTree::<[u8; 5], Vec<u8>>::empty_in(crate::helpers::test_subject());
         let mut delta = Delta::zero();
         for tag in tags {
             for i in 0..per_tag {
@@ -380,7 +387,7 @@ mod tests {
             ..crate::Manifest::default()
         };
         let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_with_manifest(
-            crate::helpers::test_catalog(),
+            crate::helpers::test_subject(),
             manifest,
         );
         let mut delta = Delta::zero();
@@ -528,7 +535,7 @@ mod tests {
         for (_, node) in delta.flush() {
             storage.store(node.buffer().clone());
         }
-        let tree = PersistentTree::<[u8; 5], Vec<u8>>::at(crate::helpers::test_catalog(), root);
+        let tree = PersistentTree::<[u8; 5], Vec<u8>>::at(crate::helpers::test_subject(), root);
 
         // Fixture check: the ops must live as novelty, or this pins nothing.
         let buffered = |tree: &PersistentTree<[u8; 5], Vec<u8>>| {

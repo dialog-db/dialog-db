@@ -31,7 +31,7 @@ use dialog_common::Holds;
 use dialog_corpus::tree::{CorpusCache, CorpusNode};
 use dialog_effects::MethodExt as _;
 use dialog_effects::archive::Load;
-use dialog_effects::archive::prelude::CatalogScope;
+use dialog_effects::archive::prelude::{ArchiveScope, CatalogScope};
 use dialog_search_tree::DialogSearchTreeError;
 use dialog_search_tree::nodes;
 use dialog_search_tree::nodes::decode as decode_node;
@@ -131,7 +131,7 @@ where
     hydrate_through(env, catalog, digest, HydrationLane::Block, priority).await
 }
 
-/// The node `read` names: from the node cache `env` holds for the catalog's
+/// The node `read` names: from the node cache `env` holds for the read's
 /// subject, else from `store`, else hydrated through `env`'s [`Hydrate`]
 /// from the routes registered for the subject, as [`load_or_hydrate`] does
 /// for a block, and decoded; what was read is kept in the cache.
@@ -153,7 +153,7 @@ where
     Env: Provider<Hydrate> + Holds + ConditionalSync + ?Sized,
     Store: Provider<nodes::Read<CorpusNode>> + ConditionalSync + ?Sized,
 {
-    let cache = CorpusCache::of(env, read.catalog.subject());
+    let cache = CorpusCache::of(env, read.subject.did());
     // A hit answers at once, before any of the hydrating machinery is set
     // up: nothing is allocated for it.
     if let Some(cache) = &cache
@@ -169,9 +169,11 @@ where
             if read.local {
                 return Ok(None);
             }
+            // The node is fetched as the block it is kept as: the load the
+            // translation layer would perform names the catalog.
             let block = hydrate_through(
                 env,
-                read.catalog.clone(),
+                read.load().catalog,
                 name.clone(),
                 HydrationLane::Block,
                 read.priority,
@@ -200,7 +202,7 @@ where
     Env: Provider<Hydrate> + Holds + ConditionalSync + ?Sized,
     Store: Provider<nodes::Read<CorpusNode>> + ConditionalSync + ?Sized,
 {
-    if CorpusCache::of(env, preload.catalog.subject()).is_none() {
+    if CorpusCache::of(env, preload.subject.did()).is_none() {
         return Resume::now(());
     }
     match read_node_or_hydrate(env, store, preload.read()).into_now() {
@@ -212,7 +214,7 @@ where
 }
 
 /// Writes the nodes `write` carries through `store`, then keeps them in the
-/// node cache `env` holds for the catalog's subject, so the next edit opens
+/// node cache `env` holds for the write's subject, so the next edit opens
 /// them without reading them back. A write that fails keeps nothing.
 pub fn write_nodes<'a, Env, Store>(
     env: &'a Env,
@@ -223,7 +225,7 @@ where
     Env: Holds + ?Sized,
     Store: Provider<nodes::Write<CorpusNode>> + ConditionalSync + ?Sized,
 {
-    let cache = CorpusCache::of(env, write.catalog.subject());
+    let cache = CorpusCache::of(env, write.subject.did());
     let nodes = write.nodes.clone();
     write.perform(store).map(move |written| {
         written?;
@@ -468,7 +470,7 @@ where
     // The import verifies the bytes against the digest; a failed write-back
     // is not a failed read (the reader verifies what it loads), only a
     // future remote round trip, so it is traced rather than raised.
-    if let Err(error) = write_blob(env, &catalog, &digest, &bytes).await {
+    if let Err(error) = write_blob(env, &catalog.archive(), &digest, &bytes).await {
         tracing::debug!(
             target: "dialog::sync::hydrate",
             blob = %digest,
@@ -483,15 +485,14 @@ where
 /// verified against it.
 pub(crate) async fn write_blob<Env>(
     env: &Env,
-    catalog: &CatalogScope,
+    archive: &ArchiveScope,
     digest: &Blake3Hash,
     bytes: &[u8],
 ) -> Result<(), BlobError>
 where
     Env: Provider<BlobImport> + ConditionalSync + ?Sized + 'static,
 {
-    let sink = catalog
-        .archive()
+    let sink = archive
         .blob()
         .import(digest.clone(), bytes.len() as u64)
         .perform(env)
@@ -636,7 +637,7 @@ mod tests {
             .perform(&env)
             .await?;
         assert_eq!(demand, None);
-        let speculative = Index::at(branch.archive().index(), absent.clone())
+        let speculative = Index::at(branch.subject(), absent.clone())
             .ranked(Priority::Maybe)
             .manifest(&env)
             .await;

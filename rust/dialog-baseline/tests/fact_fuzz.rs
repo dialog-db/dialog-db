@@ -262,7 +262,7 @@ async fn it_converges_across_canonicalization_points_with_supersession_and_spill
         }
 
         let tree = Corpus::at(
-            repo.catalog(),
+            repo.branch().subject(),
             NodeHash::from(*reference.revision().tree.hash()),
         );
         let divergences = tree.canonical_divergences(repo.operator()).await?;

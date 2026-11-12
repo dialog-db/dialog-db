@@ -85,9 +85,9 @@ where
             return Err(lost.into());
         };
         let store = erased(env);
-        let catalog = branch.archive().index();
+        let subject = branch.subject();
         let Some(context) =
-            published_context(&theirs, &branch.contexts(), &catalog, &store).await?
+            published_context(&theirs, &branch.contexts(), &subject, &store).await?
         else {
             // A head minted before heads carried their context: its
             // ancestry is not known without a walk, so it is not merged.
@@ -147,14 +147,14 @@ where
         + 'static,
 {
     let store = erased(env);
-    let catalog = branch.archive().index();
+    let subject = branch.subject();
     let tree =
-        |reference: &TreeReference| Index::at(catalog.clone(), NodeHash::from(*reference.hash()));
+        |reference: &TreeReference| Index::at(subject.clone(), NodeHash::from(*reference.hash()));
     // No base means the commit's ancestry and the head's share nothing:
     // everything the commit holds is its change.
     let base_tree = match base {
         Some(base) => tree(&base.tree),
-        None => Index::empty_in(catalog.clone()),
+        None => Index::empty_in(subject.clone()),
     };
     let mine_tree = tree(&mine.tree);
     let mut merged = tree(&theirs.tree);
@@ -240,7 +240,7 @@ where
     revision.publish_region(own_count(&revision, &merged_context));
     revision.signature = Attest::new(revision.payload()).perform(env).await?;
 
-    persist(&catalog, &mut delta, env).await?;
+    persist(&subject, &mut delta, env).await?;
     Ok((revision, merged_context))
 }
 

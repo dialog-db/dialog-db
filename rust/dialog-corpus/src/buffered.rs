@@ -38,9 +38,9 @@
 use crate::reads::*;
 use crate::{ArchiveDelta, DeltaOverlay};
 use async_trait::async_trait;
+use dialog_capability::Subject;
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::ConditionalSend;
-use dialog_effects::archive::prelude::CatalogScope;
 use dialog_search_tree::{
     Buffer, DialogSearchTreeError, Entry, HitchhikerTree, Manifest, TransientTree,
 };
@@ -73,8 +73,8 @@ pub type BufferedCorpus = HitchhikerTree<Key, State<Datum>>;
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 pub trait CorpusWriter: Sized {
-    /// The catalog the target's blocks live in.
-    fn catalog(&self) -> &CatalogScope;
+    /// The subject whose tree the target is.
+    fn subject(&self) -> &Subject;
 
     /// Insert (or overwrite) `value` at `key`.
     async fn write<S>(
@@ -152,8 +152,8 @@ pub trait CorpusWriter: Sized {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl CorpusWriter for TransientTree<Key, State<Datum>> {
-    fn catalog(&self) -> &CatalogScope {
-        TransientTree::catalog(self)
+    fn subject(&self) -> &Subject {
+        TransientTree::subject(self)
     }
 
     async fn write<S>(
@@ -209,8 +209,8 @@ impl CorpusWriter for TransientTree<Key, State<Datum>> {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl CorpusWriter for BufferedCorpus {
-    fn catalog(&self) -> &CatalogScope {
-        HitchhikerTree::catalog(self)
+    fn subject(&self) -> &Subject {
+        HitchhikerTree::subject(self)
     }
 
     // Writes route into the buffers with the flush policy DEFERRED: the
@@ -737,17 +737,17 @@ impl BufferedBatch {
             // bytes.
             let mut tree = self.tree.settle(&storage).await?;
             let root = tree.persist_mut(delta)?;
-            let catalog = tree.catalog().clone();
+            let subject = tree.subject().clone();
             slot.put(root.clone(), tree);
-            Corpus::at(catalog, root)
+            Corpus::at(subject, root)
         } else {
             // Settle the batch's deferred writes, then serialize the spine
             // with its buffers intact and seal the resulting root: the hash
             // covers the buffered ops, so this is a complete identity for
             // the tree's content.
-            let catalog = self.tree.catalog().clone();
+            let subject = self.tree.subject().clone();
             let root = self.tree.settle(&storage).await?.persist(delta)?;
-            Corpus::at(catalog, root)
+            Corpus::at(subject, root)
         })
     }
 }
@@ -820,7 +820,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use dialog_search_tree::helpers::test_catalog;
+    use dialog_search_tree::helpers::test_subject;
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
@@ -890,7 +890,7 @@ mod tests {
         let store = store();
         let version = |edition| Version::new(Origin::from([7u8; 32]), Edition::new(edition));
         let slot = SpineSlot::new();
-        let mut tree = Corpus::empty_in(test_catalog());
+        let mut tree = Corpus::empty_in(test_subject());
         let mut delta = ArchiveDelta::zero();
         apply_buffered_reusing(
             &slot,
@@ -989,7 +989,7 @@ mod tests {
         const COMMITS: usize = 200;
 
         let store = store();
-        let mut tree = Corpus::empty_in(test_catalog());
+        let mut tree = Corpus::empty_in(test_subject());
         for i in 0..COMMITS {
             let mut delta = ArchiveDelta::zero();
             apply_buffered(
@@ -1036,7 +1036,7 @@ mod tests {
         use crate::tree::CorpusExt as _;
 
         let store = store();
-        let mut tree = Corpus::empty_in(test_catalog());
+        let mut tree = Corpus::empty_in(test_subject());
 
         // Enough commits that the spine grows and the buffers matter, each one
         // buffering its batch and then writing a record entry, as a commit does.
@@ -1116,7 +1116,7 @@ mod tests {
         }
 
         let direct_store = store();
-        let mut direct = Corpus::empty_in(test_catalog());
+        let mut direct = Corpus::empty_in(test_subject());
         for batch in batches() {
             let mut delta = ArchiveDelta::zero();
             direct
@@ -1126,7 +1126,7 @@ mod tests {
         }
 
         let buffered_store = store();
-        let mut buffered = Corpus::empty_in(test_catalog());
+        let mut buffered = Corpus::empty_in(test_subject());
         for batch in batches() {
             let mut delta = ArchiveDelta::zero();
             apply_buffered(
@@ -1165,7 +1165,7 @@ mod tests {
 
         for canonicalize in [true, false] {
             let buffered_store = store();
-            let mut tree = Corpus::empty_in(test_catalog());
+            let mut tree = Corpus::empty_in(test_subject());
             let mut delta = ArchiveDelta::zero();
             let changed = apply_buffered(
                 &mut tree,
@@ -1196,7 +1196,7 @@ mod tests {
                 // The same batch through the canonical path on a fresh tree
                 // must land on the identical root.
                 let direct_store = store();
-                let mut direct = Corpus::empty_in(test_catalog());
+                let mut direct = Corpus::empty_in(test_subject());
                 let mut direct_delta = ArchiveDelta::zero();
                 direct
                     .apply_versioned(
@@ -1255,7 +1255,7 @@ mod tests {
         // The canonical reference: data through the canonical edit path, then
         // the record through the canonical `record` surface.
         let direct_store = store();
-        let mut direct = Corpus::empty_in(test_catalog());
+        let mut direct = Corpus::empty_in(test_subject());
         let mut direct_delta = ArchiveDelta::zero();
         direct
             .apply_versioned(
@@ -1272,7 +1272,7 @@ mod tests {
         // The batch surface, sealed canonical: the same fact set must land on
         // the byte-identical root.
         let batch_store = store();
-        let base = Corpus::empty_in(test_catalog());
+        let base = Corpus::empty_in(test_subject());
         let mut delta = ArchiveDelta::zero();
         let batch = BufferedBatch::apply(
             &base,
@@ -1292,7 +1292,7 @@ mod tests {
         );
         assert_eq!(
             base.root(),
-            Corpus::empty_in(test_catalog()).root(),
+            Corpus::empty_in(test_subject()).root(),
             "applying a batch must not touch the base tree"
         );
 
@@ -1301,7 +1301,7 @@ mod tests {
         let buffered_store = store();
         let mut delta = ArchiveDelta::zero();
         let batch = BufferedBatch::apply(
-            &Corpus::empty_in(test_catalog()),
+            &Corpus::empty_in(test_subject()),
             &buffered_store,
             Some(version()),
             stream::iter(data()),
@@ -1345,7 +1345,7 @@ mod tests {
         let asset = Asset::new(b"asset bytes".to_vec());
 
         let batch = BufferedBatch::apply(
-            &Corpus::empty_in(test_catalog()),
+            &Corpus::empty_in(test_subject()),
             &store,
             Some(asset_version()),
             stream::iter(vec![assert_of("user:alice", "Alice")]),
@@ -1370,7 +1370,7 @@ mod tests {
         );
         assert_eq!(tree.content_size(&store, &[0u8; 32]).await?, None);
 
-        let changes: Vec<_> = blob_changes(Corpus::empty_in(test_catalog()), tree, store.clone())
+        let changes: Vec<_> = blob_changes(Corpus::empty_in(test_subject()), tree, store.clone())
             .try_collect()
             .await?;
         assert_eq!(changes, vec![BlobChange::Added(*asset.hash())]);
@@ -1384,7 +1384,7 @@ mod tests {
         let store = store();
         let asset = Asset::new(b"asset bytes".to_vec());
         let refused = BufferedBatch::apply(
-            &Corpus::empty_in(test_catalog()),
+            &Corpus::empty_in(test_subject()),
             &store,
             Some(asset_version()),
             stream::iter(vec![Instruction::Assert(asset.fact()?, crate::Pick::All)]),

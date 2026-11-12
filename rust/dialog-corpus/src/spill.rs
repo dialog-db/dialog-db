@@ -238,7 +238,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use dialog_search_tree::helpers::test_catalog;
+    use dialog_search_tree::helpers::test_subject;
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
@@ -259,7 +259,7 @@ mod tests {
         let mut delta = ArchiveDelta::zero();
 
         // Base: empty.
-        let base = Corpus::empty_in(test_catalog());
+        let base = Corpus::empty_in(test_subject());
 
         // Current: one spilling fact (touches all three EAV/AEV/VAE orderings).
         let mut current = base.clone();
@@ -309,7 +309,7 @@ mod tests {
         let mut delta = ArchiveDelta::zero();
 
         // Base: the spilled fact is asserted.
-        let mut base = Corpus::empty_in(test_catalog());
+        let mut base = Corpus::empty_in(test_subject());
         base.apply(
             &store,
             &mut delta,
@@ -365,7 +365,7 @@ mod tests {
         let mut delta = ArchiveDelta::zero();
 
         // Base: what the remote already has — nothing.
-        let base = Corpus::empty_in(test_catalog());
+        let base = Corpus::empty_in(test_subject());
 
         // Locally: assert the spilling fact, then retract it, each its own
         // version-tagged commit, before pushing either.
@@ -422,7 +422,7 @@ mod tests {
         let store = Blocks::new();
         let mut delta = ArchiveDelta::zero();
 
-        let base = Corpus::empty_in(test_catalog());
+        let base = Corpus::empty_in(test_subject());
         let mut current = base.clone();
         current
             .apply_versioned(
@@ -457,7 +457,7 @@ mod tests {
         let store = Blocks::new();
         let mut delta = ArchiveDelta::zero();
 
-        let base = Corpus::empty_in(test_catalog());
+        let base = Corpus::empty_in(test_subject());
         let mut current = base.clone();
         current
             .apply(

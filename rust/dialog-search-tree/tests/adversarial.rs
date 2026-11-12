@@ -176,13 +176,13 @@ async fn checkpoint_root(tree: &Tree, storage: &Store, label: &str) -> Result<Bl
 /// every later edit recovers it from the root.
 async fn run_canonical(program: &Program, manifest: Manifest) -> Result<Vec<Blake3Hash>> {
     let mut storage: Store = Blocks::new();
-    let mut tree = Tree::empty_in(dialog_search_tree::helpers::test_catalog());
+    let mut tree = Tree::empty_in(dialog_search_tree::helpers::test_subject());
     let mut roots = Vec::new();
     for (at, op) in program.ops.iter().enumerate() {
         let mut delta = Delta::zero();
         let edit = if tree.stored_root().is_none() {
             TransientTree::empty_with_manifest(
-                dialog_search_tree::helpers::test_catalog(),
+                dialog_search_tree::helpers::test_subject(),
                 manifest.clone(),
             )
         } else {
@@ -229,7 +229,7 @@ async fn run_buffered(
     let first = *ops.next().expect("programs are non-empty");
     let mut delta = Delta::zero();
     let seed_edit = TransientTree::empty_with_manifest(
-        dialog_search_tree::helpers::test_catalog(),
+        dialog_search_tree::helpers::test_subject(),
         manifest.clone(),
     );
     let mut tree = match first {
@@ -278,7 +278,7 @@ async fn run_buffered(
             let mut delta = Delta::zero();
             let root = buffered.persist(&mut delta)?;
             settle(&mut delta, &mut storage).await?;
-            tree = Tree::at(dialog_search_tree::helpers::test_catalog(), root);
+            tree = Tree::at(dialog_search_tree::helpers::test_subject(), root);
             buffered = open.clone()(&tree, next_buf());
         }
     }
@@ -421,12 +421,12 @@ async fn minimize_caught_divergence() -> Result<()> {
     };
     // Re-run both arms, retaining the trees this time.
     let mut storage: Store = Blocks::new();
-    let mut tree = Tree::empty_in(dialog_search_tree::helpers::test_catalog());
+    let mut tree = Tree::empty_in(dialog_search_tree::helpers::test_subject());
     for op in &program.ops {
         let mut delta = Delta::zero();
         let edit = if tree.stored_root().is_none() {
             TransientTree::empty_with_manifest(
-                dialog_search_tree::helpers::test_catalog(),
+                dialog_search_tree::helpers::test_subject(),
                 manifest.clone(),
             )
         } else {
@@ -452,7 +452,7 @@ async fn minimize_caught_divergence() -> Result<()> {
     let first = *ops2.next().expect("non-empty");
     let mut delta = Delta::zero();
     let seed_edit = TransientTree::empty_with_manifest(
-        dialog_search_tree::helpers::test_catalog(),
+        dialog_search_tree::helpers::test_subject(),
         manifest.clone(),
     );
     let mut tree2 = match first {
@@ -495,7 +495,7 @@ async fn minimize_caught_divergence() -> Result<()> {
             let mut delta = Delta::zero();
             let root = buffered.persist(&mut delta)?;
             settle(&mut delta, &mut storage2).await?;
-            tree2 = Tree::at(dialog_search_tree::helpers::test_catalog(), root);
+            tree2 = Tree::at(dialog_search_tree::helpers::test_subject(), root);
             buffered = open.clone()(&tree2, bufs[session % bufs.len()]);
             session += 1;
         }

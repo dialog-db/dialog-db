@@ -63,8 +63,8 @@ use rkyv::{
 };
 
 use crate::{
-    Accessor, DialogSearchTreeError, Distribution, Key, NodeBody, NoveltyEntry, NoveltyOp,
-    PersistentNode, PersistentTree, TransientTree, Value, into_owned,
+    DialogSearchTreeError, Distribution, Key, NodeBody, NoveltyEntry, NoveltyOp, PersistentNode,
+    PersistentTree, TransientTree, Value, into_owned,
 };
 
 /// Renders a separator for a violation message: a bounded hex prefix, so
@@ -118,12 +118,12 @@ where
             return Ok(Vec::new());
         }
         let manifest = self.manifest(storage).await?;
-        let accessor: Accessor<'_, K, V, Env> = Accessor::new(storage, self.catalog());
+        let (env, reading) = (storage, self.reading());
 
         // The empty tree's node: canonical exactly when it is byte-identical
         // to the fixed zero-entry encoding for its manifest — under every
         // manifest, the default included.
-        let root_node: PersistentNode<K, V> = accessor.get_node(self.root()).await?;
+        let root_node: PersistentNode<K, V> = reading.node(env, self.root()).await?;
         if root_node.is_empty()? {
             let mut scratch = crate::Delta::zero();
             let canonical = crate::persist_empty_root::<K, V>(&manifest, &mut scratch)?;
@@ -149,7 +149,7 @@ where
             let mut next: Vec<Blake3Hash> = Vec::new();
             let mut separators: Vec<Vec<u8>> = Vec::new();
             for hash in &current {
-                let node: PersistentNode<K, V> = accessor.get_node(hash).await?;
+                let node: PersistentNode<K, V> = reading.node(env, hash).await?;
                 match node.body() {
                     NodeBody::Index(index) => {
                         for at in 0..index.len() {
@@ -189,7 +189,7 @@ where
 
         // The canonical constructor, over the same entries, in memory.
         let expected =
-            TransientTree::<K, V, D>::empty_with_manifest(self.catalog().clone(), manifest)
+            TransientTree::<K, V, D>::empty_with_manifest(self.subject().clone(), manifest)
                 .plant(entries, storage)
                 .await?;
         let expected_levels = expected.level_separators()?;
@@ -259,7 +259,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_validates_canonically_edited_trees_clean() -> Result<()> {
         let mut storage: Store = Blocks::new();
-        let mut tree = Tree::empty_in(crate::helpers::test_catalog());
+        let mut tree = Tree::empty_in(crate::helpers::test_subject());
         for i in 0..250u32 {
             let key = (i * 37 % 1000).to_be_bytes();
             let mut delta = Delta::zero();
@@ -288,7 +288,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_validates_canonicalized_buffered_trees_clean() -> Result<()> {
         let mut storage: Store = Blocks::new();
-        let mut buffered = HitchhikerTree::open(&Tree::empty_in(crate::helpers::test_catalog()))
+        let mut buffered = HitchhikerTree::open(&Tree::empty_in(crate::helpers::test_subject()))
             .with_op_buf_size(8);
         for i in 0..300u32 {
             let key = (i * 17 % 700).to_be_bytes();
@@ -319,7 +319,7 @@ mod tests {
         // published-but-not-canonical form the property excludes. (A tiny
         // op buffer would cascade every op to the leaves and publish a form
         // that genuinely IS canonical — the validator correctly accepts it.)
-        let mut tree = Tree::empty_in(crate::helpers::test_catalog());
+        let mut tree = Tree::empty_in(crate::helpers::test_subject());
         for i in 0..200u32 {
             let key = (i * 13 % 400).to_be_bytes();
             let mut delta = Delta::zero();
@@ -338,7 +338,7 @@ mod tests {
         let mut delta = Delta::zero();
         let root = buffered.persist(&mut delta)?;
         settle(&mut delta, &mut storage).await?;
-        let tree = Tree::at(crate::helpers::test_catalog(), root);
+        let tree = Tree::at(crate::helpers::test_subject(), root);
 
         let divergences = tree.canonical_divergences(&storage).await?;
         assert!(
@@ -369,7 +369,7 @@ mod tests {
         ] {
             let mut delta = Delta::zero();
             let emptied = TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(
-                crate::helpers::test_catalog(),
+                crate::helpers::test_subject(),
                 manifest,
             )
             .persist(&mut delta)?;

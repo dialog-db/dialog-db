@@ -141,8 +141,8 @@ pub(crate) mod test {
             .await
         }
     }
-
-    // Node reads for the scans, in the branch's catalog: what the operator
+    // Node reads for the scans, of the branch's subject: what the operator
+    // Node reads for the scans, of the branch's subject: what the operator
     /// answers at once is at once here too.
     impl Provider<nodes::Read<CorpusNode>> for TestEnv<'_> {
         fn execute(
@@ -151,7 +151,7 @@ pub(crate) mod test {
         ) -> Resume<'_, Result<Option<CorpusNode>, dialog_search_tree::DialogSearchTreeError>>
         {
             let mut line = read;
-            line.catalog = self.branch.archive().index();
+            line.subject = self.branch.subject();
             line.perform(self.operator)
         }
     }
@@ -160,7 +160,7 @@ pub(crate) mod test {
     impl Provider<nodes::Preload<CorpusNode>> for TestEnv<'_> {
         async fn execute(&self, preload: nodes::Preload<CorpusNode>) {
             let mut line = preload;
-            line.catalog = self.branch.archive().index();
+            line.subject = self.branch.subject();
             line.perform(self.operator).await
         }
     }

@@ -884,7 +884,7 @@ mod screen_tests {
     use anyhow::Result;
     use dialog_search_tree::helpers::Blocks;
     use dialog_search_tree::helpers::ObservingBlocks;
-    use dialog_search_tree::helpers::test_catalog;
+    use dialog_search_tree::helpers::test_subject;
     use futures_util::{StreamExt as _, stream};
 
     #[cfg(target_arch = "wasm32")]
@@ -936,7 +936,7 @@ mod screen_tests {
                 })
             })
             .collect::<Result<_>>()?;
-        let mut local = Corpus::empty_in(test_catalog());
+        let mut local = Corpus::empty_in(test_subject());
         let mut delta = ArchiveDelta::zero();
         local
             .apply_versioned(
@@ -992,7 +992,7 @@ mod screen_tests {
 
         // Screen against a COLD copy of the receiver's tree, so every slot
         // scan has to read.
-        let cold = Corpus::at(test_catalog(), local.root().clone());
+        let cold = Corpus::at(test_subject(), local.root().clone());
         observing.reset();
         let screened = screen_history(
             stream::iter(incoming.into_iter().map(Ok)),

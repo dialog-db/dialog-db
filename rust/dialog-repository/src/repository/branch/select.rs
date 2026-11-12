@@ -1,16 +1,15 @@
-use base58::ToBase58;
 use dialog_capability::Provider;
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::{ConditionalSend, ConditionalSync, Holds};
 use dialog_corpus::selector::Constrained;
 use dialog_corpus::tree::CorpusExt as _;
 use dialog_corpus::tree::CorpusNode;
-use dialog_corpus::{Datum, DialogCorpusError, Fact, FactStream, FactView, Key, Selector, State};
+use dialog_corpus::{DialogCorpusError, Fact, FactStream, FactView, Selector};
 use dialog_effects::archive::Get;
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::blob::Load as BlobLoad;
 use dialog_search_tree::nodes;
-use dialog_search_tree::{DialogSearchTreeError, Manifest, load_node};
+use dialog_search_tree::{DialogSearchTreeError, Manifest};
 use dialog_storage::Blake3Hash;
 use futures_util::Stream;
 
@@ -150,23 +149,18 @@ impl Select<'_> {
         // the node cache the env holds and the rest (and the scan's own
         // root read) are answered from there, while a genuine miss still
         // fetches and a truly absent root fails fast.
-        let catalog = self.catalog();
+        let subject = self.view.subject();
         Ok(match self.tree_hash() {
             Some(tree_hash) => {
                 let root = NodeHash::from(tree_hash);
-                load_node::<Key, State<Datum>, S>(store, &catalog, &root)
-                    .await?
-                    .ok_or_else(|| {
-                        DialogSearchTreeError::Node(format!(
-                            "Block not found in storage: {}",
-                            tree_hash.to_base58(),
-                        ))
-                    })?;
-                Index::at(catalog, root)
+                let tree = Index::at(subject, root.clone());
+                // The root a tree links to: absent is an error.
+                tree.reading().node::<CorpusNode, _>(store, &root).await?;
+                tree
             }
             // No revision means no tree to probe or scan: the select runs
             // over the empty index and yields nothing.
-            None => Index::empty_in(catalog),
+            None => Index::empty_in(subject),
         })
     }
 
@@ -279,7 +273,7 @@ impl Select<'_> {
         let Some(tree_hash) = self.tree_hash() else {
             return Ok(None);
         };
-        let tree = Index::at(self.catalog(), NodeHash::from(tree_hash));
+        let tree = Index::at(self.view.subject(), NodeHash::from(tree_hash));
         tree.estimate(store, self.selector).await
     }
 

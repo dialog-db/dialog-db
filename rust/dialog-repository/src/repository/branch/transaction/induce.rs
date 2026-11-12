@@ -853,8 +853,8 @@ where
     let store = erased(env);
     let raw_store = store;
     let storage = store;
-    let previous = crate::Index::at(archive.index(), NodeHash::from(*watermark.tree.hash()));
-    let next = crate::Index::at(archive.index(), NodeHash::from(*head.tree.hash()));
+    let previous = crate::Index::at(branch.subject(), NodeHash::from(*watermark.tree.hash()));
+    let next = crate::Index::at(branch.subject(), NodeHash::from(*head.tree.hash()));
 
     let scope = vec![
         <EntityKey<Key> as KeyViewConstruct>::min().into_key()

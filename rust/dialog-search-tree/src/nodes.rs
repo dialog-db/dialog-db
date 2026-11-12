@@ -42,9 +42,10 @@
 
 use std::marker::PhantomData;
 
+use dialog_capability::Subject;
 use dialog_capability::{Command, Provider, Resume};
 use dialog_common::{Blake3Hash, Buffer, ConditionalSend, ConditionalSync, Holds, Priority};
-use dialog_effects::archive::prelude::CatalogScope;
+use dialog_effects::archive::prelude::ArchiveScope;
 use dialog_effects::archive::{self, Import, Load};
 use dialog_storage::DialogStorageError;
 use rkyv::{
@@ -133,20 +134,33 @@ where
     }
 }
 
+/// The block catalog a subject's nodes are kept in, when they are kept as
+/// blocks: the translation layer's, never a tree's.
+fn blocks_of(subject: &Subject) -> dialog_effects::archive::prelude::CatalogScope {
+    ArchiveScope::new(subject.clone()).index()
+}
+
 /// `block` as the node `name` names ([`Node::decode`]).
 pub fn decode<N: Node>(block: Buffer, name: &Blake3Hash) -> Result<N, DialogSearchTreeError> {
     N::decode(block, name)
 }
 
-/// Command: the node `name` names in `catalog`, from the local archive, or
-/// else from wherever the environment knows the subject's blocks live. The
-/// node layer's read.
+/// Command: the node `name` names in `subject`'s archive, from this
+/// replica, or else from wherever the environment knows the subject's
+/// blocks live. The node layer's read.
+///
+/// The subject says whose nodes these are, not which store holds them: an
+/// environment that serves several subjects (a peer, a query over lines of
+/// several repositories) routes the read to the subject's space, scopes its
+/// node cache by it, and hydrates from the routes the subject's branches
+/// registered. Which block catalog a node is kept in, when it is kept as a
+/// block, is the translation layer's concern ([`load`](Self::load)).
 ///
 /// `None` means the environment can reach no such node. An environment
 /// that keeps a node cache answers a node it holds from there.
 pub struct Read<N> {
-    /// The catalog the node's block lives in.
-    pub catalog: CatalogScope,
+    /// Whose node this is: the subject whose archive keeps it.
+    pub subject: Subject,
     /// The name the node is asked for by: the hash of its block.
     pub name: Blake3Hash,
     /// How a hydration this read causes ranks against the site's other
@@ -161,7 +175,7 @@ pub struct Read<N> {
 impl<N> std::fmt::Debug for Read<N> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Read")
-            .field("catalog", &self.catalog)
+            .field("subject", &self.subject)
             .field("name", &self.name)
             .field("priority", &self.priority)
             .field("local", &self.local)
@@ -172,7 +186,7 @@ impl<N> std::fmt::Debug for Read<N> {
 impl<N> Clone for Read<N> {
     fn clone(&self) -> Self {
         Self {
-            catalog: self.catalog.clone(),
+            subject: self.subject.clone(),
             name: self.name.clone(),
             priority: self.priority,
             local: self.local,
@@ -182,11 +196,11 @@ impl<N> Clone for Read<N> {
 }
 
 impl<N> Read<N> {
-    /// Read the node `name` names in `catalog`, as a read someone is
-    /// waiting on, from anywhere.
-    pub fn new(catalog: CatalogScope, name: Blake3Hash) -> Self {
+    /// Read the node `name` names in `subject`'s archive, as a read someone
+    /// is waiting on, from anywhere.
+    pub fn new(subject: Subject, name: Blake3Hash) -> Self {
         Self {
-            catalog,
+            subject,
             name,
             priority: Priority::Demand,
             local: false,
@@ -211,8 +225,13 @@ impl<N> Read<N> {
 
     /// The load of the block this read's node is encoded as, asked the
     /// way this read is: what the translation layer performs on a miss.
+    ///
+    /// A node kept as a block is kept in its subject's index catalog
+    /// ([`ArchiveScope::index`]); this is the one place the node layer
+    /// names it.
     pub fn load(&self) -> Load {
-        let load = Load::new(self.catalog.clone(), self.name.clone()).with_priority(self.priority);
+        let load =
+            Load::new(blocks_of(&self.subject), self.name.clone()).with_priority(self.priority);
         if self.local { load.locally() } else { load }
     }
 
@@ -293,8 +312,7 @@ impl<N: Node> Read<N> {
     }
 
     /// [`through_blocks`](Self::through_blocks), with the node cache `env`
-    /// holds for the catalog's subject ([`NodeCache::of`]), if it holds
-    /// one.
+    /// holds for the read's subject ([`NodeCache::of`]), if it holds one.
     pub fn through_held_blocks<'a, Env>(
         self,
         env: &'a Env,
@@ -302,7 +320,7 @@ impl<N: Node> Read<N> {
     where
         Env: Provider<Load> + Holds + ConditionalSync + ?Sized,
     {
-        match NodeCache::of(env, self.catalog.subject()) {
+        match NodeCache::of(env, self.subject.did()) {
             None => self.through_blocks(env, None),
             Some(cache) => {
                 if let Some(node) = cache.get_cached(&self.name) {
@@ -314,8 +332,8 @@ impl<N: Node> Read<N> {
     }
 }
 
-/// Command: make the node `name` names in `catalog` cheap to read soon.
-/// The node layer's read-ahead.
+/// Command: make the node `name` names in `subject`'s archive cheap to
+/// read soon. The node layer's read-ahead.
 ///
 /// Nothing observes its outcome: a node that is missing or fails to load
 /// is left to the read that needs it. The future is the work, and it
@@ -324,8 +342,8 @@ impl<N: Node> Read<N> {
 /// can join it, by polling it to completion. An environment with nowhere
 /// to keep the node does nothing.
 pub struct Preload<N> {
-    /// The catalog the node's block lives in.
-    pub catalog: CatalogScope,
+    /// Whose node this is: the subject whose archive keeps it.
+    pub subject: Subject,
     /// The name of the node to make cheap.
     pub name: Blake3Hash,
     /// How a hydration this causes ranks against the site's other reads.
@@ -336,7 +354,7 @@ pub struct Preload<N> {
 impl<N> std::fmt::Debug for Preload<N> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Preload")
-            .field("catalog", &self.catalog)
+            .field("subject", &self.subject)
             .field("name", &self.name)
             .field("priority", &self.priority)
             .finish()
@@ -346,7 +364,7 @@ impl<N> std::fmt::Debug for Preload<N> {
 impl<N> Clone for Preload<N> {
     fn clone(&self) -> Self {
         Self {
-            catalog: self.catalog.clone(),
+            subject: self.subject.clone(),
             name: self.name.clone(),
             priority: self.priority,
             node: PhantomData,
@@ -355,10 +373,10 @@ impl<N> Clone for Preload<N> {
 }
 
 impl<N> Preload<N> {
-    /// Preload the node `name` names in `catalog`.
-    pub fn new(catalog: CatalogScope, name: Blake3Hash) -> Self {
+    /// Preload the node `name` names in `subject`'s archive.
+    pub fn new(subject: Subject, name: Blake3Hash) -> Self {
         Self {
-            catalog,
+            subject,
             name,
             priority: Priority::Demand,
             node: PhantomData,
@@ -373,7 +391,7 @@ impl<N> Preload<N> {
 
     /// The read this preload makes ahead of time.
     pub fn read(&self) -> Read<N> {
-        Read::new(self.catalog.clone(), self.name.clone()).with_priority(self.priority)
+        Read::new(self.subject.clone(), self.name.clone()).with_priority(self.priority)
     }
 
     /// Perform this preload on `env`.
@@ -415,12 +433,12 @@ impl<N: Node> Preload<N> {
     }
 
     /// [`through_blocks`](Self::through_blocks), with the node cache `env`
-    /// holds for the catalog's subject, if it holds one.
+    /// holds for the preload's subject, if it holds one.
     pub fn through_held_blocks<'a, Env>(self, env: &'a Env) -> Resume<'a, ()>
     where
         Env: Provider<Load> + Holds + ConditionalSync + ?Sized,
     {
-        let Some(cache) = NodeCache::of(env, self.catalog.subject()) else {
+        let Some(cache) = NodeCache::of(env, self.subject.did()) else {
             return Resume::now(());
         };
         if cache.get_cached(&self.name).is_some() {
@@ -432,8 +450,8 @@ impl<N: Node> Preload<N> {
     }
 }
 
-/// Command: store the nodes a persist sealed into `catalog`, and keep them
-/// readable. The node layer's write.
+/// Command: store the nodes a persist sealed into `subject`'s archive, and
+/// keep them readable. The node layer's write.
 ///
 /// The nodes are durable when this returns: a read of any of them through
 /// the environment finds it. An environment that keeps a node cache keeps
@@ -441,8 +459,8 @@ impl<N: Node> Preload<N> {
 /// a write that fails keeps nothing, so a scope holds only what its archive
 /// has.
 pub struct Write<N> {
-    /// The catalog the nodes belong in.
-    pub catalog: CatalogScope,
+    /// Whose nodes these are: the subject whose archive keeps them.
+    pub subject: Subject,
     /// The nodes to store.
     pub nodes: Vec<N>,
 }
@@ -450,16 +468,16 @@ pub struct Write<N> {
 impl<N> std::fmt::Debug for Write<N> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Write")
-            .field("catalog", &self.catalog)
+            .field("subject", &self.subject)
             .field("nodes", &self.nodes.len())
             .finish()
     }
 }
 
 impl<N> Write<N> {
-    /// Write `nodes` into `catalog`.
-    pub fn new(catalog: CatalogScope, nodes: Vec<N>) -> Self {
-        Self { catalog, nodes }
+    /// Write `nodes` into `subject`'s archive.
+    pub fn new(subject: Subject, nodes: Vec<N>) -> Self {
+        Self { subject, nodes }
     }
 
     /// Perform this write on `env`.
@@ -478,8 +496,9 @@ impl<N> Command for Write<N> {
 
 impl<N: Node> Write<N> {
     /// Answers this write over `env`'s blocks: [imports](Import) each
-    /// node's block into the catalog, then keeps the nodes in `cache`. A
-    /// failed import keeps nothing; a write of no nodes is done at once.
+    /// node's block into the subject's index catalog, then keeps the nodes
+    /// in `cache`. A failed import keeps nothing; a write of no nodes is
+    /// done at once.
     ///
     /// The translation layer's write, for an environment whose store keeps
     /// bytes.
@@ -491,12 +510,12 @@ impl<N: Node> Write<N> {
     where
         Env: Provider<Import> + ConditionalSync + ?Sized,
     {
-        let Self { catalog, nodes } = self;
+        let Self { subject, nodes } = self;
         if nodes.is_empty() {
             return Resume::now(Ok(()));
         }
         Resume::later(async move {
-            catalog
+            blocks_of(&subject)
                 .import(nodes.iter().map(|node| node.buffer().clone()))
                 .perform(env)
                 .await
@@ -515,7 +534,7 @@ impl<N: Node> Write<N> {
     }
 
     /// [`through_blocks`](Self::through_blocks), with the node cache `env`
-    /// holds for the catalog's subject, if it holds one.
+    /// holds for the write's subject, if it holds one.
     pub fn through_held_blocks<'a, Env>(
         self,
         env: &'a Env,
@@ -526,12 +545,12 @@ impl<N: Node> Write<N> {
         if self.nodes.is_empty() {
             return Resume::now(Ok(()));
         }
-        let cache = NodeCache::of(env, self.catalog.subject());
+        let cache = NodeCache::of(env, self.subject.did());
         Resume::later(async move { self.through_blocks(env, cache.as_ref()).await })
     }
 }
 
-/// The node `read` names if the cache `env` holds for the catalog's subject
+/// The node `read` names if the cache `env` holds for the read's subject
 /// holds it ([`NodeCache::held_for`]): what an environment that keeps its
 /// cache in its handles answers a read with at once ([`Resume::now`]),
 /// before it asks anything beneath it.
@@ -540,14 +559,14 @@ where
     Env: Holds + ?Sized,
     N: Node,
 {
-    NodeCache::held_for(env, read.catalog.subject())?
+    NodeCache::held_for(env, read.subject.did())?
         .get_cached(&read.name)
         .map(N::from_persistent)
 }
 
 /// Makes a type that answers [`Load`] and holds handles ([`Holds`]) answer
 /// the node layer's reads ([`Read`], [`Preload`]) through the translation
-/// layer, with the node cache it holds for the catalog's subject.
+/// layer, with the node cache it holds for the request's subject.
 ///
 /// For a non-generic environment: `reads_nodes_through_blocks!(MyEnv);`.
 /// For a generic one, its generics and where clause in brackets, each
@@ -590,7 +609,7 @@ macro_rules! reads_nodes_through_blocks {
 
 /// Makes a type that answers [`Import`] and holds handles ([`Holds`])
 /// answer the node layer's [`Write`] through the translation layer, keeping
-/// the nodes in the cache it holds for the catalog's subject. Same syntax
+/// the nodes in the cache it holds for the write's subject. Same syntax
 /// as [`reads_nodes_through_blocks!`].
 #[macro_export]
 macro_rules! writes_nodes_through_blocks {

@@ -25,14 +25,14 @@
 //! use dialog_corpus::{
 //!     ArchiveDelta, Fact, Selector, Entity, Instruction, Relation, Value,
 //! };
-//! use dialog_search_tree::helpers::{Blocks, test_catalog};
+//! use dialog_search_tree::helpers::{Blocks, test_subject};
 //! use futures_util::{StreamExt, stream};
 //!
 //! // Any environment that answers the corpus's node reads and spilled-value
 //! // loads will do; this one keeps everything in memory. The corpus lives
 //! // in a catalog of a subject's archive.
 //! let blocks = Blocks::new();
-//! let mut corpus = Corpus::empty_in(test_catalog());
+//! let mut corpus = Corpus::empty_in(test_subject());
 //! let mut delta = ArchiveDelta::zero();
 //!
 //! // Assert a fact: the new nodes (and any spilled value) are staged

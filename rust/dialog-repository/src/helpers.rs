@@ -348,7 +348,7 @@ fn load_block<P: CountedLoads>(env: &Counting<P>, load: ArchiveLoad) -> Loaded<'
 // `Get`, `Hydrate` or `Import` it is. A node the env holds is at hand,
 // uncounted: no block is read for it.
 fn read_node<P: CountedLoads>(env: &Counting<P>, read: nodes::Read<CorpusNode>) -> NodeRead<'_> {
-    let Some(cache) = CorpusCache::of(env, read.catalog.subject()) else {
+    let Some(cache) = CorpusCache::of(env, read.subject.did()) else {
         return read.through_loader(|load| crate::load_or_hydrate(env, load), None);
     };
     if let Some(node) = cache.get_cached(&read.name) {
@@ -364,7 +364,7 @@ fn preload_node<P: CountedLoads>(
     env: &Counting<P>,
     preload: nodes::Preload<CorpusNode>,
 ) -> Resume<'_, ()> {
-    if CorpusCache::of(env, preload.catalog.subject()).is_none() {
+    if CorpusCache::of(env, preload.subject.did()).is_none() {
         return Resume::now(());
     }
     match read_node(env, preload.read()).into_now() {

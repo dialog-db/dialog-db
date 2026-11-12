@@ -91,7 +91,7 @@ async fn it_reads_trees_written_in_the_legacy_layout() -> anyhow::Result<()> {
             );
         }
         let tree = Tree::at(
-            dialog_search_tree::helpers::test_catalog(),
+            dialog_search_tree::helpers::test_subject(),
             fixture.root.clone(),
         );
         assert_eq!(
@@ -137,7 +137,7 @@ async fn it_edits_trees_written_in_the_legacy_layout() -> anyhow::Result<()> {
         for buffered in [false, true] {
             let storage = load(&fixture).await?;
             let tree = Tree::at(
-                dialog_search_tree::helpers::test_catalog(),
+                dialog_search_tree::helpers::test_subject(),
                 fixture.root.clone(),
             );
             let added = [1000u32, 1001, 1002];
@@ -169,7 +169,7 @@ async fn it_edits_trees_written_in_the_legacy_layout() -> anyhow::Result<()> {
                 storage.store(buffer.buffer().clone());
             }
 
-            let edited = Tree::at(dialog_search_tree::helpers::test_catalog(), root);
+            let edited = Tree::at(dialog_search_tree::helpers::test_subject(), root);
             assert_eq!(
                 edited.manifest(&storage).await?,
                 fixture.manifest,

@@ -52,13 +52,12 @@ impl<E: Exporter> Export<'_, E> {
         let mut exporter = self.exporter;
 
         let archive = ArchiveScope::new(branch.subject());
-        let catalog = archive.index();
         let store = erased(env);
 
         let tree = match branch.revision() {
-            Some(revision) => Index::at(catalog, NodeHash::from(*revision.tree.hash())),
+            Some(revision) => Index::at(branch.subject(), NodeHash::from(*revision.tree.hash())),
             // No revision, no tree: the export streams nothing.
-            None => Index::empty_in(catalog),
+            None => Index::empty_in(branch.subject()),
         };
 
         let range = <EntityKey<Key> as KeyViewConstruct>::min().into_key()

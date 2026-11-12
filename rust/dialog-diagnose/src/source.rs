@@ -26,7 +26,7 @@ pub type DiagnoseSession = Peer<VolatileSpace, Session>;
 
 /// The tree a branch committed, and the session its blocks load through.
 pub struct Explored {
-    /// The committed tree, a root under the branch's catalog.
+    /// The committed tree, a root of the branch's subject.
     pub tree: Index,
     /// The session the tree's nodes and spilled values load through.
     pub session: Arc<DiagnoseSession>,
@@ -68,10 +68,9 @@ where
         .await?;
 
     let branch = repository.branch("main").load().perform(&session).await?;
-    let catalog = branch.archive().index();
     let tree = match branch.revision() {
-        Some(revision) => Index::at(catalog, Blake3Hash::from(*revision.tree.hash())),
-        None => Index::empty_in(catalog),
+        Some(revision) => Index::at(branch.subject(), Blake3Hash::from(*revision.tree.hash())),
+        None => Index::empty_in(branch.subject()),
     };
     Ok(Explored {
         tree,

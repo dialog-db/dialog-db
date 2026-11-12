@@ -36,7 +36,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let fact_count = data.len();
 
     let blocks = Blocks::new();
-    let mut index = Corpus::empty_in(dialog_search_tree::helpers::test_catalog());
+    let mut index = Corpus::empty_in(dialog_search_tree::helpers::test_subject());
     let mut delta = ArchiveDelta::zero();
     apply_buffered(
         &mut index,

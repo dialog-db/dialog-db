@@ -88,10 +88,7 @@ impl Branch {
             return Ok(None);
         };
         let store = erased(env);
-        let tree = Index::at(
-            self.archive().index(),
-            NodeHash::from(*revision.tree.hash()),
-        );
+        let tree = Index::at(self.subject(), NodeHash::from(*revision.tree.hash()));
         let manifest = tree
             .manifest(&store)
             .await
@@ -192,8 +189,8 @@ impl RekeyStorage<'_> {
             return Ok(None);
         };
         let store = erased(env);
-        let catalog = branch.archive().index();
-        let tree = Index::at(catalog.clone(), NodeHash::from(*revision.tree.hash()));
+        let subject = branch.subject();
+        let tree = Index::at(subject.clone(), NodeHash::from(*revision.tree.hash()));
         let manifest = tree
             .manifest(&store)
             .await
@@ -209,7 +206,7 @@ impl RekeyStorage<'_> {
         // names them is minted: a revision points only at durable blocks.
         let mut delta = ArchiveDelta::zero();
         let rewritten = rekey_tree(&tree, &store, &mut delta, target).await?;
-        persist(&catalog, &mut delta, env).await?;
+        persist(&subject, &mut delta, env).await?;
         // Boxed: the commit is a large future, and this one runs once.
         let revision = Box::pin(
             branch
@@ -320,7 +317,7 @@ where
     };
     let mut delta = ArchiveDelta::zero();
     let rewritten = rekey_tree(&tree, &store, &mut delta, target).await?;
-    persist(tree.catalog(), &mut delta, env).await?;
+    persist(tree.subject(), &mut delta, env).await?;
     branch.rewrites().insert(root, rewritten.root().clone());
     Ok(rewritten)
 }

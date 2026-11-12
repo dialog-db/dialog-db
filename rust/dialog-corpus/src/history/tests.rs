@@ -1,6 +1,7 @@
 //! Tests reproducing the scenarios illustrated in `notes/version-control.md`
 
-use dialog_search_tree::helpers::test_catalog;
+use dialog_effects::archive::prelude::ArchiveScope;
+use dialog_search_tree::helpers::test_subject;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -547,7 +548,7 @@ async fn it_records_history_in_the_fact_tree() -> Result<()> {
     // Persist each version-tagged batch so the next edit can read the
     // spine back — data and history land in the same tree, so one root
     // covers both.
-    let mut tree = Corpus::empty_in(test_catalog());
+    let mut tree = Corpus::empty_in(test_subject());
     let apply = async |tree: &mut Corpus,
                        store: &Blocks,
                        version: Version,
@@ -645,7 +646,7 @@ async fn it_succeeds_the_claim_the_succession_elects() -> Result<()> {
     let fourth = Version::new(Origin::from([7u8; 32]), Edition::new(3));
     let fifth = Version::new(Origin::from([7u8; 32]), Edition::new(4));
 
-    let mut tree = Corpus::empty_in(test_catalog());
+    let mut tree = Corpus::empty_in(test_subject());
     let apply = async |tree: &mut Corpus,
                        store: &Blocks,
                        version: Version,
@@ -778,7 +779,7 @@ async fn it_selects_the_records_of_one_revision() -> Result<()> {
     let second = Version::new(Origin::from([8u8; 32]), Edition::new(1));
     let third = Version::new(Origin::from([8u8; 32]), Edition::new(2));
 
-    let mut tree = Corpus::empty_in(test_catalog());
+    let mut tree = Corpus::empty_in(test_subject());
     let apply = async |tree: &mut Corpus,
                        store: &Blocks,
                        version: Version,
@@ -891,7 +892,7 @@ async fn it_selects_records_whose_values_spilled() -> Result<()> {
     let body = "x".repeat(4096);
     let version = Version::new(Origin::from([9u8; 32]), Edition::new(0));
 
-    let mut tree = Corpus::empty_in(test_catalog());
+    let mut tree = Corpus::empty_in(test_subject());
     let mut delta = ArchiveDelta::zero();
     tree.apply_versioned(
         &store,
@@ -1004,7 +1005,7 @@ async fn it_fetches_spilled_history_values_concurrently() -> Result<()> {
     let bodies: Vec<String> = (0..24)
         .map(|index| format!("{index}:").repeat(2048))
         .collect();
-    let mut tree = Corpus::empty_in(test_catalog());
+    let mut tree = Corpus::empty_in(test_subject());
     let mut delta = ArchiveDelta::zero();
     let mut claims = Vec::new();
     for body in &bodies {
@@ -1025,7 +1026,7 @@ async fn it_fetches_spilled_history_values_concurrently() -> Result<()> {
     // A cold reader: no node or spill cache holds anything yet, so every
     // spilled block reads from the store.
     let history = TreeHistory::new(
-        Corpus::at(test_catalog(), tree.root().clone()),
+        Corpus::at(test_subject(), tree.root().clone()),
         store.clone(),
     );
     store.peak.store(0, Ordering::SeqCst);
@@ -1235,7 +1236,7 @@ async fn it_collapses_a_same_batch_assert_and_retract() -> Result<()> {
     };
     let version = Version::new(Origin::from([7u8; 32]), Edition::new(0));
 
-    let mut tree = Corpus::empty_in(test_catalog());
+    let mut tree = Corpus::empty_in(test_subject());
     let mut delta = ArchiveDelta::zero();
     let changed = tree
         .apply_versioned(
@@ -1299,7 +1300,7 @@ async fn it_keeps_a_fact_retracted_and_re_asserted_in_one_batch() -> Result<()> 
     let first = Version::new(Origin::from([7u8; 32]), Edition::new(0));
     let second = Version::new(Origin::from([7u8; 32]), Edition::new(1));
 
-    let mut tree = Corpus::empty_in(test_catalog());
+    let mut tree = Corpus::empty_in(test_subject());
     let mut delta = ArchiveDelta::zero();
 
     // Establish the fact, so the retraction below has something standing
@@ -1378,7 +1379,7 @@ async fn it_reads_spilled_claim_values_back_through_history() -> Result<()> {
     let first = Version::new(Origin::from([7u8; 32]), Edition::new(0));
     let second = Version::new(Origin::from([7u8; 32]), Edition::new(1));
 
-    let mut tree = Corpus::empty_in(test_catalog());
+    let mut tree = Corpus::empty_in(test_subject());
     for (version, instruction) in [
         (
             first,
@@ -1433,7 +1434,7 @@ async fn it_ignores_a_retraction_of_a_nonexistent_fact() -> Result<()> {
     };
     let version = Version::new(Origin::from([7u8; 32]), Edition::new(0));
 
-    let mut tree = Corpus::empty_in(test_catalog());
+    let mut tree = Corpus::empty_in(test_subject());
     let mut delta = ArchiveDelta::zero();
     let changed = tree
         .apply_versioned(
@@ -1494,7 +1495,7 @@ async fn it_folds_same_batch_records_at_one_history_key() -> Result<()> {
     let old = Version::new(Origin::from([7u8; 32]), Edition::new(0));
     let new = Version::new(Origin::from([7u8; 32]), Edition::new(1));
 
-    let mut tree = Corpus::empty_in(test_catalog());
+    let mut tree = Corpus::empty_in(test_subject());
     for (version, instructions) in [
         (
             old,
@@ -1595,7 +1596,7 @@ async fn it_covers_every_observed_claim_of_a_retracted_value() -> Result<()> {
     let mallory = Version::new(Origin::from([2u8; 32]), Edition::new(1));
     let retractor = Version::new(Origin::from([3u8; 32]), Edition::new(2));
 
-    let mut tree = Corpus::empty_in(test_catalog());
+    let mut tree = Corpus::empty_in(test_subject());
     for (version, instruction) in [
         (bob, Instruction::Assert(urgent.clone(), crate::Pick::All)),
         (
@@ -1669,7 +1670,7 @@ async fn it_unions_contended_claim_versions_in_either_direction() -> Result<()> 
     // either tree can see and spares the test a block-transfer step.
     let mut replicas = Vec::new();
     for version in [bob, mallory] {
-        let mut tree = Corpus::empty_in(test_catalog());
+        let mut tree = Corpus::empty_in(test_subject());
         let mut delta = ArchiveDelta::zero();
         tree.apply_versioned(
             &store,
@@ -1685,7 +1686,7 @@ async fn it_unions_contended_claim_versions_in_either_direction() -> Result<()> 
     let mut a = replicas.pop().expect("two replicas were built");
 
     let storage = store.clone();
-    let empty = Corpus::empty_in(test_catalog());
+    let empty = Corpus::empty_in(test_subject());
 
     // Each side's full state as a change stream, the shape a pull ships
     // when the sync base is empty: bare adds, no removes, so the
@@ -1769,7 +1770,7 @@ async fn it_supersedes_only_different_values_when_replacing_many() -> Result<()>
     let second = Version::new(Origin::from([7u8; 32]), Edition::new(1));
     let third = Version::new(Origin::from([7u8; 32]), Edition::new(2));
 
-    let mut tree = Corpus::empty_in(test_catalog());
+    let mut tree = Corpus::empty_in(test_subject());
     let apply = async |tree: &mut Corpus,
                        store: &Blocks,
                        version: Version,
@@ -1885,7 +1886,7 @@ async fn it_disambiguates_truncated_history_keys_in_queries() -> Result<()> {
         )
     };
 
-    let mut tree = Corpus::empty_in(test_catalog());
+    let mut tree = Corpus::empty_in(test_subject());
     let mut delta = ArchiveDelta::zero();
     tree.apply_versioned(
         &store,
@@ -2020,7 +2021,7 @@ async fn it_refuses_forged_revision_records_in_the_tree() -> Result<()> {
     };
     signed.signature = key.sign(&signed.payload()?).to_bytes().to_vec();
 
-    let mut tree = Corpus::empty_in(test_catalog());
+    let mut tree = Corpus::empty_in(test_subject());
     let mut delta = ArchiveDelta::zero();
     tree.record(
         &store,
@@ -2095,7 +2096,7 @@ async fn it_reads_a_spilled_revision_record_back() -> Result<()> {
         panic!("a record larger than inline_n spills");
     };
 
-    let mut tree: Corpus = PersistentTree::empty_with_manifest(test_catalog(), small.clone());
+    let mut tree: Corpus = PersistentTree::empty_with_manifest(test_subject(), small.clone());
     let mut delta = ArchiveDelta::zero();
     tree.record(&store, &mut delta, entries).await?;
     delta.flush_into(&store);
@@ -2106,12 +2107,12 @@ async fn it_reads_a_spilled_revision_record_back() -> Result<()> {
 
     let storage = store.clone();
     let observed = Arc::new(Mutex::new(BTreeSet::new()));
-    let empty: Corpus = PersistentTree::empty_with_manifest(test_catalog(), small);
+    let empty: Corpus = PersistentTree::empty_with_manifest(test_subject(), small);
     let changes = observe_revisions(
         empty.differentiate(&tree, &storage, &storage),
         observed.clone(),
         store.clone(),
-        tree.catalog().archive(),
+        ArchiveScope::new(tree.subject().clone()),
     );
     let _: Vec<_> = changes.try_collect().await?;
     assert!(
@@ -2479,7 +2480,7 @@ async fn it_mirrors_covering_records_into_the_coverage_region() -> Result<()> {
     let second = Version::new(Origin::from([8u8; 32]), Edition::new(1));
     let third = Version::new(Origin::from([8u8; 32]), Edition::new(2));
 
-    let mut tree = Corpus::empty_in(test_catalog());
+    let mut tree = Corpus::empty_in(test_subject());
     for (version, instruction) in [
         (first, Instruction::Assert(title("Hej"), crate::Pick::All)),
         (second, Instruction::Assert(title("Hi"), crate::Pick::Last)),

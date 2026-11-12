@@ -207,13 +207,15 @@ where
     /// The tree the branch head names.
     pub fn tree(&self) -> Corpus {
         match self.branch.revision() {
-            Some(revision) => Corpus::at(self.catalog(), NodeHash::from(*revision.tree.hash())),
-            None => Corpus::empty_in(self.catalog()),
+            Some(revision) => {
+                Corpus::at(self.branch.subject(), NodeHash::from(*revision.tree.hash()))
+            }
+            None => Corpus::empty_in(self.branch.subject()),
         }
     }
 
-    /// The catalog the branch's tree keeps its blocks in: a tree read
-    /// through the operator loads its nodes from here.
+    /// The catalog the branch's tree keeps its blocks in: a block walk
+    /// through the operator loads the tree's nodes from here.
     pub fn catalog(&self) -> CatalogScope {
         self.branch.archive().index()
     }

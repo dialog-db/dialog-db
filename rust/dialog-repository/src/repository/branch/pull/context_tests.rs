@@ -899,14 +899,14 @@ async fn it_answers_observes_after_a_takeover_at_zero_reads() -> Result<()> {
     // none (the branch handles keep their record caches).
     HeldCaches::of(&device).release(joiner.of());
     let store = &device;
-    let catalog = joiner.archive().index();
+    let subject = joiner.subject();
     device.reset();
     let seen = head_observes(
         &ours,
         &theirs,
         &ContextCache::new(),
         &joiner.records(),
-        &catalog,
+        &subject,
         &store,
     )
     .await?;
@@ -922,7 +922,7 @@ async fn it_answers_observes_after_a_takeover_at_zero_reads() -> Result<()> {
         &theirs,
         &ContextCache::new(),
         &Cache::new(),
-        &catalog,
+        &subject,
         &store,
     )
     .await?;

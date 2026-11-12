@@ -414,9 +414,9 @@ async fn measure_shape(depth: usize) -> Result<()> {
 
     let root = main.revision().expect("committed").tree;
     let store = &env;
-    let catalog = main.archive().index();
+    let subject = main.subject();
     let tree = crate::Index::at(
-        catalog.clone(),
+        subject.clone(),
         dialog_common::Blake3Hash::from(*root.hash()),
     );
     let tree_store = store;
@@ -433,7 +433,7 @@ async fn measure_shape(depth: usize) -> Result<()> {
         count
     };
 
-    let empty = crate::Index::empty_in(catalog);
+    let empty = crate::Index::empty_in(subject);
     let difference = TreeDifference::compute(&empty, &tree, &tree_store, &tree_store).await?;
     let nodes = {
         use futures_util::StreamExt as _;
@@ -490,7 +490,7 @@ async fn measure_write_paths(depth: usize, batches: usize) -> Result<()> {
 
     let root = main.revision().expect("committed").tree;
     let base = crate::Index::at(
-        main.archive().index(),
+        main.subject(),
         dialog_common::Blake3Hash::from(*root.hash()),
     );
 
@@ -505,7 +505,7 @@ async fn measure_write_paths(depth: usize, batches: usize) -> Result<()> {
     // load finds it.
     macro_rules! persist {
         ($delta:expr) => {{
-            nodes::Write::<CorpusNode>::new(main.archive().index(), $delta.flush_nodes())
+            nodes::Write::<CorpusNode>::new(main.subject(), $delta.flush_nodes())
                 .perform(&env)
                 .await?;
             main.archive()
@@ -827,12 +827,9 @@ async fn measure_first_query(origins: usize) -> Result<()> {
     let before = cache.bytes();
     reader.reset();
     let store = &reader;
-    crate::Index::at(
-        adopter.archive().index(),
-        Blake3Hash::from(*head.tree.hash()),
-    )
-    .manifest(&store)
-    .await?;
+    crate::Index::at(adopter.subject(), Blake3Hash::from(*head.tree.hash()))
+        .manifest(&store)
+        .await?;
     let root = cache.bytes() - before;
 
     let rows: Vec<Claim> = adopter

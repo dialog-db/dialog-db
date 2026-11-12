@@ -135,7 +135,7 @@ where
     let values = data.random_buffers::<32>(size);
 
     let mut tree = PersistentTree::<[u8; 16], Vec<u8>, D>::empty_in(
-        dialog_search_tree::helpers::test_catalog(),
+        dialog_search_tree::helpers::test_subject(),
     );
     let mut delta = Delta::zero();
 
@@ -165,7 +165,7 @@ where
     let blocks = Blocks::new();
     let storage = Holding::new(&blocks);
     let mut tree = PersistentTree::<[u8; 16], Vec<u8>, D>::empty_in(
-        dialog_search_tree::helpers::test_catalog(),
+        dialog_search_tree::helpers::test_subject(),
     );
     let mut delta = Delta::zero();
     for (key, value) in keys.iter().zip(values.iter()) {

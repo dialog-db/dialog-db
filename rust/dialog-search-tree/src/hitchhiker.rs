@@ -29,7 +29,6 @@ use std::marker::PhantomData;
 use std::ops::{Bound, RangeBounds};
 
 use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync};
-use dialog_effects::archive::prelude::CatalogScope;
 use futures_util::Stream;
 use rkyv::{
     Deserialize, Serialize,
@@ -43,11 +42,11 @@ use rkyv::{
 
 use crate::nodes::{Preload, Read};
 use crate::{
-    Accessor, Delta, DialogSearchTreeError, Distribution, Entry, Geometric, Key, Manifest, Node,
-    NodeBody, NoveltyEntry, NoveltyOp, PersistentNode, PersistentTree, TransientNode,
+    Delta, DialogSearchTreeError, Distribution, Entry, Geometric, Key, Manifest, Node, NodeBody,
+    NoveltyEntry, NoveltyOp, PersistentNode, PersistentTree, Reading, TransientNode,
     TransientRootParts, TransientSegment, TransientTree, Value, link_bounds,
 };
-use dialog_capability::Provider;
+use dialog_capability::{Provider, Subject};
 
 /// The per-node op-count cap a buffered tree flushes at: the tree's expected
 /// fanout (`2^fanout_n`, 256 under the default manifest), so a buffer holds
@@ -219,8 +218,8 @@ enum HitchhikerRoot<Key, Value> {
 /// A write-buffered search tree.
 ///
 /// Like [`PersistentTree`] it is backed by content-addressed storage, read
-/// as a root under a catalog whose blocks it reads through the environment
-/// each method is given, but it keeps a live spine across writes so buffered ops accumulate
+/// as a root and the [`Reading`](crate::Reading) it asks for nodes by,
+/// through the environment each method is given, but it keeps a live spine across writes so buffered ops accumulate
 /// in node `novelty` and cascade lazily. Seal it back into a canonical
 /// [`PersistentTree`] with [`canonicalize`](Self::canonicalize), or serialize
 /// the buffered form as-is with [`persist`](Self::persist).
@@ -231,8 +230,9 @@ where
     D: Distribution,
 {
     root: HitchhikerRoot<Key, Value>,
-    /// The catalog the tree's blocks live in.
-    catalog: CatalogScope,
+    /// How the tree asks for the nodes it reads: inherited from the tree it
+    /// was opened over, and handed to the tree it canonicalizes into.
+    reading: Reading,
     /// Explicit op-count cap; `None` derives it from the manifest (see
     /// [`op_buf_size`]).
     op_buf_size: Option<usize>,
@@ -287,7 +287,7 @@ where
         };
         Self {
             root,
-            catalog: tree.catalog().clone(),
+            reading: tree.reading().clone(),
             op_buf_size: env_op_buf_size(),
             op_buf_bytes: env_op_buf_bytes(),
             policy: FlushPolicy::default(),
@@ -297,11 +297,12 @@ where
         }
     }
 
-    /// Opens a new, empty buffered tree in `catalog` under `manifest`.
-    pub fn empty(catalog: CatalogScope, manifest: Manifest) -> Self {
+    /// Opens a new, empty buffered tree reading `subject`'s nodes, under
+    /// `manifest`.
+    pub fn empty(subject: Subject, manifest: Manifest) -> Self {
         Self {
             root: HitchhikerRoot::Empty,
-            catalog,
+            reading: Reading::new(subject),
             op_buf_size: env_op_buf_size(),
             op_buf_bytes: env_op_buf_bytes(),
             policy: FlushPolicy::default(),
@@ -311,9 +312,9 @@ where
         }
     }
 
-    /// The catalog this tree's blocks live in.
-    pub fn catalog(&self) -> &CatalogScope {
-        &self.catalog
+    /// The subject whose nodes this tree reads.
+    pub fn subject(&self) -> &Subject {
+        &self.reading.subject
     }
 
     /// Replaces the format [`Manifest`] this session writes under while the
@@ -514,7 +515,7 @@ where
             + Provider<Preload<PersistentNode<Key, Value>>>
             + ConditionalSync,
     {
-        let accessor = Accessor::new(storage, &self.catalog);
+        let (env, reading) = (storage, &self.reading);
 
         // An empty tree has no node to buffer into; every op goes straight to
         // the (initially empty) canonical tree.
@@ -522,7 +523,7 @@ where
             HitchhikerRoot::Loaded(node) => Some(node),
             HitchhikerRoot::Empty => None,
             HitchhikerRoot::Unloaded(ref hash) => {
-                let node: PersistentNode<Key, Value> = accessor.get_node(hash).await?;
+                let node: PersistentNode<Key, Value> = reading.node(env, hash).await?;
                 // Capture the tree's format header at the first root load,
                 // where storage is in hand: the synchronous `open` cannot read
                 // it, and every replay and persist below must run under the
@@ -567,7 +568,8 @@ where
                         settle,
                     },
                     &mut deferred,
-                    &accessor,
+                    env,
+                    reading,
                 )
                 .await?;
                 Some(node)
@@ -622,8 +624,8 @@ where
                         })
                         .collect();
                     oplist.extend(deferred);
-                    let edit = TransientTree::<Key, Value, D>::empty_with_manifest(
-                        self.catalog.clone(),
+                    let edit = TransientTree::<Key, Value, D>::empty_reading(
+                        self.reading.clone(),
                         Self::format(&self.manifest)?,
                     )
                     .plant(oplist, storage)
@@ -654,7 +656,7 @@ where
         // reshaped, exactly as a sequential edit would reshape them.
         let edit = match node {
             Some(node) => TransientTree::<Key, Value, D>::from_loaded(
-                self.catalog.clone(),
+                self.reading.clone(),
                 node,
                 Self::format(&self.manifest)?,
             ),
@@ -666,8 +668,8 @@ where
                 // pacing while the stamped headers claimed the session's
                 // format — silent shape divergence from a replica that built
                 // the same entries canonically.)
-                TransientTree::<Key, Value, D>::empty_with_manifest(
-                    self.catalog.clone(),
+                TransientTree::<Key, Value, D>::empty_reading(
+                    self.reading.clone(),
                     Self::format(&self.manifest)?,
                 )
             }
@@ -708,12 +710,12 @@ where
         // deeper therefore means older, so after the stable sort by key the
         // SHALLOWEST (newest) op for a key sits last, and last-write-wins
         // replay lets exactly that op stand.
-        let accessor = Accessor::new(storage, &self.catalog);
+        let (env, reading) = (storage, &self.reading);
         let edit = match self.root {
             // The session's manifest rides along so the empty tree
             // canonicalizes to the manifest-carrying empty node.
-            HitchhikerRoot::Empty => TransientTree::<Key, Value, D>::empty_with_manifest(
-                self.catalog.clone(),
+            HitchhikerRoot::Empty => TransientTree::<Key, Value, D>::empty_reading(
+                self.reading.clone(),
                 Self::format(&self.manifest)?,
             ),
             HitchhikerRoot::Unloaded(hash) => {
@@ -723,19 +725,19 @@ where
                 // no novelty anywhere is already canonical (an empty buffer is
                 // byte-identical to a canonical node's) and keeps its hash
                 // with no rewrite.
-                if !subtree_has_novelty::<Key, Value, Env>(&hash, &accessor).await? {
-                    TransientTree::<Key, Value, D>::new(self.catalog.clone(), hash)
+                if !subtree_has_novelty::<Key, Value, Env>(&hash, env, reading).await? {
+                    TransientTree::<Key, Value, D>::new_reading(self.reading.clone(), hash)
                 } else {
-                    let root: PersistentNode<Key, Value> = accessor.get_node(&hash).await?;
+                    let root: PersistentNode<Key, Value> = reading.node(env, &hash).await?;
                     // The replay must re-shape and re-stamp under the tree's
                     // own format, read from the root it is inlined into.
                     let manifest = root.manifest()?;
                     let mut node = TransientNode::open(&root, Vec::new())?;
                     let mut ops = Vec::new();
-                    drain_novelty(&mut node, &mut ops, &accessor).await?;
+                    drain_novelty(&mut node, &mut ops, env, reading).await?;
                     ops.sort_by(|a, b| a.key.cmp(&b.key));
                     let edit = TransientTree::<Key, Value, D>::from_loaded(
-                        self.catalog.clone(),
+                        self.reading.clone(),
                         node,
                         manifest,
                     );
@@ -744,10 +746,10 @@ where
             }
             HitchhikerRoot::Loaded(mut node) => {
                 let mut ops = Vec::new();
-                drain_novelty(&mut node, &mut ops, &accessor).await?;
+                drain_novelty(&mut node, &mut ops, env, reading).await?;
                 ops.sort_by(|a, b| a.key.cmp(&b.key));
                 let edit = TransientTree::<Key, Value, D>::from_loaded(
-                    self.catalog.clone(),
+                    self.reading.clone(),
                     node,
                     Self::format(&self.manifest)?,
                 );
@@ -942,13 +944,13 @@ where
             }
         };
 
-        let accessor = Accessor::new(storage, &self.catalog);
+        let (env, reading) = (storage, &self.reading);
         async_stream::try_stream! {
             for step in plan {
                 match step {
                     StoredStep::Subtree(hash) => {
                         let inner = crate::TreeWalker::<Key, Value>::new(Some(hash))
-                            .stream(bounds.clone(), accessor.clone());
+                            .stream(bounds.clone(), env, reading.clone());
                         futures_util::pin_mut!(inner);
                         while let Some(entry) = futures_util::StreamExt::next(&mut inner).await {
                             yield entry?;
@@ -979,7 +981,7 @@ where
             + ConditionalSync,
     {
         let subtree: PersistentTree<Key, Value, D> =
-            PersistentTree::seal(self.catalog.clone(), hash.clone());
+            PersistentTree::seal(self.reading.clone(), hash.clone());
         subtree.get(key, storage).await
     }
 
@@ -1080,7 +1082,8 @@ fn enqueue<'a, Key, Value, D, Env>(
     msgs: Vec<NoveltyEntry<Value>>,
     config: EnqueueConfig,
     deferred: &'a mut Vec<NoveltyEntry<Value>>,
-    accessor: &'a Accessor<'_, Key, Value, Env>,
+    env: &'a Env,
+    reading: &'a Reading,
 ) -> NodeFuture<'a, Key, Value>
 where
     Key: self::Key + ConditionalSync + 'static,
@@ -1188,7 +1191,7 @@ where
             let took = index.novelty.take_link::<Key>(at)?;
             buffered_weight -= link_weight;
             buffered_ops -= link_ops;
-            lift_child(&mut index.children[at], accessor).await?;
+            lift_child(&mut index.children[at], env, reading).await?;
 
             let child = std::mem::replace(
                 &mut index.children[at],
@@ -1218,7 +1221,8 @@ where
                     ..config.clone()
                 },
                 deferred,
-                accessor,
+                env,
+                reading,
             )
             .await?;
             index.children[at] = Node::Transient(updated);
@@ -1232,7 +1236,8 @@ where
 /// form, loading it from storage; a transient child is left untouched.
 async fn lift_child<Key, Value, Env>(
     child: &mut Node<Key, Value>,
-    accessor: &Accessor<'_, Key, Value, Env>,
+    env: &Env,
+    reading: &Reading,
 ) -> Result<(), DialogSearchTreeError>
 where
     Key: self::Key,
@@ -1245,7 +1250,7 @@ where
         + ConditionalSync,
 {
     if let Node::Persistent(link) = child {
-        let persistent = accessor.get_node(&link.node).await?;
+        let persistent = reading.node(env, &link.node).await?;
         // The link carries the seam at the child's left edge; a lifted segment
         // must keep it, since it is the ground truth every level above derives
         // its separators from.
@@ -1476,7 +1481,8 @@ where
 /// subtrees that need rewriting, leaving every clean subtree's hash untouched.
 fn subtree_has_novelty<'a, Key, Value, Env>(
     hash: &'a Blake3Hash,
-    accessor: &'a Accessor<'_, Key, Value, Env>,
+    env: &'a Env,
+    reading: &'a Reading,
 ) -> BoolFuture<'a>
 where
     Key: self::Key + ConditionalSync + 'static,
@@ -1490,7 +1496,7 @@ where
         + ConditionalSync,
 {
     Box::pin(async move {
-        let node: PersistentNode<Key, Value> = accessor.get_node(hash).await?;
+        let node: PersistentNode<Key, Value> = reading.node(env, hash).await?;
         let links = match node.body() {
             NodeBody::Segment(_) => return Ok(false),
             NodeBody::Index(index) => {
@@ -1501,7 +1507,7 @@ where
             }
         };
         for link in links {
-            if subtree_has_novelty::<Key, Value, Env>(&link.node, accessor).await? {
+            if subtree_has_novelty::<Key, Value, Env>(&link.node, env, reading).await? {
                 return Ok(true);
             }
         }
@@ -1525,7 +1531,8 @@ where
 fn drain_novelty<'a, Key, Value, Env>(
     node: &'a mut TransientNode<Key, Value>,
     ops: &'a mut Vec<NoveltyEntry<Value>>,
-    accessor: &'a Accessor<'_, Key, Value, Env>,
+    env: &'a Env,
+    reading: &'a Reading,
 ) -> UnitFuture<'a>
 where
     Key: self::Key + ConditionalSync + 'static,
@@ -1542,15 +1549,15 @@ where
         if let TransientNode::Index(index) = node {
             for child in &mut index.children {
                 if let Node::Persistent(link) = child {
-                    if !subtree_has_novelty::<Key, Value, Env>(&link.node, accessor).await? {
+                    if !subtree_has_novelty::<Key, Value, Env>(&link.node, env, reading).await? {
                         continue;
                     }
                     // Measurement-only (uncommitted, env-gated) lift breadcrumb.
                     dialog_storage::dup_audit::note_lift(link.node.as_bytes(), "drain_novelty");
-                    lift_child(child, accessor).await?;
+                    lift_child(child, env, reading).await?;
                 }
                 if let Node::Transient(child) = child {
-                    drain_novelty(child, ops, accessor).await?;
+                    drain_novelty(child, ops, env, reading).await?;
                 }
             }
             ops.extend(index.novelty.take_all::<Key>()?);
@@ -1572,7 +1579,7 @@ mod tests {
         DistributionSimulator, SpecKey, TestStorage as SpecStorage, encode_key, test_storage,
     };
     use crate::{
-        Accessor, Change, Delta, Manifest, Node, NodeBody, NoveltyEntry, NoveltyOp, PersistentNode,
+        Change, Delta, Manifest, Node, NodeBody, NoveltyEntry, NoveltyOp, PersistentNode,
         PersistentTree, TransientNode, TransientTree, tree_spec,
     };
 
@@ -1621,7 +1628,7 @@ mod tests {
     /// in its own edit batch, flushing after each. This is the history-independent
     /// canonical oracle a canonicalized hitchhiker tree must reproduce.
     async fn sequential(keys: &[u32], storage: &mut TestStorage) -> Result<TestTree> {
-        let mut tree = TestTree::empty_in(crate::helpers::test_catalog());
+        let mut tree = TestTree::empty_in(crate::helpers::test_subject());
         let mut delta = Delta::zero();
         for &k in keys {
             tree = tree
@@ -1660,9 +1667,12 @@ mod tests {
         let keys: Vec<u32> = (0..2000).collect();
         let tree = sequential(&keys, &mut storage).await?;
         let root_hashes: Vec<Blake3Hash> = {
-            let accessor = crate::Accessor::new(&storage, &crate::helpers::test_catalog());
+            let (env, reading) = (
+                &storage,
+                &crate::Reading::new(crate::helpers::test_subject()),
+            );
             let node: crate::PersistentNode<[u8; 4], Vec<u8>> =
-                accessor.get_node(tree.root()).await?;
+                reading.node(env, tree.root()).await?;
             let index = node.as_index()?;
             (0..index.len())
                 .map(|at| index.hash_at(at).cloned())
@@ -1741,7 +1751,7 @@ mod tests {
             flush(&mut delta, &mut storage).await?;
 
             let oracle_tree: TestTree =
-                PersistentTree::seal(crate::helpers::test_catalog(), oracle_root);
+                PersistentTree::at(crate::helpers::test_subject(), oracle_root);
             let mut oracle = TestHitchhiker::open(&oracle_tree).with_op_buf_size(8);
             for &k in &batch_keys {
                 oracle = oracle
@@ -1761,8 +1771,7 @@ mod tests {
         // The two paths must also agree on the canonical form.
         let mut delta = Delta::zero();
         let live_canonical = live.canonicalize(&storage, &mut delta).await?;
-        let oracle_tree: TestTree =
-            PersistentTree::seal(crate::helpers::test_catalog(), oracle_root);
+        let oracle_tree: TestTree = PersistentTree::at(crate::helpers::test_subject(), oracle_root);
         let mut delta = Delta::zero();
         let oracle_canonical = TestHitchhiker::open(&oracle_tree)
             .canonicalize(&storage, &mut delta)
@@ -1923,7 +1932,7 @@ mod tests {
         // node carries it and the buffered path below runs under it.
         let mut delta = Delta::zero();
         let mut seed = TransientTree::<VarKey, Vec<u8>>::empty_with_manifest(
-            crate::helpers::test_catalog(),
+            crate::helpers::test_subject(),
             manifest,
         );
         let mut rng = Rng::new(11);
@@ -1943,7 +1952,7 @@ mod tests {
         let mut root = base.root().clone();
         for _ in 0..1500 {
             let tree: VarPersistent =
-                PersistentTree::seal(crate::helpers::test_catalog(), root.clone());
+                PersistentTree::at(crate::helpers::test_subject(), root.clone());
             let mut buffered = VarHitchhiker::open(&tree).with_op_buf_size(16);
             for _ in 0..8 {
                 let (key, value) = small_frame_op(&mut rng);
@@ -1959,7 +1968,7 @@ mod tests {
 
         // The canonicalize half of the field failure: a full drain of every
         // buffer through the same reshape machinery.
-        let tree: VarPersistent = PersistentTree::seal(crate::helpers::test_catalog(), root);
+        let tree: VarPersistent = PersistentTree::at(crate::helpers::test_subject(), root);
         let mut delta = Delta::zero();
         VarHitchhiker::open(&tree)
             .canonicalize(&storage, &mut delta)
@@ -1973,7 +1982,7 @@ mod tests {
     async fn it_canonicalizes_empty_to_the_empty_node() -> Result<()> {
         let storage = Blocks::new();
         let mut delta = Delta::zero();
-        let canonical = TestHitchhiker::empty(crate::helpers::test_catalog(), Manifest::default())
+        let canonical = TestHitchhiker::empty(crate::helpers::test_subject(), Manifest::default())
             .canonicalize(&storage, &mut delta)
             .await?;
         let mut scratch = Delta::zero();
@@ -1994,7 +2003,7 @@ mod tests {
         let expected = sequential(&keys, &mut storage).await?;
 
         // A large buffer keeps every op in the root: no cascade until canonicalize.
-        let mut tree = TestHitchhiker::empty(crate::helpers::test_catalog(), Manifest::default())
+        let mut tree = TestHitchhiker::empty(crate::helpers::test_subject(), Manifest::default())
             .with_op_buf_size(100_000);
         for &k in &keys {
             tree = tree
@@ -2023,7 +2032,7 @@ mod tests {
             let expected = sequential(&keys, &mut storage).await?;
 
             let mut tree =
-                TestHitchhiker::empty(crate::helpers::test_catalog(), Manifest::default())
+                TestHitchhiker::empty(crate::helpers::test_subject(), Manifest::default())
                     .with_op_buf_size(buf);
             for &k in &keys {
                 tree = tree
@@ -2059,7 +2068,7 @@ mod tests {
             // touches three key orderings plus a history record.
             let mut rng = Rng::new(buf as u64);
             let mut keys: Vec<u32> = Vec::new();
-            let mut tree = TestTree::empty_in(crate::helpers::test_catalog());
+            let mut tree = TestTree::empty_in(crate::helpers::test_subject());
             for batch in 0..200u32 {
                 let batch_keys: Vec<u32> = (0..4).map(|_| rng.next_u32() % 1_000_000).collect();
                 let mut hitchhiker = HitchhikerTree::open(&tree).with_op_buf_size(buf);
@@ -2071,7 +2080,7 @@ mod tests {
                 let mut delta = Delta::zero();
                 let root = hitchhiker.persist(&mut delta)?;
                 flush(&mut delta, &mut storage).await?;
-                tree = TestTree::at(crate::helpers::test_catalog(), root);
+                tree = TestTree::at(crate::helpers::test_subject(), root);
                 keys.extend(batch_keys);
                 let _ = batch;
             }
@@ -2132,7 +2141,7 @@ mod tests {
             let expected = sequential(&sorted, &mut storage).await?;
 
             let mut tree =
-                TestHitchhiker::empty(crate::helpers::test_catalog(), Manifest::default())
+                TestHitchhiker::empty(crate::helpers::test_subject(), Manifest::default())
                     .with_op_buf_size(8);
             for &k in &keys {
                 tree = tree
@@ -2173,7 +2182,7 @@ mod tests {
             let expected = sequential(&survivors, &mut storage).await?;
 
             let mut tree =
-                TestHitchhiker::empty(crate::helpers::test_catalog(), Manifest::default())
+                TestHitchhiker::empty(crate::helpers::test_subject(), Manifest::default())
                     .with_op_buf_size(16);
             for &k in &keys {
                 tree = tree
@@ -2212,7 +2221,7 @@ mod tests {
             }
 
             // Sequential reference through the canonical edit path.
-            let mut reference = TestTree::empty_in(crate::helpers::test_catalog());
+            let mut reference = TestTree::empty_in(crate::helpers::test_subject());
             let mut delta = Delta::zero();
             for &(is_insert, key) in &ops {
                 reference = if is_insert {
@@ -2233,7 +2242,7 @@ mod tests {
 
             // Buffered through the hitchhiker tree, with a cascading buffer.
             let mut tree =
-                TestHitchhiker::empty(crate::helpers::test_catalog(), Manifest::default())
+                TestHitchhiker::empty(crate::helpers::test_subject(), Manifest::default())
                     .with_op_buf_size(8);
             for &(is_insert, key) in &ops {
                 tree = if is_insert {
@@ -2275,7 +2284,7 @@ mod tests {
 
             // Reference: replay the ops canonically and flush, so its reads are
             // fully resolvable from storage.
-            let mut reference = TestTree::empty_in(crate::helpers::test_catalog());
+            let mut reference = TestTree::empty_in(crate::helpers::test_subject());
             let mut delta = Delta::zero();
             for &(is_insert, key) in &ops {
                 reference = if is_insert {
@@ -2297,7 +2306,7 @@ mod tests {
             // Buffered: the same ops through a cascading hitchhiker tree, never
             // canonicalized; reads merge the live buffers over the leaves.
             let mut tree =
-                TestHitchhiker::empty(crate::helpers::test_catalog(), Manifest::default())
+                TestHitchhiker::empty(crate::helpers::test_subject(), Manifest::default())
                     .with_op_buf_size(8);
             for &(is_insert, key) in &ops {
                 tree = if is_insert {
@@ -2338,7 +2347,7 @@ mod tests {
                 ops.push((is_insert, rng.next_u32() % 150));
             }
 
-            let mut reference = TestTree::empty_in(crate::helpers::test_catalog());
+            let mut reference = TestTree::empty_in(crate::helpers::test_subject());
             let mut delta = Delta::zero();
             for &(is_insert, key) in &ops {
                 reference = if is_insert {
@@ -2360,7 +2369,7 @@ mod tests {
             // A small buffer forces cascades, so ops end up spread across several
             // levels of novelty and the scan has to merge all of them.
             let mut tree =
-                TestHitchhiker::empty(crate::helpers::test_catalog(), Manifest::default())
+                TestHitchhiker::empty(crate::helpers::test_subject(), Manifest::default())
                     .with_op_buf_size(8);
             for &(is_insert, key) in &ops {
                 tree = if is_insert {
@@ -2466,7 +2475,7 @@ mod tests {
 
         // A large buffer keeps every op in the root buffer, so all collisions on
         // a key resolve purely within one node's novelty.
-        let mut tree = TestHitchhiker::empty(crate::helpers::test_catalog(), Manifest::default())
+        let mut tree = TestHitchhiker::empty(crate::helpers::test_subject(), Manifest::default())
             .with_op_buf_size(100_000);
 
         tree = tree.insert(7u32.to_le_bytes(), vec![1], &storage).await?;
@@ -2558,7 +2567,7 @@ mod tests {
             }
 
             // Canonical reference via the sequential edit path, flushed.
-            let mut reference = TestTree::empty_in(crate::helpers::test_catalog());
+            let mut reference = TestTree::empty_in(crate::helpers::test_subject());
             let mut delta = Delta::zero();
             for &(is_insert, key) in &ops {
                 reference = if is_insert {
@@ -2581,7 +2590,7 @@ mod tests {
                 // A small buffer forces cascades for Amortized and Recursive; for
                 // Immediate the buffer is never used.
                 let mut tree =
-                    TestHitchhiker::empty(crate::helpers::test_catalog(), Manifest::default())
+                    TestHitchhiker::empty(crate::helpers::test_subject(), Manifest::default())
                         .with_op_buf_size(8)
                         .with_flush_policy(policy);
                 for &(is_insert, key) in &ops {
@@ -2627,7 +2636,7 @@ mod tests {
         let keys: Vec<u32> = (0..200).collect();
         let expected = sequential(&keys, &mut storage).await?;
 
-        let mut tree = TestHitchhiker::empty(crate::helpers::test_catalog(), Manifest::default())
+        let mut tree = TestHitchhiker::empty(crate::helpers::test_subject(), Manifest::default())
             .with_flush_policy(FlushPolicy::Immediate);
         for &k in &keys {
             tree = tree
@@ -2663,7 +2672,7 @@ mod tests {
         let mut delta = Delta::zero();
         let root = tree.persist(&mut delta)?;
         flush(&mut delta, storage).await?;
-        Ok(TestTree::at(crate::helpers::test_catalog(), root))
+        Ok(TestTree::at(crate::helpers::test_subject(), root))
     }
 
     /// Canonicalizes a hitchhiker tree and flushes it, returning the canonical
@@ -2968,7 +2977,7 @@ mod tests {
                 FlushTrigger::PerChild { floor: 16 },
             ] {
                 let mut tree =
-                    TestHitchhiker::empty(crate::helpers::test_catalog(), Manifest::default())
+                    TestHitchhiker::empty(crate::helpers::test_subject(), Manifest::default())
                         .with_op_buf_size(64)
                         .with_flush_trigger(trigger);
                 for (insert, key) in &ops {
@@ -3104,7 +3113,7 @@ mod tests {
         .await
         .expect("the fixture spec is valid");
         let mut storage = spec.storage().clone();
-        let base = SpecTree::at(crate::helpers::test_catalog(), spec.tree().root().clone());
+        let base = SpecTree::at(crate::helpers::test_subject(), spec.tree().root().clone());
 
         // The writes are deterministic, so a persisted twin proves where the
         // returned (still live) tree holds its ops.
@@ -3210,7 +3219,7 @@ mod tests {
         spec_flush(&mut delta, &mut storage).await?;
         assert_probe_spans_two_levels(&root, &storage, &NoveltyOp::Assert(vec![2])).await?;
 
-        let reopened = SpecTree::at(crate::helpers::test_catalog(), root);
+        let reopened = SpecTree::at(crate::helpers::test_subject(), root);
         assert_eq!(
             reopened.get(&probe(), &storage).await?,
             Some(vec![2]),
@@ -3251,7 +3260,7 @@ mod tests {
         spec_flush(&mut delta, &mut storage).await?;
         assert_probe_spans_two_levels(&root, &storage, &NoveltyOp::Retract).await?;
 
-        let reopened = SpecTree::at(crate::helpers::test_catalog(), root);
+        let reopened = SpecTree::at(crate::helpers::test_subject(), root);
         assert_eq!(
             reopened.get(&probe(), &storage).await?,
             None,
@@ -3285,7 +3294,7 @@ mod tests {
         let mut delta = Delta::zero();
         let root = tree.persist(&mut delta)?;
         spec_flush(&mut delta, &mut storage).await?;
-        let reopened = SpecTree::at(crate::helpers::test_catalog(), root);
+        let reopened = SpecTree::at(crate::helpers::test_subject(), root);
 
         let mut adds: Vec<(SpecKey, Vec<u8>)> = Vec::new();
         {
@@ -3321,7 +3330,7 @@ mod tests {
         let mut delta = Delta::zero();
         let root = tree.persist(&mut delta)?;
         spec_flush(&mut delta, &mut storage).await?;
-        let reopened = SpecTree::at(crate::helpers::test_catalog(), root);
+        let reopened = SpecTree::at(crate::helpers::test_subject(), root);
 
         let mut probe_adds: Vec<Vec<u8>> = Vec::new();
         let mut probe_removed = false;
@@ -3366,7 +3375,7 @@ mod tests {
 
         // A giant buffer keeps every op (after the first) in the root buffer,
         // so the persisted tree is unambiguously non-canonical.
-        let mut tree = TestHitchhiker::empty(crate::helpers::test_catalog(), Manifest::default())
+        let mut tree = TestHitchhiker::empty(crate::helpers::test_subject(), Manifest::default())
             .with_op_buf_size(100_000);
         for &k in &keys {
             tree = tree
@@ -3377,7 +3386,7 @@ mod tests {
         let root = tree.persist(&mut delta)?;
         flush(&mut delta, &mut storage).await?;
 
-        let reopened = TestTree::at(crate::helpers::test_catalog(), root);
+        let reopened = TestTree::at(crate::helpers::test_subject(), root);
         let mut delta = Delta::zero();
         let canonical = HitchhikerTree::open(&reopened)
             .canonicalize(&storage, &mut delta)
@@ -3416,7 +3425,7 @@ mod tests {
         .await
         .expect("the fixture spec is valid");
         let mut storage = spec.storage().clone();
-        let base = SpecTree::at(crate::helpers::test_catalog(), spec.tree().root().clone());
+        let base = SpecTree::at(crate::helpers::test_subject(), spec.tree().root().clone());
 
         // Park one new key in each mid-level buffer via the one-op cascade,
         // then persist without canonicalizing.
@@ -3432,7 +3441,7 @@ mod tests {
         // A later write loads the root; its children stay persistent links
         // carrying the sealed buffers.
         let late = encode_key(b"cc", 1, 1);
-        let reopened = SpecTree::at(crate::helpers::test_catalog(), root);
+        let reopened = SpecTree::at(crate::helpers::test_subject(), root);
         let tree = SpecHitchhiker::open(&reopened)
             .insert(late, vec![7], &storage)
             .await?;
@@ -3486,7 +3495,7 @@ mod tests {
         let mut storage = Blocks::new();
 
         let mut edit = TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(
-            crate::helpers::test_catalog(),
+            crate::helpers::test_subject(),
             custom.clone(),
         );
         for k in 0..50u32 {
@@ -3527,7 +3536,7 @@ mod tests {
         let mut storage = Blocks::new();
 
         let mut edit = TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(
-            crate::helpers::test_catalog(),
+            crate::helpers::test_subject(),
             custom.clone(),
         );
         for k in 0..40u32 {
@@ -3550,7 +3559,7 @@ mod tests {
         flush(&mut delta, &mut storage).await?;
 
         let mut oracle = TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(
-            crate::helpers::test_catalog(),
+            crate::helpers::test_subject(),
             custom,
         );
         for k in 0..80u32 {
@@ -3585,7 +3594,7 @@ mod tests {
         // Fill a pinned session from empty, drain it back to empty, then
         // refill: every write into the empty tree must shape under the pin.
         let mut tree = HitchhikerTree::<[u8; 4], Vec<u8>>::empty(
-            crate::helpers::test_catalog(),
+            crate::helpers::test_subject(),
             custom.clone(),
         );
         for k in 0..30u32 {
@@ -3606,7 +3615,7 @@ mod tests {
         flush(&mut delta, &mut storage).await?;
 
         let mut oracle = TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(
-            crate::helpers::test_catalog(),
+            crate::helpers::test_subject(),
             custom,
         );
         for k in 100..150u32 {
@@ -3641,7 +3650,7 @@ mod tests {
         let mut storage = Blocks::new();
 
         let mut edit = TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(
-            crate::helpers::test_catalog(),
+            crate::helpers::test_subject(),
             custom.clone(),
         );
         for k in 0..30u32 {
@@ -3666,8 +3675,8 @@ mod tests {
             "an emptied tree must keep a stored root node"
         );
         let node: PersistentNode<[u8; 4], Vec<u8>> =
-            Accessor::new(&storage, &crate::helpers::test_catalog())
-                .get_node(emptied.root())
+            crate::Reading::new(crate::helpers::test_subject())
+                .node(&storage, emptied.root())
                 .await?;
         assert!(node.is_empty()?, "the empty root is a zero-entry node");
         assert_eq!(
@@ -3690,7 +3699,7 @@ mod tests {
         // from scratch under the same manifest yields the same root.
         let mut delta = Delta::zero();
         let scratch = TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(
-            crate::helpers::test_catalog(),
+            crate::helpers::test_subject(),
             custom,
         )
         .persist(&mut delta)?;
@@ -3714,7 +3723,7 @@ mod tests {
         // default manifest's empty node, the pure function of (empty set,
         // Manifest::default()).
         let mut edit = TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(
-            crate::helpers::test_catalog(),
+            crate::helpers::test_subject(),
             Manifest::default(),
         );
         for k in 0..10u32 {
@@ -3763,7 +3772,7 @@ mod tests {
 
         // Build under the custom format, then empty.
         let mut edit = TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(
-            crate::helpers::test_catalog(),
+            crate::helpers::test_subject(),
             custom.clone(),
         );
         for k in 0..40u32 {
@@ -3785,7 +3794,7 @@ mod tests {
         // The oracle: the second-life entries written directly under the
         // custom format by a replica that never emptied anything.
         let mut oracle = TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(
-            crate::helpers::test_catalog(),
+            crate::helpers::test_subject(),
             custom,
         );
         for k in 100..160u32 {
@@ -3800,7 +3809,7 @@ mod tests {
         // Second life via canonical edits, reopened with no pinning: the
         // manifest comes off the empty node.
         let reopened = PersistentTree::<[u8; 4], Vec<u8>>::at(
-            crate::helpers::test_catalog(),
+            crate::helpers::test_subject(),
             emptied.root().clone(),
         );
         let mut edit = reopened.edit();
@@ -3820,7 +3829,7 @@ mod tests {
 
         // Second life via the buffered path, also unpinned.
         let reopened = PersistentTree::<[u8; 4], Vec<u8>>::at(
-            crate::helpers::test_catalog(),
+            crate::helpers::test_subject(),
             emptied.root().clone(),
         );
         let mut buffered = HitchhikerTree::open(&reopened).with_op_buf_size(4);
@@ -3841,7 +3850,7 @@ mod tests {
         // And a buffered session that EMPTIES the tree persists the empty
         // node itself, closing the loop without any pinning.
         let reopened = PersistentTree::<[u8; 4], Vec<u8>>::at(
-            crate::helpers::test_catalog(),
+            crate::helpers::test_subject(),
             expected.root().clone(),
         );
         let mut buffered = HitchhikerTree::open(&reopened).with_op_buf_size(4);
@@ -3916,18 +3925,18 @@ mod tests {
             ..Manifest::default()
         };
         let keys: Vec<u32> = (0..500).collect();
-        let mut base = TestTree::empty_in(crate::helpers::test_catalog());
+        let mut base = TestTree::empty_in(crate::helpers::test_subject());
         {
             let mut delta = Delta::zero();
             for &k in &keys {
                 base = match base.stored_root() {
                     Some(root) => TransientTree::with_manifest(
-                        crate::helpers::test_catalog(),
+                        crate::helpers::test_subject(),
                         root.clone(),
                         manifest.clone(),
                     ),
                     None => TransientTree::empty_with_manifest(
-                        crate::helpers::test_catalog(),
+                        crate::helpers::test_subject(),
                         manifest.clone(),
                     ),
                 }
@@ -3954,8 +3963,7 @@ mod tests {
         let batch: Vec<u32> = vec![700, 701];
         let mut roots = Vec::new();
         for fresh in [false, true] {
-            let sealed: TestTree =
-                PersistentTree::seal(crate::helpers::test_catalog(), root.clone());
+            let sealed: TestTree = PersistentTree::at(crate::helpers::test_subject(), root.clone());
             let mut tree = HitchhikerTree::open(&sealed)
                 .with_op_buf_size(100_000)
                 .with_op_buf_bytes(usize::MAX);

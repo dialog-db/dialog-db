@@ -2,9 +2,9 @@
 
 use std::sync::mpsc::Sender;
 
+use dialog_capability::Subject;
 use dialog_corpus::{Datum, DialogCorpusError, Key, State};
-use dialog_effects::archive::prelude::CatalogScope;
-use dialog_search_tree::{Entry, Key as TreeKey, NodeBody, PersistentNode, into_owned, load_node};
+use dialog_search_tree::{Entry, Key as TreeKey, NodeBody, PersistentNode, into_owned, nodes};
 use dialog_storage::Blake3Hash;
 
 use super::store::WorkerMessage;
@@ -41,8 +41,8 @@ pub enum TreeNode {
 pub struct FactsHierarchy {
     /// The session the tree's blocks load through
     storage: Arc<DiagnoseSession>,
-    /// The catalog the tree's nodes live in
-    catalog: CatalogScope,
+    /// The subject whose tree this is: the one its nodes are read for
+    subject: Subject,
     /// Channel sender for worker messages
     tx: Sender<WorkerMessage>,
 }
@@ -54,14 +54,10 @@ impl FactsHierarchy {
     ///
     /// * `tree` - The probabilistic search tree index to load nodes from
     /// * `tx` - Channel sender for worker messages
-    pub fn new(
-        storage: Arc<DiagnoseSession>,
-        catalog: CatalogScope,
-        tx: Sender<WorkerMessage>,
-    ) -> Self {
+    pub fn new(storage: Arc<DiagnoseSession>, subject: Subject, tx: Sender<WorkerMessage>) -> Self {
         Self {
             storage,
-            catalog,
+            subject,
             tx,
         }
     }
@@ -76,13 +72,15 @@ impl FactsHierarchy {
     /// * `hash` - The hash of the node to look up
     pub fn lookup_node(&self, hash: &Blake3Hash) {
         let storage = self.storage.clone();
-        let catalog = self.catalog.clone();
+        let subject = self.subject.clone();
         let tx = self.tx.clone();
         let hash = hash.to_owned();
 
         tokio::spawn(async move {
             let Some(block): Option<PersistentNode<Key, State<Datum>>> =
-                load_node(storage.as_ref(), &catalog, &hash.into()).await?
+                nodes::Read::new(subject, hash.into())
+                    .perform(storage.as_ref())
+                    .await?
             else {
                 // TODO: This should be an error condition
                 return Ok(());

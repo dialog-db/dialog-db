@@ -10,15 +10,13 @@ use dialog_corpus::tree::CorpusNode;
 #[cfg(not(feature = "web-integration-tests"))]
 use dialog_effects::archive::Load as ArchiveLoad;
 #[cfg(not(feature = "web-integration-tests"))]
-use dialog_effects::archive::prelude::CatalogScope;
-#[cfg(not(feature = "web-integration-tests"))]
 use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::storage::Location;
 #[cfg(not(feature = "web-integration-tests"))]
 use dialog_search_tree::nodes;
 
 use dialog_effects::MethodExt as _;
-use dialog_effects::archive::prelude::{ArchiveExt as _, ArchiveScope};
+use dialog_effects::archive::prelude::ArchiveExt as _;
 use dialog_effects::blob::prelude::{ArchiveBlobExt as _, ReadBlobExt as _};
 use std::collections::HashSet;
 use std::ops::Range;
@@ -3049,13 +3047,13 @@ where
 /// blocks they reference are all present too. This must hold after ANY
 /// prefix of a push, aborted pushes included: it is what entitles a
 /// later pusher to prune a whole subtree on one positive existence
-/// probe. The head is walked in `catalog` (the pusher's archive,
+/// probe. The head is walked as `subject`'s tree (the pusher's archive,
 /// optionally hydrating through a source remote), never trusting the
 /// remote under test for its own audit.
 #[cfg(not(feature = "web-integration-tests"))]
 async fn assert_remote_closure_complete(
     operator: &Peer<VolatileSpace, dialog_peer::Session>,
-    catalog: CatalogScope,
+    subject: Subject,
     head: NodeHash,
     remote: &ConnectedReplica,
 ) -> Result<()> {
@@ -3064,7 +3062,7 @@ async fn assert_remote_closure_complete(
     // a segment, buffered ops in an index node — both are bytes of the
     // node that holds them).
     let storage = operator;
-    let tree = Index::at(catalog, head);
+    let tree = Index::at(subject, head);
     let mut nodes: Vec<(NodeHash, Vec<NodeHash>, Vec<ShipmentRef>)> = Vec::new();
     let visits = tree.traverse_available(&storage);
     futures_util::pin_mut!(visits);
@@ -3251,8 +3249,7 @@ async fn it_leaves_an_aborted_push_closure_complete(s3: S3Address) -> Result<()>
         .perform(&operator)
         .await?;
     let head = NodeHash::from(*branch.revision().expect("committed").tree.hash());
-    let index = branch.archive().index();
-    assert_remote_closure_complete(&operator, index, head, &origin).await?;
+    assert_remote_closure_complete(&operator, branch.subject(), head, &origin).await?;
 
     Ok(())
 }
@@ -3365,8 +3362,7 @@ async fn it_leaves_an_aborted_bridge_push_closure_complete(s3: S3Address) -> Res
     // Audit B against the full head, hydrating the walk through A (the
     // bridge holds the adopted region only by reference).
     let head = NodeHash::from(*bridge_branch.revision().expect("committed").tree.hash());
-    let index = bridge_branch.archive().index();
-    assert_remote_closure_complete(&operator, index, head, &origin_b).await?;
+    assert_remote_closure_complete(&operator, bridge_branch.subject(), head, &origin_b).await?;
 
     Ok(())
 }
@@ -4885,9 +4881,8 @@ async fn raw_spill_references<C: dialog_varsig::Principal>(
     repository: &Repository<C>,
     revision: &Revision,
 ) -> Result<(HashSet<NodeHash>, HashSet<NodeHash>)> {
-    let catalog = ArchiveScope::new(repository.subject()).index();
     let storage = env;
-    let tree = Index::at(catalog, NodeHash::from(*revision.tree.hash()));
+    let tree = Index::at(repository.subject(), NodeHash::from(*revision.tree.hash()));
 
     let mut current = HashSet::new();
     let mut history = HashSet::new();

@@ -113,7 +113,7 @@ async fn main() -> anyhow::Result<()> {
     // Ordinary keys through the canonical edit path, in small sessions.
     let mut rng = Rng::new(1);
     let facts: Vec<VarKey> = (0..6000).map(|_| fact_key(&mut rng)).collect();
-    let mut tree = Tree::empty_in(storage.catalog().clone());
+    let mut tree = Tree::empty_in(storage.subject());
     for batch in facts.chunks(37) {
         let mut edit = tree.edit();
         for key in batch {
@@ -189,7 +189,7 @@ async fn main() -> anyhow::Result<()> {
         writes.swap(at, rng.below(at + 1));
     }
     for batch in writes.chunks(3) {
-        let stored = Tree::at(storage.catalog().clone(), buffered_root.clone());
+        let stored = Tree::at(storage.subject(), buffered_root.clone());
         let mut buffered = HitchhikerTree::open(&stored);
         for key in batch {
             buffered = buffered
@@ -201,7 +201,7 @@ async fn main() -> anyhow::Result<()> {
     }
     println!("buffered sealed     {}", hex(buffered_root.as_bytes()));
 
-    let stored = Tree::at(storage.catalog().clone(), buffered_root);
+    let stored = Tree::at(storage.subject(), buffered_root);
     let canonical = HitchhikerTree::open(&stored)
         .canonicalize(&storage, &mut delta)
         .await?;

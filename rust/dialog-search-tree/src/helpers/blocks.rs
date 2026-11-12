@@ -13,10 +13,16 @@ use std::sync::{
 
 use crate::{Delta, NodeCache, PersistentNode};
 
-/// The catalog the trees of this crate's tests, benches and examples live
-/// in: the default catalog of a fixed test subject.
+/// The subject whose nodes the trees of this crate's tests, benches and
+/// examples read.
+pub fn test_subject() -> Subject {
+    Subject::from(did!("key:zSearchTreeTest"))
+}
+
+/// The block catalog [`test_subject`]'s nodes are kept in: what the block
+/// stores here write a tree's nodes to.
 pub fn test_catalog() -> CatalogScope {
-    ArchiveScope::new(Subject::from(did!("key:zSearchTreeTest"))).index()
+    ArchiveScope::new(test_subject()).index()
 }
 
 /// Blocks of one catalog in a [`Volatile`] store: the archive the tests,
@@ -59,6 +65,12 @@ impl Blocks {
     /// The catalog these blocks are written to.
     pub fn catalog(&self) -> &CatalogScope {
         &self.catalog
+    }
+
+    /// The subject whose nodes these blocks keep: the one a tree over them
+    /// reads.
+    pub fn subject(&self) -> Subject {
+        Subject::from(self.catalog.subject().clone())
     }
 
     /// The volatile store underneath.
@@ -182,17 +194,17 @@ impl<'a, Env: ?Sized> Holding<'a, Env> {
         self.env
     }
 
-    /// The node cache trees of [`test_catalog`] read through this keep
+    /// The node cache trees of [`test_subject`] read through this keep
     /// their nodes in.
     pub fn cache<Key, Value>(&self) -> NodeCache<Key, Value>
     where
         Key: dialog_common::ConditionalSend + dialog_common::ConditionalSync + 'static,
         Value: dialog_common::ConditionalSend + dialog_common::ConditionalSync + 'static,
     {
-        NodeCache::of(self, test_catalog().subject()).expect("holdings keep what they are given")
+        NodeCache::of(self, test_subject().did()).expect("holdings keep what they are given")
     }
 
-    /// Writes every node `delta` holds into [`test_catalog`] through this
+    /// Writes every node `delta` holds for [`test_subject`] through this
     /// ([`nodes::Write`](crate::nodes::Write)), emptying it: the nodes land
     /// in the blocks underneath and in the cache this holds.
     pub async fn flush<Key, Value>(
@@ -204,7 +216,7 @@ impl<'a, Env: ?Sized> Holding<'a, Env> {
         Env: Provider<Import> + dialog_common::ConditionalSync,
     {
         let nodes = delta.flush().map(|(_, node)| node).collect();
-        crate::nodes::Write::new(test_catalog(), nodes)
+        crate::nodes::Write::new(test_subject(), nodes)
             .perform(self)
             .await
     }

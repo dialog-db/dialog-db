@@ -261,12 +261,9 @@ impl RetainDelegation<'_> {
     {
         let branch = self.branch;
         let store = erased(env);
-        let tree = branch.revision().map(|revision| {
-            Index::at(
-                branch.archive().index(),
-                NodeHash::from(*revision.tree.hash()),
-            )
-        });
+        let tree = branch
+            .revision()
+            .map(|revision| Index::at(branch.subject(), NodeHash::from(*revision.tree.hash())));
 
         let mut instructions = Vec::new();
         let mut retained = Vec::new();
@@ -373,10 +370,7 @@ impl RetractDelegation<'_> {
             return Ok(Vec::new());
         };
         let store = erased(env);
-        let tree = Index::at(
-            branch.archive().index(),
-            NodeHash::from(*revision.tree.hash()),
-        );
+        let tree = Index::at(branch.subject(), NodeHash::from(*revision.tree.hash()));
 
         let mut instructions = Vec::new();
         let mut entries = Vec::new();

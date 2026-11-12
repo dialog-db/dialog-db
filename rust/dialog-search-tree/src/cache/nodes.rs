@@ -389,7 +389,7 @@ impl<Key, Value> NodeCache<Key, Value> {
     }
 
     /// The node cache `env` holds, read through the scope of `subject`, the
-    /// subject whose catalog the nodes live in. The cache a tree's reads
+    /// subject whose nodes these are. The cache a tree's reads
     /// over `env` are answered from and its persists keep their nodes in.
     ///
     /// An environment that holds handles and holds no cache yet is given

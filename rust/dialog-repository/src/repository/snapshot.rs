@@ -746,7 +746,7 @@ impl SnapshotExport {
             let local = upstream.is_none();
             let storage = erased(env);
             let index = &storage;
-            let tree = Index::at(catalog.clone(), root);
+            let tree = Index::at(subject.clone(), root);
             let tree = if local { tree.locally() } else { tree };
 
             let mut spills: HashSet<[u8; 32]> = HashSet::new();

@@ -15,8 +15,7 @@ use dialog_effects::blob::{BlobError, BlobReader, Import as BlobImport, Read as 
 use dialog_effects::memory::{Current, Publish, Resolve};
 use dialog_search_tree::nodes;
 use dialog_search_tree::{
-    Accessor, MissingBlocks, MissingPolicy, NodeBody, NoveltyOp, PersistentNode, Reading,
-    TreeDifference, into_owned,
+    MissingBlocks, MissingPolicy, NodeBody, NoveltyOp, PersistentNode, TreeDifference, into_owned,
 };
 use dialog_storage::provider::load::{load_spill, read_all};
 use futures_util::{StreamExt as _, TryStreamExt as _, stream};
@@ -294,7 +293,7 @@ async fn holds<Env: ResolveEnv>(
         RemoteFallback::None => None,
     };
     let store = erased(env);
-    let catalog = branch.archive().index();
+    let subject = branch.subject();
     let target = match upstream.target() {
         Target::Local(name) => format!("branch {name}"),
         Target::Remote(entity) => format!("upstream {entity}"),
@@ -306,7 +305,7 @@ async fn holds<Env: ResolveEnv>(
                 version,
                 &branch.contexts(),
                 &branch.records(),
-                &catalog,
+                &subject,
                 &store,
             )
             .await?
@@ -315,7 +314,7 @@ async fn holds<Env: ResolveEnv>(
             }
             let history = branch.history(env);
             let context =
-                full_context(head, &branch.contexts(), &catalog, &store, &history).await?;
+                full_context(head, &branch.contexts(), &subject, &store, &history).await?;
             Ok::<_, dialog_corpus::DialogCorpusError>(context.observes(version))
         };
         answer.await.map_err(|error| match &serving {
@@ -524,13 +523,13 @@ where
                     // Both sides are boundaries, so the difference reads
                     // the local archive's own word on every node (`Get`)
                     // and never hydrates: absence is what it asks about.
-                    let index = branch.archive().index();
+                    let subject = branch.subject();
                     let base_tree = match &base {
-                        Some(base) => Index::at(index.clone(), NodeHash::from(*base.hash())),
-                        None => Index::empty_in(index.clone()),
+                        Some(base) => Index::at(subject.clone(), NodeHash::from(*base.hash())),
+                        None => Index::empty_in(subject.clone()),
                     };
                     let current_tree =
-                        Index::at(index.clone(), NodeHash::from(*revision.tree.hash()));
+                        Index::at(subject.clone(), NodeHash::from(*revision.tree.hash()));
                     let tree_store = erased(env);
                     let difference = TreeDifference::compute_with(
                         &base_tree,
@@ -1251,11 +1250,8 @@ where
     // own `Get` (a local load). A node this replica holds by reference
     // must not be hydrated to answer, since what is forwarded is streamed
     // through and the local archive keeps none of it.
-    let local = Accessor::new(env, &branch.archive().index()).reading(Reading {
-        local: true,
-        ..Reading::default()
-    });
-    if let Some(node) = local.load_node(hash).await? {
+    let local = nodes::Read::<CorpusNode>::new(branch.subject(), hash.clone()).locally();
+    if let Some(node) = local.perform(env).await? {
         return Ok(Some(node));
     }
     for source in sources {

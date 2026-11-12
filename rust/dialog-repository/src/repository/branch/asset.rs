@@ -228,7 +228,7 @@ where
     };
     let store = erased(env);
     Ok(
-        Index::at(view.catalog(), NodeHash::from(*revision.tree.hash()))
+        Index::at(view.subject(), NodeHash::from(*revision.tree.hash()))
             .asset_size(&store, hash)
             .await?,
     )
@@ -248,7 +248,7 @@ where
 {
     write_blob(
         env,
-        &view.archive().index(),
+        &view.archive(),
         &Blake3Hash::from(*asset.hash()),
         content,
     )

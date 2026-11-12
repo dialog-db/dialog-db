@@ -24,8 +24,8 @@ use rkyv::{
 use std::sync::Arc;
 
 use crate::{
-    Accessor, DecodedKeys, DialogSearchTreeError, Entry, Key, Link, NodeBody, NoveltyOp,
-    PersistentNode, Value, into_owned,
+    DecodedKeys, DialogSearchTreeError, Entry, Key, Link, NodeBody, NoveltyOp, PersistentNode,
+    Reading, Value, into_owned,
 };
 
 /// How [`TreeWalker::stream`] materializes the keys of the entries it yields.
@@ -389,7 +389,8 @@ where
     pub fn stream<R, Env>(
         self,
         range: R,
-        accessor: Accessor<'_, Key, Value, Env>,
+        env: &Env,
+        reading: Reading,
     ) -> impl Stream<Item = Result<Entry<Key, Value>, DialogSearchTreeError>> + ConditionalSend
     where
         R: RangeBounds<Key> + ConditionalSend,
@@ -401,7 +402,7 @@ where
         // second `try_stream!` layer measurably bloats every future that
         // embeds a walk (clippy's `large_futures` catches it downstream).
         futures_util::TryStreamExt::map_ok(
-            self.stream_scan::<R, Env, TypedKey<Key>>(range, accessor),
+            self.stream_scan::<R, Env, TypedKey<Key>>(range, env, reading),
             |entry| Entry::new(entry.key.0, entry.value),
         )
     }
@@ -414,7 +415,8 @@ where
     pub fn stream_handles<R, Env>(
         self,
         range: R,
-        accessor: Accessor<'_, Key, Value, Env>,
+        env: &Env,
+        reading: Reading,
     ) -> impl Stream<Item = Result<Entry<KeyHandle, Value>, DialogSearchTreeError>> + ConditionalSend
     where
         R: RangeBounds<Key> + ConditionalSend,
@@ -422,7 +424,7 @@ where
             + Provider<Preload<PersistentNode<Key, Value>>>
             + ConditionalSync,
     {
-        self.stream_scan::<R, Env, KeyHandle>(range, accessor)
+        self.stream_scan::<R, Env, KeyHandle>(range, env, reading)
     }
 
     /// The walk shared by [`stream`](Self::stream) and
@@ -431,7 +433,8 @@ where
     fn stream_scan<R, Env, Out>(
         self,
         range: R,
-        accessor: Accessor<'_, Key, Value, Env>,
+        env: &Env,
+        reading: Reading,
     ) -> impl Stream<Item = Result<Entry<Out, Value>, DialogSearchTreeError>> + ConditionalSend
     where
         R: RangeBounds<Key> + ConditionalSend,
@@ -452,7 +455,7 @@ where
                 Bound::Unbounded => <Key as self::Key>::min(),
             };
             let Some(search_result) = self
-                .search(&start_key, accessor.clone(), SearchOptions::default())
+                .search(&start_key, env, &reading, SearchOptions::default())
                 .await?
             else {
                 return;
@@ -504,7 +507,7 @@ where
                         for sibling in (child_index + 1)..visitable {
                             let hash = index.hash_at(sibling)?.clone();
                             if queued.insert(hash.clone()) {
-                                warming.push(accessor.warm(hash));
+                                warming.push(reading.warm(env, hash));
                             }
                         }
 
@@ -519,7 +522,7 @@ where
                             until_warmed(hash, &mut warming, &mut queued).await;
                         }
                         let next_node =
-                            while_warming(accessor.get_node(hash), &mut warming, &mut queued)
+                            while_warming(reading.node(env, hash), &mut warming, &mut queued)
                                 .await?;
                         search_path.push((node, Some(child_index)));
                         search_path.push((next_node, None));
@@ -710,7 +713,8 @@ where
     pub async fn search<Env>(
         &self,
         key: &Key,
-        accessor: Accessor<'_, Key, Value, Env>,
+        env: &Env,
+        reading: &Reading,
         options: SearchOptions,
     ) -> Result<Option<SearchResult<Key, Value>>, DialogSearchTreeError>
     where
@@ -736,7 +740,7 @@ where
                 )));
             }
 
-            let node = accessor.get_node(&next_node).await?;
+            let node = reading.node(env, &next_node).await?;
 
             match node.body() {
                 // The empty tree's root: an index with no children, nothing
@@ -758,7 +762,7 @@ where
                 }
                 NodeBody::Segment(_) => {
                     let right_neighbor = if options.prefetch_right_neighbor {
-                        prefetch_right_neighbor(key, &node, &path, accessor).await?
+                        prefetch_right_neighbor(key, &node, &path, env, reading).await?
                     } else {
                         None
                     };
@@ -843,7 +847,8 @@ async fn prefetch_right_neighbor<Key, Value, Env>(
     key: &Key,
     leaf: &PersistentNode<Key, Value>,
     path: &[TreeLayer<Key, Value>],
-    accessor: Accessor<'_, Key, Value, Env>,
+    env: &Env,
+    reading: &Reading,
 ) -> Result<Option<RightNeighbor<Key, Value>>, DialogSearchTreeError>
 where
     Key: self::Key + ConditionalSync + 'static,
@@ -879,7 +884,7 @@ where
     let mut diverged_path: Vec<TreeLayer<Key, Value>> = Vec::new();
 
     let right_leaf = loop {
-        let node: PersistentNode<Key, Value> = accessor.get_node(&next_hash).await?;
+        let node: PersistentNode<Key, Value> = reading.node(env, &next_hash).await?;
         match node.body() {
             NodeBody::Index(index) => {
                 if index.is_empty() {
@@ -1093,7 +1098,7 @@ mod walker_novelty_tests {
     async fn it_accumulates_across_successive_buffered_writes() -> Result<()> {
         let mut storage: Store = Blocks::new();
 
-        let mut tree = Tree::empty_in(crate::helpers::test_catalog());
+        let mut tree = Tree::empty_in(crate::helpers::test_subject());
         let mut expected: Vec<([u8; 4], Vec<u8>)> = Vec::new();
 
         // 50 successive "commits", each buffering one write over the last
@@ -1109,7 +1114,7 @@ mod walker_novelty_tests {
             let mut delta = Delta::zero();
             let root = buffered.persist(&mut delta)?;
             settle(&mut delta, &mut storage).await?;
-            tree = Tree::at(crate::helpers::test_catalog(), root);
+            tree = Tree::at(crate::helpers::test_subject(), root);
 
             expected.retain(|(k, _)| *k != key);
             expected.push((key, value));
@@ -1160,7 +1165,7 @@ mod walker_novelty_tests {
             };
 
             let mut storage: Store = Blocks::new();
-            let mut tree = Tree::empty_in(crate::helpers::test_catalog());
+            let mut tree = Tree::empty_in(crate::helpers::test_subject());
             let mut expected: std::collections::BTreeMap<[u8; 4], Vec<u8>> = Default::default();
 
             for batch in 0..20u32 {
@@ -1178,7 +1183,7 @@ mod walker_novelty_tests {
                 let mut delta = Delta::zero();
                 let root = buffered.persist(&mut delta)?;
                 settle(&mut delta, &mut storage).await?;
-                tree = Tree::at(crate::helpers::test_catalog(), root);
+                tree = Tree::at(crate::helpers::test_subject(), root);
 
                 let mut seen = Vec::new();
                 {
@@ -1220,7 +1225,7 @@ mod walker_novelty_tests {
 
             // Random base, random keys (big-endian so byte order is key order).
             let base_keys: Vec<u32> = (0..300).map(|_| next() % 4000).collect();
-            let mut base = Tree::empty_in(crate::helpers::test_catalog());
+            let mut base = Tree::empty_in(crate::helpers::test_subject());
             let mut delta = Delta::zero();
             for key in &base_keys {
                 base = base
@@ -1255,7 +1260,7 @@ mod walker_novelty_tests {
             let mut delta = Delta::zero();
             let buffered_root = buffered.persist(&mut delta)?;
             settle(&mut delta, &mut storage).await?;
-            let buffered_tree = Tree::at(crate::helpers::test_catalog(), buffered_root);
+            let buffered_tree = Tree::at(crate::helpers::test_subject(), buffered_root);
 
             let mut delta = Delta::zero();
             let canonical_tree = canonical.canonicalize(&storage, &mut delta).await?;
@@ -1333,7 +1338,7 @@ mod prefetch_tests {
     /// node cache is cold, so that reads reach the backend.
     async fn built_tree(storage: &mut Storage) -> Result<Tree> {
         let mut delta = Delta::zero();
-        let mut edit = Tree::empty_in(crate::helpers::test_catalog()).edit();
+        let mut edit = Tree::empty_in(crate::helpers::test_subject()).edit();
 
         for entry in 0..ENTRIES {
             edit = edit
@@ -1347,7 +1352,7 @@ mod prefetch_tests {
         }
 
         Ok(Tree::at(
-            crate::helpers::test_catalog(),
+            crate::helpers::test_subject(),
             tree.root().clone(),
         ))
     }
@@ -1380,8 +1385,7 @@ mod prefetch_tests {
         // The read-ahead and the reader share one node cache, as a tree's
         // reads through one store do.
         let store = crate::helpers::Holding::new(&storage);
-        let accessor =
-            crate::Accessor::<[u8; 4], Vec<u8>, _>::new(&store, &crate::helpers::test_catalog());
+        let (env, reading) = (&store, crate::Reading::new(crate::helpers::test_subject()));
 
         // The root's second child, and a key from its leftmost leaf.
         let root = load(&storage, tree.root()).await?;
@@ -1400,7 +1404,8 @@ mod prefetch_tests {
             }
         };
 
-        let mut warm = Box::pin(accessor.warm(sibling));
+        let mut warm =
+            Box::pin(reading.warm::<crate::PersistentNode<[u8; 4], Vec<u8>>, _>(env, sibling));
         let waker = std::task::Waker::noop();
         let mut context = Context::from_waker(waker);
         assert!(matches!(warm.as_mut().poll(&mut context), Poll::Pending));
@@ -1468,7 +1473,7 @@ mod prefetch_tests {
 
         // A fresh handle, so the scan's node cache is cold and every node
         // it touches reaches the backend.
-        let scan_tree = Tree::at(crate::helpers::test_catalog(), tree.root().clone());
+        let scan_tree = Tree::at(crate::helpers::test_subject(), tree.root().clone());
         backend.reset();
         let entries: Vec<_> = scan_tree
             .stream_range(100u32.to_be_bytes()..=103u32.to_be_bytes(), &storage)

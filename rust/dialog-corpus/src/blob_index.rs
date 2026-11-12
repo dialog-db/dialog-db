@@ -373,7 +373,7 @@ impl BlobIndexExt for Corpus {
 
 #[cfg(test)]
 mod tests {
-    use dialog_search_tree::helpers::test_catalog;
+    use dialog_search_tree::helpers::test_subject;
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
@@ -426,7 +426,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_round_trips_a_blob_record() -> Result<(), DialogCorpusError> {
         let store = Blocks::new();
-        let mut tree = Corpus::empty_in(test_catalog());
+        let mut tree = Corpus::empty_in(test_subject());
 
         put_legacy(&mut tree, &store, &hash(1), BlobRecord::new(4096)).await?;
 
@@ -443,7 +443,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_lists_blobs_in_hash_order() -> Result<(), DialogCorpusError> {
         let store = Blocks::new();
-        let mut tree = Corpus::empty_in(test_catalog());
+        let mut tree = Corpus::empty_in(test_subject());
 
         for seed in [3u8, 1, 2] {
             put_legacy(&mut tree, &store, &hash(seed), BlobRecord::new(seed as u64)).await?;
@@ -464,7 +464,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_retracts_a_blob_reference() -> Result<(), DialogCorpusError> {
         let store = Blocks::new();
-        let mut tree = Corpus::empty_in(test_catalog());
+        let mut tree = Corpus::empty_in(test_subject());
 
         for seed in [1u8, 2] {
             put_legacy(&mut tree, &store, &hash(seed), BlobRecord::new(seed as u64)).await?;
@@ -491,7 +491,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_sizes_content_only_a_legacy_entry_records() -> Result<(), DialogCorpusError> {
         let store = Blocks::new();
-        let mut tree = Corpus::empty_in(test_catalog());
+        let mut tree = Corpus::empty_in(test_subject());
 
         put_legacy(&mut tree, &store, &hash(1), BlobRecord::new(10)).await?;
         assert_eq!(tree.content_size(&store, &hash(1)).await?, Some(10));
@@ -507,7 +507,7 @@ mod tests {
     -> Result<(), DialogCorpusError> {
         let store = Blocks::new();
 
-        let mut checkpoint = Corpus::empty_in(test_catalog());
+        let mut checkpoint = Corpus::empty_in(test_subject());
         put_legacy(&mut checkpoint, &store, &hash(1), BlobRecord::new(10)).await?;
 
         let mut current = checkpoint.clone();
@@ -529,7 +529,7 @@ mod tests {
     -> Result<(), DialogCorpusError> {
         let store = Blocks::new();
 
-        let checkpoint = Corpus::empty_in(test_catalog());
+        let checkpoint = Corpus::empty_in(test_subject());
         let mut current = checkpoint.clone();
         retract(&mut current, &store, &hash(9)).await?;
 
@@ -547,7 +547,7 @@ mod tests {
         let store = Blocks::new();
 
         // Checkpoint references blob A.
-        let mut checkpoint = Corpus::empty_in(test_catalog());
+        let mut checkpoint = Corpus::empty_in(test_subject());
         put_legacy(&mut checkpoint, &store, &hash(1), BlobRecord::new(10)).await?;
 
         // Current adds blob B and keeps A.

@@ -15,17 +15,16 @@
 
 use crate::nodes::{Preload, Read};
 use crate::{
-    Accessor, BOTTOM_RANK, Change, Delta, DialogSearchTreeError, Differential, Distribution, Entry,
+    BOTTOM_RANK, Change, Delta, DialogSearchTreeError, Differential, Distribution, Entry,
     Geometric, Hashed, IndexPieceOrigin, Key, Link, Manifest, Node, Novelty, NoveltyEntry,
     NoveltyOp, PersistentIndex, PersistentNode, PersistentNodeBody, PersistentTree, PieceOrigin,
-    Rank, SegmentEntry, Separator, TransientIndex, TransientNode, TransientSegment, TreeWalker,
-    Value, link_bounds, regroup_children, regroup_children_reusing, regroup_entries,
+    Rank, Reading, SegmentEntry, Separator, TransientIndex, TransientNode, TransientSegment,
+    TreeWalker, Value, link_bounds, regroup_children, regroup_children_reusing, regroup_entries,
     regroup_entries_reusing,
 };
 use async_stream::try_stream;
-use dialog_capability::Provider;
+use dialog_capability::{Provider, Subject};
 use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync};
-use dialog_effects::archive::prelude::CatalogScope;
 use futures_core::Stream;
 use futures_util::StreamExt;
 use futures_util::stream::FuturesUnordered;
@@ -105,11 +104,12 @@ pub(crate) enum TransientRootParts<Key, Value> {
 /// A batch of in-place edits over a tree's [`Node`] spine.
 ///
 /// The edit holds no storage handle: like [`PersistentTree`], it is a root
-/// under a catalog, and every method that may read from storage takes the
-/// environment it reads through as a parameter.
+/// and the [`Reading`] it asks for nodes by, and every method that may read
+/// from storage takes the environment it reads through as a parameter.
 /// It retains only the in-memory transient spine: nodes it reads are the
-/// catalog's, asked of the environment each method is given
-/// ([`nodes::Read`](crate::nodes::Read)), and the new nodes a batch
+/// subject's, asked of the environment each method is given
+/// ([`nodes::Read`](crate::nodes::Read)) as the reading says, and the new
+/// nodes a batch
 /// produces are sealed into a caller-owned [`Delta`] at
 /// [`persist`](Self::persist) time, not held here.
 pub struct TransientTree<Key, Value, D = Geometric>
@@ -123,8 +123,10 @@ where
     /// only by the first edit that descends into it, so opening neither awaits
     /// nor touches storage.
     root: TransientRoot<Key, Value>,
-    /// The catalog the tree's blocks live in.
-    catalog: CatalogScope,
+    /// How the batch asks for the nodes it reads: inherited from the tree
+    /// it was opened from ([`PersistentTree::edit`]), and handed to the tree
+    /// it persists.
+    reading: Reading,
     /// The tree's format header, stamped into every node this batch persists
     /// and read by the boundary coin during reshaping. Every node in a tree
     /// carries the same manifest.
@@ -166,13 +168,22 @@ where
     /// all-zero hash (see [`LEGACY_EMPTY_ROOT`](crate::LEGACY_EMPTY_ROOT))
     /// names no node to read a format from, and opens as a new empty tree
     /// under [`Manifest::default`].
-    pub fn new(catalog: CatalogScope, root: Blake3Hash) -> Self {
+    ///
+    /// The batch reads `subject`'s nodes as demand reads that may hydrate;
+    /// one opened from a tree ([`PersistentTree::edit`]) reads as that tree
+    /// does.
+    pub fn new(subject: Subject, root: Blake3Hash) -> Self {
+        Self::new_reading(Reading::new(subject), root)
+    }
+
+    /// [`new`](Self::new), asking for nodes as `reading` says.
+    pub(crate) fn new_reading(reading: Reading, root: Blake3Hash) -> Self {
         if root.as_bytes() == &crate::LEGACY_EMPTY_ROOT {
-            return Self::empty_with_manifest(catalog, Manifest::default());
+            return Self::empty_reading(reading, Manifest::default());
         }
         Self {
             root: TransientRoot::Unloaded(root),
-            catalog,
+            reading,
             manifest: None,
             distribution: PhantomData,
         }
@@ -182,10 +193,16 @@ where
     /// `manifest` — no root exists to load, in memory or in storage, and
     /// persisting the batch unedited writes the canonical manifest-carrying
     /// empty node (see [`persist_empty_root`]).
-    pub fn empty_with_manifest(catalog: CatalogScope, manifest: Manifest) -> Self {
+    pub fn empty_with_manifest(subject: Subject, manifest: Manifest) -> Self {
+        Self::empty_reading(Reading::new(subject), manifest)
+    }
+
+    /// [`empty_with_manifest`](Self::empty_with_manifest), asking for nodes
+    /// as `reading` says.
+    pub(crate) fn empty_reading(reading: Reading, manifest: Manifest) -> Self {
         Self {
             root: TransientRoot::Empty,
-            catalog,
+            reading,
             manifest: Some(manifest),
             distribution: PhantomData,
         }
@@ -199,15 +216,15 @@ where
     /// expected one and fails on a mismatch. For a caller that already knows
     /// the format and wants a tree written under another one refused rather
     /// than edited.
-    pub fn with_manifest(catalog: CatalogScope, root: Blake3Hash, manifest: Manifest) -> Self {
+    pub fn with_manifest(subject: Subject, root: Blake3Hash, manifest: Manifest) -> Self {
         // A root stored by a version that recorded the empty tree as the
         // all-zero hash (see `LEGACY_EMPTY_ROOT`) opens as the empty tree.
         if root.as_bytes() == &crate::LEGACY_EMPTY_ROOT {
-            return Self::empty_with_manifest(catalog, manifest);
+            return Self::empty_with_manifest(subject, manifest);
         }
         Self {
             root: TransientRoot::Unloaded(root),
-            catalog,
+            reading: Reading::new(subject),
             manifest: Some(manifest),
             distribution: PhantomData,
         }
@@ -222,21 +239,27 @@ where
     /// it first loads the tree's root, or was opened with when the tree was
     /// empty (see [`HitchhikerTree::persist`](crate::HitchhikerTree::persist)).
     pub(crate) fn from_loaded(
-        catalog: CatalogScope,
+        reading: Reading,
         node: TransientNode<Key, Value>,
         manifest: Manifest,
     ) -> Self {
         Self {
             root: TransientRoot::Loaded(node),
-            catalog,
+            reading,
             manifest: Some(manifest),
             distribution: PhantomData,
         }
     }
 
-    /// The catalog this batch's blocks live in.
-    pub fn catalog(&self) -> &CatalogScope {
-        &self.catalog
+    /// The subject whose nodes this batch reads.
+    pub fn subject(&self) -> &Subject {
+        &self.reading.subject
+    }
+
+    /// How this batch asks for the nodes it reads: as the tree it was
+    /// opened from does.
+    pub fn reading(&self) -> &Reading {
+        &self.reading
     }
 
     /// Unwraps the batch into its root: the live transient node when one was
@@ -273,7 +296,8 @@ where
     /// a root written under another fails loudly instead.
     async fn load<Env>(
         root: TransientRoot<Key, Value>,
-        accessor: &Accessor<'_, Key, Value, Env>,
+        env: &Env,
+        reading: &Reading,
         expected: Option<Manifest>,
     ) -> Result<(Option<TransientNode<Key, Value>>, Manifest), DialogSearchTreeError>
     where
@@ -290,7 +314,7 @@ where
             TransientRoot::Empty => Ok((None, known()?)),
             TransientRoot::Loaded(node) => Ok((Some(node), known()?)),
             TransientRoot::Unloaded(hash) => {
-                let node: PersistentNode<Key, Value> = accessor.get_node(&hash).await?;
+                let node: PersistentNode<Key, Value> = reading.node(env, &hash).await?;
                 let header = node.manifest()?;
                 if let Some(expected) = &expected
                     && &header != expected
@@ -330,8 +354,8 @@ where
             + ConditionalSync,
     {
         let entry = SegmentEntry::from(Entry::new(key, value));
-        let accessor = Accessor::new(storage, &self.catalog);
-        let (loaded, manifest) = Self::load(self.root, &accessor, self.manifest.take()).await?;
+        let (env, reading) = (storage, &self.reading);
+        let (loaded, manifest) = Self::load(self.root, env, reading, self.manifest.take()).await?;
         self.manifest = Some(manifest.clone());
 
         let node = match loaded {
@@ -356,7 +380,7 @@ where
                 })
             }
             Some(root) => Edit::Upsert(entry)
-                .apply::<Env, D>(root, &accessor, &manifest)
+                .apply::<Env, D>(root, env, reading, &manifest)
                 .await?
                 .expect("an insert never empties the tree"),
         };
@@ -376,8 +400,8 @@ where
             + Provider<Preload<PersistentNode<Key, Value>>>
             + ConditionalSync,
     {
-        let accessor = Accessor::new(storage, &self.catalog);
-        let (loaded, manifest) = Self::load(self.root, &accessor, self.manifest.take()).await?;
+        let (env, reading) = (storage, &self.reading);
+        let (loaded, manifest) = Self::load(self.root, env, reading, self.manifest.take()).await?;
         self.manifest = Some(manifest.clone());
 
         let Some(root) = loaded else {
@@ -386,7 +410,7 @@ where
             return Ok(self);
         };
         let edited = Edit::Delete(key.clone())
-            .apply::<Env, D>(root, &accessor, &manifest)
+            .apply::<Env, D>(root, env, reading, &manifest)
             .await?;
         self.root = match edited {
             Some(node) => TransientRoot::Loaded(node),
@@ -454,9 +478,9 @@ where
         }
 
         let manifest = Self::format(&self.manifest)?;
-        let accessor = Accessor::new(storage, &self.catalog);
+        let (env, reading) = (storage, &self.reading);
         let pieces = regroup_entries::<Key, Value, D>(entries, Vec::new(), &manifest);
-        self.root = match seal_root::<Key, Value, D, _>(pieces, 0, &manifest, &accessor).await? {
+        self.root = match seal_root::<Key, Value, D, _>(pieces, 0, &manifest, env, reading).await? {
             Some(node) => TransientRoot::Loaded(node),
             None => TransientRoot::Empty,
         };
@@ -578,7 +602,7 @@ where
             + ConditionalSync,
     {
         let subtree: PersistentTree<Key, Value, D> =
-            PersistentTree::seal(self.catalog.clone(), hash.clone());
+            PersistentTree::seal(self.reading.clone(), hash.clone());
         subtree.get(key, storage).await
     }
 
@@ -624,13 +648,13 @@ where
             }
         };
 
-        let accessor = Accessor::new(storage, &self.catalog);
+        let (env, reading) = (storage, &self.reading);
         try_stream! {
             for step in plan {
                 match step {
                     StreamStep::Persistent(hash) => {
                         let inner = TreeWalker::<Key, Value>::new(Some(hash))
-                            .stream(bounds.clone(), accessor.clone());
+                            .stream(bounds.clone(), env, reading.clone());
                         futures_util::pin_mut!(inner);
                         while let Some(entry) = inner.next().await {
                             yield entry?;
@@ -683,7 +707,7 @@ where
                 .clone(),
         };
 
-        Ok(PersistentTree::seal(self.catalog, root))
+        Ok(PersistentTree::seal(self.reading, root))
     }
 
     /// Integrates a differential into this edit batch with deterministic
@@ -878,7 +902,7 @@ where
             + Provider<Preload<PersistentNode<Key, Value>>>
             + ConditionalSync,
     {
-        let accessor = Accessor::new(storage, &self.catalog);
+        let (env, reading) = (storage, &self.reading);
         let keys: Vec<&Key> = changes.map(Change::key).collect();
         if keys.is_empty() {
             return;
@@ -916,9 +940,8 @@ where
         let mut reads = FuturesUnordered::new();
         loop {
             while let Some(hash) = queue.pop_front() {
-                let accessor = &accessor;
                 reads.push(async move {
-                    let node = accessor.load_node(&hash).await.ok().flatten();
+                    let node = reading.read(&hash).perform(env).await.ok().flatten();
                     (hash, node)
                 });
             }
@@ -994,8 +1017,8 @@ where
     /// yields the same root, byte for byte, as building a tree from scratch
     /// over the union of the pieces' entries.
     ///
-    /// Every range's source lives in `catalog`, the catalog the stitched
-    /// tree is built in.
+    /// Every range's source is a tree of `subject`'s, whose nodes the
+    /// stitched tree reads.
     ///
     /// Reads are bounded by the piece seams. Carving a range loads only the
     /// nodes on the two spines covering its bounds, and joining two adjacent
@@ -1004,7 +1027,7 @@ where
     /// verbatim at persist time, so the persist delta scales with the seams,
     /// not the entry count.
     pub async fn stitch<Env>(
-        catalog: &CatalogScope,
+        subject: &Subject,
         pieces: Vec<Piece<'_, Key, Value, D>>,
         storage: &Env,
     ) -> Result<Self, DialogSearchTreeError>
@@ -1013,7 +1036,8 @@ where
             + Provider<Preload<PersistentNode<Key, Value>>>
             + ConditionalSync,
     {
-        let accessor = Accessor::new(storage, catalog);
+        let reading = Reading::new(subject.clone());
+        let (env, reading) = (storage, &reading);
 
         // The stitched tree keeps its sources' format, read from the first
         // source's root (an unpersisted empty source knows the format it was
@@ -1031,7 +1055,7 @@ where
             if let Piece::Range { source, .. } = piece {
                 manifest = Some(match source.stored_root() {
                     Some(root) => {
-                        let node: PersistentNode<Key, Value> = accessor.get_node(root).await?;
+                        let node: PersistentNode<Key, Value> = reading.node(env, root).await?;
                         node.manifest()?
                     }
                     None => source.manifest(storage).await?,
@@ -1055,7 +1079,7 @@ where
                         continue;
                     };
                     if let Some((node, height, trim)) =
-                        carve(root.clone(), &range, &accessor).await?
+                        carve(root.clone(), &range, env, reading).await?
                     {
                         let whole = match trim {
                             Trim::Unchanged => Some(root.clone()),
@@ -1088,7 +1112,7 @@ where
         // written with.
         if let [(_, _, Some(root))] = parts.as_slice() {
             return Ok(TransientTree::with_manifest(
-                catalog.clone(),
+                subject.clone(),
                 root.clone(),
                 manifest,
             ));
@@ -1123,8 +1147,8 @@ where
                     let target = left_height.max(height);
                     let mut left = raise(left, left_height, target);
                     let mut right = raise(node, height, target);
-                    lift_boundary_spine(&mut left, false, &accessor).await?;
-                    lift_boundary_spine(&mut right, true, &accessor).await?;
+                    lift_boundary_spine(&mut left, false, env, reading).await?;
+                    lift_boundary_spine(&mut right, true, env, reading).await?;
                     let (mut run, seam_novelty) =
                         concat_levels::<Key, Value, D>(left, right, target, &manifest)?;
                     if run.len() == 1 {
@@ -1170,7 +1194,7 @@ where
         let root = match merged {
             None => {
                 return Ok(TransientTree::empty_with_manifest(
-                    catalog.clone(),
+                    subject.clone(),
                     manifest,
                 ));
             }
@@ -1178,7 +1202,7 @@ where
             // sources; hand it to the leveling loop as a height-0 run so it
             // gains its canonical index root.
             Some((node @ TransientNode::Segment(_), _)) => {
-                seal_root::<Key, Value, D, _>(vec![node.into()], 0, &manifest, &accessor).await?
+                seal_root::<Key, Value, D, _>(vec![node.into()], 0, &manifest, env, reading).await?
             }
             Some((TransientNode::Index(mut index), height)) => {
                 // `seal_root` reshapes the children into a canonical root and
@@ -1187,9 +1211,14 @@ where
                 // they are pending against this whole subtree, and the root is
                 // the one node guaranteed to cover it.
                 let novelty = index.novelty.take_all::<Key>()?;
-                let sealed =
-                    seal_root::<Key, Value, D, _>(index.children, height - 1, &manifest, &accessor)
-                        .await?;
+                let sealed = seal_root::<Key, Value, D, _>(
+                    index.children,
+                    height - 1,
+                    &manifest,
+                    env,
+                    reading,
+                )
+                .await?;
                 match sealed {
                     Some(TransientNode::Index(mut root)) if !novelty.is_empty() => {
                         let bounds = link_bounds(&root.children)?;
@@ -1206,7 +1235,7 @@ where
                 Some(node) => TransientRoot::Loaded(node),
                 None => TransientRoot::Empty,
             },
-            catalog: catalog.clone(),
+            reading: reading.clone(),
             manifest: Some(manifest),
             distribution: PhantomData,
         })
@@ -1300,7 +1329,8 @@ where
     async fn apply<Env, D>(
         self,
         mut root: TransientNode<Key, Value>,
-        accessor: &Accessor<'_, Key, Value, Env>,
+        env: &Env,
+        reading: &Reading,
         manifest: &Manifest,
     ) -> Result<Option<TransientNode<Key, Value>>, DialogSearchTreeError>
     where
@@ -1335,7 +1365,7 @@ where
                     // hold one.
                     let at = child_for::<Key, Value>(&index.children, key)?;
                     index.novelty.remove_key::<Key>(at, key.as_ref())?;
-                    lift(&mut index.children[at], accessor).await?;
+                    lift(&mut index.children[at], env, reading).await?;
                     path.push(at);
                 }
                 TransientNode::Segment(_) => break,
@@ -1381,7 +1411,7 @@ where
         };
         let mut piece_origins = if changes_membership {
             let verdict = forced_run_quiet::<Key, Value, Env, D>(
-                &mut root, &path, &self, accessor, &manifest,
+                &mut root, &path, &self, env, reading, &manifest,
             )
             .await?;
             if let RunVerdict::SurgicalMin { separator } = verdict {
@@ -1410,7 +1440,8 @@ where
                     &mut root,
                     &mut path,
                     &mut [],
-                    accessor,
+                    env,
+                    reading,
                     &manifest,
                 )
                 .await?
@@ -1757,7 +1788,8 @@ where
                     &mut root,
                     &mut path,
                     &mut [],
-                    accessor,
+                    env,
+                    reading,
                     &manifest,
                 )
                 .await?
@@ -1766,7 +1798,7 @@ where
             };
 
         let neighbor_path = if is_boundary_delete || is_orphan_append || dissolves_terminal_cut {
-            lift_right_neighbor_spine(&mut root, &path, accessor).await?
+            lift_right_neighbor_spine(&mut root, &path, env, reading).await?
         } else {
             None
         };
@@ -1784,7 +1816,8 @@ where
                     &mut root,
                     &mut neighbor_path,
                     &mut [&mut path],
-                    accessor,
+                    env,
+                    reading,
                     &manifest,
                 )
                 .await?
@@ -1795,7 +1828,8 @@ where
                         &mut root,
                         &mut neighbor_path,
                         &mut [&mut path],
-                        accessor,
+                        env,
+                        reading,
                         &manifest,
                     )
                     .await?
@@ -1860,7 +1894,7 @@ where
         // own left siblings wholesale), so only a crossing at or above the
         // LCA needs the explicit left fusion.
         let left_fuse = if dissolves_left_cut {
-            match lift_left_neighbor_spine(&mut root, &path, accessor).await? {
+            match lift_left_neighbor_spine(&mut root, &path, env, reading).await? {
                 Some(mut left_path) => {
                     // The fusion folds the left spine's nodes level by
                     // level, so any of them that is a force-split piece
@@ -1882,7 +1916,8 @@ where
                             &mut root,
                             &mut left_path,
                             &mut co_paths,
-                            accessor,
+                            env,
+                            reading,
                             &manifest,
                         )
                         .await?
@@ -1893,7 +1928,8 @@ where
                                 &mut root,
                                 &mut left_path,
                                 &mut co_paths,
-                                accessor,
+                                env,
+                                reading,
                                 &manifest,
                             )
                             .await?
@@ -1971,7 +2007,7 @@ where
                 widened || index_widened,
             )?,
         };
-        seal_root::<Key, Value, D, _>(replacement, height, &manifest, accessor).await
+        seal_root::<Key, Value, D, _>(replacement, height, &manifest, env, reading).await
     }
 }
 
@@ -2125,7 +2161,8 @@ async fn merge_forced_index_runs<Key, Value, D, Env>(
     root: &mut TransientNode<Key, Value>,
     path: &mut [usize],
     co_paths: &mut [&mut Vec<usize>],
-    accessor: &Accessor<'_, Key, Value, Env>,
+    env: &Env,
+    reading: &Reading,
     manifest: &Manifest,
 ) -> Result<(bool, Vec<(usize, Vec<IndexPieceOrigin>)>), DialogSearchTreeError>
 where
@@ -2190,7 +2227,7 @@ where
 
         for member in lo..=hi {
             let parent = follow(root, &parent_path)?.as_index_mut()?;
-            lift(&mut parent.children[member], accessor).await?;
+            lift(&mut parent.children[member], env, reading).await?;
         }
 
         let parent = follow(root, &parent_path)?.as_index_mut()?;
@@ -2327,7 +2364,8 @@ async fn forced_run_quiet<Key, Value, Env, D>(
     root: &mut TransientNode<Key, Value>,
     path: &[usize],
     edit: &Edit<Key, Value>,
-    accessor: &Accessor<'_, Key, Value, Env>,
+    env: &Env,
+    reading: &Reading,
     manifest: &Manifest,
 ) -> Result<RunVerdict, DialogSearchTreeError>
 where
@@ -2442,7 +2480,8 @@ where
     // cannot license a surgical apply). In debug builds every compressed
     // interior verdict is pinned against the full stream's.
     let summaries =
-        piece_summaries::<Key, Value, Env, D>(root, path, lo, hi, edit, accessor, manifest).await?;
+        piece_summaries::<Key, Value, Env, D>(root, path, lo, hi, edit, env, reading, manifest)
+            .await?;
     let compressed = summaries
         .as_deref()
         .and_then(|summaries| compressed_verdict::<D>(summaries, manifest));
@@ -2451,7 +2490,7 @@ where
         #[cfg(debug_assertions)]
         if let Some(verdict) = compressed {
             let full = streamed_run_quiet::<Key, Value, Env, D>(
-                root, path, lo, hi, edit, accessor, manifest,
+                root, path, lo, hi, edit, env, reading, manifest,
             )
             .await?;
             debug_assert_eq!(
@@ -2469,7 +2508,7 @@ where
             Some(verdict) => verdict,
             None => {
                 streamed_run_quiet::<Key, Value, Env, D>(
-                    root, path, lo, hi, edit, accessor, manifest,
+                    root, path, lo, hi, edit, env, reading, manifest,
                 )
                 .await?
             }
@@ -2514,7 +2553,7 @@ where
             // out of both regimes): read the piece, as that pass would
             // have.
             Some(Previous::Stored(link)) => {
-                let piece = accessor.get_node(&link.node).await?;
+                let piece = reading.node(env, &link.node).await?;
                 let TransientNode::Segment(segment) =
                     TransientNode::<Key, Value>::open(&piece, link.separator.clone())?
                 else {
@@ -2541,7 +2580,7 @@ where
         #[cfg(debug_assertions)]
         {
             let full = streamed_run_quiet::<Key, Value, Env, D>(
-                root, path, lo, hi, edit, accessor, manifest,
+                root, path, lo, hi, edit, env, reading, manifest,
             )
             .await?;
             debug_assert_eq!(
@@ -2557,8 +2596,10 @@ where
     }
 
     Ok(
-        if streamed_run_quiet::<Key, Value, Env, D>(root, path, lo, hi, edit, accessor, manifest)
-            .await?
+        if streamed_run_quiet::<Key, Value, Env, D>(
+            root, path, lo, hi, edit, env, reading, manifest,
+        )
+        .await?
         {
             RunVerdict::Quiet
         } else {
@@ -2578,7 +2619,8 @@ async fn streamed_run_quiet<Key, Value, Env, D>(
     lo: usize,
     hi: usize,
     edit: &Edit<Key, Value>,
-    accessor: &Accessor<'_, Key, Value, Env>,
+    env: &Env,
+    reading: &Reading,
     manifest: &Manifest,
 ) -> Result<bool, DialogSearchTreeError>
 where
@@ -2619,7 +2661,7 @@ where
         opened.push(match link {
             None => None,
             Some(link) => {
-                let persistent = accessor.get_node(&link.node).await?;
+                let persistent = reading.node(env, &link.node).await?;
                 let TransientNode::Segment(segment) =
                     TransientNode::<Key, Value>::open(&persistent, link.separator.clone())?
                 else {
@@ -2731,7 +2773,7 @@ where
 /// in which case the full entry stream decides.
 ///
 /// In two parts: [`piece_summaries`] gathers each piece's summary, reading
-/// the stored pieces through the accessor, and [`compressed_verdict`]
+/// the stored pieces through the env, reading, and [`compressed_verdict`]
 /// decides over them. The summaries are handed back so the caller can read
 /// a neighbouring piece's edge key from them without asking anyone again.
 ///
@@ -2744,7 +2786,8 @@ async fn piece_summaries<Key, Value, Env, D>(
     lo: usize,
     hi: usize,
     edit: &Edit<Key, Value>,
-    accessor: &Accessor<'_, Key, Value, Env>,
+    env: &Env,
+    reading: &Reading,
     manifest: &Manifest,
 ) -> Result<
     Option<Vec<std::sync::Arc<crate::distribution::summary::PieceSummary>>>,
@@ -2842,7 +2885,7 @@ where
         summaries.push(match pending {
             Pending::Ready(summary) => summary,
             Pending::Fetch(link) => {
-                let persistent = accessor.get_node(&link.node).await?;
+                let persistent = reading.node(env, &link.node).await?;
                 if let Some(summary) = persistent.summary(manifest) {
                     summary
                 } else {
@@ -3019,7 +3062,8 @@ async fn merge_forced_run<Key, Value, Env>(
     root: &mut TransientNode<Key, Value>,
     path: &mut [usize],
     co_paths: &mut [&mut Vec<usize>],
-    accessor: &Accessor<'_, Key, Value, Env>,
+    env: &Env,
+    reading: &Reading,
     manifest: &Manifest,
 ) -> Result<Option<Vec<PieceOrigin>>, DialogSearchTreeError>
 where
@@ -3072,7 +3116,7 @@ where
     }
     for member in lo..=hi {
         let parent = follow(root, &parent_path)?.as_index_mut()?;
-        lift(&mut parent.children[member], accessor).await?;
+        lift(&mut parent.children[member], env, reading).await?;
     }
 
     // Merge the pieces into one segment carrying the stretch's left
@@ -3206,7 +3250,8 @@ fn follow<'a, Key, Value>(
 /// still a persistent reference.
 async fn lift<Key, Value, Env>(
     node: &mut Node<Key, Value>,
-    accessor: &Accessor<'_, Key, Value, Env>,
+    env: &Env,
+    reading: &Reading,
 ) -> Result<(), DialogSearchTreeError>
 where
     Key: self::Key,
@@ -3219,7 +3264,7 @@ where
         + ConditionalSync,
 {
     if let Node::Persistent(link) = node {
-        let persistent = accessor.get_node(&link.node).await?;
+        let persistent = reading.node(env, &link.node).await?;
         // Measurement-only (uncommitted, env-gated) lift breadcrumb.
         dialog_storage::dup_audit::note_lift(link.node.as_bytes(), "edit_lift");
         // The link's separator is the seam at the opened subtree's left edge;
@@ -3244,7 +3289,8 @@ where
 async fn lift_right_neighbor_spine<Key, Value, Env>(
     root: &mut TransientNode<Key, Value>,
     path: &[usize],
-    accessor: &Accessor<'_, Key, Value, Env>,
+    env: &Env,
+    reading: &Reading,
 ) -> Result<Option<Vec<usize>>, DialogSearchTreeError>
 where
     Key: self::Key + ConditionalSync + 'static,
@@ -3281,7 +3327,7 @@ where
     // first child at each deeper level, never the sibling it starts from.
     let sibling = neighbor_path[neighbor_path.len() - 1];
     let parent = follow(root, &neighbor_path[..neighbor_path.len() - 1])?;
-    lift(&mut parent.as_index_mut()?.children[sibling], accessor).await?;
+    lift(&mut parent.as_index_mut()?.children[sibling], env, reading).await?;
 
     // Walk the neighbor subtree's leftmost edge to its leaf, lifting each node so
     // the whole spine is transient.
@@ -3289,7 +3335,7 @@ where
         let node = follow(root, &neighbor_path)?;
         match node {
             TransientNode::Index(index) => {
-                lift(&mut index.children[0], accessor).await?;
+                lift(&mut index.children[0], env, reading).await?;
                 neighbor_path.push(0);
             }
             TransientNode::Segment(_) => break,
@@ -3311,7 +3357,8 @@ where
 async fn lift_left_neighbor_spine<Key, Value, Env>(
     root: &mut TransientNode<Key, Value>,
     path: &[usize],
-    accessor: &Accessor<'_, Key, Value, Env>,
+    env: &Env,
+    reading: &Reading,
 ) -> Result<Option<Vec<usize>>, DialogSearchTreeError>
 where
     Key: self::Key + ConditionalSync + 'static,
@@ -3345,7 +3392,7 @@ where
     // into it.
     let sibling = neighbor_path[neighbor_path.len() - 1];
     let parent = follow(root, &neighbor_path[..neighbor_path.len() - 1])?;
-    lift(&mut parent.as_index_mut()?.children[sibling], accessor).await?;
+    lift(&mut parent.as_index_mut()?.children[sibling], env, reading).await?;
 
     // Walk the neighbor subtree's rightmost edge to its leaf, lifting each
     // node so the whole spine is transient.
@@ -3354,7 +3401,7 @@ where
         match node {
             TransientNode::Index(index) => {
                 let last = index.children.len() - 1;
-                lift(&mut index.children[last], accessor).await?;
+                lift(&mut index.children[last], env, reading).await?;
                 neighbor_path.push(last);
             }
             TransientNode::Segment(_) => break,
@@ -4076,7 +4123,8 @@ async fn seal_root<Key, Value, D, Env>(
     mut replacement: Vec<Node<Key, Value>>,
     height: Rank,
     manifest: &Manifest,
-    accessor: &Accessor<'_, Key, Value, Env>,
+    env: &Env,
+    reading: &Reading,
 ) -> Result<Option<TransientNode<Key, Value>>, DialogSearchTreeError>
 where
     Key: self::Key,
@@ -4131,7 +4179,7 @@ where
             break;
         }
         if matches!(&index.children[0], Node::Persistent(_)) {
-            lift(&mut index.children[0], accessor).await?;
+            lift(&mut index.children[0], env, reading).await?;
         }
         match &index.children[0] {
             Node::Transient(TransientNode::Index(_)) => {
@@ -4212,7 +4260,8 @@ enum Trim {
 async fn carve<Key, Value, Env>(
     root: Blake3Hash,
     range: &RangeInclusive<Key>,
-    accessor: &Accessor<'_, Key, Value, Env>,
+    env: &Env,
+    reading: &Reading,
 ) -> Result<Option<(TransientNode<Key, Value>, Rank, Trim)>, DialogSearchTreeError>
 where
     Key: self::Key,
@@ -4224,7 +4273,7 @@ where
         + Provider<Preload<PersistentNode<Key, Value>>>
         + ConditionalSync,
 {
-    let node: PersistentNode<Key, Value> = accessor.get_node(&root).await?;
+    let node: PersistentNode<Key, Value> = reading.node(env, &root).await?;
     // A zero-entry root is the empty tree's format marker: nothing to carve.
     if node.is_empty()? {
         return Ok(None);
@@ -4245,7 +4294,7 @@ where
             match node {
                 TransientNode::Index(index) => {
                     let at = child_for::<Key, Value>(&index.children, bound)?;
-                    lift(&mut index.children[at], accessor).await?;
+                    lift(&mut index.children[at], env, reading).await?;
                     path.push(at);
                 }
                 TransientNode::Segment(_) => break,
@@ -4469,7 +4518,8 @@ fn lifted_child<Key, Value>(
 async fn lift_boundary_spine<Key, Value, Env>(
     root: &mut TransientNode<Key, Value>,
     leftmost: bool,
-    accessor: &Accessor<'_, Key, Value, Env>,
+    env: &Env,
+    reading: &Reading,
 ) -> Result<(), DialogSearchTreeError>
 where
     Key: self::Key,
@@ -4496,7 +4546,7 @@ where
                 } else {
                     index.children.len() - 1
                 };
-                lift(&mut index.children[at], accessor).await?;
+                lift(&mut index.children[at], env, reading).await?;
                 path.push(at);
             }
             TransientNode::Segment(_) => break,
@@ -4875,7 +4925,7 @@ mod tests {
     use dialog_common::Blake3Hash;
 
     use crate::{
-        Accessor, Buffer, Delta, Entry, PersistentNode, PersistentTree, Piece, Rank, TransientTree,
+        Buffer, Delta, Entry, PersistentNode, PersistentTree, Piece, Rank, TransientTree,
         distribution,
     };
 
@@ -4909,7 +4959,7 @@ mod tests {
     /// every operation is the history-independence baseline a single combined
     /// batch must reproduce.
     async fn sequential(keys: &[u32], storage: &mut TestStorage) -> Result<TestTree> {
-        let mut tree = TestTree::empty_in(crate::helpers::test_catalog());
+        let mut tree = TestTree::empty_in(crate::helpers::test_subject());
         let mut delta = Delta::zero();
         for &k in keys {
             tree = tree
@@ -4935,7 +4985,7 @@ mod tests {
         let keys: Vec<u32> = (0..500).collect();
         let expected = sequential(&keys, &mut storage).await?;
 
-        let mut edit = TestTree::empty_in(crate::helpers::test_catalog()).edit();
+        let mut edit = TestTree::empty_in(crate::helpers::test_subject()).edit();
         for &k in &keys {
             edit = edit
                 .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), &storage)
@@ -4957,7 +5007,7 @@ mod tests {
     /// is stable across edits and readable from any node.
     #[dialog_common::test]
     async fn it_stamps_the_manifest_into_the_root_across_edits() -> Result<()> {
-        use crate::{Accessor, Manifest, PersistentNode};
+        use crate::{Manifest, PersistentNode};
 
         let mut storage = Blocks::new();
         let built = sequential(&(0..200).collect::<Vec<u32>>(), &mut storage).await?;
@@ -4965,8 +5015,11 @@ mod tests {
         // A fresh cache reads the persisted nodes straight from storage,
         // through a handle of its own so the edit below can keep writing.
         let reader = storage.clone();
-        let accessor = Accessor::new(&reader, &crate::helpers::test_catalog());
-        let root: PersistentNode<[u8; 4], Vec<u8>> = accessor.get_node(built.root()).await?;
+        let (env, reading) = (
+            &reader,
+            &crate::Reading::new(crate::helpers::test_subject()),
+        );
+        let root: PersistentNode<[u8; 4], Vec<u8>> = reading.node(env, built.root()).await?;
         assert_eq!(root.manifest()?, Manifest::default());
 
         // Edit the built tree and persist; the new root still carries the
@@ -4981,7 +5034,7 @@ mod tests {
             storage.store(node.buffer().clone());
         }
         let edited_root: PersistentNode<[u8; 4], Vec<u8>> =
-            accessor.get_node(edited.root()).await?;
+            reading.node(env, edited.root()).await?;
         assert_eq!(edited_root.manifest()?, Manifest::default());
         Ok(())
     }
@@ -5016,7 +5069,7 @@ mod tests {
     /// Applies `keys` to a fresh [`Edit`] in order, then persists and returns the
     /// root hash.
     async fn batched(keys: &[u32], storage: &TestStorage) -> Result<Blake3Hash> {
-        let mut edit = TestTree::empty_in(crate::helpers::test_catalog()).edit();
+        let mut edit = TestTree::empty_in(crate::helpers::test_subject()).edit();
         for &k in keys {
             edit = edit
                 .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), storage)
@@ -5082,7 +5135,7 @@ mod tests {
 
         for &victim in &keys {
             let expected = sequential_with_deletes(&keys, &[victim], &mut storage).await?;
-            let mut edit = TestTree::empty_in(crate::helpers::test_catalog()).edit();
+            let mut edit = TestTree::empty_in(crate::helpers::test_subject()).edit();
             for &k in &keys {
                 edit = edit
                     .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), &storage)
@@ -5114,7 +5167,7 @@ mod tests {
 
             let expected = sequential_with_deletes(&keys, &to_delete, &mut storage).await?;
 
-            let mut edit = TestTree::empty_in(crate::helpers::test_catalog()).edit();
+            let mut edit = TestTree::empty_in(crate::helpers::test_subject()).edit();
             for &k in &keys {
                 edit = edit
                     .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), &storage)
@@ -5156,7 +5209,7 @@ mod tests {
             }
 
             // Sequential reference through Tree.
-            let mut sequential = TestTree::empty_in(crate::helpers::test_catalog());
+            let mut sequential = TestTree::empty_in(crate::helpers::test_subject());
             let mut delta = Delta::zero();
             for &(is_insert, key) in &ops {
                 sequential = if is_insert {
@@ -5180,7 +5233,7 @@ mod tests {
             }
 
             // Batched through Edit.
-            let mut edit = TestTree::empty_in(crate::helpers::test_catalog()).edit();
+            let mut edit = TestTree::empty_in(crate::helpers::test_subject()).edit();
             for &(is_insert, key) in &ops {
                 edit = if is_insert {
                     edit.insert(key.to_le_bytes(), key.to_le_bytes().to_vec(), &storage)
@@ -5208,7 +5261,7 @@ mod tests {
     async fn it_reads_unflushed_insertions() -> Result<()> {
         let storage = Blocks::new();
 
-        let mut edit = TestTree::empty_in(crate::helpers::test_catalog()).edit();
+        let mut edit = TestTree::empty_in(crate::helpers::test_subject()).edit();
 
         edit = edit
             .insert(1u32.to_le_bytes(), vec![1, 2, 3], &storage)
@@ -5291,7 +5344,7 @@ mod tests {
             }
 
             // Build the transient tree in flight, never persisting it here.
-            let mut transient = TestTree::empty_in(crate::helpers::test_catalog()).edit();
+            let mut transient = TestTree::empty_in(crate::helpers::test_subject()).edit();
             for &(is_insert, key) in &ops {
                 transient = if is_insert {
                     transient
@@ -5304,7 +5357,7 @@ mod tests {
 
             // Build the same batch again and persist it, flushing to storage so
             // the persistent reference reads are fully resolvable.
-            let mut reference = TestTree::empty_in(crate::helpers::test_catalog()).edit();
+            let mut reference = TestTree::empty_in(crate::helpers::test_subject()).edit();
             for &(is_insert, key) in &ops {
                 reference = if is_insert {
                     reference
@@ -5373,14 +5426,14 @@ mod tests {
             let mut keys: Vec<u32> = (0..300).collect();
             Rng::new(seed).shuffle(&mut keys);
 
-            let mut transient = TestTree::empty_in(crate::helpers::test_catalog()).edit();
+            let mut transient = TestTree::empty_in(crate::helpers::test_subject()).edit();
             for &k in &keys {
                 transient = transient
                     .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), &storage)
                     .await?;
             }
 
-            let mut reference = TestTree::empty_in(crate::helpers::test_catalog()).edit();
+            let mut reference = TestTree::empty_in(crate::helpers::test_subject()).edit();
             for &k in &keys {
                 reference = reference
                     .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), &storage)
@@ -5641,7 +5694,7 @@ mod tests {
         }
 
         let storage = test_storage();
-        let mut tree = PersistentTree::<[u8; 8], Vec<u8>>::empty_in(crate::helpers::test_catalog());
+        let mut tree = PersistentTree::<[u8; 8], Vec<u8>>::empty_in(crate::helpers::test_subject());
         let mut delta = Delta::zero();
         for i in 0..5_000u32 {
             tree = tree
@@ -5658,7 +5711,7 @@ mod tests {
         // read, then edit both ends WITHOUT persisting: the spine is
         // transient at the edges and the middle stays persistent.
         let tree = PersistentTree::<[u8; 8], Vec<u8>>::at(
-            crate::helpers::test_catalog(),
+            crate::helpers::test_subject(),
             tree.root().clone(),
         );
         let edit = tree
@@ -5710,7 +5763,7 @@ mod tests {
         };
 
         let mut delta = Delta::zero();
-        let mut tree = BandTree::empty_in(crate::helpers::test_catalog());
+        let mut tree = BandTree::empty_in(crate::helpers::test_subject());
         for i in 0..60u32 {
             tree = tree
                 .edit()
@@ -5738,7 +5791,7 @@ mod tests {
                 storage.store(node.buffer().clone());
             }
         }
-        let mut scratch = BandTree::empty_in(crate::helpers::test_catalog());
+        let mut scratch = BandTree::empty_in(crate::helpers::test_subject());
         for i in 0..60u32 {
             if i % 3 == 0 {
                 continue;
@@ -5788,7 +5841,7 @@ mod tests {
         let root = buffer.blake3_hash().clone();
         storage.store(buffer);
 
-        let tree = TestTree::at(crate::helpers::test_catalog(), root);
+        let tree = TestTree::at(crate::helpers::test_subject(), root);
         assert_eq!(
             tree.manifest(&storage).await?,
             unknown,
@@ -5818,7 +5871,7 @@ mod tests {
 
         let mut delta = Delta::zero();
         TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(
-            crate::helpers::test_catalog(),
+            crate::helpers::test_subject(),
             unknown,
         )
         .persist(&mut delta)?;
@@ -5846,7 +5899,7 @@ mod tests {
             (Manifest::default(), 300..600u32),
         ] {
             let mut edit = TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(
-                crate::helpers::test_catalog(),
+                crate::helpers::test_subject(),
                 manifest,
             );
             for key in keys {
@@ -5863,7 +5916,7 @@ mod tests {
         }
 
         let stitched = TransientTree::stitch(
-            &crate::helpers::test_catalog(),
+            &crate::helpers::test_subject(),
             vec![
                 Piece::Range {
                     source: &sources[0],
@@ -5918,9 +5971,9 @@ mod tests {
         let root = buffer.blake3_hash().clone();
         storage.store(buffer);
 
-        let tree = TestTree::at(crate::helpers::test_catalog(), root.clone());
+        let tree = TestTree::at(crate::helpers::test_subject(), root.clone());
         let result = TransientTree::<[u8; 4], Vec<u8>>::with_manifest(
-            crate::helpers::test_catalog(),
+            crate::helpers::test_subject(),
             root.clone(),
             Manifest::default(),
         )
@@ -6012,7 +6065,7 @@ mod tests {
         let c = encode_key(b"c", 1, 3); // interior, seam punches level 1
 
         let mut delta = Delta::zero();
-        let mut tree = SpecTree::empty_in(crate::helpers::test_catalog());
+        let mut tree = SpecTree::empty_in(crate::helpers::test_subject());
         for key in [a, b, c] {
             tree = tree
                 .edit()
@@ -6033,7 +6086,7 @@ mod tests {
             storage.store(node.buffer().clone());
         }
 
-        let mut scratch = SpecTree::empty_in(crate::helpers::test_catalog());
+        let mut scratch = SpecTree::empty_in(crate::helpers::test_subject());
         for key in [a, c] {
             scratch = scratch
                 .edit()
@@ -6067,7 +6120,7 @@ mod tests {
         let b = encode_key(b"b", 1, 3); // interior, seam punches level 1
 
         let mut delta = Delta::zero();
-        let mut tree = SpecTree::empty_in(crate::helpers::test_catalog());
+        let mut tree = SpecTree::empty_in(crate::helpers::test_subject());
         for key in [a, b] {
             tree = tree
                 .edit()
@@ -6088,7 +6141,7 @@ mod tests {
             storage.store(node.buffer().clone());
         }
 
-        let mut scratch = SpecTree::empty_in(crate::helpers::test_catalog());
+        let mut scratch = SpecTree::empty_in(crate::helpers::test_subject());
         for key in [a] {
             scratch = scratch
                 .edit()
@@ -6401,17 +6454,17 @@ mod tests {
             keys.push(VarKey(bytes));
         }
 
-        let mut tree = VarTree::empty_in(crate::helpers::test_catalog());
+        let mut tree = VarTree::empty_in(crate::helpers::test_subject());
         let mut delta = Delta::zero();
         for key in &keys {
             let edit = match tree.stored_root() {
                 Some(root) => TransientTree::with_manifest(
-                    crate::helpers::test_catalog(),
+                    crate::helpers::test_subject(),
                     root.clone(),
                     manifest.clone(),
                 ),
                 None => TransientTree::empty_with_manifest(
-                    crate::helpers::test_catalog(),
+                    crate::helpers::test_subject(),
                     manifest.clone(),
                 ),
             };
@@ -6484,7 +6537,7 @@ mod tests {
         for key in keys {
             let transient = match &tree {
                 None => TransientTree::empty_with_manifest(
-                    crate::helpers::test_catalog(),
+                    crate::helpers::test_subject(),
                     manifest.clone(),
                 ),
                 Some(tree) => tree.edit(),
@@ -6654,12 +6707,15 @@ mod tests {
     /// the stored nodes. The shape probe the veto tests read.
     async fn leaf_boundaries(root: &Blake3Hash, storage: &Blocks) -> Result<Vec<Vec<u8>>> {
         let mut boundaries: Vec<Vec<u8>> = Vec::new();
-        let accessor = Accessor::new(storage, &crate::helpers::test_catalog());
+        let (env, reading) = (
+            storage,
+            &crate::Reading::new(crate::helpers::test_subject()),
+        );
         let mut frontier = vec![root.clone()];
         while !frontier.is_empty() {
             let mut next = Vec::new();
             for hash in &frontier {
-                let node: PersistentNode<VarKey, Vec<u8>> = accessor.get_node(hash).await?;
+                let node: PersistentNode<VarKey, Vec<u8>> = reading.node(env, hash).await?;
                 if let Ok(index) = node.as_index() {
                     for at in 0..index.len() {
                         next.push(index.hash_at(at)?.clone());
@@ -6815,12 +6871,15 @@ mod tests {
         storage: &Blocks,
     ) -> Result<Vec<(usize, Vec<u8>)>> {
         let mut pieces: Vec<(usize, Vec<u8>)> = Vec::new();
-        let accessor = Accessor::new(storage, &crate::helpers::test_catalog());
+        let (env, reading) = (
+            storage,
+            &crate::Reading::new(crate::helpers::test_subject()),
+        );
         let mut frontier: Vec<(Blake3Hash, usize)> = vec![(root.clone(), 0)];
         while !frontier.is_empty() {
             let mut next = Vec::new();
             for (hash, separator) in &frontier {
-                let node: PersistentNode<VarKey, Vec<u8>> = accessor.get_node(hash).await?;
+                let node: PersistentNode<VarKey, Vec<u8>> = reading.node(env, hash).await?;
                 if let Ok(index) = node.as_index() {
                     for at in 0..index.len() {
                         next.push((index.hash_at(at)?.clone(), index.separator(at)?.len()));
@@ -7026,7 +7085,7 @@ mod tests {
     ) -> Result<Vec<usize>> {
         let boundaries: HashSet<Vec<u8>> =
             leaf_boundaries(root, storage).await?.into_iter().collect();
-        let manifest = VarTree::at(crate::helpers::test_catalog(), root.clone())
+        let manifest = VarTree::at(crate::helpers::test_subject(), root.clone())
             .manifest(storage)
             .await?;
         let mut weights = Vec::new();
@@ -7347,7 +7406,7 @@ mod tests {
         for key in &sorted {
             let transient = match &fresh {
                 None => TransientTree::empty_with_manifest(
-                    crate::helpers::test_catalog(),
+                    crate::helpers::test_subject(),
                     manifest.clone(),
                 ),
                 Some(tree) => tree.edit(),
@@ -7384,13 +7443,16 @@ mod tests {
         storage: &Blocks,
     ) -> Result<Vec<(usize, usize, usize)>> {
         let mut stats = Vec::new();
-        let accessor = Accessor::new(storage, &crate::helpers::test_catalog());
+        let (env, reading) = (
+            storage,
+            &crate::Reading::new(crate::helpers::test_subject()),
+        );
         let mut frontier = vec![root.clone()];
         let mut depth = 0usize;
         while !frontier.is_empty() {
             let mut next = Vec::new();
             for hash in &frontier {
-                let node: PersistentNode<VarKey, Vec<u8>> = accessor.get_node(hash).await?;
+                let node: PersistentNode<VarKey, Vec<u8>> = reading.node(env, hash).await?;
                 if let Ok(index) = node.as_index() {
                     let manifest = node.manifest()?;
                     let mut weight = 0usize;
@@ -7415,13 +7477,16 @@ mod tests {
         storage: &Blocks,
     ) -> Result<Vec<HashSet<Blake3Hash>>> {
         let mut levels: Vec<HashSet<Blake3Hash>> = Vec::new();
-        let accessor = Accessor::new(storage, &crate::helpers::test_catalog());
+        let (env, reading) = (
+            storage,
+            &crate::Reading::new(crate::helpers::test_subject()),
+        );
         let mut frontier = vec![root.clone()];
         while !frontier.is_empty() {
             let mut next = Vec::new();
             levels.push(frontier.iter().cloned().collect());
             for hash in &frontier {
-                let node: PersistentNode<VarKey, Vec<u8>> = accessor.get_node(hash).await?;
+                let node: PersistentNode<VarKey, Vec<u8>> = reading.node(env, hash).await?;
                 if let Ok(index) = node.as_index() {
                     for at in 0..index.len() {
                         next.push(index.hash_at(at)?.clone());
@@ -8319,7 +8384,7 @@ mod tests {
         let mut delta = Delta::zero();
         let first = key_at(0);
         let mut tree: VarTree =
-            TransientTree::empty_with_manifest(crate::helpers::test_catalog(), manifest.clone())
+            TransientTree::empty_with_manifest(crate::helpers::test_subject(), manifest.clone())
                 .insert(first.clone(), first.0.clone(), &storage)
                 .await?
                 .persist(&mut delta)?;
@@ -8369,7 +8434,7 @@ mod tests {
         // the failure is loud and the tree is left intact.
         let last = key_at(64);
         let reformatted = TransientTree::<VarKey, Vec<u8>>::with_manifest(
-            crate::helpers::test_catalog(),
+            crate::helpers::test_subject(),
             tree.root().clone(),
             Manifest::default(),
         )
@@ -8412,7 +8477,7 @@ mod tests {
 
             // Commit 1: insert `high` and persist.
             let mut delta = Delta::zero();
-            let tree = VarTree::empty_in(crate::helpers::test_catalog())
+            let tree = VarTree::empty_in(crate::helpers::test_subject())
                 .edit()
                 .insert(high.clone(), high.0.clone(), &storage)
                 .await?
@@ -8463,7 +8528,7 @@ mod tests {
     /// Builds a tree over big-endian `keys` in one batch and flushes it to
     /// storage, so a stitch can read its nodes back.
     async fn stitch_source(keys: &[u32], storage: &mut TestStorage) -> Result<TestTree> {
-        let mut edit = TestTree::empty_in(crate::helpers::test_catalog()).edit();
+        let mut edit = TestTree::empty_in(crate::helpers::test_subject()).edit();
         for &k in keys {
             edit = edit.insert(bkey(k), bkey(k).to_vec(), storage).await?;
         }
@@ -8478,7 +8543,7 @@ mod tests {
     /// The from-scratch oracle for a stitch: the root of a tree built by
     /// inserting the union of the pieces' entries directly.
     async fn stitch_oracle(keys: &[u32], storage: &TestStorage) -> Result<Blake3Hash> {
-        let mut edit = TestTree::empty_in(crate::helpers::test_catalog()).edit();
+        let mut edit = TestTree::empty_in(crate::helpers::test_subject()).edit();
         for &k in keys {
             edit = edit.insert(bkey(k), bkey(k).to_vec(), storage).await?;
         }
@@ -8492,7 +8557,7 @@ mod tests {
         pieces: Vec<Piece<'_, [u8; 4], Vec<u8>>>,
         storage: &TestStorage,
     ) -> Result<(Blake3Hash, usize)> {
-        let tree = TransientTree::stitch(&crate::helpers::test_catalog(), pieces, storage).await?;
+        let tree = TransientTree::stitch(&crate::helpers::test_subject(), pieces, storage).await?;
         let mut delta = Delta::zero();
         let tree = tree.persist(&mut delta)?;
         Ok((tree.root().clone(), delta.flush().count()))
@@ -8894,17 +8959,17 @@ mod buffer_edit_interaction_tests {
     /// values) one at a time under [`paced_manifest`], flushing after each.
     async fn paced_base(keys: std::ops::Range<u32>, storage: &mut Store) -> Result<Tree> {
         let manifest = paced_manifest();
-        let mut base = Tree::empty_in(crate::helpers::test_catalog());
+        let mut base = Tree::empty_in(crate::helpers::test_subject());
         let mut delta = Delta::zero();
         for i in keys {
             let edit = match base.stored_root() {
                 Some(root) => TransientTree::with_manifest(
-                    crate::helpers::test_catalog(),
+                    crate::helpers::test_subject(),
                     root.clone(),
                     manifest.clone(),
                 ),
                 None => TransientTree::empty_with_manifest(
-                    crate::helpers::test_catalog(),
+                    crate::helpers::test_subject(),
                     manifest.clone(),
                 ),
             };
@@ -9068,7 +9133,7 @@ mod buffer_edit_interaction_tests {
             let mut storage: Store = Blocks::new();
 
             let base_keys: Vec<u32> = (0..400).map(|_| next() % 100_000).collect();
-            let mut base = Tree::empty_in(crate::helpers::test_catalog());
+            let mut base = Tree::empty_in(crate::helpers::test_subject());
             let mut delta = Delta::zero();
             for key in &base_keys {
                 base = base
@@ -9148,7 +9213,7 @@ mod buffer_edit_interaction_tests {
     async fn it_preserves_buffered_ops_through_stitch() -> Result<()> {
         let mut storage: Store = Blocks::new();
 
-        let mut base = Tree::empty_in(crate::helpers::test_catalog());
+        let mut base = Tree::empty_in(crate::helpers::test_subject());
         let mut delta = Delta::zero();
         for i in 0..400u32 {
             base = base
@@ -9169,7 +9234,7 @@ mod buffer_edit_interaction_tests {
             let mut delta = Delta::zero();
             let root = tree.persist(&mut delta)?;
             settle(&mut delta, &mut storage).await?;
-            Tree::at(crate::helpers::test_catalog(), root)
+            Tree::at(crate::helpers::test_subject(), root)
         };
         assert_eq!(
             buffered_tree.get(&buffered_key, &storage).await?,
@@ -9181,7 +9246,7 @@ mod buffer_edit_interaction_tests {
         // exactly what the source held.
         let mut delta = Delta::zero();
         let stitched = TransientTree::<[u8; 4], Vec<u8>>::stitch(
-            &crate::helpers::test_catalog(),
+            &crate::helpers::test_subject(),
             vec![Piece::Range {
                 source: &buffered_tree,
                 range: [0u8; 4]..=[0xFFu8; 4],
@@ -9208,7 +9273,7 @@ mod buffer_edit_interaction_tests {
     async fn it_preserves_buffered_ops_through_partial_stitch() -> Result<()> {
         let mut storage: Store = Blocks::new();
 
-        let mut base = Tree::empty_in(crate::helpers::test_catalog());
+        let mut base = Tree::empty_in(crate::helpers::test_subject());
         let mut delta = Delta::zero();
         for i in 0..400u32 {
             base = base
@@ -9231,13 +9296,13 @@ mod buffer_edit_interaction_tests {
             let mut delta = Delta::zero();
             let root = tree.persist(&mut delta)?;
             settle(&mut delta, &mut storage).await?;
-            Tree::at(crate::helpers::test_catalog(), root)
+            Tree::at(crate::helpers::test_subject(), root)
         };
 
         // Carve the middle out: a partial range, so the spine is rebuilt.
         let mut delta = Delta::zero();
         let stitched = TransientTree::<[u8; 4], Vec<u8>>::stitch(
-            &crate::helpers::test_catalog(),
+            &crate::helpers::test_subject(),
             vec![Piece::Range {
                 source: &buffered_tree,
                 range: low.to_be_bytes()..=high.to_be_bytes(),
@@ -9270,7 +9335,7 @@ mod buffer_edit_interaction_tests {
     async fn it_preserves_buffered_ops_above_the_stored_bound_through_carve() -> Result<()> {
         let mut storage: Store = Blocks::new();
 
-        let mut base = Tree::empty_in(crate::helpers::test_catalog());
+        let mut base = Tree::empty_in(crate::helpers::test_subject());
         let mut delta = Delta::zero();
         for i in 0..400u32 {
             base = base
@@ -9291,7 +9356,7 @@ mod buffer_edit_interaction_tests {
             let mut delta = Delta::zero();
             let root = tree.persist(&mut delta)?;
             settle(&mut delta, &mut storage).await?;
-            Tree::at(crate::helpers::test_catalog(), root)
+            Tree::at(crate::helpers::test_subject(), root)
         };
         for key in buffered_keys {
             assert_eq!(
@@ -9305,7 +9370,7 @@ mod buffer_edit_interaction_tests {
         // whose end reaches past it, so the buffered keys are in range.
         let mut delta = Delta::zero();
         let stitched = TransientTree::<[u8; 4], Vec<u8>>::stitch(
-            &crate::helpers::test_catalog(),
+            &crate::helpers::test_subject(),
             vec![Piece::Range {
                 source: &buffered_tree,
                 range: 200u32.to_be_bytes()..=[0xFFu8; 4],
@@ -9347,7 +9412,7 @@ mod buffer_edit_interaction_tests {
             let mut storage: Store = Blocks::new();
 
             let base_keys: Vec<u32> = (0..500).map(|_| next() % 50_000).collect();
-            let mut base = Tree::empty_in(crate::helpers::test_catalog());
+            let mut base = Tree::empty_in(crate::helpers::test_subject());
             let mut delta = Delta::zero();
             for key in &base_keys {
                 base = base
@@ -9370,7 +9435,7 @@ mod buffer_edit_interaction_tests {
                 let mut delta = Delta::zero();
                 let root = buffered.persist(&mut delta)?;
                 settle(&mut delta, &mut storage).await?;
-                let source = Tree::at(crate::helpers::test_catalog(), root);
+                let source = Tree::at(crate::helpers::test_subject(), root);
 
                 // Split the key space into three adjacent pieces and stitch them
                 // back together: the result must equal the source exactly.
@@ -9378,7 +9443,7 @@ mod buffer_edit_interaction_tests {
                 let cut_b = (33_000u32).to_be_bytes();
                 let mut delta = Delta::zero();
                 let stitched = TransientTree::<[u8; 4], Vec<u8>>::stitch(
-                    &crate::helpers::test_catalog(),
+                    &crate::helpers::test_subject(),
                     vec![
                         Piece::Range {
                             source: &source,
@@ -9458,7 +9523,7 @@ mod buffer_edit_interaction_tests {
             let mut storage: Store = Blocks::new();
 
             let base_keys: Vec<u32> = (0..400).map(|_| next() % 40_000).collect();
-            let mut base = Tree::empty_in(crate::helpers::test_catalog());
+            let mut base = Tree::empty_in(crate::helpers::test_subject());
             let mut delta = Delta::zero();
             for key in &base_keys {
                 base = base
@@ -9483,7 +9548,7 @@ mod buffer_edit_interaction_tests {
                 let mut delta = Delta::zero();
                 let root = buffered.persist(&mut delta)?;
                 settle(&mut delta, &mut storage).await?;
-                let buffered_tree = Tree::at(crate::helpers::test_catalog(), root);
+                let buffered_tree = Tree::at(crate::helpers::test_subject(), root);
 
                 // The canonical counterpart of the same content.
                 let mut flushed = HitchhikerTree::open(&base).with_op_buf_size(op_buf);
@@ -9577,7 +9642,7 @@ mod buffer_edit_interaction_tests {
         let observing = crate::helpers::ObservingBlocks::with_capacity(2);
         let observed = observing.clone();
         let manifest = paced_manifest();
-        let mut base = Tree::empty_with_manifest(crate::helpers::test_catalog(), manifest);
+        let mut base = Tree::empty_with_manifest(crate::helpers::test_subject(), manifest);
         let mut delta = Delta::zero();
         for i in (0..2400u32).step_by(2) {
             base = base
@@ -9610,7 +9675,7 @@ mod buffer_edit_interaction_tests {
         // A cold node cache, so the descents must really read.
         let cold = crate::helpers::Holding::new(&observed);
         let merged: Tree = TransientTree::with_manifest(
-            crate::helpers::test_catalog(),
+            crate::helpers::test_subject(),
             base.root().clone(),
             paced_manifest(),
         )
@@ -9684,7 +9749,7 @@ mod buffer_edit_interaction_tests {
             ..crate::Manifest::default()
         };
         let mut base =
-            TransientTree::empty_with_manifest(crate::helpers::test_catalog(), manifest.clone());
+            TransientTree::empty_with_manifest(crate::helpers::test_subject(), manifest.clone());
         for i in (0..24_000u32).step_by(2) {
             base = base
                 .insert(i.to_be_bytes(), vec![i as u8], &observed)
@@ -9717,7 +9782,7 @@ mod buffer_edit_interaction_tests {
         // A cold node cache, so the descents must really read.
         let cold = crate::helpers::Holding::new(&observed);
         let merged: Tree = TransientTree::with_manifest(
-            crate::helpers::test_catalog(),
+            crate::helpers::test_subject(),
             base.root().clone(),
             manifest,
         )
@@ -9754,7 +9819,7 @@ mod buffer_edit_interaction_tests {
         let observing = crate::helpers::ObservingBlocks::new();
         let observed = observing.clone();
         let manifest = paced_manifest();
-        let mut base = Tree::empty_with_manifest(crate::helpers::test_catalog(), manifest);
+        let mut base = Tree::empty_with_manifest(crate::helpers::test_subject(), manifest);
         let mut delta = Delta::zero();
         for i in (0..1200u32).step_by(2) {
             base = base
@@ -9785,7 +9850,7 @@ mod buffer_edit_interaction_tests {
         // A cold node cache, so the descents must really read.
         let cold = crate::helpers::Holding::new(&observed);
         let merged: Tree = TransientTree::with_manifest(
-            crate::helpers::test_catalog(),
+            crate::helpers::test_subject(),
             base.root().clone(),
             paced_manifest(),
         )
@@ -9844,7 +9909,7 @@ mod buffer_edit_interaction_tests {
         let cold = crate::helpers::Holding::new(&observed);
         let mut tree: TransientTree<[u8; 4], Vec<u8>, crate::Geometric> =
             TransientTree::with_manifest(
-                crate::helpers::test_catalog(),
+                crate::helpers::test_subject(),
                 base.root().clone(),
                 paced_manifest(),
             );
@@ -9882,7 +9947,7 @@ mod buffer_edit_interaction_tests {
     async fn it_keeps_sibling_buffered_ops_across_an_edit() -> Result<()> {
         let mut storage: Store = Blocks::new();
 
-        let mut base = Tree::empty_in(crate::helpers::test_catalog());
+        let mut base = Tree::empty_in(crate::helpers::test_subject());
         let mut delta = Delta::zero();
         for i in 0..400u32 {
             base = base
@@ -9903,7 +9968,7 @@ mod buffer_edit_interaction_tests {
             let mut delta = Delta::zero();
             let root = t.persist(&mut delta)?;
             settle(&mut delta, &mut storage).await?;
-            Tree::at(crate::helpers::test_catalog(), root)
+            Tree::at(crate::helpers::test_subject(), root)
         };
 
         // Edit ONE unrelated key through the canonical path.
@@ -9938,7 +10003,7 @@ mod buffer_edit_interaction_tests {
         let mut storage: Store = Blocks::new();
 
         // A base big enough that inserts reshape the upper levels.
-        let mut base = Tree::empty_in(crate::helpers::test_catalog());
+        let mut base = Tree::empty_in(crate::helpers::test_subject());
         let mut delta = Delta::zero();
         for i in 0..600u32 {
             base = base
@@ -9960,7 +10025,7 @@ mod buffer_edit_interaction_tests {
         let mut delta = Delta::zero();
         let root = buffered.persist(&mut delta)?;
         settle(&mut delta, &mut storage).await?;
-        let tree = Tree::at(crate::helpers::test_catalog(), root);
+        let tree = Tree::at(crate::helpers::test_subject(), root);
 
         for &key in &buffered_keys {
             assert_eq!(
@@ -10054,17 +10119,17 @@ mod buffer_edit_interaction_tests {
                 ) <= crate::BOTTOM_RANK
             })
             .collect();
-        let mut base = Tree::empty_in(crate::helpers::test_catalog());
+        let mut base = Tree::empty_in(crate::helpers::test_subject());
         let mut delta = Delta::zero();
         for key in &base_keys {
             base = match base.stored_root() {
                 Some(root) => TransientTree::with_manifest(
-                    crate::helpers::test_catalog(),
+                    crate::helpers::test_subject(),
                     root.clone(),
                     manifest.clone(),
                 ),
                 None => TransientTree::empty_with_manifest(
-                    crate::helpers::test_catalog(),
+                    crate::helpers::test_subject(),
                     manifest.clone(),
                 ),
             }
@@ -10193,7 +10258,7 @@ mod buffer_edit_interaction_tests {
     async fn it_lets_an_edit_override_a_buffered_op() -> Result<()> {
         let mut storage: Store = Blocks::new();
 
-        let mut base = Tree::empty_in(crate::helpers::test_catalog());
+        let mut base = Tree::empty_in(crate::helpers::test_subject());
         let mut delta = Delta::zero();
         for i in 0..500u32 {
             base = base
@@ -10213,7 +10278,7 @@ mod buffer_edit_interaction_tests {
         let mut delta = Delta::zero();
         let root = buffered.persist(&mut delta)?;
         settle(&mut delta, &mut storage).await?;
-        let tree = Tree::at(crate::helpers::test_catalog(), root);
+        let tree = Tree::at(crate::helpers::test_subject(), root);
 
         assert_eq!(
             tree.get(&key, &storage).await?,
@@ -10286,7 +10351,7 @@ mod buffer_edit_interaction_tests {
         .await
         .expect("the fixture spec is valid");
         let mut storage = spec.storage().clone();
-        let base = SpecTree::at(crate::helpers::test_catalog(), spec.tree().root().clone());
+        let base = SpecTree::at(crate::helpers::test_subject(), spec.tree().root().clone());
 
         let left_parked = encode_key(b"bb", 1, 1);
         let right_parked = encode_key(b"mm", 1, 1);
@@ -10318,7 +10383,7 @@ mod buffer_edit_interaction_tests {
             "fixture: both ops must sit in mid-level index buffers"
         );
 
-        let parked: SpecTree = PersistentTree::at(crate::helpers::test_catalog(), root);
+        let parked: SpecTree = PersistentTree::at(crate::helpers::test_subject(), root);
         assert_eq!(
             parked.get(&left_parked, &storage).await?,
             Some(vec![1]),
@@ -10379,7 +10444,7 @@ mod buffer_edit_interaction_tests {
         let b = encode_key(b"b", 1, 3); // interior, seam punches level 1
 
         let mut delta = Delta::zero();
-        let mut tree = SpecTree::empty_in(crate::helpers::test_catalog());
+        let mut tree = SpecTree::empty_in(crate::helpers::test_subject());
         for key in [a, b] {
             tree = tree
                 .edit()
@@ -10408,7 +10473,7 @@ mod buffer_edit_interaction_tests {
 
         // Deleting `b` empties the rightmost subtree, leaving a single-child
         // index-over-index root that `seal_root` strips.
-        let reopened: SpecTree = PersistentTree::at(crate::helpers::test_catalog(), root);
+        let reopened: SpecTree = PersistentTree::at(crate::helpers::test_subject(), root);
         let mut delta = Delta::zero();
         let stripped = reopened
             .edit()
@@ -10457,7 +10522,7 @@ mod buffer_edit_interaction_tests {
         .await
         .expect("the fixture spec is valid");
         let mut storage = spec.storage().clone();
-        let base = SpecTree::at(crate::helpers::test_catalog(), spec.tree().root().clone());
+        let base = SpecTree::at(crate::helpers::test_subject(), spec.tree().root().clone());
 
         // The probe lives under the RIGHTMOST mid-level index, the spine the
         // stitch seam below dismantles. The far key lives under the other
@@ -10497,10 +10562,10 @@ mod buffer_edit_interaction_tests {
         // Stitch the whole buffered source next to a run of entries past its
         // last key: the join runs down the source's rightmost spine, lifting
         // both the root's buffer and the mid node's seam buffer.
-        let source: SpecTree = PersistentTree::at(crate::helpers::test_catalog(), root);
+        let source: SpecTree = PersistentTree::at(crate::helpers::test_subject(), root);
         let after = encode_key(b"t", 1, 1);
         let stitched = TransientTree::stitch(
-            &crate::helpers::test_catalog(),
+            &crate::helpers::test_subject(),
             vec![
                 Piece::Range {
                     source: &source,

@@ -26,12 +26,11 @@
 //!    in-memory delta buffer until the caller hands them to the environment
 //!    to store ([`nodes::Write`]).
 //!
-//! 2. **Environment**: a tree is a root under a catalog
-//!    ([`CatalogScope`](dialog_effects::archive::prelude::CatalogScope)), and
-//!    it asks the environment it reads through for its nodes by name
-//!    ([`nodes::Read`], behind [`load_node`] and the [`Accessor`] an
-//!    operation opens), and asks it to make nodes it will read soon cheap
-//!    ([`nodes::Preload`]). Where a node comes from (a cache the environment
+//! 2. **Environment**: a tree is a root and the subject whose nodes it
+//!    reads, asked for as its [`Reading`] says. It holds no storage handle:
+//!    every operation is handed the environment it reads through, asks it
+//!    for nodes by name ([`nodes::Read`]), and asks it to make nodes it will
+//!    read soon cheap ([`nodes::Preload`]). Where a node comes from (a cache the environment
 //!    holds, its store in whatever form that keeps nodes, a remote it
 //!    hydrates from) is the environment's concern; the tree holds no nodes
 //!    and looks up no cache.
@@ -52,21 +51,21 @@
 //! ```
 //! # tokio_test::block_on(async {
 //! use dialog_capability::{Subject, did};
-//! use dialog_effects::archive::prelude::ArchiveScope;
 //! use dialog_search_tree::{Delta, PersistentTree, nodes};
 //! use dialog_storage::provider::Volatile;
 //!
 //! let storage = Volatile::new();
-//! let catalog = ArchiveScope::new(Subject::from(did!("key:z6MkTree"))).index();
-//! let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(catalog.clone());
+//! let subject = Subject::from(did!("key:z6MkTree"));
+//! let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(subject.clone());
 //! let mut delta = Delta::zero();
 //!
 //! // Insert entries
 //! tree = tree.edit().insert([0, 0, 0, 1], vec![1, 2, 3], &storage).await.unwrap().persist(&mut delta).unwrap();
 //!
-//! // Write the persisted nodes into the catalog so reads can resolve them
+//! // Write the persisted nodes into the subject's archive so reads can
+//! // resolve them
 //! let nodes: Vec<_> = delta.flush().map(|(_, node)| node).collect();
-//! nodes::Write::new(catalog.clone(), nodes).perform(&storage).await.unwrap();
+//! nodes::Write::new(subject.clone(), nodes).perform(&storage).await.unwrap();
 //!
 //! // Retrieve entries
 //! let value = tree.get(&[0, 0, 0, 1], &storage).await.unwrap();
@@ -79,13 +78,12 @@
 //! ```
 //! # tokio_test::block_on(async {
 //! use dialog_capability::{Subject, did};
-//! use dialog_effects::archive::prelude::ArchiveScope;
 //! use dialog_search_tree::{Delta, PersistentTree, nodes};
 //! use dialog_storage::provider::Volatile;
 //!
 //! let storage = Volatile::new();
-//! let catalog = ArchiveScope::new(Subject::from(did!("key:z6MkTree"))).index();
-//! let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(catalog.clone());
+//! let subject = Subject::from(did!("key:z6MkTree"));
+//! let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(subject.clone());
 //! let mut delta = Delta::zero();
 //!
 //! // Make several modifications. Each persist writes its new nodes into the
@@ -94,14 +92,14 @@
 //! for i in 0..10u32 {
 //!     tree = tree.edit().insert(i.to_le_bytes(), vec![i as u8], &storage).await.unwrap().persist(&mut delta).unwrap();
 //!     let nodes: Vec<_> = delta.flush().map(|(_, node)| node).collect();
-//!     nodes::Write::new(catalog.clone(), nodes).perform(&storage).await.unwrap();
+//!     nodes::Write::new(subject.clone(), nodes).perform(&storage).await.unwrap();
 //! }
 //!
 //! let root_hash = tree.root().clone();
 //!
-//! // After flushing, the tree can be reconstructed from its root hash in
-//! // its catalog, loading nodes from storage as needed
-//! let tree = PersistentTree::<[u8; 4], Vec<u8>>::at(catalog, root_hash);
+//! // After flushing, the tree can be reconstructed from its root hash and
+//! // its subject, loading nodes from storage as needed
+//! let tree = PersistentTree::<[u8; 4], Vec<u8>>::at(subject, root_hash);
 //! assert_eq!(tree.get(&5u32.to_le_bytes(), &storage).await.unwrap(), Some(vec![5]));
 //! assert_eq!(tree.get(&9u32.to_le_bytes(), &storage).await.unwrap(), Some(vec![9]));
 //! # })
@@ -112,17 +110,16 @@
 //! ```
 //! # tokio_test::block_on(async {
 //! use dialog_capability::{Subject, did};
-//! use dialog_effects::archive::prelude::ArchiveScope;
 //! use dialog_search_tree::{Delta, PersistentTree, nodes};
 //! use dialog_storage::provider::Volatile;
 //!
 //! let storage = Volatile::new();
-//! let catalog = ArchiveScope::new(Subject::from(did!("key:z6MkTree"))).index();
+//! let subject = Subject::from(did!("key:z6MkTree"));
 //! let flush = async |delta: &mut Delta<_, _>| {
 //!     let nodes: Vec<_> = delta.flush().map(|(_, node)| node).collect();
-//!     nodes::Write::new(catalog.clone(), nodes).perform(&storage).await.unwrap();
+//!     nodes::Write::new(subject.clone(), nodes).perform(&storage).await.unwrap();
 //! };
-//! let tree_v1 = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(catalog.clone());
+//! let tree_v1 = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(subject.clone());
 //! let mut delta = Delta::zero();
 //!
 //! // Create version 1 with some data. Each persist writes its new nodes into
@@ -147,8 +144,8 @@
 //! # })
 //! ```
 
-mod accessor;
-pub use accessor::*;
+mod reading;
+pub use reading::*;
 
 pub mod nodes;
 

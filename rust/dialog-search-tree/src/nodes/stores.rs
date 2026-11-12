@@ -4,7 +4,7 @@
 //! [`Read`] as the decode of the block it holds, a [`Write`] as the import
 //! of the nodes' blocks, and a [`Preload`] by doing nothing: it holds no
 //! cache for the node to land in. A storage routes each request to the
-//! space whose subject the catalog names, and a space hands it to its
+//! space of the subject the request names, and a space hands it to its
 //! archive. A store that keeps nodes in a form of its own implements these
 //! itself, in place of the translation.
 
@@ -70,7 +70,7 @@ space_forwards!(Read);
 space_forwards!(Preload);
 space_forwards!(Write);
 
-/// A storage routes a node request to the space the catalog's subject is
+/// A storage routes a node request to the space its subject is
 /// mounted as. A subject this storage does not serve is not a backend
 /// failure, and reports as its own condition.
 ///
@@ -87,7 +87,7 @@ macro_rules! storage_routes {
                 &self,
                 request: $request<N>,
             ) -> Resume<'_, <$request<N> as dialog_capability::Command>::Output> {
-                let subject = request.catalog.subject();
+                let subject = request.subject.did();
                 match self.space(subject) {
                     Some(space) => Resume::later(async move { space.execute(request).await }),
                     None => Resume::now($missing(StorageError::SubjectNotFound {

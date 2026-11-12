@@ -285,12 +285,12 @@ impl<'a> View<'a> {
         self.revision().map(|revision| *revision.tree.hash())
     }
 
-    /// This line's tree, in its catalog: the revision's, or the empty tree
-    /// for a branch with no commits yet.
+    /// This line's tree, reading its repository's nodes: the revision's, or
+    /// the empty tree for a branch with no commits yet.
     pub(crate) fn tree(&self) -> Index {
         match self.root() {
-            Some(root) => Index::at(self.catalog(), NodeHash::from(root)),
-            None => Index::empty_in(self.catalog()),
+            Some(root) => Index::at(self.subject(), NodeHash::from(root)),
+            None => Index::empty_in(self.subject()),
         }
     }
 
@@ -395,9 +395,9 @@ impl<'a> View<'a> {
             + ?Sized,
     {
         let history = match self.root() {
-            Some(root) => TreeHistory::from_root(self.catalog(), &root, env),
+            Some(root) => TreeHistory::from_root(self.subject(), &root, env),
             // No revision, no tree, no records.
-            None => TreeHistory::empty(self.catalog(), env),
+            None => TreeHistory::empty(self.subject(), env),
         };
         history.with_record_cache(self.records())
     }

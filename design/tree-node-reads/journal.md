@@ -817,3 +817,96 @@ own change. Build-artifact senses stay as they are (crane's
 `cargoArtifacts`, GitHub's upload artifacts), as do dated records:
 CHANGELOG release sections, this journal's earlier entries and review
 notes.
+
+## 2026-11-10, Building: no reader in the tree, and a subject where the catalog was
+
+**Asked.** A follow-up the maintainer agreed to after #755: the tree
+should perform `nodes::Read<N>` and `nodes::Preload<N>` on its
+environment and keep no storage handle, and two leftovers contradicted
+that. `Accessor` bundled an environment with a catalog and a reading
+policy and was threaded through some 45 signatures, and two crates outside
+the tree (push, the diagnose tool) built one just to read a node. And
+`CatalogScope` in every node request named a catalog that is always
+`index`. Two decisions came first: how an edit reads, and whether
+environments become subject-scoped (option a) or stay subject-agnostic
+with the request naming its subject (option b).
+
+**Learned.** How an edit reads. `PersistentTree::edit` handed the batch
+only its catalog and root, so `tree.locally().edit().insert(..)` read the
+nodes it rewrote as demand reads that could hydrate, and the tree it
+persisted read on demand whatever it was opened from. No production code
+edits a local or ranked tree today: the snapshot export reads locally and
+the fetch warm-up reads ranked, and both only read. So the gap was latent,
+and `locally()` promised something an edit did not keep.
+
+What serves several subjects. Every place a node request is answered or
+built, and what the subject does there:
+
+| where | subjects through one environment | what the subject decides |
+|---|---|---|
+| `Peer`, `AccessEnv` (`read_node_or_hydrate`, `preload_node_or_hydrate`, `write_nodes`) | every subject the peer mounts, one environment per process | the node cache's scope (`NodeCache::of(env, subject)`), the space (`Storage::space`), the hydration routes (`Routes::of(env).to(subject)`) |
+| `Storage`, `Space` | every mounted subject | which space answers |
+| query session (`QueryEnv`) | one per line; a query's lines are branches or snapshots of different repositories, read interleaved in a join; the wildcard subject means any line | which line's tree and cache a read reaches |
+| fetch's warm-up (`warm_source`) | each upstream source's subject, through one `Erased` | which routes hydrate |
+| push (`forward_node`, the boundary difference) | the branch's subject locally; remote blocks are fetched as blocks, not nodes | local read versus forwarding |
+| pull, merge, commit, context, reset | the branch's own subject, for its own trees and for the upstream heads it merges | the cache scope and routes |
+| `DeltaOverlay` | any; it answers a staged node by hash | nothing |
+| the tree crate's block stores, `Counting`, `Metered` | ignore it beyond routing to blocks | the block catalog |
+| `JoinEnv` and the query crate's `TestEnv` (test environments) | one branch: they rewrite every read to it | the only place an environment is subject-scoped |
+
+Option (a) does not remove the subject, it moves it. Under the peer, a
+subject-scoped environment would be an adapter holding a subject in front
+of the multi-subject peer, and the layer beneath the adapter still needs a
+request that names the subject to scope its cache, find its space and
+choose its routes: option (b)'s request, with an adapter on top. The
+adapter would also have to forward every other provider a tree operation
+needs (`blob::Load` for spilled values, `ArchiveLoad`, `Hydrate`,
+`Holds`) and survive erasure to `dyn TreeEnv`. And the binding point
+moves. Today the subject is bound once, where the root is learned
+(`source.tree()`, `Index::at(branch.subject(), root)`); under (a) it is
+bound at every call that passes an environment, and passing the wrong
+scope (a push's local tree read through the remote side's scope, a join
+reading line two through line one's) reads silently wrong (absent, or
+hydrated from another subject's routes) instead of failing to compile.
+`TreeDifference` already takes two environments for two trees; under (a)
+the scopes would have to agree with the trees by convention. The two test
+environments that pin every read to one branch are what (a) looks like,
+and they work because a test has one branch.
+
+A subject is not a storage handle: it is an address, a DID, cloned as an
+`Arc<str>`, the same cost per read as the `Arc` a `CatalogScope` was. The
+environment stays the only handle.
+
+**Decided.** Edits inherit. A `TransientTree` carries the `Reading` of the
+tree it was opened from, `HitchhikerTree::open` takes it too, and the
+tree a batch persists reads the same way. Pinned by `it_edits_as_the_tree_reads`
+(a ranked tree's edit ranks its loads, a local tree's edit loads locally,
+and the persisted tree reads locally) and
+`it_refuses_to_hydrate_an_edit_of_a_local_tree` (on a replica that lacks
+the root, a local tree's edit fails with `DialogSearchTreeError::Node`,
+asks for local loads only and seals nothing; the same edit of a default
+tree hydrates).
+
+Option (b). `nodes::Read`, `Preload` and `Write` carry `subject: Subject`
+in place of `catalog: CatalogScope`. The block catalog is named in one
+place, the translation layer (`Read::load`, and `Write::through_blocks`'s
+import), as the subject's index; the peer's hydration takes the catalog
+from `read.load()` rather than naming it again. The trees carry a subject
+inside their `Reading`, and their constructors take a `Subject`.
+
+`Accessor` is gone, and so is the free `load_node`. `Reading` now holds
+the subject with the priority and locality: it is a `Read` without its
+name, data a tree keeps, never an environment. It builds the requests
+(`read`, `preload`) and reads a linked node with `node(env, hash)`, which
+is where "a node a tree links to and the environment cannot reach is an
+error" now lives. Operations take the environment and the reading as two
+parameters; a difference's two sides are each an environment and a
+reading. Push's forced local read is `nodes::Read::new(subject,
+hash).locally().perform(env)`; the diagnose tool reads through the tree's
+`reading()`.
+
+The repository's `persist` takes the subject, writes spilled values into
+its archive's blobs and its nodes through `Write`. The query session's
+wildcard read tries each line's subject in turn, as it tried each line's
+catalog. `CatalogScope` stays where blocks are read or written: `Load`,
+`Get`, `Import`, the baseline's block walks, `Select::catalog`.

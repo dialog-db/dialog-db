@@ -136,7 +136,7 @@ async fn checkpoint_root(tree: &Tree, storage: &Store, label: &str) -> Result<Bl
 /// Canonical sequential edits: persist + settle every op.
 async fn run_canonical(program: &Program) -> Result<Vec<Blake3Hash>> {
     let mut storage: Store = Blocks::new();
-    let mut tree = Tree::empty_in(dialog_search_tree::helpers::test_catalog());
+    let mut tree = Tree::empty_in(dialog_search_tree::helpers::test_subject());
     let mut roots = Vec::new();
     for (at, op) in program.ops.iter().enumerate() {
         let mut delta = Delta::zero();
@@ -170,7 +170,7 @@ async fn run_buffered(
     persist_every: usize,
 ) -> Result<Vec<Blake3Hash>> {
     let mut storage: Store = Blocks::new();
-    let mut tree = Tree::empty_in(dialog_search_tree::helpers::test_catalog());
+    let mut tree = Tree::empty_in(dialog_search_tree::helpers::test_subject());
     let mut roots = Vec::new();
     let open = |tree: &Tree, op_buf: Option<usize>| {
         let buffered = HitchhikerTree::open(tree);
@@ -211,7 +211,7 @@ async fn run_buffered(
             let mut delta = Delta::zero();
             let root = buffered.persist(&mut delta)?;
             settle(&mut delta, &mut storage).await?;
-            tree = Tree::at(dialog_search_tree::helpers::test_catalog(), root);
+            tree = Tree::at(dialog_search_tree::helpers::test_subject(), root);
             buffered = open(&tree, op_buf);
         }
     }

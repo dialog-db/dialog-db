@@ -85,7 +85,7 @@ where
         + Clone,
 {
     let value_encoding = manifest.value_encoding;
-    let mut target = Corpus::empty_with_manifest(source.catalog().clone(), manifest);
+    let mut target = Corpus::empty_with_manifest(source.subject().clone(), manifest);
     let [range] = full_scope();
     let stream = source.stream_range_handles(range, store);
     tokio::pin!(stream);
@@ -106,7 +106,7 @@ where
 #[cfg(test)]
 mod tests {
     #![allow(unexpected_cfgs)]
-    use dialog_search_tree::helpers::test_catalog;
+    use dialog_search_tree::helpers::test_subject;
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
@@ -155,7 +155,7 @@ mod tests {
 
     async fn tree(store: &Blocks, instructions: Vec<Instruction>) -> anyhow::Result<Corpus> {
         let mut tree: Corpus =
-            PersistentTree::empty_with_manifest(test_catalog(), Manifest::default());
+            PersistentTree::empty_with_manifest(test_subject(), Manifest::default());
         let mut delta = ArchiveDelta::zero();
         tree.apply(store, &mut delta, stream::iter(instructions))
             .await?;

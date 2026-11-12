@@ -183,7 +183,7 @@ mod tests {
 
     use dialog_capability::access::AuthorizeError;
     use dialog_effects::archive::ArchiveError;
-    use dialog_search_tree::helpers::test_catalog;
+    use dialog_search_tree::helpers::test_subject;
     use dialog_search_tree::nodes;
 
     use super::*;
@@ -220,7 +220,7 @@ mod tests {
         // A refusal the block layer makes while a node is read arrives as
         // the tree's error, and has to come out the same way.
         let read = nodes::Read::<CorpusNode>::new(
-            test_catalog(),
+            test_subject(),
             dialog_common::Blake3Hash::from([0u8; 32]),
         );
         let through_tree = read

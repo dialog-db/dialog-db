@@ -205,10 +205,9 @@ async fn warm_source(
     if !routes.fetches(view.subject().did()) {
         return Ok(());
     }
-    let catalog = view.catalog();
     let storage: &dyn TreeEnv = env;
     // Every load the walk performs is ranked at the hint's likelihood.
-    let tree = Index::at(catalog, NodeHash::from(root)).ranked(likelihood.into());
+    let tree = Index::at(view.subject(), NodeHash::from(root)).ranked(likelihood.into());
 
     let manifest = tree.manifest(&storage).await?;
     let range = selector_range(selector, &manifest);
@@ -234,6 +233,7 @@ mod tests {
     use dialog_effects::archive::Load as ArchiveLoad;
     use dialog_peer::helpers::{test_session_with_peer, unique_name};
     use dialog_query::{AttributeQuery, Term, the};
+    use dialog_search_tree::nodes;
 
     use super::*;
     use crate::RepositoryExt as _;
@@ -298,7 +298,7 @@ mod tests {
 
     /// Persists a one-fact tree into `blocks` and returns its root.
     async fn persist(blocks: &Blocks, name: &str) -> Result<NodeHash> {
-        let mut tree = Index::empty_in(blocks.catalog().clone());
+        let mut tree = Index::empty_in(blocks.subject());
         let mut delta = ArchiveDelta::zero();
         tree.apply(
             blocks,
@@ -339,7 +339,9 @@ mod tests {
         cache.hold(&archive);
 
         let loaded: Result<Option<dialog_search_tree::PersistentNode<Key, State<Datum>>>, _> =
-            dialog_search_tree::load_node(&archive, &catalog, &asked).await;
+            nodes::Read::new(blocks.subject(), asked.clone())
+                .perform(&archive)
+                .await;
 
         assert!(
             matches!(
