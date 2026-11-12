@@ -21,18 +21,21 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use dialog_corpus::{Entity, Value};
+use dialog_corpus::{Composite, Entity, Value};
 use dialog_query::concept::descriptor::ConceptStatement;
 use dialog_query::formula::entity::derive;
 use dialog_query::{
     Any, AttributeDescriptor, ConceptConclusion, ConceptQuery, DeductiveRule, InductiveRule,
-    Term as Variable,
+    Pattern, Term as Variable,
 };
 use serde_json::{Map, Value as Json, json};
 
 use crate::Error;
+use crate::data::Data;
 use crate::form::{Form, Part};
 use crate::kernel::{Field, Formula, Head, Premise, Read, Rule, TYPES, Term};
+use crate::pattern::variables;
+use crate::syntax::Syntax;
 
 /// One thing to do with a branch.
 #[derive(Debug, Clone)]
@@ -61,6 +64,9 @@ enum Slot {
     Is(Form),
     /// The row says what this variable was bound to.
     Bound(String),
+    /// The row says the value this pattern is, with what its variables
+    /// were bound to.
+    Built(Pattern),
 }
 
 /// A query: what to select, and how a match reads as a row.
@@ -88,6 +94,10 @@ impl Query {
                 .and_then(|binding| binding.content())
                 .map(|value| written(&value))
                 .map_err(|error| Error::Refused(format!("a match binds no {name}: {error}"))),
+            Slot::Built(pattern) => pattern
+                .build(conclusion.source())
+                .map(|value| written(&value))
+                .ok_or_else(|| Error::Refused("a match leaves a part of a struct unbound".into())),
         };
         let mut parts = vec![Part::Bare(fill(&self.entity)?)];
         for (label, slot) in &self.fields {
@@ -115,6 +125,27 @@ fn written(value: &Value) -> Form {
         Value::Float(number) => Form::Number(number.to_string()),
         Value::Boolean(truth) => Form::Symbol(truth.to_string()),
         Value::Symbol(symbol) => Form::Symbol(symbol.to_string()),
+        Value::Record(_) if matches!(value.composite(), Ok(Some(_))) => {
+            match value.composite() {
+                Ok(Some(Composite::Map(map))) => Form::Map(
+                    map.iter()
+                        .map(|(key, value)| {
+                            // A symbol of no domain is the label a key
+                            // was written as.
+                            let key = match Data::Value(key.clone()).as_symbol() {
+                                Some(label) => Form::Symbol(label),
+                                None => written(key),
+                            };
+                            (key, written(value))
+                        })
+                        .collect(),
+                ),
+                Ok(Some(Composite::List(items) | Composite::Tuple(items))) => {
+                    Form::Vector(items.iter().map(written).collect())
+                }
+                _ => Form::Blank,
+            }
+        }
         Value::Bytes(bytes) | Value::Record(bytes) => Form::Vector(
             bytes
                 .iter()
@@ -254,6 +285,62 @@ fn id(formula: &Formula) -> Result<Option<Entity>, Error> {
     Ok(Some(entity))
 }
 
+/// The pattern a struct or a tuple is. A key written as a label is a
+/// symbol of no domain; any other key is the value it is written as.
+/// `name` says what a variable goes by where the pattern stands, and
+/// what a blank, given no name, is there.
+fn shape(
+    form: &Form,
+    name: &mut dyn FnMut(Option<&str>) -> Variable<Any>,
+) -> Result<Pattern, Error> {
+    fn key(node: &Syntax) -> Result<Value, Error> {
+        match node {
+            Syntax::Constant(value) => Ok(value.clone()),
+            Syntax::Reference(label) => match Data::symbol(label)? {
+                Data::Value(symbol) => Ok(symbol),
+                _ => Err(Error::Refused(format!("{label} is not a key"))),
+            },
+            other => Err(Error::Refused(format!(
+                "{other} is not a key: a key is a value"
+            ))),
+        }
+    }
+    fn walk(
+        node: &Syntax,
+        name: &mut dyn FnMut(Option<&str>) -> Variable<Any>,
+    ) -> Result<Pattern, Error> {
+        Ok(match node {
+            Syntax::Variable(variable) => name(Some(variable)).into(),
+            Syntax::Blank => name(None).into(),
+            Syntax::Constant(value) => value.clone().into(),
+            Syntax::Map(entries) => Pattern::map(
+                entries
+                    .iter()
+                    .map(|(at, value)| Ok((key(at)?, walk(value, name)?)))
+                    .collect::<Result<Vec<_>, Error>>()?,
+            )
+            .map_err(|error| refused("the struct", error))?,
+            Syntax::Tuple(items) => Pattern::tuple(
+                items
+                    .iter()
+                    .map(|item| walk(item, name))
+                    .collect::<Result<Vec<_>, Error>>()?,
+            ),
+            Syntax::Reference(symbol) => {
+                return Err(Error::Refused(format!(
+                    "{symbol} is a name, not a value: text is quoted, an entity has a `:`"
+                )));
+            }
+            other => {
+                return Err(Error::Unsupported(format!(
+                    "{other} inside a struct: only values, variables, structs and tuples are"
+                )));
+            }
+        })
+    }
+    walk(&Syntax::try_from(form)?, name)
+}
+
 /// A constant as Dialog-DB reads it. `None` for what is not a constant.
 fn constant(term: &Term, kind: Option<&str>) -> Result<Option<Json>, Error> {
     Ok(Some(match term {
@@ -271,8 +358,25 @@ fn constant(term: &Term, kind: Option<&str>) -> Result<Option<Json>, Error> {
             Some(entity) => json!({ "entity:": entity.to_string() }),
             None => return Ok(None),
         },
-        Term::Variable(_) | Term::Blank | Term::Formula(_) => return Ok(None),
+        Term::Variable(_) | Term::Blank | Term::Formula(_) | Term::Struct(_) => return Ok(None),
     }))
+}
+
+/// The value a term is, where it is one: a constant, or a struct with
+/// no variable in it.
+fn value(term: &Term, kind: Option<&str>) -> Result<Option<Value>, Error> {
+    if let Term::Struct(form) = term {
+        return Ok(shape(form, &mut |name| match name {
+            Some(name) => Variable::var(name.to_string()),
+            None => Variable::blank(),
+        })?
+        .as_value());
+    }
+    constant(term, kind)?
+        .map(|constant| {
+            serde_json::from_value(constant).map_err(|error| refused("the value", error))
+        })
+        .transpose()
 }
 
 /// The attribute a field reads or writes. With no pick written the
@@ -306,14 +410,12 @@ fn statement(read: &Read) -> Result<ConceptStatement, Error> {
     let mut with = Vec::new();
     whole(read, &BTreeSet::new())?;
     for field in &read.fields {
-        let value = constant(&field.term, field.kind.as_deref())?.ok_or_else(|| {
+        let value = value(&field.term, field.kind.as_deref())?.ok_or_else(|| {
             Error::Refused(format!(
                 "a write with no premise needs a value for {}",
                 field.attribute
             ))
         })?;
-        let value: Value =
-            serde_json::from_value(value).map_err(|error| refused("the value", error))?;
         let descriptor: AttributeDescriptor = serde_json::from_value(attribute(field))
             .map_err(|error| refused("the attribute", error))?;
         with.push(
@@ -388,6 +490,11 @@ fn bound(rule: &Rule) -> BTreeSet<String> {
                 names.insert(name.clone());
             }
             Term::Formula(inner) => formula(inner, names),
+            Term::Struct(form) => {
+                let mut inside = Vec::new();
+                variables(form, &mut inside);
+                names.extend(inside);
+            }
             _ => {}
         }
     }
@@ -439,6 +546,10 @@ struct Scope {
     bound: BTreeSet<String>,
     /// The variables only what must not hold names, seen so far.
     absent: BTreeSet<String>,
+    /// The patterns that stand where a term does, each under the
+    /// variable written in its place. A pattern has no wire form, so it
+    /// is put in once Dialog-DB has read the rest.
+    shapes: Vec<(String, Form, Pattern)>,
 }
 
 impl Scope {
@@ -508,6 +619,18 @@ impl Scope {
             }
             Term::Variable(name) => Ok(variable(&self.name(name))),
             Term::Blank => Ok(json!({ "?": {} })),
+            Term::Struct(form) => {
+                // A blank is a variable of its own here, which binds
+                // what stood there and joins nothing, so that a row can
+                // say it.
+                let pattern = shape(form, &mut |name| match name {
+                    Some(name) => Variable::var(self.name(name)),
+                    None => Variable::var(self.fresh()),
+                })?;
+                let place = self.fresh();
+                self.shapes.push((place.clone(), form.clone(), pattern));
+                Ok(variable(&place))
+            }
             Term::Formula(formula) if formula.name == "id" => self.id(formula, None),
             Term::Formula(formula) => {
                 if self.negated {
@@ -707,6 +830,39 @@ impl Scope {
         }
     }
 
+    /// The patterns, put where their variables were written in a query
+    /// Dialog-DB has read.
+    fn place(&self, query: &mut ConceptQuery) {
+        let placed: Vec<(String, Pattern)> = query
+            .terms
+            .iter()
+            .filter_map(|(field, term)| {
+                let (_, _, pattern) = self
+                    .shapes
+                    .iter()
+                    .find(|(place, _, _)| term.name() == Some(place.as_str()))?;
+                Some((field.clone(), pattern.clone()))
+            })
+            .collect();
+        for (field, pattern) in placed {
+            query.terms.set(field, pattern);
+        }
+    }
+
+    /// A rule is written out for Dialog-DB to read, and a pattern has no
+    /// written form there yet.
+    fn written(&self) -> Result<(), Error> {
+        if self.shapes.is_empty() {
+            Ok(())
+        } else {
+            Err(Error::Unsupported(
+                "a struct in a rule: a rule is handed to Dialog-DB written out, and a pattern \
+                 has no written form there yet. A query of one read takes one"
+                    .into(),
+            ))
+        }
+    }
+
     fn rule(self, head: &str, concept: Json, description: Option<&str>) -> Json {
         let mut rule = Map::new();
         if let Some(description) = description {
@@ -729,6 +885,7 @@ fn concluding(rule: &Rule, read: &Read, head: &str) -> Result<Json, Error> {
     scope.adopt(read, &fields);
     scope.body(rule)?;
     let concept = scope.head(read, &fields)?;
+    scope.written()?;
     Ok(scope.rule(head, concept, rule.description.as_deref()))
 }
 
@@ -767,7 +924,7 @@ fn report(rule: &Rule, read: &Read, site: &str) -> Result<Step, Error> {
             _ => Form::Symbol(uri.clone()),
         }),
         Term::Symbol(name) => Some(Form::Symbol(name.clone())),
-        Term::Variable(_) | Term::Blank | Term::Formula(_) => None,
+        Term::Variable(_) | Term::Blank | Term::Formula(_) | Term::Struct(_) => None,
     };
 
     if let ([Premise::Read(only)], []) = (rule.when.as_slice(), rule.unless.as_slice()) {
@@ -777,6 +934,22 @@ fn report(rule: &Rule, read: &Read, site: &str) -> Result<Step, Error> {
             let slot = |term: &Term, scope: &mut Scope| match (term, shown(term)) {
                 (_, Some(form)) => Ok(Slot::Is(form)),
                 (Term::Variable(name), _) => Ok(Slot::Bound(scope.name(name))),
+                (Term::Struct(form), _) => {
+                    // The struct as the read holds it, where the head
+                    // says the one the read takes apart.
+                    let read = scope
+                        .shapes
+                        .iter()
+                        .find(|(_, written, _)| written == form)
+                        .map(|(_, _, pattern)| pattern.clone());
+                    match read {
+                        Some(pattern) => Ok(Slot::Built(pattern)),
+                        None => Ok(Slot::Built(shape(form, &mut |name| match name {
+                            Some(name) => Variable::var(scope.name(name)),
+                            None => Variable::blank(),
+                        })?)),
+                    }
+                }
                 _ => Err(Error::Unsupported(
                     "a report of a computed value from one read".into(),
                 )),
@@ -790,10 +963,12 @@ fn report(rule: &Rule, read: &Read, site: &str) -> Result<Step, Error> {
                 Ok::<_, Error>((entity, fields))
             })();
             if let Ok((entity, fields)) = direct {
+                let mut select: ConceptQuery =
+                    serde_json::from_value(select).map_err(|error| refused("the query", error))?;
+                scope.place(&mut select);
                 return Ok(Step::Query(Box::new(Query {
                     rule: None,
-                    select: serde_json::from_value(select)
-                        .map_err(|error| refused("the query", error))?,
+                    select,
                     domain: read.domain.clone(),
                     entity,
                     fields,
@@ -859,6 +1034,7 @@ fn report(rule: &Rule, read: &Read, site: &str) -> Result<Step, Error> {
         fields: columns,
     };
     let concept = scope.head(&head, &head.fields.iter().collect::<Vec<_>>())?;
+    scope.written()?;
     let mut terms = Map::new();
     terms.insert("this".into(), variable("this"));
     for column in &head.fields {

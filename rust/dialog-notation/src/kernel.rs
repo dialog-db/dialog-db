@@ -34,6 +34,9 @@ pub enum Term {
     Symbol(String),
     /// An application of a formula, standing for its `is:` value.
     Formula(Box<Formula>),
+    /// A struct, `{key value}`, or a tuple, `[a b]`. With no variable in
+    /// it, it is a value; with one, a pattern.
+    Struct(Form),
 }
 
 /// One field of a read: an attribute, the term its value stands under,
@@ -143,12 +146,7 @@ fn term(form: &Form) -> Result<Term, Error> {
         Form::Symbol(name) if form.kind() == Some(Kind::Entity) => Term::Entity(name.clone()),
         Form::Symbol(name) => Term::Symbol(name.clone()),
         application if application.is_formula() => Term::Formula(Box::new(formula(application)?)),
-        Form::Map(_) => {
-            return Err(Error::Unsupported(format!(
-                "{form} where a term stands: a struct is a value and, with a variable in it, a \
-                 pattern, and Dialog-DB has no record values yet"
-            )));
-        }
+        Form::Map(_) | Form::Vector(_) => Term::Struct(form.clone()),
         other => return Err(Error::Refused(format!("{other} is not a term"))),
     })
 }

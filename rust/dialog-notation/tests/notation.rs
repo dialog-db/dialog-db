@@ -522,6 +522,73 @@ async fn it_keeps_definitions_on_a_branch_under_their_signatures() -> Result<()>
     Ok(())
 }
 
+/// A struct is a value like 5: written as a field's value it is kept,
+/// and comes back as the struct it was. With a variable in it, it is a
+/// pattern: a query takes the kept struct apart by it, and one that does
+/// not have its shape is no match.
+#[dialog_common::test]
+async fn it_keeps_a_struct_and_takes_it_apart_by_a_pattern() -> Result<()> {
+    let mut notebook = Notebook::open().await?;
+    notebook
+        .submit(
+            r#"(assert! (xyz.note note:1 about: {author: "Ada" tags: ["math" "engines"] pinned: true}))
+               (assert! (xyz.note note:2 about: {author: "Grace"}))"#,
+        )
+        .await?;
+
+    // Whole, under a variable.
+    assert_eq!(
+        report(&mut notebook, "(query (xyz.note ?n about: ?about))").await?,
+        vec![
+            r#"(xyz.note note:1 about: {author: "Ada" pinned: true tags: ["math" "engines"]})"#,
+            r#"(xyz.note note:2 about: {author: "Grace"})"#,
+        ]
+    );
+    // Taken apart: a map pattern with no rest is the map of exactly its
+    // entries, so only the second note has this shape.
+    assert_eq!(
+        report(&mut notebook, "(query (xyz.note ?n about: {author: ?who}))").await?,
+        vec![r#"(xyz.note note:2 about: {author: "Grace"})"#]
+    );
+    assert_eq!(
+        report(
+            &mut notebook,
+            r#"(query (xyz.note ?n about: {author: ?who tags: [?first ?second] pinned: true}))"#
+        )
+        .await?,
+        vec![r#"(xyz.note note:1 about: {author: "Ada" pinned: true tags: ["math" "engines"]})"#]
+    );
+    // A blank takes what is there and binds nothing; the row still says
+    // what was there.
+    assert_eq!(
+        report(
+            &mut notebook,
+            "(query (xyz.note ?n about: {author: _ tags: [?first _] pinned: _}))"
+        )
+        .await?,
+        vec![r#"(xyz.note note:1 about: {author: "Ada" pinned: true tags: ["math" "engines"]})"#]
+    );
+    // A constant struct in a query is the value, whatever order it is
+    // written in.
+    assert_eq!(
+        report(
+            &mut notebook,
+            r#"(query (xyz.note ?n about: {pinned: true tags: ["math" "engines"] author: "Ada"}))"#
+        )
+        .await?
+        .len(),
+        1
+    );
+
+    // In a rule a struct is not had yet.
+    let rule = notebook
+        .submit("(rule (xyz.by ?n author: ?who) (when (xyz.note ?n about: {author: ?who})))")
+        .await
+        .map_err(|error| error.downcast::<Error>());
+    assert!(matches!(rule, Err(Ok(Error::Unsupported(_)))), "{rule:?}");
+    Ok(())
+}
+
 /// What a name with two referents can be read as today. Written under
 /// `last`, a referent written after another replaces it, and two written
 /// in one round, which is what two replicas writing apart come to, both
@@ -601,10 +668,7 @@ async fn it_reads_a_call_the_same_however_its_primary_is_written() -> Result<()>
         .submit(r#"(assert! (xyz.note {of: note:3 text: (:text "by record")}))"#)
         .await
         .map_err(|error| error.downcast::<Error>());
-    assert!(
-        matches!(record, Err(Ok(Error::Unsupported(_)))),
-        "{record:?}"
-    );
+    assert!(matches!(record, Err(Ok(Error::Refused(_)))), "{record:?}");
 
     // Beside a part with no label, `of:` would be the primary twice.
     let twice = notebook
