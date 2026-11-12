@@ -358,6 +358,8 @@ where
     /// a given key schema: the same [`StreamingLeaf`] machinery segments use,
     /// on a smaller per-link buffer.
     pub fn keys<Key: self::Key>(&self) -> Result<StreamingLeaf<'_>, DialogSearchTreeError> {
+        #[cfg(any(test, feature = "helpers"))]
+        buffer_decodes::COUNT.with(|count| count.set(count.get() + 1));
         let count = self.checked_count()?;
         let schema = if self.layout == crate::MIXED_LAYOUT {
             crate::Schema::opaque()
@@ -1581,5 +1583,22 @@ mod tests {
         let node = well_formed(vec![buffer(7)])?;
         assert!(node.as_index()?.all_novelty::<[u8; 8]>().is_err());
         Ok(())
+    }
+}
+
+/// How many novelty buffers this thread has decoded, for tests that pin a
+/// walk which must decode none. Per thread, so tests running side by side
+/// on their own threads do not see each other's decodes.
+#[cfg(any(test, feature = "helpers"))]
+pub(crate) mod buffer_decodes {
+    use std::cell::Cell;
+
+    thread_local! {
+        pub(crate) static COUNT: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// The decodes so far on this thread.
+    pub(crate) fn count() -> usize {
+        COUNT.with(Cell::get)
     }
 }

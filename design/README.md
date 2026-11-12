@@ -69,6 +69,11 @@ Backtracking moves a topic to an earlier phase and says so in its journal.
   reference, so reads and writes of keys the replica held wait on the
   remote. A download can bring along only what the replica holds, and a
   pull can retry when a commit overtakes it.
+- [A typed variable over a field of no declared type fails the query](typed-read-of-untyped-field.md):
+  **Building.** A value of another type than the variable's failed a
+  plain concept read and was passed over by every other read. Every read
+  now takes it for a fact of another attribute: passed over, not elected
+  among, and absent to a variable that may be.
 
 Bringing a large dataset into a replica (large transactions) is a topic on
 its own branch, `worker/design-large-transactions`.
