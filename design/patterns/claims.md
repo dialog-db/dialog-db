@@ -27,4 +27,6 @@
 | a parameter should hold a pattern, of which a term is the leaf | opinion | Irakli, 2026-11-11 | decides |
 | a composite is dag-cbor under a version byte now, another layout later | opinion | Irakli, 2026-11-11 | decides |
 | no stored format changes for patterns now | opinion | Irakli, 2026-11-11 | decides |
-| a premise can be planned by the variables inside its patterns | hypothesis | confirmed by step 3 of [the plan](plan.md) passing in either order of premises | open |
+| a premise can be planned by the variables inside its patterns | fact | [design-feasibility.md](design-feasibility.md); `it_takes_a_record_apart_in_either_order_of_premises` runs one premise both ways and asserts which step comes first, `it_builds_a_record_in_either_order_of_premises` compiles the rule under four orders to one identity and the same cards, `a_pattern_is_feasible_by_the_variables_inside_it` | confirmed |
+| a rule whose pattern can never be bound is refused when it compiles, naming the variable | fact | `TypeError::RequiredBindings`; `it_refuses_a_rule_whose_pattern_can_never_be_bound`, for an equality and for a negated premise | holds |
+| a negated premise can hold a pattern, a blank inside it standing for any value | fact | `it_negates_a_premise_that_holds_a_pattern`; the bulk anti-join keys on the variables inside the pattern (`negate_in_bulk`, `rust/dialog-query/src/planner/plan.rs`) | holds, per candidate and in bulk: `it_negates_a_pattern_over_many_candidates` runs the bulk path over twenty-four |

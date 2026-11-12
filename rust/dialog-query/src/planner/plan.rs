@@ -341,8 +341,11 @@ where
     let premise = inner.as_premise();
     let shared: Vec<String> = premise
         .parameters()
-        .iter()
-        .filter_map(|(_, term)| term.name().map(String::from))
+        // The variables inside a map, a list or a tuple of terms too:
+        // a candidate binds those, never the whole.
+        .leaves()
+        .into_iter()
+        .filter_map(|term| term.name().map(String::from))
         // A variable any candidate binds is part of the key; a candidate
         // that leaves it without a value (absent, from an optional
         // premise before the negation) has no key, and the candidates

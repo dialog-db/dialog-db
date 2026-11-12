@@ -10,6 +10,7 @@ use super::*;
 use crate::attribute::{AttributeStatement, Relation};
 use crate::corpus::{Composite, Entity};
 use crate::error::TypeError;
+use crate::planner::{Plan, Planner};
 use crate::premise::reading;
 use crate::query::Application as _;
 use crate::rule::body;
@@ -716,6 +717,163 @@ async fn it_builds_a_record_from_two_bound_variables_and_concludes_a_fact_holdin
     Ok(())
 }
 
+/// The rule that builds a record derives the same cards whatever order
+/// its premises are written in, the equality first among them, and is
+/// one rule under every order.
+#[dialog_common::test]
+async fn it_builds_a_record_in_either_order_of_premises() -> anyhow::Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    titles_and_bodies(&branch, &operator).await?;
+
+    let written = card_rule([0, 1, 2])?;
+    let mut derived = Vec::new();
+    for order in [[0, 1, 2], [2, 0, 1], [1, 2, 0], [2, 1, 0]] {
+        let rule = card_rule(order)?;
+        assert_eq!(
+            rule.try_this(),
+            written.try_this(),
+            "one rule, in the order {order:?}"
+        );
+        let mut registry = RuleRegistry::new();
+        registry.register(rule)?;
+        let source = TestEnv::new(&branch, &operator, registry);
+        derived.push(cards(&source).await?);
+    }
+    assert_eq!(derived[0].len(), 2);
+    assert!(
+        derived.iter().all(|cards| *cards == derived[0]),
+        "every order derives the same cards"
+    );
+    Ok(())
+}
+
+/// The rows a conjunction of `premises` yields from `seed`, each as
+/// what it binds `names` to, sorted.
+async fn solve(
+    source: &TestEnv<'_>,
+    premises: Vec<Premise>,
+    scope: &Environment,
+    seed: Match,
+    names: &[&str],
+) -> anyhow::Result<(Vec<Vec<Option<Value>>>, Vec<&'static str>)> {
+    let plan = Planner::from(premises).plan(scope)?;
+    let steps = plan
+        .steps
+        .iter()
+        .map(|step| match step {
+            Plan::Concept(..) => "concept",
+            Plan::Constraint(..) => "constraint",
+            _ => "other",
+        })
+        .collect();
+    let rows = plan.evaluate(seed.seed(), source).try_vec().await?;
+    let mut rows: Vec<Vec<Option<Value>>> = rows
+        .iter()
+        .map(|row| {
+            names
+                .iter()
+                .map(|name| row.value_of(name).cloned())
+                .collect()
+        })
+        .collect();
+    rows.sort_by_key(|row| format!("{row:?}"));
+    Ok((rows, steps))
+}
+
+/// The planner runs a pattern either way round. A premise that binds a
+/// parameter holding a pattern has what it yields matched against the
+/// pattern, which binds the variables inside it and drops a row that
+/// does not match. Where those variables are bound already the value
+/// is built first and the premise is read by it. Both give the rows
+/// the other does, in either order of the premises as written.
+#[dialog_common::test]
+async fn it_takes_a_record_apart_in_either_order_of_premises() -> anyhow::Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    notes(&branch, &operator).await?;
+    store(
+        &branch,
+        &operator,
+        &[
+            (the!("search/title"), &entity("id:search"), text("Buy milk")),
+            (the!("search/title"), &entity("id:other"), text("Nowhere")),
+        ],
+    )
+    .await?;
+    let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+
+    // The notes whose payload is exactly a title some search asks for
+    // and not done.
+    let payload = || {
+        read(
+            "note/payload",
+            "record:",
+            shape(&[
+                ("title", var("title")),
+                ("done", Pattern::from(Value::Boolean(false))),
+            ]),
+        )
+    };
+    let search = || {
+        reading(
+            the!("search/title"),
+            Term::var("search"),
+            Term::var("title"),
+            None,
+        )
+    };
+    let expected = vec![vec![
+        Some(Value::Entity(entity("id:milk"))),
+        Some(text("Buy milk")),
+        Some(Value::Entity(entity("id:search"))),
+    ]];
+    let names = ["this", "title", "search"];
+
+    for premises in [vec![payload(), search()], vec![search(), payload()]] {
+        let (rows, _) = solve(&source, premises, &Environment::new(), Match::new(), &names).await?;
+        assert_eq!(rows, expected);
+    }
+
+    // With nothing bound the concept is read first and what it yields
+    // is taken apart.
+    let (rows, steps) = solve(
+        &source,
+        vec![payload()],
+        &Environment::new(),
+        Match::new(),
+        &["this", "title"],
+    )
+    .await?;
+    assert_eq!(steps, vec!["concept", "constraint"]);
+    assert_eq!(
+        rows,
+        vec![vec![
+            Some(Value::Entity(entity("id:milk"))),
+            Some(text("Buy milk"))
+        ]]
+    );
+
+    // With the title bound the record is built first and the concept
+    // is read by it.
+    let mut scope = Environment::new();
+    scope.add("title");
+    let mut seed = Match::new();
+    seed.bind(&Term::var("title"), text("Buy milk"))?;
+    let (rows, steps) = solve(&source, vec![payload()], &scope, seed, &["this", "title"]).await?;
+    assert_eq!(steps, vec!["constraint", "concept"]);
+    assert_eq!(
+        rows,
+        vec![vec![
+            Some(Value::Entity(entity("id:milk"))),
+            Some(text("Buy milk"))
+        ]]
+    );
+    Ok(())
+}
+
 /// A rule takes a stored record apart: it concludes the title held
 /// inside each payload that is a map with one, whatever else the map
 /// holds, and nothing for a payload of another shape.
@@ -756,6 +914,148 @@ async fn it_derives_a_fact_from_inside_a_stored_record() -> anyhow::Result<()> {
     headings.sort_by_key(|value| format!("{value:?}"));
     assert_eq!(headings, vec![text("Buy milk"), text("Call home")]);
     Ok(())
+}
+
+/// A negated premise holds a pattern as a positive one does: a row
+/// passes when no fact matches the pattern, a blank inside it standing
+/// for any value.
+#[dialog_common::test]
+async fn it_negates_a_premise_that_holds_a_pattern() -> anyhow::Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    notes(&branch, &operator).await?;
+    let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+
+    // Every note whose payload is not a map that says it is done.
+    let done = shape(&[("done", Pattern::from(Value::Boolean(true)))]).with_rest(Term::blank());
+    let premises = vec![
+        read("note/payload", "record:", var("payload")),
+        !read("note/payload", "record:", done),
+    ];
+    let (rows, _) = solve(
+        &source,
+        premises,
+        &Environment::new(),
+        Match::new(),
+        &["this"],
+    )
+    .await?;
+    assert_eq!(
+        rows,
+        vec![
+            vec![Some(Value::Entity(entity("id:list")))],
+            vec![Some(Value::Entity(entity("id:milk")))],
+        ]
+    );
+    Ok(())
+}
+
+/// The same over enough candidates that the negated relation is read
+/// once and joined (from sixteen up): the join keys on the variables
+/// inside the pattern, so a note passes exactly when its payload does
+/// not hold its own label.
+#[dialog_common::test]
+async fn it_negates_a_pattern_over_many_candidates() -> anyhow::Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    let entities: Vec<Entity> = (0..24)
+        .map(|at| entity(&format!("id:note-{at:02}")))
+        .collect();
+    let mut facts = Vec::new();
+    for (at, note) in entities.iter().enumerate() {
+        let held = text(&format!("label-{at:02}"));
+        let label = if at % 2 == 0 {
+            held.clone()
+        } else {
+            text("other")
+        };
+        facts.push((the!("note/payload"), note, map(&[("label", held)])));
+        facts.push((the!("note/label"), note, label));
+    }
+    store(&branch, &operator, &facts).await?;
+    let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+
+    let premises = vec![
+        reading(
+            the!("note/label"),
+            Term::var("this"),
+            Term::var("label"),
+            None,
+        ),
+        !read(
+            "note/payload",
+            "record:",
+            shape(&[("label", var("label"))]).with_rest(Term::blank()),
+        ),
+    ];
+    let (rows, _) = solve(
+        &source,
+        premises,
+        &Environment::new(),
+        Match::new(),
+        &["this"],
+    )
+    .await?;
+    let expected: Vec<Vec<Option<Value>>> = entities
+        .iter()
+        .enumerate()
+        .filter(|(at, _)| at % 2 == 1)
+        .map(|(_, note)| vec![Some(Value::Entity(note.clone()))])
+        .collect();
+    assert_eq!(rows, expected);
+    Ok(())
+}
+
+/// A rule whose pattern can never be bound is refused when it
+/// compiles, naming the variable nothing binds: here the body, which
+/// the record is to be built from and no premise reads.
+#[dialog_common::test]
+fn it_refuses_a_rule_whose_pattern_can_never_be_bound() {
+    let premises = vec![
+        reading(
+            the!("note/title"),
+            Term::var("this"),
+            Term::var("title"),
+            None,
+        ),
+        Pattern::Map(shape(&[("title", var("title")), ("body", var("body"))]))
+            .is(Term::<Any>::var("card")),
+    ];
+    let refused = DeductiveRule::new(card(), premises).expect_err("nothing binds the body");
+    match refused {
+        TypeError::RequiredBindings { required } => {
+            assert!(required.contains("body"), "names the body: {required}");
+            assert!(
+                !required.contains("title"),
+                "the title is bound: {required}"
+            );
+        }
+        other => panic!("expected RequiredBindings, got {other:?}"),
+    }
+
+    // A negated premise never binds, so a variable inside its pattern
+    // that nothing else binds is refused the same way.
+    let premises = vec![
+        reading(
+            the!("note/title"),
+            Term::var("this"),
+            Term::var("heading"),
+            None,
+        ),
+        !read(
+            "note/payload",
+            "record:",
+            shape(&[("title", var("unbound"))]),
+        ),
+    ];
+    let refused = DeductiveRule::new(concept("heading", "note/heading", "text:"), premises)
+        .expect_err("nothing binds the variable inside the negated pattern");
+    assert!(
+        matches!(&refused, TypeError::RequiredBindings { required } if required.contains("unbound")),
+        "{refused:?}"
+    );
 }
 
 /// A rule that holds a pattern runs where it was built and cannot be
