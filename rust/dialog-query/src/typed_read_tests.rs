@@ -19,7 +19,7 @@ use crate::source::test::TestEnv;
 use crate::the;
 use crate::type_system::Type as Kind;
 use crate::types::Any;
-use crate::{ConceptDescriptor, ConceptQuery, Entity, Match, Parameters, Term, Value};
+use crate::{Binding, ConceptDescriptor, ConceptQuery, Entity, Match, Parameters, Term, Value};
 use dialog_peer::helpers::{test_repo, test_session_with_peer};
 use dialog_repository::Branch;
 use dialog_storage::provider::storage::VolatileSpace;
@@ -38,8 +38,9 @@ fn sorted(mut values: Vec<Value>) -> Vec<Value> {
 }
 
 /// A text, a natural, a negative integer and a boolean, each under
-/// `mixed/value` of its own entity.
-async fn store_mixed(branch: &Branch, operator: &Operator) -> anyhow::Result<()> {
+/// `mixed/value` of its own entity. The entities, in that order.
+async fn store_mixed(branch: &Branch, operator: &Operator) -> anyhow::Result<Vec<Entity>> {
+    let mut entities = Vec::new();
     let mut transaction = branch.transaction();
     for value in [
         text("hello"),
@@ -47,9 +48,11 @@ async fn store_mixed(branch: &Branch, operator: &Operator) -> anyhow::Result<()>
         Value::SignedInt(-3),
         Value::Boolean(true),
     ] {
+        let of = Entity::new()?;
+        entities.push(of.clone());
         transaction = transaction.assert(AttributeStatement {
             the: the!("mixed/value"),
-            of: Entity::new()?,
+            of,
             is: value,
             cause: None,
             cardinality: None,
@@ -57,15 +60,42 @@ async fn store_mixed(branch: &Branch, operator: &Operator) -> anyhow::Result<()>
         });
     }
     transaction.commit().publish().perform(operator).await?;
-    Ok(())
+    Ok(entities)
 }
 
-/// A one-field concept over `mixed/value` that declares no type.
-fn untyped() -> ConceptDescriptor {
-    serde_json::from_value(serde_json::json!({
-        "with": { "value": { "the": "mixed/value", "pick": "all:" } }
-    }))
-    .expect("a one-field concept is well formed")
+/// The concept of `mixed/value` alone, its field declaring no type,
+/// read under `pick` (none for the default).
+fn untyped(pick: Option<&str>) -> ConceptDescriptor {
+    let mut field = serde_json::Map::new();
+    field.insert("the".into(), "mixed/value".into());
+    if let Some(pick) = pick {
+        field.insert("pick".into(), pick.into());
+    }
+    serde_json::from_value(serde_json::json!({ "with": { "is": field } }))
+        .expect("a one-field concept is well formed")
+}
+
+/// A registry whose one rule derives `mixed/value` from itself, which
+/// makes the relation recursive.
+fn recursive() -> anyhow::Result<RuleRegistry> {
+    let field = serde_json::json!({ "the": "mixed/value", "pick": "all:" });
+    let rule: DeductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
+        "deduce": { "with": { "is": field } },
+        "when": [{
+            "assert": { "with": { "is": field } },
+            "where": {
+                "this": { "?": { "name": "this" } },
+                "is": { "?": { "name": "is" } }
+            }
+        }]
+    }))?;
+    let mut registry = RuleRegistry::new();
+    registry.register(rule.compile()?)?;
+    assert!(
+        registry.analysis()?.quarantined().is_empty(),
+        "the self-reading rule makes the relation recursive"
+    );
+    Ok(registry)
 }
 
 /// What an attribute scan of `mixed/value` reads into a variable of
@@ -88,10 +118,10 @@ async fn scanned(source: &TestEnv<'_>, kind: Kind) -> anyhow::Result<Vec<Value>>
 async fn read(source: &TestEnv<'_>, kind: Kind) -> anyhow::Result<Vec<Value>> {
     let mut terms = Parameters::new();
     terms.insert("this".into(), Term::var("who"));
-    terms.insert("value".into(), Term::var("value").with_kind(kind));
+    terms.insert("is".into(), Term::var("value").with_kind(kind));
     let rows = ConceptQuery {
         terms,
-        predicate: untyped(),
+        predicate: untyped(Some("all:")),
     }
     .evaluate(Match::new().seed(), source)
     .try_vec()
@@ -101,6 +131,40 @@ async fn read(source: &TestEnv<'_>, kind: Kind) -> anyhow::Result<Vec<Value>> {
         .map(|row| row.lookup(&Term::<Any>::var("value"))?.content())
         .collect::<Result<Vec<Value>, crate::EvaluationError>>()?;
     Ok(sorted(values))
+}
+
+/// A variable that reads a text or nothing.
+fn optional_text() -> Term<Any> {
+    Term::<Option<String>>::var("value").into()
+}
+
+/// What each row binds the optional variable to: `None` for absent.
+fn optional_values(rows: &[Match]) -> anyhow::Result<Vec<Option<Value>>> {
+    rows.iter()
+        .map(|row| match row.lookup(&optional_text())? {
+            Binding::Present(value) => Ok(Some(value)),
+            Binding::Absent => Ok(None),
+        })
+        .collect()
+}
+
+/// What a read of `concept` for `of` gives the optional variable.
+async fn read_optional(
+    source: &TestEnv<'_>,
+    concept: ConceptDescriptor,
+    of: &Entity,
+) -> anyhow::Result<Vec<Option<Value>>> {
+    let mut terms = Parameters::new();
+    terms.insert("this".into(), Term::Constant(Value::Entity(of.clone())));
+    terms.insert("is".into(), optional_text());
+    let rows = ConceptQuery {
+        terms,
+        predicate: concept,
+    }
+    .evaluate(Match::new().seed(), source)
+    .try_vec()
+    .await?;
+    optional_values(&rows)
 }
 
 /// What each kind of variable reads of the four stored values.
@@ -147,25 +211,7 @@ async fn it_reads_the_values_of_its_type_through_a_recursive_untyped_field() -> 
     let repo = test_repo(&operator, &profile).await;
     let branch = repo.branch("main").open().perform(&operator).await?;
     store_mixed(&branch, &operator).await?;
-
-    let field = serde_json::json!({ "the": "mixed/value", "pick": "all:" });
-    let rule: DeductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
-        "deduce": { "with": { "value": field } },
-        "when": [{
-            "assert": { "with": { "value": field } },
-            "where": {
-                "this": { "?": { "name": "this" } },
-                "value": { "?": { "name": "value" } }
-            }
-        }]
-    }))?;
-    let mut registry = RuleRegistry::new();
-    registry.register(rule.compile()?)?;
-    assert!(
-        registry.analysis()?.quarantined().is_empty(),
-        "the self-reading rule makes the relation recursive"
-    );
-    let source = TestEnv::new(&branch, &operator, registry);
+    let source = TestEnv::new(&branch, &operator, recursive()?);
 
     for (kind, expected) in cases() {
         assert_eq!(
@@ -174,5 +220,87 @@ async fn it_reads_the_values_of_its_type_through_a_recursive_untyped_field() -> 
             "a recursive concept read into {kind}"
         );
     }
+    Ok(())
+}
+
+/// A variable that reads a text or nothing is absent for an entity
+/// with no value, and is not for one whose value is a number: absent
+/// says the entity has no fact of the attribute, and this one has a
+/// fact the variable does not read, so there is no row for it, as an
+/// optional scan gives none for a value that disagrees
+/// (`it_does_not_emit_absent_on_optional_value_mismatch`). Pinned for
+/// the stored rows as they are (`all:` and the default) and for a read
+/// that elects one value on the way out (`max:`).
+#[dialog_common::test]
+async fn it_gives_no_row_for_a_value_an_optional_variable_does_not_read() -> anyhow::Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    let entities = store_mixed(&branch, &operator).await?;
+    let (hello, seven) = (&entities[0], &entities[1]);
+    let nobody = Entity::new()?;
+    let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+
+    for pick in [Some("all:"), None, Some("max:")] {
+        assert_eq!(
+            read_optional(&source, untyped(pick), hello).await?,
+            vec![Some(text("hello"))],
+            "the text under {pick:?}"
+        );
+        assert_eq!(
+            read_optional(&source, untyped(pick), &nobody).await?,
+            vec![None],
+            "no value under {pick:?}"
+        );
+        assert_eq!(
+            read_optional(&source, untyped(pick), seven).await?,
+            Vec::<Option<Value>>::new(),
+            "the number under {pick:?}"
+        );
+    }
+    Ok(())
+}
+
+/// One variable in two places reads the rows where the two hold one
+/// value and passes over the others: an entity whose value is itself
+/// is read, and one whose value is anything else is not.
+#[dialog_common::test]
+async fn it_passes_over_a_row_one_variable_cannot_hold_twice() -> anyhow::Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    store_mixed(&branch, &operator).await?;
+    let own = Entity::new()?;
+    branch
+        .transaction()
+        .assert(AttributeStatement {
+            the: the!("mixed/value"),
+            of: own.clone(),
+            is: Value::Entity(own.clone()),
+            cause: None,
+            cardinality: None,
+            pick: None,
+        })
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+
+    let mut terms = Parameters::new();
+    terms.insert("this".into(), Term::var("x"));
+    terms.insert("is".into(), Term::var("x"));
+    let rows = ConceptQuery {
+        terms,
+        predicate: untyped(Some("all:")),
+    }
+    .evaluate(Match::new().seed(), &source)
+    .try_vec()
+    .await?;
+    let values = rows
+        .iter()
+        .map(|row| row.lookup(&Term::<Any>::var("x"))?.content())
+        .collect::<Result<Vec<Value>, crate::EvaluationError>>()?;
+    assert_eq!(values, vec![Value::Entity(own)]);
     Ok(())
 }

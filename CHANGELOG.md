@@ -14,6 +14,34 @@ says how to cut a release.
 
 ## Unreleased
 
+### A typed variable reads the values of its type through a concept, as it does through a scan
+
+[#782](https://github.com/dialog-db/dialog-db/pull/782),
+[design/typed-read-of-untyped-field.md](./design/typed-read-of-untyped-field.md).
+
+A variable's type says which values it reads. A scan of an attribute
+into a variable typed as text passes over a number stored under it, and
+so does a read of a recursive concept. A read of a concept that is not
+recursive did not: a value of another type under a field that declares
+no type failed the whole query with `Variable ?x of kind String cannot
+bind UnsignedInt(7)`. It now passes over the row, so the three agree.
+
+What this changes for you:
+
+- A query that reads a concept field into a typed variable no longer
+  fails when the field holds a value of another type for some entity. It
+  yields the rows whose value the variable reads.
+- A variable that reads a type or nothing (`Option<T>`) is bound absent
+  for an entity with no value, as before, and yields no row for an entity
+  whose value is of another type: the entity has a fact, and it is not
+  one the variable reads.
+
+Why: which of a concept's rows a caller's terms match should not depend
+on whether a rule makes the concept recursive, which the caller cannot
+see. `Match::bind` already says a value a type does not read is a
+mismatch that "callers that filter rows treat as a non-match"; the plain
+concept read was the one caller that did not.
+
 ### A pull says how much it downloads, and can bring along only what the replica holds
 
 [#775](https://github.com/dialog-db/dialog-db/pull/775),

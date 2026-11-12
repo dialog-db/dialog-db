@@ -36,6 +36,7 @@ use futures_util::{StreamExt, TryStreamExt, stream};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Display;
+use std::future;
 use std::mem;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -79,14 +80,27 @@ fn extract_parameters(source: &Match, terms: &Parameters) -> Result<Match, Evalu
     Ok(matched)
 }
 
+/// Whether a bind took. A value the term's type does not read, and one
+/// that disagrees with what the term is already bound to, make the row
+/// one the caller's terms do not match: it is passed over, as a scan
+/// into the same term passes over it. Any other failure is an error.
+fn took(bound: Result<(), EvaluationError>) -> Result<bool, EvaluationError> {
+    match bound {
+        Ok(()) => Ok(true),
+        Err(EvaluationError::KindMismatch { .. } | EvaluationError::Assignment { .. }) => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
 /// Merge a Match with parameter names back into a Match with user
 /// variable names after evaluation. Both Present and Absent
-/// bindings are propagated.
+/// bindings are propagated. `None` when the caller's terms do not
+/// match the result (see [`took`]).
 fn merge_parameters(
     base: &Match,
     result: &Match,
     terms: &Parameters,
-) -> Result<Match, EvaluationError> {
+) -> Result<Option<Match>, EvaluationError> {
     let mut merged = base.clone();
 
     for (param_name, user_param) in terms.iter() {
@@ -96,7 +110,9 @@ fn merge_parameters(
 
         match result.get(param_name) {
             Some(Binding::Present(value)) => {
-                merged.bind(user_param, value.clone())?;
+                if !took(merged.bind(user_param, value.clone()))? {
+                    return Ok(None);
+                }
                 if let Some(name) = user_param.shared_name()
                     && let Some(standing) = result.standing_of(param_name)
                 {
@@ -104,7 +120,10 @@ fn merge_parameters(
                 }
             }
             Some(Binding::Absent) => {
-                merged.bind_absent(user_param)?;
+                let absent = took(merged.bind_absent(user_param))?;
+                if !absent {
+                    return Ok(None);
+                }
             }
             // Unbound is expected: not every parameter survives the
             // concept evaluation (e.g. a blank slot the rule never
@@ -115,7 +134,7 @@ fn merge_parameters(
     }
     merged.adopt_citations(result);
 
-    Ok(merged)
+    Ok(Some(merged))
 }
 
 /// Represents an application of a concept with specific term bindings.
@@ -748,15 +767,17 @@ impl ConceptQuery {
         });
         let results = plan.clone().evaluate(scoped, env);
         if elect.is_none() && !widen {
-            return Box::pin(results.map(move |result| {
-                let mut result = result?;
-                let caller = result.take_caller().ok_or_else(|| {
-                    EvaluationError::Store(
-                        "a concept's result lost the row it was evaluated for".to_string(),
-                    )
-                })?;
-                merge_parameters(&caller, &result, &back)
-                    .map_err(|e| EvaluationError::Store(e.to_string()))
+            return Box::pin(results.filter_map(move |result| {
+                let merged = result.and_then(|mut result| {
+                    let caller = result.take_caller().ok_or_else(|| {
+                        EvaluationError::Store(
+                            "a concept's result lost the row it was evaluated for".to_string(),
+                        )
+                    })?;
+                    merge_parameters(&caller, &result, &back)
+                        .map_err(|e| EvaluationError::Store(e.to_string()))
+                });
+                future::ready(merged.transpose())
             }));
         }
         // An attribute concept read under a pick: what the pick
@@ -775,10 +796,16 @@ impl ConceptQuery {
                     )
                 })?;
                 let caller_id = Arc::as_ptr(&caller) as usize;
+                // A result is a fact the entity has, whether or not the
+                // caller's terms read it: a set-widened read yields
+                // `Absent` only where there is none.
                 matched.insert(caller_id);
                 if elect.is_none() {
-                    yield merge_parameters(&caller, &result, &back)
+                    let merged = merge_parameters(&caller, &result, &back)
                         .map_err(|e| EvaluationError::Store(e.to_string()))?;
+                    if let Some(merged) = merged {
+                        yield merged;
+                    }
                     continue;
                 }
                 let this = match result.lookup(&Term::<Any>::var("this")) {
@@ -810,8 +837,11 @@ impl ConceptQuery {
                         if !agrees(&result, &caller, &back, &[ConceptDescriptor::VALUE, &key_operand])? {
                             continue;
                         }
-                        yield merge_parameters(&caller, &result, &back)
+                        let merged = merge_parameters(&caller, &result, &back)
                             .map_err(|e| EvaluationError::Store(e.to_string()))?;
+                        if let Some(merged) = merged {
+                            yield merged;
+                        }
                     }
                 }
             }

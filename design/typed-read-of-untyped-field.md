@@ -1,36 +1,48 @@
 # A typed variable over a field of no declared type fails the query
 
-**Phase: Describing.** Nobody has picked this up. What follows is the situation, not yet a problem statement.
+**Phase: Building.** Reproduced on main, decided, and fixed in #782. One question about a variable that may be absent is left open below.
 
 ## Description
 
-A concept field can declare no type, and then holds values of any. A premise can still type the variable it reads that field into, `?x.text()` say. When the field holds a value of another type for some entity, three places meet the same mismatch and do not do the same thing with it.
+A concept field can declare no type, and then holds values of any. A premise can still type the variable it reads that field into, `?x.text()` say. When the field holds a value of another type for some entity, the paths a read can take met the same mismatch and did not do the same thing with it.
 
 ```
  a row whose value is not of the variable's type
 
-   concept read, non-recursive     merge_parameters   merged.bind(…)?          the query fails
-   concept read, recursive         fixpoint::join     bind(…).is_err() → None  the row is dropped
-   attribute read                  resolver::project  KindMismatch → None      the row is dropped
+   attribute scan                  AttributeQueryAll::admits      the row is passed over
+   concept read, recursive         fixpoint::join                 the row is passed over
+   concept read, a rule derives it merge_candidate → join         the row is passed over
+   concept read, plain             merge_parameters  bind(…)?     the query failed
 ```
 
-Read on main, in `rust/dialog-query/src`:
-
-- `concept/query.rs`, `merge_parameters`: each value a concept's row holds is bound to the term the caller wrote with `merged.bind(user_param, value.clone())?`. A bind that fails is the read's error.
-- `concept/query/fixpoint.rs`, `join`: the same bind, and a failure of any kind is "a non-match", in the words of its comment.
-- `resolver.rs`, `project`: an `Assignment` or a `KindMismatch` filters the row, "the membership-test semantics shared with formulas"; any other failure is an error.
-
-Seen by the agent building patterns (#778), on that branch, and not run again for this note: an untyped read of `mixed/value` over two entities, one holding a text and one the natural 7, with `?x.text()` beside it, planned and evaluated, and gave
+Run on main (`rust/dialog-query/src/typed_read_tests.rs`): a text, a natural, a negative integer and a boolean under `mixed/value`, read into a variable typed text, natural and boolean. The scan and the recursive read gave the values of the variable's type. The plain concept read gave
 
 ```
-Fact store: Variable ?x of kind String cannot bind UnsignedInt(7) (UnsignedInt)
+Fact store: Variable ?value of kind String cannot bind Boolean(true) (Boolean)
 ```
 
-It was found because the first build of patterns narrowed a variable an equality sets equal to a map to `record:`. That stamped the type on the concept premise binding it, and a test over a field of no declared type failed where it was to pass over a row. Patterns now check and do not narrow (`it_passes_over_a_value_of_no_shape`), so #778 does not depend on this.
+It was first seen by the agent building patterns (#778), whose first build narrowed a variable an equality sets equal to a map to `record:`.
 
-Not known:
+## Problem
 
-- Whether it reproduces on main as written above. Nothing in the code read says it would not, and no test on main pins either behaviour.
-- Which of the two is meant. A caller that asks for texts and gets the texts, and a caller told its field holds something it did not expect, are both things someone could want.
-- Whether anything relies on the error: a test, tonk, a rule that types a variable to find a bad write.
-- Whether the same field read through a rule of the concept and read as a stored fact take the same path, or one fails and the other drops.
+Which of a concept's rows a caller's terms match depends on which way the read is evaluated, and the caller cannot see which way that is. One value of an unexpected type under a field fails every plain query that types the variable it reads the field into.
+
+## Approach
+
+Decided by the maintainer, 2026-11-11: a variable of a type reads the values of that type, so only those are selected.
+
+`Match::bind` already says so: a value a type does not read is a mismatch, "and callers that filter rows treat it as a non-match". `merge_parameters` was the one caller that did not filter. It now gives no row for a result the caller's terms do not match, by type or because one variable written twice would have to hold two values, and each of its three callers passes over such a row.
+
+## Open: a variable that may be absent
+
+A set-widened read binds its variable absent for an entity nothing matched. For an entity whose value is of another type than the variable reads, the paths differ, by reading the code:
+
+| path | an entity with a value the variable does not read |
+|---|---|
+| plain concept read, as fixed here | no row: a result arrived, so the entity has a fact |
+| concept read a rule derives (`relation`) | no row: survivors that do not merge are dropped |
+| recursive concept read | a row with the variable absent: `matched` is set only when a row joins |
+
+The scan's tests say what absent means: "no fact for this attribute", so a value that disagrees is no row (`it_does_not_emit_absent_on_optional_value_mismatch`). The fix follows that, and pins it in `it_gives_no_row_for_a_value_an_optional_variable_does_not_read`. The recursive path is left as it is and is not pinned.
+
+Not decided: whether "the entity has no text" should read as absent instead, which is the other thing a typed optional variable could mean. Whichever it is, the recursive path and the others should agree.
