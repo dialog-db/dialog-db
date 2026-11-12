@@ -23,7 +23,8 @@
 //! - Tests that require external services (S3, databases, etc.) that need provisioning
 //! - Native integration test (`integration-tests` feature): starts service, runs test, stops service
 //! - Web integration test (`web-integration-tests` feature): starts service, spawns wasm subprocess, stops service
-//! - Wasm inner (`dialog_test_wasm_integration` cfg): deserializes address from env var, runs test
+//! - Wasm inner (`dialog_test_wasm_integration` cfg): deserializes the address the test
+//!   runner passed on from the outer test's env var, runs test
 
 use proc_macro::TokenStream;
 use quote::quote;
@@ -223,23 +224,29 @@ fn generate_unit_test(source: &ItemFn) -> TokenStream {
 ///     let json = serde_json::to_string(&service.address)?;
 ///     // Spawns: RUSTFLAGS="--cfg dialog_test_wasm_integration" \
 ///     //         PROVISIONED_SERVICE_ADDRESS='...' \
+///     //         WBG_POOL_PASS_ENV=PROVISIONED_SERVICE_ADDRESS \
 ///     //         cargo test --target wasm32-unknown-unknown it_connects_abc123
 ///     // ... spawn cargo test for wasm target ...
 ///     service.stop().await?;
 /// }
 ///
-/// // 4. Wasm test - compiled into wasm, receives address via compile-time env var
+/// // 4. Wasm test - compiled into wasm, receives the address when it runs
 /// #[cfg(all(dialog_test_wasm_integration, target_arch = "wasm32", target_os = "unknown"))]
 /// #[wasm_bindgen_test::wasm_bindgen_test]
 /// async fn it_connects_abc123() -> Result<(), wasm_bindgen::JsValue> {
-///     let json = option_env!("PROVISIONED_SERVICE_ADDRESS").unwrap();
-///     let server: ServerAddress = serde_json::from_str(json)?;
+///     let server: ServerAddress = dialog_common::helpers::address()?;
 ///     it_connects_logic_abc123(server).await?;
 /// }
 /// ```
 ///
 /// The blake3 hash ensures unique test names so the wasm provider can target
 /// exactly the intended test when spawning `cargo test`.
+///
+/// The address is not compiled into the wasm test binary: the test runner
+/// (`wbg-pool`) hands the variables `WBG_POOL_PASS_ENV` names to the test
+/// it runs. Compiling it in (`option_env!`) made the binary depend on the
+/// address, so every test of a package rebuilt and relinked the package's
+/// whole test binary, and two tests of a package could not share a build.
 fn generate_integration_test(source: &ItemFn, settings: &ProviderSettings) -> TokenStream {
     let test = match IntegrationTest::new(source, settings) {
         Ok(test) => test,
@@ -449,7 +456,9 @@ impl<'a> IntegrationTest<'a> {
             #[cfg(all(feature = "web-integration-tests", not(target_arch = "wasm32")))]
             #[tokio::test]
             #vis async fn #ident() -> ::anyhow::Result<()> {
-                use ::dialog_common::helpers::{Provisionable, PROVISIONED_SERVICE_ADDRESS};
+                use ::dialog_common::helpers::{
+                    Provisionable, PASSED_VARIABLES, PROVISIONED_SERVICE_ADDRESS,
+                };
                 use ::std::process::Stdio;
 
                 #settings_setup
@@ -499,10 +508,15 @@ impl<'a> IntegrationTest<'a> {
                 args.push("--".to_string());
                 args.push("--nocapture".to_string());
 
-                // Spawn cargo test directly with env vars
+                // Spawn cargo test directly with env vars. The address is
+                // read when the wasm test runs: the test runner passes on
+                // the variables PASSED_VARIABLES names. No build input
+                // changes between tests, so cargo builds the package's wasm
+                // test binary once.
                 let mut cmd = ::std::process::Command::new("cargo");
                 cmd.args(&args)
                     .env(PROVISIONED_SERVICE_ADDRESS, &address)
+                    .env(PASSED_VARIABLES, PROVISIONED_SERVICE_ADDRESS)
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped());
 
@@ -582,9 +596,11 @@ impl<'a> IntegrationTest<'a> {
 
     /// Generate the wasm test.
     ///
-    /// Compiled into wasm, invoked by the wasm integration test. Uses `option_env!`
-    /// (compile-time) instead of `std::env::var` (runtime) because wasm32-unknown-unknown
-    /// has no access to host environment variables at runtime.
+    /// Compiled into wasm, invoked by the wasm integration test. The address
+    /// is read when the test runs, from the variables the test runner passes
+    /// on: wasm32-unknown-unknown has no access to host environment
+    /// variables, and an address compiled in (`option_env!`) would rebuild
+    /// the test binary for every test.
     fn wasm_test(&self) -> proc_macro2::TokenStream {
         let IntegrationTest {
             vis,
@@ -596,18 +612,15 @@ impl<'a> IntegrationTest<'a> {
 
         quote! {
             // Wasm test: compiled into wasm, invoked by web integration test
-            // Address is received via compile-time env var (option_env!) since wasm has no runtime env
+            // Address is handed over by the test runner when the test runs
             #[cfg(all(dialog_test_wasm_integration, target_arch = "wasm32", target_os = "unknown"))]
             #[wasm_bindgen_test::wasm_bindgen_test]
             #vis async fn #wasm_test_ident() -> Result<(), ::wasm_bindgen::JsValue> {
-                // option_env! captures the env var at compile time and embeds it in the binary
-                let source = ::std::option_env!("PROVISIONED_SERVICE_ADDRESS")
-                    .ok_or_else(|| ::wasm_bindgen::JsValue::from_str(
-                        "Missing compile-time env var PROVISIONED_SERVICE_ADDRESS. \
-                         This test must be invoked via the web integration test."
-                    ))?;
-                let address: #address_type = ::serde_json::from_str(source)
-                    .map_err(|e| ::wasm_bindgen::JsValue::from_str(&format!("Failed to deserialize: {}", e)))?;
+                let address: #address_type = ::dialog_common::helpers::address()
+                    .map_err(|e| ::wasm_bindgen::JsValue::from_str(&format!(
+                        "{}. This test must be invoked via the web integration test.",
+                        e
+                    )))?;
 
                 #integration_ident(address).await
                     .map_err(|e| ::wasm_bindgen::JsValue::from_str(&format!("{}", e)))
