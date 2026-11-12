@@ -365,6 +365,16 @@ landed on one subject and collapsed into a single row. An entry gets
 the same treatment, `entry:<base58(hash of its key)>`, from `tree/key`
 and `tree/entry`.
 
+This note also says throughout that a resolver whose input is unbound
+is non-viable (`estimate() → None`) until a join binds it. That held
+for the first cut and no longer does: with its node open a `tree/*`
+resolver lists, walking down from the roots the scope's heads name.
+The reason is the same as for the entities. A relation that can only
+be looked up cannot be a rule's whole body, so a concept of tree nodes
+had to be a recursive rule from the root, and a recursive rule is
+evaluated in full however narrowly it is asked. `tree/value` keeps the
+old behavior.
+
 Pure formulas (ordinary `Formula`s in `dialog-query/src/formula/`,
 registered in `define_formulas!` beside `dialog/revision`):
 

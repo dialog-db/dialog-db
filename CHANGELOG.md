@@ -14,6 +14,47 @@ says how to cut a release.
 
 ## Unreleased
 
+### A tree resolver with no node given lists every node, so a plain rule over one installs
+
+A `tree/*` resolver had to be told which node to read: `of` was a
+required input. A query that left it open answered nothing, and a rule
+whose body was only `tree/node(of: ?this, …)` was refused at install
+(`RequiredBindings`), because nothing in it could be run without a node
+given. The one way to describe tree nodes as a concept was a recursive
+rule from the root down, and a recursive rule is evaluated in full
+whatever the caller asks for, so reading one node walked the whole tree.
+
+`of` is now optional on every `tree/*` resolver but `tree/value`. With a
+node given, a resolver reads that node's block, as before. With `of`
+open, it reads the roots the scope's heads name (`dialog.branch/tree`)
+and walks down from them, yielding every node reached, in key order,
+with `of` bound to it. A rule over a resolver is then an ordinary rule:
+
+```text
+node(this, kind) :- tree/node(of: this, kind)
+```
+
+Asked for every node it walks the tree, one block read per node. Asked
+for one node by `this` it reads that one block.
+
+What this changes for you:
+
+- A `tree/*` query that leaves `of` open (a blank, or a variable nothing
+  else binds) used to answer nothing and now walks the tree, loading
+  every node its heads reach, from a remote where the replica does not
+  hold one. Give `of` whenever one node is what you want.
+- A rule whose premises leave a resolver's node to the caller compiles.
+- `ResolverQuery::estimate` answers `RESOLVER_WALK_COST` instead of
+  `None` for an open node, so the planner schedules the walk, and puts
+  any premise that would name the node ahead of it.
+- `tree/value` is unchanged: `of` is still required, since a spilled
+  value is not a tree node and nothing lists them.
+
+Why: a relation that can be looked up but not listed cannot be the body
+of a rule, since a rule has to answer with nothing given. Letting the
+resolver list makes it a relation like any other, and keeps the lookup
+as cheap as it was.
+
 ### A tree node and a tree entry are entities, so a rule can derive a concept from them
 
 A `tree/*` resolver named a node by the base58 string of its hash, and
@@ -2611,6 +2652,10 @@ thread multiplies whatever it holds by the size of the thread pool.
 
 ### Compatibility and migration
 
+- **A tree resolver that lists.** Nothing stored changes. A rule stored
+  on a branch that joins a resolver through a node another premise
+  binds reads as it did. One that left a resolver's node open matched
+  nothing before and now lists.
 - **Tree nodes and entries as entities.** Nothing stored changes:
   `dialog.branch/tree` is derived from the branch when a query runs and
   was never written, and resolver rows are read off blocks. An older

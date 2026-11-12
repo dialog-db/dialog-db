@@ -4366,7 +4366,7 @@ mod resolver_tests {
 
     use crate::helpers::test_repo;
     use crate::{Branch, Repository};
-    use base58::ToBase58;
+    use base58::{FromBase58, ToBase58};
     use dialog_corpus::{Entity, Value};
     use dialog_peer::Peer;
     use dialog_peer::helpers::test_session_with_peer;
@@ -4376,6 +4376,7 @@ mod resolver_tests {
         TreeSpanQuery, TreeValueQuery, the,
     };
     use dialog_storage::provider::storage::VolatileSpace;
+    use std::collections::BTreeSet;
 
     /// Commit a handful of facts and return the branch + the committed
     /// root's node reference (base58, exactly as `dialog.branch/tree`
@@ -4517,8 +4518,8 @@ mod resolver_tests {
         branch: &Branch,
         operator: &Peer<VolatileSpace, dialog_peer::Session>,
         root: &str,
-    ) -> anyhow::Result<std::collections::BTreeSet<String>> {
-        let mut all = std::collections::BTreeSet::new();
+    ) -> anyhow::Result<BTreeSet<String>> {
+        let mut all = BTreeSet::new();
         let mut frontier = vec![root.to_string()];
         while let Some(next) = frontier.pop() {
             let spans: Vec<ResolverConclusion> = branch
@@ -4556,8 +4557,7 @@ mod resolver_tests {
             .perform(&operator)
             .try_vec()
             .await?;
-        let listed: std::collections::BTreeSet<String> =
-            rows.iter().map(|row| reference(row, "of")).collect();
+        let listed: BTreeSet<String> = rows.iter().map(|row| reference(row, "of")).collect();
         assert_eq!(rows.len(), expected.len(), "each node once: {rows:?}");
         assert_eq!(listed, expected, "exactly the nodes the root reaches");
         assert_eq!(reference(&rows[0], "of"), root, "the root comes first");
@@ -4640,7 +4640,7 @@ mod resolver_tests {
             .perform(&listing)
             .try_vec()
             .await?;
-        let listed: std::collections::BTreeSet<String> = all
+        let listed: BTreeSet<String> = all
             .iter()
             .map(|row| row.entity().node_hash().expect("a node entity").to_base58())
             .collect();
@@ -4651,8 +4651,7 @@ mod resolver_tests {
             .find(|node| **node != root)
             .expect("the root has children");
         let child = Entity::from_node(
-            &<[u8; 32]>::try_from(base58::FromBase58::from_base58(child.as_str()).unwrap())
-                .unwrap(),
+            &<[u8; 32]>::try_from(FromBase58::from_base58(child.as_str()).unwrap()).unwrap(),
         )?;
         let lookup = Counting::new(operator.clone());
         let one: Vec<ConceptConclusion> = branch
@@ -4844,7 +4843,6 @@ mod resolver_tests {
         use dialog_query::concept::query::ConceptQuery;
         use dialog_query::rule::DeductiveRuleDescriptor;
         use dialog_query::{ConceptConclusion, Parameters};
-        use std::collections::BTreeSet;
 
         let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
@@ -4943,8 +4941,6 @@ mod resolver_tests {
     /// no two entries of a segment share one.
     #[dialog_common::test]
     async fn it_names_an_entry_the_same_in_key_and_entry() -> anyhow::Result<()> {
-        use std::collections::BTreeSet;
-
         let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let (branch, root) = committed_branch(&repo, &operator).await?;

@@ -1065,7 +1065,7 @@ impl ResolverQuery {
                     return Ok(rows);
                 };
                 let row = project(
-                    &base,
+                    base,
                     &[
                         (&query.kind, Value::String(node.kind.into())),
                         (&query.size, Value::UnsignedInt(node.size.into())),
@@ -1082,7 +1082,7 @@ impl ResolverQuery {
                 };
                 for span in spans {
                     let row = project(
-                        &base,
+                        base,
                         &[
                             (&query.at, Value::UnsignedInt(span.at.into())),
                             (&query.node, Value::Entity(node_entity(&span.node)?)),
@@ -1102,7 +1102,7 @@ impl ResolverQuery {
                 };
                 for (at, entry) in keys.into_iter().enumerate() {
                     let row = project(
-                        &base,
+                        base,
                         &[
                             (&query.at, Value::UnsignedInt(at as u128)),
                             (&query.entry, Value::Entity(entry_entity(&entry.key)?)),
@@ -1123,7 +1123,7 @@ impl ResolverQuery {
                         .map(|reference| reference.to_base58())
                         .unwrap_or_default();
                     let row = project(
-                        &base,
+                        base,
                         &[
                             (&query.at, Value::UnsignedInt(entry.at.into())),
                             (&query.entry, Value::Entity(entry_entity(&entry.key)?)),
@@ -1149,7 +1149,7 @@ impl ResolverQuery {
                 // node decode. Type information lives in the
                 // key the reference came from.
                 let row = project(
-                    &base,
+                    base,
                     &[
                         (&query.size, Value::UnsignedInt(bytes.len() as u128)),
                         (&query.bytes, Value::Bytes(bytes)),
@@ -1163,7 +1163,7 @@ impl ResolverQuery {
                 };
                 for record in records {
                     let row = project(
-                        &base,
+                        base,
                         &[
                             (&query.at, Value::UnsignedInt(record.at.into())),
                             (&query.blob, Value::Bytes(record.blob)),
@@ -1179,7 +1179,7 @@ impl ResolverQuery {
                     return Ok(rows);
                 };
                 let row = project(
-                    &base,
+                    base,
                     &[
                         (&query.version, Value::UnsignedInt(manifest.version.into())),
                         (
