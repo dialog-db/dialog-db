@@ -80,6 +80,18 @@ fn extract_parameters(source: &Match, terms: &Parameters) -> Result<Match, Evalu
     Ok(matched)
 }
 
+/// The type the caller's value term reads through, when it is a typed
+/// variable. An attribute's type is part of which attribute it is, so
+/// to a variable of a type a value of another type is a fact of
+/// another attribute: it takes no part in an election and does not
+/// make the entity one that has a value. `None` reads every value.
+fn lens(terms: &Parameters) -> Option<crate::type_system::Type> {
+    match terms.get(ConceptDescriptor::VALUE) {
+        Some(term @ Term::Variable { name: Some(_), .. }) => term.kind(),
+        _ => None,
+    }
+}
+
 /// Whether a bind took. A value the term's type does not read, and one
 /// that disagrees with what the term is already bound to, make the row
 /// one the caller's terms do not match: it is passed over, as a scan
@@ -785,6 +797,7 @@ impl ConceptQuery {
         // stored row and every derived candidate alike. The candidates
         // for an entity arrive in no particular order, so the election
         // buffers the results of the whole input.
+        let lens = lens(&back);
         Box::pin(try_stream! {
             let mut groups: Groups = BTreeMap::new();
             let mut matched: HashSet<usize> = HashSet::new();
@@ -796,9 +809,15 @@ impl ConceptQuery {
                     )
                 })?;
                 let caller_id = Arc::as_ptr(&caller) as usize;
-                // A result is a fact the entity has, whether or not the
-                // caller's terms read it: a set-widened read yields
-                // `Absent` only where there is none.
+                // A value the caller's variable does not read is no fact
+                // of the attribute it asks for: it is not elected among,
+                // and the entity is not one a set-widened read matched.
+                if let Some(kind) = &lens
+                    && let Some(Binding::Present(value)) = result.get(ConceptDescriptor::VALUE)
+                    && !kind.reads(value)
+                {
+                    continue;
+                }
                 matched.insert(caller_id);
                 if elect.is_none() {
                     let merged = merge_parameters(&caller, &result, &back)
@@ -885,6 +904,7 @@ impl ConceptQuery {
             let first = first?;
             let plan = rules.plan(&app.terms, &first);
             let widen = app.widens();
+            let lens = lens(&app.terms);
             let (election, ranks) = match app.predicate.attribute_field() {
                 Some((_, field)) => (Election::of(field), rules.ranks(field)),
                 None => (Election::plain(Pick::Last), Vec::new()),
@@ -1004,6 +1024,12 @@ impl ConceptQuery {
                             }
                         }
                     }
+                    // Before the next relation is asked whether an
+                    // earlier one settled it: a value the caller's
+                    // variable does not read settles nothing.
+                    if let Some(kind) = &lens {
+                        candidates.retain(|candidate| kind.reads(&candidate.value));
+                    }
                 }
                 for row in &reduced {
                     let (Some(this), Some(value)) = (row.get("this"), row.get(ConceptDescriptor::VALUE)) else {
@@ -1023,6 +1049,9 @@ impl ConceptQuery {
                         standing: None,
                         source: Source::Folded,
                     });
+                }
+                if let Some(kind) = &lens {
+                    candidates.retain(|candidate| kind.reads(&candidate.value));
                 }
 
                 let survivors = elect(candidates, &election)?;

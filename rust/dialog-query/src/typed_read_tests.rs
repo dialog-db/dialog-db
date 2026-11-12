@@ -1,9 +1,13 @@
 //! A typed variable over a field that declares no type, pinned as tests.
 //!
-//! A variable's type says which values it reads. A value of another
-//! type is one the variable does not read, so the row that holds it is
-//! passed over, whichever way the read is evaluated: as an attribute
-//! scan, as a concept read, or as a read of a recursive concept.
+//! A variable's type says which values it reads, and an attribute's
+//! type is part of which attribute it is. So to a variable of a type a
+//! value of another type is a fact of another attribute: the row that
+//! holds it is passed over, it is not elected among, and an entity
+//! that holds nothing else has, to a variable that may be absent, no
+//! value. That holds whichever way the read is evaluated: as an
+//! attribute scan, as a plain concept read, as a read of a concept a
+//! rule derives, or as a read of a recursive concept.
 
 #[cfg(target_arch = "wasm32")]
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
@@ -224,40 +228,128 @@ async fn it_reads_the_values_of_its_type_through_a_recursive_untyped_field() -> 
 }
 
 /// A variable that reads a text or nothing is absent for an entity
-/// with no value, and is not for one whose value is a number: absent
-/// says the entity has no fact of the attribute, and this one has a
-/// fact the variable does not read, so there is no row for it, as an
-/// optional scan gives none for a value that disagrees
-/// (`it_does_not_emit_absent_on_optional_value_mismatch`). Pinned for
-/// the stored rows as they are (`all:` and the default) and for a read
-/// that elects one value on the way out (`max:`).
+/// whose only value is a number, as it is for one with no value: to
+/// the variable neither has a text. Under the stored rows as they are
+/// (`all:` and the default), under a pick that elects on the way out
+/// (`max:`), and through the fixpoint.
 #[dialog_common::test]
-async fn it_gives_no_row_for_a_value_an_optional_variable_does_not_read() -> anyhow::Result<()> {
+async fn it_reads_a_value_of_another_type_as_absent_when_it_may_be() -> anyhow::Result<()> {
     let (operator, profile) = test_session_with_peer().await;
     let repo = test_repo(&operator, &profile).await;
     let branch = repo.branch("main").open().perform(&operator).await?;
     let entities = store_mixed(&branch, &operator).await?;
     let (hello, seven) = (&entities[0], &entities[1]);
     let nobody = Entity::new()?;
-    let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+    let plain = TestEnv::new(&branch, &operator, RuleRegistry::new());
+    let recursive = TestEnv::new(&branch, &operator, recursive()?);
 
-    for pick in [Some("all:"), None, Some("max:")] {
+    let reads = [
+        (&plain, Some("all:"), "all:"),
+        (&plain, None, "the default pick"),
+        (&plain, Some("max:"), "max:"),
+        (&recursive, Some("all:"), "the fixpoint"),
+    ];
+    for (source, pick, how) in reads {
         assert_eq!(
-            read_optional(&source, untyped(pick), hello).await?,
+            read_optional(source, untyped(pick), hello).await?,
             vec![Some(text("hello"))],
-            "the text under {pick:?}"
+            "the text under {how}"
         );
         assert_eq!(
-            read_optional(&source, untyped(pick), &nobody).await?,
+            read_optional(source, untyped(pick), &nobody).await?,
             vec![None],
-            "no value under {pick:?}"
+            "no value under {how}"
         );
         assert_eq!(
-            read_optional(&source, untyped(pick), seven).await?,
-            Vec::<Option<Value>>::new(),
-            "the number under {pick:?}"
+            read_optional(source, untyped(pick), seven).await?,
+            vec![None],
+            "the number under {how}"
         );
     }
+    Ok(())
+}
+
+/// The same through a concept a rule derives, where an entity's values
+/// are elected among: `derived/value` is whatever `source/a` and
+/// `source/b` hold. A variable reads the greatest of the values of its
+/// type, not the greatest of all when that is of another, and one that
+/// may be absent is absent for an entity with none of its type.
+#[dialog_common::test]
+async fn it_elects_among_the_values_of_its_type_in_a_derived_field() -> anyhow::Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    let (both, number) = (Entity::new()?, Entity::new()?);
+    let mut transaction = branch.transaction();
+    for (the, of, is) in [
+        (the!("source/a"), &both, text("hello")),
+        (the!("source/b"), &both, Value::UnsignedInt(7)),
+        (the!("source/b"), &number, Value::UnsignedInt(9)),
+    ] {
+        transaction = transaction.assert(AttributeStatement {
+            the,
+            of: of.clone(),
+            is,
+            cause: None,
+            cardinality: None,
+            pick: None,
+        });
+    }
+    transaction.commit().publish().perform(&operator).await?;
+
+    let derived = serde_json::json!({ "the": "derived/value", "pick": "max:" });
+    let mut registry = RuleRegistry::new();
+    for from in ["source/a", "source/b"] {
+        let rule: DeductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
+            "deduce": { "with": { "is": derived } },
+            "when": [{
+                "assert": { "with": { "is": { "the": from, "pick": "all:" } } },
+                "where": {
+                    "this": { "?": { "name": "this" } },
+                    "is": { "?": { "name": "is" } }
+                }
+            }]
+        }))?;
+        registry.register(rule.compile()?)?;
+    }
+    let source = TestEnv::new(&branch, &operator, registry);
+    let concept = || -> ConceptDescriptor {
+        serde_json::from_value(serde_json::json!({ "with": { "is": derived } }))
+            .expect("a one-field concept is well formed")
+    };
+
+    let read = async |kind: Kind| -> anyhow::Result<Vec<Value>> {
+        let mut terms = Parameters::new();
+        terms.insert("this".into(), Term::Constant(Value::Entity(both.clone())));
+        terms.insert("is".into(), Term::var("value").with_kind(kind));
+        let rows = ConceptQuery {
+            terms,
+            predicate: concept(),
+        }
+        .evaluate(Match::new().seed(), &source)
+        .try_vec()
+        .await?;
+        Ok(rows
+            .iter()
+            .map(|row| row.lookup(&Term::<Any>::var("value"))?.content())
+            .collect::<Result<Vec<Value>, crate::EvaluationError>>()?)
+    };
+    assert_eq!(read(Kind::from(Type::String)).await?, vec![text("hello")]);
+    assert_eq!(
+        read(Kind::from(Type::UnsignedInt)).await?,
+        vec![Value::UnsignedInt(7)]
+    );
+
+    assert_eq!(
+        read_optional(&source, concept(), &both).await?,
+        vec![Some(text("hello"))],
+        "the text of an entity that has a number too"
+    );
+    assert_eq!(
+        read_optional(&source, concept(), &number).await?,
+        vec![None],
+        "an entity that has a number alone"
+    );
     Ok(())
 }
 
