@@ -327,7 +327,7 @@ fn overlay_holds(sources: &[Source], the: &CorpusRelation, of: &Entity) -> bool 
     let selector = Selector::new().the(the.clone()).of(of.clone());
     sources
         .iter()
-        .any(|source| !source.as_ref().overlay().scan(&selector).is_empty())
+        .any(|source| !source.overlay().scan(&selector).is_empty())
 }
 
 /// The claims a cell holds as `view` reads them: the stored claims a
@@ -803,7 +803,10 @@ mod tests {
             .publish()
             .perform(&operator)
             .await?;
-        b.pull().from(&a).perform(&operator).await?;
+        b.pull(crate::Download::MinimalRanges)
+            .from(&a)
+            .perform(&operator)
+            .await?;
         assert_eq!(stored(&b, &operator, &alice).await?, vec![100]);
 
         a.transaction()
@@ -823,8 +826,16 @@ mod tests {
 
         let mut quiesced = false;
         for _ in 0..4 {
-            let pulled_a = a.pull().from(&b).perform(&operator).await?;
-            let pulled_b = b.pull().from(&a).perform(&operator).await?;
+            let pulled_a = a
+                .pull(crate::Download::MinimalRanges)
+                .from(&b)
+                .perform(&operator)
+                .await?;
+            let pulled_b = b
+                .pull(crate::Download::MinimalRanges)
+                .from(&a)
+                .perform(&operator)
+                .await?;
             if pulled_a.is_none() && pulled_b.is_none() {
                 quiesced = true;
                 break;

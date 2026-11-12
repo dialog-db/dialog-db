@@ -33,7 +33,7 @@ use dialog_effects::storage::Location;
 use dialog_peer::helpers::unique_name;
 use dialog_peer::{Peer, Session};
 use dialog_repository::{
-    Branch, BranchReference, PeersEnv, RemoteSite, RepositoryExt as _, TransactionBatch,
+    Branch, BranchReference, Line, PeersEnv, RemoteSite, RepositoryExt as _, TransactionBatch,
     TransactionCommit,
 };
 use dialog_storage::NativeTempSpace;
@@ -357,7 +357,7 @@ where
         changes: Changes,
         canonicalize: bool,
     ) -> Result<TransactionBatch> {
-        fn canonical<Line>(commit: TransactionCommit<Line>, yes: bool) -> TransactionCommit<Line> {
+        fn canonical<L: Line>(commit: TransactionCommit<L>, yes: bool) -> TransactionCommit<L> {
             if yes { commit.canonicalize() } else { commit }
         }
         Ok(match tip {

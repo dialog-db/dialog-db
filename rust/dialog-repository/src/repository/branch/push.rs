@@ -2116,7 +2116,10 @@ mod tests {
             ),
             "the push over the rival head is refused: {refused:?}"
         );
-        let refused = feature.pull().perform(&operator).await;
+        let refused = feature
+            .pull(crate::Download::MinimalRanges)
+            .perform(&operator)
+            .await;
         assert!(
             matches!(
                 &refused,
