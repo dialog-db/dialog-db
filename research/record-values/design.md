@@ -26,10 +26,9 @@ own, which is a buffer of one.
 - **Equality** inside one buffer compares rows, provided a buffer holds
   each distinct token once; across buffers it resolves tokens, or compares
   canonical forms.
-- **Identity** (`Hash`, a spilled value's reference, a rule's identity) is
-  over the canonical form, so a view realizes it to be hashed; or identity is
-  defined over its parts' hashes, which a buffer can keep, and nothing is
-  realized. Which is a decision (section 13).
+- **Identity** is a record's merkle reference (decided; section 13): a map
+  from attributes to values, built from its parts' references, so no layout
+  and no buffer enters it.
 
 **Where it stands** (#733 at `5b1ba37`): inside the single-file archive this
 is how nodes are served already: rows of token references into the file's
@@ -66,7 +65,8 @@ record holds its encoding inline after the record type byte. Where the
 names sit, in each field or once in a header, is section 2's choice; the
 rest of this section holds either way. In memory,
 `Value::Record` holds these canonical bytes; equality is their equality, and
-`Hash` hashes them.
+`Hash` hashes them: two canonical byte strings are equal exactly when their
+merkle references are (section 13), at a tenth of the cost.
 
 **Why.** The spike's codec holds every property the topic claims, over
 200,000 generated records, each check seen to fail with its property broken:
@@ -279,19 +279,42 @@ since it is the type's name in the notation and in tonk, and call the file's
 units something else (entries) while #733 is still a draft. Renaming the
 history's records is a larger change and not needed for this one.
 
-## 13. Identity of a view
+## 13. Identity
 
-**Options.** The hash of the canonical form (a view realizes it to be hashed,
-once, kept with the value), or a hash over the hashes of its parts (a buffer
-keeps each token's hash, as the single-file archive's index already keys
-tokens by one, and a record's identity combines them without realizing
-anything). The second changes what a record's reference is, everywhere it is
-used, so it is a decision, not an optimization.
+**Decided** (the maintainer): a record is referenced canonically by its
+merkle reference (`rust/merkle-reference`). Applied as the spec applies it to
+a struct: a map under the record's type from each attribute, its relation as
+a `symbol:`, to its value's reference, or to the `set:` of its values'
+references when it holds several; a nested record is its own reference, and
+a scalar keeps the reference `Value::reference` gives it today
+([results](results/2026-11-12-identity.md)).
+
+**What it gives.** No layout enters it: names inline, in a header or in a
+buffer's table, a nested record inline or apart, all give one reference.
+Over 200,000 generated records it equals exactly when the canonical bytes
+do. A signature over a record's reference holds whatever carries the record.
+
+**What it costs.** 9 to 18 times BLAKE3 over the canonical bytes with every
+part hashed; 3.5 to 7 times when the buffer keeps each part's reference beside
+its token and only maps and sets are hashed (2.2 µs a revision record). So it
+is computed where identity leaves memory or crosses buffers (a rule's
+identity, a signature, a spilled value's name, views from two buffers), and
+`Eq` and `Hash` between canonical bytes in memory stay over the bytes.
+
+**Open: the type a record is referenced under.** `Value::reference` gives
+today's records, opaque dag-cbor, `RECORD.reference_of(bytes)`; a structured
+record under the same type would be `RECORD.map(...)`, both keyed by
+`record:`. Their contents differ in kind but not in what bytes they may hold:
+an opaque record whose bytes are some map's content (a run of 32-byte
+references, which anyone can compute and store) would share that structured
+record's reference. Structured records need a type of their own, or old
+records one; renaming the old type changes the identity of any rule holding
+one as a constant.
 
 ## What would settle it, in order
 
-1. The maintainer sets the bars, and decides how a view's identity is
-   computed (section 13).
+1. The maintainer sets the bars, and names the type structured records are
+   referenced under (section 13).
 2. Interning value payloads apart in #733 (section 4): cheap, useful without
    records, and it measures the sharing the hypothesis rests on.
 3. The segment encoder splitting records (section 2, option d).

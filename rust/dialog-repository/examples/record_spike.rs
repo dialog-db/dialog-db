@@ -30,6 +30,9 @@ mod data;
 #[path = "record_spike/measure.rs"]
 mod measure;
 #[cfg(not(target_arch = "wasm32"))]
+#[path = "record_spike/merkle.rs"]
+mod merkle;
+#[cfg(not(target_arch = "wasm32"))]
 #[path = "record_spike/variants.rs"]
 mod variants;
 

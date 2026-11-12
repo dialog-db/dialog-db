@@ -33,6 +33,8 @@ statuses mean.
     a stream's packet, the single-file archive); a record on its own is a
     buffer of one, its canonical form a sorted table of its names and fields
     by index.
+  - A record's identity is its merkle reference: a map from attributes to
+    values under its type, built from its parts' references.
   - Equality follows tokens as key comparison does, resolving them across
     sources, and the wire carries the canonical form.
   - Repetition is expected mostly across records, and shared through the
@@ -525,6 +527,42 @@ nested record bound in a query is a view. A record on its own is a buffer of
 one, its canonical form a sorted table and fields by index (the header
 layout). Open: whether identity is the hash of the canonical form or a hash
 over its parts' hashes ([design](design.md), sections 0 and 13).
+
+Commits: this entry.
+
+## 2026-11-12 — A record is referenced by its merkle reference
+
+**Question.** The design's section 13 asked how a view's identity is
+computed. The maintainer: records are referenced canonically by merkle
+references. What does that reference look like, and what does it cost?
+
+**Method.** The spec's struct rule applied to a record, computed by the spike
+from its parts; checked against canonical bytes over 200,000 generated
+records; timed against BLAKE3 of the bytes, with every part hashed and with
+each part's reference kept as a buffer could
+([results](results/2026-11-12-identity.md)).
+
+**Results.**
+
+- A map under `record:` from each attribute (a `symbol:`) to its value's
+  reference, or the `set:` of its values' when it holds several; a nested
+  record is its own reference. Equal exactly when the canonical bytes are,
+  over 155,200 distinct records.
+- A revision record: 0.63 µs as BLAKE3 of its bytes, 5.8 µs as a merkle
+  reference, 2.2 µs with its parts' references kept. Tonk's bindings: 0.78,
+  14.2 and 5.3 µs.
+- Today's opaque records are referenced `RECORD.reference_of(bytes)`, and a
+  structured one would be `RECORD.map(...)`: one type, so an opaque record
+  holding some map's content as its bytes would share that structured
+  record's reference.
+
+**Decision.** Decided by the maintainer: a record's identity is its merkle
+reference, so no layout and no buffer enters it. Followed from it: `Eq` and
+`Hash` between canonical bytes in memory stay over the bytes, which agree
+with the reference at a tenth of the cost, and the reference is computed
+where identity leaves memory or crosses buffers. Open: the type structured
+records are referenced under, so they cannot share an opaque record's
+reference.
 
 Commits: this entry.
 

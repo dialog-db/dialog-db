@@ -2,7 +2,7 @@
 //! archive's tokens, for each dataset, printed as markdown tables.
 
 use super::data::{self, Bindings};
-use super::{check, codec, variants};
+use super::{check, codec, merkle, variants};
 use anyhow::Result;
 use dialog_corpus::history::RevisionRecord;
 use std::collections::BTreeSet;
@@ -712,6 +712,124 @@ fn buffers(sets: &[Set]) {
     println!();
 }
 
+/// A record's identity as a merkle reference: equal exactly when the
+/// canonical bytes are, over generated records; and what it costs against
+/// hashing the bytes, computed whole or from references a buffer keeps.
+fn identity(sets: &[Set], rounds: usize) -> Result<()> {
+    let mut by_bytes = std::collections::HashMap::new();
+    let mut by_reference = std::collections::HashMap::new();
+    for seed in 1..=200_000u64 {
+        let bytes = codec::encode(&check::record(&mut super::Seeded(seed), 2));
+        let reference = merkle::reference(&bytes);
+        if let Some(other) = by_bytes.insert(bytes.clone(), reference) {
+            anyhow::ensure!(other == reference, "one record, two references");
+        }
+        if let Some(other) = by_reference.insert(reference, bytes.clone()) {
+            anyhow::ensure!(other == bytes, "two records, one reference");
+        }
+    }
+    println!(
+        "### Identity as a merkle reference\n\nOver 200,000 generated records ({} distinct): \
+         equal references exactly when equal canonical bytes.\n",
+        by_bytes.len()
+    );
+    let (revisions, views) = (&sets[0], &sets[2]);
+    let kept_revisions = merkle::Kept::of(&revisions.pairs);
+    let kept_views = merkle::Kept::of(&views.pairs);
+    let mut readers: Vec<Reader> = vec![
+        (
+            "revision record",
+            "BLAKE3 of its bytes",
+            Box::new(|| {
+                revisions
+                    .pairs
+                    .iter()
+                    .map(|b| merkle_reference::Reference::hash(b).as_bytes()[0] as usize)
+                    .sum()
+            }),
+        ),
+        (
+            "revision record",
+            "merkle reference, every part hashed",
+            Box::new(|| {
+                revisions
+                    .pairs
+                    .iter()
+                    .map(|b| merkle::reference(b).as_bytes()[0] as usize)
+                    .sum()
+            }),
+        ),
+        (
+            "revision record",
+            "merkle reference, parts' references kept",
+            Box::new(|| {
+                revisions
+                    .pairs
+                    .iter()
+                    .map(|b| kept_revisions.reference(b).as_bytes()[0] as usize)
+                    .sum()
+            }),
+        ),
+        (
+            "view bindings",
+            "BLAKE3 of its bytes",
+            Box::new(|| {
+                views
+                    .pairs
+                    .iter()
+                    .map(|b| merkle_reference::Reference::hash(b).as_bytes()[0] as usize)
+                    .sum()
+            }),
+        ),
+        (
+            "view bindings",
+            "merkle reference, every part hashed",
+            Box::new(|| {
+                views
+                    .pairs
+                    .iter()
+                    .map(|b| merkle::reference(b).as_bytes()[0] as usize)
+                    .sum()
+            }),
+        ),
+        (
+            "view bindings",
+            "merkle reference, parts' references kept",
+            Box::new(|| {
+                views
+                    .pairs
+                    .iter()
+                    .map(|b| kept_views.reference(b).as_bytes()[0] as usize)
+                    .sum()
+            }),
+        ),
+    ];
+    let shape = [
+        revisions.pairs.len(),
+        revisions.pairs.len(),
+        revisions.pairs.len(),
+        views.pairs.len(),
+        views.pairs.len(),
+        views.pairs.len(),
+    ];
+    let repeat = [5, 5, 5, 200, 200, 200];
+    let mut samples: Vec<Vec<f64>> = vec![Vec::new(); readers.len()];
+    for _ in 0..rounds {
+        for (index, (_, _, run)) in readers.iter_mut().enumerate() {
+            samples[index].push(time(shape[index], repeat[index], run));
+        }
+    }
+    println!("ns a record ({rounds} rounds, interleaved; revisions with versions as records):\n");
+    println!("| record | identity | min | median | max |");
+    println!("|---|---|--:|--:|--:|");
+    for (index, (what, how, _)) in readers.iter().enumerate() {
+        let (low, mid, high) = spread(&mut samples[index]);
+        println!("| {what} | {how} | {low:.0} | {mid:.0} | {high:.0} |");
+    }
+    println!();
+    Ok(())
+}
+
 pub fn run(revisions: &str, bindings: &str, rounds: usize) -> Result<()> {
     let revision_cbor = read_revisions(revisions)?;
     let encode_all = |versions: data::Versions| -> Result<Vec<Vec<u8>>> {
@@ -796,5 +914,6 @@ pub fn run(revisions: &str, bindings: &str, rounds: usize) -> Result<()> {
     reads(&sets, rounds);
     layouts(&sets, rounds)?;
     buffers(&sets);
+    identity(&sets, rounds)?;
     Ok(())
 }

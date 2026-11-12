@@ -1933,6 +1933,7 @@ dependencies = [
  "getrandom 0.2.16",
  "ipld-core",
  "memchr",
+ "merkle-reference",
  "parking_lot",
  "reqwest 0.12.22",
  "ruzstd",
