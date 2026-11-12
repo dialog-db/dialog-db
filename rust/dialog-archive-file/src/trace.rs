@@ -53,7 +53,7 @@ pub enum Tag {
     /// The file's length set: file (u8), length (u64).
     Len = 6,
     /// The file synced: file (u8).
-    Sync = 7,
+    Synced = 7,
     /// A lock on a byte: file (u8), byte (u64), flags (u8: exclusive 1,
     /// waited for 2, taken 4).
     Lock = 8,
@@ -388,7 +388,7 @@ pub(crate) fn len(file: &File, len: u64) {
 
 pub(crate) fn sync(file: &File) {
     event(file, |n, bytes| {
-        bytes.extend_from_slice(&[Tag::Sync as u8, n])
+        bytes.extend_from_slice(&[Tag::Synced as u8, n])
     });
 }
 
@@ -527,7 +527,7 @@ mod tests {
         distinct.sort_unstable();
         distinct.dedup();
         assert!(tags.contains(&(Tag::Write as u8)));
-        assert!(tags.contains(&(Tag::Sync as u8)));
+        assert!(tags.contains(&(Tag::Synced as u8)));
         assert!(tags.contains(&(Tag::Lock as u8)));
         Ok(())
     }
