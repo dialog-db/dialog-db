@@ -39,7 +39,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Display;
 use std::future;
 use std::mem;
-use std::pin::Pin;
+use std::pin::{Pin, pin};
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -528,34 +528,33 @@ impl ConceptQuery {
                 && this
                     .as_ref()
                     .is_some_and(|term| term.name().is_some() && !first.contains(term));
-            if sort {
-                let unsorted = app.clone().evaluate_unsorted(
-                    rules,
-                    Box::pin(stream::iter([Ok(first)]).chain(selection)),
-                    env,
-                );
-                let mut rows: Vec<(Vec<u8>, Match)> = Vec::new();
-                for await row in unsorted {
-                    let row = row?;
-                    let key = this
-                        .as_ref()
-                        .and_then(|term| row.value_of(term.name()?))
-                        .map(dialog_corpus::encode_value_owned)
-                        .unwrap_or_default();
-                    rows.push((key, row));
-                }
-                rows.sort_by(|a, b| a.0.cmp(&b.0));
-                for (_, row) in rows {
-                    yield row;
-                }
-                return;
-            }
-            for await row in app.evaluate_unsorted(
+            // Made once and pinned in place, whichever way its rows leave:
+            // a `for await` in each arm gave each arm room for a stream of
+            // its own, and doubled the read.
+            let mut unsorted = pin!(app.evaluate_unsorted(
                 rules,
                 Box::pin(stream::iter([Ok(first)]).chain(selection)),
                 env,
-            ) {
-                yield row?;
+            ));
+            if !sort {
+                while let Some(row) = unsorted.next().await {
+                    yield row?;
+                }
+                return;
+            }
+            let mut rows: Vec<(Vec<u8>, Match)> = Vec::new();
+            while let Some(row) = unsorted.next().await {
+                let row = row?;
+                let key = this
+                    .as_ref()
+                    .and_then(|term| row.value_of(term.name()?))
+                    .map(dialog_corpus::encode_value_owned)
+                    .unwrap_or_default();
+                rows.push((key, row));
+            }
+            rows.sort_by(|a, b| a.0.cmp(&b.0));
+            for (_, row) in rows {
+                yield row;
             }
         }
     }
@@ -586,11 +585,15 @@ impl ConceptQuery {
             // rows.
             let widen = app.widens();
             if let Some(analysis) = rules.recursion() {
+                // Boxed, as the relation below is: a stream has room for
+                // the largest thing each of its stops waits on, one beside
+                // the other, so a plain read carried the fixpoint's two
+                // futures and the relation's stream it never runs.
                 let table = match rules.continuation() {
                     Some(continuation) => {
-                        continuation.rows(&app.predicate, analysis, env).await?
+                        Box::pin(continuation.rows(&app.predicate, analysis, env)).await?
                     }
-                    None => fixpoint::evaluate(&app.predicate, analysis, env).await?,
+                    None => Box::pin(fixpoint::evaluate(&app.predicate, analysis, env)).await?,
                 };
                 // The component yields its candidates as a set; a read
                 // under a choosing pick elects one of them at the exit,
@@ -665,7 +668,7 @@ impl ConceptQuery {
             // entity and one row is built per winner.
             if app.predicate.attribute_field().is_some() && !rules.installed().is_empty() {
                 let rows = stream::iter([Ok(first)]).chain(selection);
-                for await row in app.relation(rules, reduced, rows, env) {
+                for await row in Box::pin(app.relation(rules, reduced, rows, env)) {
                     yield row?;
                 }
                 return;
@@ -2615,6 +2618,51 @@ mod tests {
         assert_eq!(
             selection[0].lookup(&Term::var("name"))?.content()?,
             Value::String("Alice".to_string())
+        );
+
+        Ok(())
+    }
+
+    /// The most a concept read's stream may take, in bytes. It measures
+    /// 3,136 on a 64-bit target; the room above that is for a toolchain
+    /// laying it out differently, not for growth.
+    const READ_STREAM_LIMIT: usize = 4096;
+
+    /// A read is returned by value and moved into the box it is polled
+    /// from, so its size is copied on every read, whichever path the read
+    /// takes. It was 12 KB, most of it room for paths a plain read never
+    /// runs (dialog-db/dialog-db#781).
+    #[dialog_common::test]
+    async fn it_keeps_a_read_small_enough_to_move() -> anyhow::Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let concept = ConceptDescriptor::try_from(vec![(
+            "name",
+            AttributeDescriptor::new(
+                the!("person/name"),
+                "Person name",
+                Cardinality::One,
+                Some(Type::String),
+            ),
+        )])
+        .unwrap();
+        let mut terms = Parameters::new();
+        terms.insert("this".to_string(), Term::var("this"));
+        terms.insert("name".to_string(), Term::var("name"));
+
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+        let app = ConceptQuery {
+            terms,
+            predicate: concept,
+        };
+        let read = app.evaluate(Match::new().seed(), &source);
+        let size = mem::size_of_val(&read);
+        assert!(
+            size <= READ_STREAM_LIMIT,
+            "a concept read is {size} bytes, over the {READ_STREAM_LIMIT} it is held to: \
+             box what a plain read does not run"
         );
 
         Ok(())
