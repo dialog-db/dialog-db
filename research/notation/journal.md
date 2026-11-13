@@ -811,6 +811,16 @@ xychart-beta
 
 **Decision.** Test the sentence on how rules are evaluated, on both the plain domain form and the shared-name form.
 
+## 2026-11-13 — R36: the maintainer's sentence on rules, and what it leaves
+
+**Question.** The one [planned](results/r36-plan.md): does "a rule that concludes a concept concludes each individual attribute that concept is made of" make readers find a rule's memo as a note? Tested on the domain form and on the shared-name form.
+
+**Method.** Clean runner, 20 readers per variant, derive case.
+
+**Results.** [r36](results/r36.md). On the domain form, 0 of 20 became 12 of 20. On the shared-name form, 11 of 20 became 12 of 20. The sentence and the shared names do the same work, and together do no more. The misses left ask two other questions: whether a concept is matched by its attributes or by its name, and whether rules run whether or not anything asks for their concept.
+
+**Decision.** Add two sentences to the maintainer's, on the domain form: a concept matches any entity that has its attributes, whoever gave them values; a rule's conclusion holds as soon as its conditions do.
+
 ## How to reproduce
 
 1. Take a variant's prompt from its round's results file and save it as `<variant>.txt`.
