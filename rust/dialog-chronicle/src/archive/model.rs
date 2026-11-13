@@ -768,7 +768,7 @@ fn run(shape: &Shape, name: &str, layout: &mut dyn Layout) {
 /// `DIALOG_INDEX_SHAPES=100x` (or `musicbrainz`) for one; lineage entries
 /// are left out (the layouts that name keys by position would find a
 /// node's predecessor another way).
-#[test]
+#[dialog_common::test]
 #[ignore = "models the index's layouts; run by hand"]
 fn index_layouts() {
     let shapes = [

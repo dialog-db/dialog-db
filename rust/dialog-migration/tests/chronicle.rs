@@ -81,7 +81,7 @@ macro_rules! select_all {
     }};
 }
 
-#[tokio::test]
+#[dialog_common::test]
 async fn it_transcodes_a_replica_the_fs_provider_wrote() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let at = At::At(directory.path().to_string_lossy().into_owned());
@@ -167,7 +167,7 @@ async fn it_transcodes_a_replica_the_fs_provider_wrote() -> anyhow::Result<()> {
 /// a run that moves every space, and a second run with nothing left to do;
 /// a run interrupted mid-way picks up where it stopped; and the `fs`
 /// archives go once asked to.
-#[tokio::test]
+#[dialog_common::test]
 async fn it_migrates_a_replica_as_an_application_would() -> anyhow::Result<()> {
     use dialog_migration::Migrations;
     use dialog_migration::chronicle::{IntoChronicle, MIGRATING};
@@ -272,9 +272,8 @@ fn buffer(text: &str) -> dialog_common::Buffer {
 
 /// Migrating a space that already has an `archive.dialog` keeps what that
 /// file holds: blocks a file-archive space wrote are not dropped for the
-/// `fs` archive's. Today the transcode writes a new file and renames it
-/// over the existing one, so a block only the existing file held is gone.
-#[test]
+/// `fs` archive's.
+#[dialog_common::test]
 fn it_keeps_what_an_existing_archive_file_holds_when_migrating() -> anyhow::Result<()> {
     use dialog_migration::chronicle::migrate_space;
 
@@ -302,11 +301,47 @@ fn it_keeps_what_an_existing_archive_file_holds_when_migrating() -> anyhow::Resu
     Ok(())
 }
 
+/// A process with a space's `archive.dialog` open while the space migrates
+/// goes on using that file: the migration writes into it through the same
+/// handle, so the process reads what was migrated, and what it writes
+/// after is in the file a later open reads.
+#[dialog_common::test]
+fn it_migrates_into_a_file_a_process_has_open() -> anyhow::Result<()> {
+    use dialog_migration::chronicle::migrate_space;
+
+    let directory = tempfile::tempdir()?;
+    let space = directory.path().join("repo");
+    let (old, before, after) = (
+        buffer("only in the fs archive"),
+        buffer("written before the migration"),
+        buffer("written after the migration"),
+    );
+    put_block(&space, "index", old.as_ref(), old.as_ref())?;
+    {
+        let archive = Chronicle::open(space.join(FILE_NAME))?;
+        archive.append("index", std::slice::from_ref(&before))?;
+        migrate_space(&space, false)?;
+        assert_eq!(
+            archive.get("index", old.blake3_hash())?.as_deref(),
+            Some(old.as_ref()),
+            "the open handle reads what was migrated"
+        );
+        archive.append("index", std::slice::from_ref(&after))?;
+    }
+    let archive = Chronicle::open(space.join(FILE_NAME))?;
+    for block in [&old, &before, &after] {
+        assert_eq!(
+            archive.get("index", block.blake3_hash())?.as_deref(),
+            Some(block.as_ref())
+        );
+    }
+    Ok(())
+}
+
 /// A space whose `archive.dialog` holds nothing (opening a path creates
-/// it) but whose `fs` archive holds blocks still needs migrating. Today a
-/// space with any `archive.dialog` counts as migrated, so its blocks are
-/// never moved and a run reports nothing to do.
-#[test]
+/// it) but whose `fs` archive holds blocks still needs migrating: a space
+/// counts as migrated by its marker, not by having a file.
+#[dialog_common::test]
 fn it_counts_a_space_with_an_empty_archive_file_as_unmigrated() -> anyhow::Result<()> {
     use dialog_migration::Migrations;
     use dialog_migration::chronicle::{IntoChronicle, unmigrated};
@@ -332,10 +367,9 @@ fn it_counts_a_space_with_an_empty_archive_file_as_unmigrated() -> anyhow::Resul
 
 /// A migration that removes the `fs` archive does so only when every file
 /// in it went into the archive file: a block whose bytes no longer match
-/// its name, or a file not named as a block, is reported and kept (or the
-/// run fails). Today they are left out silently and then deleted with the
-/// rest of the `fs` archive.
-#[test]
+/// its name, or a file not named as a block, fails the run and the `fs`
+/// archive is kept.
+#[dialog_common::test]
 fn it_does_not_remove_files_the_migration_left_out() -> anyhow::Result<()> {
     use dialog_migration::Migrations;
     use dialog_migration::chronicle::IntoChronicle;

@@ -462,9 +462,9 @@ environment's business.
 
 A node's body is now read through views, `IndexView` and `SegmentView`, that
 either a block or a store's rows back. A store that keeps nodes as rows
-implements `NodeRows`. An environment that holds a `NodeSource` for a
-subject (`NodeSource::serve`) makes every tree read of that subject ask it
-first. The node is then read in place: keys compare part by part, values
+implements `NodeRows`, and answers the tree's `nodes::Read` with nodes
+over them (see the entry on the tree asking its environment for nodes).
+Such a node is read in place: keys compare part by part, values
 are read as archives where the store keeps them, and no block is built,
 hashed or validated. `Chronicle` is such a source.
 
@@ -480,8 +480,7 @@ What this changes for you:
   rows builds its block the first time it is asked, and that can fail.
 - A segment's `keys()` returns a `KeyCursor`, which has `next_key` as
   `StreamingLeaf` does.
-- Nothing changes for a tree read through an environment with no node
-  source.
+- Nothing changes for a tree read through a store that keeps blocks.
 
 Why: a store that keeps nodes compactly need not rebuild a block for every
 read. Read in place, the single-file archive's cold reads match the `fs`
@@ -620,7 +619,7 @@ What this changes for you:
 - A block another process holds only in its extent is written again into
   the writer's own, so a head it commits never names a block another
   process has not yet folded into the file.
-- The file's format is version 14: a file written by an earlier build of
+- The file's format is version 15: a file written by an earlier build of
   `dialog-chronicle` does not open.
 
 Why: many processes work on separate branches of one space at once, and on
@@ -657,13 +656,14 @@ What this changes for you:
   readers take no lock. A file this process already has open is shared,
   not opened twice.
 - The file is synced after an append once 64 appends have come since
-  the last sync or 2 seconds have passed, on `Chronicle::sync` and on the
-  last close. Nothing syncs it on a timer: a commit followed by no other
-  append is durable only once something syncs. This is weaker than the
-  `fs` provider, which syncs every block it writes; call
-  `Chronicle::sync` where a commit must survive power loss. A power loss
-  loses at most the appends since the last sync, and never leaves the
-  file damaged: opening goes back to the newest state
+  the last sync or 2 seconds have passed, on `Chronicle::sync`, on the
+  last close, and by a thread of the archive's own once appends have
+  waited 2 seconds for a sync (`Options::sync_in_background`, on by
+  default), so a commit no other append follows is durable within about
+  three seconds. That is weaker than the `fs` provider, which syncs every
+  block it writes; call `Chronicle::sync` where a commit must be durable
+  before anything else happens. A power loss loses at most the appends
+  since the last sync, and never leaves the file damaged: opening goes back to the newest state
   that is whole. The slot that state is read from is kept twice, and a
   sync writes over the older copy, so a sync torn by power loss leaves
   the previous copy whole.
@@ -671,6 +671,15 @@ What this changes for you:
   to the exact block it stands for (a node another peer wrote in another
   layout, say) is kept whole, never written as rows that read back
   different bytes.
+- `Put` and `Import` append on tokio's blocking threads when a tokio
+  runtime runs the caller: an append can wait for the writer's turn
+  another process holds and make a sync point, and holds up none of the
+  runtime's other tasks while it does. `Get` answers at once from the
+  file's mapping.
+- An append of more than 32 Ki blocks is committed in parts, so the index
+  pages one commit frees fit the slot that lists them.
+- An open of a file that has to be recovered holds up no open or close of
+  another file in the process.
 - An extent a process left behind when it closed or died is written into
   again by the next writer that needs one, instead of a new one, so a
   file opened and closed many times does not grow a dead extent each
@@ -689,9 +698,10 @@ What this changes for you:
   it, and an interrupted run picks up where it stopped. The `chronicle`
   step (`chronicle::IntoChronicle`) moves every space of a replica the
   `fs` provider wrote into the `archive.dialog` a file-archive space reads,
-  writing it under another name (starting from the space's
-  `archive.dialog`, if it has one, so what that holds stays), renaming it
-  once complete and writing `archive.dialog.migrated`. A space is
+  writing it under another name and renaming it once complete, or, for a
+  space that has an `archive.dialog` already, into that file through
+  `Chronicle` (so what it holds stays, and a process with it open goes on
+  using it), and then writing `archive.dialog.migrated`. A space is
   migrated when that marker is there, not when it has an `archive.dialog`
   (opening a `Chronicle` creates one). With `remove_source` it deletes
   the `fs` archive after, unless a block's bytes did not match its name

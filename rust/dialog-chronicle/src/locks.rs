@@ -9,8 +9,14 @@
 //! other with them, and closing any handle of the file releases them. The
 //! archive opens a file once per process and shares it (`Chronicle`'s
 //! table of open files), closes it only when the last handle goes, and
-//! keeps threads apart with its own mutexes, so both hold. On Windows they
-//! are `LockFileEx` locks, which belong to the handle.
+//! keeps threads apart with its own mutexes, so both hold. Code outside
+//! the archive that opens the file and closes it again, in a process that
+//! has it open, lets go of them: such code goes through `Chronicle`, as
+//! `dialog-migration` does, or runs in another process. Linux's
+//! open-file-description locks would not be let go of that way, but they
+//! would make Linux the one platform where two handles in a process
+//! exclude each other, and macOS has none. On Windows they are
+//! `LockFileEx` locks, which belong to the handle.
 
 use std::fs::File;
 use std::io;
@@ -251,7 +257,7 @@ pub(crate) mod tests {
     /// Another process's lock is what a try reports as taken; a process's
     /// own locks never exclude each other (POSIX), which the archive's
     /// mutexes cover. The test binary runs itself as the other process.
-    #[test]
+    #[dialog_common::test]
     fn it_reports_a_byte_another_process_holds() -> anyhow::Result<()> {
         use std::io::{BufRead, BufReader, Read, Write};
         use std::process::{Command, Stdio};

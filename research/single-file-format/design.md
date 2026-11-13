@@ -281,13 +281,14 @@ rest. (Built: `rust/dialog-chronicle`.)
    records other processes appended, and readers that follow the file's
    growth (`tests/repository.rs` runs two processes appending at once).
 4. **Done.** A node over rows in `dialog-search-tree`: `IndexView` and
-   `SegmentView`, backed by a block or by a store's `NodeRows`, which a
-   `NodeSource` the environment holds hands over before any block is
-   loaded. Tested by reading every node both ways and comparing every
+   `SegmentView`, backed by a block or by a store's `NodeRows`, which the
+   archive hands the tree in answer to its `nodes::Read` (first through a
+   `NodeSource`, since replaced by the tree's node commands, see
+   `design/tree-node-reads.md`). Tested by reading every node both ways and comparing every
    accessor (`tests/repository.rs`; by hand, all 14,900 nodes of a
    4096-commit Stack Exchange file).
 5. **Done.** Frames: tokens, rows, predecessors and the checked conversion
-   in the file; `Get` realizes. The archive is a `NodeSource`.
+   in the file; `Get` realizes. The archive answers `nodes::Read` with nodes read in place.
 6. **The perf gate's scenarios** over it, against the `fs` archive.
 
 ## Reading in place (step 4)

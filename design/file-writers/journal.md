@@ -883,7 +883,8 @@ option there measured its cost as small next to the encode.
 
 - `migrate_space` wrote a fresh file and renamed it over an existing
   `archive.dialog`, which dropped whatever a space had already written to
-  it. It now starts from a copy of that file.
+  it. It now writes into that file through `Chronicle` (see below for why
+  not a copy).
 - `unmigrated` took any `archive.dialog` to mean "migrated", but opening
   a `Chronicle` creates one. Migration now writes
   `archive.dialog.migrated` last, and that marker decides.
@@ -892,3 +893,70 @@ option there measured its cost as small next to the encode.
   name, or a file that is not a block. The migration now fails instead,
   with the file written and the `fs` archive kept, and `strays` lists
   those files.
+
+## 2026-11-13: the review's other findings
+
+The review also listed findings it reasoned about without a test. Each is
+addressed here, with a test except where noted.
+
+**Durability on a timer.** A sync point was only ever made by a later
+append, `Chronicle::sync` or the last close. A process that committed and
+then sat idle could lose that commit to a power loss for as long as it
+stayed idle. Now a thread per open file (holding the archive only while it
+looks) makes a sync point once appends have waited `SYNC_AFTER` for one.
+The thread and a handle being dropped take a mutex in turn, so the
+thread's handle is never the last one and the last close always runs
+where the user dropped the handle. Pinned by
+`it_syncs_a_commit_no_append_follows`, which waits for the durable slot to
+reach a lone commit's sequence.
+
+**The slot's size against the freed-page lists.** The slot (64 KiB) lists
+the index pages free to reuse and those freed since the last sync point,
+4 bytes each. Measured by appending sequential 8-byte blocks:
+
+| batch | file | reusable + pending | slot bytes |
+|---|---|---|---|
+| 50 000 | to 2 M blocks | under 2 700 | under 11 KB |
+| 1 000 000 | 2 M | 2 993 | 12 145 |
+| 1 000 000 | 4 M | 6 945 | 27 941 |
+| 1 000 000 | 6 M | 9 496 | 38 145 |
+
+With batches of 50 000 the lists stay flat as the file grows: the tree
+buffers inserts, so one commit rewrites a bounded number of pages. With
+batches of a million they grow with the file, and would outgrow the slot
+somewhere past 12 million blocks. A commit whose slot does not fit fails
+and leaves the file as it was, but an append that size would fail every
+time it was tried. An append now commits at most 32 Ki blocks at a time
+(`COMMIT_BLOCKS`). A fold of extents is not split: an extent holds 1 MiB,
+and a fold takes what the listed extents hold.
+
+**The table of open files held across recovery.** `open_with` held the
+process-wide table while it recovered the file, which after a power loss
+can read everything written since the last sync point. Every other open,
+and every last close, in the process waited for it. Now opens of one file
+wait for each other through a gate keyed by the file (or, for a file not
+made yet, its path), and the table is taken only to look up and register.
+Pinned by `it_opens_another_file_while_one_is_recovered`, which holds one
+file in recovery through a test hook and opens another meanwhile.
+
+**Blocking I/O in async providers.** `Put` and `Import` ran the append on
+the caller's thread: waiting for the writer's turn another process holds,
+and the syncs of a sync point. On a runtime with one thread, that stalls
+every other task. When a tokio runtime runs the caller, they now append on
+its blocking threads (the `fs` provider goes through `tokio::fs`, which
+does the same). `Get` stays inline: it reads the mapping and takes no
+lock. Pinned by `it_waits_for_the_turn_off_the_runtime`, in which another
+task of a one-thread runtime must run while the import waits. It fails
+after 5 s with the append put back inline.
+
+**Locks let go by another descriptor's close.** fcntl locks belong to the
+process, and closing any descriptor of the file lets go of all of them.
+The archive opens a file once per process, but the migration copied an
+open `archive.dialog` with `std::fs::copy`, which opens and closes a
+descriptor of it. The migration now writes into an existing file through
+`Chronicle`, which shares the process's handle, so nothing in the
+workspace opens the file beside the archive. Pinned by
+`it_migrates_into_a_file_a_process_has_open`. Linux's
+open-file-description locks would not be let go of, but they would make
+Linux the one platform where two handles in a process exclude each other,
+and macOS has no equivalent, so the archive keeps fcntl locks.

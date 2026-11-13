@@ -47,6 +47,27 @@ use tree::{Child, Nodes, PAGE, Pages, check, is_stale};
 static OPEN: LazyLock<Mutex<HashMap<FileId, Weak<Inner>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// Opens under way in this process, by what they open: two opens of one
+/// file wait for each other, so the second shares what the first opened,
+/// while opens of other files go on. The table of open files is not held
+/// while a file is recovered, which can read everything written since its
+/// last sync point.
+static OPENING: LazyLock<Mutex<HashMap<Opens, Arc<Mutex<()>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Called with the path of each file opened, before it is recovered.
+#[cfg(test)]
+#[allow(clippy::type_complexity)]
+static RECOVERING: Mutex<Option<Arc<dyn Fn(&Path) + Send + Sync>>> = Mutex::new(None);
+
+/// What an open opens: the file, when there is one, whatever name it is
+/// reached by; else the path it will be made at.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum Opens {
+    File(FileId),
+    Path(PathBuf),
+}
+
 /// Which file a path names, whatever name it is reached by (see
 /// `file::identity`): a file reached by two names (a hard link, a symbolic
 /// link) is one file, and must be one handle in a process. On Unix the
@@ -104,6 +125,15 @@ const SYNC_APPENDS: u64 = 64;
 const SYNC_PAGES: usize = 2048;
 const SYNC_AFTER: Duration = Duration::from_secs(2);
 
+/// The most blocks one commit appends: a larger append is made as several.
+/// The index pages a commit frees are listed in the slot, which has a size
+/// of its own; the more blocks a commit inserts, the more pages it
+/// rewrites. Appends of 50 000 blocks list under 3 000 pages (12 KB) at
+/// any file size measured, to 2 million blocks; appends of a million list
+/// 9 500 pages (38 KB) at 6 million, growing with the file, and would
+/// outgrow the slot past 12 million or so.
+const COMMIT_BLOCKS: usize = 32 * 1024;
+
 /// Keys that are hashes already: hashed by taking them as they are.
 #[derive(Clone, Copy, Default)]
 struct Hashed;
@@ -155,6 +185,10 @@ pub struct Options {
     /// process holds; taken back as this process closes. On by default; a
     /// process that only reads can leave none, and grow the file by none.
     pub leave_extent: bool,
+    /// Whether a thread makes a sync point once appends have waited
+    /// [`SYNC_AFTER`] for one, so a commit followed by no other append is
+    /// durable within a few seconds. On by default.
+    pub sync_in_background: bool,
 }
 
 impl Default for Options {
@@ -165,6 +199,7 @@ impl Default for Options {
             rows_cached: 4096,
             extent: 1 << 20,
             leave_extent: true,
+            sync_in_background: true,
         }
     }
 }
@@ -309,6 +344,9 @@ impl Drop for Inner {
 }
 
 struct Inner {
+    /// Held by the sync thread while it holds the archive, and by a handle
+    /// being dropped: the thread's handle is never the last.
+    looking: Arc<Mutex<()>>,
     timings: Timings,
     file: File,
     path: PathBuf,
@@ -1126,20 +1164,45 @@ impl Chronicle {
     /// options it was first opened with.
     pub fn open_with(path: impl AsRef<Path>, options: Options) -> Result<Self, ArchiveError> {
         let path = path.as_ref().to_path_buf();
-        let mut open = OPEN.lock();
-        open.retain(|_, inner| inner.strong_count() > 0);
-        // Looked up before the file is opened: a descriptor opened and
-        // closed again for a file this process has open would let go of its
-        // locks.
-        if let Some(id) = FileId::at(&path).map_err(|error| storage_error(&path, error))?
-            && let Some(inner) = open.get(&id).and_then(Weak::upgrade)
-        {
-            return Ok(Self {
-                inner: ManuallyDrop::new(inner),
-            });
+        let opens = match FileId::at(&path).map_err(|error| storage_error(&path, error))? {
+            Some(id) => Opens::File(id),
+            None => Opens::Path(
+                std::path::absolute(&path).map_err(|error| storage_error(&path, error))?,
+            ),
+        };
+        let gate = OPENING.lock().entry(opens.clone()).or_default().clone();
+        let opened = {
+            let _gate = gate.lock();
+            Self::open_shared(&path, options)
+        };
+        let mut opening = OPENING.lock();
+        // Only this open and the table hold it: no other is under way.
+        if Arc::strong_count(&gate) == 2 {
+            opening.remove(&opens);
         }
-        let opened = Self::open_unshared(&path, options)?;
-        let id = FileId::of(&opened.inner.file).map_err(|error| storage_error(&path, error))?;
+        opened
+    }
+
+    /// Shares the handle this process has of the file at `path`, or opens
+    /// one, with no other open of the file under way in this process.
+    fn open_shared(path: &Path, options: Options) -> Result<Self, ArchiveError> {
+        {
+            let mut open = OPEN.lock();
+            open.retain(|_, inner| inner.strong_count() > 0);
+            // Looked up before the file is opened: a descriptor opened and
+            // closed again for a file this process has open would let go
+            // of its locks.
+            if let Some(id) = FileId::at(path).map_err(|error| storage_error(path, error))?
+                && let Some(inner) = open.get(&id).and_then(Weak::upgrade)
+            {
+                return Ok(Self {
+                    inner: ManuallyDrop::new(inner),
+                });
+            }
+        }
+        let opened = Self::open_unshared(path, options)?;
+        let id = FileId::of(&opened.inner.file).map_err(|error| storage_error(path, error))?;
+        let mut open = OPEN.lock();
         if let Some(inner) = open.get(&id).and_then(Weak::upgrade) {
             // Another name for an open file came to name it between the
             // look and the open. The new descriptor is never closed, so
@@ -1150,12 +1213,62 @@ impl Chronicle {
             });
         }
         open.insert(id, Arc::downgrade(&opened.inner));
+        drop(open);
+        if opened.inner.options.sync_in_background {
+            let inner = Arc::downgrade(&opened.inner);
+            let looking = opened.inner.looking.clone();
+            std::thread::Builder::new()
+                .name("chronicle sync".into())
+                .spawn(move || Self::keep_synced(inner, looking))
+                .map_err(|error| storage_error(path, error))?;
+        }
         Ok(opened)
+    }
+
+    /// Makes a sync point once appends have waited [`SYNC_AFTER`] for one,
+    /// until the archive is closed. Holds the archive only while it looks,
+    /// under `looking`, which a handle being dropped takes first: a handle
+    /// dropped meanwhile waits for this one to go, and so is the last
+    /// handle and closes the file itself.
+    fn keep_synced(inner: Weak<Inner>, looking: Arc<Mutex<()>>) {
+        loop {
+            std::thread::sleep(SYNC_AFTER / 2);
+            let _looking = looking.lock();
+            let Some(inner) = inner.upgrade() else {
+                return;
+            };
+            // Not dropped as a handle: dropping one would wait for
+            // `looking`, held here, and this one is never the last.
+            let mut archive = ManuallyDrop::new(Self {
+                inner: ManuallyDrop::new(inner),
+            });
+            let dies = {
+                #[cfg(test)]
+                {
+                    archive.inner.dies.load(Ordering::Relaxed)
+                }
+                #[cfg(not(test))]
+                {
+                    false
+                }
+            };
+            // Read from this process's view, without a lock: what another
+            // process appended, its own thread syncs.
+            let slot = &archive.current().slot;
+            if !dies
+                && slot.durable != slot.sequence
+                && archive.inner.synced.lock().elapsed() >= SYNC_AFTER
+            {
+                let _ = archive.sync_now(false);
+            }
+            // SAFETY: taken once, and `archive` is not used again.
+            drop(unsafe { ManuallyDrop::take(&mut archive.inner) });
+        }
     }
 
     /// Opens the file with a handle of its own, not shared with another
     /// open of it in this process. Outside tests, only [`open_with`](Self::open_with)
-    /// calls it, holding the table of open files. A test uses it for a
+    /// calls it, with no other open of the file under way. A test uses it for a
     /// second handle with its own index and extents, as another process
     /// has, driven from one thread; its locks are not another process's,
     /// so a test of what locks keep apart runs another process instead.
@@ -1170,6 +1283,13 @@ impl Chronicle {
             .map_err(|error| storage_error(&path, error))?;
         #[cfg(all(feature = "trace", unix))]
         crate::trace::opened(&file, &path);
+        #[cfg(test)]
+        {
+            let hook = RECOVERING.lock().clone();
+            if let Some(hook) = hook {
+                hook(&path);
+            }
+        }
         let current = recover(&file)
             .and_then(|slot| snapshot(&file, slot, None))
             .map_err(|error| storage_error(&path, error))?;
@@ -1178,6 +1298,7 @@ impl Chronicle {
         locks::lock(&file, locks::PRESENT, false, true)
             .map_err(|error| storage_error(&path, error))?;
         let inner = Arc::new(Inner {
+            looking: Arc::default(),
             known: AtomicU64::new(current.slot.end),
             current: ArcSwap::from_pointee(current),
             timings: Timings::default(),
@@ -1563,14 +1684,17 @@ impl Chronicle {
     /// Appends the `blocks` the archive does not hold yet to `catalog`, as
     /// one append.
     pub fn append(&self, catalog: &str, blocks: &[Buffer]) -> Result<(), ArchiveError> {
-        let started = Instant::now();
-        let appended = self
-            .append_somewhere(catalog, blocks)
-            .and_then(|()| self.sync_if_due())
-            .map_err(|error| storage_error(&self.inner.path, error));
-        Timings::add(&self.inner.timings.append, started);
-        self.inner.timings.appends.fetch_add(1, Ordering::Relaxed);
-        appended
+        for blocks in blocks.chunks(COMMIT_BLOCKS) {
+            let started = Instant::now();
+            let appended = self
+                .append_somewhere(catalog, blocks)
+                .and_then(|()| self.sync_if_due())
+                .map_err(|error| storage_error(&self.inner.path, error));
+            Timings::add(&self.inner.timings.append, started);
+            self.inner.timings.appends.fetch_add(1, Ordering::Relaxed);
+            appended?;
+        }
+        Ok(())
     }
 
     /// Appends with the writer's turn if it is free, folding in what other
@@ -2976,6 +3100,10 @@ fn snapshot_after_claim(
 /// [`close`](Chronicle::close)).
 impl Drop for Chronicle {
     fn drop(&mut self) {
+        // Waits out the sync thread holding the archive, so that a handle
+        // that is the last but for the thread's closes the file.
+        let looking = self.inner.looking.clone();
+        let _looking = looking.lock();
         let open = self.close();
         // SAFETY: taken once, here, and not used again: `self` is going.
         let inner = unsafe { ManuallyDrop::take(&mut self.inner) };
@@ -3149,7 +3277,7 @@ impl Provider<Put> for Chronicle {
             block.blake3_hash().as_bytes(),
             block.as_ref(),
         );
-        Resume::now(self.append(effect.catalog(), std::slice::from_ref(&block)))
+        self.append_off_runtime(effect.catalog().to_string(), vec![block])
     }
 }
 
@@ -3163,7 +3291,34 @@ impl Provider<Import> for Chronicle {
                 block.as_ref(),
             );
         }
-        Resume::now(self.append(effect.catalog(), effect.blocks()))
+        self.append_off_runtime(effect.catalog().to_string(), effect.blocks().to_vec())
+    }
+}
+
+impl Chronicle {
+    /// Appends on tokio's blocking threads when a tokio runtime runs the
+    /// caller, and at once otherwise: an append can wait for the writer's
+    /// turn another process holds, and make a sync point, which must not
+    /// hold up the runtime's other tasks. A read answers at once: it reads
+    /// the file's mapping and takes no lock.
+    fn append_off_runtime(
+        &self,
+        catalog: String,
+        blocks: Vec<Buffer>,
+    ) -> Resume<'_, Result<(), ArchiveError>> {
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return Resume::now(self.append(&catalog, &blocks));
+        };
+        let archive = Self {
+            inner: ManuallyDrop::new(Arc::clone(&self.inner)),
+        };
+        let path = self.inner.path.clone();
+        Resume::later(async move {
+            runtime
+                .spawn_blocking(move || archive.append(&catalog, &blocks))
+                .await
+                .unwrap_or_else(|error| Err(storage_error(&path, io::Error::other(error))))
+        })
     }
 }
 
@@ -3178,7 +3333,7 @@ mod tests {
     /// back at once, here and through another handle. Once the turn is
     /// free, the next append folds them into the file and retires the
     /// extent; everything reads back after reopening.
-    #[test]
+    #[dialog_common::test]
     fn it_appends_without_waiting_while_another_process_holds_the_turn() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("archive");
@@ -3270,7 +3425,7 @@ mod tests {
     /// process as it opened is before its blocks, so it stays, free, and
     /// the next open takes it again instead of growing the file. The file
     /// reopens whole, and every block reads back.
-    #[test]
+    #[dialog_common::test]
     fn it_cuts_free_extents_off_the_end_at_the_last_close() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("archive");
@@ -3317,7 +3472,7 @@ mod tests {
     /// An extent a writer left before folding it in (its process gone) is
     /// read from where it is after reopening, and folded in by the next
     /// writer to take the turn.
-    #[test]
+    #[dialog_common::test]
     fn it_reads_and_folds_in_an_extent_its_writer_left() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("archive");
@@ -3384,7 +3539,7 @@ mod tests {
     /// it, and reads what was appended after the mapping was made; past
     /// it, the file is mapped again, reserving room to grow.
     #[cfg(unix)]
-    #[test]
+    #[dialog_common::test]
     fn it_maps_the_file_again_only_when_it_outgrows_the_mapping() -> io::Result<()> {
         let directory = tempfile::tempdir()?;
         let file = OpenOptions::new()
@@ -3434,7 +3589,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[dialog_common::test]
     async fn it_returns_none_for_missing_content() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let archive = Chronicle::open(directory.path().join("archive"))?;
@@ -3449,7 +3604,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[dialog_common::test]
     async fn it_stores_and_retrieves_content() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let archive = Chronicle::open(directory.path().join("archive"))?;
@@ -3472,7 +3627,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[dialog_common::test]
     async fn it_keeps_catalogs_apart() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let archive = Chronicle::open(directory.path().join("archive"))?;
@@ -3495,7 +3650,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[dialog_common::test]
     async fn it_imports_a_batch() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let archive = Chronicle::open(directory.path().join("archive"))?;
@@ -3515,7 +3670,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[dialog_common::test]
     async fn it_writes_a_block_it_holds_only_once() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("archive");
@@ -3529,7 +3684,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[dialog_common::test]
     async fn it_reads_what_it_wrote_after_reopening() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("archive");
@@ -3549,7 +3704,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[dialog_common::test]
     async fn it_drops_a_torn_tail_and_keeps_the_whole_records() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("archive");
@@ -3588,7 +3743,7 @@ mod tests {
 
     /// A slot whose bytes changed is not whole: opening takes the other,
     /// and drops the append only the changed one named.
-    #[tokio::test]
+    #[dialog_common::test]
     async fn it_opens_from_the_other_slot_when_one_changed() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("archive");
@@ -3622,7 +3777,7 @@ mod tests {
     /// yet), a reader on another thread reads what was there before, frames
     /// in place included, and misses the block being appended rather than
     /// waiting for it; once the append publishes, the block reads.
-    #[test]
+    #[dialog_common::test]
     fn it_reads_while_an_append_is_under_way() -> anyhow::Result<()> {
         use crate::node::tests::{entity_segment, segment_manifest};
         use std::sync::mpsc::channel;
@@ -3704,7 +3859,7 @@ mod tests {
     /// its turn comes: a node the other appended is not written again,
     /// tokens the other wrote first are not either, and every block reads
     /// back, in this process and after reopening.
-    #[test]
+    #[dialog_common::test]
     fn it_reconciles_an_append_prepared_before_another() -> anyhow::Result<()> {
         use crate::node::tests::{entity_segment, segment_manifest};
 
@@ -3771,7 +3926,7 @@ mod tests {
     /// A node an append framed before its turn, which another writer
     /// appended whole meanwhile, cannot be named by a frame of its own:
     /// the append prepares again in its turn, and the node stays whole.
-    #[test]
+    #[dialog_common::test]
     fn it_prepares_again_when_a_framed_node_was_appended_whole() -> anyhow::Result<()> {
         use crate::node::tests::{entity_segment, index_over, segment_manifest};
 
@@ -3862,7 +4017,7 @@ mod tests {
     /// over where they were: every page in the file is one the root
     /// reaches or one free to write over, and the file holds fewer pages
     /// than were written.
-    #[test]
+    #[dialog_common::test]
     fn it_writes_index_pages_over_once_a_sync_point_frees_them() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let archive = Chronicle::open(directory.path().join("archive"))?;
@@ -3896,7 +4051,7 @@ mod tests {
     /// finds them stale rather than reading another node's entries (or
     /// reads them as they were, from the pages this process kept), and a
     /// read through the archive looks again from a newer one.
-    #[test]
+    #[dialog_common::test]
     fn it_finds_a_page_written_over_stale_and_reads_on() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let archive = Chronicle::open(directory.path().join("archive"))?;
@@ -3929,7 +4084,7 @@ mod tests {
     /// Readers on other threads read every block they hold while a writer
     /// writes the index's pages over: each read is the block, whether its
     /// snapshot's pages were still there or it looked again.
-    #[test]
+    #[dialog_common::test]
     fn it_reads_every_block_while_pages_are_written_over() -> anyhow::Result<()> {
         use std::sync::atomic::AtomicBool;
 
@@ -3968,7 +4123,7 @@ mod tests {
 
     /// `sync` makes a sync point: the durable slot is the file as it was,
     /// and every page freed until then is free to write over.
-    #[test]
+    #[dialog_common::test]
     fn it_makes_a_sync_point() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let archive = Chronicle::open(directory.path().join("archive"))?;
@@ -3998,7 +4153,7 @@ mod tests {
     /// opening checks what was written since the durable slot, finds the
     /// record damaged, and goes back to the newest state that is whole: no
     /// block it holds is damaged, and every block synced before is there.
-    #[test]
+    #[dialog_common::test]
     fn it_goes_back_to_what_is_whole_after_a_power_loss() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("archive");
@@ -4055,7 +4210,7 @@ mod tests {
     /// lost (the page there is still the one it wrote over) fails its
     /// check when the file is opened in the next boot, and the file goes
     /// back to the durable slot, whose pages nothing wrote over.
-    #[test]
+    #[dialog_common::test]
     fn it_goes_back_to_the_durable_slot_when_a_page_did_not_reach_the_disk() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("archive");
@@ -4098,7 +4253,7 @@ mod tests {
     /// Readers on other threads read every block they find while one writer
     /// keeps appending frames and whole blocks: whatever a reader finds, it
     /// reads whole, and its bytes hash to its name.
-    #[test]
+    #[dialog_common::test]
     fn it_reads_whole_whatever_it_finds_while_appending() -> anyhow::Result<()> {
         use crate::node::tests::{entity_segment, segment_manifest};
         use std::sync::atomic::AtomicBool;
@@ -4153,7 +4308,7 @@ mod tests {
     /// A read of a block the file does not hold, while an append holds the
     /// writer's turn, answers without waiting for it: the file has not
     /// grown past what this process knows, so there is nothing to read.
-    #[test]
+    #[dialog_common::test]
     fn it_answers_a_miss_while_an_append_holds_the_turn() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let archive = Chronicle::open(directory.path().join("archive"))?;
@@ -4177,7 +4332,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[dialog_common::test]
     async fn it_refuses_a_file_that_is_not_an_archive() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("archive");
@@ -4229,7 +4384,7 @@ mod tests {
     /// every build, even when it parses as a tree node with padding
     /// between its prelude and its body: its rows would rebuild other
     /// bytes, so it is kept whole, not as a frame.
-    #[test]
+    #[dialog_common::test]
     fn it_reads_back_a_padded_node_as_appended() -> anyhow::Result<()> {
         use crate::node::tests::entity_segment;
         use dialog_search_tree::Manifest;
@@ -4245,11 +4400,146 @@ mod tests {
     /// the mixed layout (as `PersistentSegment::from_columns` allows) reads
     /// back as appended: its rows would be encoded again under the layout
     /// the keys imply, other bytes, so it is kept whole.
-    #[test]
+    #[dialog_common::test]
     fn it_reads_back_a_mixed_layout_segment_as_appended() -> anyhow::Result<()> {
         use crate::node::tests::{mixed_entity_segment, segment_manifest};
 
         non_canonical_node_reads_back(mixed_entity_segment("alice", &segment_manifest())?)
+    }
+
+    /// A file being recovered holds up no open of another file: the table
+    /// of open files is not held while one is.
+    #[dialog_common::test]
+    fn it_opens_another_file_while_one_is_recovered() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let slow = directory.path().join("slow");
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let released = Mutex::new(released);
+        let (started, starts) = std::sync::mpsc::channel::<()>();
+        let started = Mutex::new(started);
+        let held = slow.clone();
+        *RECOVERING.lock() = Some(Arc::new(move |path: &Path| {
+            if path == held {
+                let _ = started.lock().send(());
+                let _ = released.lock().recv();
+            }
+        }));
+        let opening = std::thread::spawn(move || Chronicle::open(slow).map(drop));
+        starts.recv_timeout(Duration::from_secs(10))?;
+        let (done, finished) = std::sync::mpsc::channel();
+        let other = directory.path().join("other");
+        std::thread::spawn(move || {
+            let _ = done.send(Chronicle::open(other).map(drop));
+        });
+        let other = finished.recv_timeout(Duration::from_secs(10));
+        release.send(())?;
+        *RECOVERING.lock() = None;
+        opening.join().expect("the open of the slow file")?;
+        assert!(
+            matches!(other, Ok(Ok(()))),
+            "the other file opened while the first was recovered: {other:?}"
+        );
+        Ok(())
+    }
+
+    /// An import that waits for the writer's turn holds up no other task of
+    /// the runtime running it, one thread as it is: it waits on a blocking
+    /// thread. The turn is held here until another task of the runtime
+    /// says to let it go, which it could not while the import held the
+    /// runtime's thread.
+    #[dialog_common::test]
+    fn it_waits_for_the_turn_off_the_runtime() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let archive = Chronicle::open(directory.path().join("archive"))?;
+        let (go, gone) = std::sync::mpsc::channel::<()>();
+        let (held, holding) = std::sync::mpsc::channel::<()>();
+        let archive = &archive;
+        std::thread::scope(|scope| -> anyhow::Result<()> {
+            let holder = scope.spawn(move || -> anyhow::Result<bool> {
+                let turn = archive.turn()?;
+                held.send(())?;
+                let told = gone.recv_timeout(Duration::from_secs(5)).is_ok();
+                drop(turn);
+                Ok(told)
+            });
+            holding.recv()?;
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            runtime.block_on(async {
+                // A catalog the file does not number yet: no extent takes
+                // it, so the import waits for the turn.
+                let import = subject()
+                    .writer()
+                    .archive()
+                    .catalog("fresh")
+                    .import(vec![block("waits")])
+                    .perform(archive);
+                let tell = async {
+                    tokio::task::yield_now().await;
+                    let _ = go.send(());
+                };
+                let (imported, ()) = futures_util::join!(import, tell);
+                imported
+            })?;
+            assert!(
+                holder.join().expect("the holder")?,
+                "the other task told the holder to let the turn go"
+            );
+            Ok(())
+        })?;
+        assert!(
+            archive
+                .get("fresh", block("waits").blake3_hash())?
+                .is_some()
+        );
+        Ok(())
+    }
+
+    /// A commit no other append follows is made durable by the sync thread
+    /// within a few seconds, with no call to [`Chronicle::sync`].
+    #[dialog_common::test]
+    fn it_syncs_a_commit_no_append_follows() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let archive = Chronicle::open(directory.path().join("archive"))?;
+        archive.append("index", &[block("alone")])?;
+        let sequence = archive.current().slot.sequence;
+        assert!(
+            Slot::read_durable(&archive.inner.file)?.is_none_or(|slot| slot.sequence < sequence),
+            "the append made no sync point itself"
+        );
+        let deadline = Instant::now() + SYNC_AFTER * 3;
+        while !Slot::read_durable(&archive.inner.file)?
+            .is_some_and(|slot| slot.sequence >= sequence)
+        {
+            assert!(
+                Instant::now() < deadline,
+                "no sync point within {:?}",
+                SYNC_AFTER * 3
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        Ok(())
+    }
+
+    /// An append larger than a commit takes is made as several commits,
+    /// so the pages one commit frees stay within what the slot lists (see
+    /// [`COMMIT_BLOCKS`]), and every block reads back.
+    #[dialog_common::test]
+    fn it_commits_a_large_append_in_parts() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let archive = Chronicle::open(directory.path().join("archive"))?;
+        let blocks: Vec<Buffer> = (0..2 * COMMIT_BLOCKS as u64 + 1)
+            .map(|n| Buffer::from(n.to_le_bytes().to_vec()))
+            .collect();
+        archive.append("index", &blocks)?;
+        assert_eq!(archive.inner.timings.appends.load(Ordering::Relaxed), 3);
+        assert_eq!(archive.len(), blocks.len());
+        for block in blocks.iter().step_by(997) {
+            let read = archive.get("index", block.blake3_hash())?;
+            assert_eq!(read.as_deref(), Some(block.as_ref()));
+        }
+        Ok(())
     }
 }
 
@@ -4264,7 +4554,7 @@ mod breakdown {
     /// the mapping, checking each one's checksum, the keys of every block,
     /// frame and token, sorting them, and writing the tree in one batch
     /// (in memory). Run by hand.
-    #[test]
+    #[dialog_common::test]
     #[ignore = "rebuilds the index of the file named by DIALOG_ARCHIVE_INDEX"]
     fn rebuild() -> anyhow::Result<()> {
         use crate::archive::tree::{Node, tests::Memory};
@@ -4329,7 +4619,7 @@ mod breakdown {
     /// `DIALOG_ARCHIVE_INDEX` takes alone, as a file holding no history
     /// would: every frame the root reaches written whole (against nothing)
     /// and every token those frames name. Run by hand.
-    #[test]
+    #[dialog_common::test]
     #[ignore = "sizes the tree DIALOG_ARCHIVE_ROOT names in DIALOG_ARCHIVE_INDEX"]
     fn live() -> anyhow::Result<()> {
         use crate::rows::{INDEX, NONE, put_rows};
@@ -4432,7 +4722,7 @@ mod breakdown {
     /// kind by kind, what its tokens' records spend on lengths and
     /// padding, and what the archive keeps in memory to read it. Run by
     /// hand.
-    #[test]
+    #[dialog_common::test]
     #[ignore = "breaks down the file named by DIALOG_ARCHIVE_INDEX"]
     fn breakdown() -> anyhow::Result<()> {
         let Ok(path) = std::env::var("DIALOG_ARCHIVE_INDEX") else {

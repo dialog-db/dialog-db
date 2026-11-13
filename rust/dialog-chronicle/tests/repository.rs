@@ -115,7 +115,7 @@ async fn commit_facts(at: &Directory, peer: &str, name: &str) -> anyhow::Result<
     Ok(())
 }
 
-#[tokio::test]
+#[dialog_common::test]
 async fn it_commits_and_selects_through_a_file_archive() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let at = Directory::At(directory.path().to_string_lossy().into_owned());
@@ -232,7 +232,7 @@ fn copy_share(source: &Path, target: &Path, share: usize, go: &Path) -> anyhow::
 
 /// The other process of [`it_takes_turns_with_another_process`]: copies its
 /// share of the blocks. Does nothing unless that test started it.
-#[test]
+#[dialog_common::test]
 #[ignore = "run by it_takes_turns_with_another_process in its own process"]
 fn copying_process() -> anyhow::Result<()> {
     let (Ok(source), Ok(target), Ok(share)) = (
@@ -257,7 +257,7 @@ fn copying_process() -> anyhow::Result<()> {
 /// so the frames either writes name the other's tokens and nodes by the
 /// ids the file gives them. Every block reads back from a fresh open, and
 /// a process that holds the file open sees the other's blocks.
-#[tokio::test]
+#[dialog_common::test]
 async fn it_takes_turns_with_another_process() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let at = Directory::At(directory.path().to_string_lossy().into_owned());
@@ -425,7 +425,7 @@ fn compare(archive: &Chronicle, catalog: &str, hash: &Blake3Hash) -> anyhow::Res
 
 /// Every node the archive keeps as a frame reads the same served in place
 /// as it does from its block, accessor by accessor.
-#[tokio::test]
+#[dialog_common::test]
 async fn it_serves_every_node_as_its_block_reads() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let at = Directory::At(directory.path().to_string_lossy().into_owned());
@@ -442,7 +442,7 @@ async fn it_serves_every_node_as_its_block_reads() -> anyhow::Result<()> {
 
 /// The same, over an archive file named by `DIALOG_ARCHIVE_SERVED`: run by
 /// hand over a large replica.
-#[test]
+#[dialog_common::test]
 #[ignore = "compares every node of a file named by DIALOG_ARCHIVE_SERVED"]
 fn it_serves_every_node_of_a_file_as_its_block_reads() -> anyhow::Result<()> {
     let Ok(path) = std::env::var("DIALOG_ARCHIVE_SERVED") else {
@@ -464,7 +464,7 @@ fn it_serves_every_node_of_a_file_as_its_block_reads() -> anyhow::Result<()> {
 /// with other data. Frames are verified in a debug build, so a row taken
 /// for an entry whose data changed would fail to rebuild its node's block
 /// and count as unverified; none does, and every fact reads back.
-#[tokio::test]
+#[dialog_common::test]
 async fn it_takes_unchanged_rows_from_the_node_a_commit_supersedes() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let at = Directory::At(directory.path().to_string_lossy().into_owned());
@@ -533,7 +533,7 @@ async fn it_takes_unchanged_rows_from_the_node_a_commit_supersedes() -> anyhow::
 /// A repository whose space keeps its blocks in the archive reads its tree
 /// from the frames in place, the archive answering the tree's node reads,
 /// and selects what it committed.
-#[tokio::test]
+#[dialog_common::test]
 async fn it_selects_through_nodes_served_in_place() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let at = Directory::At(directory.path().to_string_lossy().into_owned());
@@ -568,7 +568,7 @@ async fn it_selects_through_nodes_served_in_place() -> anyhow::Result<()> {
 /// A node in an older layout is kept whole: its frame would rebuild it in
 /// the current layout, other bytes than were stored. The node is a real segment from a committed tree,
 /// archived again under the older layout's header.
-#[tokio::test]
+#[dialog_common::test]
 async fn it_keeps_a_node_of_another_layout_whole() -> anyhow::Result<()> {
     use dialog_corpus::{Datum, Key, State};
     use dialog_search_tree::{
@@ -638,7 +638,7 @@ async fn it_keeps_a_node_of_another_layout_whole() -> anyhow::Result<()> {
 /// With its cells in the file too, a repository commits, reopens and reads
 /// back, and no space keeps a memory directory: branch heads are in the
 /// file with the blocks they name.
-#[tokio::test]
+#[dialog_common::test]
 async fn it_keeps_branch_heads_in_the_file() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let at = Directory::At(directory.path().to_string_lossy().into_owned());
@@ -754,7 +754,7 @@ fn signalled(signal: &Path) -> bool {
 /// The other processes of the branch tests below: open the repository's
 /// branch, commit once, say ready, wait to be told to go, make their
 /// commits, say done, and close. Does nothing unless a test started it.
-#[tokio::test]
+#[dialog_common::test]
 #[ignore = "run by the branch tests in processes of its own"]
 async fn committing_process() -> anyhow::Result<()> {
     let Ok(setting) = std::env::var(COMMIT) else {
@@ -843,7 +843,7 @@ fn hold_turn(path: &Path) -> anyhow::Result<std::fs::File> {
 /// `locks` module), and `it_commits_concurrently_to_one_branch_from_many_processes`
 /// runs the commits.
 #[cfg(unix)]
-#[tokio::test]
+#[dialog_common::test]
 async fn it_commits_to_two_branches_from_two_processes_at_once() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let at_text = directory.path().to_string_lossy().into_owned();
@@ -899,7 +899,7 @@ async fn it_commits_to_two_branches_from_two_processes_at_once() -> anyhow::Resu
 /// Processes committing to one branch at once all land: a transaction that
 /// loses the race for the head is staged again over the one that won, so
 /// no commit's facts are lost.
-#[tokio::test]
+#[dialog_common::test]
 async fn it_commits_concurrently_to_one_branch_from_many_processes() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let at_text = directory.path().to_string_lossy().into_owned();

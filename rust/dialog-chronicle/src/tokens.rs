@@ -222,7 +222,7 @@ mod tests {
     use super::*;
     use std::io;
 
-    #[test]
+    #[dialog_common::test]
     fn it_reads_back_each_token_from_its_place_alone() -> io::Result<()> {
         let mut draft = Draft::detached();
         let tokens: Vec<Vec<u8>> = (0..40).map(|n| vec![n as u8; n * 3 % 37]).collect();
@@ -240,7 +240,7 @@ mod tests {
         Ok(())
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_interns_a_token_once() {
         let mut draft = Draft::detached();
         let a = draft.intern(b"alpha");

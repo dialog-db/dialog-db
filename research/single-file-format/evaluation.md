@@ -35,7 +35,7 @@ archive; `branch/fs` against the `file/*` stores isolates the archive. The
 harness uses only the API main and the branch share (repository, branch,
 transaction, query), and is built twice: in this branch, and in a worktree
 of `origin/main`. Every store reads through the tree in place where it can
-(`NodeSource`; main has none, and reads blocks). Every identity is derived
+(the archive answers the tree's `nodes::Read` with nodes read in place; main reads blocks). Every identity is derived
 from one seed, so every store writes the same blocks and ends on the same
 root, and a run refuses to report stores that disagree.
 

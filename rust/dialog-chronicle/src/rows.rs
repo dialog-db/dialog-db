@@ -562,7 +562,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_reads_back_rows_written_whole_and_against_a_base() -> io::Result<()> {
         let form = dialog_corpus::ENTITY_KEY_TAG as u32;
         // Ids as a real leaf has them: an entity column that rises, the
@@ -601,7 +601,7 @@ mod tests {
         Ok(())
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_reads_back_links_to_children_by_id_and_by_hash() -> io::Result<()> {
         let rows = Rows {
             kind: INDEX,
@@ -624,7 +624,7 @@ mod tests {
         Ok(())
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_reads_back_columns_written_in_runs() -> io::Result<()> {
         let columns: [&[u64]; 6] = [
             &[],
@@ -647,7 +647,7 @@ mod tests {
         Ok(())
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_fails_on_bytes_that_end_early() {
         let rows = segment(vec![[0xFE, 7, 0, 0, 0, 9]; 4]);
         let mut bytes = Vec::new();

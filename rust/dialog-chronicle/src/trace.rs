@@ -491,7 +491,7 @@ mod tests {
     /// Reads through the mapping inside an operation are caught, page by
     /// page, the archive answering them as it would untraced; positioned
     /// writes, syncs and locks are recorded too.
-    #[test]
+    #[dialog_common::test]
     fn it_catches_the_pages_an_operation_reads() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let out = directory.path().join("trace");

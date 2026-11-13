@@ -309,12 +309,13 @@ pub fn size(space: impl AsRef<Path>) -> io::Result<(u64, u64)> {
 }
 
 /// Moves one space into the file a file-archive space reads: transcodes its
-/// `fs` archive into [`MIGRATING`] (a copy of the space's `archive.dialog`
-/// when it has one, so what that holds stays), makes that durable, renames
-/// it to [`FILE_NAME`] and writes [`MIGRATED`]. Interrupted, it resumes: the
-/// blocks already in [`MIGRATING`] are not written again. Run it while no
-/// process has the space open: what one writes to `archive.dialog` during
-/// the copy is not in the file that replaces it.
+/// `fs` archive into the space's `archive.dialog` when it has one, through
+/// [`Chronicle`] as any writer of it does, so what it holds stays and a
+/// process with it open goes on using it; else into [`MIGRATING`], renamed
+/// to [`FILE_NAME`] once whole, so a space never has a partial file it did
+/// not have before. Then the file is made durable and [`MIGRATED`] written.
+/// Interrupted, it resumes: the blocks already in the file are not written
+/// again.
 ///
 /// With `remove_source`, the `fs` archive is deleted once the file is in
 /// place, but only if every file in it went in: a block whose bytes do not
@@ -326,19 +327,30 @@ pub fn migrate_space(space: impl AsRef<Path>, remove_source: bool) -> io::Result
     let space = space.as_ref();
     let migrating = space.join(MIGRATING);
     let file = space.join(FILE_NAME);
-    if !migrating.exists() && file.exists() {
-        std::fs::copy(&file, &migrating)?;
-    }
+    // A space that has its file already is migrated into it, through the
+    // archive, as any writer writes to it: whatever it holds stays, and a
+    // process with it open goes on using it. Else into a file of another
+    // name, renamed once whole.
+    let existing = file.exists();
+    let target = if existing { &file } else { &migrating };
     let report = {
         let archive =
-            Chronicle::open(&migrating).map_err(|error| io::Error::other(error.to_string()))?;
+            Chronicle::open(target).map_err(|error| io::Error::other(error.to_string()))?;
         let report = transcode(&Directory::space(space), &archive)?;
         archive
             .sync()
             .map_err(|error| io::Error::other(error.to_string()))?;
         report
     };
-    std::fs::rename(&migrating, &file)?;
+    if existing {
+        // Left by a run interrupted before the file was made: what it holds
+        // is in the fs archive still, and so in the file now.
+        if migrating.exists() {
+            std::fs::remove_file(&migrating)?;
+        }
+    } else {
+        std::fs::rename(&migrating, &file)?;
+    }
     if remove_source {
         let corrupt: usize = report.catalogs.iter().map(|c| c.corrupt.len()).sum();
         let strays = strays(space)?;

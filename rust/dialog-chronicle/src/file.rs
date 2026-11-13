@@ -289,7 +289,7 @@ mod tests {
         Ok((file, bytes.len() as u64))
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_reads_back_a_record_it_wrote() -> anyhow::Result<()> {
         let mut bytes = Vec::new();
         put_record(&mut bytes, Kind::Tokens, b"a body")?;
@@ -306,7 +306,7 @@ mod tests {
         Ok(())
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_refuses_a_record_cut_short() -> anyhow::Result<()> {
         let mut bytes = Vec::new();
         put_record(&mut bytes, Kind::Tokens, b"a body")?;
@@ -316,7 +316,7 @@ mod tests {
         Ok(())
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_refuses_a_record_whose_body_changed() -> anyhow::Result<()> {
         let mut bytes = Vec::new();
         put_record(&mut bytes, Kind::Tokens, b"a body")?;
@@ -327,7 +327,7 @@ mod tests {
         Ok(())
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_refuses_an_unknown_kind() -> anyhow::Result<()> {
         let mut bytes = Vec::new();
         put_record(&mut bytes, Kind::Tokens, b"a body")?;

@@ -280,7 +280,7 @@ fn play(
 /// every block synced, reads no block as other bytes, and a cell holding a
 /// value it held at the last sync point or was given after, every block of
 /// which is in the file.
-#[test]
+#[dialog_common::test]
 fn every_power_loss_recovers_to_what_was_synced() -> anyhow::Result<()> {
     play(workload, |wrong| match wrong {
         Wrong::File(wrong) | Wrong::Cell(wrong) | Wrong::Names(wrong) => Some(wrong),
@@ -328,7 +328,7 @@ fn wide_slots(path: &Path, watch: &disk::Watch) -> anyhow::Result<Done> {
 /// one copy written over in place, so a power loss during a sync point that
 /// keeps one of its sectors and not the other leaves no whole durable slot,
 /// and the file does not open.
-#[test]
+#[dialog_common::test]
 fn it_recovers_from_every_power_loss_with_slots_over_a_sector() -> anyhow::Result<()> {
     play(wide_slots, |wrong| match wrong {
         Wrong::File(wrong) | Wrong::Cell(wrong) | Wrong::Names(wrong) => Some(wrong),
@@ -340,7 +340,7 @@ fn it_recovers_from_every_power_loss_with_slots_over_a_sector() -> anyhow::Resul
 /// leaves a file that opens and keeps every block synced before it. Today
 /// the durable slot is one copy written over in place, so either tear
 /// leaves no whole durable slot and the file does not open.
-#[test]
+#[dialog_common::test]
 fn it_opens_after_a_durable_slot_torn_at_a_sector() -> anyhow::Result<()> {
     use super::slot::SLOT;
     use crate::file::MAGIC;

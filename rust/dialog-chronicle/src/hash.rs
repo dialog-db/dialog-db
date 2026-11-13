@@ -47,7 +47,7 @@ mod tests {
 
     /// The hash is part of the file format: these values must never
     /// change, or a file's index stops finding what it holds.
-    #[test]
+    #[dialog_common::test]
     fn it_hashes_as_the_format_says() {
         // Computed independently of this code, from the definition above.
         assert_eq!(hash(b""), 0x16C5_6ECB_6524_155D);
@@ -55,7 +55,7 @@ mod tests {
         assert_eq!(hash(b"mb.artist/name"), 0x31F8_8A83_EE29_8CB1);
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_tells_lengths_and_trailing_zeros_apart() {
         assert_ne!(hash(b"a"), hash(b"a\0"));
         assert_ne!(hash(&[0; 8]), hash(&[0; 16]));
