@@ -5,7 +5,7 @@
 |  | Understanding | Activity |
 |---|---|---|
 | **Status** | *What do we know?* The problem, accepted. What is held is decided: two commands with handlers built into dialog, each answering with a second command that a rule in the space places. That a rule's head is committed or transient today, never the overlay. That dialog dispatches commands as transient facts and reacts with inductive rules at commit, and has no built-in reaction that performs an effect. Use cases are drafted (nine). A strategy matrix exists with six columns, the sixth born from the decision on what is held. | *Where are we at?* Directing. The matrix is written and not read by the maintainer. |
-| **Agenda** | *What do we need to know?* Whether what a node holds is reached the way held-ness now is, by a command answered with commands, or by queries (asked): this is the strategy decision. Whether writing to the overlay from rules is its own topic. Whether the use cases are right (asked, not answered). For column 6 of the strategy and for the held decision alike: how dialog reacts to a command with an effect and answers with a command. For column 5: whether a record reaches a page whole. For column 4: what a decoding formula's rows would be, which the maintainer has not said. Which rows the maintainer weighs most. | *Where are we going?* The maintainer reads the use cases and the matrix; the open cells are checked; a direction is chosen. |
+| **Agenda** | *What do we need to know?* Whether a tree node has to be reachable as a concept, or whether a consumer asking a resolver directly is enough (asked): every difficulty in columns 2 to 5 comes from the concept. Whether writing to the overlay from rules is its own topic. Whether the use cases are right (asked, not answered). For column 6 of the strategy and for the held decision alike: how dialog reacts to a command with an effect and answers with a command. For column 5: whether a record reaches a page whole. For column 4: what a decoding formula's rows would be, which the maintainer has not said. Which rows the maintainer weighs most. | *Where are we going?* The maintainer reads the use cases and the matrix; the open cells are checked; a direction is chosen. |
 
 ## 2026-11-12, Describing: what was tried and what was seen
 
@@ -381,3 +381,40 @@ holding it describes.
 wait for overlay writes. Scope: a way for rules to write to the overlay
 is not taken on in this topic; whether it becomes a topic of its own is
 on the agenda.
+
+## 2026-11-13, Directing: contents by resolvers; where the difficulty came from
+
+**Asked.** For a node's contents: commands answered with commands, as
+for held, or queries? The maintainer: "I expected through resolvers;
+what commands help us [with is] to avoid issuing a query if it would
+cause a block to be fetched."
+
+**Learned.** Column 6 is struck. Commands have one job: letting a
+consumer know what it may ask for without causing a fetch.
+
+Looking at the columns left (2 to 5), all four put a rule and a concept
+between the consumer and the resolver. Every difficulty recorded since
+the first sitting sits in that layer:
+
+- a resolver's rows had no entity, so a concept over them collapsed;
+- a rule could not be given its node, so a concept of nodes had to
+  recurse from the root;
+- only `this` reaches a rule's body, so a child's details came back
+  unpaired or cost a walk.
+
+None is a property of the resolvers. A resolver asked directly, with
+its node as a constant, returns whole rows from one block: seen on
+2026-11-12 through tonk's evaluate, and it is how dialog's own tests
+read them. The concept was assumed because a tonk page sends concept
+queries and a tonk view shows a concept, and the assumption was never
+written down or questioned. It is now column 7.
+
+*You are not your idea.* Column 7 is where the agent started on
+2026-11-12, before this topic existed (let the embedder's query carry
+any premise), and left when asked whether a concept and a rule could not
+expose the resolvers. Three of the columns and the draft branch's two
+changes followed from that turn.
+
+**Decided.** By the maintainer: contents through resolvers; column 6
+struck. The strategy among columns 2 to 5 and 7 is not decided; it
+turns on whether a node has to be a concept.
