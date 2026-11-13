@@ -60,8 +60,8 @@ static OPENING: LazyLock<Mutex<HashMap<Opens, Arc<Mutex<()>>>>> =
 #[allow(clippy::type_complexity)]
 static RECOVERING: Mutex<Option<Arc<dyn Fn(&Path) + Send + Sync>>> = Mutex::new(None);
 
-/// What an open opens: the file, when there is one, whatever name it is
-/// reached by; else the path it will be made at.
+/// What an open opens: the path it names, and the file, when there is
+/// one, whatever name it is reached by.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum Opens {
     File(FileId),
@@ -345,7 +345,7 @@ impl Drop for Inner {
 
 struct Inner {
     /// Held by the sync thread while it holds the archive, and by a handle
-    /// being dropped: the thread's handle is never the last.
+    /// being dropped that may be the last: see `sync_if_waited`.
     looking: Arc<Mutex<()>>,
     timings: Timings,
     file: File,
@@ -1185,23 +1185,47 @@ impl Chronicle {
     /// options it was first opened with.
     pub fn open_with(path: impl AsRef<Path>, options: Options) -> Result<Self, ArchiveError> {
         let path = path.as_ref().to_path_buf();
-        let opens = match FileId::at(&path).map_err(|error| storage_error(&path, error))? {
-            Some(id) => Opens::File(id),
-            None => Opens::Path(
-                std::path::absolute(&path).map_err(|error| storage_error(&path, error))?,
-            ),
-        };
-        let gate = OPENING.lock().entry(opens.clone()).or_default().clone();
+        // The path's gate first, always: an open of a file that is not made
+        // yet and one that comes after it was made, by the same path, wait
+        // for each other. Then the file's, when there is one: opens of one
+        // file by two names wait for each other. Always in that order, so
+        // no two opens each hold a gate the other waits for.
+        let by_path =
+            Opens::Path(std::path::absolute(&path).map_err(|error| storage_error(&path, error))?);
+        let path_gate = Self::gate(&by_path);
         let opened = {
-            let _gate = gate.lock();
-            Self::open_shared(&path, options)
+            let _path = path_gate.lock();
+            match FileId::at(&path).map_err(|error| storage_error(&path, error))? {
+                Some(id) => {
+                    let by_file = Opens::File(id);
+                    let file_gate = Self::gate(&by_file);
+                    let opened = {
+                        let _file = file_gate.lock();
+                        Self::open_shared(&path, options)
+                    };
+                    Self::ungate(&by_file, file_gate);
+                    opened
+                }
+                None => Self::open_shared(&path, options),
+            }
         };
+        Self::ungate(&by_path, path_gate);
+        opened
+    }
+
+    /// The gate of opens of `opens` (see [`OPENING`]).
+    fn gate(opens: &Opens) -> Arc<Mutex<()>> {
+        OPENING.lock().entry(opens.clone()).or_default().clone()
+    }
+
+    /// Lets go of the gate of `opens`, dropping it from the table when no
+    /// other open holds it.
+    fn ungate(opens: &Opens, gate: Arc<Mutex<()>>) {
         let mut opening = OPENING.lock();
         // Only this open and the table hold it: no other is under way.
         if Arc::strong_count(&gate) == 2 {
-            opening.remove(&opens);
+            opening.remove(opens);
         }
-        opened
     }
 
     /// Shares the handle this process has of the file at `path`, or opens
@@ -1236,55 +1260,77 @@ impl Chronicle {
         open.insert(id, Arc::downgrade(&opened.inner));
         drop(open);
         if opened.inner.options.sync_in_background {
-            let inner = Arc::downgrade(&opened.inner);
-            let looking = opened.inner.looking.clone();
-            std::thread::Builder::new()
-                .name("chronicle sync".into())
-                .spawn(move || Self::keep_synced(inner, looking))
-                .map_err(|error| storage_error(path, error))?;
+            Self::start_syncing().map_err(|error| storage_error(path, error))?;
         }
         Ok(opened)
     }
 
-    /// Makes a sync point once appends have waited [`SYNC_AFTER`] for one,
-    /// until the archive is closed. Holds the archive only while it looks,
-    /// under `looking`, which a handle being dropped takes first: a handle
-    /// dropped meanwhile waits for this one to go, and so is the last
-    /// handle and closes the file itself.
-    fn keep_synced(inner: Weak<Inner>, looking: Arc<Mutex<()>>) {
+    /// Starts the process's sync thread, if it is not running: one for
+    /// every file this process has open, not one each.
+    fn start_syncing() -> io::Result<()> {
+        static STARTED: Mutex<bool> = Mutex::new(false);
+        let mut started = STARTED.lock();
+        if !*started {
+            std::thread::Builder::new()
+                .name("chronicle sync".into())
+                .spawn(Self::keep_synced)?;
+            *started = true;
+        }
+        Ok(())
+    }
+
+    /// The process's sync thread: every [`SYNC_AFTER`]` / 2`, a sync point
+    /// in each file this process has open whose appends have waited
+    /// [`SYNC_AFTER`] for one.
+    fn keep_synced() {
         loop {
             std::thread::sleep(SYNC_AFTER / 2);
-            let _looking = looking.lock();
-            let Some(inner) = inner.upgrade() else {
-                return;
-            };
-            // Not dropped as a handle: dropping one would wait for
-            // `looking`, held here, and this one is never the last.
-            let mut archive = ManuallyDrop::new(Self {
-                inner: ManuallyDrop::new(inner),
-            });
-            let dies = {
-                #[cfg(test)]
-                {
-                    archive.inner.dies.load(Ordering::Relaxed)
+            let open: Vec<Weak<Inner>> = OPEN.lock().values().cloned().collect();
+            for inner in open {
+                if let Some(inner) = inner.upgrade() {
+                    Self::sync_if_waited(inner);
                 }
-                #[cfg(not(test))]
-                {
-                    false
-                }
-            };
-            // Read from this process's view, without a lock: what another
-            // process appended, its own thread syncs.
-            let slot = &archive.current().slot;
-            if !dies
-                && slot.durable != slot.sequence
-                && archive.inner.synced.lock().elapsed() >= SYNC_AFTER
-            {
-                let _ = archive.sync_now(false);
             }
-            // SAFETY: taken once, and `archive` is not used again.
-            drop(unsafe { ManuallyDrop::take(&mut archive.inner) });
         }
+    }
+
+    /// Makes a sync point in the archive `inner` holds if its appends have
+    /// waited [`SYNC_AFTER`] for one, holding `looking` while it does: a
+    /// handle dropped meanwhile that may be the last waits for it (see
+    /// [`Drop`](#impl-Drop-for-Chronicle)), and one that is not does not.
+    /// The thread's own handle is let go under `looking` too, and closes
+    /// the file if every other went meanwhile.
+    fn sync_if_waited(inner: Arc<Inner>) {
+        let looking = inner.looking.clone();
+        // Not dropped as a handle, which would take `looking`, held here.
+        let mut archive = ManuallyDrop::new(Self {
+            inner: ManuallyDrop::new(inner),
+        });
+        let _looking = looking.lock();
+        let dies = {
+            #[cfg(test)]
+            {
+                archive.inner.dies.load(Ordering::Relaxed)
+            }
+            #[cfg(not(test))]
+            {
+                false
+            }
+        };
+        // Read from this process's view, without a lock: what another
+        // process appended, its own thread syncs.
+        let slot = &archive.current().slot;
+        if archive.inner.options.sync_in_background
+            && !dies
+            && slot.durable != slot.sequence
+            && archive.inner.synced.lock().elapsed() >= SYNC_AFTER
+        {
+            let _ = archive.sync_now(false);
+        }
+        let open = archive.close();
+        // SAFETY: taken once, and `archive` is not used again.
+        drop(unsafe { ManuallyDrop::take(&mut archive.inner) });
+        drop(open);
     }
 
     /// Opens the file with a handle of its own, not shared with another
@@ -2373,6 +2419,10 @@ impl Chronicle {
                     && extent::used(snapshot.bytes(), record) != Some(0)
                     && locks::lock(file, locks::owner(record), true, false)?
                 {
+                    // Read again under the byte, from the mapping, which
+                    // shows what the file holds now: its count went back to
+                    // nothing if another process claimed it again and died
+                    // between the look above and the lock.
                     if extent::used(snapshot.bytes(), record) == Some(0) {
                         locks::unlock(file, locks::owner(record))?;
                     } else {
@@ -3140,10 +3190,14 @@ fn snapshot_after_claim(
 /// [`close`](Chronicle::close)).
 impl Drop for Chronicle {
     fn drop(&mut self) {
-        // Waits out the sync thread holding the archive, so that a handle
-        // that is the last but for the thread's closes the file.
+        // A handle that may be the last but for the sync thread's waits for
+        // the thread to let its own go, so that it closes the file itself.
+        // One of three or more is not the last: it does not wait for a sync
+        // point. Two such dropped at once may each find the other: then the
+        // sync thread is the last, and closes the file (see
+        // `sync_if_waited`).
         let looking = self.inner.looking.clone();
-        let _looking = looking.lock();
+        let _looking = (Arc::strong_count(&self.inner) <= 2).then(|| looking.lock());
         let open = self.close();
         // SAFETY: taken once, here, and not used again: `self` is going.
         let inner = unsafe { ManuallyDrop::take(&mut self.inner) };
@@ -3339,27 +3393,42 @@ impl Provider<Import> for Chronicle {
 
 impl Chronicle {
     /// Appends on tokio's blocking threads when a tokio runtime runs the
-    /// caller, and at once otherwise: an append can wait for the writer's
-    /// turn another process holds, and make a sync point, which must not
-    /// hold up the runtime's other tasks. A read answers at once: it reads
-    /// the file's mapping and takes no lock.
+    /// caller (see [`off_runtime`](Self::off_runtime)).
     fn append_off_runtime(
         &self,
         catalog: String,
         blocks: Vec<Buffer>,
     ) -> Resume<'_, Result<(), ArchiveError>> {
+        let path = self.inner.path.clone();
+        self.off_runtime(
+            move |archive| archive.append(&catalog, &blocks),
+            move |error| Err(storage_error(&path, io::Error::other(error))),
+        )
+    }
+
+    /// Does `work` on tokio's blocking threads when a tokio runtime runs
+    /// the caller, and at once otherwise; `failed` answers if the blocking
+    /// thread panicked. Everything that writes goes through here: an
+    /// append or a cell's update can wait for the writer's turn another
+    /// process holds, and make a sync point, which must not hold up the
+    /// runtime's other tasks. A read answers at once: it reads the file's
+    /// mapping and takes no lock.
+    pub(crate) fn off_runtime<T: Send + 'static>(
+        &self,
+        work: impl FnOnce(&Chronicle) -> T + Send + 'static,
+        failed: impl FnOnce(tokio::task::JoinError) -> T + Send + 'static,
+    ) -> Resume<'_, T> {
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-            return Resume::now(self.append(&catalog, &blocks));
+            return Resume::now(work(self));
         };
         let archive = Self {
             inner: ManuallyDrop::new(Arc::clone(&self.inner)),
         };
-        let path = self.inner.path.clone();
         Resume::later(async move {
             runtime
-                .spawn_blocking(move || archive.append(&catalog, &blocks))
+                .spawn_blocking(move || work(&archive))
                 .await
-                .unwrap_or_else(|error| Err(storage_error(&path, io::Error::other(error))))
+                .unwrap_or_else(failed)
         })
     }
 }
@@ -4484,9 +4553,9 @@ mod tests {
         Ok(())
     }
 
-    /// An import that waits for the writer's turn holds up no other task of
-    /// the runtime running it, one thread as it is: it waits on a blocking
-    /// thread. The turn is held here until another task of the runtime
+    /// An import and a cell's update that wait for the writer's turn hold
+    /// up no other task of the runtime running them, one thread as it is:
+    /// they wait on blocking threads. The turn is held here until another task of the runtime
     /// says to let it go, which it could not while the import held the
     /// runtime's thread.
     #[dialog_common::test]
@@ -4510,19 +4579,29 @@ mod tests {
                 .build()?;
             runtime.block_on(async {
                 // A catalog the file does not number yet: no extent takes
-                // it, so the import waits for the turn.
+                // it, so the import waits for the turn; a cell's update
+                // always does.
                 let import = subject()
                     .writer()
                     .archive()
                     .catalog("fresh")
                     .import(vec![block("waits")])
                     .perform(archive);
+                let publish = subject()
+                    .writer()
+                    .memory()
+                    .space("local")
+                    .cell("main")
+                    .publish(b"waits too".to_vec(), None)
+                    .perform(archive);
                 let tell = async {
                     tokio::task::yield_now().await;
                     let _ = go.send(());
                 };
-                let (imported, ()) = futures_util::join!(import, tell);
-                imported
+                let (imported, published, ()) = futures_util::join!(import, publish, tell);
+                published?;
+                imported?;
+                anyhow::Ok(())
             })?;
             assert!(
                 holder.join().expect("the holder")?,
@@ -4534,6 +4613,10 @@ mod tests {
             archive
                 .get("fresh", block("waits").blake3_hash())?
                 .is_some()
+        );
+        assert_eq!(
+            archive.resolve_cell("local", "main")?.as_deref(),
+            Some(&b"waits too"[..])
         );
         Ok(())
     }
