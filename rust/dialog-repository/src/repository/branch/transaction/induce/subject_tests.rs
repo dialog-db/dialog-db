@@ -125,9 +125,19 @@ fn rule(head: Json, when: Vec<Json>, unless: Vec<Json>) -> Result<InductiveRule>
 /// `alice` has an event of kind `click`, `bob` one of kind `view`.
 fn events() -> Changes {
     let mut changes = Changes::new();
-    write(&mut changes, "evt/user", "evt:1", Value::Entity(entity("user:alice")));
+    write(
+        &mut changes,
+        "evt/user",
+        "evt:1",
+        Value::Entity(entity("user:alice")),
+    );
     write(&mut changes, "evt/kind", "evt:1", text("click"));
-    write(&mut changes, "evt/user", "evt:2", Value::Entity(entity("user:bob")));
+    write(
+        &mut changes,
+        "evt/user",
+        "evt:2",
+        Value::Entity(entity("user:bob")),
+    );
     write(&mut changes, "evt/kind", "evt:2", text("view"));
     changes
 }
@@ -139,9 +149,7 @@ fn lines(changes: &Changes) -> Vec<String> {
         .into_instructions()
         .into_iter()
         .filter_map(|instruction| match instruction {
-            Instruction::Assert(fact, _) => {
-                Some(format!("{} {} {:?}", fact.the, fact.of, fact.is))
-            }
+            Instruction::Assert(fact, _) => Some(format!("{} {} {:?}", fact.the, fact.of, fact.is)),
             Instruction::Retract(_) => None,
         })
         .collect();
@@ -341,7 +349,12 @@ async fn counted(seeded: Seeded) -> Result<(Vec<Value>, Vec<Value>)> {
         vec![],
     )?;
     let mut ground = events();
-    write(&mut ground, "user/count", "user:alice", Value::UnsignedInt(0));
+    write(
+        &mut ground,
+        "user/count",
+        "user:alice",
+        Value::UnsignedInt(0),
+    );
     write(&mut ground, "user/count", "user:bob", Value::UnsignedInt(0));
     install(&world, vec![issue, count], vec![], &[concept], ground).await?;
 
@@ -387,7 +400,12 @@ async fn it_fires_alike_for_one_field_written_and_for_two() -> Result<()> {
     install(&world, vec![rule], vec![], &[concept], events()).await?;
 
     let mut changes = Changes::new();
-    write(&mut changes, "evt/user", "evt:3", Value::Entity(entity("user:carol")));
+    write(
+        &mut changes,
+        "evt/user",
+        "evt:3",
+        Value::Entity(entity("user:carol")),
+    );
     write(&mut changes, "evt/kind", "evt:3", text("click"));
     assert_eq!(
         commit(&world, changes).await?,
@@ -462,8 +480,18 @@ async fn fired_through_a_mirror(named: bool, seeded: Seeded) -> Result<Vec<Strin
     let world = world().await?;
     let (rule, concept) = seen(named)?;
     let mut ground = events();
-    write(&mut ground, "evt/user", "evt:9", Value::Entity(entity("user:carol")));
-    write(&mut ground, "mirror/of", "evt:9", Value::Entity(entity("evt:1")));
+    write(
+        &mut ground,
+        "evt/user",
+        "evt:9",
+        Value::Entity(entity("user:carol")),
+    );
+    write(
+        &mut ground,
+        "mirror/of",
+        "evt:9",
+        Value::Entity(entity("evt:1")),
+    );
     install(&world, vec![rule], vec![mirror()?], &[concept], ground).await?;
 
     let mut changes = Changes::new();
