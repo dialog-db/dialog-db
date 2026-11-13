@@ -168,20 +168,27 @@ mod tests {
             .collect();
         assert_eq!(said, vec!["Something to do, on a list."]);
 
-        // Dialog-DB is given the description and keeps none: the rule
-        // it builds gives none back, and what it stores of a rule holds
-        // no description. So what a comment says is not yet anywhere a
-        // query can find it.
-        let kept: Vec<Option<String>> = checked
-            .steps
-            .iter()
-            .filter_map(|step| match step {
-                Step::Induce(rule) => Some(rule.descriptor().description),
-                Step::Deduce(rule) => Some(rule.descriptor().description),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(kept, vec![None, None, None]);
+        // Dialog-DB leaves a description out of the rule it builds and
+        // out of what it stores of one, so it is kept as a fact about
+        // the rule's entity, which a query can find.
+        let mut rules = Vec::new();
+        let mut described = Vec::new();
+        for step in &checked.steps {
+            match step {
+                Step::Induce(rule) => {
+                    assert_eq!(rule.descriptor().description, None);
+                    rules.push(rule.this());
+                }
+                Step::Deduce(rule) => {
+                    assert_eq!(rule.descriptor().description, None);
+                    rules.push(rule.this());
+                }
+                Step::Assert(statement) => described.push(statement.this.clone()),
+                _ => {}
+            }
+        }
+        assert_eq!(rules.len(), 3);
+        assert_eq!(described, rules[..2].to_vec());
         Ok(())
     }
 

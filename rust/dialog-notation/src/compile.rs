@@ -14,6 +14,7 @@
 //! | `(:id domain label: term …)` | the entity `entity/derive` makes of the domain, the labels and each value in turn |
 //! | `(report A)` with one read as its premise | a [`ConceptQuery`] |
 //! | `(report A)` with any other premises | a [`DeductiveRule`] deriving the report, and a [`ConceptQuery`] of it |
+//! | `description: "…"` on a rule Dialog-DB keeps | a [`ConceptStatement`] asserting `syntax.meta/description` of the rule's entity |
 //!
 //! A kernel rule has one head, as a Dialog-DB rule has. What Dialog-DB
 //! has no counterpart for comes back as [`Error::Unsupported`], never as
@@ -149,6 +150,11 @@ fn written(value: &Value) -> Syntax {
     }
 }
 
+/// The domain a description is kept in, as a fact about what it
+/// describes. Dialog-DB reserves `dialog.` for what it writes itself, so
+/// `dialog.meta/description` cannot be written from here.
+pub const DESCRIBED: &str = "syntax.meta";
+
 /// Compile an analyzed tree: the third phase, from a rule of the
 /// kernel to what Dialog-DB runs.
 pub fn compile(form: &Syntax) -> Result<Vec<Step>, Error> {
@@ -161,7 +167,7 @@ pub fn compile(form: &Syntax) -> Result<Vec<Step>, Error> {
         }
         return Ok(vec![ground(&rule.head)?]);
     }
-    Ok(match &rule.head {
+    let mut steps = match &rule.head {
         Head::Derive(read) => vec![deduce(&rule, read)?],
         Head::Assert(read) => vec![Step::Induce(Box::new(induce(&rule, read, "assert!")?))],
         Head::Retract(read) => vec![Step::Induce(Box::new(induce(&rule, read, "retract!")?))],
@@ -181,7 +187,30 @@ pub fn compile(form: &Syntax) -> Result<Vec<Step>, Error> {
             let site = form.reference()?.to_string();
             vec![report(&rule, read, &site)?]
         }
-    })
+    };
+    // What a rule says it is for is a fact about the rule, kept beside
+    // it: Dialog-DB leaves a description out of what a rule is and out
+    // of what it stores of one. A rule Dialog-DB cannot keep has no
+    // entity to say it of.
+    let kept = steps.iter().find_map(|step| match step {
+        Step::Deduce(rule) => rule.try_this(),
+        Step::Induce(rule) => rule.try_this(),
+        _ => None,
+    });
+    if let (Some(description), Some(entity)) = (&rule.description, kept) {
+        steps.push(Step::Assert(statement(&Read {
+            domain: DESCRIBED.into(),
+            entity: Term::Entity(entity.as_str().to_string()),
+            fields: vec![Field {
+                label: "description".into(),
+                attribute: format!("{DESCRIBED}/description"),
+                term: Term::Text(description.clone()),
+                kind: Some("text".into()),
+                pick: Some("last".into()),
+            }],
+        })?));
+    }
+    Ok(steps)
 }
 
 fn refused(what: &str, error: impl std::fmt::Display) -> Error {

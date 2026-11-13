@@ -142,12 +142,14 @@ A rule may also say something about a form without refusing it:
 
 A description is a fact about an entity, `dialog.meta/description`, never part of what the entity is. Dialog's descriptors already carry a description and leave it out of identity (`without_description`), and the stored body of a rule drops it; tonk keeps it as `dialog.meta/description` today.
 
-- A `rule` takes `description:` as a labelled part. It lands as that fact on the rule's entity.
-- `syntax` and `concept` pass what they are told about themselves to the rule they write:
+Built 2026-11-13, and changed in two ways. What a form is for is said in a comment right above it, not in a `description:` part (Irakli: `description:` does not belong in a concept). And Dialog-DB refuses `dialog.meta/` from a transaction, since `dialog.` is kept for what it writes itself, so the proof of concept keeps the fact as `syntax.meta/description`. Whether dialog lets `dialog.meta/` through is open.
+
+- A comment right above a `rule`, and one that ends its line, are the rule's description. It lands as that fact on the rule's entity. The kernel rule still carries it as `description:`, which is how it reaches the compiler.
+- A concept's comment is kept with its form. It is not a fact yet: a definition has no entity until syntax is kept on a branch.
 
   ```clj
+  ; Something to do, on a list.
   (concept (todo ?t list: ?l text: ?x state: ?s)
-    description: "Something to do, on a list."
     (xyz.todo ?t list: (:last (:entity ?l)) text: (:last (:text ?x)) state: (:top ?s)))
   ```
 

@@ -282,6 +282,47 @@ async fn it_says_where_a_warning_and_a_refusal_are() -> Result<()> {
     Ok(())
 }
 
+/// What the comment above a rule says is kept as a fact about the rule,
+/// so a rule is found by what it is for.
+#[dialog_common::test]
+async fn it_finds_a_rule_by_what_the_comment_above_it_says() -> Result<()> {
+    let mut notebook = Notebook::open().await?;
+    notebook
+        .submit(
+            r#"; How a shop prices things.
+
+               ; What costs less than ten.
+               (rule (shop.offer ?i name: ?n price: ?p)
+                 (shop.item ?i name: (:text ?n) price: (:natural ?p))
+                 (< ?p : 10))
+
+               ; Restocking sets the count.
+               (rule (assert! (shop.stock ?i count: (:last (:natural ?n))))
+                 (restock (shop.item ?i count: ?n)))
+
+               (rule (shop.dear ?i name: ?n)
+                 (shop.item ?i name: (:text ?n) price: (:natural ?p))
+                 (> ?p : 100))"#,
+        )
+        .await?;
+    let said = report(
+        &mut notebook,
+        r#"(query (syntax.meta ?rule description: ?text))"#,
+    )
+    .await?;
+    assert_eq!(said.len(), 2, "{said:?}");
+    assert!(said.iter().all(|row| row.starts_with("(syntax.meta rule:")));
+    assert!(
+        said.iter()
+            .any(|row| row.ends_with(r#"description: "What costs less than ten.")"#))
+    );
+    assert!(
+        said.iter()
+            .any(|row| row.ends_with(r#"description: "Restocking sets the count.")"#))
+    );
+    Ok(())
+}
+
 /// A rule has one head. Two written as one rule are refused, and
 /// nothing the document says is written, the fact beside the rule
 /// included.
