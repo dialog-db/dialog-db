@@ -41,6 +41,12 @@ What this changes for you:
   the scan under it reads another set of rows. They are evaluated each
   on its own, as before. So are a rule fired in full and a rule that
   reduces.
+- A condition written once for each fact it concludes costs what it
+  costs written once. Measured in instructions against one rule with a
+  head of every fact: two rules over one read were 61% over at 500
+  commands a commit and are 0.8% over, and 27% over at one command a
+  commit and are 1.6% over; four rules over four reads were 148% and
+  86% over and are 3.3% and 5.7% over.
 - `dialog_query::rule::canonical::body` and its `Body` are new: a
   rule's premises spelled without its head, equal for two rules that
   state one body whatever their heads name.
