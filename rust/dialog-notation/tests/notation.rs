@@ -279,10 +279,7 @@ async fn it_says_where_a_warning_and_a_refusal_are() -> Result<()> {
         refused.to_string().contains("line 3, column 3"),
         "{refused:#}"
     );
-    assert!(matches!(
-        refused.downcast::<Error>(),
-        Ok(Error::Unknown(_))
-    ));
+    assert!(matches!(refused.downcast::<Error>(), Ok(Error::Unknown(_))));
     Ok(())
 }
 

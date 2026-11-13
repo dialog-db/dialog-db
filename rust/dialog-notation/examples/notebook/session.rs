@@ -87,8 +87,7 @@ impl Notebook {
         for (rule, origin) in analyzed.iter().zip(&analysis.origin) {
             // What the compiler refuses is said with where the tree the
             // rule came of is.
-            let steps =
-                compile(rule).with_context(|| self.place(&[Segment::Item(*origin)]))?;
+            let steps = compile(rule).with_context(|| self.place(&[Segment::Item(*origin)]))?;
             for step in steps {
                 transaction = match step {
                     Step::Assert(statement) => transaction.assert(statement),

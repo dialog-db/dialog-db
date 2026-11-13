@@ -208,7 +208,10 @@ mod tests {
         // The concept the refused document defined was not kept.
         let after = analyzer.analyze(&parse("(query (todo ?t text: ?x))")?);
         assert!(matches!(
-            after.refusals().next().and_then(|refused| refused.refusal.as_ref()),
+            after
+                .refusals()
+                .next()
+                .and_then(|refused| refused.refusal.as_ref()),
             Some(Error::Unknown(_))
         ));
 
@@ -218,7 +221,11 @@ mod tests {
             .replace("(rule (all (assert! (xyz.todo ?t text: ?x))\n           (retract! (xyz.draft ?t text: ?x)))", "(rule (assert! (xyz.todo ?t text: ?x))")
             .replace("\n  (frobnicate ?t))", ")");
         let analysis = analyzer.analyze(&parse(&mended)?);
-        assert!(analysis.diagnostics.is_empty(), "{:?}", analysis.diagnostics);
+        assert!(
+            analysis.diagnostics.is_empty(),
+            "{:?}",
+            analysis.diagnostics
+        );
         assert_eq!(analysis.origin, vec![1, 2, 3]);
         let after = analyzer.analyze(&parse("(query (todo ?t text: ?x))")?);
         assert!(after.diagnostics.is_empty());

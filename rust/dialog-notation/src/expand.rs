@@ -880,9 +880,9 @@ impl Expander {
             )));
         }
         let heads = match written.head {
-            Some(head) => members(self.about(&head, |this| {
-                this.application(head.clone(), Position::Head)
-            })?),
+            Some(head) => {
+                members(self.about(&head, |this| this.application(head.clone(), Position::Head))?)
+            }
             None => Vec::new(),
         };
         let mut walked = Clauses {
