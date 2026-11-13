@@ -3,9 +3,8 @@
 //! The kernel is small: `rule`, whose first part is its head and whose
 //! other parts are its premises, `(unless …)` among them for what must
 //! not hold; the application of a relation and of a formula; `assert!`,
-//! `retract!`, `assert` and `report` as a rule's head; `(all …)` where
-//! several stand for one. Every other form is given its meaning by a
-//! rule about syntax:
+//! `retract!`, `assert` and `report` as a rule's head. A rule has one
+//! head. Every other form is given its meaning by a rule about syntax:
 //!
 //! ```clj
 //! (rule (syntax (rule (report ?head) ?head))
@@ -15,6 +14,12 @@
 //! `(expand pattern)` holds for the tree being expanded when it has the
 //! pattern's shape, and `(syntax template)` is what the tree becomes.
 //! Neither is walked into: what is inside them is syntax.
+//!
+//! A template answers `(all a b)` when the tree stands for several, as
+//! a concept does for the reads of its body. Among the premises they
+//! stand one after another. In the head's place they are a rule each,
+//! with the premises again. `(all …)` is not written in a rule: it is
+//! refused there.
 //!
 //! The [`Expander`] is the walker. It rewrites a top-level tree until
 //! it is a `rule`, then every head and premise until each applies a
@@ -27,6 +32,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::Error;
 use crate::form::Kind;
+use crate::kernel::{Head, Rule};
 use crate::parse::parse;
 use crate::pattern::{Binding, Bindings, fill, matches};
 use crate::syntax::{Parameters, Signature, Syntax};
@@ -111,8 +117,8 @@ fn items(tree: &Syntax) -> &[Syntax] {
 pub struct Clauses {
     /// What the rule says about itself: its labelled parts.
     pub said: BTreeMap<String, Syntax>,
-    /// Its heads: the first part, or what `(all …)` there holds.
-    pub heads: Vec<Syntax>,
+    /// Its head: the first part.
+    pub head: Option<Syntax>,
     /// Its premises: what must hold.
     pub when: Vec<Syntax>,
     /// What `(unless …)` holds: what must not.
@@ -120,9 +126,9 @@ pub struct Clauses {
 }
 
 impl Clauses {
-    /// The parts of a `(rule …)` tree: its first part is its head, or
-    /// `(all …)` of several; every part after it is a premise, and what
-    /// `(unless …)` holds must not hold.
+    /// The parts of a `(rule …)` tree: its first part is its head, every
+    /// part after it is a premise, and what `(unless …)` holds must not
+    /// hold.
     pub fn of(rule: &Syntax) -> Self {
         let mut clauses = Clauses::default();
         let Some(operand) = rule.operand() else {
@@ -132,7 +138,7 @@ impl Clauses {
         let Some((head, premises)) = operand.items.split_first() else {
             return clauses;
         };
-        clauses.heads = members(head.clone());
+        clauses.head = Some(head.clone());
         for premise in premises {
             if premise.applies() == Some("unless") {
                 clauses.unless.extend(items(premise).iter().cloned());
@@ -144,13 +150,8 @@ impl Clauses {
     }
 
     /// These parts as a `(rule …)` tree.
-    pub fn into_rule(mut self) -> Syntax {
-        let head = if self.heads.len() == 1 {
-            self.heads.remove(0)
-        } else {
-            apply("all", self.heads)
-        };
-        let mut parts = vec![head];
+    pub fn into_rule(self) -> Syntax {
+        let mut parts: Vec<Syntax> = self.head.into_iter().collect();
         parts.extend(self.when);
         if !self.unless.is_empty() {
             parts.push(apply("unless", self.unless));
@@ -306,8 +307,9 @@ impl Expander {
     }
 
     /// Parse `text` and expand every tree of it. A rule about syntax is
-    /// kept here; every other comes back as a kernel rule, in the order
-    /// written, with what the rules said about the document.
+    /// kept here; every other comes back as kernel rules, in the order
+    /// written, with what the rules said about the document. A tree
+    /// whose head stands for several comes back as a rule each.
     pub fn submit(&mut self, text: &str) -> Result<(Vec<Syntax>, Vec<Diagnostic>), Error> {
         self.expand(parse(text)?)
     }
@@ -325,12 +327,14 @@ impl Expander {
             let mut choices = Vec::new();
             loop {
                 self.choices = choices;
-                let rule = self.top(tree.clone())?;
+                let rules = self.top(tree.clone())?;
                 choices = std::mem::take(&mut self.choices);
-                if let Some(rule) = self.install(rule)?
-                    && !kernel.contains(&rule)
-                {
-                    kernel.push(rule);
+                for rule in rules {
+                    if let Some(rule) = self.install(rule)?
+                        && !kernel.contains(&rule)
+                    {
+                        kernel.push(rule);
+                    }
                 }
                 while let Some(last) = choices.last_mut() {
                     if last.taken + 1 < last.of {
@@ -350,12 +354,12 @@ impl Expander {
     /// Keep a rule about syntax, and note what any other rule reads.
     fn install(&mut self, rule: Syntax) -> Result<Option<Syntax>, Error> {
         let clauses = Clauses::of(&rule);
-        let answer = match clauses.heads.as_slice() {
-            [head] if head.applies() == Some("syntax") => match items(head) {
+        let answer = match clauses.head.as_ref() {
+            Some(head) if head.applies() == Some("syntax") => match items(head) {
                 [template] => Some(Answer::Syntax(template.clone())),
                 _ => return Err(Error::Refused(format!("{head} takes one template"))),
             },
-            [head] if head.applies() == Some("warning") => match items(head) {
+            Some(head) if head.applies() == Some("warning") => match items(head) {
                 [Syntax::Constant(dialog_corpus::Value::String(message))] => {
                     Some(Answer::Warning(message.clone()))
                 }
@@ -696,10 +700,12 @@ impl Expander {
         }
     }
 
-    /// A top-level tree, rewritten until it is a kernel rule. A write at
+    /// A top-level tree, rewritten until it is kernel rules. A write at
     /// the top level is a rule with that head and whatever clauses
-    /// follow it.
-    fn top(&mut self, mut tree: Syntax) -> Result<Syntax, Error> {
+    /// follow it. A kernel rule has one head, so a head that stands for
+    /// several, as a concept of several reads does, is a rule each, with
+    /// the premises again.
+    fn top(&mut self, mut tree: Syntax) -> Result<Vec<Syntax>, Error> {
         while tree.applies() != Some("rule") {
             tree = match (
                 tree.applies().filter(|word| HEAD_WORDS.contains(word)),
@@ -724,15 +730,39 @@ impl Expander {
             };
         }
         let written = Clauses::of(&tree);
+        // `(all …)` is what a template answers when a tree stands for
+        // several. Nobody writes it: several premises are written one
+        // after another, and several heads are a rule each.
+        let several = |part: &Syntax| part.applies() == Some("all");
+        if let Some(head) = &written.head
+            && (several(head)
+                || (head
+                    .applies()
+                    .is_some_and(|word| HEAD_WORDS.contains(&word))
+                    && items(head).iter().any(several)))
+        {
+            return Err(Error::Refused(format!(
+                "{head} is several heads: a rule has one head, so write a rule for each"
+            )));
+        }
+        if let Some(part) = written
+            .when
+            .iter()
+            .chain(&written.unless)
+            .find(|part| several(part))
+        {
+            return Err(Error::Refused(format!(
+                "{part} is not a premise: premises are written one after another"
+            )));
+        }
+        let heads = match written.head {
+            Some(head) => members(self.application(head, Position::Head)?),
+            None => Vec::new(),
+        };
         let mut walked = Clauses {
             said: written.said,
             ..Clauses::default()
         };
-        for head in written.heads {
-            walked
-                .heads
-                .extend(members(self.application(head, Position::Head)?));
-        }
         for premise in written.when {
             // Nothing but its place tells a head from a premise, so a
             // write after the first part is said to be misplaced, and
@@ -742,7 +772,7 @@ impl Expander {
                 .is_some_and(|word| HEAD_WORDS.contains(&word))
             {
                 return Err(Error::Refused(format!(
-                    "{premise} is a head, and stands among the premises: the first part of a rule is its head, and several heads are written (all …)"
+                    "{premise} is a head, and stands among the premises: the first part of a rule is its head, and a rule has one, so write a rule for each"
                 )));
             }
             walked
@@ -755,7 +785,30 @@ impl Expander {
             self.negating = false;
             walked.unless.push(together(members(stands?), &premise)?);
         }
-        Ok(walked.into_rule())
+        let split = heads.len() > 1;
+        let mut rules = Vec::new();
+        for head in heads {
+            let rule = Clauses {
+                head: Some(head),
+                ..walked.clone()
+            }
+            .into_rule();
+            // A concept of several reads is reported a rule a read. A
+            // read the query named no field of says nothing, so it gets
+            // no rule.
+            if split
+                && let Ok(typed) = Rule::parse(&rule)
+                && let Head::Report(read) = &typed.head
+                && read.named(&typed.bound()).is_empty()
+            {
+                continue;
+            }
+            rules.push(rule);
+        }
+        if rules.is_empty() {
+            return Err(Error::Refused(format!("{tree} reports no field")));
+        }
+        Ok(rules)
     }
 }
 
@@ -801,33 +854,98 @@ mod tests {
     }
 
     /// Nothing but its place tells a head from a premise, so a write
-    /// after the first part is refused, and the refusal says how several
-    /// heads are written.
+    /// after the first part is refused. A rule has one head: `(all …)`
+    /// in its place is refused too, and both refusals say to write a
+    /// rule for each.
     #[test]
-    fn it_refuses_a_second_head_written_among_the_premises() {
-        let refused = expanded(
+    fn it_refuses_a_second_head_however_it_is_written() {
+        let among = expanded(
             "",
             "(rule (assert! (xyz.todo ?t list: ?to))
                    (retract! (xyz.todo ?t list: ?from))
                (xyz.move ?t to: ?to from: ?from))",
         );
         assert!(
-            matches!(&refused, Err(Error::Refused(why)) if why.contains("(all …)")),
-            "{refused:?}"
+            matches!(&among, Err(Error::Refused(why))
+                if why.contains("stands among the premises") && why.contains("a rule for each")),
+            "{among:?}"
         );
+        for written in [
+            "(rule (all (assert! (xyz.todo ?t list: ?to))
+                        (retract! (xyz.todo ?t list: ?from)))
+               (xyz.move ?t to: ?to from: ?from))",
+            "(rule (assert! (all (xyz.todo ?t list: ?to) (xyz.seen ?t at: ?to)))
+               (xyz.move ?t to: ?to from: ?from))",
+            "(assert! (all (xyz.todo ?t list: ?to) (xyz.seen ?t at: ?to))
+               (xyz.move ?t to: ?to from: ?from))",
+        ] {
+            let several = expanded("", written);
+            assert!(
+                matches!(&several, Err(Error::Refused(why))
+                    if why.contains("is several heads") && why.contains("a rule for each")),
+                "{several:?}"
+            );
+        }
+        let premise = expanded(
+            "",
+            "(rule (xyz.done ?t at: ?to)
+               (all (xyz.todo ?t list: ?to) (xyz.seen ?t at: ?to)))",
+        );
+        assert!(
+            matches!(&premise, Err(Error::Refused(why)) if why.contains("is not a premise")),
+            "{premise:?}"
+        );
+        // The two rules that say it.
         assert_eq!(
             expanded(
                 "",
-                "(rule (all (assert! (xyz.todo ?t list: ?to))
-                            (retract! (xyz.todo ?t list: ?from)))
+                "(rule (assert! (xyz.todo ?t list: ?to))
+                   (xyz.move ?t to: ?to from: ?from))
+                 (rule (retract! (xyz.todo ?t list: ?from))
                    (xyz.move ?t to: ?to from: ?from))",
             )
             .unwrap(),
             vec![
-                "(rule (all (assert! (xyz.todo ?t list: ?to)) (retract! (xyz.todo ?t list: ?from))) \
-                 (xyz.move ?t from: ?from to: ?to))"
+                "(rule (assert! (xyz.todo ?t list: ?to)) (xyz.move ?t from: ?from to: ?to))",
+                "(rule (retract! (xyz.todo ?t list: ?from)) (xyz.move ?t from: ?from to: ?to))",
             ]
         );
+    }
+
+    /// A concept of several reads stands for them all. Written, it is a
+    /// rule a read, each with the premises again, since a kernel rule
+    /// has one head.
+    #[test]
+    fn it_writes_a_concept_of_several_reads_as_a_rule_each() {
+        let kernel = expanded(
+            "(concept (card ?c title: ?x owner: ?o)
+               (xyz.card ?c title: (:last (:text ?x)))
+               (xyz.owned ?c by: (:last (:entity ?o))))",
+            "(rule (assert! (card ?c title: ?x owner: ?o))
+               (xyz.draft ?c title: ?x by: ?o))",
+        )
+        .unwrap();
+        assert_eq!(
+            kernel,
+            vec![
+                "(rule (assert! (xyz.card ?c title: (:last (:text ?x)))) (xyz.draft ?c by: ?o title: ?x))",
+                "(rule (assert! (xyz.owned ?c by: (:last (:entity ?o)))) (xyz.draft ?c by: ?o title: ?x))",
+            ]
+        );
+    }
+
+    /// Reported, a read the query named no field of gets no rule.
+    #[test]
+    fn it_reports_only_the_reads_a_query_names_a_field_of() {
+        let kernel = expanded(
+            "(concept (card ?c title: ?x owner: ?o)
+               (xyz.card ?c title: (:last (:text ?x)))
+               (xyz.owned ?c by: (:last (:entity ?o))))",
+            "(query (card ?c title: ?x))",
+        )
+        .unwrap();
+        assert_eq!(kernel.len(), 1, "{kernel:?}");
+        assert!(kernel[0].starts_with("(rule (report (xyz.card ?c title: (:last (:text ?x))))"));
     }
 
     /// A pattern is any form, not an application only: here a form in
@@ -876,8 +994,9 @@ mod tests {
             Some(list) => list.to_string(),
             None => panic!("{tree} reads the list"),
         };
-        assert_eq!(rule.heads[0].applies(), Some("report"));
-        let head = &items(&rule.heads[0])[0];
+        let reported = rule.head.as_ref().unwrap();
+        assert_eq!(reported.applies(), Some("report"));
+        let head = &items(reported)[0];
         assert_eq!(at(head, "text"), at(&rule.when[0], "text"));
         assert!(own(head).starts_with("(:last (:entity ?l."));
         assert!(own(&rule.when[0]).starts_with("(:last (:entity ?l."));

@@ -15,14 +15,14 @@ flowchart LR
 
 | | Form | In dialog today |
 |---|---|---|
-| Abstraction | `(rule head premise… (unless premise…))` | a rule descriptor: the first part is the head, or `(all …)` of several; every part after it is a premise; what `(unless …)` holds must not hold |
+| Abstraction | `(rule head premise… (unless premise…))` | a rule descriptor: the first part is the head, and a rule has one; every part after it is a premise; what `(unless …)` holds must not hold |
 | Read | `(xyz.todo ?t text: ?x state: ?s)`: application of a relation, one entity and the fields named | a concept query |
 | Compute | `(:text ?x)`, `(:value ?a is: ?b)`, `(+ ?a : ?b is: ?c)`: application of a formula | a formula query or a constraint |
 | Write | `(assert! A)`, `(retract! A)` as a rule's head: what stays | the `assert!` and `retract!` heads of an inductive rule; `Instruction::Assert(fact, pick)`, `Instruction::Retract(fact)` |
 | Hold | `(assert A)` as a rule's head: holds this round and is not kept | a dispatched transient |
 | Answer | `(report A)` as a rule's head | what a query returns |
 | Syntax | `(expand pattern)` as a premise, `(syntax template)` as a head | new |
-| Together | `(all form…)`: several forms standing where one was written | new; a template needs it to say more than one thing |
+| Together | `(all form…)` as what a template answers: several forms standing where one was written | new; a template needs it to say more than one thing. Not written in a rule, where it is refused |
 
 - `!` marks what stays. `(assert! A)` lands and is kept until retracted. `(assert A)` holds for the round, which is how a command is issued. A head with no word derives: the relation holds while the premises do.
 - This departs from #728's design as of R25, where a plain `assert` head lands and `!` only re-issues a command. Irakli, 2026-11-11: without `!` the new count does not persist.
@@ -102,12 +102,22 @@ A body's reads stand together, as `(all …)`, where the concept is written:
 | Where the concept is written | What its reads become |
 |---|---|
 | among the premises | premises, side by side |
-| in a write or a report | one head each |
+| in a write or a report | a rule each, with the premises again |
 | in an `unless` | one read when they are of one entity: `(io.person ?p name: … io.contact/email: …)` |
 
 The last row is there because `unless` negates one proposition: two reads side by side under it would mean neither holds, not that they do not hold together. A read of one entity may span domains, as a concept query does in dialog. The absence of a concept over several entities is not one proposition, and waits on dialog negating a conjunction.
 
-A rule may have several heads, asserts and retracts together. Dialog's inductive rule has one head today, for no reason beyond the shape tonk's notation had (Irakli, 2026-11-11).
+A rule has one head, as dialog's rules do (Irakli, 2026-11-13). To assert and retract on one condition, write a rule for each, or give the condition a name with a command and write a rule for each that reads it:
+
+```clj
+(rule (assert! (xyz.todo ?t list: ?to))
+  (move (xyz.todo ?t list: ?to)))
+(rule (retract! (xyz.todo ?t list: ?from))
+  (move (xyz.todo ?t list: ?to))
+  (xyz.todo ?t list: ?from))
+```
+
+`(all h1 h2)` in the head's place is refused, and so is a write after the first part; both refusals say to write a rule for each. It can be added later without changing what is written today.
 
 A command is an application around an application whose head names nothing. In a premise it reads the command's rows:
 

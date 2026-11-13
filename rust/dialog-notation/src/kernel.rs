@@ -5,6 +5,8 @@
 //! the shapes Dialog-DB's own descriptors have, and refuses what is not
 //! kernel.
 
+use std::collections::BTreeSet;
+
 use dialog_corpus::Value;
 
 use crate::Error;
@@ -125,13 +127,28 @@ impl Head {
     }
 }
 
-/// A kernel rule.
+impl Read {
+    /// The fields the author named. A field an expansion added, under a
+    /// variable of its own that no premise binds, is one the author
+    /// left out, which a report does not show.
+    pub fn named(&self, bound: &BTreeSet<String>) -> Vec<&Field> {
+        self.fields
+            .iter()
+            .filter(|field| match &field.term {
+                Term::Variable(name) => !name.contains('.') || bound.contains(name),
+                _ => true,
+            })
+            .collect()
+    }
+}
+
+/// A kernel rule: one head, and what must and must not hold for it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Rule {
     /// What the rule says it is for.
     pub description: Option<String>,
-    /// Its heads.
-    pub heads: Vec<Head>,
+    /// Its head.
+    pub head: Head,
     /// What must hold.
     pub when: Vec<Premise>,
     /// What must not.
@@ -269,6 +286,11 @@ fn head(node: &Syntax) -> Result<Head, Error> {
     if node.is_read() {
         return Ok(Head::Derive(read(node)?));
     }
+    if node.applies() == Some("all") {
+        return Err(Error::Refused(format!(
+            "{node} is several heads, and a kernel rule has one"
+        )));
+    }
     let inner = match node.operand().map(|operand| operand.items.as_slice()) {
         Some([inner]) => read(inner)?,
         _ => return Err(Error::Refused(format!("{node} is not a kernel head"))),
@@ -293,26 +315,18 @@ impl Rule {
             Some(Syntax::Constant(Value::String(text))) => Some(text.clone()),
             _ => None,
         };
+        // The first part is the head. Every part after it is a premise,
+        // and what `(unless …)` holds must not hold.
+        let members = |clause: &Syntax| clause.operand().map(|operand| operand.items.clone());
+        let Some((first, premises)) = operand.items.split_first() else {
+            return Err(Error::Refused(format!("{node} has no head")));
+        };
         let mut rule = Rule {
             description,
-            heads: Vec::new(),
+            head: head(first)?,
             when: Vec::new(),
             unless: Vec::new(),
         };
-        // The first part is the head, or `(all …)` of several. Every
-        // part after it is a premise, and what `(unless …)` holds must
-        // not hold.
-        let members = |clause: &Syntax| clause.operand().map(|operand| operand.items.clone());
-        let Some((first, premises)) = operand.items.split_first() else {
-            return Ok(rule);
-        };
-        if first.applies() == Some("all") {
-            for member in members(first).unwrap_or_default() {
-                rule.heads.push(head(&member)?);
-            }
-        } else {
-            rule.heads.push(head(first)?);
-        }
         for part in premises {
             if part.applies() == Some("unless") {
                 for negated in members(part).unwrap_or_default() {
@@ -324,6 +338,47 @@ impl Rule {
         }
         Ok(rule)
     }
+
+    /// Every variable the premises may bind.
+    pub fn bound(&self) -> BTreeSet<String> {
+        fn term(term: &Term, names: &mut BTreeSet<String>) {
+            match term {
+                Term::Variable(name) => {
+                    names.insert(name.clone());
+                }
+                Term::Formula(inner) => formula(inner, names),
+                Term::Struct(form) => {
+                    let mut inside = Vec::new();
+                    form.variables(&mut inside);
+                    names.extend(inside);
+                }
+                _ => {}
+            }
+        }
+        fn formula(formula: &Formula, names: &mut BTreeSet<String>) {
+            formula
+                .subject
+                .iter()
+                .for_each(|subject| term(subject, names));
+            formula
+                .labelled
+                .iter()
+                .for_each(|(_, part)| term(part, names));
+        }
+        let mut names = BTreeSet::new();
+        for premise in &self.when {
+            match premise {
+                Premise::Read(read) => {
+                    term(&read.entity, &mut names);
+                    read.fields
+                        .iter()
+                        .for_each(|field| term(&field.term, &mut names));
+                }
+                Premise::Formula(inner) => formula(inner, &mut names),
+            }
+        }
+        names
+    }
 }
 
 #[cfg(test)]
@@ -332,7 +387,7 @@ mod tests {
     use crate::parse as forms;
 
     #[test]
-    fn it_reads_a_rule_into_heads_and_premises() {
+    fn it_reads_a_rule_into_its_head_and_premises() {
         let form = forms(
             "(rule (assert! (xyz.counter ?c count: (:last (:natural (+ ?n : 1)))))
                (command.increment.xyz.counter _ about: ?c)
@@ -341,7 +396,7 @@ mod tests {
         .unwrap()
         .remove(0);
         let rule = Rule::parse(&form).unwrap();
-        let Head::Assert(head) = &rule.heads[0] else {
+        let Head::Assert(head) = &rule.head else {
             panic!("the head asserts");
         };
         assert_eq!(head.fields[0].attribute, "xyz.counter/count");
@@ -357,7 +412,7 @@ mod tests {
             .unwrap()
             .remove(0);
         let rule = Rule::parse(&form).unwrap();
-        let Head::Report(head) = &rule.heads[0] else {
+        let Head::Report(head) = &rule.head else {
             panic!("the head reports");
         };
         // The fields come by label, since a tree keeps no order of them.
@@ -368,6 +423,23 @@ mod tests {
     #[test]
     fn it_refuses_what_is_not_kernel() {
         let form = forms("(rule (assert! (todo ?t)))").unwrap().remove(0);
-        assert!(Rule::parse(&form).is_err());
+        assert!(matches!(Rule::parse(&form), Err(Error::Refused(_))));
+    }
+
+    /// A kernel rule has one head: no head and several are both refused.
+    #[test]
+    fn it_refuses_a_rule_of_no_head_and_of_several() {
+        let none = forms("(rule)").unwrap().remove(0);
+        assert!(
+            matches!(Rule::parse(&none), Err(Error::Refused(why)) if why.contains("has no head"))
+        );
+        let several = forms(
+            "(rule (all (assert! (xyz.a ?a n: ?n)) (retract! (xyz.b ?a n: ?n))) (xyz.c ?a n: ?n))",
+        )
+        .unwrap()
+        .remove(0);
+        assert!(
+            matches!(Rule::parse(&several), Err(Error::Refused(why)) if why.contains("has one"))
+        );
     }
 }

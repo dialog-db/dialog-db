@@ -242,35 +242,38 @@ async fn it_derives_a_relation_and_reports_rows_of_several_premises() -> Result<
     Ok(())
 }
 
-/// One rule, two heads of different kinds: moving a to-do writes where
-/// it is and takes back where it was.
+/// A rule has one head. Two written as one rule are refused, and
+/// nothing the document says is written, the fact beside the rule
+/// included.
 #[dialog_common::test]
-async fn it_asserts_and_retracts_from_one_rule() -> Result<()> {
+async fn it_refuses_to_assert_and_retract_from_one_rule() -> Result<()> {
     let mut notebook = Notebook::open().await?;
-    notebook
+    let refused = notebook
         .submit(
-            r#"(rule (all (assert! (xyz.todo ?t list: ?to))
+            r#"(assert! (xyz.todo todo:1 list: list:home))
+               (rule (all (assert! (xyz.todo ?t list: ?to))
                           (retract! (xyz.todo ?t list: ?from)))
                  (move (xyz.todo ?t list: ?to))
-                 (xyz.todo ?t list: ?from))
-               (assert! (xyz.todo todo:1 list: list:home))"#,
+                 (xyz.todo ?t list: ?from))"#,
         )
-        .await?;
-    notebook
-        .submit("(move (xyz.todo todo:1 list: list:work))")
-        .await?;
+        .await
+        .map_err(|error| error.downcast::<Error>());
+    assert!(
+        matches!(&refused, Err(Ok(Error::Refused(why))) if why.contains("a rule for each")),
+        "{refused:?}"
+    );
     assert_eq!(
         report(&mut notebook, "(query (xyz.todo ?t list: ?l))").await?,
-        vec!["(xyz.todo todo:1 list: list:work)"]
+        Vec::<String>::new()
     );
     Ok(())
 }
 
-/// The same move as two rules of one head, each with the premises
-/// written again. A round reads one state, so both see where the to-do
-/// was. The one difference from a rule of two heads: a to-do on no
-/// list is still put on one, since the write no longer waits on what
-/// only the retraction needs.
+/// Moving a to-do writes where it is and takes back where it was: two
+/// rules of one head, each with the premises it needs. A round reads
+/// one state, so both see where the to-do was. A to-do on no list is
+/// still put on one, since the write does not wait on what only the
+/// retraction needs.
 #[dialog_common::test]
 async fn it_asserts_and_retracts_from_two_rules_of_one_head() -> Result<()> {
     let mut notebook = Notebook::open().await?;

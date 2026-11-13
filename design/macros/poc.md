@@ -76,7 +76,7 @@ This is a stand-in. Decided the same day: `entity/derive` takes one record, the 
 What the crate does in place of Dialog-DB, and should not in the end:
 
 - **Syntax is not stored.** The walker holds the rules about syntax in memory and matches patterns itself. Dialog-DB has no value a form can be and no premise that takes one apart, so `expand` and `syntax` cannot be premises and heads of stored rules. This is the part of "macros as rules" that is not shown.
-- **A rule of several heads is several rules.** They read the same round, so the result is the same, but they are stored and triggered apart.
+- **A rule has one head.** To write on one condition twice is two rules. They read the same round, but they are stored and triggered apart, and each waits only on its own premises.
 - **Descriptions.** A rule's `description:` reaches the Dialog-DB rule. A concept's is read and dropped, since nothing stores the concept.
 - **Types are written, not inferred.** A field with no `(:type …)` is an attribute with no type.
 

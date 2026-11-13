@@ -15,9 +15,9 @@
 //! | `(report A)` with one read as its premise | a [`ConceptQuery`] |
 //! | `(report A)` with any other premises | a [`DeductiveRule`] deriving the report, and a [`ConceptQuery`] of it |
 //!
-//! A rule of several heads becomes one Dialog-DB rule a head, since a
-//! Dialog-DB rule has one. What Dialog-DB has no counterpart for comes
-//! back as [`Error::Unsupported`], never as something close.
+//! A kernel rule has one head, as a Dialog-DB rule has. What Dialog-DB
+//! has no counterpart for comes back as [`Error::Unsupported`], never as
+//! something close.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -153,53 +153,35 @@ fn written(value: &Value) -> Syntax {
 /// kernel to what Dialog-DB runs.
 pub fn compile(form: &Syntax) -> Result<Vec<Step>, Error> {
     let rule = Rule::parse(form)?;
-    if rule.heads.is_empty() {
-        return Err(Error::Refused(format!("{form} has no head")));
-    }
     if rule.when.is_empty() {
         if !rule.unless.is_empty() {
             return Err(Error::Refused(format!(
                 "{form} says what must not hold and nothing that must"
             )));
         }
-        return rule.heads.iter().map(ground).collect();
+        return Ok(vec![ground(&rule.head)?]);
     }
-    let bound = bound(&rule);
-    let mut steps = Vec::new();
-    for (at, head) in rule.heads.iter().enumerate() {
-        match head {
-            Head::Derive(read) => steps.push(deduce(&rule, read)?),
-            Head::Assert(read) => {
-                steps.push(Step::Induce(Box::new(induce(&rule, read, "assert!")?)));
-            }
-            Head::Retract(read) => {
-                steps.push(Step::Induce(Box::new(induce(&rule, read, "retract!")?)));
-            }
-            Head::Hold(read) => {
-                let issuing = induce(&rule, read, "assert!")?;
-                steps.push(Step::Transient(issuing.conclusion().this()));
-                steps.push(Step::Induce(Box::new(issuing)));
-            }
-            // A concept of several reads is reported as several heads.
-            // A read the query named no field of says nothing.
-            Head::Report(read) if kept(read, &bound).is_empty() => {}
-            Head::Report(read) => {
-                // The relation a report is derived into is named by the
-                // rule and which of its heads this is.
-                let site = Syntax::Tuple(vec![
-                    form.clone(),
-                    Syntax::Constant(Value::UnsignedInt((at as u64).into())),
-                ])
-                .reference()?
-                .to_string();
-                steps.push(report(&rule, read, &site)?);
-            }
+    Ok(match &rule.head {
+        Head::Derive(read) => vec![deduce(&rule, read)?],
+        Head::Assert(read) => vec![Step::Induce(Box::new(induce(&rule, read, "assert!")?))],
+        Head::Retract(read) => vec![Step::Induce(Box::new(induce(&rule, read, "retract!")?))],
+        Head::Hold(read) => {
+            let issuing = induce(&rule, read, "assert!")?;
+            vec![
+                Step::Transient(issuing.conclusion().this()),
+                Step::Induce(Box::new(issuing)),
+            ]
         }
-    }
-    if steps.is_empty() {
-        return Err(Error::Refused(format!("{form} reports no field")));
-    }
-    Ok(steps)
+        Head::Report(read) => {
+            if read.named(&rule.bound()).is_empty() {
+                return Err(Error::Refused(format!("{form} reports no field")));
+            }
+            // The relation a report is derived into is named by its
+            // rule.
+            let site = form.reference()?.to_string();
+            vec![report(&rule, read, &site)?]
+        }
+    })
 }
 
 fn refused(what: &str, error: impl std::fmt::Display) -> Error {
@@ -449,7 +431,7 @@ fn ground(head: &Head) -> Result<Step, Error> {
 /// written in part is not the concept: a read through it would not find
 /// what was written.
 fn whole(read: &Read, bound: &BTreeSet<String>) -> Result<(), Error> {
-    let named = kept(read, bound);
+    let named = read.named(bound);
     let left_out: Vec<&str> = read
         .fields
         .iter()
@@ -465,60 +447,6 @@ fn whole(read: &Read, bound: &BTreeSet<String>) -> Result<(), Error> {
             left_out.join(", ")
         )))
     }
-}
-
-/// The fields of a head the author named. A field an expansion added
-/// and no premise binds is one the author left out, which a report does
-/// not show.
-fn kept<'a>(read: &'a Read, bound: &BTreeSet<String>) -> Vec<&'a Field> {
-    read.fields
-        .iter()
-        .filter(|field| match &field.term {
-            Term::Variable(name) => !name.contains('.') || bound.contains(name),
-            _ => true,
-        })
-        .collect()
-}
-
-/// Every variable the premises of a rule may bind.
-fn bound(rule: &Rule) -> BTreeSet<String> {
-    fn term(term: &Term, names: &mut BTreeSet<String>) {
-        match term {
-            Term::Variable(name) => {
-                names.insert(name.clone());
-            }
-            Term::Formula(inner) => formula(inner, names),
-            Term::Struct(form) => {
-                let mut inside = Vec::new();
-                form.variables(&mut inside);
-                names.extend(inside);
-            }
-            _ => {}
-        }
-    }
-    fn formula(formula: &Formula, names: &mut BTreeSet<String>) {
-        formula
-            .subject
-            .iter()
-            .for_each(|subject| term(subject, names));
-        formula
-            .labelled
-            .iter()
-            .for_each(|(_, part)| term(part, names));
-    }
-    let mut names = BTreeSet::new();
-    for premise in &rule.when {
-        match premise {
-            Premise::Read(read) => {
-                term(&read.entity, &mut names);
-                read.fields
-                    .iter()
-                    .for_each(|field| term(&field.term, &mut names));
-            }
-            Premise::Formula(inner) => formula(inner, &mut names),
-        }
-    }
-    names
 }
 
 fn variable(name: &str) -> Json {
@@ -564,7 +492,7 @@ impl Scope {
     }
 
     fn body(&mut self, rule: &Rule) -> Result<(), Error> {
-        self.bound = bound(rule);
+        self.bound = rule.bound();
         for premise in &rule.when {
             let compiled = self.premise(premise)?;
             self.when.push(compiled);
@@ -880,7 +808,7 @@ impl Scope {
 
 /// A Dialog-DB rule concluding `read` when the premises of `rule` hold.
 fn concluding(rule: &Rule, read: &Read, head: &str) -> Result<(Json, Vec<Proposition>), Error> {
-    whole(read, &bound(rule))?;
+    whole(read, &rule.bound())?;
     let fields: Vec<&Field> = read.fields.iter().collect();
     let mut scope = Scope::default();
     scope.adopt(read, &fields);
@@ -924,8 +852,8 @@ fn induce(rule: &Rule, read: &Read, head: &str) -> Result<InductiveRule, Error> 
 /// rule derives a relation of the report's own, a column for each
 /// variable the head holds, and that relation is what is selected.
 fn report(rule: &Rule, read: &Read, site: &str) -> Result<Step, Error> {
-    let bound = bound(rule);
-    let fields = kept(read, &bound);
+    let bound = rule.bound();
+    let fields = read.named(&bound);
     for term in fields.iter().map(|field| &field.term).chain([&read.entity]) {
         if let Term::Variable(name) = term
             && !bound.contains(name)
@@ -1095,18 +1023,36 @@ mod tests {
     }
 
     #[test]
-    fn it_compiles_each_head_to_a_rule_of_its_kind() {
-        let steps = steps(
-            "(rule (all (assert! (xyz.counter ?c count: (:last (:natural (+ ?n : 1)))))
-                        (retract! (xyz.counter ?c stale: ?n))
-                        (xyz.seen ?c count: ?n))
-               (xyz.counter ?c count: (:last (:natural ?n))))",
-        )
+    fn it_compiles_a_head_to_a_rule_of_its_kind() {
+        let premise = "(xyz.counter ?c count: (:last (:natural ?n)))";
+        let asserted = steps(&format!(
+            "(rule (assert! (xyz.counter ?c count: (:last (:natural (+ ?n : 1))))) {premise})"
+        ))
         .unwrap();
-        assert!(matches!(
-            steps.as_slice(),
-            [Step::Induce(_), Step::Induce(_), Step::Deduce(_)]
-        ));
+        assert!(matches!(asserted.as_slice(), [Step::Induce(_)]));
+        let retracted = steps(&format!(
+            "(rule (retract! (xyz.counter ?c stale: ?n)) {premise})"
+        ))
+        .unwrap();
+        assert!(matches!(retracted.as_slice(), [Step::Induce(_)]));
+        let derived = steps(&format!("(rule (xyz.seen ?c count: ?n) {premise})")).unwrap();
+        assert!(matches!(derived.as_slice(), [Step::Deduce(_)]));
+    }
+
+    /// A kernel rule has one head, so several are refused and nothing is
+    /// compiled of them.
+    #[test]
+    fn it_refuses_a_rule_of_several_heads() {
+        let refused = steps(
+            "(rule (all (assert! (xyz.counter ?c count: (:last (:natural (+ ?n : 1)))))
+                        (retract! (xyz.counter ?c stale: ?n)))
+               (xyz.counter ?c count: (:last (:natural ?n))))",
+        );
+        assert!(
+            matches!(&refused, Err(Error::Refused(why)) if why.contains("a kernel rule has one")),
+            "{:?}",
+            refused.as_ref().map(Vec::len)
+        );
     }
 
     #[test]
