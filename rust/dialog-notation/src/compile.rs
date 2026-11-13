@@ -27,8 +27,8 @@ use dialog_query::concept::descriptor::ConceptStatement;
 use dialog_query::formula::entity::derive;
 use dialog_query::{
     Any, AttributeDescriptor, ConceptConclusion, ConceptQuery, DeductiveRule,
-    DeductiveRuleDescriptor, InductiveRule, InductiveRuleDescriptor, MapPattern, Pattern,
-    Premise as DialogPremise, Proposition, Term as Variable,
+    DeductiveRuleDescriptor, InductiveRule, InductiveRuleDescriptor, ListPattern, MapPattern,
+    Pattern, Premise as DialogPremise, Proposition, Term as Variable,
 };
 use serde_json::{Map, Value as Json, json};
 
@@ -132,9 +132,24 @@ fn written(value: &Value) -> Syntax {
                         .collect(),
                     None,
                 ),
-                Ok(Some(Composite::List(items) | Composite::Tuple(items))) => {
+                Ok(Some(Composite::Tuple(items))) => {
                     Syntax::Tuple(items.iter().map(written).collect())
                 }
+                // A list is written `( )`: its first item where an
+                // operator stands, and the others after it.
+                Ok(Some(Composite::List(items))) => match items.split_first() {
+                    Some((first, others)) => Syntax::Application(
+                        Box::new(written(first)),
+                        Parameters {
+                            items: others.iter().map(written).collect(),
+                            ..Parameters::default()
+                        },
+                    ),
+                    // The list of nothing has no tree: `( )` has a
+                    // first part. It is printed as it would be written
+                    // and does not read back.
+                    None => Syntax::Reference("()".into()),
+                },
                 _ => Syntax::Blank,
             }
         }
@@ -295,7 +310,7 @@ fn id(formula: &Formula) -> Result<Option<Entity>, Error> {
     Ok(Some(entity))
 }
 
-/// The pattern a struct or a tuple is. A key written as a label is a
+/// The pattern a struct, a tuple or a list is. A key written as a label is a
 /// symbol of no domain; any other key is the value it is written as.
 /// `name` says what a variable goes by where the pattern stands, and
 /// what a blank, given no name, is there.
@@ -354,9 +369,36 @@ fn shape(
                     "{symbol} is a name, not a value: text is quoted, an entity has a `:`"
                 )));
             }
+            // `( )` is a list, and `...?run` after its items is the
+            // ones after them, as a list. Headed by a keyword or an
+            // operator it is a formula, which nothing here applies.
+            Syntax::Application(..) if node.is_formula() => {
+                return Err(Error::Unsupported(format!(
+                    "{node} where a value stands: it applies a formula, and a list that \
+                     starts with a keyword or an operator has no spelling yet"
+                )));
+            }
+            Syntax::Application(first, operand) => {
+                if let Some(label) = operand.terms.keys().next() {
+                    return Err(Error::Refused(format!(
+                        "{node} is a list, and a list has no part labelled `{label}:`"
+                    )));
+                }
+                let items = ListPattern::new(
+                    std::iter::once(&**first)
+                        .chain(&operand.items)
+                        .map(|item| walk(item, name))
+                        .collect::<Result<Vec<_>, Error>>()?,
+                );
+                match &operand.rest {
+                    Some(run) => items.with_run(name(Some(run))),
+                    None => items,
+                }
+                .into()
+            }
             other => {
                 return Err(Error::Unsupported(format!(
-                    "{other} inside a struct: only values, variables, structs and tuples are"
+                    "{other} inside a struct: only values, variables, structs, tuples and lists are"
                 )));
             }
         })

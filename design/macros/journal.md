@@ -5,7 +5,7 @@
 |  | Understanding | Activity |
 |---|---|---|
 | **Status** | The kernel and the core forms run on a real branch through `rust/dialog-notation` ([poc.md](poc.md)); the prelude is rules only. The syntax tree is built, apart from the notation as parsed, and kept as data: maps that say their `type` ([design-forms.md](design-forms.md#the-syntax-tree)). A struct is a value and, with a variable in it, a pattern, which is a topic of its own with an agent on it (#777). Rules of several heads are #776. Expanding and compiling still read the notation as parsed, and `kernel.rs` still copies dialog's forms. | **Designing** again from 2026-11-12, for the three phases ([design-pipeline.md](design-pipeline.md)); how the phases stand behind the query engine is still Directing. Direction decided by the maintainer: phases as formulas and a resolver, one rule over them. A proof of concept runs. A name is kept as a name, what is named and a signature; a definition under it is read `last`; an application resolves by the labels written and a read that fits several is of all. Built and tested, by pattern, in the expander. |
-| **Agenda** | To ask: whether descriptions are `dialog.meta/description`, which Dialog-DB refuses from a transaction today, or stay under the notation's own `syntax.meta`. Which format a stored rule that holds a pattern is stamped (#779), which is what stands between the notation and structs in rules that write. What `[ ]` says, a list or a tuple: it is a tuple today, a list has no spelling, and the choice is dear to change once values are stored. Next: a list and a list with a run, which dialog has and the notation does not write, once `[ ]` is decided; a reported row in the order asked; printing from the analyzed tree. Parked by the maintainer: authority, for two definitions of one signature written apart; `last` elects one until then. How a query reports. Decided 2026-11-13: a rule has one head and `(all …)` is not written; what that does to #776 and to several heads in #779 is the maintainer's to say. Whether a template says several things with `(all …)` or a spread. Whether a command takes fields beside what it is about, and a slash in its name. The prelude written without `when`. Parked by the maintainer: `update`, and with it what it does with a dependent that does not fit or arrives by sync. Whether the name as written is part of what names a macro. Whether the analyzer, a resolver by the maintainer's word, gives back the table of what each name meant. Whether dialog can be asked for an expansion a form at a time (H3). What a read with no pick reads. | The notation is on top of patterns (#778, merged in, its perf gate failing): a struct is a value in a write and a pattern in a query of one read. Next: a struct in a rule, which needs the compiler to build dialog's forms in Rust, since a pattern has no wire form; `entity/derive` over a record; then an application lowers to a `ConceptQuery` of the definition's concept. Not waiting: a helper rule for a negated conjunction. Waiting on patterns (#777, #778): a struct as a term, `entity/derive` over a record, syntax kept on the branch. |
+| **Agenda** | **One at a time, in the order of the queue at the end of this journal** (the maintainer, 2026-11-13: the threads were more than he could follow). The rest of this cell is what the queue was drawn from. To ask: whether descriptions are `dialog.meta/description`, which Dialog-DB refuses from a transaction today, or stay under the notation's own `syntax.meta`. Which format a stored rule that holds a pattern is stamped (#779), which is what stands between the notation and structs in rules that write. What `[ ]` says, a list or a tuple: it is a tuple today, a list has no spelling, and the choice is dear to change once values are stored. Next: a list and a list with a run, which dialog has and the notation does not write, once `[ ]` is decided; a reported row in the order asked; printing from the analyzed tree. Parked by the maintainer: authority, for two definitions of one signature written apart; `last` elects one until then. How a query reports. Decided 2026-11-13: a rule has one head and `(all …)` is not written; what that does to #776 and to several heads in #779 is the maintainer's to say. Whether a template says several things with `(all …)` or a spread. Whether a command takes fields beside what it is about, and a slash in its name. The prelude written without `when`. Parked by the maintainer: `update`, and with it what it does with a dependent that does not fit or arrives by sync. Whether the name as written is part of what names a macro. Whether the analyzer, a resolver by the maintainer's word, gives back the table of what each name meant. Whether dialog can be asked for an expansion a form at a time (H3). What a read with no pick reads. | The notation is on top of patterns (#778, merged in, its perf gate failing): a struct is a value in a write and a pattern in a query of one read. Next: a struct in a rule, which needs the compiler to build dialog's forms in Rust, since a pattern has no wire form; `entity/derive` over a record; then an application lowers to a `ConceptQuery` of the definition's concept. Not waiting: a helper rule for a negated conjunction. Waiting on patterns (#777, #778): a struct as a term, `entity/derive` over a record, syntax kept on the branch. |
 
 ## Candidate problems
 
@@ -901,3 +901,38 @@ Not examined yet. They are columns, not recommendations.
 - A list with a run is not built. `[?first ...?more]` would have to be a list, since a tuple has no run, which makes `[ ]` a tuple until a rest is written in it. That is the same question as what `[ ]` says, so it waits on it.
 
 **Decided.** Built, needing no decision: the tree over the composite value; a symbol written in a struct; a rest in a struct, since `...?rest` already says a rest in an application. By the agent, open to change: a rest stands after the entries and nowhere else. Not decided, the maintainer's: what `[ ]` says. The agent's hypothesis is a list, in the ledger with what would refute it.
+
+## 2026-11-13, Designing: a list is `( )`, and one thing at a time
+
+**Asked.** "List is ()" (the maintainer), to the agent's question of what `[ ]` says. Then: "This is overwhelming amount of information and threads that I can't possibly navigate myself. So lets tackle one at a time an you pick the order in terms of priorities."
+
+**Learned.**
+
+- The question was already answered. The journal of 2026-11-11 has "`( )` is a list, as every lisp calls it, and `[ ]` a tuple". The agent asked it again, with a hypothesis against it, without reading what was written. The hypothesis is withdrawn in the ledger.
+- Built: where a value stands, a `( )` headed by a keyword or an operator is a formula, as it was, and any other is the list of what it holds. `...?run` after its items is the ones after them, as a list. It is read where the kernel reads a term, so the tree has one `( )` node and a pattern over syntax is not changed.
+
+```
+ (assert! (xyz.note note:1 tags: ("math" "engines" "looms")))
+ (query (xyz.note ?n tags: ("math" ...?more)))        the lists that start with "math"
+ (query (xyz.note ?n tags: (?only)))                  the lists of one
+ (query (syntax.form ?f is: {type: :tuple items: (_ _)}))    the kept tuples of two parts
+```
+
+- A list prints `( )` and a tuple `[ ]`, so what a row prints reads back as the value it was.
+- With it the notation writes every pattern dialog has, in a write and in a query. In a stored rule none of them, which is #779.
+- Two lists have no spelling: one that starts with a keyword, since `(:open :done)` is a formula, and the list of nothing, since `( )` has a first part.
+- The agent ran too many threads at once and reported them all together. From here one question is asked at a time, and nothing new is started beside it.
+
+**Decided.** By the maintainer: `( )` is a list, `[ ]` a tuple; one thing at a time, the agent picks the order. By the agent, open to change: how a list is told from a formula.
+
+## The queue
+
+In order. One is asked, answered and written down before the next.
+
+1. Which format a stored rule that holds a pattern is stamped (#779, `design/rule-format/stamping.md`). First because it is what stands between the notation and patterns in rules, and no other answer unblocks as much building.
+2. Whether a rule that leaves a premise's subject unnamed fires only for the entity written (#789, #791). It changes what a commit writes on main.
+3. How a list that starts with a keyword, and the list of nothing, are written.
+4. Whether descriptions are `dialog.meta/description` or stay under `syntax.meta`.
+5. Review of #777 and the open questions of #778.
+6. The agent's choices standing until said otherwise: the blank-line rule for comments; a refused document keeps no definition; a rest stands after a struct's entries; `(all …)` or a spread in a template.
+7. Housekeeping: #776 and the several-heads part of #779 after one head a rule; the Perf gate on #788; the sweep output under `/home/claude/heads/target`; the branch `wip/patterns-step-2`.

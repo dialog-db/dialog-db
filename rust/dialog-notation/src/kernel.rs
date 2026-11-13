@@ -155,6 +155,28 @@ pub struct Rule {
     pub unless: Vec<Premise>,
 }
 
+/// The variables a struct, a tuple or a list binds: the ones in it,
+/// and the run of a list, which among the parts of an application is
+/// no variable.
+fn held(form: &Syntax, into: &mut Vec<String>) {
+    match form {
+        Syntax::Application(first, operand) => {
+            held(first, into);
+            operand.items.iter().for_each(|item| held(item, into));
+            into.extend(operand.rest.iter().cloned());
+        }
+        Syntax::Map(entries, rest) => {
+            entries.iter().for_each(|(key, value)| {
+                held(key, into);
+                held(value, into);
+            });
+            into.extend(rest.iter().cloned());
+        }
+        Syntax::Tuple(items) => items.iter().for_each(|item| held(item, into)),
+        other => other.variables(into),
+    }
+}
+
 fn term(node: &Syntax) -> Result<Term, Error> {
     Ok(match node {
         Syntax::Variable(name) => Term::Variable(name.clone()),
@@ -168,7 +190,10 @@ fn term(node: &Syntax) -> Result<Term, Error> {
         Syntax::Constant(Value::Symbol(_)) => Term::Symbol(node.to_string()),
         Syntax::Reference(name) => Term::Symbol(name.clone()),
         application if application.is_formula() => Term::Formula(Box::new(formula(application)?)),
-        Syntax::Map(..) | Syntax::Tuple(_) => Term::Struct(node.clone()),
+        // `( )` is a list. Headed by a keyword or an operator it is a
+        // formula, above; any other where a value stands is the list
+        // of what it holds.
+        Syntax::Map(..) | Syntax::Tuple(_) | Syntax::Application(..) => Term::Struct(node.clone()),
         other => return Err(Error::Refused(format!("{other} is not a term"))),
     })
 }
@@ -349,7 +374,7 @@ impl Rule {
                 Term::Formula(inner) => formula(inner, names),
                 Term::Struct(form) => {
                     let mut inside = Vec::new();
-                    form.variables(&mut inside);
+                    held(form, &mut inside);
                     names.extend(inside);
                 }
                 _ => {}
