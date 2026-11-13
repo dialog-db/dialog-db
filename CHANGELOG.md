@@ -14,6 +14,31 @@ says how to cut a release.
 
 ## Unreleased
 
+### A rule is planned once for each set of names its seeds bind
+
+[#792](https://github.com/dialog-db/dialog-db/pull/792), [#788](https://github.com/dialog-db/dialog-db/pull/788)
+
+Commit-time induction binds each changed row into a premise and
+evaluates the rule under a plan ordered for the names the row binds. It
+made that plan again for every row: a commit of 500 commands planned a
+rule 500 times, each time for the same names. A plan depends on the
+rule and on which names are bound, not on the values bound to them, so
+the plans are now kept with the decoded rule, one for each set of names,
+and a seed takes a copy.
+
+What this changes for you:
+
+- What induction writes is unchanged. In this crate's tests every kept
+  plan handed out is compared with the plan made afresh for the same
+  names.
+- The plans live as long as the decoded rule does, in the rule cache
+  the environment bounds, and a rule keeps at most 32: a set of names
+  past that is planned each time, as before.
+
+Why: planning was 3% to 9% of what a commit of 500 commands cost in
+instructions, and nothing a second plan could find differs from the
+first.
+
 ### A prefetch hint a query took but did not finish is resumed by the next query
 
 [#770](https://github.com/dialog-db/dialog-db/pull/770), argued in

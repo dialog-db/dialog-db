@@ -57,10 +57,12 @@ use crate::repository::archive::erased;
 use crate::repository::branch::session::{QueryEnv, shared_metadata};
 use crate::repository::source::View;
 use crate::rules::{
-    TriggerFootprint, hydrate, hydrate_inductive, on_attr, reads_attr, source_attr, transient_attr,
+    Induced, TriggerFootprint, hydrate, hydrate_inductive, on_attr, reads_attr, source_attr,
+    transient_attr,
 };
 use crate::{CommitError, RemoteSite, Revision, Staged};
 use std::slice::from_ref;
+use std::sync::Arc;
 
 /// Round bound for the induction loop: a cascade still emitting
 /// transients or novelty after this many rounds fails the commit
@@ -260,9 +262,10 @@ where
         let mut novelty = Changes::new();
         let mut emitted_transients = Changes::new();
         for entity in candidates {
-            let Some(rule) = dispatch.load(&entity, &overlay, env).await? else {
+            let Some(induced) = dispatch.load(&entity, &overlay, env).await? else {
                 continue;
             };
+            let rule = induced.rule();
             let transient_head = dispatch
                 .is_transient(&rule.conclusion().this(), &overlay, env)
                 .await?;
@@ -274,7 +277,7 @@ where
             // seed cannot express: enabling by removal (`unless` over
             // a retracted or superseded fact) and premises that
             // changed derivedly through the deductive closure.
-            let (positive, unless) = premise_reach(&rule);
+            let (positive, unless) = premise_reach(rule);
             let full = installed.contains(&entity)
                 || expanded
                     .iter()
@@ -287,7 +290,7 @@ where
                     .any(|a| unless.iter().any(|u| u.covers(a)));
             if full {
                 fire(
-                    &rule,
+                    &induced,
                     transient_head,
                     &view,
                     &mut novelty,
@@ -296,7 +299,7 @@ where
                 .await?;
             } else {
                 fire_seeded(
-                    &rule,
+                    &induced,
                     transient_head,
                     &assert_rows,
                     &view,
@@ -656,7 +659,7 @@ impl<'a> Dispatch<'a> {
         entity: &Entity,
         overlay: &OverlayTriggers,
         env: &Env,
-    ) -> Result<Option<InductiveRule>, CommitError>
+    ) -> Result<Option<Arc<Induced>>, CommitError>
     where
         Env: Provider<BlobRead>
             + Provider<Get>
@@ -698,8 +701,7 @@ impl<'a> Dispatch<'a> {
         if !rule.stored_as(entity) {
             return Ok(None);
         }
-        cache.record_inductive(entity.clone(), &bytes, rule.clone());
-        Ok(Some(rule))
+        Ok(Some(cache.record_inductive(entity.clone(), &bytes, rule)))
     }
 
     /// Whether the concept at `entity` carries the
@@ -974,13 +976,14 @@ async fn select<'a>(
 /// head for every binding: transient heads into `transients`, durable
 /// heads (novelty-checked against the view) into `novelty`.
 async fn fire<'a>(
-    rule: &InductiveRule,
+    induced: &Induced,
     transient_head: bool,
     view: &QueryEnv<'a>,
     novelty: &mut Changes,
     transients: &mut Changes,
 ) -> Result<(), CommitError> {
-    let plan = rule.plan(&Environment::new());
+    let rule = induced.rule();
+    let plan = induced.plan(&Environment::new());
     let matches: Vec<Match> = plan
         .evaluate(Match::new().seed(), view)
         .try_collect()
@@ -1027,14 +1030,15 @@ fn premise_reach(rule: &InductiveRule) -> (BTreeSet<Reach>, BTreeSet<Reach>) {
 /// seeded one by one when it finds any (see [`seed_groups`] for why);
 /// when it finds none, the rows are seeded one by one.
 async fn fire_seeded<'a>(
-    rule: &InductiveRule,
+    induced: &Induced,
     transient_head: bool,
     rows: &[Fact],
     view: &QueryEnv<'a>,
     novelty: &mut Changes,
     transients: &mut Changes,
 ) -> Result<(), CommitError> {
-    let matches = seeded_matches(rule, rows, view, Seeding::Grouped).await?;
+    let rule = induced.rule();
+    let matches = seeded_matches(induced, rows, view, Seeding::Grouped).await?;
     #[cfg(test)]
     let before = (novelty.clone(), transients.clone());
     if !matches.is_empty() {
@@ -1042,7 +1046,7 @@ async fn fire_seeded<'a>(
     }
     #[cfg(test)]
     oracle::agrees(
-        rule,
+        induced,
         transient_head,
         rows,
         view,
@@ -1072,7 +1076,7 @@ enum Seeding {
 /// two matches writing one transient cell under `last` are decided by
 /// it: the later replaces the earlier.
 async fn seeded_matches<'a>(
-    rule: &InductiveRule,
+    induced: &Induced,
     rows: &[Fact],
     view: &QueryEnv<'a>,
     seeding: Seeding,
@@ -1080,7 +1084,7 @@ async fn seeded_matches<'a>(
     use dialog_query::{Premise, Proposition};
 
     let mut matches: Vec<Match> = Vec::new();
-    for premise in &rule.analysis().premises {
+    for premise in &induced.rule().analysis().premises {
         let Premise::Assert(Proposition::Concept(query)) = premise else {
             continue;
         };
@@ -1097,7 +1101,7 @@ async fn seeded_matches<'a>(
             }
             if group.len() > 1 {
                 let together =
-                    evaluate_seed(rule, query, group.iter().map(|&at| &rows[at]), view).await?;
+                    evaluate_seed(induced, query, group.iter().map(|&at| &rows[at]), view).await?;
                 if !together.is_empty() {
                     found.push((group[0], together));
                     continue;
@@ -1108,7 +1112,7 @@ async fn seeded_matches<'a>(
                 oracle::count(group.len());
             }
             for at in group {
-                found.push((at, evaluate_seed(rule, query, [&rows[at]], view).await?));
+                found.push((at, evaluate_seed(induced, query, [&rows[at]], view).await?));
             }
         }
         // Groups come in the order of their first rows, so only rows
@@ -1120,10 +1124,11 @@ async fn seeded_matches<'a>(
     Ok(matches)
 }
 
-/// Evaluates `rule` with `rows` bound into `query` (see [`seed`]); no
-/// matches when the rows do not bind it.
+/// Evaluates the rule of `induced` with `rows` bound into `query` (see
+/// [`seed`]), under the plan the rule keeps for the names the rows
+/// bind; no matches when the rows do not bind it.
 async fn evaluate_seed<'a, 'r>(
-    rule: &InductiveRule,
+    induced: &Induced,
     query: &dialog_query::ConceptQuery,
     rows: impl IntoIterator<Item = &'r Fact>,
     view: &QueryEnv<'a>,
@@ -1131,7 +1136,8 @@ async fn evaluate_seed<'a, 'r>(
     let Some((matched, scope)) = seed(query, rows) else {
         return Ok(Vec::new());
     };
-    rule.plan(&scope)
+    induced
+        .plan(&scope)
         .evaluate(matched.seed(), view)
         .try_collect()
         .await
@@ -1441,7 +1447,7 @@ async fn is_novel<'a>(view: &QueryEnv<'a>, instruction: &Instruction) -> Result<
 /// tests reach, not only where a test was written for it.
 #[cfg(test)]
 mod oracle {
-    use super::{InductiveRule, QueryEnv, Seeding, emit_matches, seeded_matches};
+    use super::{Induced, QueryEnv, Seeding, emit_matches, seeded_matches};
     use crate::CommitError;
     use dialog_corpus::{Changes, Fact};
     use std::cell::Cell;
@@ -1467,7 +1473,7 @@ mod oracle {
     /// `transients` the grouped firing wrote; panics with both when it
     /// does not.
     pub(super) async fn agrees(
-        rule: &InductiveRule,
+        induced: &Induced,
         transient_head: bool,
         rows: &[Fact],
         view: &QueryEnv<'_>,
@@ -1475,7 +1481,8 @@ mod oracle {
         novelty: &Changes,
         transients: &Changes,
     ) -> Result<(), CommitError> {
-        let per_row = seeded_matches(rule, rows, view, Seeding::PerRow).await?;
+        let rule = induced.rule();
+        let per_row = seeded_matches(induced, rows, view, Seeding::PerRow).await?;
         let (mut expected_novelty, mut expected_transients) = before;
         if !per_row.is_empty() {
             emit_matches(
