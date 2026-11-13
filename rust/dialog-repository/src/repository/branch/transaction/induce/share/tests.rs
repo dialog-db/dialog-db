@@ -786,7 +786,9 @@ async fn it_writes_in_its_own_order_a_body_two_rules_list_in_two_orders() -> Res
 
     // Each hub is reached from one node, and one commit adds an edge
     // to it from a second. The pairs are named so that whichever order
-    // a scan gives two nodes in, some hub has the old one first.
+    // a scan gives two nodes in, some hub has the old one first. The
+    // heads are commands, so what a rule elects for a hub is what the
+    // commit reports under its attribute.
     const HUBS: usize = 6;
     let pair = |hub: usize| {
         if hub.is_multiple_of(2) {
@@ -795,8 +797,10 @@ async fn it_writes_in_its_own_order_a_body_two_rules_list_in_two_orders() -> Res
             (format!("node:z{hub}"), format!("node:a{hub}"))
         }
     };
+    let transient: Vec<Entity> = rules.iter().map(|rule| rule.conclusion().this()).collect();
     let world_of = |share: bool| {
         let rules = rules.clone();
+        let transient = transient.clone();
         async move {
             let _unshared = (!share).then(Unshared::new);
             let world = world().await?;
@@ -809,69 +813,49 @@ async fn it_writes_in_its_own_order_a_body_two_rules_list_in_two_orders() -> Res
                     Pick::All,
                 );
             };
-            let mut ground = Changes::new();
+            let mut edges = Changes::new();
             for hub in 0..HUBS {
-                link(&mut ground, &pair(hub).0, hub);
+                link(&mut edges, &pair(hub).0, hub);
             }
-            commit(&world, ground, Changes::new()).await?;
-            let mut transaction = world.branch.transaction();
-            for rule in &rules {
-                transaction = transaction.assert(rule);
-            }
-            transaction
-                .commit()
-                .publish()
-                .perform(&world.operator)
-                .await?;
-            world.branch.refresh(&world.operator).await?;
+            commit(&world, edges, Changes::new()).await?;
+            install(&world, &rules, &transient).await?;
             probe::take();
 
             let mut changes = Changes::new();
             for hub in 0..HUBS {
                 link(&mut changes, &pair(hub).1, hub);
             }
-            commit(&world, changes, Changes::new()).await?;
-            let counts = probe::take();
-
-            // What each hub holds under each rule's attribute.
-            let mut held = Vec::new();
-            for hub in 0..HUBS {
-                let mut by_rule = Vec::new();
-                for domain in domains {
-                    let selector = Selector::new()
-                        .the(relation(&format!("{domain}/from")))
-                        .of(entity(&format!("hub:{hub}")));
-                    let stream = world
-                        .branch
-                        .claims()
-                        .select(selector)
-                        .perform(&world.operator)
-                        .await?;
-                    let facts: Vec<_> = stream.collect().await;
-                    let mut values = Vec::new();
-                    for fact in facts {
-                        values.push(format!("{:?}", fact.and_then(|view| view.to_owned())?.is));
-                    }
-                    by_rule.push(values);
-                }
-                held.push(by_rule);
-            }
-            anyhow::Ok((held, counts))
+            let reported = commit(&world, changes, Changes::new()).await?;
+            anyhow::Ok((reported, probe::take()))
         }
     };
     let (shared, counts) = world_of(true).await?;
     let (unshared, _) = world_of(false).await?;
     assert_eq!(shared, unshared, "every rule elects what it elects alone");
 
-    for by_rule in &shared {
-        for values in by_rule {
-            assert_eq!(values.len(), 1, "one value is elected under `last`");
-        }
+    // What each rule elected for each hub.
+    let mut differ = false;
+    for hub in 0..HUBS {
+        let elected: Vec<&str> = domains
+            .iter()
+            .map(|domain| {
+                let cell = format!("assert hub:{hub} {domain}/from ");
+                let lines: Vec<&String> = shared
+                    .iter()
+                    .filter(|line| line.starts_with(&cell))
+                    .collect();
+                assert_eq!(
+                    lines.len(),
+                    1,
+                    "one value is elected under `last`: {lines:?}"
+                );
+                &lines[0][cell.len()..]
+            })
+            .collect();
+        differ |= elected.iter().any(|value| *value != elected[0]);
     }
     assert!(
-        shared
-            .iter()
-            .any(|by_rule| by_rule.iter().any(|values| values != &by_rule[0])),
+        differ,
         "at some hub the two orders elect different values: {shared:?}"
     );
     let (read, alone) = counts;
