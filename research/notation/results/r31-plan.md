@@ -232,3 +232,22 @@ issue:7  xyz.tracker/state  "open"
 ````
 
 </details>
+
+## Addendum, after the first 20 readers
+
+Written after 20 of the 30 readers had answered and before anything was scored, because the maintainer asked whether readers were biased by memory or other data. They were exposed to it. Every reader agent in R17 to R31 started with this session's context:
+
+- the maintainer's memory snapshot, which names Dialog DB and a project of "Dialog rules";
+- this repository's `.claude/rules`;
+- the instructions of the session's MCP servers, among them the Tonk connector's, which describe concept heads and domain heads.
+
+No reader read a memory file or called anything but Read, and every variant in a round saw the same context. So comparisons within a round stand. The levels may not: the Tonk text in particular may push readers to treat a domain call as a lower layer.
+
+So the round changes runner. The 20 answers already in are kept and reported as the `agent` runner. Then all three variants run 10 readers each again, as the `clean` runner:
+
+- headless `claude -p --model haiku`;
+- the system prompt replaced by "You are a careful reader.";
+- no MCP servers, no settings sources, no tools;
+- the document given as the prompt itself.
+
+A probe of this runner reported no memory, no Dialog, Tonk or maintainer context. It still carries the harness's user-email line and one browser connector's instructions. The bars apply to the `clean` runner. R30's `concept` and `baseline` variants are also rerun on the `clean` runner, 10 each, with R30's bars, to check whether R30's result came from the context.
