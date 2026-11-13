@@ -64,7 +64,7 @@ Backtracking moves a topic to an earlier phase and says so in its journal.
   **Building.** The tree talks in nodes through capabilities it performs on
   the environment; caching, decoding and storage form belong to providers.
   The [plan](tree-node-reads/plan.md) is for whoever builds it.
-- [Macros as rules](macros.md): **Directing.** A slim kernel (`rule`, two
+- [Macros as rules](macros.md): **Designing.** A slim kernel (`rule`, two
   kinds of application, the write relations) and every other form a macro
   that is a rule. The [core forms](macros/kernel.md) are defined and
   [run on Dialog-DB](macros/poc.md) as a proof of concept; syntax is not
