@@ -22,6 +22,28 @@ Two of the agent's guesses were wrong. `named` is not within a tenth of `wide` w
 
 Commits: `4138dc9` and the one this entry is in.
 
+## 2026-11-12, one command a commit: what is expected
+
+**Question.** A person issues one command a commit. Do the differences between `wide`, `named` and `repeat`, measured at 500 commands a commit, hold there?
+
+**Method.** Scenarios `heads-each-…`: 500 to-dos seeded and the rules installed as before, one commit of one command off the record so the rules are loaded, then 100 commits of one command each, a different to-do each time. The instructions divided by 100 are one commit. Two floors beside the three shapes: `none`, the command dispatched with no rule to read it, which writes nothing, and `plain`, a transaction that asserts the same facts itself with no rule installed, which is what committing those facts costs before any rule. Each shape is reported gross and net of `plain`.
+
+Checks that the input does not flatter the result: the same at 10 and 300 commits (a commit should not cost more for the commits before it), the same over 5000 to-dos, and the first commit of a process, with none before it.
+
+**Expected.** Guesses, written before any of these ran. A commit of two facts with no rule costs about 2 million instructions (`commit-rows` in `perf/baseline/`: 197 million for 100). At 500 a commit a command costs 1.8 million as `wide`, 2.3 as `named` and 2.9 as `repeat`, one read and two heads. So:
+
+- the order holds: `wide`, `named`, `repeat`;
+- gross, the three are closer than at 500, since each carries the same commit;
+- net of `plain`, they are as far apart as at 500 or further. What a round does once (probing the triggers, building the round's view, loading and planning a rule) was shared by 500 commands and is now paid by one, `named` has a round more, and `repeat` a rule more a head.
+
+**Bars.** Proposed by the agent before any run. On the gross number, which is what a person pays, in the four cells (one read or four, two heads or four):
+
+- the difference **holds** if `named` is 10% or more over `wide` in every cell;
+- it **does not hold** if the cheaper of `named` and `repeat` is within 10% of `wide` in every cell: then at one command a commit a rule of several heads buys nothing worth having;
+- between, the cells are reported one by one.
+
+Net of `plain` has no bar. It is reported to say what the rules themselves cost. Three runs, interleaved; a difference inside the spread between runs is noise.
+
 ## How to reproduce
 
 ```
