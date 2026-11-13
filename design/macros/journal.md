@@ -665,3 +665,17 @@ Not examined yet. They are columns, not recommendations.
 ```
 
 **Decided.** By the maintainer: "analyzed tree". Open, and asked of him: whether types are inferred once, by the engine, and asked for by the pipeline, or by analysis itself; and whether a row keeps the order its fields were written in.
+
+## 2026-11-12, Designing: what was written, kept beside what was said
+
+**Asked.** Irakli, as the stages went by. Inference should happen when compiling: why would it be at run time, and is there a reason the compiled form is not complete? A type error with no place in the source will not do: tonk's notation and its language server say where an error is, and this cannot be worse. Look at conduct, which captured a mapping so the source could be shown as written, and at Unison. Then: a form that takes the analyzed tree and gives the source, tested by printing the original, and the same from the compiled form, which carries none of the mapping. And: holding the source is cheating; keep the mapping only, which attribute was named what, needed for invocations anyway, and the order, so it is easy to arrange back.
+
+**Learned.**
+
+- The agent had inference in the wrong place. The engine infers when a rule value is built (`DeductiveRule::new`), and `compile` is what builds it, so inference is in the compile phase already and planning does not infer again. What is left for later is the order of joins, and analyzing a kept rule again each time it is read from the branch.
+- Stages 2 and 3 are built: the compiler and the analyzer read trees, and nothing after `parse` names the notation as parsed. Every test passes with expected text reordered by label and nothing else changed.
+- Conduct made most of today's choices already: a range on every node; a template's name with a pin, the hash it meant where the macro was defined, and the name as written got back from it; labels kept by the definition and a call's arguments arranged into its order; a cycle hashed as a unit; a definition checked once, ever.
+- Unison's reference: a hash is of a term's structure "excluding all names", and a member of a cycle is the cycle's hash and its place in it.
+- A macro call is not in the analyzed tree, and does not have to be held beside it. A definition run backwards gives the call back: the template taken off what the call became gives what the pattern's variables took, and the pattern filled with them is the call. Tested for one step, three shapes of definition. What does not come back is a labelled part the call left out: the template's own variable stands there.
+
+**Decided.** By the maintainer: inference belongs to compiling; an error says where it is; each phase's result can be printed back to the source with a mapping the result does not carry; the mapping holds names and order and never the source. Proposed by the agent, in [design-pipeline.md](design-pipeline.md), not decided: what is held at each phase; that space and comments are not held, so the test is the same tokens in the same order; that a range is on the node, as in conduct and tonk.

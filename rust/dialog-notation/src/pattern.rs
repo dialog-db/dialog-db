@@ -315,6 +315,64 @@ mod tests {
         );
     }
 
+    /// A definition runs both ways: the template taken off what a call
+    /// expanded to gives what the pattern's variables took, and the
+    /// pattern filled with them is the call. So what a call was need
+    /// not be kept beside what it became, only which definition it was.
+    #[test]
+    fn it_gives_back_a_call_by_running_its_definition_backwards() {
+        for (call, pattern, template) in [
+            (
+                "(query (a ?x) (b ?y) (when (c ?x) (d ?y)))",
+                "(query ?head ... (when ?premise ...))",
+                "(rule (report ?head) ... (when ?premise ...))",
+            ),
+            (
+                "(task ?mine title: \"Buy milk\")",
+                "(task ?t title: ?x)",
+                "(xyz.todo ?t text: (:last (:text ?x)))",
+            ),
+            (
+                "(add (todo list: list:home text: \"x\"))",
+                "(?command (?concept ...?fields))",
+                "(command ?command about: ?concept ...?fields)",
+            ),
+        ] {
+            let (call, pattern, template) = (one(call), one(pattern), one(template));
+            let became = fill(
+                &template,
+                &matches(&call, &pattern, Bindings::new()).unwrap(),
+                "s",
+            )
+            .unwrap();
+            let took = matches(&became, &template, Bindings::new()).unwrap();
+            assert_eq!(fill(&pattern, &took, "s").unwrap(), call, "{became}");
+        }
+    }
+
+    /// What does not come back: a labelled part the call left out. The
+    /// template names it with a variable of its own, and run backwards
+    /// that variable stands where nothing was written.
+    #[test]
+    fn it_gives_back_a_part_the_call_left_out_as_the_templates_own_variable() {
+        let (call, pattern, template) = (
+            one("(task ?mine)"),
+            one("(task ?t title: ?x)"),
+            one("(xyz.todo ?t text: (:last (:text ?x)))"),
+        );
+        let became = fill(
+            &template,
+            &matches(&call, &pattern, Bindings::new()).unwrap(),
+            "s",
+        )
+        .unwrap();
+        let took = matches(&became, &template, Bindings::new()).unwrap();
+        assert_eq!(
+            fill(&pattern, &took, "s").unwrap().to_string(),
+            "(task ?mine title: ?x.s)"
+        );
+    }
+
     #[test]
     fn it_refuses_a_label_the_template_and_the_rest_both_say() {
         let bindings = matches(

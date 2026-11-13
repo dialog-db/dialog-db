@@ -24,15 +24,47 @@ Named by the maintainer: what analysis gives is the **analyzed tree**. What is t
 
 Each ends with the tests passing.
 
-1. **The boundary.** `parse`, `Analyzer::analyze` and `compile` take and give trees. Done. Inside, expanding and compiling still go through the notation as parsed.
+1. **The boundary.** `parse`, `Analyzer::analyze` and `compile` take and give trees. Done.
 2. **The compiler reads the tree.** `kernel.rs` and `compile.rs`. Done: neither names the notation as parsed, and a reported row is a tree.
 3. **The analyzer reads the tree.** Patterns and templates match and fill trees; the walker walks trees. Done: nothing after `parse` names the notation as parsed.
-4. **The name table.** Names are resolved as a step of their own, and the analysis gives the table back.
+4. **What was written, beside what was said.** Each phase gives its result and a mapping of what the result left out, and a printer takes both back to the source. See below.
+5. **A pinned reference and the name table.** A resolved reference is the name and the entity it meant where it was written.
+
+## The mapping, and printing back
+
+Decided by the maintainer, 2026-11-12: there is a form that takes the analyzed tree and gives the source, and the test is that it prints the original; the same from the compiled form. The compiled form carries none of the mapping. The mapping does not hold the source: that is cheating. It holds what was named what, which invocation needs anyway, and the order things were written in, so they are easy to arrange back.
+
+```
+ text ──parse──▶ syntax tree   + written   each label's place in the order written, each
+                                           name and number as spelled, where each node is
+      ──analyze─▶ analyzed tree + origin    which definition was applied at which node, and
+                                           what each name resolved to
+      ──compile─▶ compiled form + sites     which analyzed node each rule, premise and
+                                           variable came of
+
+ print(syntax tree, written)                    says the text
+ print(analyzed tree, origin, written)          says the text
+ print(compiled form, sites, origin, written)   says the text
+```
+
+A macro call is not in the analyzed tree: after `(query (todo ?t text: ?x))` only `?t` and `?x` are left. It does not have to be held either. A definition is a pattern and a template, and both run both ways: matching the template against the analyzed node gives back what the pattern's variables took, and filling the pattern with them gives back the call. So `origin` holds which definition was applied where, and beside it only what the template threw away: a part the pattern bound and the template did not use.
+
+| lost at | what | held as |
+|---|---|---|
+| parse | the order of labelled parts | a permutation a node |
+| parse | `of:` written or left out; a number's digits; `:open` or `open:`; which bracket | a spelling a node, where it is not the default |
+| parse | where a node is in the text | a range a node |
+| parse | space between tokens, and comments | not held: it is source. A printer lays the text out, so the test is the same tokens in the same order |
+| analyze | the call a definition was applied to | the definition, by entity, at the node; what its template dropped |
+| analyze | the name a reference was written as | the name, beside the entity |
+| analyze | the names a template's own variables were given | derived from the site, as now |
+| compile | which rule, premise and variable is which node | a path a compiled part |
+
+Proposed by the agent, not decided: this table; that a comment is not reproduced; that order is held a node and not once a definition, since a call may write its labels in another order than the definition does.
 
 ## Not in these stages
 
 - A template that holds the entity of what it names, with the name beside it (decided 2026-11-12): needs a definition to have an entity, and a group that refers to itself named as one unit.
-- Where in the text a node came from. A node moves when a template is filled, so it cannot be a table by path beside the tree.
 - A kept form's relations to what it references: needs syntax kept on the branch, which waits on the composite value (#778, #748).
 - The phases behind a formula and a resolver in `dialog-query`, and `(dialog/evaluate (source "…"))`.
 - A rule without `when`: the maintainer's lean, waiting on what several heads are (#788).
