@@ -710,7 +710,7 @@ async fn it_keeps_a_struct_and_takes_it_apart_by_a_pattern() -> Result<()> {
     assert_eq!(
         report(
             &mut notebook,
-            "(query (xyz.note ?n about: {author: ?who ...?others}))"
+            "(query (xyz.note ?n about: {author: ?who ... ?others}))"
         )
         .await?,
         vec![
@@ -983,11 +983,11 @@ async fn it_finds_a_kept_form_by_a_pattern_over_its_tree() -> Result<()> {
     applies.sort();
     let mut expected = vec![
         format!(
-            "(syntax.form {} is: {{operand: {{items: ({{name: \"t\" type: :variable}}) terms: {{}} type: :parameters}} operator: {{name: /todo type: :reference}} type: :application}})",
+            "(syntax.form {} is: {{operand: {{items: '({{name: \"t\" type: :variable}}) terms: {{}} type: :parameters}} operator: {{name: /todo type: :reference}} type: :application}})",
             entities[0]
         ),
         format!(
-            "(syntax.form {} is: {{operand: {{items: ({{name: \"t\" type: :variable}}) terms: {{state: {{type: :constant value: :open}}}} type: :parameters}} operator: {{name: /todo type: :reference}} type: :application}})",
+            "(syntax.form {} is: {{operand: {{items: '({{name: \"t\" type: :variable}}) terms: {{state: {{type: :constant value: :open}}}} type: :parameters}} operator: {{name: /todo type: :reference}} type: :application}})",
             entities[1]
         ),
     ];
@@ -1021,14 +1021,14 @@ async fn it_finds_a_kept_form_by_a_pattern_over_its_tree() -> Result<()> {
     // form that applies a name, whatever else its nodes hold.
     let named = report(
         &mut notebook,
-        "(query (syntax.form ?f is: {operator: {name: ?name ...?reference} ...?node}))",
+        "(query (syntax.form ?f is: {operator: {name: ?name ... ?reference} ... ?node}))",
     )
     .await?;
     assert_eq!(named.len(), 3, "{named:?}");
 
     // The parts of a node are a list, which `( )` takes apart and
     // `[ ]`, a tuple, does not: the kept tuple of two parts.
-    let pair = "(query (syntax.form ?f is: {type: :tuple items: (_ _)}))";
+    let pair = "(query (syntax.form ?f is: {type: :tuple items: '(_ _)}))";
     let pairs = report(&mut notebook, pair).await?;
     assert_eq!(pairs.len(), 1, "{pairs:?}");
     assert!(pairs[0].contains(&entities[3]));
@@ -1043,28 +1043,28 @@ async fn it_finds_a_kept_form_by_a_pattern_over_its_tree() -> Result<()> {
     // And by a run: every application whose first part is a variable.
     let first = report(
         &mut notebook,
-        "(query (syntax.form ?f is: {operand: {items: ({type: :variable name: ?variable} ...?more)
-                                               ...?parameters}
-                                     ...?node}))",
+        "(query (syntax.form ?f is: {operand: {items: '({type: :variable name: ?variable} ... ?more)
+                                               ... ?parameters}
+                                     ... ?node}))",
     )
     .await?;
     assert_eq!(first.len(), 3, "{first:?}");
     Ok(())
 }
 
-/// `( )` is a list and `[ ]` a tuple. Where a value stands, a `( )`
-/// headed by a keyword or an operator is a formula and any other is the
-/// list of what it holds; `...?run` after its items is the ones after
-/// them. A list comes back written as it went in.
+/// A list is `'(1 2 3)` where a value stands: quoted, as in lisp, so
+/// that it is not read as applying `1`. `... ?run` after its items is
+/// the ones after them, and `...` alone takes them and binds nothing. A
+/// list comes back written as it went in.
 #[dialog_common::test]
 async fn it_keeps_a_list_and_takes_it_apart_by_its_first_items() -> Result<()> {
     let mut notebook = Notebook::open().await?;
     notebook
         .submit(
-            r#"(assert! (xyz.note note:1 tags: ("math" "engines" "looms")))
-               (assert! (xyz.note note:2 tags: ("math")))
+            r#"(assert! (xyz.note note:1 tags: '("math" "engines" "looms")))
+               (assert! (xyz.note note:2 tags: '("math")))
                (assert! (xyz.note note:3 tags: ["math" "engines"]))
-               (assert! (xyz.note note:4 about: {tags: ("math" {by: "Ada"})}))"#,
+               (assert! (xyz.note note:4 about: {tags: '("math" {by: "Ada"})}))"#,
         )
         .await?;
 
@@ -1074,36 +1074,36 @@ async fn it_keeps_a_list_and_takes_it_apart_by_its_first_items() -> Result<()> {
     assert_eq!(
         whole,
         vec![
-            r#"(xyz.note note:1 tags: ("math" "engines" "looms"))"#,
-            r#"(xyz.note note:2 tags: ("math"))"#,
+            r#"(xyz.note note:1 tags: '("math" "engines" "looms"))"#,
+            r#"(xyz.note note:2 tags: '("math"))"#,
             r#"(xyz.note note:3 tags: ["math" "engines"])"#,
         ]
     );
     // A list pattern with no run is the list of exactly its items.
     assert_eq!(
-        report(&mut notebook, "(query (xyz.note ?n tags: (?only)))").await?,
-        vec![r#"(xyz.note note:2 tags: ("math"))"#]
+        report(&mut notebook, "(query (xyz.note ?n tags: '(?only)))").await?,
+        vec![r#"(xyz.note note:2 tags: '("math"))"#]
     );
     // With a run it is a list that starts with them.
     assert_eq!(
         report(
             &mut notebook,
-            "(query (xyz.note ?n tags: (?first ?second ...?more)))"
+            "(query (xyz.note ?n tags: '(?first ?second ... ?more)))"
         )
         .await?,
-        vec![r#"(xyz.note note:1 tags: ("math" "engines" "looms"))"#]
+        vec![r#"(xyz.note note:1 tags: '("math" "engines" "looms"))"#]
     );
     let mut starts = report(
         &mut notebook,
-        r#"(query (xyz.note ?n tags: ("math" ...?more)))"#,
+        r#"(query (xyz.note ?n tags: '("math" ... ?more)))"#,
     )
     .await?;
     starts.sort();
     assert_eq!(
         starts,
         vec![
-            r#"(xyz.note note:1 tags: ("math" "engines" "looms"))"#,
-            r#"(xyz.note note:2 tags: ("math"))"#,
+            r#"(xyz.note note:1 tags: '("math" "engines" "looms"))"#,
+            r#"(xyz.note note:2 tags: '("math"))"#,
         ]
     );
     // A list is not a tuple, nor a tuple a list.
@@ -1116,45 +1116,45 @@ async fn it_keeps_a_list_and_takes_it_apart_by_its_first_items() -> Result<()> {
     assert_eq!(
         report(
             &mut notebook,
-            r#"(query (xyz.note ?n tags: ("math" "engines" "looms")))"#
+            r#"(query (xyz.note ?n tags: '("math" "engines" "looms")))"#
         )
         .await?,
-        vec![r#"(xyz.note note:1 tags: ("math" "engines" "looms"))"#]
+        vec![r#"(xyz.note note:1 tags: '("math" "engines" "looms"))"#]
     );
     // Inside a struct, and a struct inside it.
     assert_eq!(
         report(
             &mut notebook,
-            "(query (xyz.note ?n about: {tags: (_ {by: ?who})}))"
+            "(query (xyz.note ?n about: {tags: '(_ {by: ?who})}))"
         )
         .await?,
-        vec![r#"(xyz.note note:4 about: {tags: ("math" {by: "Ada"})})"#]
+        vec![r#"(xyz.note note:4 about: {tags: '("math" {by: "Ada"})})"#]
     );
 
     // A list has no labelled part.
     let labelled = notebook
-        .submit("(query (xyz.note ?n tags: (?first then: ?second)))")
+        .submit("(query (xyz.note ?n tags: '(?first then: ?second)))")
         .await
         .map_err(|error| error.downcast::<Error>());
     assert!(
         matches!(labelled, Err(Ok(Error::Refused(_)))),
         "{labelled:?}"
     );
-    // A list that starts with a keyword has no spelling yet: headed by
-    // one, `( )` is a formula.
-    let keyword = notebook
-        .submit("(query (xyz.note ?n tags: (:open :done)))")
-        .await
-        .map_err(|error| error.downcast::<Error>());
-    assert!(keyword.is_err(), "{keyword:?}");
-    let inside = notebook
-        .submit("(query (xyz.note ?n about: {tags: (:open :done)}))")
-        .await
-        .map_err(|error| error.downcast::<Error>());
-    assert!(
-        matches!(inside, Err(Ok(Error::Unsupported(_)))),
-        "{inside:?}"
+    // Quoted, a list may start with anything, a keyword too. Not
+    // quoted, a `( )` where a value stands is refused, with what to
+    // write.
+    notebook
+        .submit("(assert! (xyz.note note:5 tags: '(:open :done)))")
+        .await?;
+    assert_eq!(
+        report(&mut notebook, "(query (xyz.note ?n tags: '(:open ...)))").await?,
+        vec!["(xyz.note note:5 tags: '(:open :done))"]
     );
+    let bare = notebook
+        .submit(r#"(query (xyz.note ?n tags: ("math" "engines")))"#)
+        .await
+        .map_err(|error| error.downcast::<Error>());
+    assert!(matches!(bare, Err(Ok(Error::Refused(_)))), "{bare:?}");
     Ok(())
 }
 

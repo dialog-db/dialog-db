@@ -26,15 +26,10 @@ pub enum Form {
     Text(String),
     /// A number as it was written.
     Number(String),
-    /// `...`, which in a pattern or a template repeats what is before it.
-    Ellipsis,
-    /// `...?name`, the labelled parts a pattern does not name.
-    Rest(String),
     /// `[a b]`.
     Vector(Vec<Form>),
-    /// `{key value}` and `{label: value}`: entries in the order written,
-    /// and `...?name` after them, the entries a pattern does not name.
-    Map(Vec<(Form, Form)>, Option<String>),
+    /// `{key value}` and `{label: value}`: entries in the order written.
+    Map(Vec<(Form, Form)>),
     /// `(head part...)`.
     Application(Box<Form>, Vec<Part>),
 }
@@ -93,7 +88,13 @@ impl Form {
     /// name of a symbol that is not an entity or an operator.
     pub fn label(&self) -> Option<&str> {
         match (self, self.kind()) {
-            (Form::Symbol(name), Some(Kind::Name | Kind::Domain | Kind::Attribute)) => Some(name),
+            // `...` is a key like any other, and never written as a
+            // label: `{author: ?who ... ?others}`.
+            (Form::Symbol(name), Some(Kind::Name | Kind::Domain | Kind::Attribute))
+                if name != "..." =>
+            {
+                Some(name)
+            }
             _ => None,
         }
     }
@@ -108,10 +109,13 @@ impl Form {
     /// The part labelled `of:`, where no part is written without a
     /// label: the primary, spelled out.
     pub(crate) fn of(&self) -> Option<&Form> {
+        // `...` and what follows it are the parts not named, and no
+        // part with no label of their own.
         let mut bare = self
             .parts()
             .iter()
-            .filter(|part| matches!(part, Part::Bare(form) if !matches!(form, Form::Rest(_))));
+            .take_while(|part| !matches!(part, Part::Bare(Form::Symbol(name)) if name == "..."))
+            .filter(|part| matches!(part, Part::Bare(_)));
         if bare.next().is_some() {
             return None;
         }
@@ -169,8 +173,8 @@ impl Form {
         })
     }
 
-    /// The parts of an application that stand without a label, a
-    /// `...?rest` left out. The part with no label may also be written
+    /// The parts of an application that stand without a label. The
+    /// part with no label may also be written
     /// `of:`, anywhere, so where none stands without a label the part
     /// labelled `of:` is the one.
     pub fn bare(&self) -> Vec<&Form> {
@@ -180,7 +184,7 @@ impl Form {
         self.parts()
             .iter()
             .filter_map(|part| match part {
-                Part::Bare(Form::Rest(_)) | Part::Labelled(..) => None,
+                Part::Labelled(..) => None,
                 Part::Bare(form) => Some(form),
             })
             .collect()
@@ -361,7 +365,7 @@ fn tokens(text: &str) -> (Vec<Token>, Tail, Option<Misread>) {
                 }
                 continue;
             }
-            '(' | ')' | '[' | ']' | '{' | '}' => {
+            '(' | ')' | '[' | ']' | '{' | '}' | '\'' => {
                 take(&mut chars, &mut here);
                 next.to_string()
             }
@@ -437,11 +441,7 @@ fn label(token: &str) -> Option<&str> {
 /// The atom a token is. A symbol read back from data is told apart
 /// the same way, by its spelling alone.
 pub(crate) fn atom(token: &str) -> Form {
-    if token == "..." {
-        Form::Ellipsis
-    } else if let Some(name) = token.strip_prefix("...?") {
-        Form::Rest(name.to_string())
-    } else if let Some(name) = token.strip_prefix('?') {
+    if let Some(name) = token.strip_prefix('?') {
         Form::Variable(name.to_string())
     } else if token == "_" {
         Form::Blank
@@ -504,29 +504,9 @@ fn form(tokens: &[Token], at: &mut usize) -> Result<(Form, Mark), Misread> {
         }
         "{" => {
             let mut entries = Vec::new();
-            let mut rest = None;
             loop {
                 let next = tokens.get(*at).ok_or_else(ended)?;
                 if next.text == "}" {
-                    break;
-                }
-                if let Some(name) = next.text.strip_prefix("...?") {
-                    *at += 1;
-                    mark.parts.push(Mark {
-                        span: next.span,
-                        raw: next.raw.clone(),
-                        comments: next.comments.clone(),
-                        after: next.after.clone(),
-                        ..Mark::default()
-                    });
-                    rest = Some(name.to_string());
-                    let last = tokens.get(*at).ok_or_else(ended)?;
-                    if last.text != "}" {
-                        return Err((
-                            Error::Read("a `...?rest` stands after the entries of a struct".into()),
-                            last.span,
-                        ));
-                    }
                     break;
                 }
                 let key = match label(&next.text) {
@@ -555,7 +535,24 @@ fn form(tokens: &[Token], at: &mut usize) -> Result<(Form, Mark), Misread> {
                 entries.push((key, value));
             }
             close(&mut mark, at);
-            Form::Map(entries, rest)
+            Form::Map(entries)
+        }
+        // `'x` is `(quote x)`, and nothing more to the reader.
+        "'" => {
+            let (quoted, inside) = form(tokens, at)?;
+            mark.raw = "'".into();
+            mark.span.end = inside.span.end;
+            mark.after = inside.after.clone();
+            mark.parts.push(Mark {
+                span: token.span,
+                ..Mark::default()
+            });
+            mark.parts.push(Mark {
+                after: None,
+                ..inside
+            });
+            mark.labels.push(None);
+            Form::application(Form::symbol("quote"), vec![Part::Bare(quoted)])
         }
         "(" => {
             let (head, inside) = form(tokens, at)?;
@@ -612,8 +609,6 @@ impl Display for Form {
                 write!(f, "\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
             }
             Form::Number(number) => write!(f, "{number}"),
-            Form::Ellipsis => write!(f, "..."),
-            Form::Rest(name) => write!(f, "...?{name}"),
             Form::Vector(items) => {
                 write!(f, "[")?;
                 for (at, item) in items.iter().enumerate() {
@@ -624,7 +619,7 @@ impl Display for Form {
                 }
                 write!(f, "]")
             }
-            Form::Map(entries, rest) => {
+            Form::Map(entries) => {
                 write!(f, "{{")?;
                 for (at, (key, value)) in entries.iter().enumerate() {
                     if at > 0 {
@@ -635,13 +630,14 @@ impl Display for Form {
                         None => write!(f, "{key} {value}")?,
                     }
                 }
-                if let Some(name) = rest {
-                    let space = if entries.is_empty() { "" } else { " " };
-                    write!(f, "{space}...?{name}")?;
-                }
                 write!(f, "}}")
             }
             Form::Application(head, parts) => {
+                if let (Form::Symbol(name), [Part::Bare(quoted)]) = (&**head, parts.as_slice())
+                    && name == "quote"
+                {
+                    return write!(f, "'{quoted}");
+                }
                 write!(f, "({head}")?;
                 for part in parts {
                     match part {
@@ -713,7 +709,7 @@ mod tests {
     #[test]
     fn it_reads_a_struct_as_the_part_it_is() {
         let form = &read("(expand {note: ?n})").unwrap()[0];
-        let Form::Map(entries, None) = form.bare()[0] else {
+        let Form::Map(entries) = form.bare()[0] else {
             panic!("a struct");
         };
         assert_eq!(entries.len(), 1);
@@ -725,7 +721,7 @@ mod tests {
     fn it_reads_a_map_by_label_or_by_pair() {
         let text = r#"{name: "Ada" xyz.person/age: 36 :open true [1 2] ?x}"#;
         let forms = read(text).unwrap();
-        let Form::Map(entries, None) = &forms[0] else {
+        let Form::Map(entries) = &forms[0] else {
             panic!("a map");
         };
         assert_eq!(entries.len(), 4);
@@ -734,24 +730,43 @@ mod tests {
         assert_eq!(forms[0].to_string(), text);
     }
 
-    /// `...?name` after a struct's entries is the entries not named. It
-    /// stands after them and nowhere else.
+    /// The reader gives `...` no meaning: it is a symbol, a part among
+    /// the parts of a list and a key among the keys of a struct.
     #[test]
-    fn it_reads_the_rest_of_a_struct_after_its_entries() {
-        for text in ["{author: ?who ...?others}", "{...?all}"] {
-            let forms = read(text).unwrap();
-            let Form::Map(_, Some(rest)) = &forms[0] else {
-                panic!("a struct with a rest");
-            };
-            assert!(rest == "others" || rest == "all");
-            assert_eq!(forms[0].to_string(), text);
-        }
+    fn it_reads_three_dots_as_a_symbol() {
+        let forms =
+            read("(query ?head ... ?more) {author: ?who ... ?others} (todo ?t ...)").unwrap();
         assert_eq!(
-            read("{...?others author: ?who}"),
-            Err(Error::Read(
-                "a `...?rest` stands after the entries of a struct".into()
-            ))
+            forms[0].bare(),
+            vec![
+                &Form::Variable("head".into()),
+                &Form::symbol("..."),
+                &Form::Variable("more".into())
+            ]
         );
+        let Form::Map(entries) = &forms[1] else {
+            panic!("a struct");
+        };
+        assert_eq!(entries[1].0, Form::symbol("..."));
+        assert_eq!(entries[1].1, Form::Variable("others".into()));
+        assert_eq!(forms[2].bare().last(), Some(&&Form::symbol("...")));
+        assert_eq!(
+            forms.iter().map(Form::to_string).collect::<Vec<_>>(),
+            vec![
+                "(query ?head ... ?more)",
+                "{author: ?who ... ?others}",
+                "(todo ?t ...)"
+            ]
+        );
+    }
+
+    /// `'x` is `(quote x)` to the reader, a list like any other.
+    #[test]
+    fn it_reads_a_quote_as_the_list_it_is_sugar_for() {
+        let quoted = read("'(1 2 3)").unwrap();
+        assert_eq!(quoted, read("(quote (1 2 3))").unwrap());
+        assert_eq!(quoted[0].to_string(), "'(1 2 3)");
+        assert_eq!(read("'?x").unwrap()[0].to_string(), "'?x");
     }
 
     #[test]

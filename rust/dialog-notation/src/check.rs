@@ -258,6 +258,50 @@ mod tests {
         Ok(())
     }
 
+    /// The reader gives labels and `...` no meaning, so what they may
+    /// not say is the analyzer's to refuse, at the form that says it: a
+    /// second part with no label beside labels, `of:` beside a part
+    /// with none, and `...` written against what follows it.
+    #[dialog_common::test]
+    fn it_refuses_what_a_record_and_three_dots_may_not_say() -> Result<(), Error> {
+        let mut analyzer = Analyzer::new()?;
+        for (text, says, at) in [
+            (
+                "(query (xyz.a ?a n: ?n)\n  (xyz.a ?a ?extra n: ?n))",
+                "has 2 parts with no label beside its labelled parts",
+                (1, 2),
+            ),
+            (
+                "(query (xyz.a ?a n: ?n)\n  (xyz.a ?a of: ?b))",
+                "says `of:` twice",
+                (1, 2),
+            ),
+            (
+                "(query (xyz.a ?a n: ?n ...?others))",
+                "`...` stands apart from what follows it, `... ?others`",
+                (0, 23),
+            ),
+        ] {
+            let checked = check(&mut analyzer, text);
+            let [refused] = checked.diagnostics.as_slice() else {
+                panic!("one refusal of {text}: {:?}", checked.diagnostics);
+            };
+            assert!(
+                matches!(&refused.refusal, Some(Error::Refused(_))),
+                "{text}"
+            );
+            assert!(refused.message.contains(says), "{}", refused.message);
+            assert_eq!(started(refused), at, "{text}");
+            assert!(checked.steps.is_empty());
+        }
+        // `...` and what follows it are no part of their own, and a
+        // form with no label is a list of any number of parts.
+        let several = "(query (xyz.a ?a n: ?n) (xyz.a ?a n: ?n) \
+                       (unless (xyz.b ?a n: ?n) (xyz.c ?a n: ?n)))";
+        assert_eq!(check(&mut analyzer, several).refusals().count(), 0);
+        Ok(())
+    }
+
     /// A document the compiler refuses is refused whole: the analyzer
     /// keeps none of its definitions.
     #[dialog_common::test]

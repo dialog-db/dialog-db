@@ -34,7 +34,8 @@ use serde_json::{Map, Value as Json, json};
 
 use crate::Error;
 use crate::data;
-use crate::kernel::{Field, Formula, Head, Premise, Read, Rule, TYPES, Term};
+use crate::kernel::{Field, Formula, Head, Premise, QUOTE, Read, Rule, TYPES, Term};
+use crate::pattern::REST;
 use crate::syntax::{self, Parameters, Syntax};
 
 /// One thing to do with a branch.
@@ -115,6 +116,21 @@ impl Query {
 
 /// A value, as the tree that says it.
 fn written(value: &Value) -> Syntax {
+    shown(value, false)
+}
+
+/// [`written`], where `quoted` says the value stands inside a quoted
+/// list, in which a list has no quote of its own.
+fn shown(value: &Value, quoted: bool) -> Syntax {
+    let apply = |operator: Syntax, items: Vec<Syntax>| {
+        Syntax::Application(
+            Box::new(operator),
+            Parameters {
+                items,
+                ..Parameters::default()
+            },
+        )
+    };
     match value {
         Value::Record(_) if matches!(value.composite(), Ok(Some(_))) => {
             match value.composite() {
@@ -125,31 +141,34 @@ fn written(value: &Value) -> Syntax {
                             // was written as.
                             let key = match data::spelled(key) {
                                 Some(label) => Syntax::Reference(label),
-                                None => written(key),
+                                None => shown(key, quoted),
                             };
-                            (key, written(value))
+                            (key, shown(value, quoted))
                         })
                         .collect(),
-                    None,
                 ),
                 Ok(Some(Composite::Tuple(items))) => {
-                    Syntax::Tuple(items.iter().map(written).collect())
+                    Syntax::Tuple(items.iter().map(|item| shown(item, quoted)).collect())
                 }
-                // A list is written `( )`: its first item where an
-                // operator stands, and the others after it.
-                Ok(Some(Composite::List(items))) => match items.split_first() {
-                    Some((first, others)) => Syntax::Application(
-                        Box::new(written(first)),
-                        Parameters {
-                            items: others.iter().map(written).collect(),
-                            ..Parameters::default()
-                        },
-                    ),
-                    // The list of nothing has no tree: `( )` has a
-                    // first part. It is printed as it would be written
-                    // and does not read back.
-                    None => Syntax::Reference("()".into()),
-                },
+                // A list is `'(a b)`: `( )` with its first item where
+                // an operator stands, quoted.
+                Ok(Some(Composite::List(items))) => {
+                    let list = match items.split_first() {
+                        Some((first, others)) => apply(
+                            shown(first, true),
+                            others.iter().map(|item| shown(item, true)).collect(),
+                        ),
+                        // The list of nothing has no tree: `( )` has a
+                        // first part. It is printed as it would be
+                        // written and does not read back.
+                        None => Syntax::Reference("()".into()),
+                    };
+                    if quoted {
+                        list
+                    } else {
+                        apply(Syntax::Reference(QUOTE.into()), vec![list])
+                    }
+                }
                 _ => Syntax::Blank,
             }
         }
@@ -327,25 +346,42 @@ fn shape(
             ))),
         }
     }
+    /// What takes the parts not named: the variable after `...`.
+    fn rest(
+        taken: &Syntax,
+        name: &mut dyn FnMut(Option<&str>) -> Variable<Any>,
+    ) -> Result<Variable<Any>, Error> {
+        match taken {
+            Syntax::Variable(rest) => Ok(name(Some(rest))),
+            Syntax::Blank => Ok(name(None)),
+            other => Err(Error::Unsupported(format!(
+                "`... {other}` where a value stands: a variable takes the parts not named"
+            ))),
+        }
+    }
     fn walk(
         node: &Syntax,
         name: &mut dyn FnMut(Option<&str>) -> Variable<Any>,
+        quoted: bool,
     ) -> Result<Pattern, Error> {
+        let dots = |part: &Syntax| matches!(part, Syntax::Reference(symbol) if symbol == REST);
         Ok(match node {
             Syntax::Variable(variable) => name(Some(variable)).into(),
             Syntax::Blank => name(None).into(),
             Syntax::Constant(value) => value.clone().into(),
-            Syntax::Map(entries, rest) => {
+            // The entry under `...` is the entries not named, as a
+            // struct.
+            Syntax::Map(entries) => {
                 let named = MapPattern::new(
                     entries
                         .iter()
-                        .map(|(at, value)| Ok((key(at)?, walk(value, name)?)))
+                        .filter(|(at, _)| !dots(at))
+                        .map(|(at, value)| Ok((key(at)?, walk(value, name, quoted)?)))
                         .collect::<Result<Vec<_>, Error>>()?,
                 )
                 .map_err(|error| refused("the struct", error))?;
-                // `...?rest` is the entries not named, as a struct.
-                match rest {
-                    Some(rest) => named.with_rest(name(Some(rest))),
+                match entries.iter().find(|(at, _)| dots(at)) {
+                    Some((_, taken)) => named.with_rest(rest(taken, name)?),
                     None => named,
                 }
                 .into()
@@ -353,9 +389,67 @@ fn shape(
             Syntax::Tuple(items) => Pattern::tuple(
                 items
                     .iter()
-                    .map(|item| walk(item, name))
+                    .map(|item| walk(item, name, quoted))
                     .collect::<Result<Vec<_>, Error>>()?,
             ),
+            // `'(1 2 3)`: what is quoted is not applied, and a `( )` in
+            // it is the list of what it holds.
+            Syntax::Application(_, operand) if !quoted && node.applies() == Some(QUOTE) => {
+                match (operand.items.as_slice(), operand.terms.is_empty()) {
+                    ([list @ Syntax::Application(..)], true) => walk(list, name, true)?,
+                    _ => {
+                        return Err(Error::Refused(format!(
+                            "{node} where a value stands: what is quoted there is a list, \
+                             `'(1 2 3)`"
+                        )));
+                    }
+                }
+            }
+            // A list, and `... ?run` after its items for the ones after
+            // them, as a list.
+            Syntax::Application(first, operand) if quoted => {
+                if let Some(label) = operand.terms.keys().next() {
+                    return Err(Error::Refused(format!(
+                        "{node} is a list, and a list has no part labelled `{label}:`"
+                    )));
+                }
+                let mut items: Vec<&Syntax> =
+                    std::iter::once(&**first).chain(&operand.items).collect();
+                let run = match items.iter().position(|item| dots(item)) {
+                    Some(at) if at + 2 == items.len() => {
+                        let taken = rest(items[at + 1], name)?;
+                        items.truncate(at);
+                        Some(taken)
+                    }
+                    Some(at) if at + 1 == items.len() => {
+                        items.truncate(at);
+                        Some(name(None))
+                    }
+                    Some(_) => {
+                        return Err(Error::Refused(format!(
+                            "{node}: `...` stands after the items of a list, with what takes \
+                             the ones after them"
+                        )));
+                    }
+                    None => None,
+                };
+                let list = ListPattern::new(
+                    items
+                        .into_iter()
+                        .map(|item| walk(item, name, quoted))
+                        .collect::<Result<Vec<_>, Error>>()?,
+                );
+                match run {
+                    Some(run) => list.with_run(run),
+                    None => list,
+                }
+                .into()
+            }
+            Syntax::Application(..) => {
+                return Err(Error::Refused(format!(
+                    "{node} where a value stands: a list is quoted, `'(1 2 3)`"
+                )));
+            }
             // A name with a `/` in it is the symbol it says, as it is
             // where a field's value is one: `xyz.todo/text`, and `/todo`
             // for a symbol of no domain, which is how one is printed.
@@ -369,41 +463,9 @@ fn shape(
                     "{symbol} is a name, not a value: text is quoted, an entity has a `:`"
                 )));
             }
-            // `( )` is a list, and `...?run` after its items is the
-            // ones after them, as a list. Headed by a keyword or an
-            // operator it is a formula, which nothing here applies.
-            Syntax::Application(..) if node.is_formula() => {
-                return Err(Error::Unsupported(format!(
-                    "{node} where a value stands: it applies a formula, and a list that \
-                     starts with a keyword or an operator has no spelling yet"
-                )));
-            }
-            Syntax::Application(first, operand) => {
-                if let Some(label) = operand.terms.keys().next() {
-                    return Err(Error::Refused(format!(
-                        "{node} is a list, and a list has no part labelled `{label}:`"
-                    )));
-                }
-                let items = ListPattern::new(
-                    std::iter::once(&**first)
-                        .chain(&operand.items)
-                        .map(|item| walk(item, name))
-                        .collect::<Result<Vec<_>, Error>>()?,
-                );
-                match &operand.rest {
-                    Some(run) => items.with_run(name(Some(run))),
-                    None => items,
-                }
-                .into()
-            }
-            other => {
-                return Err(Error::Unsupported(format!(
-                    "{other} inside a struct: only values, variables, structs, tuples and lists are"
-                )));
-            }
         })
     }
-    walk(form, name)
+    walk(form, name, false)
 }
 
 /// A constant as Dialog-DB reads it. `None` for what is not a constant.

@@ -109,8 +109,8 @@ mod tests {
     fn it_prints_labels_in_the_order_written_and_of_where_it_was_written() -> Result<(), Error> {
         back("(todo text: ?x of: ?t state: :open)")?;
         back("(todo ?t state: :open text: ?x)")?;
-        back("(expand (?name ?this ...?fields) in: :head)")?;
-        back("(expand (?name ...?fields ?this))")?;
+        back("(expand (?name ?this ... ?fields) in: :head)")?;
+        back("(expand (?name ... ?fields ?this))")?;
         back("(syntax (rule (report ?head ...) ?premise ... ?last))")
     }
 
@@ -142,14 +142,19 @@ mod tests {
     /// comment above it.
     #[dialog_common::test]
     fn it_prints_the_rest_of_a_struct_where_it_was_written() -> Result<(), Error> {
-        back("(query (xyz.note ?n about: {author: ?who   ...?others}))")?;
-        back("{...?all}")?;
-        back("{author: ?who\n ; and whatever else\n ...?others }")?;
+        back("(query (xyz.note ?n about: {author: ?who   ... ?others}))")?;
+        back("{... ?all}")?;
+        // `...` is a part like any other, wherever it stands, and a
+        // quote is printed as it was written.
+        back("(rule (syntax (all ?first   ... ?more))\n  (expand (query ?head ...)))")?;
+        back("(assert! (xyz.note note:1 tags: '(1 2   (3 4))))")?;
+        back("(assert! (xyz.note note:1 tags: (quote (1 2))))")?;
+        back("{author: ?who\n ; and whatever else\n ... ?others }")?;
         // With no mapping, it is printed after the entries.
-        let trees = parse("{author: ?who\n   ...?others}")?;
+        let trees = parse("{author: ?who\n   ... ?others}")?;
         assert_eq!(
             print(&trees, &Written::default()),
-            "{author: ?who ...?others}"
+            "{author: ?who ... ?others}"
         );
         Ok(())
     }
@@ -158,7 +163,7 @@ mod tests {
     /// and otherwise about the form below it.
     #[dialog_common::test]
     fn it_keeps_a_comment_on_the_form_it_is_about() -> Result<(), Error> {
-        let text = "; A to-do, on a list.\n;; Two lines of it.\n(concept (todo ?t\n           ; what it says\n           text: ?x ; shown in the list\n           ; the list it is on\n           list: ?l\n           ; nothing below\n           ) ; the call\n  (xyz.todo ?t text: ?x ; again\n   ...?rest)) ; the whole of it\n; the end\n";
+        let text = "; A to-do, on a list.\n;; Two lines of it.\n(concept (todo ?t\n           ; what it says\n           text: ?x ; shown in the list\n           ; the list it is on\n           list: ?l\n           ; nothing below\n           ) ; the call\n  (xyz.todo ?t text: ?x ; again\n   ... ?rest)) ; the whole of it\n; the end\n";
         back(text)?;
         let (_, written) = parse_written(text)?;
         let said = |path: &[Segment]| -> Vec<String> {
@@ -229,7 +234,7 @@ mod tests {
     /// comment after it is about what is below.
     #[dialog_common::test]
     fn it_keeps_a_comment_after_a_bracket_or_a_label_on_the_form_below() -> Result<(), Error> {
-        let text = "(xyz.todo ?t text: ; what it says\n  ?x\n  tags: [ ; the first\n    ?a ?rest ... ; any more\n  ])";
+        let text = "(xyz.todo ?t text: ; what it says\n  ?x\n  tags: [ ; the first\n    ?a ... ?rest ; any more\n  ])";
         back(text)?;
         let (_, written) = parse_written(text)?;
         let said = |path: &[Segment]| -> Vec<String> {
@@ -245,7 +250,7 @@ mod tests {
         first.push(Segment::Item(0));
         assert_eq!(said(&first), vec!["the first"]);
         let mut repeat = part("tags");
-        repeat.push(Segment::Item(1));
+        repeat.push(Segment::Item(2));
         assert_eq!(said(&repeat), vec!["any more"]);
         Ok(())
     }
@@ -369,7 +374,6 @@ mod tests {
                     3,
                     19
                 ),
-                ("a `...` that repeats nothing".to_string(), 4, 4, 4, 7),
                 (
                     "cannot read: a map key with no name".to_string(),
                     5,
@@ -402,12 +406,12 @@ mod tests {
         // The forms around them are read, and the mapping is of them.
         assert_eq!(
             parsed.trees,
-            parse("(todo ?t state: :open) (xyz.todo todo:1 n: 5)").unwrap()
+            parse("(todo ?t state: :open) (f [... ?a]) (xyz.todo todo:1 n: 5)").unwrap()
         );
         assert_eq!(
             parsed
                 .written
-                .span(&[Segment::Item(1)])
+                .span(&[Segment::Item(2)])
                 .map(|span| span.start),
             Some(Point { line: 6, column: 0 })
         );

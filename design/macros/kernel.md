@@ -47,7 +47,7 @@ A macro is a rule like any other (Irakli, 2026-11-11). Its premise says which fo
 - Neither is walked into. What is inside them is syntax, not premises and heads. They are the quote and the quasi-quote, and a bound variable is the unquote, as in Racket's `syntax-case` and `#'`.
 - The rule's other premises are ordinary: they read facts and apply formulas over the same variables.
 
-`expand` works as a command the walker issues on each form, and `syntax` as what the rules answer. A pattern takes bare parts in order and in number, with `p ...` for any number of them. A labelled part the form leaves out leaves its variable unbound, and `...?rest` takes the labelled parts the pattern does not name.
+`expand` works as a command the walker issues on each form, and `syntax` as what the rules answer. A pattern takes bare parts in order and in number. `...` stands before what takes the parts not named: `... ?rest` binds them, `... (?key ?text)` takes each of them apart, and `...` alone is `... _`. The labelled parts of a form are one record with its one part that has no label, its `of:`, so `... ?rest` takes the labelled parts the pattern does not name as well. A labelled part the form leaves out leaves its variable unbound. The reader gives `...` no meaning: it is a symbol among the parts, read here.
 
 The walker rewrites a top-level form until it is a `rule` or a write, then every head and premise until each is a read or a formula. No answer and two different answers are both refused.
 
@@ -59,10 +59,10 @@ The prelude in `rust/dialog-notation/src/prelude.clj` is rules and nothing else.
 (rule (syntax (rule (report ?head) ?head))
   (expand (query ?head)))
 
-(rule (syntax (rule ...?about
+(rule (syntax (rule ... ?about
                 (syntax ?body)
-                (expand (?name ?this ...?fields))))
-  (expand (concept (?name ?this ...?fields) ?body ...?about)))
+                (expand (?name ?this ... ?fields))))
+  (expand (concept (?name ?this ... ?fields) ?body ... ?about)))
 ```
 
 A pattern is any form, not an application only. `(unless …)` may stand anywhere among the premises and more than once, each premise in it one more "and not": `A (unless B) (unless C)` is `A, not B, not C`.
@@ -122,8 +122,8 @@ A rule has one head, as dialog's rules do (Irakli, 2026-11-13). To assert and re
 A command is an application around an application whose head names nothing. In a premise it reads the command's rows:
 
 ```clj
-(rule (syntax (?domain _ about: ?subject ...?fields))
-  (expand (?command (?concept ?subject ...?fields)) in: :premise)
+(rule (syntax (?domain _ about: ?subject ... ?fields))
+  (expand (?command (?concept ?subject ... ?fields)) in: :premise)
   (:command ?command : ?concept is: ?domain)
   (unless (dialog.name _ is: ?command)))
 ```
@@ -132,7 +132,7 @@ A rule may also say something about a form without refusing it:
 
 ```clj
 (rule (warning "no rule reads this command")
-  (expand (?command (?concept ?subject ...?fields)) in: :head)
+  (expand (?command (?concept ?subject ... ?fields)) in: :head)
   (:command ?command : ?concept is: ?domain)
   (unless (dialog.name _ is: ?command)
           (dialog.rule _ on: ?domain)))

@@ -33,9 +33,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::Error;
 use crate::diagnostic::Diagnostic;
 use crate::form::Kind;
+use crate::kernel::QUOTE;
 use crate::kernel::{Head, Rule};
 use crate::parse::parse;
-use crate::pattern::{Binding, Bindings, fill, matches};
+use crate::pattern::{Binding, Bindings, REST, fill, matches};
 use crate::syntax::{Parameters, Signature, Syntax};
 use crate::written::{Path, Segment};
 
@@ -154,7 +155,6 @@ impl Clauses {
             Parameters {
                 items: parts,
                 terms: self.said,
-                rest: None,
             },
         )
     }
@@ -166,6 +166,59 @@ fn members(tree: Syntax) -> Vec<Syntax> {
         items(&tree).iter().cloned().flat_map(members).collect()
     } else {
         vec![tree]
+    }
+}
+
+/// Whether `tree` is written as a form may be, and otherwise the part
+/// that is not and why. The reader gives labels and `...` no meaning,
+/// so what they may not say is said here.
+///
+/// A form with a label written is one record, and its one part with no
+/// label is the record's `of:`. So beside labels a second part with no
+/// label is refused, and so is `of:` beside a part with none. `...` and
+/// what follows it are the parts not named, and no part of their own.
+fn valid(tree: &Syntax) -> Result<(), (Syntax, Error)> {
+    let refuse = |why: String| Err((tree.clone(), Error::Refused(why)));
+    match tree {
+        Syntax::Reference(name) if name.starts_with(REST) && name != REST => refuse(format!(
+            "`{name}`: `...` stands apart from what follows it, `... {}`",
+            &name[REST.len()..]
+        )),
+        // What is quoted is not a form that says anything.
+        Syntax::Application(..) if tree.applies() == Some(QUOTE) => Ok(()),
+        Syntax::Application(operator, operand) => {
+            // What is inside first, so the part that is refused is the
+            // innermost that is.
+            valid(operator)?;
+            operand
+                .items
+                .iter()
+                .chain(operand.terms.values())
+                .try_for_each(valid)?;
+            let named = operand
+                .items
+                .iter()
+                .take_while(|item| !matches!(item, Syntax::Reference(name) if name == REST))
+                .count();
+            if !operand.terms.is_empty() && named > 1 {
+                return refuse(format!(
+                    "{tree} has {named} parts with no label beside its labelled parts: the \
+                     labelled parts are one record, and its one part with no label is its `of:`"
+                ));
+            }
+            if named > 0 && operand.terms.contains_key("of") {
+                return refuse(format!(
+                    "{tree} says `of:` twice: the part with no label is its `of:`"
+                ));
+            }
+            Ok(())
+        }
+        Syntax::Tuple(items) => items.iter().try_for_each(valid),
+        Syntax::Map(entries) => entries.iter().try_for_each(|(key, value)| {
+            valid(key)?;
+            valid(value)
+        }),
+        _ => Ok(()),
     }
 }
 
@@ -188,21 +241,12 @@ fn unnamed(tree: &Syntax, site: &str) -> Syntax {
             Syntax::Tuple(items) => {
                 Syntax::Tuple(items.iter().map(|item| walk(item, suffix, seen)).collect())
             }
-            Syntax::Map(entries, rest) => {
-                let entries = entries
+            Syntax::Map(entries) => Syntax::Map(
+                entries
                     .iter()
                     .map(|(key, value)| (walk(key, suffix, seen), walk(value, suffix, seen)))
-                    .collect();
-                // The rest of a struct is a variable, renamed like one.
-                let rest = rest.as_ref().map(|name| {
-                    match walk(&Syntax::Variable(name.clone()), suffix, seen) {
-                        Syntax::Variable(renamed) => renamed,
-                        _ => name.clone(),
-                    }
-                });
-                Syntax::Map(entries, rest)
-            }
-            Syntax::Repeat(repeated) => Syntax::Repeat(Box::new(walk(repeated, suffix, seen))),
+                    .collect(),
+            ),
             Syntax::Application(operator, operand) => {
                 let operator = walk(operator, suffix, seen);
                 let items = operand
@@ -215,14 +259,7 @@ fn unnamed(tree: &Syntax, site: &str) -> Syntax {
                     .iter()
                     .map(|(label, term)| (label.clone(), walk(term, suffix, seen)))
                     .collect();
-                Syntax::Application(
-                    Box::new(operator),
-                    Parameters {
-                        items,
-                        terms,
-                        rest: operand.rest.clone(),
-                    },
-                )
+                Syntax::Application(Box::new(operator), Parameters { items, terms })
             }
             other => other.clone(),
         }
@@ -380,6 +417,9 @@ impl Expander {
         // is expanded once a definition: what is read is what any of
         // them reads. Within one rule a form that recurs is the same
         // definition's each time.
+        if let Err((part, error)) = valid(tree) {
+            return self.about(&part, |_| Err(error));
+        }
         let mut choices = Vec::new();
         loop {
             self.choices = choices;
@@ -648,11 +688,32 @@ impl Expander {
         .reference()?
         .to_string()[..4]
             .to_string();
+        // Of the rules that apply, the ones that name the most: a
+        // pattern that leaves a part to its `...` gives way to one that
+        // names it. `(?concept ... ?fields)` and
+        // `(?concept ?subject ... ?fields)` both match a call with a
+        // part that has no label, and the second is the one meant.
         let mut found: Vec<(Syntax, Option<Signature>)> = Vec::new();
+        let mut least = usize::MAX;
         for rule in &self.syntax {
             if let (Answer::Syntax(template), Some(bindings)) =
                 (&rule.answer, self.applies(rule, tree, position))
             {
+                let left: usize = bindings
+                    .values()
+                    .map(|binding| match binding {
+                        Binding::Many(taken) => taken.len(),
+                        Binding::Row(taken) => taken.len(),
+                        Binding::One(_) => 0,
+                    })
+                    .sum();
+                if left > least {
+                    continue;
+                }
+                if left < least {
+                    least = left;
+                    found.clear();
+                }
                 let answer = fill(template, &bindings, &site)?;
                 let same = unnamed(&answer, &site);
                 if !found.iter().any(|(other, _)| unnamed(other, &site) == same) {
@@ -809,7 +870,6 @@ impl Expander {
                         Parameters {
                             items: parts,
                             terms: operand.terms.clone(),
-                            rest: None,
                         },
                     )
                 }

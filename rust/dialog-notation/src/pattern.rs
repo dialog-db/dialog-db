@@ -16,8 +16,51 @@ pub enum Binding {
     One(Syntax),
     /// The trees a repeated part took, in order.
     Many(Vec<Syntax>),
-    /// The labelled parts a `...?rest` took.
+    /// The labelled parts a `... ?rest` took. The parts with no label
+    /// it took are [`Binding::Many`] under its name, and these are kept
+    /// beside them, under a key of their own.
     Row(BTreeMap<String, Syntax>),
+}
+
+/// The symbol that stands before what takes the parts not named. The
+/// reader gives it no meaning: it is read here, where a pattern is
+/// matched and a template filled.
+pub const REST: &str = "...";
+
+/// What the labelled parts a `... ?name` took are kept under: a key no
+/// variable has, since the name holds the parts with no label.
+fn row(name: &str) -> String {
+    format!("{REST}{name}")
+}
+
+/// A run of parts as a pattern and a template read it.
+struct Run<'a> {
+    /// The parts before `...`.
+    before: &'a [Syntax],
+    /// What follows `...`, which each part not named has to match.
+    /// `...` with nothing after it is `... _`.
+    rest: Option<&'a Syntax>,
+    /// The parts after that.
+    after: &'a [Syntax],
+}
+
+fn split(parts: &[Syntax]) -> Run<'_> {
+    const BLANK: &Syntax = &Syntax::Blank;
+    match parts
+        .iter()
+        .position(|part| matches!(part, Syntax::Reference(name) if name == REST))
+    {
+        None => Run {
+            before: parts,
+            rest: None,
+            after: &[],
+        },
+        Some(at) => Run {
+            before: &parts[..at],
+            rest: Some(parts.get(at + 1).unwrap_or(BLANK)),
+            after: parts.get(at + 2..).unwrap_or_default(),
+        },
+    }
 }
 
 /// What each variable of a pattern took.
@@ -34,14 +77,16 @@ fn bind(mut bindings: Bindings, name: &str, binding: Binding) -> Option<Bindings
     }
 }
 
-/// What a run of patterns binds against a run of trees. One of the
-/// patterns may repeat, `p ...`: it takes any number of trees, each
-/// matching `p`, and every variable in it takes them all.
+/// What a run of patterns binds against a run of trees. `... p` takes
+/// any number of trees, each matching `p`, and every variable in `p`
+/// takes them all.
 fn run(given: &[Syntax], wanted: &[Syntax], mut bindings: Bindings) -> Option<Bindings> {
-    let Some(at) = wanted
-        .iter()
-        .position(|pattern| matches!(pattern, Syntax::Repeat(_)))
-    else {
+    let Run {
+        before,
+        rest,
+        after,
+    } = split(wanted);
+    let Some(repeated) = rest else {
         if given.len() != wanted.len() {
             return None;
         }
@@ -51,10 +96,6 @@ fn run(given: &[Syntax], wanted: &[Syntax], mut bindings: Bindings) -> Option<Bi
             .try_fold(bindings, |bindings, (item, pattern)| {
                 matches(item, pattern, bindings)
             });
-    };
-    let (before, after) = (&wanted[..at], &wanted[at + 1..]);
-    let Syntax::Repeat(repeated) = &wanted[at] else {
-        return None;
     };
     if given.len() < before.len() + after.len() {
         return None;
@@ -92,11 +133,13 @@ fn run(given: &[Syntax], wanted: &[Syntax], mut bindings: Bindings) -> Option<Bi
 ///
 /// - A variable takes any one tree, and the same tree wherever it
 ///   recurs. `_` takes anything.
-/// - Parts with no label match in order and in number; `p ...` takes
-///   any number of them, each matching `p`.
+/// - Parts with no label match in order and in number; `... p` takes
+///   any number of them, each matching `p`, and `...` alone is `... _`.
 /// - A labelled part the tree leaves out leaves its variables unbound.
-///   `...?rest` takes the labelled parts the pattern does not name;
-///   without it the tree may have none.
+///   The labelled parts are one record with the part that has no
+///   label, so `... ?rest` takes the labelled parts the pattern does
+///   not name as well, and `... _` lets them be. Without either the
+///   tree may have none.
 pub fn matches(tree: &Syntax, pattern: &Syntax, bindings: Bindings) -> Option<Bindings> {
     match pattern {
         Syntax::Variable(name) => bind(bindings, name, Binding::One(tree.clone())),
@@ -106,26 +149,14 @@ pub fn matches(tree: &Syntax, pattern: &Syntax, bindings: Bindings) -> Option<Bi
             _ => None,
         },
         // A map is taken apart by key: the pattern's keys are what they
-        // are, and each has to be a key of the tree. Its rest is not a
-        // part this takes: it is a variable of what the tree says, so a
-        // pattern with one matches a struct with one and binds the
-        // variable written there.
-        Syntax::Map(patterns, rest) => {
-            let Syntax::Map(entries, written) = tree else {
+        // are, and each has to be a key of the tree.
+        Syntax::Map(patterns) => {
+            let Syntax::Map(entries) = tree else {
                 return None;
             };
             if entries.len() != patterns.len() {
                 return None;
             }
-            let bindings = match (rest, written) {
-                (None, None) => bindings,
-                (Some(name), Some(written)) => bind(
-                    bindings,
-                    name,
-                    Binding::One(Syntax::Variable(written.clone())),
-                )?,
-                _ => return None,
-            };
             patterns
                 .iter()
                 .try_fold(bindings, |bindings, (key, pattern)| {
@@ -150,24 +181,29 @@ pub fn matches(tree: &Syntax, pattern: &Syntax, bindings: Bindings) -> Option<Bi
                 .filter(|(label, _)| !named.terms.contains_key(*label))
                 .map(|(label, item)| (label.clone(), item.clone()))
                 .collect();
-            match &named.rest {
-                Some(name) => bind(bindings, name, Binding::Row(extra)),
-                None => extra.is_empty().then_some(bindings),
+            match split(&named.items).rest {
+                Some(Syntax::Variable(name)) => bind(bindings, &row(name), Binding::Row(extra)),
+                Some(Syntax::Blank) => Some(bindings),
+                _ => extra.is_empty().then_some(bindings),
             }
         }
         literal => (tree == literal).then_some(bindings),
     }
 }
 
-/// A run of templates, filled. A template that repeats is filled once
-/// for each of what its variables took.
+/// A run of templates, filled. `... p` is `p` filled once for each of
+/// what its variables took.
 fn fill_run(templates: &[Syntax], bindings: &Bindings, fresh: &str) -> Result<Vec<Syntax>, Error> {
+    let Run {
+        before,
+        rest,
+        after,
+    } = split(templates);
     let mut filled = Vec::new();
-    for template in templates {
-        let Syntax::Repeat(repeated) = template else {
-            filled.push(fill(template, bindings, fresh)?);
-            continue;
-        };
+    for template in before {
+        filled.push(fill(template, bindings, fresh)?);
+    }
+    if let Some(repeated) = rest {
         let mut names = Vec::new();
         repeated.variables(&mut names);
         let many: Vec<(&String, &Vec<Syntax>)> = names
@@ -188,6 +224,9 @@ fn fill_run(templates: &[Syntax], bindings: &Bindings, fresh: &str) -> Result<Ve
             filled.push(fill(repeated, &each, fresh)?);
         }
     }
+    for template in after {
+        filled.push(fill(template, bindings, fresh)?);
+    }
     Ok(filled)
 }
 
@@ -196,7 +235,7 @@ fn fill_run(templates: &[Syntax], bindings: &Bindings, fresh: &str) -> Result<Ve
 /// `fresh`, so no two expansions share it and it cannot capture a
 /// variable of the tree being expanded.
 ///
-/// A label the template writes and a `...?rest` also brings is refused:
+/// A label the template writes and a `... ?rest` also brings is refused:
 /// a tree says a label once.
 pub fn fill(template: &Syntax, bindings: &Bindings, fresh: &str) -> Result<Syntax, Error> {
     Ok(match template {
@@ -206,25 +245,13 @@ pub fn fill(template: &Syntax, bindings: &Bindings, fresh: &str) -> Result<Synta
             Some(Binding::Row(_)) | None => Syntax::Variable(format!("{name}.{fresh}")),
         },
         Syntax::Tuple(items) => Syntax::Tuple(fill_run(items, bindings, fresh)?),
-        Syntax::Map(entries, rest) => Syntax::Map(
+        Syntax::Map(entries) => Syntax::Map(
             entries
                 .iter()
                 .map(|(key, value)| {
                     Ok((fill(key, bindings, fresh)?, fill(value, bindings, fresh)?))
                 })
                 .collect::<Result<_, Error>>()?,
-            // The rest of a struct is a variable, filled like one: with
-            // the variable it is bound to, or a name of its own.
-            rest.as_ref()
-                .map(
-                    |name| match fill(&Syntax::Variable(name.clone()), bindings, fresh)? {
-                        Syntax::Variable(filled) => Ok(filled),
-                        other => Err(Error::Refused(format!(
-                            "`...?{name}` in a struct is a variable, and it is given {other}"
-                        ))),
-                    },
-                )
-                .transpose()?,
         ),
         Syntax::Application(operator, operand) => {
             let mut filled = Parameters {
@@ -236,10 +263,12 @@ pub fn fill(template: &Syntax, bindings: &Bindings, fresh: &str) -> Result<Synta
                     .terms
                     .insert(label.clone(), fill(item, bindings, fresh)?);
             }
-            if let Some(Binding::Row(row)) =
-                operand.rest.as_ref().and_then(|name| bindings.get(name))
-            {
-                for (label, item) in row {
+            let taken = match split(&operand.items).rest {
+                Some(Syntax::Variable(name)) => bindings.get(&row(name)),
+                _ => None,
+            };
+            if let Some(Binding::Row(taken)) = taken {
+                for (label, item) in taken {
                     if filled.terms.insert(label.clone(), item.clone()).is_some() {
                         return Err(Error::Refused(format!(
                             "{template} says `{label}:`, and so does what it is given"
@@ -285,8 +314,8 @@ mod tests {
         assert_eq!(
             rewrite(
                 "(query (all (a ?x) (b ?y)) (c ?x) (d ?y))",
-                "(query (all ?head ...) ?premise ...)",
-                "(rule (all (report ?head) ...) ?premise ...)"
+                "(query (all ... ?head) ... ?premise)",
+                "(rule (all ... (report ?head)) ... ?premise)"
             )
             .as_deref(),
             Some("(rule (all (report (a ?x)) (report (b ?y))) (c ?x) (d ?y))")
@@ -294,7 +323,7 @@ mod tests {
         assert_eq!(
             rewrite(
                 "(query (a ?x))",
-                "(query (all ?head ...) ?premise ...)",
+                "(query (all ... ?head) ... ?premise)",
                 "x"
             ),
             None
@@ -327,8 +356,8 @@ mod tests {
         assert_eq!(
             rewrite(
                 "(add (todo list: list:home text: \"x\"))",
-                "(?command (?concept ...?fields))",
-                "(?command.domain _ ...?fields)"
+                "(?command (?concept ... ?fields))",
+                "(?command.domain _ ... ?fields)"
             )
             .as_deref(),
             Some("(?command.domain.s _ list: list:home text: \"x\")")
@@ -348,8 +377,8 @@ mod tests {
         for (call, pattern, template) in [
             (
                 "(query (all (a ?x) (b ?y)) (c ?x) (d ?y))",
-                "(query (all ?head ...) ?premise ...)",
-                "(rule (all (report ?head) ...) ?premise ...)",
+                "(query (all ... ?head) ... ?premise)",
+                "(rule (all ... (report ?head)) ... ?premise)",
             ),
             (
                 "(task ?mine title: \"Buy milk\")",
@@ -358,8 +387,8 @@ mod tests {
             ),
             (
                 "(add (todo list: list:home text: \"x\"))",
-                "(?command (?concept ...?fields))",
-                "(command ?command about: ?concept ...?fields)",
+                "(?command (?concept ... ?fields))",
+                "(command ?command about: ?concept ... ?fields)",
             ),
         ] {
             let (call, pattern, template) = (one(call), one(pattern), one(template));
@@ -401,12 +430,16 @@ mod tests {
     fn it_refuses_a_label_the_template_and_the_rest_both_say() {
         let bindings = matches(
             &one("(add (todo state: :done text: \"x\"))"),
-            &one("(?command (?concept ...?fields))"),
+            &one("(?command (?concept ... ?fields))"),
             Bindings::new(),
         )
         .unwrap();
         assert!(matches!(
-            fill(&one("(xyz.todo _ state: :open ...?fields)"), &bindings, "s"),
+            fill(
+                &one("(xyz.todo _ state: :open ... ?fields)"),
+                &bindings,
+                "s"
+            ),
             Err(Error::Refused(_))
         ));
     }

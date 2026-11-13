@@ -79,8 +79,6 @@ pub enum Segment {
     Key(usize),
     /// The value of an entry of a struct.
     Value(usize),
-    /// What a repeat repeats.
-    Repeated,
 }
 
 /// The way from a document to a node in it.
@@ -102,11 +100,6 @@ pub enum Slot {
         /// Its label.
         label: String,
         /// Where the label is.
-        at: Point,
-    },
-    /// `...?rest`.
-    Rest {
-        /// Where it is.
         at: Point,
     },
 }
@@ -196,24 +189,5 @@ impl Written {
                 (Slot::Item { at, of }, Segment::Item(item)) if at == item => *of,
                 _ => None,
             })
-    }
-
-    /// Put the node at `path`, and every node inside it, one step
-    /// further in: under what a repeat repeats.
-    pub(crate) fn repeat(&mut self, path: &[Segment]) {
-        let inside: Vec<Path> = self
-            .notes
-            .range(path.to_vec()..)
-            .take_while(|(way, _)| way.starts_with(path))
-            .map(|(way, _)| way.clone())
-            .collect();
-        for way in inside {
-            if let Some(note) = self.notes.remove(&way) {
-                let mut moved = path.to_vec();
-                moved.push(Segment::Repeated);
-                moved.extend_from_slice(&way[path.len()..]);
-                self.notes.insert(moved, note);
-            }
-        }
     }
 }

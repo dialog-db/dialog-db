@@ -127,6 +127,19 @@ impl Printer<'_> {
         let start = span.map(|span| span.start);
         let end = span.map(|span| span.end.back(1));
         match tree {
+            // `'x`, where it was written so: the reader's sugar for
+            // `(quote x)`.
+            Syntax::Application(_, operand)
+                if note.is_some_and(|note| note.spelling.as_deref() == Some("'"))
+                    && operand.items.len() == 1
+                    && operand.terms.is_empty() =>
+            {
+                self.token(start, "'");
+                self.tight = true;
+                path.push(Segment::Item(0));
+                self.node(&operand.items[0], path, false);
+                path.pop();
+            }
             Syntax::Application(operator, operand) => {
                 self.token(start, "(");
                 path.push(Segment::Operator);
@@ -141,7 +154,6 @@ impl Printer<'_> {
                     .filter(|slot| match slot {
                         Slot::Item { at, .. } => *at < operand.items.len(),
                         Slot::Term { label, .. } => operand.terms.contains_key(label),
-                        Slot::Rest { .. } => operand.rest.is_some(),
                     })
                     .collect();
                 let nowhere = Point {
@@ -166,11 +178,6 @@ impl Printer<'_> {
                         });
                     }
                 }
-                if operand.rest.is_some()
-                    && !slots.iter().any(|slot| matches!(slot, Slot::Rest { .. }))
-                {
-                    slots.push(Slot::Rest { at: nowhere });
-                }
                 let known = |at: Point| (at != nowhere).then_some(at);
                 let mut next = 0;
                 for slot in &slots {
@@ -192,11 +199,6 @@ impl Printer<'_> {
                             self.part(&operand.terms[label], path, false, known(*at));
                             path.pop();
                         }
-                        Slot::Rest { at } => {
-                            self.closing(closing, &mut next, known(*at));
-                            let name = operand.rest.as_deref().unwrap_or_default();
-                            self.token(known(*at), &format!("...?{name}"));
-                        }
                     }
                 }
                 self.closing(closing, &mut next, None);
@@ -212,7 +214,7 @@ impl Printer<'_> {
                 self.closing(closing, &mut 0, None);
                 self.token(end, "]");
             }
-            Syntax::Map(entries, rest) => {
+            Syntax::Map(entries) => {
                 self.token(start, "{");
                 for (at, (name, value)) in entries.iter().enumerate() {
                     path.push(Segment::Key(at));
@@ -222,26 +224,8 @@ impl Printer<'_> {
                     self.node(value, path, false);
                     path.pop();
                 }
-                let mut next = 0;
-                if let Some(name) = rest {
-                    let at = note.and_then(|note| {
-                        note.order.iter().find_map(|slot| match slot {
-                            Slot::Rest { at } => Some(*at),
-                            _ => None,
-                        })
-                    });
-                    self.closing(closing, &mut next, at);
-                    self.token(at, &format!("...?{name}"));
-                }
-                self.closing(closing, &mut next, None);
-                self.token(end, "}");
-            }
-            Syntax::Repeat(repeated) => {
-                path.push(Segment::Repeated);
-                self.node(repeated, path, key);
-                path.pop();
                 self.closing(closing, &mut 0, None);
-                self.token(span.map(|span| span.end.back(3)), "...");
+                self.token(end, "}");
             }
             atom => {
                 let spelled = note

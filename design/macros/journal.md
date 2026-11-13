@@ -981,11 +981,43 @@ Not examined yet. They are columns, not recommendations.
 
 **Decided.** By the maintainer: a form with a label is sugar for one record; the reader gives `...` no meaning and the analyzer does. Not built. To confirm before building: that the split in the diagram is the one meant, and that `'` is the reader's as in lisp, `'(1 2 3)` read as `(quote (1 2 3))`.
 
+## 2026-11-13, Designing: built, the reader that knows nothing of `...`
+
+**Asked.** The maintainer: yes, `'` is the reader's as in lisp. And a trailing `...` in a rule body, `(todo ?t list: ?l ...)`, is sugar for `... _`: the form may have other labels and they are not cared about. "Again something for analyzer not reader."
+
+**Learned.**
+
+- Built. The reader knows brackets, atoms, labels and `'`. `...` is a symbol, a part among parts and a key among keys, and `'x` is `(quote x)`. The tree lost its repeat node and its rest, and the mapping lost what it kept for them: `...` is a part with a place like any other, so the text prints back with nothing special.
+- The analyzer reads `...` where a pattern is matched and a template filled, and refuses what a record may not say, at the form that says it, with line and column.
+
+```
+ text             reader          tree                    analyzer
+ ... ?more        two parts       a name, a variable      the parts not named, bound
+ ... (?k ?t)      two parts       a name, an application  each part not named, taken apart
+ ...              one part        a name                  ... _
+ '(1 2 3)         (quote (1 2 3)) an application          where a value stands: a list
+ (f ?a ?b k: 1)   a list          an application          refused: two parts beside a label
+```
+
+- One thing the single `...` forced. The prelude says a command twice, about nothing and about a subject:
+
+```
+ (?command (?concept ... ?fields))             was ...?fields: labelled parts only
+ (?command (?concept ?subject ... ?fields))
+```
+
+  With one `...` both match a call that has a part with no label, and three tests failed as ambiguous. The agent's answer, in the ledger as an opinion: of the rules that apply, the ones that leave the least to `...` are taken. It is a rule about which rule wins, which there was none of before.
+- Not built: the list of nothing, `'()`; and the trailing `...` in a use, which waits on what leaving it off means.
+- 90 unit, 25 integration and 2 doc tests pass here; clippy and the docs build are clean.
+
+**Decided.** By the maintainer: the split, the quote, the trailing `...`. By the agent, to ask: the rule that names the most wins.
+
 ## The queue
 
 In order. One is asked, answered and written down before the next.
 
-1. Decided 2026-11-13: the new format always, the old read for one cycle. To build: format 4 on #778, with the migration. Before it, since it is asked and small: what becomes of `?more ...` now that the parts not named are `... ?more`, then the reader changed once for it and for the quoted list.
+1. Asked 2026-11-13, in this order: whether a concept read that leaves fields out without `...` is refused; then whether, of the rules that apply to a form, the ones that name the most win. Built the same day: the reader that gives `...` no meaning, the quoted list, the record's refusals.
+1. Decided 2026-11-13: the new format always, the old read for one cycle. To build next: format 4 on #778, with the migration.
 2. Whether a rule that leaves a premise's subject unnamed fires only for the entity written (#789, #791). It changes what a commit writes on main.
 3. Answered 2026-11-13 by the quote: `'(:open :done)`, `'()`.
 4. Whether descriptions are `dialog.meta/description` or stay under `syntax.meta`.

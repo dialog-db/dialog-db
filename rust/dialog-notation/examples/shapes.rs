@@ -51,10 +51,15 @@ fn head(form: &Form) -> String {
 fn count(form: &Form, into: &mut BTreeMap<String, Count>) {
     match form {
         Form::Application(inner, parts) => {
+            // `...` and what follows it are the parts not named, and no
+            // part of their own.
+            let dots =
+                |part: &Part| matches!(part, Part::Bare(Form::Symbol(name)) if name == "...");
             let unlabelled: Vec<&Form> = parts
                 .iter()
+                .take_while(|part| !dots(part))
                 .filter_map(|part| match part {
-                    Part::Bare(Form::Ellipsis | Form::Rest(_)) | Part::Labelled(..) => None,
+                    Part::Labelled(..) => None,
                     Part::Bare(form) => Some(form),
                 })
                 .collect();
@@ -70,10 +75,7 @@ fn count(form: &Form, into: &mut BTreeMap<String, Count>) {
                 .example
                 .entry(shape)
                 .or_insert_with(|| form.to_string());
-            if parts
-                .iter()
-                .any(|part| matches!(part, Part::Bare(Form::Ellipsis)))
-            {
+            if parts.iter().any(dots) {
                 entry.repeats += 1;
             }
             count(inner, into);
@@ -84,7 +86,7 @@ fn count(form: &Form, into: &mut BTreeMap<String, Count>) {
             }
         }
         Form::Vector(items) => items.iter().for_each(|item| count(item, into)),
-        Form::Map(entries, _) => entries.iter().for_each(|(key, value)| {
+        Form::Map(entries) => entries.iter().for_each(|(key, value)| {
             count(key, into);
             count(value, into);
         }),

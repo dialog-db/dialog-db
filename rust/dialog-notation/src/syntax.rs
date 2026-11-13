@@ -52,7 +52,7 @@ use merkle_reference::Reference;
 use crate::Error;
 use crate::data;
 use crate::form::{Form, Kind, Mark, Part};
-use crate::written::{Note, Path, Segment, Slot, Span, Written};
+use crate::written::{Note, Path, Segment, Slot, Written};
 
 /// A node of the syntax tree.
 #[derive(Clone, Debug, PartialEq)]
@@ -70,13 +70,10 @@ pub enum Syntax {
     Reference(String),
     /// A struct, `{key value}`, its keys nodes like its values, in the
     /// order written, which its name does not depend on. With no
-    /// variable in it, it is a value. `...?name` after its entries, in
-    /// a pattern, is the entries not named, as a struct.
-    Map(Vec<(Syntax, Syntax)>, Option<String>),
+    /// variable in it, it is a value.
+    Map(Vec<(Syntax, Syntax)>),
     /// A tuple, `[a b]`.
     Tuple(Vec<Syntax>),
-    /// `p ...`, in a pattern and in a template: any number of `p`.
-    Repeat(Box<Syntax>),
 }
 
 /// What an operator is applied to.
@@ -86,9 +83,6 @@ pub struct Parameters {
     pub items: Vec<Syntax>,
     /// The labelled parts. The order they were written in is not kept.
     pub terms: BTreeMap<String, Syntax>,
-    /// `...?name`, in a pattern and in a template: the labelled parts
-    /// not named.
-    pub rest: Option<String>,
 }
 
 fn refused(what: &str, error: impl Display) -> Error {
@@ -117,8 +111,7 @@ pub(crate) fn entity(uri: &str) -> Result<Value, Error> {
         .map_err(|error| refused("not an entity", error))
 }
 
-/// The nodes a run of forms is: a form followed by `...` is that form,
-/// repeated.
+/// The nodes a run of forms is, each in its place.
 fn run<'a>(
     forms: impl IntoIterator<Item = (&'a Form, Option<&'a Mark>)>,
     path: &mut Path,
@@ -126,47 +119,10 @@ fn run<'a>(
 ) -> Result<Vec<Syntax>, Error> {
     let mut nodes: Vec<Syntax> = Vec::new();
     for (form, mark) in forms {
-        match form {
-            Form::Ellipsis => match nodes.pop() {
-                Some(Syntax::Repeat(_)) | None => {
-                    if let Some(mark) = mark {
-                        written.refused.get_or_insert(mark.span);
-                    }
-                    return Err(Error::Refused("a `...` that repeats nothing".into()));
-                }
-                Some(repeated) => {
-                    // The node the `...` follows is now what a repeat
-                    // repeats, and the repeat is where it was.
-                    path.push(Segment::Item(nodes.len()));
-                    if let Some(mark) = mark {
-                        let start = written
-                            .span(path)
-                            .map_or(mark.span.start, |span| span.start);
-                        written.repeat(path);
-                        written.notes.insert(
-                            path.clone(),
-                            Note {
-                                span: Span {
-                                    start,
-                                    end: mark.span.end,
-                                },
-                                closing: mark.comments.clone(),
-                                after: mark.after.clone(),
-                                ..Note::default()
-                            },
-                        );
-                    }
-                    path.pop();
-                    nodes.push(Syntax::Repeat(Box::new(repeated)));
-                }
-            },
-            form => {
-                path.push(Segment::Item(nodes.len()));
-                let node = tree(form, mark, false, path, written);
-                path.pop();
-                nodes.push(node?);
-            }
-        }
+        path.push(Segment::Item(nodes.len()));
+        let node = tree(form, mark, false, path, written);
+        path.pop();
+        nodes.push(node?);
     }
     Ok(nodes)
 }
@@ -233,14 +189,6 @@ fn made<'a>(
         Form::Symbol(name) => Syntax::Reference(name.clone()),
         Form::Variable(name) => Syntax::Variable(name.clone()),
         Form::Blank => Syntax::Blank,
-        Form::Ellipsis => {
-            return Err(Error::Refused("a `...` that repeats nothing".into()));
-        }
-        Form::Rest(name) => {
-            return Err(Error::Refused(format!(
-                "`...?{name}` stands for labelled parts, and is not among the parts of an application"
-            )));
-        }
         Form::Vector(items) => Syntax::Tuple(run(
             items
                 .iter()
@@ -249,7 +197,7 @@ fn made<'a>(
             path,
             written,
         )?),
-        Form::Map(entries, rest) => {
+        Form::Map(entries) => {
             let mut nodes = Vec::new();
             for (at, (name, value)) in entries.iter().enumerate() {
                 path.push(Segment::Key(at));
@@ -260,15 +208,7 @@ fn made<'a>(
                 path.pop();
                 nodes.push((name?, value?));
             }
-            if let (Some(rest), Some(note)) = (inside(2 * entries.len()), note.as_mut()) {
-                note.order.push(Slot::Rest {
-                    at: rest.span.start,
-                });
-                note.closing
-                    .extend(rest.comments.iter().chain(&rest.after).cloned());
-                note.closing.sort_by_key(|comment| comment.at);
-            }
-            Syntax::Map(nodes, rest.clone())
+            Syntax::Map(nodes)
         }
         Form::Application(head, parts) => {
             let mut operand = Parameters::default();
@@ -282,31 +222,11 @@ fn made<'a>(
                     .and_then(|mark| mark.labels.get(at))
                     .and_then(Option::as_ref);
                 match part {
-                    Part::Bare(Form::Rest(name)) => {
-                        if operand.rest.replace(name.clone()).is_some() {
-                            return Err(Error::Refused(format!(
-                                "{form} takes the labelled parts not named twice"
-                            )));
-                        }
-                        if let (Some(rest), Some(note)) = (part_mark, note.as_mut()) {
-                            order.push(Slot::Rest {
-                                at: rest.span.start,
-                            });
-                            note.closing
-                                .extend(rest.comments.iter().chain(&rest.after).cloned());
-                            note.closing.sort_by_key(|comment| comment.at);
-                        }
-                    }
                     Part::Bare(part) => {
-                        if !matches!(part, Form::Ellipsis) {
-                            order.push(Slot::Item {
-                                at: bare
-                                    .iter()
-                                    .filter(|(form, _)| **form != Form::Ellipsis)
-                                    .count(),
-                                of: None,
-                            });
-                        }
+                        order.push(Slot::Item {
+                            at: bare.len(),
+                            of: None,
+                        });
                         bare.push((part, part_mark));
                     }
                     Part::Labelled(label, part) => {
@@ -396,16 +316,9 @@ impl Parameters {
                 .map(|(label, term)| Ok((label.as_str(), term.value()?)))
                 .collect::<Result<Vec<_>, Error>>()?,
         )?;
-        let rest = self
-            .rest
-            .as_ref()
-            .map(|name| node("rest", [("name", data::text(name))]))
-            .transpose()?;
         node(
             "parameters",
-            [("items", list(&self.items)?), ("terms", terms)]
-                .into_iter()
-                .chain(rest.map(|rest| ("rest", rest))),
+            [("items", list(&self.items)?), ("terms", terms)],
         )
     }
 }
@@ -417,15 +330,13 @@ impl Syntax {
     /// | node | fields |
     /// |---|---|
     /// | `:application` | `operator`, a node; `operand`, a `:parameters` |
-    /// | `:parameters` | `items`, a list of nodes; `terms`, a map from label to node; `rest`, a `:rest`, where one is written |
+    /// | `:parameters` | `items`, a list of nodes; `terms`, a map from label to node |
     /// | `:variable` | `name`, text |
     /// | `:blank` | |
     /// | `:constant` | `value` |
     /// | `:reference` | `name`, a symbol |
-    /// | `:map` | `entries`, a map from node to node; `rest`, a `:rest`, where one is written |
+    /// | `:map` | `entries`, a map from node to node |
     /// | `:tuple` | `items`, a list of nodes |
-    /// | `:repeat` | `of`, a node |
-    /// | `:rest` | `name`, text |
     pub fn value(&self) -> Result<Value, Error> {
         match self {
             Syntax::Application(operator, operand) => node(
@@ -439,7 +350,7 @@ impl Syntax {
             Syntax::Blank => node("blank", []),
             Syntax::Constant(value) => node("constant", [("value", value.clone())]),
             Syntax::Reference(name) => node("reference", [("name", data::symbol(name)?)]),
-            Syntax::Map(entries, rest) => node(
+            Syntax::Map(entries) => node(
                 "map",
                 [(
                     "entries",
@@ -449,17 +360,9 @@ impl Syntax {
                             .map(|(key, value)| Ok((key.value()?, value.value()?)))
                             .collect::<Result<Vec<_>, Error>>()?,
                     )?,
-                )]
-                .into_iter()
-                .chain(
-                    rest.as_ref()
-                        .map(|name| node("rest", [("name", data::text(name))]))
-                        .transpose()?
-                        .map(|rest| ("rest", rest)),
-                ),
+                )],
             ),
             Syntax::Tuple(items) => node("tuple", [("items", list(items)?)]),
-            Syntax::Repeat(repeated) => node("repeat", [("of", repeated.value()?)]),
         }
     }
 
@@ -522,17 +425,11 @@ impl Syntax {
                 operand.items.iter().for_each(|item| item.variables(into));
                 operand.terms.values().for_each(|term| term.variables(into));
             }
-            Syntax::Map(entries, rest) => {
-                entries.iter().for_each(|(key, value)| {
-                    key.variables(into);
-                    value.variables(into);
-                });
-                // The rest of a struct is a variable like any in it: it
-                // is bound to a value, the entries not named.
-                into.extend(rest.iter().cloned());
-            }
+            Syntax::Map(entries) => entries.iter().for_each(|(key, value)| {
+                key.variables(into);
+                value.variables(into);
+            }),
             Syntax::Tuple(items) => items.iter().for_each(|item| item.variables(into)),
-            Syntax::Repeat(repeated) => repeated.variables(into),
             Syntax::Blank | Syntax::Constant(_) | Syntax::Reference(_) => {}
         }
     }
@@ -599,10 +496,9 @@ impl Syntax {
                     .iter()
                     .enumerate()
                     .any(|(at, item)| inside(Segment::Item(at), item, path)),
-                Syntax::Map(entries, _) => entries.iter().enumerate().any(|(at, (name, value))| {
+                Syntax::Map(entries) => entries.iter().enumerate().any(|(at, (name, value))| {
                     inside(Segment::Key(at), name, path) || inside(Segment::Value(at), value, path)
                 }),
-                Syntax::Repeat(repeated) => inside(Segment::Repeated, repeated, path),
                 _ => false,
             }
         }
@@ -627,22 +523,16 @@ impl Syntax {
     pub fn form(&self) -> Form {
         match self {
             Syntax::Application(operator, operand) => {
-                let mut parts = Vec::new();
-                for item in &operand.items {
-                    item.write(&mut parts);
-                }
-                let mut parts: Vec<Part> = parts.into_iter().map(Part::Bare).collect();
+                let mut parts: Vec<Part> = operand
+                    .items
+                    .iter()
+                    .map(|item| Part::Bare(item.form()))
+                    .collect();
                 parts.extend(
                     operand
                         .terms
                         .iter()
                         .map(|(label, term)| Part::Labelled(label.clone(), term.form())),
-                );
-                parts.extend(
-                    operand
-                        .rest
-                        .iter()
-                        .map(|name| Part::Bare(Form::Rest(name.clone()))),
                 );
                 Form::Application(Box::new(operator.form()), parts)
             }
@@ -665,45 +555,20 @@ impl Syntax {
                 Value::Bytes(_) | Value::Record(_) => Form::Blank,
             },
             Syntax::Reference(name) => Form::Symbol(name.clone()),
-            Syntax::Map(entries, rest) => Form::Map(
+            Syntax::Map(entries) => Form::Map(
                 entries
                     .iter()
                     .map(|(key, value)| (key.form(), value.form()))
                     .collect(),
-                rest.clone(),
             ),
-            Syntax::Tuple(items) => {
-                let mut forms = Vec::new();
-                for item in items {
-                    item.write(&mut forms);
-                }
-                Form::Vector(forms)
-            }
-            Syntax::Repeat(repeated) => repeated.form(),
-        }
-    }
-
-    /// This node among the members of a run: a repeat is what it
-    /// repeats and then `...`.
-    fn write(&self, forms: &mut Vec<Form>) {
-        forms.push(self.form());
-        if matches!(self, Syntax::Repeat(_)) {
-            forms.push(Form::Ellipsis);
+            Syntax::Tuple(items) => Form::Vector(items.iter().map(Syntax::form).collect()),
         }
     }
 }
 
 impl Display for Syntax {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        let mut forms = Vec::new();
-        self.write(&mut forms);
-        for (at, form) in forms.iter().enumerate() {
-            if at > 0 {
-                write!(f, " ")?;
-            }
-            write!(f, "{form}")?;
-        }
-        Ok(())
+        write!(f, "{}", self.form())
     }
 }
 
@@ -732,19 +597,6 @@ fn text(node: &CompositeMap, field: &str) -> Result<String, Error> {
         Some(Value::String(text)) => Ok(text.clone()),
         _ => Err(unread(field)),
     }
-}
-
-/// The name of the `:rest` a node holds, where it holds one.
-fn rest(node: &CompositeMap) -> Result<Option<String>, Error> {
-    data::field(node, "rest")
-        .map(|rest| {
-            let rest = fields(rest)?;
-            match kind(&rest)? {
-                "rest" => text(&rest, "name"),
-                _ => Err(unread("rest")),
-            }
-        })
-        .transpose()
 }
 
 /// The type a node says it is: the name of the entity under `type`.
@@ -782,7 +634,6 @@ impl TryFrom<&Value> for Parameters {
         Ok(Parameters {
             items: nodes(&node, "items")?,
             terms,
-            rest: rest(&node)?,
         })
     }
 }
@@ -817,10 +668,8 @@ impl TryFrom<&Value> for Syntax {
                     .iter()
                     .map(|(key, value)| Ok((Syntax::try_from(key)?, Syntax::try_from(value)?)))
                     .collect::<Result<_, Error>>()?,
-                rest(&node)?,
             ),
             "tuple" => Syntax::Tuple(nodes(&node, "items")?),
-            "repeat" => Syntax::Repeat(Box::new(Syntax::try_from(part("of")?)?)),
             other => {
                 return Err(Error::Read(format!(
                     "a node of no type this reads: {other}"
@@ -1048,13 +897,10 @@ mod tests {
         assert!(operand.terms.is_empty());
         assert_eq!(
             operand.items,
-            vec![Syntax::Map(
-                vec![(
-                    Syntax::Reference("note".into()),
-                    Syntax::Variable("n".into())
-                )],
-                None
-            )]
+            vec![Syntax::Map(vec![(
+                Syntax::Reference("note".into()),
+                Syntax::Variable("n".into())
+            )])]
         );
         assert_ne!(
             one("(expand {note: ?n})").reference()?,
@@ -1063,10 +909,12 @@ mod tests {
         Ok(())
     }
 
+    /// The tree gives `...` no meaning either: it is a name among the
+    /// parts, and what it is followed by is the part after it. The
+    /// analyzer reads the two as the parts not named.
     #[test]
-    fn it_reads_what_a_pattern_adds() -> Result<(), Error> {
-        let Syntax::Application(operator, operand) =
-            one("(?name ?this ?more ... ...?fields label: _)")
+    fn it_keeps_three_dots_as_a_name_among_the_parts() -> Result<(), Error> {
+        let Syntax::Application(operator, operand) = one("(?name ?this label: _ ... ?fields)")
         else {
             panic!("an application");
         };
@@ -1075,16 +923,48 @@ mod tests {
             operand.items,
             vec![
                 Syntax::Variable("this".into()),
-                Syntax::Repeat(Box::new(Syntax::Variable("more".into())))
+                Syntax::Reference("...".into()),
+                Syntax::Variable("fields".into())
             ]
         );
-        assert_eq!(operand.rest.as_deref(), Some("fields"));
         assert_eq!(operand.terms.get("label"), Some(&Syntax::Blank));
         assert_eq!(
-            one("(?name ?this ?more ... ...?fields label: _)").to_string(),
-            "(?name ?this ?more ... label: _ ...?fields)"
+            one("(?name ?this label: _ ... ?fields)").to_string(),
+            "(?name ?this ... ?fields label: _)"
+        );
+        // With nothing after it, it is the last part.
+        assert_eq!(
+            one("(todo ?t list: ?l ...)").to_string(),
+            "(todo ?t ... list: ?l)"
+        );
+        // In a struct it is a key, and what follows it the value.
+        assert_eq!(
+            one("{author: ?who ... ?others}"),
+            Syntax::Map(vec![
+                (
+                    Syntax::Reference("author".into()),
+                    Syntax::Variable("who".into())
+                ),
+                (
+                    Syntax::Reference("...".into()),
+                    Syntax::Variable("others".into())
+                ),
+            ])
+        );
+        let kept = one("{author: ?who ... ?others}");
+        assert_eq!(
+            Syntax::try_from(&kept.value()?)?.reference()?,
+            kept.reference()?
         );
         Ok(())
+    }
+
+    /// `'x` is `(quote x)`: an application like any other in the tree.
+    #[test]
+    fn it_reads_a_quote_as_an_application_of_quote() {
+        assert_eq!(one("'(1 2 3)"), one("(quote (1 2 3))"));
+        assert_eq!(one("'(1 2 3)").applies(), Some("quote"));
+        assert_eq!(one("{tags: '(1 (2 3))}").to_string(), "{tags: '(1 (2 3))}");
     }
 
     #[test]
@@ -1110,21 +990,11 @@ mod tests {
     }
 
     #[test]
-    fn it_refuses_a_label_twice_and_a_repeat_of_nothing() {
+    fn it_refuses_a_label_twice() {
         assert_eq!(
             refusal("(f a: 1 a: 2)"),
             Error::Refused("(f a: 1 a: 2) says `a:` twice".into())
         );
-        assert_eq!(
-            refusal("(f ...)"),
-            Error::Refused("a `...` that repeats nothing".into())
-        );
-        assert_eq!(
-            refusal("(f ?a ... ...)"),
-            Error::Refused("a `...` that repeats nothing".into())
-        );
-        assert!(matches!(refusal("[...?rest]"), Error::Refused(_)));
-        assert!(matches!(refusal("(f ...?a ...?b)"), Error::Refused(_)));
     }
 
     #[test]
@@ -1178,10 +1048,6 @@ mod tests {
                 "form:6zdaZQpk7kebcAVHhZ7D2aHfm8qH2YH8DSpMFj3N8wzU",
             ),
             (
-                r#"{a: 1 b: [2.0 "x" -3 ?y ...]}"#,
-                "form:ANpSivMCf1y68JwcKpfx6hPmhpm5EkLJWcT67DduHD6k",
-            ),
-            (
                 "(rule (xyz.todo ?t done: true) (xyz.todo ?t state: :done) (unless (f 1.5 x/y +)))",
                 "form:DUVe6jwPbwVjGQu4D26HERqULgLWyxA8H5DN88bXZ9Px",
             ),
@@ -1203,7 +1069,7 @@ mod tests {
     /// back as `2`.
     #[test]
     fn it_keeps_a_tree_as_a_composite_value() -> Result<(), Error> {
-        let tree = one(r#"(f ?x 2.0 {a: [1 "b"]} label: _ ...?rest)"#);
+        let tree = one(r#"(f ?x 2.0 {a: [1 "b"]} label: _ ... ?rest)"#);
         let kept = tree.value()?;
         assert!(matches!(
             kept.composite(),
@@ -1212,35 +1078,10 @@ mod tests {
         let back = Syntax::try_from(&kept)?;
         assert_eq!(
             back.to_string(),
-            r#"(f ?x 2 {a: [1 "b"]} label: _ ...?rest)"#
+            r#"(f ?x 2 {a: [1 "b"]} ... ?rest label: _)"#
         );
         assert_eq!(back.value()?, kept);
         assert_eq!(back.reference()?, tree.reference()?);
-        Ok(())
-    }
-
-    /// The rest of a struct is part of what it says: it is kept, read
-    /// back, a variable of the tree, and a struct with one is another
-    /// tree than the struct without.
-    #[test]
-    fn it_keeps_the_rest_of_a_struct() -> Result<(), Error> {
-        let open = one("{author: ?who ...?others}");
-        assert_eq!(
-            open,
-            Syntax::Map(
-                vec![(
-                    Syntax::Reference("author".into()),
-                    Syntax::Variable("who".into())
-                )],
-                Some("others".into())
-            )
-        );
-        assert_eq!(Syntax::try_from(&open.value()?)?, open);
-        assert_eq!(open.to_string(), "{author: ?who ...?others}");
-        assert_ne!(open.reference()?, one("{author: ?who}").reference()?);
-        let mut variables = Vec::new();
-        open.variables(&mut variables);
-        assert_eq!(variables, vec!["who", "others"]);
         Ok(())
     }
 

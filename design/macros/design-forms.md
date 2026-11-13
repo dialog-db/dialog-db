@@ -14,7 +14,7 @@
 ```
 
 1. A form is something a variable can be bound to.
-2. `expand` takes a bound form apart by shape, and binds the parts. A part may be a run: `...` and `...?rest`.
+2. `expand` takes a bound form apart by shape, and binds the parts. A part may be a run: `...` and `... ?rest`.
 3. `syntax` builds a form from the parts, and names apart every variable the pattern did not bind.
 4. The walker asks dialog what a form expands to, a form at a time.
 
@@ -37,7 +37,7 @@ D  data       pattern and template stored; a native expander applies them; no ru
 |---|---|---|---|---|---|
 | a rule about syntax is a stored rule dialog evaluates | 🔴 it is a Rust struct in a walker | 🟢 a rule over `form/*` facts whose head asserts the facts of new forms | 🟢 a deductive rule: `expand` lowers to one `form/match` premise a variable, `syntax` to a chain that fills one variable a link, as `(:id …)` lowers to `entity/derive` | 🟢 a deductive rule: `expand` is destructuring a bound record, `syntax` a term that builds one | 🔴 a pattern and a template are stored; what applies them is not a rule, and a guard such as `(unless (dialog.name _ is: ?command))` is a second language |
 | a form is whole: no part of it can be retracted from under it (decided 2026-11-11, full inlining) | holds, in memory | 🔴 a subform is an entity with facts of its own, which is the shared subform that was ruled out | 🟢 one value | 🟢 one value, written and replaced whole | 🟢 one value |
-| `...` and `...?rest` | matched natively | 🟡 a run is a scan of a sequence, and the rest of a dictionary is "every entry but these", which is a negation a field | 🟢 a run and a rest are forms too, so a variable holds them | ? #748 leaves the surface of destructuring open, and says nothing of binding what a pattern did not name | matched natively |
+| `...` and `... ?rest` | matched natively | 🟡 a run is a scan of a sequence, and the rest of a dictionary is "every entry but these", which is a negation a field | 🟢 a run and a rest are forms too, so a variable holds them | ? #748 leaves the surface of destructuring open, and says nothing of binding what a pattern did not name | matched natively |
 | what dialog has to gain | nothing | heads that write several entities; a formula that makes each one (there now: `entity/derive`) | three or four formulas of fixed cells; a layout for a form's bytes, canonical, that nothing else reads | #748 built, plus what it has not decided: destructuring by pattern, a rest, and a term that builds a record in a head | an index of syntax by head name; nothing in the engine |
 | one layout for compound values | not a question | not a question | 🟡 a second layout beside #748's, for forms alone | 🟢 the one #748 defines; a form's atoms and attributes are the tokens claims use | 🟡 as B |
 | named by hash, with names as facts | 🔴 nothing is stored | 🟡 by an entity derived from its parts | 🟢 by its merkle reference, as a rule is today | 🟢 by its canonical form | 🟢 as B |
@@ -95,7 +95,7 @@ The record's attributes carry the domain, so there is no seed, and the order of 
 |---|---|---|
 | build a record from what a rule has bound | `:id`, `syntax` | not there: it speaks of reading records, not of a rule making one |
 | take a bound record apart by pattern | `expand` | decided; the surface is open |
-| bind the pairs a pattern did not name, as a record | `...?rest` | not there |
+| bind the pairs a pattern did not name, as a record | `... ?rest` | not there |
 | several values under one field, in no order | the premises of `when`, the heads of a rule | decided |
 | a value for what is not one: a variable, `_` | a form holding `?x` as data | not there |
 
@@ -150,7 +150,7 @@ Built, in `rust/dialog-notation/src/data.rs` and `src/syntax.rs`. The first vers
 - **The data knows no syntax.** It is a value, a list or a map, as dialog has them since [patterns](../patterns.md) (#778). A node of the tree is a map that says its `type`, and only `syntax.rs` reads it as one.
 - **The name** is the reference of the tree's data, and `form:` with it in base58 is the entity. Two orders of the same labels are one name, and so are `1.5` and `1.50`. The natural 3 and the float 3.0 are one name too, as they are one number to dialog, and kept they are one byte string: `2.0` reads back as `2`.
 - **The layout** is dialog's composite value: a version byte, then dag-cbor, a map's entries in the order of their keys. A record under another version is refused by its number, and so are bytes that are not the one way the value is written. The notation had a layout of its own until 2026-11-13, a stand-in for this one; no name moved when it went (`it_names_a_tree_apart_from_how_it_is_kept`).
-- **A kept tree is taken apart by a pattern**, like any struct: `(query (syntax.form ?f is: {type: :application operator: {type: :reference name: /todo} operand: _}))` is every kept form that applies `todo` (`it_finds_a_kept_form_by_a_pattern_over_its_tree`). With a rest a pattern says only what it asks about: `{operator: {name: ?name ...?reference} ...?node}`. The parts of a node are a list, which `( )` takes apart: `{type: :tuple items: (_ _)}` is the kept tuples of two parts.
+- **A kept tree is taken apart by a pattern**, like any struct: `(query (syntax.form ?f is: {type: :application operator: {type: :reference name: /todo} operand: _}))` is every kept form that applies `todo` (`it_finds_a_kept_form_by_a_pattern_over_its_tree`). With a rest a pattern says only what it asks about: `{operator: {name: ?name ... ?reference} ... ?node}`. The parts of a node are a list, which a quoted list takes apart: `{type: :tuple items: '(_ _)}` is the kept tuples of two parts.
 - A tree is kept on a real branch as a `record:` value under its `form:` entity and read back (`it_keeps_a_form_on_a_branch_under_the_entity_that_names_it`). Every form of the prelude and the examples has a tree that lays out and reads back (`it_keeps_every_form_of_the_prelude_and_the_examples`).
 - The crate hashes no text. The names an expansion gives its own variables, and the relation a query is derived into, come from references.
 
@@ -173,7 +173,7 @@ Two readings of `( )` were on the table on 2026-11-11, both Irakli's. Counted ov
 | the 113 with none or one | fit | fit |
 | `rule`, `when`, `unless`, `query`, `all`: 27 | fit only if `operand:` may be said several times, which makes a form #748's record, pairs and not a map | fit; the order of premises is in the data, though it means nothing |
 | `(syntax pattern template)`, `(concept signature body)`: 11 | 🔴 two operands with different jobs: one of them needs a label the notation does not have | 🟢 fit, by position |
-| `p ...` | "every other member", as `...?rest` is every other label | 🟢 what it is now |
+| `p ...` | "every other member", as `... ?rest` is every other label | 🟢 what it is now |
 | one call written two ways, `(todo ?t state: :open)` and `(todo state: :open of: ?t)` | 🟢 one form | two, unless the reader puts `of:` first |
 | what data it is | a set of pairs; only #748 has it, and it is not built | a list and a map, which EDN, JSON and IPLD all have |
 | forms that have to be written differently | 11, and a new label | 0 |
@@ -241,7 +241,7 @@ Nodes the prelude and the examples need, in the shape of the example:
 | `:reference` | `name`, a symbol | `todo`, `xyz.todo`, `xyz.todo/text`, `+` |
 | `:map` | `entries`, a map from node to node | `{foo bar}`, `{label: bar}` |
 | `:tuple` | `items`, a list of nodes | `[a b]` |
-| `:repeat`, `:rest` | `of`, a node; `name`, text | `p ...`, `...?fields`, in a pattern |
+| a reference named `...` | as any reference | `... ?fields`, `... (?key ?text)`, `...`: the parts not named. The tree gives it no meaning; the analyzer reads it. Until 2026-11-13 the tree had `:repeat` and `:rest` nodes for `p ...` and `...?fields` |
 
 **Most of these nodes are in dialog already** (Irakli, the same sitting; checked in `rust/dialog-query/src`):
 
@@ -261,7 +261,7 @@ So the tree for what dialog runs exists. `kernel.rs` in the proof of concept is 
 - an operator by name, `'todo`: dialog's `ConceptQuery` holds the concept itself, inlined;
 - a term that is an application, a map or a tuple: a `Term` is a variable or a constant;
 - a rule of several heads, a head that reports, and `unless` over more than one proposition;
-- `expand`, `syntax`, `p ...` and `...?rest`: the forms a rule about syntax is made of.
+- `expand`, `syntax`, `p ...` and `... ?rest`: the forms a rule about syntax is made of.
 
 Two things the example does not yet say, both from the count above:
 
@@ -287,7 +287,7 @@ It differs from the example in two places, both from the count:
 - The operator is a node, since 20 applications have a variable there.
 - The part with no label is the first of `items`, and not `of` among the `terms`. `terms` is a map and has no place for the second and third such part of `(when A B C)`, and `(when A)` cannot have another shape than `(when A B)`. `of:` written out lands in the same place, so the two spellings of a call are one tree and one name.
 
-What the tree forgets of the notation: the order labelled parts were written in, a number's digits, and that `...` came after what it repeats. What it refuses that the reader takes: a label twice, a `...` with nothing before it, a `...?rest` anywhere but among the parts of an application.
+What the tree forgets of the notation: the order labelled parts were written in, a number's digits, and that `...` came after what it repeats. What it refuses that the reader takes: a label twice, a `...` with nothing before it, a `... ?rest` anywhere but among the parts of an application.
 
 Expanding and compiling still read the notation as parsed. They are to read the tree, and that waits on the question below.
 
@@ -432,10 +432,10 @@ What the notation needs of it, for whoever builds records:
 | a struct with nothing to bind is a value, like 5 | `{text: "hi"}` as a field's value, a constant in a rule |
 | a struct with a variable in it, where a bound record stands, takes the record apart | `(expand {note: ?n})`, reading a command's row |
 | the same struct, where its variables are bound and a value is wanted, is the record | `(:id {text: ?x})`: `entity/derive` over a record |
-| the pairs a pattern did not name, bound as a record | `...?rest` |
+| the pairs a pattern did not name, bound as a record | `... ?rest` |
 | the keys a label writes: an attribute of a domain, and a name of none | `{xyz.todo/text: ?x}`, `{text: ?x}` |
 
-Built on #778 so far (`it_keeps_a_struct_and_takes_it_apart_by_a_pattern`): a struct is a value where a write says one, and a pattern in a query of one read or of several, since dialog now lays a rule that holds a pattern over a branch. A struct in a rule that derives runs for as long as the notebook does: dialog cannot keep the rule, format 3 of a rule body having no way to write a pattern, so the notebook holds it and lays it over the branch for every query. A struct in a rule that writes is refused, since such a rule runs when a transaction commits and a rule held for queries is never seen there. `...?rest` after a struct's entries is read since 2026-11-13: the entries not named, as a struct (`MapPattern::with_rest`). A list is `( )` since the same day, with `...?run` after its items for the ones after them; headed by a keyword or an operator a `( )` is a formula, so a list that starts with one has no spelling yet. `entity/derive` stays the two-cell stand-in.
+Built on #778 so far (`it_keeps_a_struct_and_takes_it_apart_by_a_pattern`): a struct is a value where a write says one, and a pattern in a query of one read or of several, since dialog now lays a rule that holds a pattern over a branch. A struct in a rule that derives runs for as long as the notebook does: dialog cannot keep the rule, format 3 of a rule body having no way to write a pattern, so the notebook holds it and lays it over the branch for every query. A struct in a rule that writes is refused, since such a rule runs when a transaction commits and a rule held for queries is never seen there. `... ?rest` after a struct's entries is read since 2026-11-13: the entries not named, as a struct (`MapPattern::with_rest`). A list is `'(1 2 3)` since the same day, quoted as in lisp, with `... ?run` after its items for the ones after them. `entity/derive` stays the two-cell stand-in.
 
 ```
  a struct in                      today
