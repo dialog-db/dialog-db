@@ -751,6 +751,16 @@ xychart-beta
 
 **Decision.** Documentation alone is not the fix. Readers take a concept call as stored and derived, and a domain call as stored, because the `xyz.` prefix is all that marks the stored layer. The candidates are rule B reading through the concept, and the stored facts given without a table of attributes, to separate the notation from the prompt.
 
+## 2026-11-13 — R30: it was the spelling, not the table
+
+**Question.** The one [planned](results/r30-plan.md): do readers miss the rename because rule B reads `xyz.todo`, or because the prompt lists stored facts in a table under that name?
+
+**Method.** As planned, ten readers per variant, no documentation in any.
+
+**Results.** [r30](results/r30.md). With rule B reading `(todo ?t title: ?old)`, all 10 readers saw the rename land and the to-do show "Fix login bug". With the facts as prose, 0 of 10 did, and the baseline also scored 0 of 10. Readers take a domain call as the stored layer from its spelling. On whether a later issue change wins back, the `concept` readers split 4 to 6, since nothing told them how `last` orders a stored value against a derived one.
+
+**Decision.** For the maintainer: either rules read through concepts, with domain calls kept for the stored layer, or domain calls get a spelling that does not read as storage. The sentence on how `last` elects between stored and derived values stays in either case.
+
 ## How to reproduce
 
 1. Take a variant's prompt from its round's results file and save it as `<variant>.txt`.
