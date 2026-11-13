@@ -7,8 +7,8 @@ search tree in a number of reads that does not grow with the tree (the
 
 **Decided by the maintainer, 2026-11-13: column 4.** A node's entity is
 its handle; accessors are steps that ask the environment for the decoded
-node and project one part. Still to be decided under it: the accessor
-set, and the scheme of the handle (below).
+node and project one part. The scheme of the handle is decided below; the accessor
+set is drafted in [design-accessors](design-accessors.md).
 
 Opened because the maintainer said, 2026-11-13: "current
 ones are no good. I think something that allows us to obtain a block as
@@ -67,6 +67,6 @@ found, and no asset fact names it.
 | one scheme for everything addressed by its hash | 🟡 two schemes | 🟢 one |
 | things a node points at in the blob store (a spilled value, a blob record) | are `asset:`, as they are everywhere else in a branch | are `asset:` |
 
-The agent's recommendation: `node:` for nodes, and `asset:` for what a
-node points at in the blob store, so `tree/value` takes an `asset:` and
-a blob record's hash is yielded as one. Not decided.
+**Decided by the maintainer, 2026-11-13: `node:` for nodes**, and
+`asset:` for what a node points at in the blob store, so `tree/value`
+takes an `asset:` and a blob record's hash is yielded as one.

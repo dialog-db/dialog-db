@@ -80,4 +80,7 @@
 | A block can be read through an `asset:` URL | hypothesis | the maintainer, 2026-11-13, unsure | refuted for a tree node: see the row below |
 | `asset:` names content in an archive's blob store, read through the blob lane and recorded by a fact that a branch holds it; a tree node's block is kept in the index catalog | fact | `Entity::from_blob` in `rust/dialog-capability/src/identity/entity.rs`; `Asset::entity`, `Asset::fact` in `rust/dialog-corpus/src/model/asset.rs`; `ArchiveScope::index` and `BlobScope` in `rust/dialog-effects/src/archive/prelude.rs`; the resolver reads nodes with `archive::Load::new(anywhere().index(), ..)` and a spilled value with `blob::Load` | holds |
 | Today's resolvers yield a spill as a base58 string and a blob record's hash as bytes, not as `asset:` entities | fact | `ResolverQuery::evaluate`, the `TreeEntry` and `TreeBlob` arms | holds |
+| A node's handle is its `node:` entity; `asset:` is for what a node points at in the blob store | opinion | the maintainer, 2026-11-13, on the agent's recommendation | decided |
+| The manifest has three fields no resolver yields: `entry_overhead`, `key_overhead`, `link_overhead` | fact | `ManifestSummary` in `rust/dialog-corpus/src/inspect.rs` against `TreeManifestQuery` in `rust/dialog-query/src/resolver.rs` | holds |
+| A row can bind a slot absent | fact | `Match::bind_absent` in `rust/dialog-query/src/selection/match.rs` | holds; not tried from a resolver |
 

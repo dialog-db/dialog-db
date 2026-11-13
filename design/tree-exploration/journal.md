@@ -5,7 +5,7 @@
 |  | Understanding | Activity |
 |---|---|---|
 | **Status** | *What do we know?* The problem, accepted. What is held is decided: two commands with handlers built into dialog, each answering with a second command that a rule in the space places. How a node is read is decided: accessors over a handle, the environment decoding once. That a rule's head is committed or transient today, never the overlay. That dialog dispatches commands as transient facts and reacts with inductive rules at commit, and has no built-in reaction that performs an effect. Use cases are drafted (nine). A strategy matrix exists with six columns, the sixth born from the decision on what is held. | *Where are we at?* Directing. The matrix is written and not read by the maintainer. |
-| **Agenda** | *What do we need to know?* Whether the handle is `node:` or `asset:` (asked, with a recommendation). The accessor set: which steps, and what a row of each holds; the agent drafts it next for the maintainer to mark up. Whether a node has to be a concept (asked 2026-11-13, not answered). Whether a tree node has to be reachable as a concept, or whether a consumer asking a resolver directly is enough (asked 2026-11-13, not answered): every difficulty in columns 2 to 5 of the strategy comes from the concept. For [design-resolvers](design-resolvers.md): what a decoding formula's row is; whether the block travels as bytes or as a record. Whether writing to the overlay from rules is its own topic. Whether the use cases are right (asked, not answered). For column 6 of the strategy and for the held decision alike: how dialog reacts to a command with an effect and answers with a command. For column 5: whether a record reaches a page whole. For column 4: what a decoding formula's rows would be, which the maintainer has not said. Which rows the maintainer weighs most. | *Where are we going?* The maintainer reads the use cases and the matrix; the open cells are checked; a direction is chosen. |
+| **Agenda** | *What do we need to know?* The maintainer's marks on the drafted accessor set ([design-accessors](design-accessors.md)) and its seven open points. Whether a node has to be a concept (asked 2026-11-13, not answered). Whether a tree node has to be reachable as a concept, or whether a consumer asking a resolver directly is enough (asked 2026-11-13, not answered): every difficulty in columns 2 to 5 of the strategy comes from the concept. For [design-resolvers](design-resolvers.md): what a decoding formula's row is; whether the block travels as bytes or as a record. Whether writing to the overlay from rules is its own topic. Whether the use cases are right (asked, not answered). For column 6 of the strategy and for the held decision alike: how dialog reacts to a command with an effect and answers with a command. For column 5: whether a record reaches a page whole. For column 4: what a decoding formula's rows would be, which the maintainer has not said. Which rows the maintainer weighs most. | *Where are we going?* The maintainer reads the use cases and the matrix; the open cells are checked; a direction is chosen. |
 
 ## 2026-11-12, Describing: what was tried and what was seen
 
@@ -517,3 +517,19 @@ spill is a base58 string, a blob record's hash is bytes).
 **Decided.** By the maintainer: column 4 of
 [design-resolvers](design-resolvers.md). The handle's scheme is not
 decided; the comparison is in that file.
+
+## 2026-11-13, Designing: the handle is `node:`; an accessor set is drafted
+
+**Asked.** Is `node:` for nodes and `asset:` for blob-store content the
+split you want? The maintainer: "ok node: it is".
+
+**Learned.** Drafting the set ([design-accessors](design-accessors.md))
+turned up what the earlier decisions already imply and what they leave
+open. Implied: a segment's entries come from one accessor; `of` is the
+entity; a spill and a blob record's hash are `asset:` entities and
+absent when there is none; names are kebab-case. Open: seven points,
+listed in the file, of which one (an entity per entry and per span)
+waits on the strategy question of whether a node must be a concept.
+
+**Decided.** By the maintainer: the handle is `node:`. The accessor set
+is a draft.
