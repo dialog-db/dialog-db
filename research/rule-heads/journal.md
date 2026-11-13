@@ -44,6 +44,40 @@ Checks that the input does not flatter the result: the same at 10 and 300 commit
 
 Net of `plain` has no bar. It is reported to say what the rules themselves cost. Three runs, interleaved; a difference inside the spread between runs is noise.
 
+## 2026-11-12, what the engine could recover: what is expected
+
+**Question.** How much of what `named` and `repeat` cost over `wide` could the engine recover, with no rule of several heads?
+
+**Where the instructions go.** Read from the profiles of the two sittings above, before any prototype ran.
+
+- **Range estimates.** The harness's command premise leaves its subject unnamed, as a rule that reads a command has no use for the command's entity. A seed then binds the command's fields and leaves the entity free, so each field is read by value. The conjunction of the fields asks the tree how wide each read is, to choose a merge or a fold: four estimates an evaluation, about 150 thousand instructions each. In `wide`, one read and two heads, that is 309 of 901 million at 500 a commit and 0.66 of 4.5 million a commit at one. `repeat` pays it a head.
+- **Planning.** Every seed plans its rule again: 52 thousand instructions a seed for the body of one read.
+- **The second round of `named`.** A rule that reads the transient command costs 116 thousand instructions an evaluation: 81 the layered read, of which 52 settling the cell.
+
+**Prototypes.** On `spike/induce-cost`, each behind a switch of one build (`DIALOG_SPIKE`):
+
+```
+ plan      a rule is planned once for each set of names a seed binds, and the plan kept
+ share     rules of a round that state one body have it evaluated once
+ subject   a seed binds the entity its rows are about, where the premise leaves it unnamed
+```
+
+**Expected.** Guesses, written while the first sweep ran and before any of its numbers were read.
+
+- `subject` takes the estimates off every shape, less what four reads at one entity cost in their place: about a quarter off `wide` at 500, the same amount off `named`, and that amount a head off `repeat`. It does not bring `named` nearer `wide`: the gap stays and the base shrinks, so the percentage grows.
+- `share` brings `repeat` to `wide` and what a head costs to write.
+- `plan` takes 3% to 8% off each at 500 and less at one command a commit.
+- Nothing here touches the second round of `named`, so its gap of about 120 million a head at 500 stays.
+
+**Bars.** Proposed by the agent.
+
+- With every prototype on, `repeat` **needs no rule of several heads for its cost** if it is within 10% of `wide` in every cell, at 500 a commit and at one.
+- The prototypes **are not worth more work for this question** if `repeat` stays 30% or more over `wide`.
+- `named` has no bar: nothing here aims at it. It is reported, and what is left of its gap is the second round's.
+- No gated scenario grows past the gate's allowance with every prototype on, and every counter holds (`perf compare` against `perf/baseline/` and against the same scenarios swept from the build without the prototypes).
+
+Three runs, interleaved: off, `plan`, `subject`, `share`, all, then again.
+
 ## How to reproduce
 
 ```
