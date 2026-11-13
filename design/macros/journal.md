@@ -5,7 +5,7 @@
 |  | Understanding | Activity |
 |---|---|---|
 | **Status** | The kernel and the core forms run on a real branch through `rust/dialog-notation` ([poc.md](poc.md)); the prelude is rules only. The syntax tree is built, apart from the notation as parsed, and kept as data: maps that say their `type` ([design-forms.md](design-forms.md#the-syntax-tree)). A struct is a value and, with a variable in it, a pattern, which is a topic of its own with an agent on it (#777). Rules of several heads are #776. Expanding and compiling still read the notation as parsed, and `kernel.rs` still copies dialog's forms. | **Designing** again from 2026-11-12, for the three phases ([design-pipeline.md](design-pipeline.md)); how the phases stand behind the query engine is still Directing. Direction decided by the maintainer: phases as formulas and a resolver, one rule over them. A proof of concept runs. A name is kept as a name, what is named and a signature; a definition under it is read `last`; an application resolves by the labels written and a read that fits several is of all. Built and tested, by pattern, in the expander. |
-| **Agenda** | Next: a refusal by the parser and by the compiler as a diagnostic with a place, as the analyzer's are (stage 4 of [design-pipeline.md](design-pipeline.md)). Then: a reported row in the order asked, `description:` out of `concept` with comments in its place, printing from the analyzed tree. Parked by the maintainer: authority, for two definitions of one signature written apart; `last` elects one until then. How a query reports. Decided 2026-11-13: a rule has one head and `(all …)` is not written; what that does to #776 and to several heads in #779 is the maintainer's to say. Whether a template says several things with `(all …)` or a spread. Whether a command takes fields beside what it is about, and a slash in its name. The prelude written without `when`. Parked by the maintainer: `update`, and with it what it does with a dependent that does not fit or arrives by sync. Whether the name as written is part of what names a macro. Whether the analyzer, a resolver by the maintainer's word, gives back the table of what each name meant. Whether dialog can be asked for an expansion a form at a time (H3). What a read with no pick reads. | The notation is on top of patterns (#778, merged in, its perf gate failing): a struct is a value in a write and a pattern in a query of one read. Next: a struct in a rule, which needs the compiler to build dialog's forms in Rust, since a pattern has no wire form; `entity/derive` over a record; then an application lowers to a `ConceptQuery` of the definition's concept. Not waiting: a helper rule for a negated conjunction. Waiting on patterns (#777, #778): a struct as a term, `entity/derive` over a record, syntax kept on the branch. |
+| **Agenda** | Next: a reported row in the order asked, `description:` out of `concept` with comments in its place, printing from the analyzed tree. Parked by the maintainer: authority, for two definitions of one signature written apart; `last` elects one until then. How a query reports. Decided 2026-11-13: a rule has one head and `(all …)` is not written; what that does to #776 and to several heads in #779 is the maintainer's to say. Whether a template says several things with `(all …)` or a spread. Whether a command takes fields beside what it is about, and a slash in its name. The prelude written without `when`. Parked by the maintainer: `update`, and with it what it does with a dependent that does not fit or arrives by sync. Whether the name as written is part of what names a macro. Whether the analyzer, a resolver by the maintainer's word, gives back the table of what each name meant. Whether dialog can be asked for an expansion a form at a time (H3). What a read with no pick reads. | The notation is on top of patterns (#778, merged in, its perf gate failing): a struct is a value in a write and a pattern in a query of one read. Next: a struct in a rule, which needs the compiler to build dialog's forms in Rust, since a pattern has no wire form; `entity/derive` over a record; then an application lowers to a `ConceptQuery` of the definition's concept. Not waiting: a helper rule for a negated conjunction. Waiting on patterns (#777, #778): a struct as a term, `entity/derive` over a record, syntax kept on the branch. |
 
 ## Candidate problems
 
@@ -803,4 +803,29 @@ Not examined yet. They are columns, not recommendations.
 - The engine work is with an agent, a draft pull request an optimization, measured against main on #788's scenarios. Nothing of it is reported yet.
 
 **Decided.** By the maintainer: a comment that ends a line is about the node before it; the analyzer offers diagnostics for a language server. By the agent, open to change: a refused document is refused whole and keeps no definition; refusals come before warnings; a refusal holds the error it was.
+
+## 2026-11-13, Designing: every phase says what it refuses, and where
+
+**Asked.** Irakli: "Why did you stop?" The agent had reported and waited where it had already named what was next: the parser's refusals and the compiler's had no place.
+
+**Learned.** Built.
+
+```
+ text ──check──▶ steps          what the text compiles to, or nothing
+                 written        the mapping
+                 diagnostics    of every phase, each with a span
+
+   parse      says every refusal, and goes on with the next top-level form
+   analyze    runs when the parser refused nothing; says every refusal and warning
+   compile    runs when the analyzer refused nothing; a refusal is placed at the tree it came of
+```
+
+- One kind of diagnostic for the three phases: a message, a severity, the refusal when it is one, and where. The parser knows the text and says a span. The analyzer and the compiler know trees and say a path, which the mapping turns into a span.
+- The parser's refusals are placed where they are: the bracket that closes nothing, the bracket of a form that never closes, the quote of a text that never ends, the `...` that repeats nothing, the form that says a label twice. After a refusal reading goes on at the next top-level form.
+- A later phase does not run on what an earlier one refused, as tonk's language server does. That keeps a refusal from being followed by the refusals it causes downstream.
+- A document the compiler refuses now keeps no definition either. Before, the analyzer had kept them by the time the compiler ran.
+- The notebook is `check` and then the steps.
+- Not covered: the compiler says which tree and not which part. Its errors are texts, and the analyzed tree has no way back to the written one yet: that is the analyzer's half of the mapping.
+
+**Decided.** By the agent, open to change: one diagnostic type for the three phases; a later phase waits on the one before; `check` as the one call an editor makes.
 

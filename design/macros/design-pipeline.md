@@ -30,7 +30,8 @@ Each ends with the tests passing.
 4. **What was written, beside what was said.** Each phase gives its result and a mapping of what the result left out, and a printer takes both back to the source. See below.
    - Done, the parser's part: `parse_written` gives the trees and `Written`, the mapping; `print(trees, written)` gives the text, the same bytes for the prelude and both examples. A warning says the way to its form and an analyzed tree says which tree it came of, so the notebook says `5:1: warning: …` and where a refusal by the compiler is.
    - Done, diagnostics: the analyzer does not stop at a refusal. It goes to the end of the document and gives every refusal and every warning as a diagnostic, each with a severity and the way to the form it is about, for a language server to show. A document with a refusal in it is refused whole: nothing of it comes back analyzed and none of its definitions is kept.
-   - Not done: a refusal by the parser has no place, and neither does one by the compiler beyond the tree it came of; a reported row is still printed by label and not in the order asked; `description:` is still in `concept`; printing from the analyzed tree and from the compiled form.
+   - Done, the other two phases: the parser goes on past a refusal and says each with its span; `check(analyzer, text)` runs the three phases and gives what the text compiles to and every diagnostic with a span. A later phase does not run on what an earlier one refused.
+   - Not done: a refusal by the compiler is placed at the tree it came of and no closer; a reported row is still printed by label and not in the order asked; `description:` is still in `concept`; printing from the analyzed tree and from the compiled form.
 5. **A pinned reference and the name table.** A resolved reference is the name and the entity it meant where it was written.
 
 ## The mapping, and printing back
