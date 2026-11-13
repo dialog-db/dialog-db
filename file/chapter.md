@@ -26,7 +26,7 @@ The example's repository is small: seven commits leave nine versions of its node
 
 {{why}}
 
-The file spends 1,431 bytes on the nine nodes and 5,043 bytes on their 49 tokens, against 68,536 bytes of blocks. Two things make the difference. Every distinct entity, attribute and value is written once, as a **token**, however many keys and versions mention it. And a new version of a node is written as a **frame**: its rows of token ids, mostly copied from the version before.
+The file spends 1,434 bytes on the nine nodes and 5,042 bytes on their 49 tokens, against 68,536 bytes of blocks. Two things make the difference. Every distinct entity, attribute and value is written once, as a **token**, however many keys and versions mention it. And a new version of a node is written as a **frame**: its rows of token ids, mostly copied from the version before.
 
 The gap grows with history. Over two measured histories:
 
@@ -55,13 +55,13 @@ When Alice's peer created the repository, its file looked like this:
 
 {{opened}}
 
-Every file starts with eight bytes of **magic**: `DIALOGA` and a byte for the format's version. A file that starts with anything else is not opened.
+Every file starts with sixteen bytes of **magic**: `DIALOG`, the byte `b6`, a byte for the format's version, now 1, and eight zeros, reserved. The `b6` is a pilcrow in Latin-1 and is not valid UTF-8 on its own, so a tool that reads the file as text fails at once. A file that starts with anything else is not opened.
 
 {{magic}}
 
-Then come three **slots** of 64 KiB each. A slot says what the file holds: where its records end, the root of the file's own index, which space is free. Most of what follows is about how slots are written and trusted.
+Then come four **slots** of 64 KiB each: two **rolling** slots, which appends write in turn, and two copies of the **durable** slot, which only a sync point writes. A slot says what the file holds: where its records end, the root of the file's own index, which space is free. Most of what follows is about how slots are written and trusted.
 
-After the slots, from byte 196,616, come **records**, appended one after another. A new file already has two. One is an **extent**, a megabyte a writer can use without waiting for anyone (it comes back in [When others are writing too](#when-others-are-writing-too)). It has never been written to, so the file system stores it as a hole: the file is 1.2 MB long but takes 24 KiB of disk. The other is a **cell** record, the repository's `dialog/version`.
+After the slots, from byte 262,160, come **records**, appended one after another. A new file already has two. One is an **extent**, a megabyte a writer can use without waiting for anyone (it comes back in [When others are writing too](#when-others-are-writing-too)). It has never been written to, so the file system stores it as a hole: the file is 1.3 MB long but takes 28 KiB of disk. The other is a **cell** record, the repository's `dialog/version`.
 
 ### Step 1: the commit makes one new node
 
@@ -113,7 +113,7 @@ The six new rows are then written column by column:
 
 Neighboring rows mostly share their parts, so each column is written as the difference from the row above, and a run of equal values is written once. The whole section of 16 operations takes 76 bytes. The frame's data is 126 bytes, header included, for a block of 4,372.
 
-A frame stands for its block exactly. The tree's encoding is canonical, so the rows rebuild the block byte for byte. Every build checks that a frame decodes back to its rows before writing it, and a debug build, or one with `DIALOG_ARCHIVE_VERIFY` set, also rebuilds the block and compares. A node in an older layout, or a block that is not a tree node, is kept whole instead, as a frame of kind `ff` with the block's bytes after the header.
+A frame stands for its block exactly. The tree's own encoding is canonical, so the rows of a node dialog wrote rebuild its block byte for byte, and before writing a frame the archive rebuilds the block and compares. A block that parses as a node but is not canonical (padded, say, or in a layout its keys would not choose), a node in an older layout, and a block that is not a tree node are kept whole, as a frame of kind `ff` with the block's bytes after the header.
 
 <div class="aside">
 
@@ -145,7 +145,7 @@ A slot holds the file's whole state as of one append:
 
 {{slot_layout}}
 
-There are two **rolling** slots, and an append writes the older of the two. That way one of them is always whole, whatever a crash does to the other:
+An append writes the older of the two rolling slots. That way one of them is always whole, whatever a crash does to the other:
 
 {{rolling}}
 
@@ -167,7 +167,7 @@ The branch's head is a cell (see [Commits and History](./history.md)), and the f
 
 {{cell_record}}
 
-The name is the cell's memory space, `branch/main`, a zero byte, and the cell, `revision`. The value is the new revision, which names the new root by its hash: `56 54 12 b9 09 …` sits right in its bytes. The commit also moves a second cell, `induction`, the revision through which the branch's rules have run.
+The name is the cell's memory space, `branch/main`, a zero byte, and the cell, `revision`. The value is the new revision, which names the new root by its hash: `45 a7 06 40 1b …` sits right in its bytes. The commit also moves a second cell, `induction`, the revision through which the branch's rules have run.
 
 The order of the records is what keeps heads safe:
 
@@ -185,7 +185,11 @@ Until now, everything Alice wrote went to the operating system, not necessarily 
 
 {{sync_point}}
 
-The **durable slot**, the third one, is written only here. Nothing the durable slot reaches is ever written over, so after a power loss the file can always go back to it. In the example, the sync point after commit 3 made slot 12 durable.
+The **durable slot** is written only here. Nothing the durable slot reaches is ever written over, so after a power loss the file can always go back to it. In the example, the sync point after commit 3 made slot 12 durable.
+
+A slot can span more than one sector, and a power loss during its write can keep some sectors and lose others. So the durable slot has two copies, and a sync point writes over the copy that does not hold the newest whole durable slot: a sync torn by a power loss leaves the other copy whole. Opening reads the newer copy that is whole. The last 8 bytes of each copy's 64 KiB hold the sequence of the copy last synced there, written after the fsync:
+
+{{durable}}
 
 ### Step 7: reading it back
 
@@ -233,9 +237,9 @@ An extent is a record whose body is written later, one frame at a time:
 
 {{extent_bytes}}
 
-The block is readable at once, by Bob's process and by any other: a reader that misses in the index reads the extents the slot lists. The head is another matter. It must come after what it names, so it waits for the turn. When it lands, its record names the extent, epoch and byte count it needs, and recovery keeps that head only if the extent holds whole frames that far.
+The block is readable at once, by Bob's process and by any other: a reader that misses in the index reads the extents the slot lists. The head is another matter. It must come after what it names, so it waits for the turn. When it lands, its record names the extent, epoch and byte count it needs, with a CRC-32 of those bytes, and recovery keeps that head only if the extent holds whole frames that far and their bytes match the CRC. A power loss can keep an extent's new count and lose a frame written under it, and the CRC tells the frame this claim wrote from one an earlier claim of the extent left in the same place.
 
-The next writer to hold the turn, usually the same one at its next commit, **folds** the extent in: its blocks become tokens and frames, and the extent is retired. Here the 7,996-byte block became a 128-byte frame. A retired extent is free to claim again after the next sync point. A process that writes keeps one extent ready for itself, and a process that opens the file while the turn is free leaves one that no process owns, for a process that has none. So even a process that has never held the turn can write without waiting.
+The next writer to hold the turn, usually the same one at its next commit, **folds** the extent in: its blocks become tokens and frames, and the extent is retired. Here the 7,996-byte block became a 122-byte frame. A retired extent is free to claim again after the next sync point. A process that writes keeps one extent ready for itself, and a process that opens the file while the turn is free leaves one that no process owns, for a process that has none. So even a process that has never held the turn can write without waiting.
 
 ### Two writers on one branch
 
@@ -243,7 +247,7 @@ Bob's commit and Alice's went to the same file but could have gone to different 
 
 {{cas}}
 
-`Branch::transact` takes the code that builds the transaction, not the transaction, so a lost race runs that code again over the head that won, and what it read is read again. The losing try's root had already been written to the file, as frame 209,547. No head names it, and it stays there.
+`Branch::transact` takes the code that builds the transaction, not the transaction, so a lost race runs that code again over the head that won, and what it read is read again. The losing try's root had already been written to the file, as frame 213,645. No head names it, and it stays there.
 
 ### A reader while a write is under way
 
@@ -306,10 +310,10 @@ All integers are little-endian. *Varint* is LEB128, *zigzag* maps signed to unsi
 
 | what | where | layout |
 |---|---|---|
-| magic | 0 | `DIALOGA`, then the format version (14) |
-| rolling slots | 8 and 65,544 | 64 KiB each: length u32, crc32 u32, body |
-| durable slot | 131,080 | the same, written only at a sync point |
-| records | from 196,616 | kind u8, length u32, crc32 u32, body |
+| magic | 0 | 16 bytes: `DIALOG`, the byte `b6`, the format version (1), then eight zeros, reserved |
+| rolling slots | 16 and 65,552 | 64 KiB each: length u32, crc32 u32, body |
+| durable slot | 131,088 and 196,624 | two copies, the same layout, written only at a sync point; the last 8 bytes of each 64 KiB hold the sequence of the copy last synced there |
+| records | from 262,160 | kind u8, length u32, crc32 u32, body |
 | lock bytes | from 2⁶²−3 | sync, recovery, present, turn, then an owner byte per extent |
 
 | record | body |
@@ -318,7 +322,7 @@ All integers are little-endian. *Varint* is LEB128, *zigzag* maps signed to unsi
 | frame (5) | pad u8, padding, then data on a multiple of 16: hash (32), kind u8, depth u8, catalog varint, base varint (frame id + 1, or 0), manifest varint (token id), then the rows; or, for kind `ff`, length varint and the block |
 | pages (7) | padding length u16, padding, pages of 4,096 bytes on 4,096-byte boundaries |
 | extent (8) | pad u8 to 8 bytes, count u64, its inverse u64, epoch u64, then frame records |
-| cell (9) | pad u8, padding, then on a multiple of 16: name length u16, name, present u8, value length u32, value, needs count u16, per need record u64, epoch u64, bytes u64 |
+| cell (9) | pad u8, padding, then on a multiple of 16: name length u16, name, present u8, value length u32, value, needs count u16, per need record u64, epoch u64, bytes u64, crc32 of those bytes u32 |
 
 | slot field | size |
 |---|---|
@@ -348,5 +352,6 @@ All integers are little-endian. *Varint* is LEB128, *zigzag* maps signed to unsi
 | setting | value |
 |---|---|
 | extent size | 1 MiB (`Options::extent`) |
-| sync point | every 64 appends, 2 seconds, or 2,048 freed index pages |
+| sync point | every 64 appends, 2 seconds, or 2,048 freed index pages; after 2 seconds a thread in each process makes one even if no append follows |
+| blocks in one append | at most 32,768 (`COMMIT_BLOCKS`); a larger commit is appended in parts |
 | longest chain of frames | 32 (`CHAIN`) |
