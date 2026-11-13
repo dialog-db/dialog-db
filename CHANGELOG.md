@@ -14,6 +14,65 @@ says how to cut a release.
 
 ## Unreleased
 
+### A rule that leaves a premise's subject unnamed fires for the entity a commit wrote
+
+[#791](https://github.com/dialog-db/dialog-db/pull/791), [`design/seed-subject.md`](https://github.com/dialog-db/dialog-db/pull/789), [#788](https://github.com/dialog-db/dialog-db/pull/788)
+
+Commit-time induction binds each changed row into the premise that
+reads it and evaluates the rule with that binding fixed. It bound the
+row's value to the premise's field, and the row's entity to the variable
+the premise gives `this`. A premise that named no `this` left the entity
+unbound, so the premise was read at every entity holding the value
+written, and the rule fired for entities the commit did not touch. Such
+a premise is now seeded with its subject named, in a variable nothing
+else in the rule reads, so the seed binds the entity the row is about.
+The rule fires for what the same rule with its subject named fired for
+already.
+
+A row seeds the entity it is about, so a fact a deductive rule derives
+from it for another entity is found only by evaluating in full. An
+attribute a commit writes now counts as changed derivedly too when a
+deductive rule concludes it from something the commit touched, and a
+rule premised on it is fired in full. Before, a written attribute was
+never counted as derived, and a rule over an attribute derived from
+itself missed the facts derived for other entities, unless its subject
+was unnamed and they held the value written.
+
+What this changes for you:
+
+- **A rule whose premise names no `this` fires for fewer entities.**
+  Writing one field of one entity no longer fires the rule for every
+  entity that holds the same value in that field. What it wrote for
+  them is no longer written: a durable head under `last` no longer
+  writes its value again over what was written since, and a command is
+  no longer issued again for them, so whatever acts on the command no
+  longer runs a second time. A rule that relied on being fired for
+  every holder of a value has to be given a premise that says so.
+- A commit that writes one field of an entity and a commit that writes
+  two now fire such a rule for the same entities. Before, the two fields
+  together found the entity written and the one field found every
+  holder of its value.
+- **A rule premised on an attribute a deductive rule derives from
+  itself fires in full when that attribute is written**, for every
+  match of its body, as a rule premised on any other derived attribute
+  does when what it is derived from is written. Before, it fired for
+  the entity written, and missed the entities whose derived facts
+  changed with it.
+- A rule fired in full is not seeded and is unchanged: a rule installed
+  over existing state, one whose premise changed derivedly, and one
+  enabled by a retraction under `unless` fire for every match, as
+  before.
+- A commit that reads a command of several fields without naming it
+  does less work: each field was a read by value over every entity,
+  estimated before it was made.
+
+Why: a row is a fact of one entity. The matches it newly makes are
+those where the premise is read at that entity, which is what the
+module's own account of seeding says it finds. Reading by value alone
+found old matches too and fired for them again, and which entities it
+found depended on whether a commit happened to write one field or
+several.
+
 ### A prefetch hint a query took but did not finish is resumed by the next query
 
 [#770](https://github.com/dialog-db/dialog-db/pull/770), argued in
@@ -2723,6 +2782,16 @@ thread multiplies whatever it holds by the size of the thread pool.
 
 ### Compatibility and migration
 
+- Nothing stored or synced changes shape for the seeding of an unnamed
+  subject (#791): rules, facts and the wire format are as before,
+  nothing is rewritten on upgrade, and an older release reads everything
+  this one writes. What differs is which facts a commit induces. A rule
+  with a premise that names no `this` is fired for fewer entities by
+  this release than by the last, so two replicas on the two releases
+  that commit the same change write different derived facts. Facts the
+  older release induced for untouched entities stay as they are; this
+  release does not write them again and does not retract them. An
+  embedder runs nothing.
 - Nothing stored or synced changes for the file store's lock; only the
   lock files beside its cells do. A lock file the previous release left
   behind holds a bare PID, which this release reads as a holder: one
