@@ -57,4 +57,8 @@
 | A rule's head is either committed or transient; none writes to the branch's ephemeral line | fact | module doc and `is_transient` in `rust/dialog-repository/src/repository/branch/transaction/induce.rs`; no reference to `Ephemeral` there | holds by search |
 | A transient fact is visible only inside the commit that carries it | fact | `Transaction::dispatch` doc: "visible to reads and to inductive-rule bodies during this commit ... never committed" | holds |
 | A rule head can be marked to land in the overlay, as one is marked transient | hypothesis | confirmed by a marker concept and a test in which a rule fired by a command leaves a fact a query reads and no commit carries; refuted if induction cannot reach the branch's line | open; the held decision rests on it |
+| A built-in reaction to a command, performing an effect and dispatching a command in answer, is easy to add to dialog | opinion | the maintainer, 2026-11-13; nothing built or measured | - |
+| Rules should be able to assert, retract, deduce and induce into the overlay | opinion | the maintainer, 2026-11-13, as a want this topic does not depend on | - |
+| The overlay can be asserted into and retracted from by a call on the branch, and not from a rule | fact | `Ephemeral::assert` and `Ephemeral::retract` in `rust/dialog-repository/src/repository/ephemeral.rs`; `transaction/induce.rs` routes heads to the commit or the next round only | holds |
+| A committed fact about what a replica holds is false on any other replica it syncs to unless it names the replica | fact | follows from the fact syncing and holdings differing per replica; the replica is an entity (`rust/dialog-repository/src/schema.rs`) | holds by reasoning |
 

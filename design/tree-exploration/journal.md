@@ -5,7 +5,7 @@
 |  | Understanding | Activity |
 |---|---|---|
 | **Status** | *What do we know?* The problem, accepted. What is held is decided: two commands with handlers built into dialog, each answering with a second command that a rule in the space places. That a rule's head is committed or transient today, never the overlay. That dialog dispatches commands as transient facts and reacts with inductive rules at commit, and has no built-in reaction that performs an effect. Use cases are drafted (nine). A strategy matrix exists with six columns, the sixth born from the decision on what is held. | *Where are we at?* Directing. The matrix is written and not read by the maintainer. |
-| **Agenda** | *What do we need to know?* Whether a rule head that writes to the overlay is wanted in dialog (asked): without it the answer can only be committed, which the maintainer does not want. Whether the use cases are right (asked, not answered). For column 6 of the strategy and for the held decision alike: how dialog reacts to a command with an effect and answers with a command. For column 5: whether a record reaches a page whole. For column 4: what a decoding formula's rows would be, which the maintainer has not said. Which rows the maintainer weighs most. | *Where are we going?* The maintainer reads the use cases and the matrix; the open cells are checked; a direction is chosen. |
+| **Agenda** | *What do we need to know?* Whether what a node holds is reached the way held-ness now is, by a command answered with commands, or by queries (asked): this is the strategy decision. Whether writing to the overlay from rules is its own topic. Whether the use cases are right (asked, not answered). For column 6 of the strategy and for the held decision alike: how dialog reacts to a command with an effect and answers with a command. For column 5: whether a record reaches a page whole. For column 4: what a decoding formula's rows would be, which the maintainer has not said. Which rows the maintainer weighs most. | *Where are we going?* The maintainer reads the use cases and the matrix; the open cells are checked; a direction is chosen. |
 
 ## 2026-11-12, Describing: what was tried and what was seen
 
@@ -350,3 +350,34 @@ maintainer, replacing the fifth. It rests on two open hypotheses.
 
 **Backtracked.** Not a phase: one decision, made and revised in the same
 day, both entries kept.
+
+## 2026-11-13, Directing: what the held decision rests on is settled
+
+**Asked.** Do you want overlay heads added to dialog's rules? The
+maintainer: the first dependency (a built-in reaction to a command) "we
+can address pretty easily and we should do it". The second "would be
+nice", and "even without it we can expose responses as commands and
+store results in the db itself, although it would be better if we can
+come up with a way to assert / retract / deduce / induce into the
+overlay."
+
+**Learned.** The held decision no longer waits on the overlay: with
+answers as commands, where an answer is kept is a rule's business and
+can change later without dialog changing. "Easy" is the maintainer's
+estimate and is in the ledger as an opinion; nothing was built or
+measured.
+
+The want is wider than a rule head. Assert and retract into the overlay
+exist as calls on the branch (`Ephemeral::assert`, `retract`); what does
+not exist is reaching it from a rule, by deduction or by induction. That
+is a question about rules and the overlay in general, of which this
+topic is one user.
+
+Committing the answer in the meantime has a consequence the rule's
+author must handle: the fact syncs, so it has to name the replica whose
+holding it describes.
+
+**Decided.** By the maintainer: build the built-in reaction; do not
+wait for overlay writes. Scope: a way for rules to write to the overlay
+is not taken on in this topic; whether it becomes a topic of its own is
+on the agenda.

@@ -13,11 +13,22 @@ This replaces the same day's earlier decision for the fifth column
 (handlers assert into the overlay), which the maintainer made first and
 then improved on.
 
-It rests on two things not yet true of dialog: a built-in reaction to a
-command that performs an effect and dispatches a command in answer; and,
-for the answer to land in the overlay as the maintainer wants, a rule
-head that writes there. Until the second exists, a rule can only commit
-the answer or pass it on.
+It rests on two things not yet true of dialog, and the maintainer has
+said what to do about each (2026-11-13):
+
+1. A built-in reaction to a command that performs an effect and
+   dispatches a command in answer. To be built; the maintainer expects
+   it to be easy.
+2. A way for a rule to write to the overlay. Wanted, and not required:
+   until it exists the answer is exposed as a command and a rule that
+   keeps it commits it to the branch. The maintainer states the want
+   more widely than this decision needs: a way to assert, retract,
+   deduce and induce into the overlay.
+
+A consequence of committing in the meantime, for whoever writes the
+rule: a committed fact syncs, and what one replica holds is not what
+another holds, so the fact has to say whose holding it is (the replica
+is already an entity) or it is false wherever it arrives.
 
 | criterion \ approach | Status quo: tonk's reader probes the local archive while answering | A resolver that takes a time (the maintainer's) | A scan that probes the archive when the query runs (the agent's earlier) | Recorded answers: a command probes, the answer is a fact in the branch's ephemeral line | Two commands whose handlers assert (the maintainer's): one asks whether a block is local and asserts the answer; one fetches a block and asserts it is local | Two commands whose handlers answer with a command (the maintainer's, later the same day): the built-in handler asserts nothing; it dispatches a second command carrying the answer, and a rule in the space decides what becomes of it |
 |---|---|---|---|---|---|---|
