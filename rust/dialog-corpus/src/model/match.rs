@@ -66,6 +66,33 @@ fn truncated_order(stored: &[u8], probe: &[u8]) -> TruncatedOrder {
     }
 }
 
+/// Whether an escaped, terminated byte string `payload` (the `ordkey`
+/// encoding, in which each zero byte is the pair `0x00 0xFF`) holds a string
+/// that starts with the raw bytes `prefix`. The escaped form of the prefix
+/// is a prefix of the payload exactly when the prefix is a prefix of the
+/// string, because the payload's terminator is a lone `0x00` that no escaped
+/// zero of the prefix can match.
+fn starts_with_escaped(payload: &[u8], prefix: &[u8]) -> bool {
+    // A prefix with no zero byte is its own escaped form.
+    if !prefix.contains(&0x00) {
+        return payload.starts_with(prefix);
+    }
+    let mut at = 0usize;
+    for &byte in prefix {
+        if payload.get(at) != Some(&byte) {
+            return false;
+        }
+        at += 1;
+        if byte == 0x00 {
+            if payload.get(at) != Some(&0xFF) {
+                return false;
+            }
+            at += 1;
+        }
+    }
+    true
+}
+
 /// Whether the key bytes of an index entry can match `selector`, as a scan of
 /// a tree checks each entry that its range holds. A range of the value index spans
 /// every attribute, since the value leads its key, so a store that reads such a range
@@ -204,16 +231,18 @@ pub fn match_selector_and_key_ref(
 
     if let Some(prefix) = selector.value_prefix() {
         // A prefix predicate is a STRING predicate. An inline string decides
-        // directly against its order-preserving payload (raw UTF-8 for a
-        // NUL-free prefix); a spilled string decides from its in-key prefix
-        // unless the probe extends past it.
+        // directly against its order-preserving payload, which holds each
+        // zero byte of the string as the pair `0x00 0xFF`, so the payload
+        // must start with the prefix in that same escaped form. A spilled
+        // string decides from its in-key prefix unless the probe extends
+        // past it.
         if key.value_type != ValueDataType::String {
             return SelectorMatch::Excluded;
         }
         let bytes = prefix.as_bytes();
         match &key.value {
             ValueRef::Inline(payload) => {
-                if bytes.len() > payload.len() || &payload[..bytes.len()] != bytes {
+                if !starts_with_escaped(payload, bytes) {
                     return SelectorMatch::Excluded;
                 }
             }
