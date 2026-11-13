@@ -14,6 +14,40 @@ says how to cut a release.
 
 ## Unreleased
 
+### The rules of a round that state one body have it evaluated once
+
+[#790](https://github.com/dialog-db/dialog-db/pull/790), [`design/share-body.md`](./design/share-body.md), [#788](https://github.com/dialog-db/dialog-db/pull/788)
+
+Commit-time induction evaluated every rule a changed row reaches on its
+own. Rules that state one condition and conclude different things from
+it, which is how a rule of several heads is written with one head a
+rule, each evaluated the condition again. The seeded rules of a round
+are now partitioned by body: the same premises, and the same type for
+every variable, under a renaming of variables that keeps `this`. A part
+of two rules or more is evaluated once, under its first rule, and each
+of the others reads those matches through the renaming and writes its
+own head.
+
+What this changes for you:
+
+- What induction writes is unchanged. Two rules of one body find the
+  same matches but not in one order, so a rule whose matches write one
+  cell two ways (two values under `last`, two members of a set) is
+  evaluated on its own, as before. In this crate's tests every rule
+  fired from another rule's matches is also evaluated alone, and the
+  two must write the same novelty and the same transients.
+- Rules whose heads type a variable of the body differently are not one
+  body: a numeric head field narrows a number the body left open, so
+  the scan under it reads another set of rows. They are evaluated each
+  on its own, as before. So are a rule fired in full and a rule that
+  reduces.
+- `dialog_query::rule::canonical::body` and its `Body` are new: a
+  rule's premises spelled without its head, equal for two rules that
+  state one body whatever their heads name.
+
+Why: a notation with one head a rule writes the condition once for each
+fact it concludes, and a commit paid for the condition once for each.
+
 ### A prefetch hint a query took but did not finish is resumed by the next query
 
 [#770](https://github.com/dialog-db/dialog-db/pull/770), argued in

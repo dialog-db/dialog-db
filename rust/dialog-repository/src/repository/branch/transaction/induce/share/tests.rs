@@ -727,6 +727,152 @@ async fn it_evaluates_a_rule_alone_when_the_order_of_matches_decides() -> Result
     Ok(())
 }
 
+/// Two rules of one body may list its premises in two orders: a stored
+/// rule's premises are sorted under names its head takes part in
+/// choosing. Matches are found premise by premise, so the two rules
+/// find the same matches in two orders, and where two matches write
+/// one cell under `last` the two rules elect different values. A rule
+/// that reads another's matches must still write what it writes alone.
+///
+/// Eight rules state one body of two premises over one concept, and
+/// differ in the attribute they write. The test requires that both
+/// orders occur among them and that the two orders do write different
+/// values, so it cannot pass by every rule agreeing with the first.
+#[dialog_common::test]
+async fn it_writes_in_its_own_order_a_body_two_rules_list_in_two_orders() -> Result<()> {
+    let edge = |from: &str, to: &str| {
+        premise(
+            concept(&[("to", field("edge/to", "entity:", "all:"))]),
+            &[("this", from), ("to", to)],
+        )
+    };
+    let domains = [
+        "out.a", "out.b", "out.c", "out.d", "out.e", "out.f", "out.g", "out.h",
+    ];
+    let rules: Vec<InductiveRule> = domains
+        .iter()
+        .map(|domain| {
+            rule(
+                "assert!",
+                head("far", &format!("{domain}/far"), "entity:", "last:"),
+                vec![edge("near", "this"), edge("far", "near")],
+                vec![],
+            )
+        })
+        .collect::<Result<_>>()?;
+
+    // Which premise each rule lists first, as it is stored and decoded:
+    // the one whose `to` is `this`, or the other.
+    let near_first: Vec<bool> = rules
+        .iter()
+        .map(|rule| {
+            let stored = InductiveRule::decode(&rule.encode()).expect("a stored rule decodes");
+            let first = stored.analysis().premises[0].parameters();
+            first.get("to").and_then(|term| term.name()) == Some("this")
+        })
+        .collect();
+    assert!(
+        near_first.contains(&true) && near_first.contains(&false),
+        "the rules list the body in both orders: {near_first:?}"
+    );
+
+    // `hub` is reached from `old`, and `new` from `outer`. One commit
+    // adds an edge from `new` to `hub` and one from `beyond` to `old`:
+    // `hub` is now two steps from `outer` through `new`, found through
+    // the near premise, and from `beyond` through `old`, found through
+    // the far one.
+    let world_of = |share: bool| {
+        let rules = rules.clone();
+        async move {
+            let _unshared = (!share).then(Unshared::new);
+            let world = world().await?;
+            let mut ground = Changes::new();
+            let link = |changes: &mut Changes, from: &str, to: &str| {
+                assert(
+                    changes,
+                    "edge/to",
+                    from,
+                    Value::Entity(entity(to)),
+                    Pick::All,
+                );
+            };
+            link(&mut ground, "node:old", "node:hub");
+            link(&mut ground, "node:outer", "node:new");
+            commit(&world, ground, Changes::new()).await?;
+            let mut transaction = world.branch.transaction();
+            for rule in &rules {
+                transaction = transaction.assert(rule);
+            }
+            transaction
+                .commit()
+                .publish()
+                .perform(&world.operator)
+                .await?;
+            world.branch.refresh(&world.operator).await?;
+            probe::take();
+
+            let mut changes = Changes::new();
+            link(&mut changes, "node:new", "node:hub");
+            link(&mut changes, "node:beyond", "node:old");
+            commit(&world, changes, Changes::new()).await?;
+            let counts = probe::take();
+
+            let mut held = Vec::new();
+            for domain in domains {
+                let selector = Selector::new()
+                    .the(relation(&format!("{domain}/far")))
+                    .of(entity("node:hub"));
+                let stream = world
+                    .branch
+                    .claims()
+                    .select(selector)
+                    .perform(&world.operator)
+                    .await?;
+                let facts: Vec<_> = stream.collect().await;
+                let mut values = Vec::new();
+                for fact in facts {
+                    values.push(format!("{:?}", fact.and_then(|view| view.to_owned())?.is));
+                }
+                held.push(values);
+            }
+            anyhow::Ok((held, counts))
+        }
+    };
+    let (shared, counts) = world_of(true).await?;
+    let (unshared, _) = world_of(false).await?;
+    assert_eq!(shared, unshared, "every rule elects what it elects alone");
+
+    let outer = format!("{:?}", Value::Entity(entity("node:outer")));
+    let beyond = format!("{:?}", Value::Entity(entity("node:beyond")));
+    let elected: Vec<&str> = shared
+        .iter()
+        .map(|values| match values.as_slice() {
+            [value] if *value == outer => "outer",
+            [value] if *value == beyond => "beyond",
+            other => panic!("one value is elected under `last`: {other:?}"),
+        })
+        .collect();
+    assert!(
+        elected.contains(&"outer") && elected.contains(&"beyond"),
+        "the two orders elect different values: {elected:?}"
+    );
+    for (near, elected) in near_first.iter().zip(&elected) {
+        assert_eq!(
+            *elected,
+            if *near { "beyond" } else { "outer" },
+            "a rule elects the match its later premise finds"
+        );
+    }
+    let (read, alone) = counts;
+    assert_eq!(read + alone, rules.len() - 1, "all eight state one body");
+    assert_eq!(
+        alone,
+        rules.len() - 1,
+        "each writes one cell two ways, so each is evaluated alone"
+    );
+    Ok(())
+}
+
 /// Which heads the order of writing decides for: only those that write
 /// one cell differently.
 #[dialog_common::test]
