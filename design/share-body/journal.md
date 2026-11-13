@@ -16,6 +16,7 @@
 - The head reaches the body through types alone, and only by narrowing a number (claim 2). So the type of every variable belongs in what makes two bodies one, and nothing else of the head does.
 - Sharing only rules that list the body in one order would share nothing the notation writes: a stored rule's premises are sorted under names its head takes part in choosing (claim 3).
 - The order of matches shows only in a cell written two ways (claim 5). That is cheap to see before anything is written.
+- The two orders are real and they decide: of eight rules of one body both orders occur, and with the guard off one of them reports another command than it reports alone (claim 6a).
 - A rule's own identity cannot serve: it hashes the head, and it says nothing of types. The body needs a spelling of its own, which the labeling that makes a rule's identity gives when it is run over the premises alone.
 
 **Decided.** Not decided: the choices in `design-same.md` and `design-order.md` are the agent's. Both rest on claim 6, a hypothesis the differential check tests at every shared firing.

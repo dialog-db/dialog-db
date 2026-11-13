@@ -24,3 +24,5 @@ A head's writes land in its cells, and a cell keeps its writes in the order they
 Chosen: the last column. The agent's choice, not yet the maintainer's.
 
 It rests on one hypothesis (claim 6): two rules of one body find the same set of matches, whatever order each is planned in. The differential check is what tests it.
+
+The guard is not there for a case nobody has seen. With it turned off, a test in which eight rules state one body and list it in both orders fails the differential check: a rule that read the first rule's matches would have reported another command than it reports alone (claim 6a).
