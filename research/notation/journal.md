@@ -771,6 +771,16 @@ xychart-beta
 
 **Decision.** The context did not create the misreading; the spelling does. Rounds run on the clean runner from now on. The next lever is the spelling of a domain call, with the election stated.
 
+## 2026-11-13 — R32: a concept reads as a lens, a rule's conclusion does not
+
+**Question.** The one [planned](results/r32-plan.md), from the maintainer's hypothesis: do models read a concept as a one-way Datalog view or as a two-way lens? Two concepts, `note` and `memo`, over the same `xyz.tonk.post/content`; a memo is asserted, or concluded by a rule, and notes are queried.
+
+**Method.** Clean runner, ten readers per variant, two turns each: predictions, then dialog's answer and a question about what would have made it obvious. Half the readers had a paraphrase of the [anatomy](https://gozala.io/dialog/anatomy) on claims, layers and concepts as lenses.
+
+**Results.** [r32](results/r32.md). An asserted memo was found as a note by all 20 readers. A rule-concluded memo was found by none of 20, with or without the anatomy paraphrase. 39 of 40 said information flows both ways between a concept and its domain. So readers already hold the lens model for concepts. What they lack is that a rule's conclusion goes through it: they take it for a query-time view. Without documentation, 9 of 10 also read `(xyz.tonk.post ?m content: ...)` as a record with a local field, not as the attribute `xyz.tonk.post/content`. In turn 2, 31 of 40 asked for attributes written by full name.
+
+**Decision.** The misreading is about rules, not concepts. To test next, together: the sentence that a rule's conclusion gives values to its attributes as asserting would, and concepts that name attributes in full.
+
 ## How to reproduce
 
 1. Take a variant's prompt from its round's results file and save it as `<variant>.txt`.
