@@ -2338,6 +2338,125 @@ async fn it_follows_the_claim_that_a_pick_elects_for_a_key_that_another_premise_
     Ok(())
 }
 
+/// Under `max:`, `min:`, and `top:`, a read of a field of one attribute
+/// elects one claim among each claim of the entity. A rule gives each item
+/// whose rank is the level that board:1 elects. Item 1 shows while the first
+/// claim wins. It leaves when a second claim wins, and item 2 shows. It shows
+/// again when the second claim leaves, though the first claim did not change.
+/// After each change the live query holds the rows of a first read, for a
+/// concept of the level alone and for a concept of the level and the name of
+/// the board.
+#[dialog_common::test]
+async fn it_follows_the_claim_that_a_pick_elects_for_a_field_that_another_premise_joins()
+-> Result<()> {
+    let entity = |name: &str| Value::Entity(name.parse().expect("an entity"));
+    for (kind, rank, pick, first, second) in [
+        (
+            json!("natural:"),
+            "natural:",
+            "max:",
+            Value::UnsignedInt(7),
+            Value::UnsignedInt(9),
+        ),
+        (
+            json!("natural:"),
+            "natural:",
+            "min:",
+            Value::UnsignedInt(7),
+            Value::UnsignedInt(3),
+        ),
+        (
+            json!(["rank:gold", "rank:silver"]),
+            "entity:",
+            "top:",
+            entity("rank:silver"),
+            entity("rank:gold"),
+        ),
+    ] {
+        for named in [false, true] {
+            let (branch, operator, board) = board().await?;
+            let mut transaction = branch.transaction();
+            for (item, value) in [("item:1", &first), ("item:2", &second)] {
+                transaction =
+                    transaction.assert(fact("test.item/rank", &item.parse()?, value.clone())?);
+            }
+            transaction.commit().publish().perform(&operator).await?;
+
+            let mut level = json!({ "with": { "level": {
+                "the": "test.board/level",
+                "as": kind,
+                "pick": pick,
+            } } });
+            let mut terms = json!({
+                "this": { "entity:": "board:1" },
+                "level": { "?": { "name": "rank" } }
+            });
+            if named {
+                level["with"]["name"] = json!({ "the": "test.board/name", "as": "text:" });
+                terms["name"] = json!({ "?": {} });
+            }
+            let head = json!({ "with": { "rank": { "the": "test.ranked/rank", "as": rank } } });
+            let rule: DeductiveRuleDescriptor = serde_json::from_value(json!({
+                "deduce": head,
+                "when": [
+                    {
+                        "assert": { "with": { "rank": { "the": "test.item/rank", "as": rank } } },
+                        "where": { "this": { "?": { "name": "this" } }, "rank": { "?": { "name": "rank" } } }
+                    },
+                    { "assert": level, "where": terms }
+                ]
+            }))?;
+            let rule = rule.compile()?;
+            let mut live = branch
+                .query()
+                .with(rule.clone())
+                .subscribe(each_field(&head)?);
+            live.poll(&operator).await?;
+
+            let mut held = Vec::new();
+            for (exists, value) in [
+                (true, &first),
+                (true, &second),
+                (false, &second),
+                (true, &second),
+                (false, &first),
+                (true, &first),
+                (false, &second),
+            ] {
+                let level = fact("test.board/level", &board, value.clone())?;
+                let transaction = branch.transaction();
+                let transaction = if exists {
+                    transaction.assert(level)
+                } else {
+                    transaction.retract(level)
+                };
+                transaction.commit().publish().perform(&operator).await?;
+                rows_of_both(&branch, &operator, &rule, &head, &mut live).await?;
+                let items: Vec<String> = live
+                    .results()
+                    .iter()
+                    .map(|row| row.entity().to_string())
+                    .collect();
+                held.push(items);
+            }
+            assert_eq!(
+                held,
+                [
+                    vec!["item:1"],
+                    vec!["item:2"],
+                    vec!["item:1"],
+                    vec!["item:2"],
+                    vec!["item:2"],
+                    vec!["item:2"],
+                    vec!["item:1"],
+                ],
+                "under {pick}, named {named}"
+            );
+        }
+    }
+    Ok(())
+}
+
 /// A read of a collection with its holder free reads the entries in the
 /// order of their keys, and not in the order of the holders. A rule gives
 /// each holder of 7 with its name, and the two boards hold 7 under the keys
