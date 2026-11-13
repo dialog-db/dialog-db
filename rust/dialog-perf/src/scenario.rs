@@ -342,7 +342,7 @@ pub fn catalog() -> Vec<Spec> {
             about: "one rule of one head that writes two facts a command, the whole body: a stand-in for a rule of several heads, a body of one read (research/rule-heads.md)",
             volatile: false,
             cross_cpu_pct: 0.0,
-            prepare: |size| Box::pin(heads::writing(size, heads::Shape::Wide, false, 2)),
+            prepare: |size| Box::pin(heads::writing(size, heads::Shape::Wide, false, false, 2)),
         },
         Spec {
             name: "heads-repeat-light-2",
@@ -350,7 +350,7 @@ pub fn catalog() -> Vec<Spec> {
             about: "two rules of one head, each with the whole body: what a rule of several heads is compiled to, a body of one read (research/rule-heads.md)",
             volatile: false,
             cross_cpu_pct: 0.0,
-            prepare: |size| Box::pin(heads::writing(size, heads::Shape::Repeat, false, 2)),
+            prepare: |size| Box::pin(heads::writing(size, heads::Shape::Repeat, false, false, 2)),
         },
         Spec {
             name: "heads-named-light-2",
@@ -358,7 +358,7 @@ pub fn catalog() -> Vec<Spec> {
             about: "one rule issues a command carrying what the body bound, and two rules of one head read it a round later, a body of one read (research/rule-heads.md)",
             volatile: false,
             cross_cpu_pct: 0.0,
-            prepare: |size| Box::pin(heads::writing(size, heads::Shape::Named, false, 2)),
+            prepare: |size| Box::pin(heads::writing(size, heads::Shape::Named, false, false, 2)),
         },
         Spec {
             name: "heads-wide-light-4",
@@ -366,7 +366,7 @@ pub fn catalog() -> Vec<Spec> {
             about: "one rule of one head that writes four facts a command, the whole body: a stand-in for a rule of several heads, a body of one read (research/rule-heads.md)",
             volatile: false,
             cross_cpu_pct: 0.0,
-            prepare: |size| Box::pin(heads::writing(size, heads::Shape::Wide, false, 4)),
+            prepare: |size| Box::pin(heads::writing(size, heads::Shape::Wide, false, false, 4)),
         },
         Spec {
             name: "heads-repeat-light-4",
@@ -374,7 +374,7 @@ pub fn catalog() -> Vec<Spec> {
             about: "four rules of one head, each with the whole body: what a rule of several heads is compiled to, a body of one read (research/rule-heads.md)",
             volatile: false,
             cross_cpu_pct: 0.0,
-            prepare: |size| Box::pin(heads::writing(size, heads::Shape::Repeat, false, 4)),
+            prepare: |size| Box::pin(heads::writing(size, heads::Shape::Repeat, false, false, 4)),
         },
         Spec {
             name: "heads-named-light-4",
@@ -382,7 +382,7 @@ pub fn catalog() -> Vec<Spec> {
             about: "one rule issues a command carrying what the body bound, and four rules of one head read it a round later, a body of one read (research/rule-heads.md)",
             volatile: false,
             cross_cpu_pct: 0.0,
-            prepare: |size| Box::pin(heads::writing(size, heads::Shape::Named, false, 4)),
+            prepare: |size| Box::pin(heads::writing(size, heads::Shape::Named, false, false, 4)),
         },
         Spec {
             name: "heads-wide-heavy-2",
@@ -390,7 +390,7 @@ pub fn catalog() -> Vec<Spec> {
             about: "one rule of one head that writes two facts a command, the whole body: a stand-in for a rule of several heads, a body of four reads (research/rule-heads.md)",
             volatile: false,
             cross_cpu_pct: 0.0,
-            prepare: |size| Box::pin(heads::writing(size, heads::Shape::Wide, true, 2)),
+            prepare: |size| Box::pin(heads::writing(size, heads::Shape::Wide, true, false, 2)),
         },
         Spec {
             name: "heads-repeat-heavy-2",
@@ -398,7 +398,7 @@ pub fn catalog() -> Vec<Spec> {
             about: "two rules of one head, each with the whole body: what a rule of several heads is compiled to, a body of four reads (research/rule-heads.md)",
             volatile: false,
             cross_cpu_pct: 0.0,
-            prepare: |size| Box::pin(heads::writing(size, heads::Shape::Repeat, true, 2)),
+            prepare: |size| Box::pin(heads::writing(size, heads::Shape::Repeat, true, false, 2)),
         },
         Spec {
             name: "heads-named-heavy-2",
@@ -406,7 +406,7 @@ pub fn catalog() -> Vec<Spec> {
             about: "one rule issues a command carrying what the body bound, and two rules of one head read it a round later, a body of four reads (research/rule-heads.md)",
             volatile: false,
             cross_cpu_pct: 0.0,
-            prepare: |size| Box::pin(heads::writing(size, heads::Shape::Named, true, 2)),
+            prepare: |size| Box::pin(heads::writing(size, heads::Shape::Named, true, false, 2)),
         },
         Spec {
             name: "heads-wide-heavy-4",
@@ -414,7 +414,7 @@ pub fn catalog() -> Vec<Spec> {
             about: "one rule of one head that writes four facts a command, the whole body: a stand-in for a rule of several heads, a body of four reads (research/rule-heads.md)",
             volatile: false,
             cross_cpu_pct: 0.0,
-            prepare: |size| Box::pin(heads::writing(size, heads::Shape::Wide, true, 4)),
+            prepare: |size| Box::pin(heads::writing(size, heads::Shape::Wide, true, false, 4)),
         },
         Spec {
             name: "heads-repeat-heavy-4",
@@ -422,7 +422,7 @@ pub fn catalog() -> Vec<Spec> {
             about: "four rules of one head, each with the whole body: what a rule of several heads is compiled to, a body of four reads (research/rule-heads.md)",
             volatile: false,
             cross_cpu_pct: 0.0,
-            prepare: |size| Box::pin(heads::writing(size, heads::Shape::Repeat, true, 4)),
+            prepare: |size| Box::pin(heads::writing(size, heads::Shape::Repeat, true, false, 4)),
         },
         Spec {
             name: "heads-named-heavy-4",
@@ -430,7 +430,47 @@ pub fn catalog() -> Vec<Spec> {
             about: "one rule issues a command carrying what the body bound, and four rules of one head read it a round later, a body of four reads (research/rule-heads.md)",
             volatile: false,
             cross_cpu_pct: 0.0,
-            prepare: |size| Box::pin(heads::writing(size, heads::Shape::Named, true, 4)),
+            prepare: |size| Box::pin(heads::writing(size, heads::Shape::Named, true, false, 4)),
+        },
+        Spec {
+            name: "heads-wide-narrow-2",
+            size: 500,
+            about: "one rule of one head that writes two facts a command, the whole body, a body of one read, a command of two fields where the others have four (research/rule-heads.md)",
+            volatile: false,
+            cross_cpu_pct: 0.0,
+            prepare: |size| Box::pin(heads::writing(size, heads::Shape::Wide, false, true, 2)),
+        },
+        Spec {
+            name: "heads-repeat-narrow-2",
+            size: 500,
+            about: "two rules of one head, each with the whole body, a body of one read, a command of two fields where the others have four (research/rule-heads.md)",
+            volatile: false,
+            cross_cpu_pct: 0.0,
+            prepare: |size| Box::pin(heads::writing(size, heads::Shape::Repeat, false, true, 2)),
+        },
+        Spec {
+            name: "heads-named-narrow-2",
+            size: 500,
+            about: "one rule issues a command carrying what the body bound, and two rules of one head read it a round later, a body of one read, a command of two fields where the others have four (research/rule-heads.md)",
+            volatile: false,
+            cross_cpu_pct: 0.0,
+            prepare: |size| Box::pin(heads::writing(size, heads::Shape::Named, false, true, 2)),
+        },
+        Spec {
+            name: "heads-none",
+            size: 500,
+            about: "the same commit of commands of four fields with no rule to run: what the others cost before any rule (research/rule-heads.md)",
+            volatile: false,
+            cross_cpu_pct: 0.0,
+            prepare: |size| Box::pin(heads::writing(size, heads::Shape::None, false, false, 2)),
+        },
+        Spec {
+            name: "heads-none-narrow",
+            size: 500,
+            about: "the same commit of commands of two fields with no rule to run: what the others cost before any rule (research/rule-heads.md)",
+            volatile: false,
+            cross_cpu_pct: 0.0,
+            prepare: |size| Box::pin(heads::writing(size, heads::Shape::None, false, true, 2)),
         },
         Spec {
             name: "heads-move-repeat",

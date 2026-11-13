@@ -44,6 +44,8 @@ pub enum Shape {
     /// One rule issues a command carrying what the body bound, and one
     /// rule a head reads it.
     Named,
+    /// No rule at all: what the commit costs before any rule runs.
+    None,
 }
 
 /// A premise reading `attribute` of the entity `of` into `into`.
@@ -54,24 +56,31 @@ fn read(of: &str, attribute: &str, kind: &str, into: &str) -> Json {
     })
 }
 
+/// What a command carries beside the to-do it is about: all of it, or
+/// the list alone when it is narrow.
+fn carried(narrow: bool) -> &'static [&'static str] {
+    if narrow { &["to"] } else { &["to", "by", "at"] }
+}
+
 /// The premises every shape's condition is: the command, the list the
 /// to-do is on, and in the heavy body three reads more.
-fn body(heavy: bool) -> Vec<Json> {
+fn body(heavy: bool, narrow: bool) -> Vec<Json> {
+    let mut with = serde_json::Map::new();
+    let mut bound = serde_json::Map::new();
+    with.insert(
+        "target".into(),
+        json!({ "the": "cmd.move/target", "as": "entity:" }),
+    );
+    bound.insert("target".into(), var("this"));
+    for field in carried(narrow) {
+        with.insert(
+            (*field).into(),
+            json!({ "the": format!("cmd.move/{field}"), "as": "entity:" }),
+        );
+        bound.insert((*field).into(), var(field));
+    }
     let mut premises = vec![
-        json!({
-            "assert": { "with": {
-                "target": { "the": "cmd.move/target", "as": "entity:" },
-                "to": { "the": "cmd.move/to", "as": "entity:" },
-                "by": { "the": "cmd.move/by", "as": "entity:" },
-                "at": { "the": "cmd.move/at", "as": "entity:" }
-            } },
-            "where": {
-                "target": var("this"),
-                "to": var("to"),
-                "by": var("by"),
-                "at": var("at")
-            }
-        }),
+        json!({ "assert": { "with": with }, "where": bound }),
         read("this", "todo/list", "entity:", "from"),
     ];
     if heavy {
@@ -112,23 +121,25 @@ fn induce(polarity: &str, conclusion: Json, premises: Vec<Json>) -> Result<Induc
 fn rules(
     shape: Shape,
     heavy: bool,
+    narrow: bool,
     heads: usize,
 ) -> Result<(Vec<InductiveRule>, Option<Transient>)> {
     let writes = &WRITES[..heads];
     Ok(match shape {
+        Shape::None => (Vec::new(), None),
         Shape::Wide => (
-            vec![induce("assert!", head("out", writes), body(heavy))?],
+            vec![induce("assert!", head("out", writes), body(heavy, narrow))?],
             None,
         ),
         Shape::Repeat => (
             writes
                 .iter()
-                .map(|write| induce("assert!", head("out", &[write]), body(heavy)))
+                .map(|write| induce("assert!", head("out", &[write]), body(heavy, narrow)))
                 .collect::<Result<_>>()?,
             None,
         ),
         Shape::Named => {
-            let issue = induce("assert!", head("moved", writes), body(heavy))?;
+            let issue = induce("assert!", head("moved", writes), body(heavy, narrow))?;
             let transient = Transient(issue.conclusion().this());
             let mut rules = vec![issue];
             for write in writes {
@@ -163,7 +174,11 @@ fn moving(shape: Shape) -> Result<(Vec<InductiveRule>, Option<Transient>)> {
     };
     Ok(match shape {
         Shape::Named => {
-            let issue = induce("assert!", head("moved", &["to", "from"]), body(false))?;
+            let issue = induce(
+                "assert!",
+                head("moved", &["to", "from"]),
+                body(false, false),
+            )?;
             let transient = Transient(issue.conclusion().this());
             (
                 vec![
@@ -174,7 +189,10 @@ fn moving(shape: Shape) -> Result<(Vec<InductiveRule>, Option<Transient>)> {
                 Some(transient),
             )
         }
-        _ => (vec![put(body(false))?, take(body(false))?], None),
+        _ => (
+            vec![put(body(false, false))?, take(body(false, false))?],
+            None,
+        ),
     })
 }
 
@@ -230,7 +248,7 @@ async fn install(env: &Env, rules: Vec<InductiveRule>, transient: Option<Transie
 /// Dispatch a `move` command for each of `size` to-dos in one
 /// transaction: to the next list, by one of seven movers, at a time of
 /// its own.
-async fn dispatch(env: &Env, size: usize) -> Result<()> {
+async fn dispatch(env: &Env, size: usize, narrow: bool) -> Result<()> {
     let mut transaction = env.branch.transaction();
     for index in 0..size {
         let command = entity("move", index);
@@ -240,6 +258,9 @@ async fn dispatch(env: &Env, size: usize) -> Result<()> {
             ("cmd.move/by", entity("user", index % 7)),
             ("cmd.move/at", entity("tick", index)),
         ] {
+            if name != "cmd.move/target" && !carried(narrow).contains(&&name["cmd.move/".len()..]) {
+                continue;
+            }
             transaction = transaction.dispatch(DynamicAttributeExpression {
                 the: name.parse::<Relation>()?,
                 of: command.clone(),
@@ -262,6 +283,7 @@ struct Heads {
     env: Env,
     size: usize,
     facts: usize,
+    narrow: bool,
 }
 
 impl Prepared for Heads {
@@ -271,7 +293,7 @@ impl Prepared for Heads {
 
     fn measure<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = Result<Outcome>> + 'a>> {
         Box::pin(async move {
-            dispatch(&self.env, self.size).await?;
+            dispatch(&self.env, self.size, self.narrow).await?;
             Ok(Outcome::from([(
                 "facts".into(),
                 (self.facts * self.size) as u64,
@@ -280,23 +302,25 @@ impl Prepared for Heads {
     }
 }
 
-/// `heads-<shape>-<body>-<heads>`: `size` to-dos seeded, the rules of
+/// `heads-<shape>-<body or narrow>-<heads>`: `size` to-dos seeded, the rules of
 /// `shape` installed, then one transaction dispatching a `move` command
 /// a to-do. The phase is that commit and the induction it runs.
 pub async fn writing(
     size: usize,
     shape: Shape,
     heavy: bool,
+    narrow: bool,
     heads: usize,
 ) -> Result<Box<dyn Prepared>> {
     let env = Env::open().await?;
     seed(&env, size).await?;
-    let (rules, transient) = rules(shape, heavy, heads)?;
+    let (rules, transient) = rules(shape, heavy, narrow, heads)?;
     install(&env, rules, transient).await?;
     Ok(Box::new(Heads {
         env,
         size,
-        facts: heads,
+        facts: if shape == Shape::None { 0 } else { heads },
+        narrow,
     }))
 }
 
@@ -311,6 +335,7 @@ pub async fn moved(size: usize, shape: Shape) -> Result<Box<dyn Prepared>> {
         env,
         size,
         facts: 2,
+        narrow: false,
     }))
 }
 
@@ -348,8 +373,13 @@ mod tests {
     }
 
     /// What `shape` leaves under every attribute it may write.
-    async fn outcome(shape: Shape, heavy: bool, heads: usize) -> Result<Vec<Vec<String>>> {
-        let mut prepared = writing(20, shape, heavy, heads).await?;
+    async fn outcome(
+        shape: Shape,
+        heavy: bool,
+        narrow: bool,
+        heads: usize,
+    ) -> Result<Vec<Vec<String>>> {
+        let mut prepared = writing(20, shape, heavy, narrow, heads).await?;
         prepared.measure().await?;
         let mut all = Vec::new();
         for write in WRITES {
@@ -366,16 +396,22 @@ mod tests {
     /// different work.
     #[tokio::test]
     async fn it_writes_the_same_facts_in_every_shape() -> Result<()> {
-        for heavy in [false, true] {
-            for heads in [2, 4] {
-                let wide = outcome(Shape::Wide, heavy, heads).await?;
-                for (at, rows) in wide.iter().enumerate() {
-                    let expected = if at < heads { 20 } else { 0 };
-                    assert_eq!(rows.len(), expected, "wide, attribute {at}");
-                }
-                assert_eq!(wide, outcome(Shape::Repeat, heavy, heads).await?);
-                assert_eq!(wide, outcome(Shape::Named, heavy, heads).await?);
+        for (heavy, narrow, heads) in [
+            (false, false, 2),
+            (false, false, 4),
+            (true, false, 2),
+            (true, false, 4),
+            (false, true, 2),
+        ] {
+            let wide = outcome(Shape::Wide, heavy, narrow, heads).await?;
+            for (at, rows) in wide.iter().enumerate() {
+                let expected = if at < heads { 20 } else { 0 };
+                assert_eq!(rows.len(), expected, "wide, attribute {at}");
             }
+            assert_eq!(wide, outcome(Shape::Repeat, heavy, narrow, heads).await?);
+            assert_eq!(wide, outcome(Shape::Named, heavy, narrow, heads).await?);
+            let none = outcome(Shape::None, heavy, narrow, heads).await?;
+            assert!(none.iter().all(Vec::is_empty), "no rule writes nothing");
         }
         Ok(())
     }

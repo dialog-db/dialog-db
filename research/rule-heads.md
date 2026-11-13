@@ -1,6 +1,6 @@
 # What a rule of several heads would save
 
-**Status: Exploring.** Asked by the design of the notation ([macros](../design/macros.md), #773), which would drop rules of several heads from its kernel if writing on one condition is as cheap without them.
+**Status: Exploring.** One sitting is in ([results](rule-heads/results/2026-11-12.md)): a named condition costs 22% to 39% more than the stand-in for several heads, and the body written again 61% to 148% more, which is between the bars below. Asked by the design of the notation ([macros](../design/macros.md), #773), which would drop rules of several heads from its kernel if writing on one condition is as cheap without them.
 
 ## The question
 
