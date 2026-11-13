@@ -155,7 +155,10 @@ fn it_keeps_no_more_plans_than_its_bound() {
 /// What a commit of `commands` increments leaves in each counter, and
 /// how many plans the commit made and reused; then the same for a
 /// second commit.
-async fn incremented(commands: usize, keep: bool) -> Result<(Vec<Vec<Value>>, [(usize, usize); 2])> {
+async fn incremented(
+    commands: usize,
+    keep: bool,
+) -> Result<(Vec<Vec<Value>>, [(usize, usize); 2])> {
     let _unkept = (!keep).then(Unkept::new);
     let (operator, profile) = test_session_with_peer().await;
     let repository = test_repo(&operator, &profile).await;
@@ -240,10 +243,7 @@ async fn it_plans_once_for_the_seeds_that_bind_the_same_names() -> Result<()> {
         first.0 <= 3,
         "the first commit plans once for each set of names, not once a seed: {first:?}"
     );
-    assert_eq!(
-        second.0, 0,
-        "the second commit plans nothing: {second:?}"
-    );
+    assert_eq!(second.0, 0, "the second commit plans nothing: {second:?}");
     assert_eq!(second.0 + second.1, second_unkept.0);
     Ok(())
 }
