@@ -29,37 +29,37 @@ The example's repository is small: seven commits leave nine versions of its node
 <defs><marker id="why-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z"/></marker></defs>
 <text class="title" x="16" y="22">a file per block: archive/index/</text>
 <rect class="hash" x="16" y="36" width="7.88782" height="20"/>
-<text class="small" x="31.8878" y="50">b4ff23…  360 bytes</text>
+<text class="small" x="31.8878" y="50">f2d9bf…  360 bytes</text>
 <rect class="hash" x="16" y="61" width="55.8282" height="20"/>
-<text class="small" x="79.8282" y="75">35a1e8…  2,548 bytes</text>
+<text class="small" x="79.8282" y="75">194660…  2,548 bytes</text>
 <rect class="hash" x="16" y="86" width="95.7932" height="20"/>
-<text class="small" x="119.793" y="100">565412…  4,372 bytes</text>
+<text class="small" x="119.793" y="100">45a706…  4,372 bytes</text>
 <rect class="hash" x="16" y="111" width="133.479" height="20"/>
-<text class="small" x="157.479" y="125">1a442d…  6,092 bytes</text>
+<text class="small" x="157.479" y="125">3ff595…  6,092 bytes</text>
 <rect class="hash" x="16" y="136" width="175.197" height="20"/>
-<text class="small" x="199.197" y="150">387ac8…  7,996 bytes</text>
+<text class="small" x="199.197" y="150">66b118…  7,996 bytes</text>
 <rect class="hash" x="16" y="161" width="216.74" height="20"/>
-<text class="small" x="240.74" y="175">9afe62…  9,892 bytes</text>
+<text class="small" x="240.74" y="175">4168a4…  9,892 bytes</text>
 <rect class="hash" x="16" y="186" width="258.107" height="20"/>
-<text class="small" x="282.107" y="200">fc9fc5…  11,780 bytes</text>
+<text class="small" x="282.107" y="200">9d7c28…  11,780 bytes</text>
 <rect class="hash" x="16" y="211" width="258.633" height="20"/>
-<text class="small" x="282.633" y="225">6c8933…  11,804 bytes</text>
+<text class="small" x="282.633" y="225">d30e52…  11,804 bytes</text>
 <rect class="hash" x="16" y="236" width="300" height="20"/>
-<text class="small" x="324" y="250">2c38c1…  13,692 bytes</text>
+<text class="small" x="324" y="250">b1ed7a…  13,692 bytes</text>
 <text class="label small muted" x="16" y="275">nine blocks, 68,536 bytes</text>
 <text class="title" x="470" y="22">one file: archive.dialog</text>
-<rect class="value" x="470" y="36" width="31.3541" height="20"/>
-<text class="small" x="509.354" y="50">9 frames, 1,431 bytes</text>
-<rect class="attribute" x="470" y="61" width="110.495" height="20"/>
-<text class="small" x="588.495" y="75">49 tokens, 5,043 bytes</text>
-<text class="label small muted" x="470" y="104">6,474 bytes for the same nine</text>
+<rect class="value" x="470" y="36" width="31.4198" height="20"/>
+<text class="small" x="509.42" y="50">9 frames, 1,434 bytes</text>
+<rect class="attribute" x="470" y="61" width="110.473" height="20"/>
+<text class="small" x="588.473" y="75">49 tokens, 5,042 bytes</text>
+<text class="label small muted" x="470" y="104">6,476 bytes for the same nine</text>
 <text class="label small muted" x="470" y="120">blocks, each rebuilt byte for byte</text>
 <text class="label small muted" x="470" y="136">when asked for</text>
 <text class="label small muted" x="380" y="290" text-anchor="middle">Drawn to one scale. The nodes come from the example&#x27;s seven commits.</text>
 </svg>
 </figure>
 
-The file spends 1,431 bytes on the nine nodes and 5,043 bytes on their 49 tokens, against 68,536 bytes of blocks. Two things make the difference. Every distinct entity, attribute and value is written once, as a **token**, however many keys and versions mention it. And a new version of a node is written as a **frame**: its rows of token ids, mostly copied from the version before.
+The file spends 1,434 bytes on the nine nodes and 5,042 bytes on their 49 tokens, against 68,536 bytes of blocks. Two things make the difference. Every distinct entity, attribute and value is written once, as a **token**, however many keys and versions mention it. And a new version of a node is written as a **frame**: its rows of token ids, mostly copied from the version before.
 
 The gap grows with history. Over two measured histories:
 
@@ -87,77 +87,101 @@ This section follows that fact from the commit to the disk and back, one step at
 When Alice's peer created the repository, its file looked like this:
 
 <figure class="dg">
-<svg class="dg" viewBox="0 0 760 190" width="760" height="190" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="The file as Alice&#x27;s peer created it: magic, three slots, an empty extent and one cell">
+<svg class="dg" viewBox="0 0 760 190" width="760" height="190" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="The file as Alice&#x27;s peer created it: magic, four slots, an empty extent and one cell">
 <defs><marker id="open-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z"/></marker></defs>
-<rect class="shade" x="16" y="40" width="8" height="44"/>
+<rect class="shade" x="16" y="40" width="16" height="44"/>
 <line x1="16" y1="84" x2="16" y2="96"/>
 <text class="small muted" x="16" y="110">0</text>
-<rect x="28" y="40" width="100" height="44"/>
-<text class="small" x="78" y="66" text-anchor="middle">rolling slot 0</text>
-<line x1="28" y1="84" x2="28" y2="96"/>
-<text class="small muted" x="28" y="110" text-anchor="middle">8</text>
-<rect x="132" y="40" width="100" height="44"/>
-<text class="small" x="182" y="66" text-anchor="middle">rolling slot 1</text>
-<line x1="132" y1="84" x2="132" y2="96"/>
-<text class="small muted" x="132" y="110" text-anchor="middle">65,544</text>
-<rect x="236" y="40" width="100" height="44"/>
-<text class="small" x="286" y="66" text-anchor="middle">durable slot</text>
-<line x1="236" y1="84" x2="236" y2="96"/>
-<text class="small muted" x="236" y="110" text-anchor="middle">131,080</text>
-<rect class="dashed" x="340" y="40" width="270" height="44"/>
-<text class="label small" x="475" y="66" text-anchor="middle">extent, empty: 1 MiB, never written</text>
-<line x1="340" y1="84" x2="340" y2="96"/>
-<text class="small muted" x="340" y="110" text-anchor="middle">196,616</text>
-<rect class="hash" x="614" y="40" width="90" height="44"/>
-<text class="small" x="659" y="66" text-anchor="middle">cell</text>
-<line x1="614" y1="84" x2="614" y2="96"/>
-<text class="small muted" x="614" y="110" text-anchor="middle">1,245,232</text>
-<text class="small muted" x="704" y="124" text-anchor="end">1,245,272</text>
+<rect x="36" y="40" width="84" height="44"/>
+<text class="small" x="78" y="66" text-anchor="middle">rolling 0</text>
+<line x1="36" y1="84" x2="36" y2="96"/>
+<text class="small muted" x="36" y="110" text-anchor="middle">16</text>
+<rect x="124" y="40" width="84" height="44"/>
+<text class="small" x="166" y="66" text-anchor="middle">rolling 1</text>
+<line x1="124" y1="84" x2="124" y2="96"/>
+<text class="small muted" x="124" y="110" text-anchor="middle">65,552</text>
+<rect x="212" y="40" width="84" height="44"/>
+<text class="small" x="254" y="66" text-anchor="middle">durable 0</text>
+<line x1="212" y1="84" x2="212" y2="96"/>
+<text class="small muted" x="212" y="110" text-anchor="middle">131,088</text>
+<rect x="300" y="40" width="84" height="44"/>
+<text class="small" x="342" y="66" text-anchor="middle">durable 1</text>
+<line x1="300" y1="84" x2="300" y2="96"/>
+<text class="small muted" x="300" y="110" text-anchor="middle">196,624</text>
+<rect class="dashed" x="388" y="40" width="230" height="44"/>
+<text class="label small" x="503" y="66" text-anchor="middle">extent: 1 MiB, never written</text>
+<line x1="388" y1="84" x2="388" y2="96"/>
+<text class="small muted" x="388" y="110" text-anchor="middle">262,160</text>
+<rect class="hash" x="622" y="40" width="90" height="44"/>
+<text class="small" x="667" y="66" text-anchor="middle">cell</text>
+<line x1="622" y1="84" x2="622" y2="96"/>
+<text class="small muted" x="622" y="110" text-anchor="middle">1,310,776</text>
+<text class="small muted" x="712" y="124" text-anchor="end">1,310,824</text>
 <text class="label small muted" x="16" y="28">archive.dialog, just created (offsets in bytes)</text>
-<text class="small" x="54" y="66"></text>
-<text class="label small muted" x="16" y="140">1,245,272 bytes long, 24,576 allocated: the extent is a hole the file system never stores.</text>
-<text class="label small muted" x="16" y="158">The cell is the repository&#x27;s dialog/version; slots are 64 KiB each, so data starts at 196,616.</text>
+<text class="label small muted" x="16" y="140">1,310,824 bytes long, 28,672 allocated: the extent is a hole the file system never stores.</text>
+<text class="label small muted" x="16" y="158">The cell is the repository&#x27;s dialog/version. The slots are 64 KiB each, so data starts at 262,160.</text>
 </svg>
 </figure>
 
-Every file starts with eight bytes of **magic**: `DIALOGA` and a byte for the format's version. A file that starts with anything else is not opened.
+Every file starts with sixteen bytes of **magic**: `DIALOG`, the byte `b6`, a byte for the format's version, now 1, and eight zeros, reserved. The `b6` is a pilcrow in Latin-1 and is not valid UTF-8 on its own, so a tool that reads the file as text fails at once. A file that starts with anything else is not opened.
 
 <figure class="dg">
-<svg class="dg" viewBox="0 0 520 92" width="520" height="92" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="The eight bytes of magic: DIALOGA and the format version 0e">
+<svg class="dg" viewBox="0 0 760 150" width="760" height="150" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="The sixteen bytes of magic: DIALOG, the byte b6, the format version 1, then eight zero bytes, reserved">
 <defs><marker id="mag-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z"/></marker></defs>
-<rect class="shade" x="16" y="16" width="40" height="40"/>
-<text x="36" y="34" text-anchor="middle">D</text>
-<text class="small muted" x="36" y="50" text-anchor="middle">44</text>
-<rect class="shade" x="56" y="16" width="40" height="40"/>
-<text x="76" y="34" text-anchor="middle">I</text>
-<text class="small muted" x="76" y="50" text-anchor="middle">49</text>
-<rect class="shade" x="96" y="16" width="40" height="40"/>
-<text x="116" y="34" text-anchor="middle">A</text>
-<text class="small muted" x="116" y="50" text-anchor="middle">41</text>
-<rect class="shade" x="136" y="16" width="40" height="40"/>
-<text x="156" y="34" text-anchor="middle">L</text>
-<text class="small muted" x="156" y="50" text-anchor="middle">4c</text>
-<rect class="shade" x="176" y="16" width="40" height="40"/>
-<text x="196" y="34" text-anchor="middle">O</text>
-<text class="small muted" x="196" y="50" text-anchor="middle">4f</text>
-<rect class="shade" x="216" y="16" width="40" height="40"/>
-<text x="236" y="34" text-anchor="middle">G</text>
-<text class="small muted" x="236" y="50" text-anchor="middle">47</text>
-<rect class="shade" x="256" y="16" width="40" height="40"/>
-<text x="276" y="34" text-anchor="middle">A</text>
-<text class="small muted" x="276" y="50" text-anchor="middle">41</text>
-<rect class="critical" x="296" y="16" width="40" height="40"/>
-<text class="critical" x="316" y="34" text-anchor="middle">14</text>
-<text class="small muted" x="316" y="50" text-anchor="middle">0e</text>
-<text class="label small muted" x="356" y="34">bytes 0 to 7</text>
-<text class="label small muted" x="356" y="50">the last is the format: 14</text>
-<text class="label small muted" x="16" y="80">A file whose first bytes differ is not opened; a format change bumps the last byte.</text>
+<rect class="shade" x="16" y="16" width="38" height="40"/>
+<text x="35" y="34" text-anchor="middle">D</text>
+<text class="small muted" x="35" y="50" text-anchor="middle">44</text>
+<rect class="shade" x="54" y="16" width="38" height="40"/>
+<text x="73" y="34" text-anchor="middle">I</text>
+<text class="small muted" x="73" y="50" text-anchor="middle">49</text>
+<rect class="shade" x="92" y="16" width="38" height="40"/>
+<text x="111" y="34" text-anchor="middle">A</text>
+<text class="small muted" x="111" y="50" text-anchor="middle">41</text>
+<rect class="shade" x="130" y="16" width="38" height="40"/>
+<text x="149" y="34" text-anchor="middle">L</text>
+<text class="small muted" x="149" y="50" text-anchor="middle">4c</text>
+<rect class="shade" x="168" y="16" width="38" height="40"/>
+<text x="187" y="34" text-anchor="middle">O</text>
+<text class="small muted" x="187" y="50" text-anchor="middle">4f</text>
+<rect class="shade" x="206" y="16" width="38" height="40"/>
+<text x="225" y="34" text-anchor="middle">G</text>
+<text class="small muted" x="225" y="50" text-anchor="middle">47</text>
+<rect class="critical" x="244" y="16" width="38" height="40"/>
+<text class="critical" x="263" y="34" text-anchor="middle">¶</text>
+<text class="small muted" x="263" y="50" text-anchor="middle">b6</text>
+<rect class="critical" x="282" y="16" width="38" height="40"/>
+<text class="critical" x="301" y="34" text-anchor="middle">1</text>
+<text class="small muted" x="301" y="50" text-anchor="middle">01</text>
+<rect x="320" y="16" width="38" height="40"/>
+<text class="small muted" x="339" y="50" text-anchor="middle">00</text>
+<rect x="358" y="16" width="38" height="40"/>
+<text class="small muted" x="377" y="50" text-anchor="middle">00</text>
+<rect x="396" y="16" width="38" height="40"/>
+<text class="small muted" x="415" y="50" text-anchor="middle">00</text>
+<rect x="434" y="16" width="38" height="40"/>
+<text class="small muted" x="453" y="50" text-anchor="middle">00</text>
+<rect x="472" y="16" width="38" height="40"/>
+<text class="small muted" x="491" y="50" text-anchor="middle">00</text>
+<rect x="510" y="16" width="38" height="40"/>
+<text class="small muted" x="529" y="50" text-anchor="middle">00</text>
+<rect x="548" y="16" width="38" height="40"/>
+<text class="small muted" x="567" y="50" text-anchor="middle">00</text>
+<rect x="586" y="16" width="38" height="40"/>
+<text class="small muted" x="605" y="50" text-anchor="middle">00</text>
+<path class="wire" d="M16,62 L16,68 L244,68 L244,62"/>
+<text class="small muted" x="130" y="82" text-anchor="middle">DIALOG</text>
+<path class="wire" d="M244,62 L244,68 L320,68 L320,62"/>
+<text class="small critical" x="282" y="82" text-anchor="middle">b6, then version 1</text>
+<path class="wire" d="M320,62 L320,68 L624,68 L624,62"/>
+<text class="small muted" x="472" y="82" text-anchor="middle">reserved: zeros</text>
+<text class="label small muted" x="16" y="112">Bytes 0 to 15. The byte b6 is a pilcrow in Latin-1 and not valid UTF-8 on its own, so a file read as text fails at once.</text>
+<text class="label small muted" x="16" y="130">A file whose first sixteen bytes differ is not opened; a format change bumps byte 7.</text>
 </svg>
 </figure>
 
-Then come three **slots** of 64 KiB each. A slot says what the file holds: where its records end, the root of the file's own index, which space is free. Most of what follows is about how slots are written and trusted.
+Then come four **slots** of 64 KiB each: two **rolling** slots, which appends write in turn, and two copies of the **durable** slot, which only a sync point writes. A slot says what the file holds: where its records end, the root of the file's own index, which space is free. Most of what follows is about how slots are written and trusted.
 
-After the slots, from byte 196,616, come **records**, appended one after another. A new file already has two. One is an **extent**, a megabyte a writer can use without waiting for anyone (it comes back in [When others are writing too](#when-others-are-writing-too)). It has never been written to, so the file system stores it as a hole: the file is 1.2 MB long but takes 24 KiB of disk. The other is a **cell** record, the repository's `dialog/version`.
+After the slots, from byte 262,160, come **records**, appended one after another. A new file already has two. One is an **extent**, a megabyte a writer can use without waiting for anyone (it comes back in [When others are writing too](#when-others-are-writing-too)). It has never been written to, so the file system stores it as a hole: the file is 1.3 MB long but takes 28 KiB of disk. The other is a **cell** record, the repository's `dialog/version`.
 
 ### Step 1: the commit makes one new node
 
@@ -169,13 +193,13 @@ The commit edits the tree as [The Search Tree](./tree.md) describes. With buffer
 <text class="title" x="16" y="20">after commit 1</text>
 <text class="title" x="440" y="20">after commit 2</text>
 <rect class="faded" x="16" y="34" width="300" height="74"/>
-<text class="hash" x="26" y="54">root 35a1e8…</text>
+<text class="hash" x="26" y="54">root 194660…</text>
 <text class="small muted" x="26" y="70">2,548 bytes</text>
 <rect class="shade" x="166" y="42" width="140" height="56"/>
 <text class="small" x="236" y="66" text-anchor="middle">buffer</text>
 <text class="small" x="236" y="82" text-anchor="middle">10 operations</text>
 <rect x="440" y="34" width="300" height="74"/>
-<text class="hash" x="450" y="54">root 565412…</text>
+<text class="hash" x="450" y="54">root 45a706…</text>
 <text class="small muted" x="450" y="70">4,372 bytes</text>
 <rect class="value" x="590" y="42" width="140" height="56"/>
 <text class="small" x="660" y="66" text-anchor="middle">buffer</text>
@@ -183,7 +207,7 @@ The commit edits the tree as [The Search Tree](./tree.md) describes. With buffer
 <line class="dashed" x1="120" y1="108" x2="318" y2="162" marker-end="url(#ct-arrow)"/>
 <line x1="540" y1="108" x2="444" y2="162" marker-end="url(#ct-arrow)"/>
 <rect x="270" y="164" width="220" height="46"/>
-<text class="hash" x="380" y="184" text-anchor="middle">leaf b4ff23…</text>
+<text class="hash" x="380" y="184" text-anchor="middle">leaf f2d9bf…</text>
 <text class="small muted" x="380" y="200" text-anchor="middle">360 bytes, unchanged</text>
 <text class="label small muted" x="380" y="238" text-anchor="middle">Buffered writes (see The Search Tree): new facts wait in the root&#x27;s buffer, so a small commit rewrites the root alone.</text>
 </svg>
@@ -211,19 +235,19 @@ Here is the fact's EAV key, split:
 <text class="entity" x="200" y="50" text-anchor="middle">item:1 00</text>
 <line class="dashed" x1="200" y1="60" x2="200" y2="96" marker-end="url(#kt-arrow)"/>
 <rect class="entity" x="120" y="98" width="160" height="44"/>
-<text class="entity" x="200" y="116" text-anchor="middle">token 77831</text>
+<text class="entity" x="200" y="116" text-anchor="middle">token 81928</text>
 <text class="small muted" x="200" y="132" text-anchor="middle">found, from commit 1</text>
 <rect class="attribute" x="284" y="30" width="230" height="30"/>
 <text class="attribute" x="399" y="50" text-anchor="middle">demo.grocery/name 00</text>
 <line class="dashed" x1="399" y1="60" x2="399" y2="96" marker-end="url(#kt-arrow)"/>
 <rect class="attribute" x="284" y="98" width="230" height="44"/>
-<text class="attribute" x="399" y="116" text-anchor="middle">token 77873</text>
+<text class="attribute" x="399" y="116" text-anchor="middle">token 81970</text>
 <text class="small muted" x="399" y="132" text-anchor="middle">found: item:2&#x27;s, commit 1</text>
 <rect class="value" x="518" y="30" width="200" height="30"/>
 <text class="value" x="618" y="50" text-anchor="middle">03 &quot;Oat milk&quot; 00</text>
 <line x1="618" y1="60" x2="618" y2="96" marker-end="url(#kt-arrow)"/>
 <rect class="value solid" x="518" y="98" width="200" height="44"/>
-<text x="618" y="116" text-anchor="middle" style="fill:var(--dg-paper)">token 143526</text>
+<text x="618" y="116" text-anchor="middle" style="fill:var(--dg-paper)">token 147623</text>
 <text class="small" x="618" y="132" text-anchor="middle" style="fill:var(--dg-paper)">new: written now</text>
 <text class="label small muted" x="16" y="176">The writer looks each part up by the hash of its bytes in the file&#x27;s index. Parts the file holds are only named:</text>
 <text class="label small muted" x="16" y="194">of this fact, only &quot;Oat milk&quot; is written. The form byte is the key&#x27;s tag and stays in the row.</text>
@@ -237,7 +261,7 @@ A token's place in the file is its id:
 <figure class="dg">
 <svg class="dg" viewBox="0 0 760 200" width="760" height="200" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="A token in the file: a pad byte, padding, a four-byte length, then the bytes, starting on a multiple of 16">
 <defs><marker id="tb-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z"/></marker></defs>
-<text class="label small muted" x="16" y="20">inside commit 2&#x27;s tokens record, from offset 2,296,400</text>
+<text class="label small muted" x="16" y="20">inside commit 2&#x27;s tokens record, from offset 2,361,952</text>
 <rect class="shade" x="16" y="32" width="21" height="24"/>
 <text x="26.5" y="48.5" text-anchor="middle">0b</text>
 <rect x="37" y="32" width="21" height="24"/>
@@ -299,7 +323,7 @@ A token's place in the file is its id:
 <path class="wire" d="M352,58 L352,64 L562,64 L562,58"/>
 <text class="small value" x="457" y="78" text-anchor="middle">03 &quot;Oat milk&quot; 00</text>
 <line class="critical" x1="352" y1="96" x2="352" y2="112"/>
-<text class="critical" x="352" y="126" text-anchor="middle">offset 2,296,416 = 16 × 143,526</text>
+<text class="critical" x="352" y="126" text-anchor="middle">offset 2,361,968 = 16 × 147,623</text>
 <text class="label small muted" x="16" y="156">The id is the offset over 16. A reader holding only the id reads the length just before it and the bytes after:</text>
 <text class="label small muted" x="16" y="174">nothing in memory says where a token is, and a token is never moved.</text>
 </svg>
@@ -320,40 +344,40 @@ A value's token is the value's type byte and payload, here `03` for a string, so
 <rect class="shade" x="16" y="34" width="86" height="28"/>
 <text class="small" x="24" y="53">00 EAV</text>
 <rect class="entity" x="110" y="34" width="130" height="28"/>
-<text class="entity" x="175" y="53" text-anchor="middle">77831</text>
+<text class="entity" x="175" y="53" text-anchor="middle">81928</text>
 <rect class="attribute" x="250" y="34" width="130" height="28"/>
-<text class="attribute" x="315" y="53" text-anchor="middle">77873</text>
+<text class="attribute" x="315" y="53" text-anchor="middle">81970</text>
 <rect class="value" x="390" y="34" width="130" height="28"/>
-<text class="value" x="455" y="53" text-anchor="middle">143526</text>
+<text class="value" x="455" y="53" text-anchor="middle">147623</text>
 <rect class="ghost" x="530" y="34" width="130" height="28"/>
 <rect class="shade" x="16" y="68" width="86" height="28"/>
 <text class="small" x="24" y="87">01 AEV</text>
 <rect class="entity" x="110" y="68" width="130" height="28"/>
-<text class="entity" x="175" y="87" text-anchor="middle">77831</text>
+<text class="entity" x="175" y="87" text-anchor="middle">81928</text>
 <rect class="attribute" x="250" y="68" width="130" height="28"/>
-<text class="attribute" x="315" y="87" text-anchor="middle">77873</text>
+<text class="attribute" x="315" y="87" text-anchor="middle">81970</text>
 <rect class="value" x="390" y="68" width="130" height="28"/>
-<text class="value" x="455" y="87" text-anchor="middle">143526</text>
+<text class="value" x="455" y="87" text-anchor="middle">147623</text>
 <rect class="ghost" x="530" y="68" width="130" height="28"/>
 <rect class="shade" x="16" y="102" width="86" height="28"/>
 <text class="small" x="24" y="121">02 VAE</text>
 <rect class="entity" x="110" y="102" width="130" height="28"/>
-<text class="entity" x="175" y="121" text-anchor="middle">77831</text>
+<text class="entity" x="175" y="121" text-anchor="middle">81928</text>
 <rect class="attribute" x="250" y="102" width="130" height="28"/>
-<text class="attribute" x="315" y="121" text-anchor="middle">77873</text>
+<text class="attribute" x="315" y="121" text-anchor="middle">81970</text>
 <rect class="value" x="390" y="102" width="130" height="28"/>
-<text class="value" x="455" y="121" text-anchor="middle">143526</text>
+<text class="value" x="455" y="121" text-anchor="middle">147623</text>
 <rect class="ghost" x="530" y="102" width="130" height="28"/>
 <rect class="shade" x="16" y="136" width="86" height="28"/>
 <text class="small" x="24" y="155">03 history</text>
 <rect class="hash" x="110" y="136" width="130" height="28"/>
-<text class="hash" x="175" y="155" text-anchor="middle">143527</text>
+<text class="hash" x="175" y="155" text-anchor="middle">147624</text>
 <rect class="entity" x="250" y="136" width="130" height="28"/>
-<text class="entity" x="315" y="155" text-anchor="middle">77831</text>
+<text class="entity" x="315" y="155" text-anchor="middle">81928</text>
 <rect class="attribute" x="390" y="136" width="130" height="28"/>
-<text class="attribute" x="455" y="155" text-anchor="middle">77873</text>
+<text class="attribute" x="455" y="155" text-anchor="middle">81970</text>
 <rect class="value" x="530" y="136" width="130" height="28"/>
-<text class="value" x="595" y="155" text-anchor="middle">143526</text>
+<text class="value" x="595" y="155" text-anchor="middle">147623</text>
 <text class="label small muted" x="16" y="192">A row stores the entity, attribute and value in the same slots whatever its ordering; the form says which ordering it is.</text>
 </svg>
 </figure>
@@ -367,71 +391,71 @@ The new root is written as a **frame**: its rows, naming tokens by id, written a
 <figure class="dg">
 <svg class="dg" viewBox="0 0 760 220" width="760" height="220" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="A frame&#x27;s data starts on a multiple of 16 with the node&#x27;s hash, then kind, depth, catalog, base and manifest">
 <defs><marker id="fh-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z"/></marker></defs>
-<text class="label small muted" x="16" y="20">commit 2&#x27;s frame: record at 2,296,472, data at 2,296,496 = 16 × 143,531</text>
+<text class="label small muted" x="16" y="20">commit 2&#x27;s frame: record at 2,362,024, data at 2,362,048 = 16 × 147,628</text>
 <rect class="hash" x="16" y="32" width="17.6" height="24"/>
-<text class="hash" x="24.8" y="48.5" text-anchor="middle">56</text>
+<text class="hash" x="24.8" y="48.5" text-anchor="middle">45</text>
 <rect class="hash" x="33.6" y="32" width="17.6" height="24"/>
-<text class="hash" x="42.4" y="48.5" text-anchor="middle">54</text>
+<text class="hash" x="42.4" y="48.5" text-anchor="middle">a7</text>
 <rect class="hash" x="51.2" y="32" width="17.6" height="24"/>
-<text class="hash" x="60" y="48.5" text-anchor="middle">12</text>
+<text class="hash" x="60" y="48.5" text-anchor="middle">06</text>
 <rect class="hash" x="68.8" y="32" width="17.6" height="24"/>
-<text class="hash" x="77.6" y="48.5" text-anchor="middle">b9</text>
+<text class="hash" x="77.6" y="48.5" text-anchor="middle">40</text>
 <rect class="hash" x="86.4" y="32" width="17.6" height="24"/>
-<text class="hash" x="95.2" y="48.5" text-anchor="middle">09</text>
+<text class="hash" x="95.2" y="48.5" text-anchor="middle">1b</text>
 <rect class="hash" x="104" y="32" width="17.6" height="24"/>
-<text class="hash" x="112.8" y="48.5" text-anchor="middle">7e</text>
+<text class="hash" x="112.8" y="48.5" text-anchor="middle">31</text>
 <rect class="hash" x="121.6" y="32" width="17.6" height="24"/>
-<text class="hash" x="130.4" y="48.5" text-anchor="middle">31</text>
+<text class="hash" x="130.4" y="48.5" text-anchor="middle">97</text>
 <rect class="hash" x="139.2" y="32" width="17.6" height="24"/>
-<text class="hash" x="148" y="48.5" text-anchor="middle">22</text>
+<text class="hash" x="148" y="48.5" text-anchor="middle">40</text>
 <rect class="hash" x="156.8" y="32" width="17.6" height="24"/>
-<text class="hash" x="165.6" y="48.5" text-anchor="middle">dd</text>
+<text class="hash" x="165.6" y="48.5" text-anchor="middle">7f</text>
 <rect class="hash" x="174.4" y="32" width="17.6" height="24"/>
-<text class="hash" x="183.2" y="48.5" text-anchor="middle">82</text>
+<text class="hash" x="183.2" y="48.5" text-anchor="middle">03</text>
 <rect class="hash" x="192" y="32" width="17.6" height="24"/>
-<text class="hash" x="200.8" y="48.5" text-anchor="middle">98</text>
+<text class="hash" x="200.8" y="48.5" text-anchor="middle">21</text>
 <rect class="hash" x="209.6" y="32" width="17.6" height="24"/>
-<text class="hash" x="218.4" y="48.5" text-anchor="middle">73</text>
+<text class="hash" x="218.4" y="48.5" text-anchor="middle">fb</text>
 <rect class="hash" x="227.2" y="32" width="17.6" height="24"/>
-<text class="hash" x="236" y="48.5" text-anchor="middle">1e</text>
+<text class="hash" x="236" y="48.5" text-anchor="middle">d5</text>
 <rect class="hash" x="244.8" y="32" width="17.6" height="24"/>
-<text class="hash" x="253.6" y="48.5" text-anchor="middle">f7</text>
+<text class="hash" x="253.6" y="48.5" text-anchor="middle">3c</text>
 <rect class="hash" x="262.4" y="32" width="17.6" height="24"/>
-<text class="hash" x="271.2" y="48.5" text-anchor="middle">d4</text>
+<text class="hash" x="271.2" y="48.5" text-anchor="middle">28</text>
 <rect class="hash" x="280" y="32" width="17.6" height="24"/>
-<text class="hash" x="288.8" y="48.5" text-anchor="middle">5e</text>
+<text class="hash" x="288.8" y="48.5" text-anchor="middle">e8</text>
 <rect class="hash" x="16" y="64" width="17.6" height="24"/>
-<text class="hash" x="24.8" y="80.5" text-anchor="middle">49</text>
+<text class="hash" x="24.8" y="80.5" text-anchor="middle">77</text>
 <rect class="hash" x="33.6" y="64" width="17.6" height="24"/>
-<text class="hash" x="42.4" y="80.5" text-anchor="middle">5b</text>
+<text class="hash" x="42.4" y="80.5" text-anchor="middle">f3</text>
 <rect class="hash" x="51.2" y="64" width="17.6" height="24"/>
-<text class="hash" x="60" y="80.5" text-anchor="middle">d6</text>
+<text class="hash" x="60" y="80.5" text-anchor="middle">75</text>
 <rect class="hash" x="68.8" y="64" width="17.6" height="24"/>
-<text class="hash" x="77.6" y="80.5" text-anchor="middle">24</text>
+<text class="hash" x="77.6" y="80.5" text-anchor="middle">5c</text>
 <rect class="hash" x="86.4" y="64" width="17.6" height="24"/>
-<text class="hash" x="95.2" y="80.5" text-anchor="middle">60</text>
+<text class="hash" x="95.2" y="80.5" text-anchor="middle">68</text>
 <rect class="hash" x="104" y="64" width="17.6" height="24"/>
-<text class="hash" x="112.8" y="80.5" text-anchor="middle">c4</text>
+<text class="hash" x="112.8" y="80.5" text-anchor="middle">e6</text>
 <rect class="hash" x="121.6" y="64" width="17.6" height="24"/>
-<text class="hash" x="130.4" y="80.5" text-anchor="middle">61</text>
+<text class="hash" x="130.4" y="80.5" text-anchor="middle">d7</text>
 <rect class="hash" x="139.2" y="64" width="17.6" height="24"/>
-<text class="hash" x="148" y="80.5" text-anchor="middle">f6</text>
+<text class="hash" x="148" y="80.5" text-anchor="middle">cb</text>
 <rect class="hash" x="156.8" y="64" width="17.6" height="24"/>
-<text class="hash" x="165.6" y="80.5" text-anchor="middle">6f</text>
+<text class="hash" x="165.6" y="80.5" text-anchor="middle">e7</text>
 <rect class="hash" x="174.4" y="64" width="17.6" height="24"/>
-<text class="hash" x="183.2" y="80.5" text-anchor="middle">ae</text>
+<text class="hash" x="183.2" y="80.5" text-anchor="middle">2e</text>
 <rect class="hash" x="192" y="64" width="17.6" height="24"/>
-<text class="hash" x="200.8" y="80.5" text-anchor="middle">37</text>
+<text class="hash" x="200.8" y="80.5" text-anchor="middle">d6</text>
 <rect class="hash" x="209.6" y="64" width="17.6" height="24"/>
-<text class="hash" x="218.4" y="80.5" text-anchor="middle">2b</text>
+<text class="hash" x="218.4" y="80.5" text-anchor="middle">b6</text>
 <rect class="hash" x="227.2" y="64" width="17.6" height="24"/>
-<text class="hash" x="236" y="80.5" text-anchor="middle">d2</text>
+<text class="hash" x="236" y="80.5" text-anchor="middle">49</text>
 <rect class="hash" x="244.8" y="64" width="17.6" height="24"/>
-<text class="hash" x="253.6" y="80.5" text-anchor="middle">cc</text>
+<text class="hash" x="253.6" y="80.5" text-anchor="middle">50</text>
 <rect class="hash" x="262.4" y="64" width="17.6" height="24"/>
-<text class="hash" x="271.2" y="80.5" text-anchor="middle">1a</text>
+<text class="hash" x="271.2" y="80.5" text-anchor="middle">74</text>
 <rect class="hash" x="280" y="64" width="17.6" height="24"/>
-<text class="hash" x="288.8" y="80.5" text-anchor="middle">54</text>
+<text class="hash" x="288.8" y="80.5" text-anchor="middle">3b</text>
 <path class="wire" d="M16,98 L16,104 L297.6,104 L297.6,98"/>
 <text class="small hash" x="156.8" y="118" text-anchor="middle">the node&#x27;s BLAKE3 hash: 32 bytes</text>
 <rect x="16" y="130" width="100" height="24"/>
@@ -441,17 +465,17 @@ The new root is written as a **frame**: its rows, naming tokens by id, written a
 <rect x="196" y="130" width="80" height="24"/>
 <text x="236" y="146.5" text-anchor="middle">00</text>
 <rect class="shade" x="276" y="130" width="56" height="24"/>
-<text x="304" y="146.5" text-anchor="middle">ca</text>
+<text x="304" y="146.5" text-anchor="middle">cb</text>
 <rect class="shade" x="332" y="130" width="56" height="24"/>
-<text x="360" y="146.5" text-anchor="middle">e0</text>
+<text x="360" y="146.5" text-anchor="middle">80</text>
 <rect class="shade" x="388" y="130" width="56" height="24"/>
-<text x="416" y="146.5" text-anchor="middle">04</text>
+<text x="416" y="146.5" text-anchor="middle">05</text>
 <rect class="attribute" x="444" y="130" width="56" height="24"/>
-<text class="attribute" x="472" y="146.5" text-anchor="middle">94</text>
+<text class="attribute" x="472" y="146.5" text-anchor="middle">95</text>
 <rect class="attribute" x="500" y="130" width="56" height="24"/>
-<text class="attribute" x="528" y="146.5" text-anchor="middle">e0</text>
+<text class="attribute" x="528" y="146.5" text-anchor="middle">80</text>
 <rect class="attribute" x="556" y="130" width="56" height="24"/>
-<text class="attribute" x="584" y="146.5" text-anchor="middle">04</text>
+<text class="attribute" x="584" y="146.5" text-anchor="middle">05</text>
 <path class="wire" d="M16,158 L16,164 L116,164 L116,158"/>
 <text class="small muted" x="66" y="178" text-anchor="middle">kind 1: index</text>
 <path class="wire" d="M116,158 L116,164 L196,164 L196,158"/>
@@ -459,9 +483,9 @@ The new root is written as a **frame**: its rows, naming tokens by id, written a
 <path class="wire" d="M196,158 L196,164 L276,164 L276,158"/>
 <text class="small muted" x="236" y="178" text-anchor="middle">catalog 0</text>
 <path class="wire" d="M276,158 L276,164 L444,164 L444,158"/>
-<text class="small muted" x="360" y="178" text-anchor="middle">base: frame 77,897 (+1)</text>
+<text class="small muted" x="360" y="178" text-anchor="middle">base: frame 81,994 (+1)</text>
 <path class="wire" d="M444,158 L444,164 L612,164 L612,158"/>
-<text class="small attribute" x="528" y="178" text-anchor="middle">manifest: token 77,844</text>
+<text class="small attribute" x="528" y="178" text-anchor="middle">manifest: token 81,941</text>
 <text class="label small muted" x="620" y="147">then rows</text>
 </svg>
 </figure>
@@ -573,49 +597,49 @@ The six new rows are then written column by column:
 <text class="small" x="740" y="70" text-anchor="end">04 00 04 01 03 02 03</text>
 <text class="small" x="16" y="104">slot 0</text>
 <rect class="entity" x="90" y="88" width="100" height="24"/>
-<text class="small entity" x="140" y="104" text-anchor="middle">143487</text>
+<text class="small entity" x="140" y="104" text-anchor="middle">147584</text>
 <rect class="entity" x="200" y="88" width="100" height="24"/>
-<text class="small entity" x="250" y="104" text-anchor="middle">77831</text>
+<text class="small entity" x="250" y="104" text-anchor="middle">81928</text>
 <rect class="entity" x="310" y="88" width="100" height="24"/>
-<text class="small entity" x="360" y="104" text-anchor="middle">77831</text>
+<text class="small entity" x="360" y="104" text-anchor="middle">81928</text>
 <rect class="entity" x="420" y="88" width="100" height="24"/>
-<text class="small entity" x="470" y="104" text-anchor="middle">143487</text>
+<text class="small entity" x="470" y="104" text-anchor="middle">147584</text>
 <rect class="entity" x="530" y="88" width="100" height="24"/>
-<text class="small entity" x="580" y="104" text-anchor="middle">77831</text>
+<text class="small entity" x="580" y="104" text-anchor="middle">81928</text>
 <rect class="entity" x="640" y="88" width="100" height="24"/>
-<text class="small entity" x="690" y="104" text-anchor="middle">143527</text>
-<text class="small muted" x="90" y="128">+143487 −65656 0 +65656 −65656 +65696</text>
-<text class="small" x="740" y="128" text-anchor="end">0b fe c1 11 ef 81 08 00 f0 81 08 ef 81 08 c0 82 08</text>
+<text class="small entity" x="690" y="104" text-anchor="middle">147624</text>
+<text class="small muted" x="90" y="128">+147584 −65656 0 +65656 −65656 +65696</text>
+<text class="small" x="740" y="128" text-anchor="end">0b 80 82 12 ef 81 08 00 f0 81 08 ef 81 08 c0 82 08</text>
 <text class="small" x="16" y="162">slot 1</text>
 <rect class="attribute" x="90" y="146" width="100" height="24"/>
-<text class="small attribute" x="140" y="162" text-anchor="middle">77850</text>
+<text class="small attribute" x="140" y="162" text-anchor="middle">81947</text>
 <rect class="attribute" x="200" y="146" width="100" height="24"/>
-<text class="small attribute" x="250" y="162" text-anchor="middle">77873</text>
+<text class="small attribute" x="250" y="162" text-anchor="middle">81970</text>
 <rect class="attribute" x="310" y="146" width="100" height="24"/>
-<text class="small attribute" x="360" y="162" text-anchor="middle">77873</text>
+<text class="small attribute" x="360" y="162" text-anchor="middle">81970</text>
 <rect class="attribute" x="420" y="146" width="100" height="24"/>
-<text class="small attribute" x="470" y="162" text-anchor="middle">77850</text>
+<text class="small attribute" x="470" y="162" text-anchor="middle">81947</text>
 <rect class="attribute" x="530" y="146" width="100" height="24"/>
-<text class="small attribute" x="580" y="162" text-anchor="middle">77873</text>
+<text class="small attribute" x="580" y="162" text-anchor="middle">81970</text>
 <rect class="attribute" x="640" y="146" width="100" height="24"/>
-<text class="small attribute" x="690" y="162" text-anchor="middle">77831</text>
-<text class="small muted" x="90" y="186">+77850 +23 0 −23 +23 −42</text>
-<text class="small" x="740" y="186" text-anchor="end">0b b4 c0 09 2e 00 2d 2e 53</text>
+<text class="small attribute" x="690" y="162" text-anchor="middle">81928</text>
+<text class="small muted" x="90" y="186">+81947 +23 0 −23 +23 −42</text>
+<text class="small" x="740" y="186" text-anchor="end">0b b6 80 0a 2e 00 2d 2e 53</text>
 <text class="small" x="16" y="220">slot 2</text>
 <rect class="value" x="90" y="204" width="100" height="24"/>
-<text class="small value" x="140" y="220" text-anchor="middle">143491</text>
+<text class="small value" x="140" y="220" text-anchor="middle">147588</text>
 <rect class="value" x="200" y="204" width="100" height="24"/>
-<text class="small value" x="250" y="220" text-anchor="middle">143526</text>
+<text class="small value" x="250" y="220" text-anchor="middle">147623</text>
 <rect class="value" x="310" y="204" width="100" height="24"/>
-<text class="small value" x="360" y="220" text-anchor="middle">143526</text>
+<text class="small value" x="360" y="220" text-anchor="middle">147623</text>
 <rect class="value" x="420" y="204" width="100" height="24"/>
-<text class="small value" x="470" y="220" text-anchor="middle">143491</text>
+<text class="small value" x="470" y="220" text-anchor="middle">147588</text>
 <rect class="value" x="530" y="204" width="100" height="24"/>
-<text class="small value" x="580" y="220" text-anchor="middle">143526</text>
+<text class="small value" x="580" y="220" text-anchor="middle">147623</text>
 <rect class="value" x="640" y="204" width="100" height="24"/>
-<text class="small value" x="690" y="220" text-anchor="middle">77873</text>
-<text class="small muted" x="90" y="244">+143491 +35 0 −35 +35 −65653</text>
-<text class="small" x="740" y="244" text-anchor="end">0b 86 c2 11 46 00 45 46 e9 81 08</text>
+<text class="small value" x="690" y="220" text-anchor="middle">81970</text>
+<text class="small muted" x="90" y="244">+147588 +35 0 −35 +35 −65653</text>
+<text class="small" x="740" y="244" text-anchor="end">0b 88 82 12 46 00 45 46 e9 81 08</text>
 <text class="small" x="16" y="278">slot 3</text>
 <rect class="ghost" x="90" y="262" width="100" height="24"/>
 <rect class="ghost" x="200" y="262" width="100" height="24"/>
@@ -623,24 +647,24 @@ The six new rows are then written column by column:
 <rect class="ghost" x="420" y="262" width="100" height="24"/>
 <rect class="ghost" x="530" y="262" width="100" height="24"/>
 <rect class="value" x="640" y="262" width="100" height="24"/>
-<text class="small value" x="690" y="278" text-anchor="middle">143526</text>
+<text class="small value" x="690" y="278" text-anchor="middle">147623</text>
 <text class="small muted" x="90" y="302">only the history row has a fourth part</text>
-<text class="small" x="740" y="302" text-anchor="end">01 cc c2 11</text>
+<text class="small" x="740" y="302" text-anchor="end">01 ce 82 12</text>
 <text class="small" x="16" y="336">datum</text>
 <rect class="hash" x="90" y="320" width="100" height="24"/>
-<text class="small hash" x="140" y="336" text-anchor="middle">143517</text>
+<text class="small hash" x="140" y="336" text-anchor="middle">147614</text>
 <rect class="hash" x="200" y="320" width="100" height="24"/>
-<text class="small hash" x="250" y="336" text-anchor="middle">143517</text>
+<text class="small hash" x="250" y="336" text-anchor="middle">147614</text>
 <rect class="hash" x="310" y="320" width="100" height="24"/>
-<text class="small hash" x="360" y="336" text-anchor="middle">143517</text>
+<text class="small hash" x="360" y="336" text-anchor="middle">147614</text>
 <rect class="hash" x="420" y="320" width="100" height="24"/>
-<text class="small hash" x="470" y="336" text-anchor="middle">143517</text>
+<text class="small hash" x="470" y="336" text-anchor="middle">147614</text>
 <rect class="hash" x="530" y="320" width="100" height="24"/>
-<text class="small hash" x="580" y="336" text-anchor="middle">143517</text>
+<text class="small hash" x="580" y="336" text-anchor="middle">147614</text>
 <rect class="hash" x="640" y="320" width="100" height="24"/>
-<text class="small hash" x="690" y="336" text-anchor="middle">143517</text>
-<text class="small muted" x="90" y="360">+143517, then a run of five zeros</text>
-<text class="small" x="740" y="360" text-anchor="end">01 ba c2 11 0a 00</text>
+<text class="small hash" x="690" y="336" text-anchor="middle">147614</text>
+<text class="small muted" x="90" y="360">+147614, then a run of five zeros</text>
+<text class="small" x="740" y="360" text-anchor="end">01 bc 82 12 0a 00</text>
 <text class="label small muted" x="16" y="390">Each column is zigzag deltas from the row above, as runs: a signed count, then one value repeated or values one by one.</text>
 <text class="label small muted" x="16" y="408">Slot 0 of rows 0 and 7 is the revision&#x27;s entity; a history row&#x27;s slot 0 is its version. Ids are token offsets over 16.</text>
 </svg>
@@ -665,7 +689,7 @@ Every record has the same nine-byte header:
 <figure class="dg">
 <svg class="dg" viewBox="0 0 760 170" width="760" height="170" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="A record&#x27;s header: kind, length and CRC-32, then the body">
 <defs><marker id="rh-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z"/></marker></defs>
-<text class="label small muted" x="16" y="20">commit 2&#x27;s tokens record, at offset 2,295,767</text>
+<text class="label small muted" x="16" y="20">commit 2&#x27;s tokens record, at offset 2,361,319</text>
 <rect class="critical" x="16" y="32" width="70" height="24"/>
 <text class="critical" x="51" y="48.5" text-anchor="middle">04</text>
 <rect class="shade" x="86" y="32" width="36" height="24"/>
@@ -677,13 +701,13 @@ Every record has the same nine-byte header:
 <rect class="shade" x="194" y="32" width="36" height="24"/>
 <text x="212" y="48.5" text-anchor="middle">00</text>
 <rect class="hash" x="230" y="32" width="36" height="24"/>
-<text class="hash" x="248" y="48.5" text-anchor="middle">e8</text>
+<text class="hash" x="248" y="48.5" text-anchor="middle">57</text>
 <rect class="hash" x="266" y="32" width="36" height="24"/>
-<text class="hash" x="284" y="48.5" text-anchor="middle">52</text>
+<text class="hash" x="284" y="48.5" text-anchor="middle">e0</text>
 <rect class="hash" x="302" y="32" width="36" height="24"/>
-<text class="hash" x="320" y="48.5" text-anchor="middle">3a</text>
+<text class="hash" x="320" y="48.5" text-anchor="middle">06</text>
 <rect class="hash" x="338" y="32" width="36" height="24"/>
-<text class="hash" x="356" y="48.5" text-anchor="middle">af</text>
+<text class="hash" x="356" y="48.5" text-anchor="middle">28</text>
 <rect class="dashed" x="374" y="32" width="300" height="30"/>
 <text class="small" x="524" y="52" text-anchor="middle">body: 696 bytes, five tokens</text>
 <path class="wire" d="M16,66 L16,72 L86,72 L86,66"/>
@@ -691,7 +715,7 @@ Every record has the same nine-byte header:
 <path class="wire" d="M86,66 L86,72 L230,72 L230,66"/>
 <text class="small muted" x="158" y="86" text-anchor="middle">length 696</text>
 <path class="wire" d="M230,66 L230,72 L374,72 L374,66"/>
-<text class="small hash" x="302" y="86" text-anchor="middle">crc32 af3a52e8</text>
+<text class="small hash" x="302" y="86" text-anchor="middle">crc32 2806e057</text>
 <text class="label small muted" x="16" y="118">1 + 4 + 4 bytes, little-endian. The checksum covers the kind byte and the body, so a reader walking the file stops at</text>
 <text class="label small muted" x="16" y="136">the first record that is cut short or does not match: everything before it is whole.</text>
 </svg>
@@ -714,25 +738,25 @@ The commit's append is the tokens record and the frame record. The new head foll
 <text class="small" x="178.15" y="58" text-anchor="middle">tokens</text>
 <text class="small muted" x="178.15" y="72" text-anchor="middle">705 B</text>
 <line x1="16" y1="80" x2="16" y2="90"/>
-<text class="small muted" x="16" y="100">2,295,767</text>
+<text class="small muted" x="16" y="100">2,361,319</text>
 <rect class="value" x="340.3" y="40" width="69" height="40"/>
 <text class="small" x="374.8" y="58" text-anchor="middle">frame</text>
 <text class="small muted" x="374.8" y="72" text-anchor="middle">150 B</text>
 <line x1="340.3" y1="80" x2="340.3" y2="104"/>
-<text class="small muted" x="340.3" y="114">2,296,472</text>
+<text class="small muted" x="340.3" y="114">2,362,024</text>
 <rect class="hash" x="409.3" y="40" width="159.62" height="40"/>
 <text class="small" x="489.11" y="58" text-anchor="middle">cell: revision</text>
 <text class="small muted" x="489.11" y="72" text-anchor="middle">347 B</text>
 <line x1="409.3" y1="80" x2="409.3" y2="90"/>
-<text class="small muted" x="409.3" y="100">2,296,622</text>
+<text class="small muted" x="409.3" y="100">2,362,174</text>
 <rect class="hash" x="568.92" y="40" width="162.38" height="40"/>
 <text class="small" x="650.11" y="58" text-anchor="middle">cell: induction</text>
 <text class="small muted" x="650.11" y="72" text-anchor="middle">353 B</text>
 <line x1="568.92" y1="80" x2="568.92" y2="104"/>
-<text class="small muted" x="568.92" y="114">2,296,969</text>
+<text class="small muted" x="568.92" y="114">2,362,521</text>
 <line x1="731.3" y1="80" x2="731.3" y2="90"/>
-<text class="small muted" x="731.3" y="100" text-anchor="end">2,297,322</text>
-<text class="label small muted" x="16" y="28">after commit 1, the file ended at 2,295,767</text>
+<text class="small muted" x="731.3" y="100" text-anchor="end">2,362,874</text>
+<text class="label small muted" x="16" y="28">after commit 1, the file ended at 2,361,319</text>
 <line class="critical" x1="409.3" y1="82" x2="409.3" y2="130" marker-end="url(#al-arrow)"/>
 <rect class="critical" x="239.3" y="134" width="166" height="24"/>
 <text class="small critical" x="322.3" y="150" text-anchor="middle">sequence 7 → rolling 1</text>
@@ -758,7 +782,7 @@ A slot holds the file's whole state as of one append:
 <rect class="hash" x="16" y="43" width="410" height="24"/>
 <text class="label small" x="24" y="59">crc32 of the body</text>
 <text class="small muted" x="436" y="59">u32</text>
-<text class="small" x="536" y="59">6624d565</text>
+<text class="small" x="536" y="59">cc7df6cd</text>
 <rect x="16" y="70" width="410" height="24"/>
 <text class="label small" x="24" y="86">sequence</text>
 <text class="small muted" x="436" y="86">u64</text>
@@ -766,7 +790,7 @@ A slot holds the file's whole state as of one append:
 <rect x="16" y="97" width="410" height="24"/>
 <text class="label small" x="24" y="113">end</text>
 <text class="small muted" x="436" y="113">u64</text>
-<text class="small" x="536" y="113">2,297,322</text>
+<text class="small" x="536" y="113">2,362,874</text>
 <rect x="16" y="124" width="410" height="24"/>
 <text class="label small" x="24" y="140">durable: the last sync point&#x27;s sequence</text>
 <text class="small muted" x="436" y="140">u64</text>
@@ -774,11 +798,11 @@ A slot holds the file's whole state as of one append:
 <rect class="hash" x="16" y="151" width="410" height="24"/>
 <text class="label small" x="24" y="167">boot it was written in</text>
 <text class="small muted" x="436" y="167">u64</text>
-<text class="small" x="536" y="167">1d7afa8f10579f35</text>
+<text class="small" x="536" y="167">9e810cf63cfcde94</text>
 <rect class="shade" x="16" y="178" width="410" height="24"/>
 <text class="label small" x="24" y="194">counts: blocks, bytes, frames, against, frame bytes, tokens, …</text>
 <text class="small muted" x="436" y="194">7 × u64</text>
-<text class="small" x="536" y="194">0, 0, 3, 1, 363, 20, 1,435</text>
+<text class="small" x="536" y="194">0, 0, 3, 1, 363, 20, 1,434</text>
 <rect class="attribute" x="16" y="205" width="410" height="24"/>
 <text class="label small" x="24" y="221">catalogs</text>
 <text class="small muted" x="436" y="221">count, names</text>
@@ -794,7 +818,7 @@ A slot holds the file's whole state as of one append:
 <rect class="bob" x="16" y="286" width="410" height="24"/>
 <text class="label small" x="24" y="302">extents held; free; freed since the sync point</text>
 <text class="small muted" x="436" y="302">lists of u64</text>
-<text class="small" x="536" y="302">196,616 and 1,246,469; –; –</text>
+<text class="small" x="536" y="302">262,160 and 1,312,021; –; –</text>
 <rect class="hash" x="16" y="313" width="410" height="24"/>
 <text class="label small" x="24" y="329">the cells&#x27; index: its root</text>
 <text class="small muted" x="436" y="329">u32, node</text>
@@ -803,7 +827,7 @@ A slot holds the file's whole state as of one append:
 </svg>
 </figure>
 
-There are two **rolling** slots, and an append writes the older of the two. That way one of them is always whole, whatever a crash does to the other:
+An append writes the older of the two rolling slots. That way one of them is always whole, whatever a crash does to the other:
 
 <figure class="dg">
 <svg class="dg" viewBox="0 0 760 230" width="760" height="230" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Two rolling slots take turns; a slot torn by a crash leaves the other, older one whole">
@@ -834,7 +858,7 @@ There are two **rolling** slots, and an append writes the older of the two. That
 <text class="label small" x="676" y="110">takes this</text>
 <text class="label small muted" x="16" y="160">Opening reads both rolling slots and takes the newer one whose checksum matches. The records an append wrote</text>
 <text class="label small muted" x="16" y="178">before its slot was cut short are past that slot&#x27;s end: no slot names them, and the next writer writes over them.</text>
-<text class="label small muted" x="16" y="206">The third slot, the durable one, is written only at a sync point (below).</text>
+<text class="label small muted" x="16" y="206">The other two slots hold the durable slot, written only at a sync point (below).</text>
 </svg>
 </figure>
 
@@ -845,7 +869,7 @@ The turn itself is not a lock on the file. It is a lock on one byte, far past th
 <defs><marker id="lk-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z"/></marker></defs>
 <line class="dashed" x1="126" y1="60" x2="396" y2="60"/>
 <rect class="value" x="16" y="48" width="110" height="24"/>
-<text class="small" x="71" y="64" text-anchor="middle">the data, 3.5 MB</text>
+<text class="small" x="71" y="64" text-anchor="middle">the data, 3.6 MB</text>
 <text class="small muted" x="261" y="50" text-anchor="middle">4.6 × 10¹⁸ empty bytes</text>
 <rect class="shade" x="396" y="48" width="64" height="24"/>
 <text class="small" x="428" y="64" text-anchor="middle">sync</text>
@@ -883,7 +907,7 @@ The branch's head is a cell (see [Commits and History](./history.md)), and the f
 <figure class="dg">
 <svg class="dg" viewBox="0 0 760 344" width="760" height="344" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="The head&#x27;s cell record: its name, its value naming the new root, and the extents it needs, none here">
 <defs><marker id="cr-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z"/></marker></defs>
-<text class="label small muted" x="16" y="20">commit 2&#x27;s head: record at 2,296,622, data at 2,296,640 = 16 × 143,540</text>
+<text class="label small muted" x="16" y="20">commit 2&#x27;s head: record at 2,362,174, data at 2,362,192 = 16 × 147,637</text>
 <rect class="shade" x="16" y="32" width="26" height="24"/>
 <text x="29" y="48.5" text-anchor="middle">09</text>
 <rect class="shade" x="42" y="32" width="26" height="24"/>
@@ -895,15 +919,15 @@ The branch's head is a cell (see [Commits and History](./history.md)), and the f
 <rect class="shade" x="120" y="32" width="26" height="24"/>
 <text x="133" y="48.5" text-anchor="middle">00</text>
 <rect class="shade" x="146" y="32" width="26" height="24"/>
-<text x="159" y="48.5" text-anchor="middle">11</text>
+<text x="159" y="48.5" text-anchor="middle">e7</text>
 <rect class="shade" x="172" y="32" width="26" height="24"/>
-<text x="185" y="48.5" text-anchor="middle">79</text>
+<text x="185" y="48.5" text-anchor="middle">ed</text>
 <rect class="shade" x="198" y="32" width="26" height="24"/>
-<text x="211" y="48.5" text-anchor="middle">cd</text>
+<text x="211" y="48.5" text-anchor="middle">f7</text>
 <rect class="shade" x="224" y="32" width="26" height="24"/>
-<text x="237" y="48.5" text-anchor="middle">1c</text>
+<text x="237" y="48.5" text-anchor="middle">b8</text>
 <path class="wire" d="M16,60 L16,66 L250,66 L250,60"/>
-<text class="small muted" x="133" y="80" text-anchor="middle">kind 9: cell, length 338, crc 1ccd7911</text>
+<text class="small muted" x="133" y="80" text-anchor="middle">kind 9: cell, length 338, crc b8f7ede7</text>
 <rect x="16" y="96" width="40" height="24"/>
 <text x="36" y="112.5" text-anchor="middle">08</text>
 <rect x="56" y="96" width="20" height="24"/>
@@ -961,26 +985,26 @@ The branch's head is a cell (see [Commits and History](./history.md)), and the f
 <rect class="hash" x="408" y="168" width="26" height="24"/>
 <text class="hash" x="421" y="184.5" text-anchor="middle">18</text>
 <rect class="hash" x="434" y="168" width="26" height="24"/>
-<text class="hash" x="447" y="184.5" text-anchor="middle">56</text>
+<text class="hash" x="447" y="184.5" text-anchor="middle">45</text>
 <rect class="hash" x="460" y="168" width="26" height="24"/>
 <text class="hash" x="473" y="184.5" text-anchor="middle">18</text>
 <rect class="hash" x="486" y="168" width="26" height="24"/>
-<text class="hash" x="499" y="184.5" text-anchor="middle">54</text>
+<text class="hash" x="499" y="184.5" text-anchor="middle">a7</text>
 <rect class="hash" x="512" y="168" width="26" height="24"/>
-<text class="hash" x="525" y="184.5" text-anchor="middle">12</text>
+<text class="hash" x="525" y="184.5" text-anchor="middle">06</text>
 <rect class="hash" x="538" y="168" width="26" height="24"/>
 <text class="hash" x="551" y="184.5" text-anchor="middle">18</text>
 <rect class="hash" x="564" y="168" width="26" height="24"/>
-<text class="hash" x="577" y="184.5" text-anchor="middle">b9</text>
+<text class="hash" x="577" y="184.5" text-anchor="middle">40</text>
 <rect class="hash" x="590" y="168" width="26" height="24"/>
-<text class="hash" x="603" y="184.5" text-anchor="middle">09</text>
+<text class="hash" x="603" y="184.5" text-anchor="middle">18</text>
 <text x="624" y="185">…</text>
 <path class="wire" d="M16,196 L16,202 L80,202 L80,196"/>
 <text class="small muted" x="48" y="216" text-anchor="middle">present</text>
 <path class="wire" d="M80,196 L80,202 L200,202 L200,196"/>
 <text class="small muted" x="140" y="216" text-anchor="middle">300 bytes</text>
 <path class="wire" d="M408,196 L408,202 L616,202 L616,196"/>
-<text class="small hash" x="512" y="216" text-anchor="middle">the root&#x27;s hash: 56 54 12 b9 09 …</text>
+<text class="small hash" x="512" y="216" text-anchor="middle">the root&#x27;s hash: 45 a7 06 40 …</text>
 <text class="small muted" x="304" y="230" text-anchor="middle">CBOR: &quot;tree&quot; is the root&#x27;s 32 bytes</text>
 <rect class="bob" x="16" y="262" width="56" height="24"/>
 <text class="bob" x="44" y="278.5" text-anchor="middle">00</text>
@@ -988,12 +1012,13 @@ The branch's head is a cell (see [Commits and History](./history.md)), and the f
 <text class="bob" x="100" y="278.5" text-anchor="middle">00</text>
 <path class="wire" d="M16,290 L16,296 L128,296 L128,290"/>
 <text class="small bob" x="72" y="310" text-anchor="middle">needs: 0 extents</text>
-<text class="label small muted" x="140" y="278">each needed extent would follow: record u64, epoch u64, bytes of frames u64</text>
-<text class="label small muted" x="16" y="336">The cells&#x27; index then files the name&#x27;s key, 1f2546b7, at 143,540. A cell read follows that and nothing else.</text>
+<text class="label small muted" x="140" y="278">each needed extent would follow: record u64, epoch u64,</text>
+<text class="label small muted" x="140" y="294">bytes of frames u64, and the CRC-32 of those bytes u32</text>
+<text class="label small muted" x="16" y="336">The cells&#x27; index then files the name&#x27;s key, 1f2546b7, at 147,637. A cell read follows that and nothing else.</text>
 </svg>
 </figure>
 
-The name is the cell's memory space, `branch/main`, a zero byte, and the cell, `revision`. The value is the new revision, which names the new root by its hash: `56 54 12 b9 09 …` sits right in its bytes. The commit also moves a second cell, `induction`, the revision through which the branch's rules have run.
+The name is the cell's memory space, `branch/main`, a zero byte, and the cell, `revision`. The value is the new revision, which names the new root by its hash: `45 a7 06 40 1b …` sits right in its bytes. The commit also moves a second cell, `induction`, the revision through which the branch's rules have run.
 
 The order of the records is what keeps heads safe:
 
@@ -1004,9 +1029,9 @@ The order of the records is what keeps heads safe:
 <rect class="attribute" x="16" y="34" width="170" height="34"/>
 <text class="small" x="101" y="56" text-anchor="middle">tokens</text>
 <rect class="value" x="190" y="34" width="170" height="34"/>
-<text class="small" x="275" y="56" text-anchor="middle">frame 565412…</text>
+<text class="small" x="275" y="56" text-anchor="middle">frame 45a706…</text>
 <rect class="hash" x="364" y="34" width="170" height="34"/>
-<text class="small" x="449" y="56" text-anchor="middle">head → 565412…</text>
+<text class="small" x="449" y="56" text-anchor="middle">head → 45a706…</text>
 <path class="wire hash" d="M 446 34 C 420 6, 300 6, 280 32" marker-end="url(#or-arrow)"/>
 <line class="critical" x1="360" y1="30" x2="360" y2="76"/>
 <text class="small critical" x="360" y="90" text-anchor="middle">1</text>
@@ -1033,29 +1058,77 @@ The order of the records is what keeps heads safe:
 Until now, everything Alice wrote went to the operating system, not necessarily to the disk. A process that crashes loses nothing the operating system has. A power loss can lose any of it, in any order. A **sync point** draws the line:
 
 <figure class="dg">
-<svg class="dg" viewBox="0 0 760 230" width="760" height="230" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="A sync point: the file synced, the durable slot written as slot 12 and synced, then rolling slot 13 says durable 12">
+<svg class="dg" viewBox="0 0 760 290" width="760" height="290" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="A sync point: the file synced, slot 12 written over one durable copy and synced, the copy marked synced, then rolling slot 13 says durable 12">
 <defs><marker id="sp-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z"/></marker></defs>
 <circle class="shade" cx="32" cy="34" r="12"/>
 <text x="32" y="39" text-anchor="middle">1</text>
 <text class="label small" x="56" y="32">fsync the file</text>
-<text class="small muted" x="56" y="48">everything up to slot 12&#x27;s end (2,299,109) is on the disk</text>
+<text class="small muted" x="56" y="48">everything up to slot 12&#x27;s end (2,364,663) is on the disk</text>
 <circle class="critical" cx="32" cy="78" r="12"/>
 <text x="32" y="83" text-anchor="middle">2</text>
 <text class="label small" x="56" y="76">write the durable slot</text>
-<text class="small muted" x="56" y="92">a copy of slot 12, freed pages and extents now free</text>
+<text class="small muted" x="56" y="92">slot 12, freed pages and extents now free, over copy 1: copy 0 holds the newest whole one</text>
 <circle class="shade" cx="32" cy="122" r="12"/>
 <text x="32" y="127" text-anchor="middle">3</text>
 <text class="label small" x="56" y="120">fsync again</text>
-<text class="small muted" x="56" y="136">the durable slot is on the disk</text>
-<circle class="value" cx="32" cy="166" r="12"/>
+<text class="small muted" x="56" y="136">durable copy 1 is on the disk</text>
+<circle class="critical" cx="32" cy="166" r="12"/>
 <text x="32" y="171" text-anchor="middle">4</text>
-<text class="label small" x="56" y="164">write rolling slot 13</text>
-<text class="small muted" x="56" y="180">durable = 12: pages and extents freed before 12 can be reused</text>
-<text class="label small muted" x="16" y="210">One follows every 64 appends, 2 seconds, or 2,048 freed index pages, and Chronicle::sync. It is made after the turn is let go.</text>
+<text class="label small" x="56" y="164">mark it synced</text>
+<text class="small muted" x="56" y="180">12 in the last 8 bytes of copy 1&#x27;s 64 KiB, at 262,152</text>
+<circle class="value" cx="32" cy="210" r="12"/>
+<text x="32" y="215" text-anchor="middle">5</text>
+<text class="label small" x="56" y="208">write rolling slot 13</text>
+<text class="small muted" x="56" y="224">durable = 12: pages and extents freed before 12 can be reused</text>
+<text class="label small muted" x="16" y="252">One follows every 64 appends, 2 seconds, or 2,048 freed index pages, and Chronicle::sync. It is made after the turn</text>
+<text class="label small muted" x="16" y="270">is let go. After 2 seconds a thread in each process makes one even if no append follows.</text>
 </svg>
 </figure>
 
-The **durable slot**, the third one, is written only here. Nothing the durable slot reaches is ever written over, so after a power loss the file can always go back to it. In the example, the sync point after commit 3 made slot 12 durable.
+The **durable slot** is written only here. Nothing the durable slot reaches is ever written over, so after a power loss the file can always go back to it. In the example, the sync point after commit 3 made slot 12 durable.
+
+A slot can span more than one sector, and a power loss during its write can keep some sectors and lose others. So the durable slot has two copies, and a sync point writes over the copy that does not hold the newest whole durable slot: a sync torn by a power loss leaves the other copy whole. Opening reads the newer copy that is whole. The last 8 bytes of each copy's 64 KiB hold the sequence of the copy last synced there, written after the fsync:
+
+<figure class="dg">
+<svg class="dg" viewBox="0 0 760 300" width="760" height="300" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="The two durable copies in the example: each sync point writes over the copy that does not hold the newest whole durable slot">
+<defs><marker id="du-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z"/></marker></defs>
+<text class="label small" x="216" y="20" text-anchor="middle">durable 0 (at 131,088)</text>
+<text class="label small" x="460" y="20" text-anchor="middle">durable 1 (at 196,624)</text>
+<text class="label small" x="16" y="54">created</text>
+<rect class="value" x="96" y="32" width="180" height="34"/>
+<text class="small" x="186" y="54" text-anchor="middle">slot 0</text>
+<rect class="shade" x="276" y="32" width="60" height="34"/>
+<text class="small" x="306" y="54" text-anchor="middle">0</text>
+<rect class="ghost" x="340" y="32" width="240" height="34"/>
+<text class="small muted" x="460" y="54" text-anchor="middle">never written</text>
+<text class="label small" x="16" y="98">after commit 3</text>
+<rect class="shade" x="96" y="76" width="180" height="34"/>
+<text class="small" x="186" y="98" text-anchor="middle">slot 0</text>
+<rect class="shade" x="276" y="76" width="60" height="34"/>
+<text class="small" x="306" y="98" text-anchor="middle">0</text>
+<rect class="critical" x="340" y="76" width="180" height="34"/>
+<text class="small" x="430" y="98" text-anchor="middle">slot 12</text>
+<rect class="shade" x="520" y="76" width="60" height="34"/>
+<text class="small" x="550" y="98" text-anchor="middle">12</text>
+<text class="label small" x="16" y="142">last close</text>
+<rect class="critical" x="96" y="120" width="180" height="34"/>
+<text class="small" x="186" y="142" text-anchor="middle">slot 31</text>
+<rect class="shade" x="276" y="120" width="60" height="34"/>
+<text class="small" x="306" y="142" text-anchor="middle">31</text>
+<rect class="shade" x="340" y="120" width="180" height="34"/>
+<text class="small" x="430" y="142" text-anchor="middle">slot 12</text>
+<rect class="shade" x="520" y="120" width="60" height="34"/>
+<text class="small" x="550" y="142" text-anchor="middle">12</text>
+<text class="label small muted" x="596" y="54">the last 8 bytes of each</text>
+<text class="label small muted" x="596" y="70">64 KiB: the sequence of</text>
+<text class="label small muted" x="596" y="86">the copy last synced there</text>
+<text class="label small muted" x="16" y="186">A power loss while slot 31 was written could tear copy 0; copy 1 would still hold slot 12, whole. Opening reads</text>
+<text class="label small muted" x="16" y="204">the newer copy that is whole. A copy is written, the file synced, and only then the marker: a copy the marker</text>
+<text class="label small muted" x="16" y="222">names is on the disk. A writer reuses the pages and extents a durable slot frees only once the marker names it,</text>
+<text class="label small muted" x="16" y="240">since a copy written but not yet synced can still be lost, and the older one, which reaches those pages, read.</text>
+<text class="label small muted" x="16" y="274">Slot 0 is the one the file was created with; slot 31 is the sync point the example&#x27;s last close made.</text>
+</svg>
+</figure>
 
 ### Step 7: reading it back
 
@@ -1065,31 +1138,31 @@ A query for item 1's name walks the tree as [The Search Tree](./tree.md) describ
 <svg class="dg" viewBox="0 0 760 300" width="760" height="300" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Reading item:1&#x27;s name back: the block&#x27;s key in the slot&#x27;s index, the frame, then each token by its id">
 <defs><marker id="lu-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z"/></marker></defs>
 <rect class="hash" x="16" y="30" width="200" height="30"/>
-<text class="small hash" x="116" y="50" text-anchor="middle">hash 565412b9097e…</text>
+<text class="small hash" x="116" y="50" text-anchor="middle">hash 45a706401b31…</text>
 <text class="small muted" x="16" y="76">a reader asks for the root</text>
 <rect class="shade" x="16" y="100" width="200" height="30"/>
-<text class="small " x="116" y="120" text-anchor="middle">key 39125456</text>
+<text class="small " x="116" y="120" text-anchor="middle">key 0006a745</text>
 <text class="small muted" x="16" y="146">two bits of space (00: blocks), thirty of the hash</text>
 <line x1="116" y1="60" x2="116" y2="98" marker-end="url(#lu-arrow)"/>
 <rect class="value" x="16" y="170" width="200" height="30"/>
-<text class="small value" x="116" y="190" text-anchor="middle">frame 143531</text>
-<text class="small muted" x="16" y="216">the slot&#x27;s index leaf: 39125456 → 143531</text>
+<text class="small value" x="116" y="190" text-anchor="middle">frame 147628</text>
+<text class="small muted" x="16" y="216">the slot&#x27;s index leaf: 0006a745 → 147628</text>
 <line x1="116" y1="130" x2="116" y2="168" marker-end="url(#lu-arrow)"/>
 <rect class="value" x="380" y="170" width="180" height="30"/>
-<text class="small value" x="470" y="190" text-anchor="middle">offset 2,296,496</text>
-<text class="small muted" x="380" y="216">16 × 143531: the frame&#x27;s data</text>
+<text class="small value" x="470" y="190" text-anchor="middle">offset 2,362,048</text>
+<text class="small muted" x="380" y="216">16 × 147628: the frame&#x27;s data</text>
 <line x1="216" y1="185" x2="378" y2="185" marker-end="url(#lu-arrow)"/>
 <rect x="380" y="100" width="180" height="30"/>
 <text class="small " x="470" y="120" text-anchor="middle">rows, decoded</text>
-<text class="small muted" x="380" y="146">against frame 77,897, depth 1</text>
+<text class="small muted" x="380" y="146">against frame 81,994, depth 1</text>
 <line x1="470" y1="170" x2="470" y2="132" marker-end="url(#lu-arrow)"/>
 <rect class="value" x="380" y="30" width="180" height="30"/>
-<text class="small value" x="470" y="50" text-anchor="middle">token 143526</text>
+<text class="small value" x="470" y="50" text-anchor="middle">token 147623</text>
 <text class="small muted" x="380" y="76">row 2&#x27;s slot 2</text>
 <line x1="470" y1="100" x2="470" y2="62" marker-end="url(#lu-arrow)"/>
 <rect class="value" x="600" y="30" width="140" height="30"/>
 <text class="small value" x="670" y="50" text-anchor="middle">03 &quot;Oat milk&quot; 00</text>
-<text class="small muted" x="600" y="76">at 16 × 143526</text>
+<text class="small muted" x="600" y="76">at 16 × 147623</text>
 <line x1="560" y1="45" x2="598" y2="45" marker-end="url(#lu-arrow)"/>
 <text class="label small muted" x="16" y="270">Inside a leaf, a search compares keys part by part where their tokens sit, through the mapping: no key is copied out.</text>
 <text class="label small muted" x="16" y="288">When opening trusts the newest slot, it reads the slots and nothing else; everything after is mapped and read on demand.</text>
@@ -1118,17 +1191,17 @@ Alice buys the bigger carton and changes the name to `"Oat milk, 2 L"`. Under `P
 <text class="small critical" x="484" y="37">retracted</text>
 <rect class="value" x="16" y="50" width="460" height="26"/>
 <text class="small" x="24" y="67">00 item:1 name &quot;Oat milk, 2 L&quot;</text>
-<text class="small muted" x="484" y="67">datum 143614</text>
+<text class="small muted" x="484" y="67">datum 147711</text>
 <rect class="critical" x="16" y="80" width="460" height="26"/>
 <text class="small" x="24" y="97">01 item:1 name &quot;Oat milk&quot;</text>
 <text class="small critical" x="484" y="97">retracted</text>
 <rect class="value" x="16" y="110" width="460" height="26"/>
 <text class="small" x="24" y="127">01 item:1 name &quot;Oat milk, 2 L&quot;</text>
-<text class="small muted" x="484" y="127">datum 143614</text>
+<text class="small muted" x="484" y="127">datum 147711</text>
 <rect class="shade" x="16" y="140" width="460" height="26"/>
 <text class="small" x="24" y="157">02 …, 03 …, and 05: a coverage entry for what the change replaced</text>
 <text class="small muted" x="484" y="157"></text>
-<text class="label small muted" x="16" y="182">Commit 3&#x27;s root frame: 23 operations, 13 copied from commit 2&#x27;s and 10 new, 159 bytes for a 6,092-byte block.</text>
+<text class="label small muted" x="16" y="182">Commit 3&#x27;s root frame: 23 operations, 13 copied from commit 2&#x27;s and 10 new, 156 bytes for a 6,092-byte block.</text>
 </svg>
 </figure>
 
@@ -1138,39 +1211,39 @@ The new root is written against commit 2's, which was written against commit 1's
 <svg class="dg" viewBox="0 0 760 220" width="760" height="220" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="The root&#x27;s frames, each written against the one before: reading the newest decodes the chain back to a whole frame">
 <defs><marker id="ch-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z"/></marker></defs>
 <rect class="value solid" x="16" y="40" width="104" height="44"/>
-<text class="small" x="68" y="58" text-anchor="middle" style="fill:var(--dg-paper)">frame 77897</text>
+<text class="small" x="68" y="58" text-anchor="middle" style="fill:var(--dg-paper)">frame 81994</text>
 <text class="small" x="68" y="74" text-anchor="middle" style="fill:var(--dg-paper)">depth 0, 117 B</text>
 <text class="small muted" x="68" y="100" text-anchor="middle">commit 1</text>
 <rect class="value" x="138" y="40" width="104" height="44"/>
-<text class="small" x="190" y="58" text-anchor="middle">frame 143531</text>
+<text class="small" x="190" y="58" text-anchor="middle">frame 147628</text>
 <text class="small" x="190" y="74" text-anchor="middle">depth 1, 126 B</text>
 <text class="small muted" x="190" y="100" text-anchor="middle">commit 2</text>
 <line x1="136" y1="62" x2="120" y2="62" marker-end="url(#ch-arrow)"/>
 <rect class="value" x="260" y="40" width="104" height="44"/>
-<text class="small" x="312" y="58" text-anchor="middle">frame 143642</text>
-<text class="small" x="312" y="74" text-anchor="middle">depth 2, 159 B</text>
+<text class="small" x="312" y="58" text-anchor="middle">frame 147739</text>
+<text class="small" x="312" y="74" text-anchor="middle">depth 2, 156 B</text>
 <text class="small muted" x="312" y="100" text-anchor="middle">commit 3</text>
 <line x1="258" y1="62" x2="242" y2="62" marker-end="url(#ch-arrow)"/>
 <rect class="value" x="382" y="40" width="104" height="44"/>
-<text class="small" x="434" y="58" text-anchor="middle">frame 143847</text>
-<text class="small" x="434" y="74" text-anchor="middle">depth 3, 128 B</text>
+<text class="small" x="434" y="58" text-anchor="middle">frame 147945</text>
+<text class="small" x="434" y="74" text-anchor="middle">depth 3, 122 B</text>
 <text class="small muted" x="434" y="100" text-anchor="middle">commit 4, folded</text>
 <line x1="380" y1="62" x2="364" y2="62" marker-end="url(#ch-arrow)"/>
 <rect class="value" x="504" y="40" width="104" height="44"/>
-<text class="small" x="556" y="58" text-anchor="middle">frame 209486</text>
-<text class="small" x="556" y="74" text-anchor="middle">depth 4, 214 B</text>
+<text class="small" x="556" y="58" text-anchor="middle">frame 213583</text>
+<text class="small" x="556" y="74" text-anchor="middle">depth 4, 217 B</text>
 <text class="small muted" x="556" y="100" text-anchor="middle">commit 6</text>
 <line x1="502" y1="62" x2="486" y2="62" marker-end="url(#ch-arrow)"/>
 <rect class="value" x="626" y="40" width="104" height="44"/>
-<text class="small" x="678" y="58" text-anchor="middle">frame 209547</text>
+<text class="small" x="678" y="58" text-anchor="middle">frame 213645</text>
 <text class="small" x="678" y="74" text-anchor="middle">depth 5, 114 B</text>
 <text class="small muted" x="678" y="100" text-anchor="middle">a lost try</text>
 <line x1="624" y1="62" x2="608" y2="62" marker-end="url(#ch-arrow)"/>
 <text class="label small muted" x="16" y="28">base ←</text>
-<text class="label small muted" x="16" y="136">Reading frame 209,547 decodes six frames: the whole one, then each frame&#x27;s copies and new rows on top. A writer looks up the</text>
+<text class="label small muted" x="16" y="136">Reading frame 213,645 decodes six frames: the whole one, then each frame&#x27;s copies and new rows on top. A writer looks up the</text>
 <text class="label small muted" x="16" y="154">node&#x27;s lineage (its catalog, its kind and its first key) to find the frame to write against.</text>
 <text class="label small muted" x="16" y="180">At depth 32 (CHAIN) the next version is written whole again, so no read decodes more than 32 frames.</text>
-<text class="label small muted" x="16" y="206">Commit 5&#x27;s root is frame 143,836, also written against 143,642: two versions can share a base.</text>
+<text class="label small muted" x="16" y="206">Commit 5&#x27;s root is frame 147,934, also written against 147,739: two versions can share a base.</text>
 </svg>
 </figure>
 
@@ -1204,7 +1277,7 @@ A writer holds the turn only while it lays out and writes its records. Even so, 
 <text class="small bob" x="506" y="80" text-anchor="middle">tries the turn: taken</text>
 <line class="bob" x1="630" y1="134" x2="384" y2="134" marker-end="url(#tp-arrow)"/>
 <text class="small bob" x="506" y="110" text-anchor="middle">writes the block whole into</text>
-<text class="small bob" x="506" y="126" text-anchor="middle">its extent at 1,246,469</text>
+<text class="small bob" x="506" y="126" text-anchor="middle">its extent at 1,312,021</text>
 <line class="bob" x1="630" y1="168" x2="384" y2="168" marker-end="url(#tp-arrow)"/>
 <text class="small bob" x="506" y="162" text-anchor="middle">count: 8,059 bytes</text>
 <text class="small muted" x="392" y="192">readers in any process</text>
@@ -1215,12 +1288,13 @@ A writer holds the turn only while it lays out and writes its records. Even so, 
 <text class="small bob" x="650" y="284">the turn</text>
 <line class="alice" x1="130" y1="306" x2="376" y2="306" marker-end="url(#tp-arrow)"/>
 <text class="small alice" x="250" y="300" text-anchor="middle">lets go</text>
-<line class="bob" x1="630" y1="350" x2="384" y2="350" marker-end="url(#tp-arrow)"/>
-<text class="small bob" x="506" y="326" text-anchor="middle">takes the turn, appends the head:</text>
-<text class="small bob" x="506" y="342" text-anchor="middle">needs extent 1,246,469, epoch 4</text>
+<line class="bob" x1="630" y1="356" x2="384" y2="356" marker-end="url(#tp-arrow)"/>
+<text class="small bob" x="506" y="318" text-anchor="middle">takes the turn, appends the head:</text>
+<text class="small bob" x="506" y="332" text-anchor="middle">needs extent 1,312,021, epoch 4,</text>
+<text class="small bob" x="506" y="346" text-anchor="middle">8,059 bytes, CRC-32 50fb2dc1</text>
 <line class="bob" x1="630" y1="396" x2="384" y2="396" marker-end="url(#tp-arrow)"/>
 <text class="small bob" x="506" y="372" text-anchor="middle">its next commit, in the turn,</text>
-<text class="small bob" x="506" y="388" text-anchor="middle">folds the block in as frame 143,847</text>
+<text class="small bob" x="506" y="388" text-anchor="middle">folds the block in as frame 147,945</text>
 <text class="label small muted" x="16" y="424">In the example, a helper process holds the turn for 300 ms while the example&#x27;s peer commits item:3.</text>
 </svg>
 </figure>
@@ -1230,7 +1304,7 @@ An extent is a record whose body is written later, one frame at a time:
 <figure class="dg">
 <svg class="dg" viewBox="0 0 760 260" width="760" height="260" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="An extent&#x27;s header: count, its inverse and the epoch, then whole frames">
 <defs><marker id="eb-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z"/></marker></defs>
-<text class="label small muted" x="16" y="20">the extent at 1,246,469 while it holds Bob&#x27;s block</text>
+<text class="label small muted" x="16" y="20">the extent at 1,312,021 while it holds Bob&#x27;s block</text>
 <rect class="shade" x="16" y="32" width="26" height="24"/>
 <text x="29" y="48.5" text-anchor="middle">08</text>
 <rect class="shade" x="42" y="32" width="26" height="24"/>
@@ -1312,14 +1386,14 @@ An extent is a record whose body is written later, one frame at a time:
 <path class="wire" d="M480,132 L480,138 L704,138 L704,132"/>
 <text class="small muted" x="592" y="152" text-anchor="middle">epoch 4: claimed by append 4</text>
 <rect class="value" x="16" y="180" width="620" height="28"/>
-<text class="small" x="24" y="198">frame record, 8,050 bytes: hash 387ac86c…, kind ff (whole), then the 7,996-byte block</text>
+<text class="small" x="24" y="198">frame record, 8,050 bytes: hash 66b11878…, kind ff (whole), then the 7,996-byte block</text>
 <text class="label small muted" x="16" y="238">Only the count is written over, after the frames it counts. The epoch tells a new claim of the same space from an old one.</text>
 </svg>
 </figure>
 
-The block is readable at once, by Bob's process and by any other: a reader that misses in the index reads the extents the slot lists. The head is another matter. It must come after what it names, so it waits for the turn. When it lands, its record names the extent, epoch and byte count it needs, and recovery keeps that head only if the extent holds whole frames that far.
+The block is readable at once, by Bob's process and by any other: a reader that misses in the index reads the extents the slot lists. The head is another matter. It must come after what it names, so it waits for the turn. When it lands, its record names the extent, epoch and byte count it needs, with a CRC-32 of those bytes, and recovery keeps that head only if the extent holds whole frames that far and their bytes match the CRC. A power loss can keep an extent's new count and lose a frame written under it, and the CRC tells the frame this claim wrote from one an earlier claim of the extent left in the same place.
 
-The next writer to hold the turn, usually the same one at its next commit, **folds** the extent in: its blocks become tokens and frames, and the extent is retired. Here the 7,996-byte block became a 128-byte frame. A retired extent is free to claim again after the next sync point. A process that writes keeps one extent ready for itself, and a process that opens the file while the turn is free leaves one that no process owns, for a process that has none. So even a process that has never held the turn can write without waiting.
+The next writer to hold the turn, usually the same one at its next commit, **folds** the extent in: its blocks become tokens and frames, and the extent is retired. Here the 7,996-byte block became a 122-byte frame. A retired extent is free to claim again after the next sync point. A process that writes keeps one extent ready for itself, and a process that opens the file while the turn is free leaves one that no process owns, for a process that has none. So even a process that has never held the turn can write without waiting.
 
 ### Two writers on one branch
 
@@ -1350,7 +1424,7 @@ Bob's commit and Alice's went to the same file but could have gone to different 
 </svg>
 </figure>
 
-`Branch::transact` takes the code that builds the transaction, not the transaction, so a lost race runs that code again over the head that won, and what it read is read again. The losing try's root had already been written to the file, as frame 209,547. No head names it, and it stays there.
+`Branch::transact` takes the code that builds the transaction, not the transaction, so a lost race runs that code again over the head that won, and what it read is read again. The losing try's root had already been written to the file, as frame 213,645. No head names it, and it stays there.
 
 ### A reader while a write is under way
 
@@ -1358,7 +1432,7 @@ Bob's commit and Alice's went to the same file but could have gone to different 
 <svg class="dg" viewBox="0 0 760 250" width="760" height="250" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="A reader holds a snapshot: the slot it took and a mapping up to that slot&#x27;s end; a writer appends past it">
 <defs><marker id="rd-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z"/></marker></defs>
 <rect class="value" x="16" y="50" width="420" height="36"/>
-<text class="small" x="226" y="72" text-anchor="middle">up to slot 9&#x27;s end (2,297,322): never written again</text>
+<text class="small" x="226" y="72" text-anchor="middle">up to slot 9&#x27;s end (2,362,874): never written again</text>
 <rect class="attribute" x="436" y="50" width="160" height="36"/>
 <text class="small" x="516" y="72" text-anchor="middle">commit 3&#x27;s records</text>
 <line class="critical" x1="436" y1="40" x2="436" y2="100"/>
@@ -1367,7 +1441,7 @@ Bob's commit and Alice's went to the same file but could have gone to different 
 <text class="label small muted" x="16" y="152">Everything a slot names stays as it was, except index pages, which are reused. So a reader reads its snapshot without</text>
 <text class="label small muted" x="16" y="170">a lock, and the writer never waits for it. A lookup that misses looks for a newer slot, once the file has grown.</text>
 <text class="label small muted" x="16" y="196">An index page reused since is caught: each page records the append that wrote it and a checksum, and its parent names</text>
-<text class="label small muted" x="16" y="214">both (page 860, append 29). A mismatch is stale: the reader takes the newest slot and looks again.</text>
+<text class="label small muted" x="16" y="214">both (page 876, append 29). A mismatch is stale: the reader takes the newest slot and looks again.</text>
 </svg>
 </figure>
 
@@ -1376,7 +1450,7 @@ The file's index is the one thing written over: its pages are reused once no dur
 <figure class="dg">
 <svg class="dg" viewBox="0 0 760 220" width="760" height="220" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="An index page: the append that wrote it, a checksum, a header, then entries; the slot&#x27;s root names pages by page and append">
 <defs><marker id="pg-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z"/></marker></defs>
-<text class="label small muted" x="16" y="20">page 860 (offset 3,522,560), written by append 29 when 2,100 blocks were appended at once</text>
+<text class="label small muted" x="16" y="20">page 876 (offset 3,588,096), written by append 29 when 2,100 blocks were appended at once</text>
 <rect class="critical" x="16" y="32" width="30" height="24"/>
 <text class="critical" x="31" y="48.5" text-anchor="middle">1d</text>
 <rect class="critical" x="46" y="32" width="30" height="24"/>
@@ -1386,13 +1460,13 @@ The file's index is the one thing written over: its pages are reused once no dur
 <rect class="critical" x="106" y="32" width="30" height="24"/>
 <text class="critical" x="121" y="48.5" text-anchor="middle">00</text>
 <rect class="hash" x="136" y="32" width="30" height="24"/>
-<text class="hash" x="151" y="48.5" text-anchor="middle">2c</text>
+<text class="hash" x="151" y="48.5" text-anchor="middle">0f</text>
 <rect class="hash" x="166" y="32" width="30" height="24"/>
-<text class="hash" x="181" y="48.5" text-anchor="middle">06</text>
+<text class="hash" x="181" y="48.5" text-anchor="middle">3f</text>
 <rect class="hash" x="196" y="32" width="30" height="24"/>
-<text class="hash" x="211" y="48.5" text-anchor="middle">0e</text>
+<text class="hash" x="211" y="48.5" text-anchor="middle">55</text>
 <rect class="hash" x="226" y="32" width="30" height="24"/>
-<text class="hash" x="241" y="48.5" text-anchor="middle">cd</text>
+<text class="hash" x="241" y="48.5" text-anchor="middle">40</text>
 <rect class="shade" x="256" y="32" width="30" height="24"/>
 <text x="271" y="48.5" text-anchor="middle">00</text>
 <rect class="shade" x="286" y="32" width="30" height="24"/>
@@ -1419,8 +1493,8 @@ The file's index is the one thing written over: its pages are reused once no dur
 <text class="small muted" x="316" y="86" text-anchor="middle">leaf, 360 entries</text>
 <path class="wire" d="M376,66 L376,72 L496,72 L496,66"/>
 <text class="small muted" x="436" y="86" text-anchor="middle">unused</text>
-<text class="small muted" x="16" y="118">The slot&#x27;s root became internal: children (860, 29) … (865, 29),</text>
-<text class="small muted" x="16" y="134">pivots 0ac5a1f9, 15a8af75, 21212262, 2c05ce66, 36b4584b.</text>
+<text class="small muted" x="16" y="118">The slot&#x27;s root became internal: children (876, 29) … (881, 29),</text>
+<text class="small muted" x="16" y="134">pivots 0ac5a1f9, 15a28396, 212673a3, 2c09715d, 36d03879.</text>
 <text class="label small muted" x="16" y="166">4,096 bytes a page, on a 4,096-byte boundary of the file. A leaf holds up to 510 entries; an internal node 8 children and a buffer.</text>
 <text class="label small muted" x="16" y="184">Most appends write only the root, whose buffer holds up to 2,048 entries.</text>
 </svg>
@@ -1440,12 +1514,12 @@ Replicas exchange blocks, not frames (see [Sync](./sync.md)). When a peer asks f
 <svg class="dg" viewBox="0 0 760 270" width="760" height="270" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Serving a block to a peer: the frame chain rebuilds the exact bytes, and their BLAKE3 hash is the name asked for">
 <defs><marker id="sv-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z"/></marker></defs>
 <rect class="hash" x="16" y="20" width="380" height="28"/>
-<text class="small" x="206" y="38" text-anchor="middle">peer asks for 565412…</text>
+<text class="small" x="206" y="38" text-anchor="middle">peer asks for 45a706…</text>
 <rect class="value" x="16" y="58" width="380" height="28"/>
-<text class="small" x="206" y="76" text-anchor="middle">frame 143531, depth 1</text>
+<text class="small" x="206" y="76" text-anchor="middle">frame 147628, depth 1</text>
 <line x1="206" y1="48" x2="206" y2="56" marker-end="url(#sv-arrow)"/>
 <rect class="value" x="16" y="96" width="380" height="28"/>
-<text class="small" x="206" y="114" text-anchor="middle">rows of frame 77,897, then copies and new rows</text>
+<text class="small" x="206" y="114" text-anchor="middle">rows of frame 81,994, then copies and new rows</text>
 <line x1="206" y1="86" x2="206" y2="94" marker-end="url(#sv-arrow)"/>
 <rect class="attribute" x="16" y="134" width="380" height="28"/>
 <text class="small" x="206" y="152" text-anchor="middle">each token&#x27;s bytes, by id</text>
@@ -1454,7 +1528,7 @@ Replicas exchange blocks, not frames (see [Sync](./sync.md)). When a peer asks f
 <text class="small" x="206" y="190" text-anchor="middle">the block: 4,372 bytes, encoded</text>
 <line x1="206" y1="162" x2="206" y2="170" marker-end="url(#sv-arrow)"/>
 <rect class="hash" x="16" y="210" width="380" height="28"/>
-<text class="small" x="206" y="228" text-anchor="middle">BLAKE3 = 565412…  ✓</text>
+<text class="small" x="206" y="228" text-anchor="middle">BLAKE3 = 45a706…  ✓</text>
 <line x1="206" y1="200" x2="206" y2="208" marker-end="url(#sv-arrow)"/>
 <text class="label small" x="420" y="40">The example rebuilt all nine nodes this way:</text>
 <text class="label small" x="420" y="58">every hash matched.</text>
@@ -1543,7 +1617,7 @@ Whether this works is tested, not argued. The tests record every write the archi
 <figure class="dg">
 <svg class="dg" viewBox="0 0 760 176" width="760" height="176" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="The last close: extents are freed and a sync point made; free extents that end the file are cut off">
 <defs><marker id="cl-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z"/></marker></defs>
-<text class="label small muted" x="16" y="20">the example&#x27;s file after its last close: 3,547,136 bytes long, 241,664 allocated</text>
+<text class="label small muted" x="16" y="20">the example&#x27;s file after its last close: 3,612,672 bytes long, 245,760 allocated</text>
 <rect class="shade" x="16" y="34" width="20" height="30"/>
 <rect class="ghost" x="36" y="34" width="40" height="30"/>
 <text class="small" x="56" y="54" text-anchor="middle">free</text>
@@ -1585,10 +1659,10 @@ All integers are little-endian. *Varint* is LEB128, *zigzag* maps signed to unsi
 
 | what | where | layout |
 |---|---|---|
-| magic | 0 | `DIALOGA`, then the format version (14) |
-| rolling slots | 8 and 65,544 | 64 KiB each: length u32, crc32 u32, body |
-| durable slot | 131,080 | the same, written only at a sync point |
-| records | from 196,616 | kind u8, length u32, crc32 u32, body |
+| magic | 0 | 16 bytes: `DIALOG`, the byte `b6`, the format version (1), then eight zeros, reserved |
+| rolling slots | 16 and 65,552 | 64 KiB each: length u32, crc32 u32, body |
+| durable slot | 131,088 and 196,624 | two copies, the same layout, written only at a sync point; the last 8 bytes of each 64 KiB hold the sequence of the copy last synced there |
+| records | from 262,160 | kind u8, length u32, crc32 u32, body |
 | lock bytes | from 2⁶²−3 | sync, recovery, present, turn, then an owner byte per extent |
 
 | record | body |
@@ -1597,7 +1671,7 @@ All integers are little-endian. *Varint* is LEB128, *zigzag* maps signed to unsi
 | frame (5) | pad u8, padding, then data on a multiple of 16: hash (32), kind u8, depth u8, catalog varint, base varint (frame id + 1, or 0), manifest varint (token id), then the rows; or, for kind `ff`, length varint and the block |
 | pages (7) | padding length u16, padding, pages of 4,096 bytes on 4,096-byte boundaries |
 | extent (8) | pad u8 to 8 bytes, count u64, its inverse u64, epoch u64, then frame records |
-| cell (9) | pad u8, padding, then on a multiple of 16: name length u16, name, present u8, value length u32, value, needs count u16, per need record u64, epoch u64, bytes u64 |
+| cell (9) | pad u8, padding, then on a multiple of 16: name length u16, name, present u8, value length u32, value, needs count u16, per need record u64, epoch u64, bytes u64, crc32 of those bytes u32 |
 
 | slot field | size |
 |---|---|
@@ -1627,5 +1701,6 @@ All integers are little-endian. *Varint* is LEB128, *zigzag* maps signed to unsi
 | setting | value |
 |---|---|
 | extent size | 1 MiB (`Options::extent`) |
-| sync point | every 64 appends, 2 seconds, or 2,048 freed index pages |
+| sync point | every 64 appends, 2 seconds, or 2,048 freed index pages; after 2 seconds a thread in each process makes one even if no append follows |
+| blocks in one append | at most 32,768 (`COMMIT_BLOCKS`); a larger commit is appended in parts |
 | longest chain of frames | 32 (`CHAIN`) |

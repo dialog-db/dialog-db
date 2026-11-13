@@ -471,6 +471,17 @@ mod walk {
             {
                 let at = HEAD + index as u64 * SLOT;
                 let slot = self.slot(&bytes, at, name)?;
+                if index >= 2 {
+                    // The last 8 bytes of a durable copy's area: the
+                    // sequence of the copy last synced there.
+                    let marker = (at + SLOT - 8) as usize;
+                    if let Some(synced) = bytes.get(marker..marker + 8) {
+                        println!(
+                            "  {name}: synced marker @{marker} = {}",
+                            u64::from_le_bytes(synced.try_into()?)
+                        );
+                    }
+                }
                 if let Some(slot) = slot.filter(|_| index < 2)
                     && newest
                         .as_ref()
