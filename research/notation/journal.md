@@ -741,6 +741,16 @@ xychart-beta
 
 **Decision.** The sentence is not enough. The candidate to test is the skipped step: a rule that concludes a concept derives values of that concept's domain fields, and a pick elects among stored and derived values by when they were last caused.
 
+## 2026-11-13 — R29: stating the step helps some readers, showing it helps none
+
+**Question.** The one [planned](results/r29-plan.md): do readers see the rename of a derived to-do land when they are told the step R28's readers skipped, or shown it in an example?
+
+**Method.** As planned, ten readers per variant. The session caps agents at 20, so ten started a few seconds after the rest.
+
+**Results.** [r29](results/r29.md). The two sentences (`steps`) scored 6 of 10 on the whole of question 8: no verdict by the bars. Every reader who scored also got question 9 right, for dialog's reason. The worked example scored 0 of 10, below R28's sentence (`baseline`), which scored 4 on the step and 3 on the whole, as in R28. Every miss in three rounds follows one script: look up the stored-facts list, find no `xyz.todo` line for `issue:7`, conclude rule B cannot fire.
+
+**Decision.** Documentation alone is not the fix. Readers take a concept call as stored and derived, and a domain call as stored, because the `xyz.` prefix is all that marks the stored layer. The candidates are rule B reading through the concept, and the stored facts given without a table of attributes, to separate the notation from the prompt.
+
 ## How to reproduce
 
 1. Take a variant's prompt from its round's results file and save it as `<variant>.txt`.
