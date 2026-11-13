@@ -1106,3 +1106,24 @@ one finds itself the last. Pinned by
 handle between its check and its release, as if all three were dropped at
 the same instant. Without the lock no handle closes the file; with it, one
 does.
+
+## 2026-11-13: the fifth review round
+
+The fifth review (at 5e467d97) found no defects and made two observations.
+Both are acted on.
+
+- **The upgrade under the table had no test of its own.** The reviewer's
+  test plays an upgrade taken without the table, which only `shared`
+  answers. The sync thread's upgrade is now `upgrade_open`.
+  `it_takes_the_sync_threads_reference_under_the_open_table` holds the
+  table and checks that the upgrade waits for it; it fails with the lock
+  taken out.
+- **The last close held `dropping` while it waited for the writer's
+  turn,** so handles of a reopen made meanwhile waited for another
+  process's turn as they were let go. A handle that is not the last still
+  lets go under `dropping`. The last lets go of `dropping` before it
+  closes, and takes it again only if the close stands down, so that the
+  reopen's last handle then closes the file.
+  `it_lets_go_of_a_reopened_handle_while_the_last_close_waits_for_the_turn`
+  waited 1.0 s before (the other process held the turn that long), and
+  now does not wait.

@@ -1625,3 +1625,46 @@ fn it_keeps_the_file_present_when_the_sync_thread_looks_during_the_last_close() 
     );
     all_read_back(&reopened, &["first".into(), "loose".into()])
 }
+
+/// A handle of a file reopened while its last close waits for the writer's
+/// turn another process holds is let go of without waiting for that turn:
+/// the close does not hold up the reopen's handles. Once it has the turn it
+/// stands down, and the reopen keeps the file, its blocks read back.
+#[dialog_common::test]
+fn it_lets_go_of_a_reopened_handle_while_the_last_close_waits_for_the_turn() -> anyhow::Result<()> {
+    use std::mem::ManuallyDrop;
+    use std::sync::Arc;
+    use std::time::Instant;
+
+    let directory = tempfile::tempdir()?;
+    let path = archive_in(&directory);
+    let options = Options {
+        sync_in_background: false,
+        ..Options::default()
+    };
+    let archive = Chronicle::open_with(&path, options.clone())?;
+    archive.append("index", &[block("first")])?;
+    let holder = hold(&path, locks::TURN, true)?;
+    let closing = std::thread::spawn(move || drop(archive));
+    // The close waits for the turn the other process holds.
+    std::thread::sleep(Duration::from_millis(200));
+    let reopened = Chronicle::open_with(&path, options)?;
+    // The other process lets the turn go in a second, whatever happens here.
+    let letting_go = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(1));
+        holder.finish()
+    });
+    let clone = Chronicle {
+        inner: ManuallyDrop::new(Arc::clone(&reopened.inner)),
+    };
+    let started = Instant::now();
+    drop(clone);
+    let took = started.elapsed();
+    letting_go.join().expect("the holder")?;
+    closing.join().expect("the close");
+    assert!(
+        took < Duration::from_millis(200),
+        "letting go of a reopened handle waited {took:?} for the last close's turn"
+    );
+    all_read_back(&reopened, &["first".into()])
+}

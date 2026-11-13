@@ -1331,19 +1331,20 @@ impl Chronicle {
             std::thread::sleep(SYNC_AFTER / 2);
             let synced: Vec<Weak<Inner>> = SYNCED.lock().clone();
             for inner in synced {
-                // Upgraded under the table, which a last close holds from
-                // finding itself the last until its descriptor is closed:
-                // the upgrade comes before that, and the close stands
-                // down, or after, and finds nothing.
-                let inner = {
-                    let _open = OPEN.lock();
-                    inner.upgrade()
-                };
-                if let Some(inner) = inner {
+                if let Some(inner) = Self::upgrade_open(&inner) {
                     Self::sync_if_waited(inner);
                 }
             }
         }
+    }
+
+    /// The open file `inner` names, if it is still open: upgraded under the
+    /// table of open files, which a last close holds from finding itself
+    /// the last until its descriptor is closed, so the upgrade comes before
+    /// that, and the close stands down, or after, and finds nothing.
+    fn upgrade_open(inner: &Weak<Inner>) -> Option<Arc<Inner>> {
+        let _open = OPEN.lock();
+        inner.upgrade()
     }
 
     /// Makes a sync point in the archive `inner` holds if its appends have
@@ -1379,12 +1380,8 @@ impl Chronicle {
         {
             let _ = archive.sync_now(false);
         }
-        let dropping = archive.inner.dropping.clone();
-        let _dropping = dropping.lock();
-        let open = archive.close();
-        // SAFETY: taken once, and `archive` is not used again.
-        drop(unsafe { ManuallyDrop::take(&mut archive.inner) });
-        drop(open);
+        // Let go of as a handle is, but without `looking`, held here.
+        archive.let_go();
     }
 
     /// Opens the file with a handle of its own, not shared with another
@@ -3254,19 +3251,35 @@ impl Drop for Chronicle {
         // point.
         let looking = self.inner.looking.clone();
         let _looking = (Arc::strong_count(&self.inner) <= 2).then(|| looking.lock());
-        // Handles are let go of one at a time, the sync thread's among
-        // them: the one that finds itself the last is, and closes the file.
+        self.let_go();
+    }
+}
+
+impl Chronicle {
+    /// Lets go of this handle's reference, closing the file if it is the
+    /// last (see [`close`](Self::close)). Handles are let go of one at a
+    /// time, the sync thread's among them, under `dropping`: one that is
+    /// not the last lets go under it, so two let go at once cannot each
+    /// find the other. The last lets go of `dropping` before it closes,
+    /// which waits for the writer's turn: handles of a reopen meanwhile
+    /// are let go of without waiting for it. A reopen meanwhile makes the
+    /// close stand down; then this one lets go under `dropping`, and the
+    /// reopen's last handle closes the file. `self.inner` is taken: the
+    /// handle is not used again.
+    fn let_go(&mut self) {
         let dropping = self.inner.dropping.clone();
-        let _dropping = dropping.lock();
-        let open = self.close();
-        #[cfg(test)]
-        {
-            let hook = self.inner.before_letting_go.lock().clone();
-            if let Some(hook) = hook {
-                hook();
-            }
+        let guard = dropping.lock();
+        if Arc::strong_count(&self.inner) != 1 {
+            self.letting_go();
+            // SAFETY: taken once, here, and not used again.
+            drop(unsafe { ManuallyDrop::take(&mut self.inner) });
+            return;
         }
-        // SAFETY: taken once, here, and not used again: `self` is going.
+        drop(guard);
+        let open = self.close();
+        let _guard = open.is_none().then(|| dropping.lock());
+        self.letting_go();
+        // SAFETY: taken once, here, and not used again.
         let inner = unsafe { ManuallyDrop::take(&mut self.inner) };
         // The last handle's state, its descriptor among it, goes while the
         // table of open files is held: an open of the file in this process
@@ -3275,6 +3288,18 @@ impl Drop for Chronicle {
         // process holds on the file, a new handle's among them.
         drop(inner);
         drop(open);
+    }
+
+    /// In tests, the hook between finding whether a handle is the last and
+    /// letting go of it.
+    fn letting_go(&self) {
+        #[cfg(test)]
+        {
+            let hook = self.inner.before_letting_go.lock().clone();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
     }
 }
 
@@ -4804,6 +4829,29 @@ mod tests {
                 "round {round}: no handle closed the file"
             );
         }
+        Ok(())
+    }
+
+    /// The sync thread takes its reference to an open file under the table
+    /// of open files, so it waits out a last close, which holds the table
+    /// from finding itself the last until its descriptor is closed, and
+    /// then finds the file gone.
+    #[dialog_common::test]
+    fn it_takes_the_sync_threads_reference_under_the_open_table() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let archive = Chronicle::open(directory.path().join("archive"))?;
+        let weak = Arc::downgrade(&archive.inner);
+        let closing = OPEN.lock();
+        let (taken, takes) = std::sync::mpsc::channel();
+        let looking = std::thread::spawn(move || {
+            let _ = taken.send(Chronicle::upgrade_open(&weak).is_some());
+        });
+        let while_held = takes.recv_timeout(Duration::from_millis(200));
+        drop(closing);
+        let after = takes.recv_timeout(Duration::from_secs(10))?;
+        looking.join().expect("the sync thread's part");
+        assert!(while_held.is_err(), "the upgrade waited for the table");
+        assert!(after, "the file is still open");
         Ok(())
     }
 
