@@ -168,7 +168,7 @@ fn term(node: &Syntax) -> Result<Term, Error> {
         Syntax::Constant(Value::Symbol(_)) => Term::Symbol(node.to_string()),
         Syntax::Reference(name) => Term::Symbol(name.clone()),
         application if application.is_formula() => Term::Formula(Box::new(formula(application)?)),
-        Syntax::Map(_) | Syntax::Tuple(_) => Term::Struct(node.clone()),
+        Syntax::Map(..) | Syntax::Tuple(_) => Term::Struct(node.clone()),
         other => return Err(Error::Refused(format!("{other} is not a term"))),
     })
 }

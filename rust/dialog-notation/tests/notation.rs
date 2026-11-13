@@ -705,6 +705,19 @@ async fn it_keeps_a_struct_and_takes_it_apart_by_a_pattern() -> Result<()> {
         .await?,
         vec![r#"(xyz.note note:1 about: {author: "Ada" pinned: true tags: ["math" "engines"]})"#]
     );
+    // With a rest it is a map of at least its entries, and the rest is
+    // the others, as a struct: both notes have an author.
+    assert_eq!(
+        report(
+            &mut notebook,
+            "(query (xyz.note ?n about: {author: ?who ...?others}))"
+        )
+        .await?,
+        vec![
+            r#"(xyz.note note:1 about: {author: "Ada" pinned: true tags: ["math" "engines"]})"#,
+            r#"(xyz.note note:2 about: {author: "Grace"})"#,
+        ]
+    );
     // A blank takes what is there and binds nothing; the row still says
     // what was there.
     assert_eq!(
@@ -1003,6 +1016,15 @@ async fn it_finds_a_kept_form_by_a_pattern_over_its_tree() -> Result<()> {
     .await?;
     assert_eq!(tuples.len(), 1, "{tuples:?}");
     assert!(tuples[0].contains(&entities[3]));
+
+    // With a rest, a pattern says only what it asks about: every kept
+    // form that applies a name, whatever else its nodes hold.
+    let named = report(
+        &mut notebook,
+        "(query (syntax.form ?f is: {operator: {name: ?name ...?reference} ...?node}))",
+    )
+    .await?;
+    assert_eq!(named.len(), 3, "{named:?}");
 
     // The parts of a node are a list, and `[ ]` in a query is a tuple:
     // a list is not a tuple, so a pattern cannot yet take the items of

@@ -70,8 +70,9 @@ pub enum Syntax {
     Reference(String),
     /// A struct, `{key value}`, its keys nodes like its values, in the
     /// order written, which its name does not depend on. With no
-    /// variable in it, it is a value.
-    Map(Vec<(Syntax, Syntax)>),
+    /// variable in it, it is a value. `...?name` after its entries, in
+    /// a pattern, is the entries not named, as a struct.
+    Map(Vec<(Syntax, Syntax)>, Option<String>),
     /// A tuple, `[a b]`.
     Tuple(Vec<Syntax>),
     /// `p ...`, in a pattern and in a template: any number of `p`.
@@ -248,7 +249,7 @@ fn made<'a>(
             path,
             written,
         )?),
-        Form::Map(entries) => {
+        Form::Map(entries, rest) => {
             let mut nodes = Vec::new();
             for (at, (name, value)) in entries.iter().enumerate() {
                 path.push(Segment::Key(at));
@@ -259,7 +260,15 @@ fn made<'a>(
                 path.pop();
                 nodes.push((name?, value?));
             }
-            Syntax::Map(nodes)
+            if let (Some(rest), Some(note)) = (inside(2 * entries.len()), note.as_mut()) {
+                note.order.push(Slot::Rest {
+                    at: rest.span.start,
+                });
+                note.closing
+                    .extend(rest.comments.iter().chain(&rest.after).cloned());
+                note.closing.sort_by_key(|comment| comment.at);
+            }
+            Syntax::Map(nodes, rest.clone())
         }
         Form::Application(head, parts) => {
             let mut operand = Parameters::default();
@@ -413,7 +422,7 @@ impl Syntax {
     /// | `:blank` | |
     /// | `:constant` | `value` |
     /// | `:reference` | `name`, a symbol |
-    /// | `:map` | `entries`, a map from node to node |
+    /// | `:map` | `entries`, a map from node to node; `rest`, a `:rest`, where one is written |
     /// | `:tuple` | `items`, a list of nodes |
     /// | `:repeat` | `of`, a node |
     /// | `:rest` | `name`, text |
@@ -430,7 +439,7 @@ impl Syntax {
             Syntax::Blank => node("blank", []),
             Syntax::Constant(value) => node("constant", [("value", value.clone())]),
             Syntax::Reference(name) => node("reference", [("name", data::symbol(name)?)]),
-            Syntax::Map(entries) => node(
+            Syntax::Map(entries, rest) => node(
                 "map",
                 [(
                     "entries",
@@ -440,7 +449,14 @@ impl Syntax {
                             .map(|(key, value)| Ok((key.value()?, value.value()?)))
                             .collect::<Result<Vec<_>, Error>>()?,
                     )?,
-                )],
+                )]
+                .into_iter()
+                .chain(
+                    rest.as_ref()
+                        .map(|name| node("rest", [("name", data::text(name))]))
+                        .transpose()?
+                        .map(|rest| ("rest", rest)),
+                ),
             ),
             Syntax::Tuple(items) => node("tuple", [("items", list(items)?)]),
             Syntax::Repeat(repeated) => node("repeat", [("of", repeated.value()?)]),
@@ -506,10 +522,15 @@ impl Syntax {
                 operand.items.iter().for_each(|item| item.variables(into));
                 operand.terms.values().for_each(|term| term.variables(into));
             }
-            Syntax::Map(entries) => entries.iter().for_each(|(key, value)| {
-                key.variables(into);
-                value.variables(into);
-            }),
+            Syntax::Map(entries, rest) => {
+                entries.iter().for_each(|(key, value)| {
+                    key.variables(into);
+                    value.variables(into);
+                });
+                // The rest of a struct is a variable like any in it: it
+                // is bound to a value, the entries not named.
+                into.extend(rest.iter().cloned());
+            }
             Syntax::Tuple(items) => items.iter().for_each(|item| item.variables(into)),
             Syntax::Repeat(repeated) => repeated.variables(into),
             Syntax::Blank | Syntax::Constant(_) | Syntax::Reference(_) => {}
@@ -578,7 +599,7 @@ impl Syntax {
                     .iter()
                     .enumerate()
                     .any(|(at, item)| inside(Segment::Item(at), item, path)),
-                Syntax::Map(entries) => entries.iter().enumerate().any(|(at, (name, value))| {
+                Syntax::Map(entries, _) => entries.iter().enumerate().any(|(at, (name, value))| {
                     inside(Segment::Key(at), name, path) || inside(Segment::Value(at), value, path)
                 }),
                 Syntax::Repeat(repeated) => inside(Segment::Repeated, repeated, path),
@@ -644,11 +665,12 @@ impl Syntax {
                 Value::Bytes(_) | Value::Record(_) => Form::Blank,
             },
             Syntax::Reference(name) => Form::Symbol(name.clone()),
-            Syntax::Map(entries) => Form::Map(
+            Syntax::Map(entries, rest) => Form::Map(
                 entries
                     .iter()
                     .map(|(key, value)| (key.form(), value.form()))
                     .collect(),
+                rest.clone(),
             ),
             Syntax::Tuple(items) => {
                 let mut forms = Vec::new();
@@ -712,6 +734,19 @@ fn text(node: &CompositeMap, field: &str) -> Result<String, Error> {
     }
 }
 
+/// The name of the `:rest` a node holds, where it holds one.
+fn rest(node: &CompositeMap) -> Result<Option<String>, Error> {
+    data::field(node, "rest")
+        .map(|rest| {
+            let rest = fields(rest)?;
+            match kind(&rest)? {
+                "rest" => text(&rest, "name"),
+                _ => Err(unread("rest")),
+            }
+        })
+        .transpose()
+}
+
 /// The type a node says it is: the name of the entity under `type`.
 fn kind(node: &CompositeMap) -> Result<&str, Error> {
     match data::field(node, "type") {
@@ -744,19 +779,10 @@ impl TryFrom<&Value> for Parameters {
                 ))
             })
             .collect::<Result<_, Error>>()?;
-        let rest = data::field(&node, "rest")
-            .map(|rest| {
-                let rest = fields(rest)?;
-                match kind(&rest)? {
-                    "rest" => text(&rest, "name"),
-                    _ => Err(unread("rest")),
-                }
-            })
-            .transpose()?;
         Ok(Parameters {
             items: nodes(&node, "items")?,
             terms,
-            rest,
+            rest: rest(&node)?,
         })
     }
 }
@@ -791,6 +817,7 @@ impl TryFrom<&Value> for Syntax {
                     .iter()
                     .map(|(key, value)| Ok((Syntax::try_from(key)?, Syntax::try_from(value)?)))
                     .collect::<Result<_, Error>>()?,
+                rest(&node)?,
             ),
             "tuple" => Syntax::Tuple(nodes(&node, "items")?),
             "repeat" => Syntax::Repeat(Box::new(Syntax::try_from(part("of")?)?)),
@@ -1021,10 +1048,13 @@ mod tests {
         assert!(operand.terms.is_empty());
         assert_eq!(
             operand.items,
-            vec![Syntax::Map(vec![(
-                Syntax::Reference("note".into()),
-                Syntax::Variable("n".into())
-            )])]
+            vec![Syntax::Map(
+                vec![(
+                    Syntax::Reference("note".into()),
+                    Syntax::Variable("n".into())
+                )],
+                None
+            )]
         );
         assert_ne!(
             one("(expand {note: ?n})").reference()?,
@@ -1186,6 +1216,31 @@ mod tests {
         );
         assert_eq!(back.value()?, kept);
         assert_eq!(back.reference()?, tree.reference()?);
+        Ok(())
+    }
+
+    /// The rest of a struct is part of what it says: it is kept, read
+    /// back, a variable of the tree, and a struct with one is another
+    /// tree than the struct without.
+    #[test]
+    fn it_keeps_the_rest_of_a_struct() -> Result<(), Error> {
+        let open = one("{author: ?who ...?others}");
+        assert_eq!(
+            open,
+            Syntax::Map(
+                vec![(
+                    Syntax::Reference("author".into()),
+                    Syntax::Variable("who".into())
+                )],
+                Some("others".into())
+            )
+        );
+        assert_eq!(Syntax::try_from(&open.value()?)?, open);
+        assert_eq!(open.to_string(), "{author: ?who ...?others}");
+        assert_ne!(open.reference()?, one("{author: ?who}").reference()?);
+        let mut variables = Vec::new();
+        open.variables(&mut variables);
+        assert_eq!(variables, vec!["who", "others"]);
         Ok(())
     }
 

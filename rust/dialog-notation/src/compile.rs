@@ -27,7 +27,7 @@ use dialog_query::concept::descriptor::ConceptStatement;
 use dialog_query::formula::entity::derive;
 use dialog_query::{
     Any, AttributeDescriptor, ConceptConclusion, ConceptQuery, DeductiveRule,
-    DeductiveRuleDescriptor, InductiveRule, InductiveRuleDescriptor, Pattern,
+    DeductiveRuleDescriptor, InductiveRule, InductiveRuleDescriptor, MapPattern, Pattern,
     Premise as DialogPremise, Proposition, Term as Variable,
 };
 use serde_json::{Map, Value as Json, json};
@@ -130,6 +130,7 @@ fn written(value: &Value) -> Syntax {
                             (key, written(value))
                         })
                         .collect(),
+                    None,
                 ),
                 Ok(Some(Composite::List(items) | Composite::Tuple(items))) => {
                     Syntax::Tuple(items.iter().map(written).collect())
@@ -319,13 +320,21 @@ fn shape(
             Syntax::Variable(variable) => name(Some(variable)).into(),
             Syntax::Blank => name(None).into(),
             Syntax::Constant(value) => value.clone().into(),
-            Syntax::Map(entries) => Pattern::map(
-                entries
-                    .iter()
-                    .map(|(at, value)| Ok((key(at)?, walk(value, name)?)))
-                    .collect::<Result<Vec<_>, Error>>()?,
-            )
-            .map_err(|error| refused("the struct", error))?,
+            Syntax::Map(entries, rest) => {
+                let named = MapPattern::new(
+                    entries
+                        .iter()
+                        .map(|(at, value)| Ok((key(at)?, walk(value, name)?)))
+                        .collect::<Result<Vec<_>, Error>>()?,
+                )
+                .map_err(|error| refused("the struct", error))?;
+                // `...?rest` is the entries not named, as a struct.
+                match rest {
+                    Some(rest) => named.with_rest(name(Some(rest))),
+                    None => named,
+                }
+                .into()
+            }
             Syntax::Tuple(items) => Pattern::tuple(
                 items
                     .iter()

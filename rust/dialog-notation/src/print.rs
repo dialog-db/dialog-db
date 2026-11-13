@@ -212,7 +212,7 @@ impl Printer<'_> {
                 self.closing(closing, &mut 0, None);
                 self.token(end, "]");
             }
-            Syntax::Map(entries) => {
+            Syntax::Map(entries, rest) => {
                 self.token(start, "{");
                 for (at, (name, value)) in entries.iter().enumerate() {
                     path.push(Segment::Key(at));
@@ -222,7 +222,18 @@ impl Printer<'_> {
                     self.node(value, path, false);
                     path.pop();
                 }
-                self.closing(closing, &mut 0, None);
+                let mut next = 0;
+                if let Some(name) = rest {
+                    let at = note.and_then(|note| {
+                        note.order.iter().find_map(|slot| match slot {
+                            Slot::Rest { at } => Some(*at),
+                            _ => None,
+                        })
+                    });
+                    self.closing(closing, &mut next, at);
+                    self.token(at, &format!("...?{name}"));
+                }
+                self.closing(closing, &mut next, None);
                 self.token(end, "}");
             }
             Syntax::Repeat(repeated) => {

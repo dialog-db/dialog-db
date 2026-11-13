@@ -84,7 +84,7 @@ fn count(form: &Form, into: &mut BTreeMap<String, Count>) {
             }
         }
         Form::Vector(items) => items.iter().for_each(|item| count(item, into)),
-        Form::Map(entries) => entries.iter().for_each(|(key, value)| {
+        Form::Map(entries, _) => entries.iter().for_each(|(key, value)| {
             count(key, into);
             count(value, into);
         }),

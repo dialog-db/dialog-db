@@ -32,8 +32,9 @@ pub enum Form {
     Rest(String),
     /// `[a b]`.
     Vector(Vec<Form>),
-    /// `{key value}` and `{label: value}`: entries in the order written.
-    Map(Vec<(Form, Form)>),
+    /// `{key value}` and `{label: value}`: entries in the order written,
+    /// and `...?name` after them, the entries a pattern does not name.
+    Map(Vec<(Form, Form)>, Option<String>),
     /// `(head part...)`.
     Application(Box<Form>, Vec<Part>),
 }
@@ -503,9 +504,29 @@ fn form(tokens: &[Token], at: &mut usize) -> Result<(Form, Mark), Misread> {
         }
         "{" => {
             let mut entries = Vec::new();
+            let mut rest = None;
             loop {
                 let next = tokens.get(*at).ok_or_else(ended)?;
                 if next.text == "}" {
+                    break;
+                }
+                if let Some(name) = next.text.strip_prefix("...?") {
+                    *at += 1;
+                    mark.parts.push(Mark {
+                        span: next.span,
+                        raw: next.raw.clone(),
+                        comments: next.comments.clone(),
+                        after: next.after.clone(),
+                        ..Mark::default()
+                    });
+                    rest = Some(name.to_string());
+                    let last = tokens.get(*at).ok_or_else(ended)?;
+                    if last.text != "}" {
+                        return Err((
+                            Error::Read("a `...?rest` stands after the entries of a struct".into()),
+                            last.span,
+                        ));
+                    }
                     break;
                 }
                 let key = match label(&next.text) {
@@ -534,7 +555,7 @@ fn form(tokens: &[Token], at: &mut usize) -> Result<(Form, Mark), Misread> {
                 entries.push((key, value));
             }
             close(&mut mark, at);
-            Form::Map(entries)
+            Form::Map(entries, rest)
         }
         "(" => {
             let (head, inside) = form(tokens, at)?;
@@ -603,7 +624,7 @@ impl Display for Form {
                 }
                 write!(f, "]")
             }
-            Form::Map(entries) => {
+            Form::Map(entries, rest) => {
                 write!(f, "{{")?;
                 for (at, (key, value)) in entries.iter().enumerate() {
                     if at > 0 {
@@ -613,6 +634,10 @@ impl Display for Form {
                         Some(label) => write!(f, "{label}: {value}")?,
                         None => write!(f, "{key} {value}")?,
                     }
+                }
+                if let Some(name) = rest {
+                    let space = if entries.is_empty() { "" } else { " " };
+                    write!(f, "{space}...?{name}")?;
                 }
                 write!(f, "}}")
             }
@@ -688,7 +713,7 @@ mod tests {
     #[test]
     fn it_reads_a_struct_as_the_part_it_is() {
         let form = &read("(expand {note: ?n})").unwrap()[0];
-        let Form::Map(entries) = form.bare()[0] else {
+        let Form::Map(entries, None) = form.bare()[0] else {
             panic!("a struct");
         };
         assert_eq!(entries.len(), 1);
@@ -700,13 +725,33 @@ mod tests {
     fn it_reads_a_map_by_label_or_by_pair() {
         let text = r#"{name: "Ada" xyz.person/age: 36 :open true [1 2] ?x}"#;
         let forms = read(text).unwrap();
-        let Form::Map(entries) = &forms[0] else {
+        let Form::Map(entries, None) = &forms[0] else {
             panic!("a map");
         };
         assert_eq!(entries.len(), 4);
         assert_eq!(entries[0].0, Form::symbol("name"));
         assert_eq!(entries[2].0, Form::Keyword("open".into()));
         assert_eq!(forms[0].to_string(), text);
+    }
+
+    /// `...?name` after a struct's entries is the entries not named. It
+    /// stands after them and nowhere else.
+    #[test]
+    fn it_reads_the_rest_of_a_struct_after_its_entries() {
+        for text in ["{author: ?who ...?others}", "{...?all}"] {
+            let forms = read(text).unwrap();
+            let Form::Map(_, Some(rest)) = &forms[0] else {
+                panic!("a struct with a rest");
+            };
+            assert!(rest == "others" || rest == "all");
+            assert_eq!(forms[0].to_string(), text);
+        }
+        assert_eq!(
+            read("{...?others author: ?who}"),
+            Err(Error::Read(
+                "a `...?rest` stands after the entries of a struct".into()
+            ))
+        );
     }
 
     #[test]

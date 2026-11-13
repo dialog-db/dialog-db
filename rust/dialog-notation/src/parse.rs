@@ -138,6 +138,22 @@ mod tests {
         back("(a)(b) [ 1  2 ]{ k: 1 }")
     }
 
+    /// The rest of a struct is printed where it was written, with the
+    /// comment above it.
+    #[dialog_common::test]
+    fn it_prints_the_rest_of_a_struct_where_it_was_written() -> Result<(), Error> {
+        back("(query (xyz.note ?n about: {author: ?who   ...?others}))")?;
+        back("{...?all}")?;
+        back("{author: ?who\n ; and whatever else\n ...?others }")?;
+        // With no mapping, it is printed after the entries.
+        let trees = parse("{author: ?who\n   ...?others}")?;
+        assert_eq!(
+            print(&trees, &Written::default()),
+            "{author: ?who ...?others}"
+        );
+        Ok(())
+    }
+
     /// A comment is about the form that ends before it on its line,
     /// and otherwise about the form below it.
     #[dialog_common::test]

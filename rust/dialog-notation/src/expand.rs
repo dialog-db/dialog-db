@@ -188,12 +188,20 @@ fn unnamed(tree: &Syntax, site: &str) -> Syntax {
             Syntax::Tuple(items) => {
                 Syntax::Tuple(items.iter().map(|item| walk(item, suffix, seen)).collect())
             }
-            Syntax::Map(entries) => Syntax::Map(
-                entries
+            Syntax::Map(entries, rest) => {
+                let entries = entries
                     .iter()
                     .map(|(key, value)| (walk(key, suffix, seen), walk(value, suffix, seen)))
-                    .collect(),
-            ),
+                    .collect();
+                // The rest of a struct is a variable, renamed like one.
+                let rest = rest.as_ref().map(|name| {
+                    match walk(&Syntax::Variable(name.clone()), suffix, seen) {
+                        Syntax::Variable(renamed) => renamed,
+                        _ => name.clone(),
+                    }
+                });
+                Syntax::Map(entries, rest)
+            }
             Syntax::Repeat(repeated) => Syntax::Repeat(Box::new(walk(repeated, suffix, seen))),
             Syntax::Application(operator, operand) => {
                 let operator = walk(operator, suffix, seen);

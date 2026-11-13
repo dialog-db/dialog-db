@@ -106,14 +106,26 @@ pub fn matches(tree: &Syntax, pattern: &Syntax, bindings: Bindings) -> Option<Bi
             _ => None,
         },
         // A map is taken apart by key: the pattern's keys are what they
-        // are, and each has to be a key of the tree.
-        Syntax::Map(patterns) => {
-            let Syntax::Map(entries) = tree else {
+        // are, and each has to be a key of the tree. Its rest is not a
+        // part this takes: it is a variable of what the tree says, so a
+        // pattern with one matches a struct with one and binds the
+        // variable written there.
+        Syntax::Map(patterns, rest) => {
+            let Syntax::Map(entries, written) = tree else {
                 return None;
             };
             if entries.len() != patterns.len() {
                 return None;
             }
+            let bindings = match (rest, written) {
+                (None, None) => bindings,
+                (Some(name), Some(written)) => bind(
+                    bindings,
+                    name,
+                    Binding::One(Syntax::Variable(written.clone())),
+                )?,
+                _ => return None,
+            };
             patterns
                 .iter()
                 .try_fold(bindings, |bindings, (key, pattern)| {
@@ -194,13 +206,25 @@ pub fn fill(template: &Syntax, bindings: &Bindings, fresh: &str) -> Result<Synta
             Some(Binding::Row(_)) | None => Syntax::Variable(format!("{name}.{fresh}")),
         },
         Syntax::Tuple(items) => Syntax::Tuple(fill_run(items, bindings, fresh)?),
-        Syntax::Map(entries) => Syntax::Map(
+        Syntax::Map(entries, rest) => Syntax::Map(
             entries
                 .iter()
                 .map(|(key, value)| {
                     Ok((fill(key, bindings, fresh)?, fill(value, bindings, fresh)?))
                 })
                 .collect::<Result<_, Error>>()?,
+            // The rest of a struct is a variable, filled like one: with
+            // the variable it is bound to, or a name of its own.
+            rest.as_ref()
+                .map(
+                    |name| match fill(&Syntax::Variable(name.clone()), bindings, fresh)? {
+                        Syntax::Variable(filled) => Ok(filled),
+                        other => Err(Error::Refused(format!(
+                            "`...?{name}` in a struct is a variable, and it is given {other}"
+                        ))),
+                    },
+                )
+                .transpose()?,
         ),
         Syntax::Application(operator, operand) => {
             let mut filled = Parameters {
