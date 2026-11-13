@@ -619,7 +619,7 @@ What this changes for you:
 - A block another process holds only in its extent is written again into
   the writer's own, so a head it commits never names a block another
   process has not yet folded into the file.
-- The file's format is version 15: a file written by an earlier build of
+- The file's format is version 16: a file written by an earlier build of
   `dialog-chronicle` does not open.
 
 Why: many processes work on separate branches of one space at once, and on
@@ -671,6 +671,19 @@ What this changes for you:
   to the exact block it stands for (a node another peer wrote in another
   layout, say) is kept whole, never written as rows that read back
   different bytes.
+- A file shorter than its durable slot names (cut short by something
+  other than the archive, such as a copy that did not finish) does not
+  open, where it used to be filled back out with zeros and opened as an
+  older state.
+- A cell's update that names blocks still in its writer's extent names
+  their frames by a checksum, so a power loss that keeps the extent's new
+  count but loses a frame no longer leaves the cell naming a block the
+  file does not hold: an extent claimed again can still hold a whole frame
+  from its earlier claim in the same place.
+- What a sync point frees is taken up by a writer only once the durable
+  slot that frees it is on the disk, and a sync point made in the writer's
+  turn waits for one made without it, so two never write the same durable
+  copy.
 - `Put` and `Import` append on tokio's blocking threads when a tokio
   runtime runs the caller: an append can wait for the writer's turn
   another process holds and make a sync point, and holds up none of the
@@ -2006,8 +2019,8 @@ has a tree to canonicalize even when the link itself wrote nothing.
 
 #### Compatibility and migration
 
-- A `Chronicle` file is format 15; one written by an earlier build of
-  this branch's `dialog-chronicle` (format 10 to 14) does not open, and is
+- A `Chronicle` file is format 16; one written by an earlier build of
+  this branch's `dialog-chronicle` (format 10 to 15) does not open, and is
   moved again from the replica it came from with `dialog-migrate`. Nothing
   else stored or synced changes: blocks, their hashes and what a replica
   syncs are the same.

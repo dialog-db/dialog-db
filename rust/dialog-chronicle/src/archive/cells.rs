@@ -16,11 +16,14 @@
 //! Unlike SQLite, a writer's blocks need not be in the log before the
 //! value: they may still be in this process's extents, written without the
 //! turn. The record names them instead: each of this process's extents
-//! that holds blocks, by its record, epoch and how many bytes of frames it
-//! held. A record is whole only if every extent it names that the slot
-//! still lists in that epoch holds whole frames up to there (one the slot
-//! no longer lists, or lists claimed again, was folded into the log before
-//! the slot). So a cell's update holds the writer's turn for the append of
+//! that holds blocks, by its record, epoch, how many bytes of frames it
+//! held and their checksum. A record is whole only if every extent it
+//! names that the slot still lists in that epoch holds those frames, by
+//! their checksum (one the slot no longer lists, or lists claimed again,
+//! was folded into the log before the slot). The checksum, and not only
+//! the frames' own, tells a frame this claim wrote from one an earlier
+//! claim of the extent left in the same place: a power loss can keep the
+//! extent's new count and lose a frame written under it. So a cell's update holds the writer's turn for the append of
 //! one small record, never for folding blocks in.
 //!
 //! Readers take no lock: a read looks again at the slots when the file
@@ -32,7 +35,7 @@
 //! zero byte, the cell); a byte, 1 when a value follows and 0 when the
 //! cell was retracted; the value's length (u32) and the value; then how
 //! many extents it names (u16), each its record, epoch and bytes of frames
-//! (u64 each).
+//! (u64 each) and their checksum (u32).
 
 use std::io;
 
@@ -94,6 +97,7 @@ pub(crate) fn record(
         bytes.extend_from_slice(&needed.record.to_le_bytes());
         bytes.extend_from_slice(&needed.epoch.to_le_bytes());
         bytes.extend_from_slice(&needed.used.to_le_bytes());
+        bytes.extend_from_slice(&needed.checksum.to_le_bytes());
     }
     let mut out = Vec::with_capacity(HEADER as usize + bytes.len());
     put_record(&mut out, Kind::Cell, &bytes)?;
@@ -102,13 +106,18 @@ pub(crate) fn record(
 }
 
 /// An extent a cell's record needs whole: by its record, in the epoch it
-/// was claimed in, up to how many bytes of frames it held.
+/// was claimed in, up to how many bytes of frames it held, and the
+/// checksum of those bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Needed {
     pub record: u64,
     pub epoch: u64,
     pub used: u64,
+    pub checksum: u32,
 }
+
+/// The bytes each extent a cell's record names takes in it.
+const NEEDED: usize = 28;
 
 /// The extents the cell record whose body starts at `body` in `bytes`
 /// needs whole (see the module docs).
@@ -138,11 +147,18 @@ pub(crate) fn needs(bytes: &[u8], body: usize) -> io::Result<Vec<Needed>> {
     at += 2;
     (0..count)
         .map(|n| {
-            let at = at + n as usize * 24;
+            let at = at + n as usize * NEEDED;
             Ok(Needed {
                 record: word(at)?,
                 epoch: word(at + 8)?,
                 used: word(at + 16)?,
+                checksum: u32::from_le_bytes(
+                    bytes
+                        .get(at + 24..at + 28)
+                        .ok_or_else(|| invalid("a cell past the file's end"))?
+                        .try_into()
+                        .expect("four bytes"),
+                ),
             })
         })
         .collect()
@@ -212,10 +228,12 @@ impl Chronicle {
         ours.filter_map(|record| {
             let used = super::extent::used(snapshot.bytes(), record)?;
             let epoch = super::extent::epoch(snapshot.bytes(), record)?;
+            let checksum = super::extent::checksum(snapshot.bytes(), record, used)?;
             (used > 0).then_some(Needed {
                 record,
                 epoch,
                 used,
+                checksum,
             })
         })
         .collect()

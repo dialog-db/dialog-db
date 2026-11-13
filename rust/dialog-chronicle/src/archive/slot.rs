@@ -47,6 +47,12 @@ const DURABLE: [u64; 2] = [MAGIC.len() as u64 + 2 * SLOT, MAGIC.len() as u64 + 3
 /// Where the first record goes: after the magic number and the slots.
 pub(crate) const DATA: u64 = MAGIC.len() as u64 + 4 * SLOT;
 
+/// Where, in each durable copy's area, the sequence of the copy last synced
+/// there is written: after the sync that made the copy durable, so a copy
+/// it names is on the disk, and one it does not name may be only in the
+/// page cache. A slot's encoding stops short of it.
+const SYNCED: u64 = SLOT - 8;
+
 /// What the archive reports holding, kept in the slot so a reopened file
 /// reports it without reading everything.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -186,7 +192,7 @@ impl Slot {
         out.extend_from_slice(&(body.len() as u32).to_le_bytes());
         out.extend_from_slice(&crc32fast::hash(&body).to_le_bytes());
         out.extend_from_slice(&body);
-        if out.len() as u64 > SLOT {
+        if out.len() as u64 > SYNCED {
             return Err(invalid("a slot over its size"));
         }
         Ok(out)
@@ -289,8 +295,9 @@ impl Slot {
     }
 
     /// Writes this slot as the durable one, over the copy that does not
-    /// hold the newest whole durable slot.
-    pub fn write_durable(&self, file: &File) -> io::Result<()> {
+    /// hold the newest whole durable slot. Returns which copy, for
+    /// [`mark_synced`](Self::mark_synced) once the file is synced.
+    pub fn write_durable(&self, file: &File) -> io::Result<usize> {
         #[cfg(test)]
         self.check_extents();
         let len = file.metadata()?.len();
@@ -305,7 +312,41 @@ impl Slot {
             [None, None] => None,
         };
         let copy = newest.map_or(0, |newest| 1 - newest);
-        write_at(file, DURABLE[copy], &self.encode()?)
+        write_at(file, DURABLE[copy], &self.encode()?)?;
+        Ok(copy)
+    }
+
+    /// Says that the durable copy `copy`, this slot, is on the disk: called
+    /// once the sync after [`write_durable`](Self::write_durable) returned.
+    pub fn mark_synced(&self, file: &File, copy: usize) -> io::Result<()> {
+        write_at(file, DURABLE[copy] + SYNCED, &self.sequence.to_le_bytes())
+    }
+
+    /// The newest durable copy known to be on the disk (see
+    /// [`mark_synced`](Self::mark_synced)): what a writer may take up as
+    /// freeing what it frees. A copy only written may be lost to a power
+    /// loss, and the older one, which still reaches those pages, read.
+    pub fn read_synced(file: &File) -> io::Result<Option<Slot>> {
+        let len = file.metadata()?.len();
+        let mut newest: Option<Slot> = None;
+        for at in DURABLE {
+            let Some(slot) = Self::read_at(file, at, len)? else {
+                continue;
+            };
+            let mut synced = [0u8; 8];
+            if at + SLOT > len {
+                continue;
+            }
+            read_at(file, at + SYNCED, &mut synced)?;
+            if u64::from_le_bytes(synced) == slot.sequence
+                && newest
+                    .as_ref()
+                    .is_none_or(|newest| slot.sequence > newest.sequence)
+            {
+                newest = Some(slot);
+            }
+        }
+        Ok(newest)
     }
 
     fn read_at(file: &File, offset: u64, len: u64) -> io::Result<Option<Slot>> {
@@ -395,8 +436,15 @@ mod tests {
         assert_eq!(Slot::read(&file)?, vec![first.clone()]);
 
         assert_eq!(Slot::read_durable(&file)?, None);
-        first.write_durable(&file)?;
+        let copy = first.write_durable(&file)?;
         assert_eq!(Slot::read_durable(&file)?, Some(first.clone()));
+        assert_eq!(
+            Slot::read_synced(&file)?,
+            None,
+            "a durable copy is not taken up before it is marked synced"
+        );
+        first.mark_synced(&file, copy)?;
+        assert_eq!(Slot::read_synced(&file)?, Some(first.clone()));
         assert_eq!(
             Slot::read(&file)?,
             vec![first],

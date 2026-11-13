@@ -960,3 +960,71 @@ workspace opens the file beside the archive. Pinned by
 open-file-description locks would not be let go of, but they would make
 Linux the one platform where two handles in a process exclude each other,
 and macOS has no equivalent, so the archive keeps fcntl locks.
+
+## 2026-11-13: the second review round
+
+A second review of #733 (at 4a96759a, before the commit above) found the
+following. Each is addressed here.
+
+**A file cut short opened as an older state.** `recover` took rolling
+slots only up to the file's length, fell back to the durable slot, and set
+the file's length to what that slot names, without checking that the file
+ever reached it. A file cut short by something other than the archive (a
+copy that did not finish, say) opened filled out with zeros. It is
+refused now: a sync point makes everything its durable slot names durable
+before it writes the slot, so a file shorter than that was cut after.
+Two places had relied on the old behaviour, and the power-loss tests found
+both:
+- A new file's slots were written before the length it was grown to was
+  synced, so a power loss could keep a durable slot naming more than the
+  file holds. The length is now synced first.
+- The last close cut free extents off the end of the file before writing
+  a durable slot naming the shorter end. It now writes the slot first.
+
+Pinned by `it_refuses_a_file_cut_short`, which also checks that nothing
+is written to the file.
+
+**A durable copy taken up before it was on the disk.** A sync point writes
+the durable copy and then syncs it. In between, a commit in the turn (in
+another thread or process) could read that copy from the page cache and
+take up what it frees: index pages the older copy still reaches, written
+over before the newer copy was on the disk. Each durable copy's area now
+ends with the sequence of the copy last synced there, written after the
+sync, and a commit takes up only a copy that it names. The marker need
+not be synced itself: one lost to a power loss only delays a take-up.
+Separately, a sync point made in the turn (by the last close) did not
+take the sync byte, so it could write the same durable copy as one made
+without the turn in another process at the same time. It takes it now.
+Pinned by `it_takes_up_a_durable_copy_only_once_it_is_synced`, which
+takes up from inside the sync point, between the copy's write and its
+sync.
+
+**A cell naming a block a power loss lost.** Found while running the
+above: with 300 images a point instead of 30, the power-loss test failed
+at 4a96759a and at fe96285a too. An extent is claimed again after it is
+folded in and freed. Its earlier frames are still in place, and they are
+whole. A power loss that keeps the extent's new count but loses a frame
+written under it leaves the earlier claim's frame there, often of the
+same length, and the recovery check (frames whole up to the count)
+passes. The cell then names a block the file does not hold. A cell's
+record now names each extent's frames by a CRC-32 of their bytes, and
+recovery compares it. This changes the cell record, so the format is 16.
+The power-loss tests pass at 300 images a point with two different seeds.
+
+**A flaky test, `processes_arriving_together_while_the_turn_is_held_do_not_wait`.**
+It failed for the reviewer in 2 of 9 runs under load, and passed in 40
+runs here, four at a time. The reviewer's guess holds up in the code:
+`gather_fold` took the owner byte of every listed extent no process
+holds, empty ones included, to look, and `orphan` took an extent's owner
+byte before checking its left byte. A process trying to take an extent
+another left for it in that instant found it held, and waited for the
+turn instead. `gather_fold` now passes over an empty extent without
+taking its byte, and `orphan` checks the left byte first, so an extent
+another process left is never touched. Not pinned: the window is a few
+system calls wide.
+
+**Two handles dropped at once.** The reviewer pointed out that two last
+handles dropped together could both see another handle and neither close
+the file. The mutex each handle takes as it is dropped (added above for
+the sync thread) serializes them now, so the second sees itself as the
+last.

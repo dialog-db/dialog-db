@@ -187,6 +187,16 @@ pub(crate) fn epoch(bytes: &[u8], record: u64) -> Option<u64> {
     Some(u64::from_le_bytes(bytes.get(at..at + 8)?.try_into().ok()?))
 }
 
+/// The checksum of the first `used` bytes of frames of the extent at
+/// `record`, as `bytes` (the file, mapped) hold them: what a cell's record
+/// names the extent's frames by, so recovery tells them from frames an
+/// earlier claim of the extent left in the same place (see the `cells`
+/// module). `None` past the file's end.
+pub(crate) fn checksum(bytes: &[u8], record: u64, used: u64) -> Option<u32> {
+    let start = (count_at(record) + COUNT) as usize;
+    Some(crc32fast::hash(bytes.get(start..start + used as usize)?))
+}
+
 /// A block an extent holds: its catalog's number, its hash, and where its
 /// frame's data starts, divided by [`ALIGN`].
 #[derive(Clone, Debug, PartialEq, Eq)]

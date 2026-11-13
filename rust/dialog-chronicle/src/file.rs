@@ -18,7 +18,7 @@ use std::io;
 
 /// The first bytes of every archive file. The last byte is the format
 /// version.
-pub(crate) const MAGIC: &[u8; 8] = b"DIALOGA\x0f";
+pub(crate) const MAGIC: &[u8; 8] = b"DIALOGA\x10";
 
 /// The bytes of a record before its body.
 pub(crate) const HEADER: u64 = 1 + 4 + 4;

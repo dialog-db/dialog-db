@@ -392,6 +392,10 @@ struct Inner {
     /// publishes them: for tests that read while an append is under way.
     #[cfg(test)]
     before_publish: Mutex<Option<Box<dyn FnMut() + Send>>>,
+    /// Called by a sync point made without the turn between writing the
+    /// durable copy and syncing it.
+    #[cfg(test)]
+    before_durable_synced: Mutex<Option<Box<dyn FnMut() + Send>>>,
     /// Set by a test to close as a process that died would: without
     /// folding in or cutting anything.
     #[cfg(test)]
@@ -715,7 +719,10 @@ fn in_use(file: &File) -> io::Result<Option<Slot>> {
 /// next writer in the turn when it could not take the turn itself. Whether
 /// `slot` changed.
 fn take_up_durable(file: &File, slot: &mut Slot) -> io::Result<bool> {
-    let Some(durable) = Slot::read_durable(file)? else {
+    // Only a copy known to be on the disk: one a sync point has written but
+    // not yet synced may be lost to a power loss, and the older copy, which
+    // still reaches the pages this one frees, read in its place.
+    let Some(durable) = Slot::read_synced(file)? else {
         return Ok(false);
     };
     if durable.sequence <= slot.durable || durable.sequence > slot.sequence {
@@ -801,13 +808,17 @@ fn recover(file: &File) -> io::Result<Slot> {
         crate::file::set_len(file, 0)?;
         write_at(file, 0, MAGIC)?;
         crate::file::set_len(file, DATA)?;
+        // The length is durable before any slot naming it is: a file
+        // shorter than its durable slot names does not open.
+        crate::file::sync(file)?;
         let slot = Slot {
             boot: boot(),
             ..Slot::default()
         };
         slot.write(file)?;
-        slot.write_durable(file)?;
+        let copy = slot.write_durable(file)?;
         crate::file::sync(file)?;
+        slot.mark_synced(file, copy)?;
         return Ok(slot);
     }
     let mut magic = [0u8; 8];
@@ -818,6 +829,14 @@ fn recover(file: &File) -> io::Result<Slot> {
         return Err(invalid("not a dialog archive file"));
     }
     let durable = Slot::read_durable(file)?.ok_or_else(|| invalid("no whole durable slot"))?;
+    if durable.end > len {
+        // A sync point makes what its durable slot names durable before it
+        // writes the slot, and the file is cut only past what one names:
+        // a file shorter than that was cut short after, by something else.
+        return Err(invalid(
+            "the file is shorter than its durable slot names: it was cut short",
+        ));
+    }
     let candidates: Vec<Slot> = Slot::read(file)?
         .into_iter()
         .filter(|slot| slot.end <= len && slot.sequence >= durable.sequence)
@@ -892,7 +911,8 @@ fn whole_since(file: &File, durable: &Slot, slot: &Slot) -> io::Result<Option<Ve
                 // A cell's value is whole only with the blocks it may name
                 // that its writer had in an extent (see the `cells`
                 // module): each extent it names that the slot still lists
-                // in that epoch holds whole frames up to where it says.
+                // in that epoch holds the frames it names, by their
+                // checksum, and so not frames an earlier claim left there.
                 let Ok(needs) = cells::needs(bytes, body) else {
                     return Ok(None);
                 };
@@ -902,8 +922,9 @@ fn whole_since(file: &File, durable: &Slot, slot: &Slot) -> io::Result<Option<Ve
                     if !listed {
                         continue;
                     }
-                    if !extent::held(bytes, needed.record, 0, needed.used)
-                        .is_ok_and(|(_, reached)| reached >= needed.used)
+                    if extent::checksum(bytes, needed.record, needed.used) != Some(needed.checksum)
+                        || !extent::held(bytes, needed.record, 0, needed.used)
+                            .is_ok_and(|(_, reached)| reached >= needed.used)
                     {
                         return Ok(None);
                     }
@@ -1321,6 +1342,8 @@ impl Chronicle {
             #[cfg(test)]
             before_publish: Mutex::new(None),
             #[cfg(test)]
+            before_durable_synced: Mutex::new(None),
+            #[cfg(test)]
             dies: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             stop_before_retire: std::sync::atomic::AtomicBool::new(false),
@@ -1492,8 +1515,13 @@ impl Chronicle {
         durable.reusable.append(&mut durable.pending);
         durable.extents_free.append(&mut durable.extents_pending);
         durable.durable = durable.sequence;
-        durable.write_durable(file)?;
+        let copy = durable.write_durable(file)?;
+        #[cfg(test)]
+        if let Some(hook) = self.inner.before_durable_synced.lock().as_mut() {
+            hook();
+        }
         crate::file::sync(file)?;
+        durable.mark_synced(file, copy)?;
         // Tried, never waited for: a writer that wrote without the turn
         // must not then wait for it. When another holds it, the next
         // commit in the turn takes up what the durable slot freed.
@@ -2095,15 +2123,19 @@ impl Chronicle {
             {
                 continue;
             }
-            if !locks::lock(file, locks::owner(record), true, false)? {
+            // The left byte first: an extent a live process left for others
+            // is passed over without its owner byte being taken, even for
+            // a moment, as a writer taking it then would find it held and
+            // wait for the turn instead.
+            if !locks::lock(file, locks::left(record), true, false)? {
                 continue;
             }
-            if locks::lock(file, locks::left(record), true, false)? {
-                locks::unlock(file, locks::left(record))?;
+            let owned = locks::lock(file, locks::owner(record), true, false)?;
+            locks::unlock(file, locks::left(record))?;
+            if owned {
                 extents.busy.insert(record);
                 return Ok(Some(record));
             }
-            locks::unlock(file, locks::owner(record))?;
         }
         Ok(None)
     }
@@ -2334,11 +2366,14 @@ impl Chronicle {
                         ours.push(extents.idle.swap_remove(at));
                     }
                 } else if !extents.busy.contains(&record)
+                    // An empty one is left listed, for a process with no
+                    // extent to take without the turn, and its owner byte
+                    // is not taken to look: a writer taking it then would
+                    // find it held and wait for the turn instead.
+                    && extent::used(snapshot.bytes(), record) != Some(0)
                     && locks::lock(file, locks::owner(record), true, false)?
                 {
                     if extent::used(snapshot.bytes(), record) == Some(0) {
-                        // Empty and no one's: left listed, for a process
-                        // with no extent to take without the turn.
                         locks::unlock(file, locks::owner(record))?;
                     } else {
                         // Busy while folded, so no thread of this process
@@ -2859,14 +2894,19 @@ impl Chronicle {
     /// Returns that next slot.
     fn sync_point(&self, slot: Slot) -> io::Result<Slot> {
         let file = &self.inner.file;
+        // One sync point at a time, as `sync_now` makes them: two would
+        // write the same durable copy.
+        let _process = self.inner.syncing.lock();
+        let _sync = SyncPoint::take(file)?;
         let started = Instant::now();
         crate::file::sync(file)?;
         let mut durable = slot;
         durable.reusable.append(&mut durable.pending);
         durable.extents_free.append(&mut durable.extents_pending);
         durable.durable = durable.sequence;
-        durable.write_durable(file)?;
+        let copy = durable.write_durable(file)?;
         crate::file::sync(file)?;
+        durable.mark_synced(file, copy)?;
         let mut next = durable;
         next.sequence += 1;
         next.write(file)?;
@@ -3203,7 +3243,9 @@ impl Chronicle {
         slot.sequence += 1;
         slot.end = cut;
         slot.boot = boot();
-        slot.write(file)?;
+        // Durable before the file is cut: a file shorter than its durable
+        // slot names does not open (see `recover`).
+        let slot = self.sync_point(slot)?;
         // A mapping past the cut is let go first, and one only as long as
         // what is kept is made: Windows refuses to cut a file under a view
         // that reaches past the cut.
@@ -3227,7 +3269,7 @@ impl Chronicle {
             pages: Default::default(),
         }));
         crate::file::set_len(file, cut)?;
-        let slot = self.sync_point(slot)?;
+        crate::file::sync(file)?;
         self.inner.known.store(slot.end, Ordering::Release);
         self.publish(snapshot_of(file, slot, &self.current())?);
         Ok(())
@@ -4493,6 +4535,65 @@ mod tests {
                 .get("fresh", block("waits").blake3_hash())?
                 .is_some()
         );
+        Ok(())
+    }
+
+    /// A file shorter than its durable slot names was cut short by
+    /// something other than the archive, and does not open: it is not
+    /// filled back out with zeros and taken for an older state. Nothing is
+    /// written to it.
+    #[dialog_common::test]
+    fn it_refuses_a_file_cut_short() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("archive");
+        {
+            let archive = Chronicle::open(&path)?;
+            let blocks: Vec<Buffer> = (0..64).map(|n| block(&format!("block {n}"))).collect();
+            archive.append("index", &blocks)?;
+            archive.sync()?;
+        }
+        let file = OpenOptions::new().write(true).open(&path)?;
+        file.set_len(DATA + 16)?;
+        drop(file);
+        let opened = Chronicle::open(&path);
+        assert!(
+            matches!(&opened, Err(ArchiveError::Storage(message)) if message.contains("cut short")),
+            "{:?}",
+            opened.err()
+        );
+        assert_eq!(std::fs::metadata(&path)?.len(), DATA + 16);
+        Ok(())
+    }
+
+    /// A commit made while a sync point has written the durable copy but
+    /// not yet synced it does not take that copy up: what it frees is free
+    /// only once the copy is on the disk.
+    #[dialog_common::test]
+    fn it_takes_up_a_durable_copy_only_once_it_is_synced() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let archive = Chronicle::open_with(
+            directory.path().join("archive"),
+            Options {
+                sync_in_background: false,
+                ..Options::default()
+            },
+        )?;
+        archive.append("index", &[block("one")])?;
+        let taken = Arc::new(Mutex::new(None));
+        let inner = Arc::downgrade(&archive.inner);
+        let seen = taken.clone();
+        *archive.inner.before_durable_synced.lock() = Some(Box::new(move || {
+            let inner = inner.upgrade().expect("the archive");
+            let mut slot = inner.current.load().slot.clone();
+            *seen.lock() = Some(take_up_durable(&inner.file, &mut slot).expect("a take-up"));
+        }));
+        archive.sync()?;
+        assert_eq!(*taken.lock(), Some(false), "taken up before it was synced");
+        let synced = Slot::read_synced(&archive.inner.file)?.expect("a synced copy");
+        let mut slot = archive.current().slot.clone();
+        assert_eq!(synced.sequence, slot.durable, "taken up once synced");
+        slot.durable = 0;
+        assert!(take_up_durable(&archive.inner.file, &mut slot)?);
         Ok(())
     }
 
