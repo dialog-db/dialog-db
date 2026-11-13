@@ -31,7 +31,8 @@ Each ends with the tests passing.
    - Done, the parser's part: `parse_written` gives the trees and `Written`, the mapping; `print(trees, written)` gives the text, the same bytes for the prelude and both examples. A warning says the way to its form and an analyzed tree says which tree it came of, so the notebook says `5:1: warning: …` and where a refusal by the compiler is.
    - Done, diagnostics: the analyzer does not stop at a refusal. It goes to the end of the document and gives every refusal and every warning as a diagnostic, each with a severity and the way to the form it is about, for a language server to show. A document with a refusal in it is refused whole: nothing of it comes back analyzed and none of its definitions is kept.
    - Done, the other two phases: the parser goes on past a refusal and says each with its span; `check(analyzer, text)` runs the three phases and gives what the text compiles to and every diagnostic with a span. A later phase does not run on what an earlier one refused.
-   - Not done: a refusal by the compiler is placed at the tree it came of and no closer; a reported row is still printed by label and not in the order asked; `description:` is still in `concept`; printing from the analyzed tree and from the compiled form.
+   - Not done: a refusal by the compiler is placed at the tree it came of and no closer; a reported row is still printed by label and not in the order asked; printing from the analyzed tree and from the compiled form.
+   - Done, descriptions: `description:` is out of `concept`. What the comments about a form say is the `description:` of each analyzed rule that came of it. Dialog-DB keeps none of it, so nothing can be found by it yet.
 5. **A pinned reference and the name table.** A resolved reference is the name and the entity it meant where it was written.
 
 ## The mapping, and printing back

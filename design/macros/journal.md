@@ -5,7 +5,7 @@
 |  | Understanding | Activity |
 |---|---|---|
 | **Status** | The kernel and the core forms run on a real branch through `rust/dialog-notation` ([poc.md](poc.md)); the prelude is rules only. The syntax tree is built, apart from the notation as parsed, and kept as data: maps that say their `type` ([design-forms.md](design-forms.md#the-syntax-tree)). A struct is a value and, with a variable in it, a pattern, which is a topic of its own with an agent on it (#777). Rules of several heads are #776. Expanding and compiling still read the notation as parsed, and `kernel.rs` still copies dialog's forms. | **Designing** again from 2026-11-12, for the three phases ([design-pipeline.md](design-pipeline.md)); how the phases stand behind the query engine is still Directing. Direction decided by the maintainer: phases as formulas and a resolver, one rule over them. A proof of concept runs. A name is kept as a name, what is named and a signature; a definition under it is read `last`; an application resolves by the labels written and a read that fits several is of all. Built and tested, by pattern, in the expander. |
-| **Agenda** | Next: a reported row in the order asked, `description:` out of `concept` with comments in its place, printing from the analyzed tree. Parked by the maintainer: authority, for two definitions of one signature written apart; `last` elects one until then. How a query reports. Decided 2026-11-13: a rule has one head and `(all …)` is not written; what that does to #776 and to several heads in #779 is the maintainer's to say. Whether a template says several things with `(all …)` or a spread. Whether a command takes fields beside what it is about, and a slash in its name. The prelude written without `when`. Parked by the maintainer: `update`, and with it what it does with a dependent that does not fit or arrives by sync. Whether the name as written is part of what names a macro. Whether the analyzer, a resolver by the maintainer's word, gives back the table of what each name meant. Whether dialog can be asked for an expansion a form at a time (H3). What a read with no pick reads. | The notation is on top of patterns (#778, merged in, its perf gate failing): a struct is a value in a write and a pattern in a query of one read. Next: a struct in a rule, which needs the compiler to build dialog's forms in Rust, since a pattern has no wire form; `entity/derive` over a record; then an application lowers to a `ConceptQuery` of the definition's concept. Not waiting: a helper rule for a negated conjunction. Waiting on patterns (#777, #778): a struct as a term, `entity/derive` over a record, syntax kept on the branch. |
+| **Agenda** | To ask: where what a comment says is kept, since Dialog-DB keeps no description of a rule. Which format a stored rule that holds a pattern is stamped (#779), which is what stands between the notation and structs in rules that write. Next: a reported row in the order asked, printing from the analyzed tree, `data.rs` over the composite value of #778. Parked by the maintainer: authority, for two definitions of one signature written apart; `last` elects one until then. How a query reports. Decided 2026-11-13: a rule has one head and `(all …)` is not written; what that does to #776 and to several heads in #779 is the maintainer's to say. Whether a template says several things with `(all …)` or a spread. Whether a command takes fields beside what it is about, and a slash in its name. The prelude written without `when`. Parked by the maintainer: `update`, and with it what it does with a dependent that does not fit or arrives by sync. Whether the name as written is part of what names a macro. Whether the analyzer, a resolver by the maintainer's word, gives back the table of what each name meant. Whether dialog can be asked for an expansion a form at a time (H3). What a read with no pick reads. | The notation is on top of patterns (#778, merged in, its perf gate failing): a struct is a value in a write and a pattern in a query of one read. Next: a struct in a rule, which needs the compiler to build dialog's forms in Rust, since a pattern has no wire form; `entity/derive` over a record; then an application lowers to a `ConceptQuery` of the definition's concept. Not waiting: a helper rule for a negated conjunction. Waiting on patterns (#777, #778): a struct as a term, `entity/derive` over a record, syntax kept on the branch. |
 
 ## Candidate problems
 
@@ -828,4 +828,33 @@ Not examined yet. They are columns, not recommendations.
 - Not covered: the compiler says which tree and not which part. Its errors are texts, and the analyzed tree has no way back to the written one yet: that is the analyzer's half of the mapping.
 
 **Decided.** By the agent, open to change: one diagnostic type for the three phases; a later phase waits on the one before; `check` as the one call an editor makes.
+
+## 2026-11-13, Designing: a comment as a description, and where patterns stand
+
+**Asked.** Irakli: "where's pattern support workstream or composite value support? We need both here".
+
+**Learned.** Two things, one built and one found.
+
+- Built: `description:` is out of `concept`. A comment right above a form, with no blank line between, and one that ends its line, say what the form is for. A comment with a blank line under it is about no form. `check` puts what they say on each analyzed rule as its `description:`, which the compiler hands to Dialog-DB.
+- Found: Dialog-DB is given a rule's description and keeps none. The descriptor reads one, the rule built from it gives none back (`DeductiveRule::descriptor`, `InductiveRule::descriptor`), and format 3 of a stored rule writes no description (`dialog-query/src/rule/body.rs`). So the hypothesis that a comment can stand for the description Dialog-DB keeps of a rule is refuted: there is none to stand for. What a comment says reaches the compiler and stops there. To find a thing by its documentation, the documentation has to be a fact.
+- Where patterns and the composite value stand:
+
+```
+ #777  design: a parameter holds a pattern        open, waiting on review
+ #778  build: composite value + patterns          draft; merged into this branch
+ #779  design: a stored rule says less than a rule can   draft, Diagnosing; stamping not decided
+ #748  research: record values                    draft; its variant question was decided 2026-11-11
+
+ in the notation today                       needs
+ a struct as a value in a write       ✓
+ a struct as a pattern in a query     ✓
+ a struct in a rule that derives      held by the notebook, not stored     a stored rule that holds a pattern (#779)
+ a struct in a rule that writes       refused                              the same
+ entity/derive over a record          taken back out                       the same
+ a tree kept as a composite value     a stand-in layout (data.rs)          nothing: #778 is merged in
+```
+
+- Neither #773 nor #778 had run a check since main was merged in on 2026-11-12: each conflicted with its base in `design/README.md`, and a pull request that conflicts is not checked. Both are merged with their bases now. Every commit of today was pushed unchecked by CI; the tests were run here.
+
+**Decided.** Not decided. What stands between the notation and structs in rules is one decision of the maintainer's, the stamping of a format that can hold a pattern, and then a build. With one head a rule, several heads are no longer one of the additions that format has to carry.
 
