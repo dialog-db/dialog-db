@@ -1,6 +1,17 @@
 # Aggregation: the `reduce` clause
 
-Aggregation lives on deductive rules as a third clause beside `when` and
+**Status.** Since #580 a deductive rule refuses `reduce`
+(`TypeError::ReduceInOpenRule`). A deductive rule is open: it is installed
+as facts and read by whatever program exists when a query runs. A fold
+withdraws its result when a fact arrives, and inside a cycle it has no
+deterministic reading. So aggregation belongs to the closed places: a
+query, a subscription, an inductive rule. None of them takes a `reduce`
+yet, so no authored form can aggregate today. An attribute's `pick` chooses
+among the candidates rules add instead. The fold itself (`reduce.rs`), its
+typing and the descriptor's `reduce` block are what remain of the design
+below, which describes the deductive clause as it was before #580.
+
+Aggregation lived on deductive rules as a third clause beside `when` and
 `unless`. The head stays an ordinary concept, so aggregate results compose —
 any rule or query consumes a reducing rule's concept like any other. The
 design goal, kept from the start: malformed aggregation is *unwriteable*
@@ -100,6 +111,12 @@ treated like negation — an aggregating edge inside its own SCC is
 `AggregationThroughRecursion`, exact sibling of `NegationThroughRecursion`,
 same Apt-Blair-Walker/SCC machinery. Registration stays unconditional
 (replica convergence); validity is checked at acquire, as for negation.
+
+Negation no longer works this way: a rule closing a cycle through an
+absence test is quarantined rather than failing the query
+(`session/dependencies.rs`). An aggregating edge inside a component is still
+a violation, but since deductive rules refuse `reduce` it is unreachable for
+authored rules.
 
 Future refinement, deliberately out of scope: `min`/`max` are monotone
 lattice joins and could in principle pass through recursion (Flix-style

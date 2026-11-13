@@ -452,7 +452,7 @@ Comparing the design with [Bloom](http://bloom-lang.net), Dedalus and LogiQL set
 - Optional parameters. `(option ?x)` in a head read correctly once in six (R2).
 - Whether a query holds several calls answered jointly, and whether questions stay calls or become rules into a relation head.
 - How text spans lines or holds `"`. The sketches write templates as `"""…"""`, which is not part of the notation.
-- How aggregation is spelled. Dialog's deductive rules have a `reduce` clause (`count`, `count-distinct`, `sum`, `min`, `max`, `avg`, grouped by the head fields not reduced; `notes/aggregation.md`); the notation has no form for it.
+- Where aggregation goes and how it is spelled. A deductive rule refuses `reduce` (#580): a fold withdraws its result when a fact arrives and has no reading inside a cycle. It belongs to a query, a subscription or an inductive rule, and none of them takes one yet ([aggregation](../../notes/aggregation.md)). Within a tick, a `pick` elects among candidates instead. A rule closing a cycle through `unless` is not refused: it is quarantined, the one of the cycle installed last.
 - Rows without an entity, such as a set of pairs, and relations without a value, such as a set of entities: every fact needs an entity and a field.
 - Record types: there is no type for a record yet.
 - Concurrent claims under `:last` are ordered by standing and last by the value's hash, so every replica elects alike (#752). A write after them settles them only once [#759](https://github.com/dialog-db/dialog-db/issues/759) lands.
