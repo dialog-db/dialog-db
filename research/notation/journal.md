@@ -781,6 +781,16 @@ xychart-beta
 
 **Decision.** The misreading is about rules, not concepts. To test next, together: the sentence that a rule's conclusion gives values to its attributes as asserting would, and concepts that name attributes in full.
 
+## 2026-11-13 — R33: one-attribute concepts carry a rule's conclusion
+
+**Question.** The one [planned](results/r33-plan.md), from the maintainer's idea: with every attribute given its own concept (`message`, `audience`) and `note` and `memo` built from them, do readers find a memo as a note, asserted and concluded by a rule?
+
+**Method.** Clean runner, ten readers per variant, R32's questions.
+
+**Results.** [r33](results/r33.md). Asserted: 10 of 10. Concluded by a rule: 7 of 10, against 0 of 10 in R32, where `memo` read `xyz.tonk.post` directly. The readers who found it chained through the named concepts: `memo` expands to `message`, and `note` is a `message`. Readers chain through named concepts, never through a domain form. As a side effect, 9 of 10 now named `xyz.tonk.post/content` as the stored attribute, against 1 of 10 in R32.
+
+**Decision.** Promising, at the bar. Replicate, then test the maintainer's two follow-ups: `message` and `audience` spelled as attributes, and `note` and `memo` spelled as records.
+
 ## How to reproduce
 
 1. Take a variant's prompt from its round's results file and save it as `<variant>.txt`.
