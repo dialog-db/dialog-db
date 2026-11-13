@@ -61,7 +61,7 @@ A macro call is not in the analyzed tree: after `(query (todo ?t text: ?x))` onl
 | analyze | the names a template's own variables were given | derived from the site, as now |
 | compile | which rule, premise and variable is which node | a path a compiled part |
 
-Proposed by the agent, not decided: this table; that order is held a node and not once a definition, since a call may write its labels in another order than the definition does; that a comment is about the node after it, or the node before it where it ends a line; that a comment on a definition and its `description:` are one thing, kept as a fact about the definition so it can be found.
+Proposed by the agent, not decided: this table; that order is held a node and not once a definition, since a call may write its labels in another order than the definition does; that a comment which ends a line is about the node before it; that a comment with a blank line under it is about the document; that what a comment says of a concept, a rule or a labelled part is what Dialog-DB keeps as its description, and is kept as a fact so it can be found. Decided by the maintainer: a comment is metadata on the form below it and takes no place among the parts, and `description:` does not belong in a concept.
 
 ## Not in these stages
 
