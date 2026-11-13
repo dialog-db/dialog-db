@@ -378,6 +378,17 @@ fn prefix_upper(prefix: &[u8]) -> Vec<u8> {
     bytes
 }
 
+/// The bytes that a key holds for a value that starts with `prefix`, before
+/// the rest of the value: the escaped form of the prefix with no terminator.
+/// The key encoding writes each zero byte of a string as `0x00 0xFF`, so a
+/// value that starts with `prefix` has a slot that starts with these bytes.
+fn escaped_prefix(prefix: &[u8]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(prefix.len() + 1);
+    encode_bytes(prefix, &mut bytes);
+    bytes.pop();
+    bytes
+}
+
 /// The lower range edge for a value bound: its full order-preserving
 /// encoding, with two widenings that keep the scanned range a superset of the
 /// true matches (the per-entry check keeps the result exact):
@@ -489,8 +500,9 @@ fn apply_prefix_bounds<K: KeyViewMut + Deref<Target = [u8]>>(
     }
     let has_value_bounds = selector.value_lower().is_some() || selector.value_upper().is_some();
     // A value prefix bounds the value tail directly: the payload's inline
-    // order-preserving bytes for a string are the raw UTF-8, so the prefix's
-    // raw bytes are the lower bound and `prefix ‖ 0xFE…` the upper (mirroring
+    // order-preserving bytes for a string are its UTF-8 with each zero byte
+    // escaped, so the prefix's escaped bytes are the lower bound and
+    // `escaped prefix ‖ 0xFE…` the upper (mirroring
     // the entity/attribute prefixes, but on the value slot). An exact value
     // takes precedence and skips this. Only sound on the VAE ordering, where
     // the value tail leads the key; on EAV/AEV the value is trailing, so
@@ -513,9 +525,17 @@ fn apply_prefix_bounds<K: KeyViewMut + Deref<Target = [u8]>>(
         // below the full probe bytes. The upper edge needs no clamp (cluster
         // keys terminate before the probe's next byte) and the per-entry
         // check re-establishes exactness.
+        //
+        // A key holds a string value in its escaped form, in which each zero
+        // byte is the pair `0x00 0xFF`. So each edge holds the escaped form
+        // of the prefix: a value that starts with the prefix keys as a slot
+        // that starts with the escaped prefix. A prefix with no zero byte is
+        // its own escaped form.
         let bytes = prefix.as_bytes();
-        let lo = prefix_lower(&bytes[..bytes.len().min(manifest.spill_prefix as usize)]);
-        let hi = prefix_upper(bytes);
+        let lo = prefix_lower(&escaped_prefix(
+            &bytes[..bytes.len().min(manifest.spill_prefix as usize)],
+        ));
+        let hi = prefix_upper(&escaped_prefix(bytes));
         // In the value index the attribute and the entity follow the value
         // slot. The lower edge holds the prefix as a fragment with no
         // terminator, so an attribute after it compares with the bytes that
@@ -3055,7 +3075,7 @@ mod value_prefix_tests {
     fn row(artifact: &Fact) -> Row {
         let is = match &artifact.is {
             Value::String(text) if text.len() > 100 => {
-                format!("String({:?}, {} bytes)", &text[..90], text.len())
+                format!("String({:?}, {} bytes)", head(text, 90), text.len())
             }
             other => format!("{other:?}"),
         };
@@ -3178,9 +3198,111 @@ mod value_prefix_tests {
         Ok(())
     }
 
-    /// The letters of the random values and prefixes. A value may also
-    /// hold a zero byte, which a key escapes.
-    const LETTERS: &[char] = &['A', 'l', 'i', 'c', 'e', 'b', 'x', 'z'];
+    /// A value prefix that holds a zero byte finds each row whose value
+    /// starts with the prefix, and none other. A key escapes each zero byte
+    /// of a value as the two bytes `0x00 0xFF` and ends the value with a lone
+    /// `0x00`. So the value `Al` keys as `Al 0x00`, which starts with the
+    /// raw bytes of the prefix `Al\0`, and the value `Al\0x` keys as
+    /// `Al 0x00 0xFF x 0x00`, which sorts above the prefix `Al\0` followed
+    /// by the `0xFE` filler of an upper edge. Each selector runs in each
+    /// index that it can use, forward and in reverse.
+    #[dialog_common::test]
+    async fn it_finds_each_row_for_a_value_prefix_that_holds_a_zero_byte() -> anyhow::Result<()> {
+        let (tree, store) = tree_of(vec![
+            fact("x/b", "e:1", "Al\0x".to_string().into()),
+            fact("x/b", "e:1", "Al".to_string().into()),
+            fact("x/b", "e:2", "Al".to_string().into()),
+            fact("x/b", "e:3", "Al\0".to_string().into()),
+            fact("x/c", "e:4", "Al\0zz".to_string().into()),
+            fact("x/c", "e:4", "Al\0\0".to_string().into()),
+            fact("x/c", "e:4", "A\0".to_string().into()),
+        ])
+        .await?;
+        let all = everything(&tree, &store).await?;
+        type Admit = fn(&Fact) -> bool;
+        let selectors: Vec<(Selector<Constrained>, Admit)> = vec![
+            (Selector::new().is_starting_with("Al\0"), |_| true),
+            (
+                Selector::new().the("x/b".parse()?).is_starting_with("Al\0"),
+                |row| row.the.to_string() == "x/b",
+            ),
+            (
+                Selector::new()
+                    .the_starting_with("x/")
+                    .is_starting_with("Al\0"),
+                |row| row.the.to_string().starts_with("x/"),
+            ),
+            (
+                Selector::new()
+                    .of_starting_with("e:")
+                    .is_starting_with("Al\0"),
+                |row| row.of.to_string().starts_with("e:"),
+            ),
+            (
+                Selector::new().of("e:1".parse()?).is_starting_with("Al\0"),
+                |row| row.of.to_string() == "e:1",
+            ),
+            (
+                Selector::new()
+                    .the("x/b".parse()?)
+                    .of("e:1".parse()?)
+                    .is_starting_with("Al\0"),
+                |row| row.the.to_string() == "x/b" && row.of.to_string() == "e:1",
+            ),
+            (
+                Selector::new()
+                    .the("x/c".parse()?)
+                    .of("e:4".parse()?)
+                    .is_starting_with("Al\0"),
+                |row| row.the.to_string() == "x/c" && row.of.to_string() == "e:4",
+            ),
+        ];
+        // Each scan that gives other rows than the filter, with the rows of
+        // the scan and the rows of the filter.
+        let mut wrong = Vec::new();
+        for (selector, admit) in selectors {
+            let kept: Vec<Fact> = all
+                .iter()
+                .filter(|row| starts_with(row, "Al\0") && admit(row))
+                .cloned()
+                .collect();
+            let expected = rows(&kept);
+            assert!(!expected.is_empty(), "{selector:?} admits a row");
+            let forward = rows(&scanned(&tree, &store, selector.clone()).await?);
+            if forward != expected {
+                wrong.push(format!(
+                    "{selector:?}\n  gave {forward:?}\n  want {expected:?}"
+                ));
+            }
+            let reverse = rows(&scanned_in_reverse(&tree, &store, selector.clone()).await?);
+            if reverse != expected {
+                wrong.push(format!(
+                    "reverse, {selector:?}\n  gave {reverse:?}\n  want {expected:?}"
+                ));
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+        Ok(())
+    }
+
+    /// The letters of the random values and prefixes. The zero byte is one
+    /// of them, and a key escapes it as `0x00 0xFF`. The letter `\u{FF}` is
+    /// the bytes `0xC3 0xBF`, and the letter `\u{10FFFF}` holds `0xF4`, the
+    /// highest byte of any UTF-8 string.
+    const LETTERS: &[char] = &[
+        'A',
+        'l',
+        'i',
+        'c',
+        'e',
+        'b',
+        'x',
+        'z',
+        '\0',
+        '\0',
+        '\u{FF}',
+        '\u{10FFFF}',
+    ];
 
     const ATTRIBUTES: &[&str] = &["x/a", "x/b", "x/c", "x.y/b", "xa/b", "y/a", "a/z"];
 
@@ -3193,11 +3315,15 @@ mod value_prefix_tests {
             .collect()
     }
 
-    /// A random value. Most are short strings. Some are strings that hold a
-    /// zero byte, some are strings long enough to spill out of the key, so
-    /// that the key holds only their first bytes, and some are not strings.
+    /// A random value. Most are short strings, and a short string may hold
+    /// zero bytes. Some are strings long enough to spill out of the key, so
+    /// that the key holds only their first bytes. A string of zero bytes
+    /// spills at half that length, because its escaped form is twice as
+    /// long. Some values are not strings: bytes that hold `0x00` and `0xFF`,
+    /// bytes that equal a string that a prefix admits, a number, and a
+    /// symbol.
     fn value(rng: &mut ChaCha8Rng) -> Value {
-        match rng.gen_range(0..20) {
+        match rng.gen_range(0..24) {
             0 => Value::UnsignedInt(rng.gen_range(0..100)),
             1 => Value::Symbol("Al/ice".parse().expect("a symbol")),
             2 | 3 => {
@@ -3205,23 +3331,69 @@ mod value_prefix_tests {
                 let tail = LETTERS[rng.gen_range(0..LETTERS.len())];
                 Value::String(format!("{head}{}", tail.to_string().repeat(4_200)))
             }
-            4 => Value::String(format!("{}\0{}", text(rng, 2), text(rng, 2))),
+            4 => {
+                // Only the escapes make this string too long for the key.
+                let head = text(rng, 3);
+                Value::String(format!("{head}{}", "\0".repeat(2_100)))
+            }
+            5 => {
+                // A long string with zero bytes near the end of the part of
+                // its key that holds its first bytes.
+                let head = text(rng, 3);
+                let unit = format!("{}{}", text(rng, 1), text(rng, 1));
+                let unit = if unit.is_empty() {
+                    "\0".to_string()
+                } else {
+                    unit
+                };
+                Value::String(format!("{head}{}", unit.repeat(4_200)))
+            }
+            6 => Value::Bytes(vec![b'A', b'l', 0x00, 0xFF, 0x00]),
+            7 => Value::Bytes(text(rng, 4).into_bytes()),
+            8 | 9 => Value::String(format!("{}\0{}", text(rng, 2), text(rng, 2))),
             _ => Value::String(text(rng, 5)),
         }
     }
 
-    /// A random prefix of a value. Some are longer than the part of a
-    /// spilled value that its key holds.
+    /// The first `length` bytes of `text`, or fewer, so that the cut falls
+    /// between two letters.
+    fn head(text: &str, length: usize) -> String {
+        let mut length = length.min(text.len());
+        while !text.is_char_boundary(length) {
+            length -= 1;
+        }
+        text[..length].to_string()
+    }
+
+    /// A random prefix of a value. Some are a prefix of a stored string, so
+    /// that they admit rows, and some of those are longer than the part of
+    /// a spilled value that its key holds. The rest are random letters, and
+    /// a letter may be a zero byte.
     fn value_prefix(rng: &mut ChaCha8Rng, facts: &[Fact]) -> String {
-        if rng.gen_range(0..8) == 0 {
-            let long = facts.iter().find_map(|fact| match &fact.is {
-                Value::String(text) if text.len() > 4_000 => Some(text.clone()),
+        let strings: Vec<&str> = facts
+            .iter()
+            .filter_map(|fact| match &fact.is {
+                Value::String(text) => Some(text.as_str()),
                 _ => None,
-            });
-            if let Some(long) = long {
-                let length = rng.gen_range(60..90);
-                return long[..length].to_string();
+            })
+            .collect();
+        match rng.gen_range(0..8) {
+            0 => {
+                let long: Vec<&str> = strings
+                    .iter()
+                    .copied()
+                    .filter(|text| text.len() > 2_000)
+                    .collect();
+                if !long.is_empty() {
+                    let long = long[rng.gen_range(0..long.len())];
+                    return head(long, rng.gen_range(60..90));
+                }
             }
+            1 | 2 if !strings.is_empty() => {
+                let stored = strings[rng.gen_range(0..strings.len())];
+                return head(stored, rng.gen_range(0..=6));
+            }
+            _ => {}
         }
         text(rng, 3)
     }
@@ -3232,10 +3404,11 @@ mod value_prefix_tests {
         attribute[..rng.gen_range(0..=attribute.len())].to_string()
     }
 
-    /// One of the three constraints on the attribute that a selector with a
-    /// value prefix can hold.
+    /// One of the constraints on the attribute that a selector with a value
+    /// prefix can hold, or none.
     #[derive(Debug, Clone)]
     enum Attribute {
+        Any,
         Exact(String),
         Prefix(String),
         Bounds {
@@ -3249,6 +3422,7 @@ mod value_prefix_tests {
             match form {
                 0 => Attribute::Exact(ATTRIBUTES[rng.gen_range(0..ATTRIBUTES.len())].to_string()),
                 1 => Attribute::Prefix(attribute_prefix(rng)),
+                2 => Attribute::Any,
                 _ => {
                     let bound = |rng: &mut ChaCha8Rng| {
                         rng.gen_bool(0.7)
@@ -3268,6 +3442,7 @@ mod value_prefix_tests {
 
         fn admits(&self, the: &str) -> bool {
             match self {
+                Attribute::Any => true,
                 Attribute::Exact(attribute) => the == attribute,
                 Attribute::Prefix(prefix) => the.starts_with(prefix.as_str()),
                 Attribute::Bounds { lower, upper } => {
@@ -3313,6 +3488,7 @@ mod value_prefix_tests {
             Of::Prefix(prefix) => selector.of_starting_with(prefix.clone()),
         };
         Ok(match attribute {
+            Attribute::Any => selector,
             Attribute::Exact(attribute) => selector.the(attribute.parse()?),
             Attribute::Prefix(prefix) => selector.the_starting_with(prefix.clone()),
             Attribute::Bounds { lower, upper } => {
@@ -3331,18 +3507,25 @@ mod value_prefix_tests {
     }
 
     /// For random facts and random prefixes of the value, a scan with the
-    /// prefix beside an exact attribute, a prefix of the attribute, or bounds
-    /// on the attribute gives the rows of a filter over the whole index. Each
-    /// shape runs with no entity and under an entity prefix, which read the
-    /// value index, and under one entity, which reads the entity index. A
-    /// reverse scan gives the same rows.
+    /// prefix beside an exact attribute, a prefix of the attribute, bounds
+    /// on the attribute, or no attribute gives the rows of a filter over the
+    /// whole index. Each shape runs with no entity, under one entity, and
+    /// under an entity prefix. One entity reads the entity index. No entity
+    /// reads the value index. An entity prefix reads the value index beside
+    /// a constraint on the attribute, and the entity index with none. A
+    /// prefix and a value may hold zero bytes. A reverse scan gives the same
+    /// rows.
     #[dialog_common::test]
     async fn it_scans_a_value_prefix_beside_an_attribute_as_a_filter_does() -> anyhow::Result<()> {
         // The rows that the selectors of each shape admit, by the form of
-        // the entity and then the form of the attribute, and the rows that
-        // the prefixes longer than the key part of a spilled value admit.
-        let mut admitted = [[0usize; 3]; 3];
+        // the entity and then the form of the attribute, in all and for the
+        // prefixes that hold a zero byte. Then the rows that the prefixes
+        // longer than the key part of a spilled value admit, in all and for
+        // those that hold a zero byte.
+        let mut admitted = [[0usize; 4]; 3];
+        let mut admitted_by_zero_prefixes = [[0usize; 4]; 3];
         let mut admitted_by_long_prefixes = 0usize;
+        let mut admitted_by_long_zero_prefixes = 0usize;
         for seed in 0..64u64 {
             let mut rng = ChaCha8Rng::seed_from_u64(seed);
             let facts: Vec<Fact> = (0..rng.gen_range(20..80))
@@ -3356,9 +3539,9 @@ mod value_prefix_tests {
                 .collect();
             let (tree, store) = tree_of(facts.clone()).await?;
             let all = everything(&tree, &store).await?;
-            for round in 0..60usize {
-                let attribute_form = round % 3;
-                let entity_form = (round / 3) % 3;
+            for round in 0..72usize {
+                let attribute_form = round % 4;
+                let entity_form = (round / 4) % 3;
                 let attribute = Attribute::random(&mut rng, attribute_form);
                 let of = match entity_form {
                     0 => Of::Any,
@@ -3390,9 +3573,16 @@ mod value_prefix_tests {
                     reverse, expected,
                     "reverse, seed {seed}, round {round}: {of:?} {attribute:?} {prefix:?}"
                 );
+                let zero = prefix.contains('\0');
                 admitted[entity_form][attribute_form] += expected.len();
+                if zero {
+                    admitted_by_zero_prefixes[entity_form][attribute_form] += expected.len();
+                }
                 if prefix.len() > 64 {
                     admitted_by_long_prefixes += expected.len();
+                    if zero {
+                        admitted_by_long_zero_prefixes += expected.len();
+                    }
                 }
             }
         }
@@ -3401,8 +3591,20 @@ mod value_prefix_tests {
             "the selectors of each shape admit rows: {admitted:?}"
         );
         assert!(
+            admitted_by_zero_prefixes
+                .iter()
+                .flatten()
+                .all(|rows| *rows > 0),
+            "the selectors of each shape admit rows for a prefix with a zero byte: \
+             {admitted_by_zero_prefixes:?}"
+        );
+        assert!(
             admitted_by_long_prefixes > 0,
             "a prefix longer than the key part of a spilled value admits rows"
+        );
+        assert!(
+            admitted_by_long_zero_prefixes > 0,
+            "a long prefix with a zero byte admits rows"
         );
         Ok(())
     }
