@@ -742,12 +742,16 @@ impl ConceptQuery {
             // attribute on its own gives a row for each key of an entity,
             // and the rows of the body, with each repeat of an entity and a
             // key dropped, are those same rows.
+            //
+            // The plan binds what the evaluation seeds, and no more: under
+            // an election the caller's value and key are tested after it,
+            // so the plan must not take them as bound.
+            let elect = app.election(&rules);
             if let Some(exact) = rules.exact()
                 && let Some(repeats) = app.exactly(exact)
                 && stored_absent(&exact.attributes, env).await?
-                && let Some(plan) = rules.plan_exact(&app.terms, &first)
+                && let Some(plan) = rules.plan_exact(&app.seeded(elect.is_some()), &first)
             {
-                let elect = app.election(&rules);
                 let rows = stream::iter([Ok(first)]).chain(selection);
                 let rows = Box::pin(rows);
                 for await merged in app.through_erased(&plan, rows, env, elect, widen, repeats) {
@@ -865,15 +869,7 @@ impl ConceptQuery {
         Env: crate::Scope<'a>,
     {
         let key_operand = The::key_operand(ConceptDescriptor::VALUE);
-        // Under an election the caller's value, bound or constant, is
-        // tested against what the election yields, never used to seed
-        // the body: seeding would elect among the candidates that happen
-        // to equal it, or sum only those.
-        let mut into = self.terms.clone();
-        if elect.is_some() {
-            into.remove(ConceptDescriptor::VALUE);
-            into.remove(&key_operand);
-        }
+        let into = self.seeded(elect.is_some());
         let back = self.terms.clone();
         // A set-widened read keeps every caller to tell, once the plan
         // has run, which of them nothing matched.
@@ -1217,6 +1213,21 @@ impl ConceptQuery {
             return None;
         }
         Some(election)
+    }
+
+    /// The terms of this call that seed the body of a rule. Under an
+    /// election (`elects`), the caller's value and key, bound or constant,
+    /// are tested against what the election yields, and never seed the
+    /// body: seeding would elect among the candidates that happen to equal
+    /// them, or sum only those. A plan of the body takes as bound only what
+    /// these terms bind.
+    fn seeded(&self, elects: bool) -> Parameters {
+        let mut seeded = self.terms.clone();
+        if elects {
+            seeded.remove(ConceptDescriptor::VALUE);
+            seeded.remove(&The::key_operand(ConceptDescriptor::VALUE));
+        }
+        seeded
     }
 
     /// Whether the rows of the covering rule `exact` are this concept's
