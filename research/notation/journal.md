@@ -21,6 +21,7 @@ What we tried, what it measured, and what we decided, newest last. The [idea](..
 - **R24:** `query`, `select`, `find` and `(? …)` read the same, 19 of 19 medians, and every reader chose its own; only readers of the others named `query`'s clash with the submission mode.
 - **R25:** cold, with no documentation, the four words read the same again: 31 of 35 points and 11 of 15 word points each, and no reader took `select` for a projection, `find` for one match or `?` for a variable. Readers expect an undeclared concept to be empty, not an error (16 of 20), and 19 of 20 could not tell what `id` does.
 - **R26:** five spellings of a type constraint, `(dialog/type ?x is: :text)`, `(: ?x as: :text)`, `(?x as: :text)`, `(:text ?x)` and `(text ?x)`, all scored 40 of 40 cold; neither prediction held. 22 of 25 found the variable label `?p:` hardest.
+- **R27:** rules without `when` read as well as with it, 70 of 70 points in both; every reader read a domain call as stored facts only, which is not what dialog does.
 - **Next:** settle what [implementation](implementation.md) found the design must decide first (rounds, `:top` ranking, authority, `fresh`), then build the front end in its order.
 - **Open:** whether commands are asserted or written; what a rule head that names no entity lands on; whether questions stay calls with variables or become rules into a domain-call head; text literals; optional parameters. The design's Open list has the rest.
 
@@ -719,6 +720,16 @@ xychart-beta
 **Results.** Every top-level form is issued as `(expand form)`; a macro is a rule that matches the syntax and asserts the facts describing it. `concept`, `view` and `query` are prelude rules; `rule` is the one built-in form, since it installs the first macro. A query becomes schema-driven, because a macro that is a rule reads the concept facts. A view is a key on its concept's entity, and displaying is a command the view handles. The hard part is assembling one form from a macro's rows, which a query compiled to a descriptor needs once.
 
 **Decision.** Proposed, for the maintainer. Next: H2, whether agents learn the language from a space's macro facts.
+
+## 2026-11-13 — R27: rules read the same without `when`
+
+**Question.** The one [planned](results/r27-plan.md): shown no documentation, do readers take the first form of a rule for its conclusion and the rest for its conditions, without `when`, and do they read `assert`, `retract` and a bare concept conclusion correctly?
+
+**Method.** As planned, ten readers per variant; one `when` reader who answered nothing was replaced.
+
+**Results.** [r27](results/r27.md). Every reader in both variants scored all seven points, and every `bare` reader wrote the archive as two rules with no `when`: dropping `when` lost nothing. 16 of 20 said the retract and assert take effect after the step that derived them. All 20 said renaming the derived to-do does nothing, because they read the domain call in rule B as stored facts only; in dialog a rule's conclusion derives into its concept's attributes, so the rename does land, as the maintainer expects.
+
+**Decision.** Rules drop `when`: `(rule conclusion condition…)`, one conclusion each, with a named directive where a rule would need two. The design has to say that a domain call reads derived facts as well as stored ones.
 
 ## How to reproduce
 
