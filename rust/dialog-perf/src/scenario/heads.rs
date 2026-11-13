@@ -591,6 +591,92 @@ mod tests {
         Ok(())
     }
 
+    /// Who was pinged by a commit that changes one event's kind to a
+    /// kind an older event of another user already has.
+    ///
+    /// The rule's premise reads an event's user and kind, and names the
+    /// event itself only when `named`. `bob`'s event becomes a click, and
+    /// `alice` has an older click that this commit does not touch.
+    async fn pinged_by_a_shared_kind(named: bool) -> Result<Vec<String>> {
+        let env = Env::open().await?;
+        let mut bound = json!({ "user": var("this"), "kind": var("seen") });
+        if named {
+            bound["this"] = var("event");
+        }
+        let rule = induce(
+            "assert!",
+            json!({ "with": { "seen": { "the": "ping/seen", "as": "text:" } } }),
+            vec![json!({
+                "assert": { "with": {
+                    "user": { "the": "evt/user", "as": "entity:" },
+                    "kind": { "the": "evt/kind", "as": "text:" }
+                } },
+                "where": bound
+            })],
+        )?;
+        let transient = Transient(rule.conclusion().this());
+        install(&env, vec![rule], Some(transient)).await?;
+        let (first, second) = (entity("evt", 1), entity("evt", 2));
+        env.commit(assert_all(
+            [
+                fact(&first, "evt/user", Value::Entity(entity("alice", 0))),
+                fact(&first, "evt/kind", text("click")),
+                fact(&second, "evt/user", Value::Entity(entity("bob", 0))),
+                fact(&second, "evt/kind", text("view")),
+            ],
+            Pick::Last,
+        ))
+        .await?;
+        let batch = env
+            .branch
+            .transaction()
+            .integrate(assert_all(
+                [fact(&second, "evt/kind", text("click"))],
+                Pick::Last,
+            ))
+            .commit()
+            .perform(&env.operator)
+            .await?;
+        let mut pinged: Vec<String> = batch
+            .induced()
+            .clone()
+            .into_instructions()
+            .into_iter()
+            .filter_map(|instruction| match instruction {
+                dialog_corpus::Instruction::Assert(fact, _) => Some(fact.of.to_string()),
+                dialog_corpus::Instruction::Retract(_) => None,
+            })
+            .collect();
+        pinged.sort();
+        Ok(pinged)
+    }
+
+    /// A seeded firing leaves the subject of a premise free when the
+    /// premise does not name it, so the seed's value is matched at every
+    /// entity that holds it: a commit that touches `bob`'s event fires
+    /// the rule for `alice` too, whose event did not change. The same
+    /// rule with the event named, in a variable nothing else reads, fires
+    /// for `bob` alone, and so does the unnamed one under the spike's
+    /// `subject` switch, where the seed binds its own entity. This pins
+    /// what the engine does today; it is the evidence for
+    /// `design/seed-subject.md`, not a behavior to keep.
+    #[tokio::test]
+    async fn it_fires_for_an_entity_the_commit_did_not_touch() -> Result<()> {
+        let spike = std::env::var("DIALOG_SPIKE").unwrap_or_default();
+        let subject = spike
+            .split(',')
+            .any(|each| each == "subject" || each == "all");
+        let (alice, bob) = (entity("alice", 0).to_string(), entity("bob", 0).to_string());
+        assert_eq!(pinged_by_a_shared_kind(true).await?, vec![bob.clone()]);
+        let unnamed = pinged_by_a_shared_kind(false).await?;
+        if subject {
+            assert_eq!(unnamed, vec![bob]);
+        } else {
+            assert_eq!(unnamed, vec![alice, bob]);
+        }
+        Ok(())
+    }
+
     /// The rules that move a to-do leave it on the list it went to and
     /// off the one it was on, written again or named.
     #[tokio::test]

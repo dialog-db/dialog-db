@@ -61,6 +61,7 @@ use crate::rules::{
 };
 use crate::{CommitError, RemoteSite, Revision, Staged};
 use std::slice::from_ref;
+use std::sync::Arc;
 
 /// Round bound for the induction loop: a cascade still emitting
 /// transients or novelty after this many rounds fails the commit
@@ -264,7 +265,7 @@ where
         // the rules that state one body are known up front and their
         // body is evaluated once. Firing order is the candidates' own
         // either way.
-        let mut loaded: Vec<(Entity, InductiveRule, bool, bool)> = Vec::new();
+        let mut loaded: Vec<(Entity, Arc<InductiveRule>, bool, bool)> = Vec::new();
         for entity in candidates {
             let Some(rule) = dispatch.load(&entity, &overlay, env).await? else {
                 continue;
@@ -305,7 +306,7 @@ where
                     &mut emitted_transients,
                 )
                 .await?;
-            } else if let Some(group) = shared.group(at) {
+            } else if let Some((group, rename)) = shared.group(at) {
                 // One evaluation of the body the group states, under a
                 // rule whose head names every variable any of the
                 // group's heads reads; each rule writes its own head
@@ -324,8 +325,9 @@ where
                 }
                 let matches = group.matches.clone().unwrap_or_default();
                 if !matches.is_empty() {
-                    emit_matches(
+                    emit_renamed(
                         rule,
+                        rename.as_deref(),
                         transient_head,
                         matches,
                         &view,
@@ -697,7 +699,7 @@ impl<'a> Dispatch<'a> {
         entity: &Entity,
         overlay: &OverlayTriggers,
         env: &Env,
-    ) -> Result<Option<InductiveRule>, CommitError>
+    ) -> Result<Option<Arc<InductiveRule>>, CommitError>
     where
         Env: Provider<BlobRead>
             + Provider<Get>
@@ -718,6 +720,13 @@ impl<'a> Dispatch<'a> {
             + 'static,
     {
         let cache = self.view.rule_cache();
+        // Spike `entity`: a rule this thread has loaded from the
+        // committed tree is found by its entity alone, with no read of
+        // its source and no hash of it.
+        let committed = !overlay.sources.contains_key(entity);
+        if committed && let Some(rule) = spike::rule_of(entity) {
+            return Ok(Some(rule));
+        }
         let bytes = match overlay.sources.get(entity) {
             Some(bytes) => Some(bytes.clone()),
             None => self.source_bytes(entity, env).await?,
@@ -726,6 +735,10 @@ impl<'a> Dispatch<'a> {
             return Ok(None);
         };
         if let Some(rule) = cache.inductive(entity, &bytes) {
+            let rule = Arc::new(rule);
+            if committed {
+                spike::keep_rule(entity, &rule);
+            }
             return Ok(Some(rule));
         }
         // Undecodable bytes, or bytes whose content address is not the
@@ -740,6 +753,10 @@ impl<'a> Dispatch<'a> {
             return Ok(None);
         }
         cache.record_inductive(entity.clone(), &bytes, rule.clone());
+        let rule = Arc::new(rule);
+        if committed {
+            spike::keep_rule(entity, &rule);
+        }
         Ok(Some(rule))
     }
 
@@ -1361,23 +1378,35 @@ fn bind_seed(
 /// - `plan`: a rule is planned once for each set of names a seed binds,
 ///   and the plan is kept for the life of the thread, where today it is
 ///   planned again for every seed of every commit.
-/// - `share`: candidates of a round that state the same body, as the
-///   author spelled it, have it evaluated once, under a rule whose head
-///   names every variable any of their heads reads.
+/// - `share`: when every candidate of a round that fires seeded states
+///   the same body, the same premises under a renaming of variables, it
+///   is evaluated once, under a rule whose head names every variable any
+///   of their heads reads. Incomplete: a round whose candidates state
+///   two bodies is left as it is, a head that writes a collection is
+///   left out, and the union's head types every variable it names for
+///   every member.
 /// - `subject`: a positive concept premise that leaves its subject
 ///   unnamed is given a variable for it, so a seed binds the entity its
 ///   rows are about and the premise is read at that entity.
+/// - `entity`: a committed rule is found by the entity it is stored
+///   under, which is a hash of it, where today each commit reads the
+///   rule's source from the tree and hashes it to find the rule it
+///   decoded before. Unsound as it stands: it no longer checks that the
+///   source is stored on this line, so a trigger row with no rule
+///   behind it here would fire a rule loaded elsewhere.
 mod spike {
     use std::cell::RefCell;
     use std::collections::HashMap;
+    use std::env;
     use std::rc::Rc;
-    use std::sync::OnceLock;
+    use std::sync::{Arc, OnceLock};
 
     use dialog_corpus::Entity;
     use dialog_query::{
         Any, Conjunction, Environment, InductiveRule, Match, Planner, Premise, Proposition, Term,
         TypeEnv,
     };
+    use serde_json::Value as Json;
 
     /// Which prototypes are on.
     #[derive(Clone, Copy, Default)]
@@ -1385,18 +1414,22 @@ mod spike {
         pub plan: bool,
         pub share: bool,
         pub subject: bool,
+        pub entity: bool,
     }
 
     /// The switches `DIALOG_SPIKE` sets, read once.
     pub(super) fn on() -> Switches {
         static ON: OnceLock<Switches> = OnceLock::new();
         *ON.get_or_init(|| {
-            let set = std::env::var("DIALOG_SPIKE").unwrap_or_default();
+            let set = env::var("DIALOG_SPIKE").unwrap_or_default();
             let has = |name: &str| set.split(',').any(|each| each == name || each == "all");
             Switches {
                 plan: has("plan"),
                 share: has("share"),
                 subject: has("subject"),
+                // Not part of `all`: it was added after the others were
+                // measured, and is measured apart.
+                entity: set.split(',').any(|each| each == "entity"),
             }
         })
     }
@@ -1406,7 +1439,7 @@ mod spike {
     /// under.
     pub(super) struct Body {
         pub premises: Vec<Premise>,
-        types: std::sync::Arc<TypeEnv>,
+        pub types: Arc<TypeEnv>,
     }
 
     impl Body {
@@ -1451,11 +1484,25 @@ mod spike {
         /// its scope binds, sorted.
         static PLANS: RefCell<HashMap<PlanKey, HashMap<Vec<String>, Conjunction>>> =
             RefCell::new(HashMap::new());
-        /// Under `share`, the body each rule states, as its author
-        /// spelled it, and the rule each group is evaluated under.
-        static BODIES: RefCell<HashMap<Entity, Rc<str>>> = RefCell::new(HashMap::new());
-        static GROUPS: RefCell<HashMap<Rc<str>, Option<InductiveRule>>> =
-            RefCell::new(HashMap::new());
+        /// Under `entity`, every committed rule this thread has loaded,
+        /// by the entity it is stored under.
+        static RULES: RefCell<HashMap<Entity, Arc<InductiveRule>>> = RefCell::new(HashMap::new());
+    }
+
+    /// The rule stored under `entity`, if `entity` is on and this
+    /// thread loaded it before.
+    pub(super) fn rule_of(entity: &Entity) -> Option<Arc<InductiveRule>> {
+        if !on().entity {
+            return None;
+        }
+        RULES.with(|rules| rules.borrow().get(entity).cloned())
+    }
+
+    /// Keep `rule` as what `entity` stores, when `entity` is on.
+    pub(super) fn keep_rule(entity: &Entity, rule: &Arc<InductiveRule>) {
+        if on().entity {
+            RULES.with(|rules| rules.borrow_mut().insert(entity.clone(), rule.clone()));
+        }
     }
 
     /// The plans of one rule, taken out of the thread's for one seeded
@@ -1499,9 +1546,13 @@ mod spike {
         }
     }
 
+    /// For a head field of a rule, the variable that holds its value in
+    /// the matches of the rule its group is evaluated under.
+    pub(super) type Rename = HashMap<String, String>;
+
     /// One body several candidates of a round state.
     pub(super) struct Group {
-        /// The body, as its authors spelled it.
+        /// The entities of the rules that state it, joined.
         pub key: Rc<str>,
         /// The rule the body is evaluated under.
         pub rule: InductiveRule,
@@ -1512,13 +1563,26 @@ mod spike {
     /// The groups of a round's candidates, by candidate.
     pub(super) struct Shared {
         groups: Vec<Group>,
-        of: HashMap<usize, usize>,
+        of: HashMap<usize, (usize, Option<Rc<Rename>>)>,
+    }
+
+    /// A group as it is kept between rounds and commits: the rule its
+    /// body is evaluated under, and each member's renaming.
+    type Kept = Option<(InductiveRule, Vec<Option<Rc<Rename>>>)>;
+
+    thread_local! {
+        /// Each rule as its stored spelling encodes, by its entity.
+        static SPELLINGS: RefCell<HashMap<Entity, Rc<Json>>> = RefCell::new(HashMap::new());
+        /// Every group made, by its members' entities.
+        static KEPT: RefCell<HashMap<Rc<str>, Kept>> = RefCell::new(HashMap::new());
     }
 
     impl Shared {
-        /// Group the candidates that fire seeded and state one body. A
-        /// candidate alone in its group is in none.
-        pub(super) fn of(loaded: &[(Entity, InductiveRule, bool, bool)]) -> Self {
+        /// Group the candidates that fire seeded and state one body:
+        /// the same premises under a renaming of their variables that
+        /// keeps `this`. A candidate alone in its group is in none, and
+        /// neither is one whose head writes a collection.
+        pub(super) fn of(loaded: &[(Entity, Arc<InductiveRule>, bool, bool)]) -> Self {
             let mut shared = Shared {
                 groups: Vec::new(),
                 of: HashMap::new(),
@@ -1526,86 +1590,205 @@ mod spike {
             if !on().share {
                 return shared;
             }
-            let mut by_body: Vec<(Rc<str>, Vec<usize>)> = Vec::new();
-            for (at, (entity, rule, _, full)) in loaded.iter().enumerate() {
-                if *full {
-                    continue;
-                }
-                let Some(body) = body_of(entity, rule) else {
-                    continue;
-                };
-                match by_body.iter_mut().find(|(key, _)| *key == body) {
-                    Some((_, members)) => members.push(at),
-                    None => by_body.push((body, vec![at])),
-                }
+            let seeded: Vec<usize> = loaded
+                .iter()
+                .enumerate()
+                .filter(|(_, (_, rule, _, full))| {
+                    !full
+                        && rule
+                            .conclusion()
+                            .with()
+                            .iter()
+                            .all(|(_, field)| field.descriptor().the().attribute().is_some())
+                })
+                .map(|(at, _)| at)
+                .collect();
+            if seeded.len() < 2 {
+                return shared;
             }
-            for (body, members) in by_body {
-                if members.len() < 2 {
-                    continue;
-                }
-                let rules: Vec<&InductiveRule> = members.iter().map(|&at| &loaded[at].1).collect();
-                let Some(rule) = union(&body, &rules) else {
-                    continue;
-                };
-                for at in members {
-                    shared.of.insert(at, shared.groups.len());
-                }
-                shared.groups.push(Group {
-                    key: body,
-                    rule,
-                    matches: None,
-                });
+            let key: Rc<str> = seeded
+                .iter()
+                .map(|&at| loaded[at].0.to_string())
+                .collect::<Vec<_>>()
+                .join(" ")
+                .into();
+            // The groups of this set of candidates, as made before.
+            let kept = KEPT.with(|kept| kept.borrow().get(&key).cloned());
+            let kept = kept.unwrap_or_else(|| {
+                let made = group(&seeded, loaded);
+                KEPT.with(|kept| kept.borrow_mut().insert(key.clone(), made.clone()));
+                made
+            });
+            let Some((rule, renames)) = kept else {
+                return shared;
+            };
+            for (&at, rename) in seeded.iter().zip(renames) {
+                shared.of.insert(at, (0, rename));
             }
+            shared.groups.push(Group {
+                key,
+                rule,
+                matches: None,
+            });
             shared
         }
 
-        /// The group candidate `at` is in, if it is in one.
-        pub(super) fn group(&mut self, at: usize) -> Option<&mut Group> {
-            let group = *self.of.get(&at)?;
-            self.groups.get_mut(group)
+        /// The group candidate `at` is in, if it is in one, and how its
+        /// head reads the group's matches.
+        pub(super) fn group(&mut self, at: usize) -> Option<(&mut Group, Option<Rc<Rename>>)> {
+            let (group, rename) = self.of.get(&at)?.clone();
+            Some((self.groups.get_mut(group)?, rename))
         }
     }
 
-    /// The body `rule` states, as its author spelled it: its `when` and
-    /// `unless`, encoded. Kept by the entity the rule is stored under,
-    /// which is a hash of the rule.
-    fn body_of(entity: &Entity, rule: &InductiveRule) -> Option<Rc<str>> {
-        if let Some(body) = BODIES.with(|bodies| bodies.borrow().get(entity).cloned()) {
-            return Some(body);
+    /// One group of all of `seeded`, if every one of them states the
+    /// body of the first: the rule that body is evaluated under, whose
+    /// head names every variable any member's head reads, and each
+    /// member's renaming. `None` when they do not all state one body. A
+    /// round whose seeded candidates state two bodies or more is left
+    /// ungrouped: the spike does not partition them.
+    fn group(seeded: &[usize], loaded: &[(Entity, Arc<InductiveRule>, bool, bool)]) -> Kept {
+        let spellings: Vec<Rc<Json>> = seeded
+            .iter()
+            .map(|&at| spelling(&loaded[at].0, &loaded[at].1))
+            .collect::<Option<_>>()?;
+        let first = &spellings[0];
+        let mut union = (**first).clone();
+        let mut renames: Vec<Option<Rc<Rename>>> = vec![None];
+        for other in &spellings[1..] {
+            let rename = same_body(first, other)?;
+            // The fields of this member's head, under the names their
+            // variables have in the first member's spelling.
+            let mut reads = Rename::new();
+            for (name, field) in head(other)? {
+                let variable = rename.get(name).cloned().unwrap_or_else(|| name.clone());
+                let fields = head_mut(&mut union)?;
+                if !fields.contains_key(&variable) {
+                    fields.insert(variable.clone(), field.clone());
+                }
+                reads.insert(name.clone(), variable);
+            }
+            renames.push(Some(Rc::new(reads)));
+        }
+        let rule: InductiveRule = serde_json::from_value(union).ok()?;
+        Some((rule, renames))
+    }
+
+    /// `rule` as it encodes, kept by the entity it is stored under.
+    fn spelling(entity: &Entity, rule: &InductiveRule) -> Option<Rc<Json>> {
+        if let Some(spelling) = SPELLINGS.with(|all| all.borrow().get(entity).cloned()) {
+            return Some(spelling);
         }
         let mut json = serde_json::to_value(rule).ok()?;
+        // The union is compiled as an asserting rule: only its body is
+        // evaluated, and each member writes with its own polarity.
         let object = json.as_object_mut()?;
-        object.remove("assert!");
-        object.remove("retract!");
+        if let Some(head) = object.remove("retract!") {
+            object.insert("assert!".into(), head);
+        }
         object.remove("description");
-        let body: Rc<str> = serde_json::to_string(&json).ok()?.into();
-        BODIES.with(|bodies| bodies.borrow_mut().insert(entity.clone(), body.clone()));
-        Some(body)
+        let spelling = Rc::new(json);
+        SPELLINGS.with(|all| all.borrow_mut().insert(entity.clone(), spelling.clone()));
+        Some(spelling)
     }
 
-    /// A rule with the body `rules` share and a head naming every field
-    /// any of their heads names, so the variables their heads read keep
-    /// their names in its matches. Kept by the body and the fields.
-    fn union(body: &Rc<str>, rules: &[&InductiveRule]) -> Option<InductiveRule> {
-        let mut fields = serde_json::Map::new();
-        for rule in rules {
-            let json = serde_json::to_value(rule).ok()?;
-            let head = json.get("assert!").or_else(|| json.get("retract!"))?;
-            for (name, field) in head.get("with")?.as_object()? {
-                fields.entry(name.clone()).or_insert_with(|| field.clone());
+    /// The fields of an encoded rule's head.
+    fn head(rule: &Json) -> Option<&serde_json::Map<String, Json>> {
+        rule.get("assert!")?.get("with")?.as_object()
+    }
+
+    fn head_mut(rule: &mut Json) -> Option<&mut serde_json::Map<String, Json>> {
+        rule.get_mut("assert!")?.get_mut("with")?.as_object_mut()
+    }
+
+    /// The renaming of `other`'s variables under which its `when` and
+    /// `unless` are those of `first`, whatever the order of the
+    /// premises: a variable of `other` to the variable of `first` in
+    /// its place. `None` when there is none.
+    fn same_body(first: &Json, other: &Json) -> Option<Rename> {
+        let mut rename = Rename::new();
+        rename.insert("this".into(), "this".into());
+        for part in ["when", "unless"] {
+            let empty = Vec::new();
+            let of_first = first.get(part).and_then(Json::as_array).unwrap_or(&empty);
+            let of_other = other.get(part).and_then(Json::as_array).unwrap_or(&empty);
+            if of_first.len() != of_other.len() {
+                return None;
             }
+            let mut taken = vec![false; of_first.len()];
+            rename = pair(of_first, of_other, &mut taken, rename)?;
         }
-        let names: Vec<&str> = fields.keys().map(String::as_str).collect();
-        let key: Rc<str> = format!("{}\n{body}", names.join(",")).into();
-        if let Some(rule) = GROUPS.with(|groups| groups.borrow().get(&key).cloned()) {
-            return rule;
+        Some(rename)
+    }
+
+    /// Pair each premise of `other` with a premise of `first` not yet
+    /// `taken` that it equals under one renaming, trying every pairing.
+    fn pair(first: &[Json], other: &[Json], taken: &mut [bool], rename: Rename) -> Option<Rename> {
+        let Some((premise, rest)) = other.split_first() else {
+            return Some(rename);
+        };
+        for at in 0..first.len() {
+            if taken[at] {
+                continue;
+            }
+            let mut attempt = rename.clone();
+            if !same(&first[at], premise, &mut attempt) {
+                continue;
+            }
+            taken[at] = true;
+            if let Some(found) = pair(first, rest, taken, attempt) {
+                return Some(found);
+            }
+            taken[at] = false;
         }
-        let mut json: serde_json::Value = serde_json::from_str(body).ok()?;
-        json.as_object_mut()?
-            .insert("assert!".into(), serde_json::json!({ "with": fields }));
-        let rule: Option<InductiveRule> = serde_json::from_value(json).ok();
-        GROUPS.with(|groups| groups.borrow_mut().insert(key, rule.clone()));
-        rule
+        None
+    }
+
+    /// The name of the variable `json` encodes, if it encodes a named
+    /// one: `{ "?": { "name": … } }`.
+    fn variable(json: &Json) -> Option<&str> {
+        let object = json.as_object()?;
+        if object.len() != 1 {
+            return None;
+        }
+        object.get("?")?.get("name")?.as_str()
+    }
+
+    /// Whether `other` is `first` with its variables renamed by
+    /// `rename`, which is extended by the variables met and kept one to
+    /// one.
+    fn same(first: &Json, other: &Json, rename: &mut Rename) -> bool {
+        if let (Some(a), Some(b)) = (variable(first), variable(other)) {
+            // The rest of the variable, its type, has to agree too.
+            let rest = |json: &Json| {
+                let mut rest = json["?"].clone();
+                rest.as_object_mut().map(|object| object.remove("name"));
+                rest
+            };
+            if rest(first) != rest(other) {
+                return false;
+            }
+            return match rename.get(b) {
+                Some(bound) => bound == a,
+                None if rename.values().any(|bound| bound == a) => false,
+                None => {
+                    rename.insert(b.to_string(), a.to_string());
+                    true
+                }
+            };
+        }
+        match (first, other) {
+            (Json::Object(a), Json::Object(b)) => {
+                a.len() == b.len()
+                    && a.iter().all(|(key, value)| {
+                        b.get(key).is_some_and(|other| same(value, other, rename))
+                    })
+            }
+            (Json::Array(a), Json::Array(b)) => {
+                a.len() == b.len() && a.iter().zip(b).all(|(a, b)| same(a, b, rename))
+            }
+            (a, b) => a == b,
+        }
     }
 }
 
@@ -1624,7 +1807,31 @@ async fn emit_matches<'a>(
     novelty: &mut Changes,
     transients: &mut Changes,
 ) -> Result<(), CommitError> {
-    let heads = written_heads(rule, &matches)?;
+    emit_renamed(
+        rule,
+        None,
+        transient_head,
+        matches,
+        view,
+        novelty,
+        transients,
+    )
+    .await
+}
+
+/// [`emit_matches`] for matches found under another spelling of the
+/// rule's body (spike `share`): `rename` gives, for a head field of
+/// `rule`, the variable that holds its value in `matches`.
+async fn emit_renamed<'a>(
+    rule: &InductiveRule,
+    rename: Option<&spike::Rename>,
+    transient_head: bool,
+    matches: Vec<Match>,
+    view: &QueryEnv<'a>,
+    novelty: &mut Changes,
+    transients: &mut Changes,
+) -> Result<(), CommitError> {
+    let heads = written_heads(rule, rename, &matches)?;
 
     // A seeded rule is evaluated once per stimulus row a premise names,
     // so an event that carries several of a premise's fields finds the
@@ -1694,7 +1901,11 @@ async fn emit_matches<'a>(
 /// The head each of `matches` writes, in order: its subject and the
 /// cells of the fields it binds. A match that leaves `this` unbound
 /// writes nothing and is left out.
-fn written_heads(rule: &InductiveRule, matches: &[Match]) -> Result<Vec<WrittenHead>, CommitError> {
+fn written_heads(
+    rule: &InductiveRule,
+    rename: Option<&spike::Rename>,
+    matches: &[Match],
+) -> Result<Vec<WrittenHead>, CommitError> {
     let conclusion = rule.conclusion();
     let mut heads: Vec<WrittenHead> = Vec::with_capacity(matches.len());
     for matched in matches {
@@ -1707,7 +1918,10 @@ fn written_heads(rule: &InductiveRule, matches: &[Match]) -> Result<Vec<WrittenH
 
         let mut cells = Vec::new();
         for (name, field) in conclusion.with().iter() {
-            let Ok(Binding::Present(value)) = matched.lookup(&Term::<Any>::var(name)) else {
+            let variable = rename
+                .and_then(|rename| rename.get(name))
+                .map_or(name, String::as_str);
+            let Ok(Binding::Present(value)) = matched.lookup(&Term::<Any>::var(variable)) else {
                 // Optional head fields the frame didn't bind emit
                 // nothing.
                 continue;
