@@ -960,6 +960,27 @@ Not examined yet. They are columns, not recommendations.
 
 **Decided.** By the maintainer: `...` takes a pattern, and `p ...` goes. Not decided: what a bare `... ?x` takes in an application. Not built; the reader changes once, for this and the quoted list.
 
+## 2026-11-13, Designing: a record beside one part, and who gives `...` its meaning
+
+**Asked.** The maintainer: think of `(todo ?t list: ?l text: ?x)` as sugar for `(todo {of: ?t list: ?l text: ?x})`, and `(todo ?t ?extra list: ?l text: ?x)` is not valid. Then, while the agent was building: "I imagine that parser / reader does not give ... any special meaning and it is analyzer that goes from just lists to interpretation I propsoed".
+
+**Learned.**
+
+- The sugar dissolves the agent's question of which parts a bare `... ?x` takes. Beside labels the rest is the record's, and a form with no label is a list, whose rest is a list's. They never share a bracket.
+- What does not fold into a record is a form of several parts and no label, `(rule head premise premise)`. The journal of 2026-11-11 had it: "The reader cannot fold it in". So a label written makes the parts a record, and no label leaves a list.
+- The agent started building all of it in the reader and the tree: a form for `... p`, the refusal of a second unlabelled part, `of:` said twice. That is the wrong phase by the maintainer's word, and it is where `...` already was before today. The change was set aside before it compiled; nothing of it was pushed.
+- With a reader that gives `...` no meaning, `{author: ?who ... ?others}` is two entries, the second under the key `...`. That is what "a special label" is: nothing in the reader, and a key the analyzer knows.
+
+```
+ the reader                                    the analyzer
+ (query ?head ?premise ... ?more)   a list     ... then a part: the parts not named
+ (todo ?t list: ?l ... ?fields)     a list     labels: one record, ?t its of:, ... its rest
+ (todo ?t ?extra list: ?l)          a list     refused, with where: two parts beside labels
+ {author: ?who ... ?others}         a struct   the entry under ... : the entries not named
+```
+
+**Decided.** By the maintainer: a form with a label is sugar for one record; the reader gives `...` no meaning and the analyzer does. Not built. To confirm before building: that the split in the diagram is the one meant, and that `'` is the reader's as in lisp, `'(1 2 3)` read as `(quote (1 2 3))`.
+
 ## The queue
 
 In order. One is asked, answered and written down before the next.
