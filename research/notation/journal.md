@@ -761,9 +761,19 @@ xychart-beta
 
 **Decision.** For the maintainer: either rules read through concepts, with domain calls kept for the stored layer, or domain calls get a spelling that does not read as storage. The sentence on how `last` elects between stored and derived values stays in either case.
 
+## 2026-11-13 — R31: "open-ended concept" does not help, and readers saw the session's context
+
+**Question.** The one [planned](results/r31-plan.md): does calling a domain call an open-ended concept, in a sentence or through the subset case, make readers see the rename land? Partway through, the maintainer asked whether readers were biased by memory or other data.
+
+**Method.** They were: every reader agent since R17 saw the maintainer's memory snapshot, the repository's rules and the session's MCP instructions, Tonk's among them. The plan's addendum, written before scoring, moved the round to a clean runner: headless `claude -p` on haiku, the system prompt replaced, no MCP servers, settings or tools. All of R31 and R30's `concept` and `baseline` ran again on it, ten readers each. The 20 answers from the old runner are kept.
+
+**Results.** [r31](results/r31.md). The sentence scored 0 of 10 clean and 0 of 7 on the old runner. The subset example scored 4 of 10 clean and 0 of 7 on the old runner. R30 held clean: rule B reading `(todo ...)` 10 of 10, reading `(xyz.todo ...)` 0 of 10. Without the context, readers would not guess how `last` elects: eight of ten said the to-do has two titles.
+
+**Decision.** The context did not create the misreading; the spelling does. Rounds run on the clean runner from now on. The next lever is the spelling of a domain call, with the election stated.
+
 ## How to reproduce
 
 1. Take a variant's prompt from its round's results file and save it as `<variant>.txt`.
-2. Start a reader with model `haiku` as a read-only agent (no shell, no tools that reach the user's apps or devices), and tell it: "This is a reading-comprehension exercise. Use the Read tool once to read `<variant>.txt`, then do exactly what that file asks. Use no other tools, do not search the web, and read no other files. Your final reply is just the numbered answers."
+2. From R31 on, run each reader clean, in an empty directory: `claude -p --model haiku --strict-mcp-config --mcp-config '{"mcpServers":{}}' --setting-sources "" --system-prompt "You are a careful reader." --tools "" --output-format json "$(cat <variant>.txt)"`. Up to R30, rounds instead started a reader with model `haiku` as a read-only agent (no shell, no tools that reach the user's apps or devices), and tell it: "This is a reading-comprehension exercise. Use the Read tool once to read `<variant>.txt`, then do exactly what that file asks. Use no other tools, do not search the web, and read no other files. Your final reply is just the numbered answers."
 3. Start every reader of a round at once, three or more per variant, interleaving variants.
 4. Score the first answer only, by the round's criteria in its results file; keep every answer.
