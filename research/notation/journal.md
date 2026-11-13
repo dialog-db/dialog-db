@@ -791,6 +791,16 @@ xychart-beta
 
 **Decision.** Promising, at the bar. Replicate, then test the maintainer's two follow-ups: `message` and `audience` spelled as attributes, and `note` and `memo` spelled as records.
 
+## 2026-11-13 — R34: R33 does not replicate; readers split on how rules run
+
+**Question.** The one [planned](results/r34-plan.md): does R33's 7 of 10 hold, and does spelling `message` and `audience` as `(attribute message the: xyz.tonk.post/content as: :text pick: :last)` keep or break it?
+
+**Method.** Clean runner, ten readers per variant.
+
+**Results.** [r34](results/r34.md). R33's document scored 3 of 10 this time, 10 of 20 over both runs. The attribute declarations scored 4 of 10, no worse; asserting still scored 10 of 10. Pooled, one-attribute building blocks find a rule's memo 14 times in 30, against none in 20 for the domain read directly. The misses are no longer about storage. They take rules as goal-directed: "the `memo` rule only runs if something asks for `memo`". The hits mostly hedged on the same point.
+
+**Decision.** Ten readers per variant is too few for rates near one half; use 20. Next: one sentence saying a rule's conclusion gives values to its attributes whether or not its concept is asked for, on the plain domain form and on the one-attribute blocks.
+
 ## How to reproduce
 
 1. Take a variant's prompt from its round's results file and save it as `<variant>.txt`.
