@@ -50,7 +50,10 @@ use dialog_effects::memory::Resolve;
 use dialog_query::attribute::The;
 use dialog_query::rule::inductive::Polarity;
 use dialog_query::rule::statement::Reach;
-use dialog_query::{Any, Binding, Environment, InductiveRule, Match, Term};
+use dialog_query::{
+    Any, Binding, ConceptQuery, Environment, InductiveRule, Match, Planner, Premise, Proposition,
+    Term,
+};
 use futures_util::{StreamExt as _, TryStreamExt};
 
 use crate::repository::archive::erased;
@@ -996,7 +999,7 @@ async fn fire<'a>(
 /// positive premises (seedable by an assert/replace row) and `unless`
 /// premises (only enabled by removal — never seedable).
 fn premise_reach(rule: &InductiveRule) -> (BTreeSet<Reach>, BTreeSet<Reach>) {
-    use dialog_query::{Negation, Premise, Proposition};
+    use dialog_query::Negation;
 
     let mut positive = BTreeSet::new();
     let mut unless = BTreeSet::new();
@@ -1077,12 +1080,18 @@ async fn seeded_matches<'a>(
     view: &QueryEnv<'a>,
     seeding: Seeding,
 ) -> Result<Vec<Match>, CommitError> {
-    use dialog_query::{Premise, Proposition};
-
     let mut matches: Vec<Match> = Vec::new();
-    for premise in &rule.analysis().premises {
+    for (at, premise) in rule.analysis().premises.iter().enumerate() {
         let Premise::Assert(Proposition::Concept(query)) = premise else {
             continue;
+        };
+        // A premise that leaves its subject unnamed is seeded with the
+        // subject named, so the seed binds the entity its rows are
+        // about (see [`subject_named`]).
+        let named = subject_named(rule, at);
+        let (query, premises) = match &named {
+            Some((premises, query)) => (query, Some(premises.as_slice())),
+            None => (query, None),
         };
         let groups = match seeding {
             Seeding::Grouped => seed_groups(query, rows),
@@ -1096,8 +1105,14 @@ async fn seeded_matches<'a>(
                 oracle::count(if group.len() > 1 { 1 } else { group.len() });
             }
             if group.len() > 1 {
-                let together =
-                    evaluate_seed(rule, query, group.iter().map(|&at| &rows[at]), view).await?;
+                let together = evaluate_seed(
+                    rule,
+                    premises,
+                    query,
+                    group.iter().map(|&at| &rows[at]),
+                    view,
+                )
+                .await?;
                 if !together.is_empty() {
                     found.push((group[0], together));
                     continue;
@@ -1108,7 +1123,10 @@ async fn seeded_matches<'a>(
                 oracle::count(group.len());
             }
             for at in group {
-                found.push((at, evaluate_seed(rule, query, [&rows[at]], view).await?));
+                found.push((
+                    at,
+                    evaluate_seed(rule, premises, query, [&rows[at]], view).await?,
+                ));
             }
         }
         // Groups come in the order of their first rows, so only rows
@@ -1121,9 +1139,13 @@ async fn seeded_matches<'a>(
 }
 
 /// Evaluates `rule` with `rows` bound into `query` (see [`seed`]); no
-/// matches when the rows do not bind it.
+/// matches when the rows do not bind it. `premises` are the rule's with
+/// the subject of `query` named, when the rule leaves it unnamed
+/// ([`subject_named`]); they are planned under the types the rule was
+/// analyzed to, which say nothing of the one variable added.
 async fn evaluate_seed<'a, 'r>(
     rule: &InductiveRule,
+    premises: Option<&[Premise]>,
     query: &dialog_query::ConceptQuery,
     rows: impl IntoIterator<Item = &'r Fact>,
     view: &QueryEnv<'a>,
@@ -1131,11 +1153,68 @@ async fn evaluate_seed<'a, 'r>(
     let Some((matched, scope)) = seed(query, rows) else {
         return Ok(Vec::new());
     };
-    rule.plan(&scope)
-        .evaluate(matched.seed(), view)
+    let plan = match premises {
+        Some(premises) => Planner::with_types(premises.to_vec(), rule.analysis().types.clone())
+            .plan(&scope)
+            .map_err(|error| CommitError::Induction(format!("seeded rule body: {error}")))?,
+        None => rule.plan(&scope),
+    };
+    plan.evaluate(matched.seed(), view)
         .try_collect()
         .await
         .map_err(|error| CommitError::Induction(format!("seeded rule body: {error}")))
+}
+
+/// The premises of `rule` with the subject of the concept premise at
+/// `at` named, and that premise as it then reads; `None` when the
+/// premise names its subject already, with a variable or a constant.
+///
+/// A row is a fact of one entity, and it matches a premise as a field
+/// of that entity. So the matches a row newly makes through a premise
+/// are those where the premise is read at the row's entity. A premise
+/// that gives `this` no variable leaves [`seed`] nothing to bind the
+/// entity to: the row's value alone would be bound, the premise read at
+/// every entity holding that value, and the rule fired for entities
+/// the commit did not touch. Naming the subject, in a variable nothing
+/// else in the rule reads, gives the seed its place. The variable binds
+/// what the unnamed subject matched and constrains nothing else, so a
+/// full evaluation finds the same matches with it or without.
+fn subject_named(rule: &InductiveRule, at: usize) -> Option<(Vec<Premise>, ConceptQuery)> {
+    let premises = &rule.analysis().premises;
+    let Premise::Assert(Proposition::Concept(query)) = &premises[at] else {
+        return None;
+    };
+    match query.terms.get("this") {
+        None | Some(Term::Variable { name: None, .. }) => {}
+        Some(_) => return None,
+    }
+
+    // A name no premise, head field or key operand of the rule has: a
+    // match binds it, and nothing may read it by accident.
+    let mut taken: BTreeSet<String> = BTreeSet::from(["this".to_string()]);
+    for premise in premises {
+        for (_, term) in premise.parameters().iter() {
+            if let Some(name) = term.name() {
+                taken.insert(name.to_string());
+            }
+        }
+    }
+    for (name, _) in rule.conclusion().with().iter() {
+        taken.insert(name.to_string());
+        taken.insert(The::key_operand(name));
+    }
+    let mut subject = String::from("subject");
+    while taken.contains(&subject) {
+        subject.push('\'');
+    }
+
+    let mut query = query.clone();
+    query
+        .terms
+        .insert("this".to_string(), Term::<Any>::var(subject));
+    let mut premises = premises.clone();
+    premises[at] = Premise::Assert(Proposition::Concept(query.clone()));
+    Some((premises, query))
 }
 
 /// The rows of `rows` that may seed `query` together: the rows of one
