@@ -2,7 +2,13 @@
 
 ## Where things stand
 
-**Exploring.** Two sittings are in. At 500 commands a commit ([results](results/2026-11-12.md)) giving the condition a name costs 22% to 39% more instructions than one rule with a wide head, which stands in for a rule of several heads, and writing the body again a head costs 61% to 148% more. At one command a commit ([results](results/2026-11-12-one-command.md)) the order is the same and the three are closer: `named` 17% to 28% over `wide`, `repeat` 27% to 87% over, of a commit that costs 2.9 to 4.0 million instructions with no rule. Both are between the topic's bars, so it is the maintainer's to weigh. Next: what the engine could recover, with the prototypes on `spike/induce-cost` being measured.
+**Exploring.** Three sittings are in.
+
+- At 500 commands a commit ([results](results/2026-11-12.md)) giving the condition a name costs 22% to 39% more instructions than one rule with a wide head, which stands in for a rule of several heads, and writing the body again a head costs 61% to 148% more.
+- At one command a commit ([results](results/2026-11-12-one-command.md)) the order is the same and the three are closer: `named` 17% to 28% over `wide`, `repeat` 27% to 87% over, of a commit that costs 2.9 to 4.0 million instructions with no rule.
+- With three prototype changes to induction on ([results](results/2026-11-12-induce-cost.md), branch `spike/induce-cost`), `repeat` is 1% to 7% over `wide` in the corner cells and every shape is 13% to 69% cheaper. `named` stays 21% to 43% over: its second round is untouched.
+
+Both of the first two are between the topic's bars, so it is the maintainer's to weigh; the third says most of what `repeat` costs is recoverable without a rule of several heads. Next, if he wants it: the cells between the corners, a sound version of evaluating a shared body once, and the design topic the measurements turned up (a seed that leaves its subject free, dialog-db/dialog-db#789).
 
 ## Datasets
 
@@ -105,6 +111,39 @@ The check called "the first commit of a process" is the first commit after the r
 
 Commits: `d311797` and the one this entry is in.
 
+## 2026-11-13, what the engine could recover: `repeat` comes to `wide`
+
+**Question.** How much of what `named` and `repeat` cost over `wide` could the engine recover, with no rule of several heads?
+
+**Method.** The branch `spike/induce-cost` at e13e838, one build, each prototype a switch: `plan`, `share`, `subject`, and `entity`, added after the others were set out, for the question of how often a rule is analyzed. The corner cells (one read and two heads, four reads and four heads) at 500 commands a commit and at one. Three sweeps a variant, interleaved. The 30 gated scenarios swept with every prototype on and with none, and compared. `dialog-perf`'s tests under every switch.
+
+**Results.** [results/2026-11-12-induce-cost.md](results/2026-11-12-induce-cost.md). Millions of instructions, runs of one scenario differ by 0.35% at most.
+
+| | body, heads | `wide` | `named` | `repeat` | `named` over `wide` | `repeat` over `wide` |
+|---|---|---|---|---|---|---|
+| 500 a commit, as it is | 1 read, 2 | 901.7 | 1142.2 | 1452.8 | +26.7% | +61.1% |
+| 500 a commit, `plan`, `share` and `subject` | 1 read, 2 | 541.9 | 762.3 | 548.5 | +40.7% | +1.2% |
+| 500 a commit, as it is | 4 reads, 4 | 1562.5 | 2077.3 | 3882.8 | +33.0% | +148.5% |
+| 500 a commit, `plan`, `share` and `subject` | 4 reads, 4 | 1142.3 | 1631.6 | 1191.7 | +42.8% | +4.3% |
+| one a commit, as it is | 1 read, 2 | 4.51 | 5.31 | 5.74 | +17.6% | +27.3% |
+| one a commit, `plan`, `share` and `subject` | 1 read, 2 | 3.74 | 4.54 | 3.84 | +21.2% | +2.6% |
+| one a commit, as it is | 4 reads, 4 | 6.25 | 7.90 | 11.67 | +26.4% | +86.6% |
+| one a commit, `plan`, `share` and `subject` | 4 reads, 4 | 5.28 | 6.91 | 5.67 | +30.7% | +7.4% |
+
+Each alone, against the build as it is: `subject` takes 22% to 38% off `wide` at 500 and 13% to 16% at one; `share` takes 37% to 59% off `repeat` at 500 and 20% to 43% at one, and nothing off the others; `plan` takes 2% to 9% off at 500 and 1% to 6% at one; `entity` takes 1.3% to 3.7% off at one.
+
+Against what was guessed: `share` did what was expected. `subject` took more off `wide` than the quarter guessed where the body is one read. `named` did end further from `wide`, and the 220 million it is over at 500 with two heads is its second round, as it was.
+
+How often a rule is compiled: an inductive rule is decoded and analyzed once a process, kept by its entity and its source's hash, and never in the commits measured. It is planned once a seed, 500 times in a commit of 500, which is what `plan` keeps. A commit reads each rule's source from the tree and hashes it to find the rule it has, 55 thousand instructions a rule a round, which is what `entity` skips. A process that starts with its rules stored, and so decodes them once, was not run.
+
+The gated scenarios, every prototype on against none in one binary: no regression, every counter unchanged, instructions from -3.4% (`rule-dispatch`) to +1.2%. Against `perf/baseline/` the comparison fails on this machine with the prototypes on and off alike, 26 of 30 scenarios 4% to 16% over their files, so it says nothing here.
+
+One thing found is not a cost alone. A rule that leaves a premise's subject unnamed is fired for entities the commit did not touch, wherever one field of the premise is written and another entity holds the same value. `subject` changes that. It is written up as a design topic of its own, dialog-db/dialog-db#789.
+
+**Decision.** The bar is met in the cells measured: with the prototypes on, `repeat` is within 10% of `wide` (1.2% to 7.4%). So what `repeat` costs over a rule of several heads is the engine's to recover, by evaluating once a body that several rules state, and the question of the topic turns on whether that is built, not on `named`. Not decided by the agent: whether to build it. The prototypes are not sound enough to land; the results file says what each leaves out. The cells between the corners were not run.
+
+Commits: `e13e838` on `spike/induce-cost`, and the one this entry is in.
+
 ## How to reproduce
 
 ```
@@ -120,4 +159,11 @@ done
 target/release/perf sweep --only … --size 10 --out-dir …        # and 300, and 1
 DIALOG_PERF_HEADS_TODOS=5000 target/release/perf sweep --only … --out-dir …
 DIALOG_PERF_HEADS_COLD=1 target/release/perf sweep --only … --size 1 --out-dir …
+```
+
+The prototypes, from a build of `spike/induce-cost`:
+
+```
+DIALOG_SPIKE=subject target/release/perf sweep --only … --out-dir …   # or plan, share, entity, all, or nothing
+target/release/perf compare --base <the gated scenarios, none on> <the same, all on>
 ```

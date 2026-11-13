@@ -52,7 +52,7 @@ By callgrind's inclusive cost, thousands of instructions a commit.
 | of it, writing heads | | 203 | 221 | 213 | 502 |
 | of it, planning | | 48 | 72 | 96 | 661 |
 
-Signing is 495 thousand of every commit. The estimates are the largest single thing a rule adds: 665 thousand for a rule, four of 166 thousand each. They come of the command premise leaving its subject unnamed (see [the next sitting](2026-11-12-induce-cost.md)).
+Signing is 495 thousand of every commit. The estimates are the largest single thing a rule adds: 665 thousand for a rule, a little over four a commit at 160 thousand each. They come of the command premise leaving its subject unnamed (see [the next sitting](2026-11-12-induce-cost.md)).
 
 ## Does the input decide it
 

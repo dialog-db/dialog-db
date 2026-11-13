@@ -1,0 +1,1923 @@
+{
+ "build": "spike/induce-cost at e13e838: main dd19d6c, the harness and the prototypes, release",
+ "date": "2026-11-12",
+ "runner": [
+  "model: Intel(R) Xeon(R) Processor @ 2.10GHz",
+  "flags: c1e7468c17a39377"
+ ],
+ "switches": {
+  "all": "plan, share and subject",
+  "entity": "entity",
+  "off": "",
+  "plan": "plan",
+  "share": "share",
+  "subject": "subject"
+ },
+ "unit": "instructions of the measured phase; for heads-each-\u2026 divide by size for one commit",
+ "variants": {
+  "all": {
+   "heads-each-named-heavy-4": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 142,
+     "archive.put.bytes": 6328768,
+     "heads.cold": 0,
+     "heads.todos": 500,
+     "span.apply_batch_reusing": 100,
+     "span.buffer_records": 200,
+     "span.commit": 100,
+     "span.resolve_bundle": 0,
+     "span.resolve_rules": 0,
+     "span.seal_batch": 100,
+     "span.settle": 100,
+     "span.settle_cell": 400,
+     "span.write_instructions": 100
+    },
+    "instructions": [
+     690573004,
+     690485531,
+     691177589
+    ],
+    "outcome": {
+     "commits": 100,
+     "facts": 400
+    },
+    "size": 100
+   },
+   "heads-each-named-light-2": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 125,
+     "archive.put.bytes": 5338348,
+     "heads.cold": 0,
+     "heads.todos": 500,
+     "span.apply_batch_reusing": 100,
+     "span.buffer_records": 200,
+     "span.commit": 100,
+     "span.resolve_bundle": 0,
+     "span.resolve_rules": 0,
+     "span.seal_batch": 100,
+     "span.settle": 100,
+     "span.settle_cell": 200,
+     "span.write_instructions": 100
+    },
+    "instructions": [
+     453872810,
+     453604551,
+     453791303
+    ],
+    "outcome": {
+     "commits": 100,
+     "facts": 200
+    },
+    "size": 100
+   },
+   "heads-each-plain-2": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 123,
+     "archive.put.bytes": 5315408,
+     "heads.cold": 0,
+     "heads.todos": 500,
+     "span.apply_batch_reusing": 100,
+     "span.buffer_records": 200,
+     "span.commit": 100,
+     "span.resolve_bundle": 0,
+     "span.resolve_rules": 0,
+     "span.seal_batch": 100,
+     "span.settle": 100,
+     "span.write_instructions": 100
+    },
+    "instructions": [
+     290930360,
+     290724662,
+     291033708
+    ],
+    "outcome": {
+     "commits": 100,
+     "facts": 200
+    },
+    "size": 100
+   },
+   "heads-each-plain-4": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 135,
+     "archive.put.bytes": 6086620,
+     "heads.cold": 0,
+     "heads.todos": 500,
+     "span.apply_batch_reusing": 100,
+     "span.buffer_records": 200,
+     "span.commit": 100,
+     "span.resolve_bundle": 0,
+     "span.resolve_rules": 0,
+     "span.seal_batch": 100,
+     "span.settle": 100,
+     "span.write_instructions": 100
+    },
+    "instructions": [
+     401938738,
+     402272709,
+     402245450
+    ],
+    "outcome": {
+     "commits": 100,
+     "facts": 400
+    },
+    "size": 100
+   },
+   "heads-each-repeat-heavy-4": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 137,
+     "archive.put.bytes": 6051288,
+     "heads.cold": 0,
+     "heads.todos": 500,
+     "span.apply_batch_reusing": 100,
+     "span.buffer_records": 200,
+     "span.commit": 100,
+     "span.resolve_bundle": 0,
+     "span.resolve_rules": 0,
+     "span.seal_batch": 100,
+     "span.settle": 100,
+     "span.write_instructions": 100
+    },
+    "instructions": [
+     567195653,
+     567165504,
+     567115016
+    ],
+    "outcome": {
+     "commits": 100,
+     "facts": 400
+    },
+    "size": 100
+   },
+   "heads-each-repeat-light-2": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 125,
+     "archive.put.bytes": 5334088,
+     "heads.cold": 0,
+     "heads.todos": 500,
+     "span.apply_batch_reusing": 100,
+     "span.buffer_records": 200,
+     "span.commit": 100,
+     "span.resolve_bundle": 0,
+     "span.resolve_rules": 0,
+     "span.seal_batch": 100,
+     "span.settle": 100,
+     "span.write_instructions": 100
+    },
+    "instructions": [
+     384161780,
+     383729598,
+     384016300
+    ],
+    "outcome": {
+     "commits": 100,
+     "facts": 200
+    },
+    "size": 100
+   },
+   "heads-each-wide-heavy-4": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 141,
+     "archive.put.bytes": 6156200,
+     "heads.cold": 0,
+     "heads.todos": 500,
+     "span.apply_batch_reusing": 100,
+     "span.buffer_records": 200,
+     "span.commit": 100,
+     "span.resolve_bundle": 0,
+     "span.resolve_rules": 0,
+     "span.seal_batch": 100,
+     "span.settle": 100,
+     "span.write_instructions": 100
+    },
+    "instructions": [
+     528197990,
+     528196241,
+     527760389
+    ],
+    "outcome": {
+     "commits": 100,
+     "facts": 400
+    },
+    "size": 100
+   },
+   "heads-each-wide-light-2": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 125,
+     "archive.put.bytes": 5350028,
+     "heads.cold": 0,
+     "heads.todos": 500,
+     "span.apply_batch_reusing": 100,
+     "span.buffer_records": 200,
+     "span.commit": 100,
+     "span.resolve_bundle": 0,
+     "span.resolve_rules": 0,
+     "span.seal_batch": 100,
+     "span.settle": 100,
+     "span.write_instructions": 100
+    },
+    "instructions": [
+     374856177,
+     374435082,
+     374292711
+    ],
+    "outcome": {
+     "commits": 100,
+     "facts": 200
+    },
+    "size": 100
+   },
+   "heads-named-heavy-4": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 26,
+     "archive.put.bytes": 1476556,
+     "span.apply_batch_reusing": 1,
+     "span.buffer_records": 2,
+     "span.commit": 1,
+     "span.resolve_bundle": 13,
+     "span.resolve_rules": 16,
+     "span.seal_batch": 1,
+     "span.settle": 1,
+     "span.settle_cell": 2000,
+     "span.write_instructions": 1
+    },
+    "instructions": [
+     1630733182,
+     1632515092,
+     1631581956
+    ],
+    "outcome": {
+     "facts": 2000
+    },
+    "size": 500
+   },
+   "heads-named-light-2": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 16,
+     "archive.put.bytes": 895948,
+     "span.apply_batch_reusing": 1,
+     "span.buffer_records": 2,
+     "span.commit": 1,
+     "span.resolve_bundle": 6,
+     "span.resolve_rules": 9,
+     "span.seal_batch": 1,
+     "span.settle": 1,
+     "span.settle_cell": 1000,
+     "span.write_instructions": 1
+    },
+    "instructions": [
+     762261578,
+     762896921,
+     761861035
+    ],
+    "outcome": {
+     "facts": 1000
+    },
+    "size": 500
+   },
+   "heads-repeat-heavy-4": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 26,
+     "archive.put.bytes": 1490740,
+     "span.apply_batch_reusing": 1,
+     "span.buffer_records": 2,
+     "span.commit": 1,
+     "span.resolve_bundle": 9,
+     "span.resolve_rules": 12,
+     "span.seal_batch": 1,
+     "span.settle": 1,
+     "span.write_instructions": 1
+    },
+    "instructions": [
+     1192501750,
+     1190437287,
+     1191667447
+    ],
+    "outcome": {
+     "facts": 2000
+    },
+    "size": 500
+   },
+   "heads-repeat-light-2": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 16,
+     "archive.put.bytes": 895468,
+     "span.apply_batch_reusing": 1,
+     "span.buffer_records": 2,
+     "span.commit": 1,
+     "span.resolve_bundle": 4,
+     "span.resolve_rules": 7,
+     "span.seal_batch": 1,
+     "span.settle": 1,
+     "span.write_instructions": 1
+    },
+    "instructions": [
+     547820772,
+     548747419,
+     548462826
+    ],
+    "outcome": {
+     "facts": 1000
+    },
+    "size": 500
+   },
+   "heads-wide-heavy-4": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 26,
+     "archive.put.bytes": 1464380,
+     "span.apply_batch_reusing": 1,
+     "span.buffer_records": 2,
+     "span.commit": 1,
+     "span.resolve_bundle": 9,
+     "span.resolve_rules": 12,
+     "span.seal_batch": 1,
+     "span.settle": 1,
+     "span.write_instructions": 1
+    },
+    "instructions": [
+     1140249620,
+     1142330616,
+     1142857230
+    ],
+    "outcome": {
+     "facts": 2000
+    },
+    "size": 500
+   },
+   "heads-wide-light-2": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 16,
+     "archive.put.bytes": 889356,
+     "span.apply_batch_reusing": 1,
+     "span.buffer_records": 2,
+     "span.commit": 1,
+     "span.resolve_bundle": 4,
+     "span.resolve_rules": 7,
+     "span.seal_batch": 1,
+     "span.settle": 1,
+     "span.write_instructions": 1
+    },
+    "instructions": [
+     541931494,
+     542000996,
+     541579640
+    ],
+    "outcome": {
+     "facts": 1000
+    },
+    "size": 500
+   }
+  },
+  "entity": {
+   "heads-each-named-heavy-4": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 142,
+     "archive.put.bytes": 6328768,
+     "heads.cold": 0,
+     "heads.todos": 500,
+     "span.apply_batch_reusing": 100,
+     "span.buffer_records": 200,
+     "span.commit": 100,
+     "span.resolve_bundle": 0,
+     "span.resolve_rules": 0,
+     "span.seal_batch": 100,
+     "span.settle": 100,
+     "span.settle_cell": 400,
+     "span.write_instructions": 100
+    },
+    "instructions": [
+     761691239,
+     760923565,
+     761422688
+    ],
+    "outcome": {
+     "commits": 100,
+     "facts": 400
+    },
+    "size": 100
+   },
+   "heads-each-named-light-2": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 125,
+     "archive.put.bytes": 5338348,
+     "heads.cold": 0,
+     "heads.todos": 500,
+     "span.apply_batch_reusing": 100,
+     "span.buffer_records": 200,
+     "span.commit": 100,
+     "span.resolve_bundle": 0,
+     "span.resolve_rules": 0,
+     "span.seal_batch": 100,
+     "span.settle": 100,
+     "span.settle_cell": 200,
+     "span.write_instructions": 100
+    },
+    "instructions": [
+     515420361,
+     516122158,
+     515838747
+    ],
+    "outcome": {
+     "commits": 100,
+     "facts": 200
+    },
+    "size": 100
+   },
+   "heads-each-repeat-heavy-4": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 137,
+     "archive.put.bytes": 6051288,
+     "heads.cold": 0,
+     "heads.todos": 500,
+     "span.apply_batch_reusing": 100,
+     "span.buffer_records": 200,
+     "span.commit": 100,
+     "span.resolve_bundle": 0,
+     "span.resolve_rules": 0,
+     "span.seal_batch": 100,
+     "span.settle": 100,
+     "span.write_instructions": 100
+    },
+    "instructions": [
+     1134050830,
+     1133727049,
+     1133370290
+    ],
+    "outcome": {
+     "commits": 100,
+     "facts": 400
+    },
+    "size": 100
+   },
+   "heads-each-repeat-light-2": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 125,
+     "archive.put.bytes": 5334088,
+     "heads.cold": 0,
+     "heads.todos": 500,
+     "span.apply_batch_reusing": 100,
+     "span.buffer_records": 200,
+     "span.commit": 100,
+     "span.resolve_bundle": 0,
+     "span.resolve_rules": 0,
+     "span.seal_batch": 100,
+     "span.settle": 100,
+     "span.write_instructions": 100
+    },
+    "instructions": [
+     562456654,
+     561918939,
+     562968274
+    ],
+    "outcome": {
+     "commits": 100,
+     "facts": 200
+    },
+    "size": 100
+   },
+   "heads-each-wide-heavy-4": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 141,
+     "archive.put.bytes": 6156200,
+     "heads.cold": 0,
+     "heads.todos": 500,
+     "span.apply_batch_reusing": 100,
+     "span.buffer_records": 200,
+     "span.commit": 100,
+     "span.resolve_bundle": 0,
+     "span.resolve_rules": 0,
+     "span.seal_batch": 100,
+     "span.settle": 100,
+     "span.write_instructions": 100
+    },
+    "instructions": [
+     616330501,
+     616563727,
+     616554690
+    ],
+    "outcome": {
+     "commits": 100,
+     "facts": 400
+    },
+    "size": 100
+   },
+   "heads-each-wide-light-2": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 125,
+     "archive.put.bytes": 5350028,
+     "heads.cold": 0,
+     "heads.todos": 500,
+     "span.apply_batch_reusing": 100,
+     "span.buffer_records": 200,
+     "span.commit": 100,
+     "span.resolve_bundle": 0,
+     "span.resolve_rules": 0,
+     "span.seal_batch": 100,
+     "span.settle": 100,
+     "span.write_instructions": 100
+    },
+    "instructions": [
+     445581810,
+     445329352,
+     445431132
+    ],
+    "outcome": {
+     "commits": 100,
+     "facts": 200
+    },
+    "size": 100
+   }
+  },
+  "off": {
+   "heads-each-named-heavy-4": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 142,
+     "archive.put.bytes": 6328768,
+     "heads.cold": 0,
+     "heads.todos": 500,
+     "span.apply_batch_reusing": 100,
+     "span.buffer_records": 200,
+     "span.commit": 100,
+     "span.resolve_bundle": 0,
+     "span.resolve_rules": 0,
+     "span.seal_batch": 100,
+     "span.settle": 100,
+     "span.settle_cell": 400,
+     "span.write_instructions": 100
+    },
+    "instructions": [
+     791043849,
+     790422297,
+     789689567
+    ],
+    "outcome": {
+     "commits": 100,
+     "facts": 400
+    },
+    "size": 100
+   },
+   "heads-each-named-light-2": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 125,
+     "archive.put.bytes": 5338348,
+     "heads.cold": 0,
+     "heads.todos": 500,
+     "span.apply_batch_reusing": 100,
+     "span.buffer_records": 200,
+     "span.commit": 100,
+     "span.resolve_bundle": 0,
+     "span.resolve_rules": 0,
+     "span.seal_batch": 100,
+     "span.settle": 100,
+     "span.settle_cell": 200,
+     "span.write_instructions": 100
+    },
+    "instructions": [
+     530365038,
+     530539952,
+     530642181
+    ],
+    "outcome": {
+     "commits": 100,
+     "facts": 200
+    },
+    "size": 100
+   },
+   "heads-each-plain-2": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 123,
+     "archive.put.bytes": 5315408,
+     "heads.cold": 0,
+     "heads.todos": 500,
+     "span.apply_batch_reusing": 100,
+     "span.buffer_records": 200,
+     "span.commit": 100,
+     "span.resolve_bundle": 0,
+     "span.resolve_rules": 0,
+     "span.seal_batch": 100,
+     "span.settle": 100,
+     "span.write_instructions": 100
+    },
+    "instructions": [
+     290777617,
+     291078545,
+     290840090
+    ],
+    "outcome": {
+     "commits": 100,
+     "facts": 200
+    },
+    "size": 100
+   },
+   "heads-each-plain-4": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 135,
+     "archive.put.bytes": 6086620,
+     "heads.cold": 0,
+     "heads.todos": 500,
+     "span.apply_batch_reusing": 100,
+     "span.buffer_records": 200,
+     "span.commit": 100,
+     "span.resolve_bundle": 0,
+     "span.resolve_rules": 0,
+     "span.seal_batch": 100,
+     "span.settle": 100,
+     "span.write_instructions": 100
+    },
+    "instructions": [
+     401822627,
+     401689093,
+     401757494
+    ],
+    "outcome": {
+     "commits": 100,
+     "facts": 400
+    },
+    "size": 100
+   },
+   "heads-each-repeat-heavy-4": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 137,
+     "archive.put.bytes": 6051288,
+     "heads.cold": 0,
+     "heads.todos": 500,
+     "span.apply_batch_reusing": 100,
+     "span.buffer_records": 200,
+     "span.commit": 100,
+     "span.resolve_bundle": 0,
+     "span.resolve_rules": 0,
+     "span.seal_batch": 100,
+     "span.settle": 100,
+     "span.write_instructions": 100
+    },
+    "instructions": [
+     1167817652,
+     1166239421,
+     1167157598
+    ],
+    "outcome": {
+     "commits": 100,
+     "facts": 400
+    },
+    "size": 100
+   },
+   "heads-each-repeat-light-2": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 125,
+     "archive.put.bytes": 5334088,
+     "heads.cold": 0,
+     "heads.todos": 500,
+     "span.apply_batch_reusing": 100,
+     "span.buffer_records": 200,
+     "span.commit": 100,
+     "span.resolve_bundle": 0,
+     "span.resolve_rules": 0,
+     "span.seal_batch": 100,
+     "span.settle": 100,
+     "span.write_instructions": 100
+    },
+    "instructions": [
+     574282349,
+     574729086,
+     574131064
+    ],
+    "outcome": {
+     "commits": 100,
+     "facts": 200
+    },
+    "size": 100
+   },
+   "heads-each-wide-heavy-4": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 141,
+     "archive.put.bytes": 6156200,
+     "heads.cold": 0,
+     "heads.todos": 500,
+     "span.apply_batch_reusing": 100,
+     "span.buffer_records": 200,
+     "span.commit": 100,
+     "span.resolve_bundle": 0,
+     "span.resolve_rules": 0,
+     "span.seal_batch": 100,
+     "span.settle": 100,
+     "span.write_instructions": 100
+    },
+    "instructions": [
+     625468404,
+     625397094,
+     625558640
+    ],
+    "outcome": {
+     "commits": 100,
+     "facts": 400
+    },
+    "size": 100
+   },
+   "heads-each-wide-light-2": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 125,
+     "archive.put.bytes": 5350028,
+     "heads.cold": 0,
+     "heads.todos": 500,
+     "span.apply_batch_reusing": 100,
+     "span.buffer_records": 200,
+     "span.commit": 100,
+     "span.resolve_bundle": 0,
+     "span.resolve_rules": 0,
+     "span.seal_batch": 100,
+     "span.settle": 100,
+     "span.write_instructions": 100
+    },
+    "instructions": [
+     450708214,
+     451169020,
+     451440552
+    ],
+    "outcome": {
+     "commits": 100,
+     "facts": 200
+    },
+    "size": 100
+   },
+   "heads-named-heavy-4": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 26,
+     "archive.put.bytes": 1476556,
+     "span.apply_batch_reusing": 1,
+     "span.buffer_records": 2,
+     "span.commit": 1,
+     "span.resolve_bundle": 13,
+     "span.resolve_rules": 16,
+     "span.seal_batch": 1,
+     "span.settle": 1,
+     "span.settle_cell": 2000,
+     "span.write_instructions": 1
+    },
+    "instructions": [
+     2075979678,
+     2080857899,
+     2077303151
+    ],
+    "outcome": {
+     "facts": 2000
+    },
+    "size": 500
+   },
+   "heads-named-light-2": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 16,
+     "archive.put.bytes": 895948,
+     "span.apply_batch_reusing": 1,
+     "span.buffer_records": 2,
+     "span.commit": 1,
+     "span.resolve_bundle": 6,
+     "span.resolve_rules": 9,
+     "span.seal_batch": 1,
+     "span.settle": 1,
+     "span.settle_cell": 1000,
+     "span.write_instructions": 1
+    },
+    "instructions": [
+     1141719944,
+     1142819361,
+     1142174997
+    ],
+    "outcome": {
+     "facts": 1000
+    },
+    "size": 500
+   },
+   "heads-repeat-heavy-4": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 26,
+     "archive.put.bytes": 1490740,
+     "span.apply_batch_reusing": 1,
+     "span.buffer_records": 2,
+     "span.commit": 1,
+     "span.resolve_bundle": 9,
+     "span.resolve_rules": 12,
+     "span.seal_batch": 1,
+     "span.settle": 1,
+     "span.write_instructions": 1
+    },
+    "instructions": [
+     3882794803,
+     3882868960,
+     3880601375
+    ],
+    "outcome": {
+     "facts": 2000
+    },
+    "size": 500
+   },
+   "heads-repeat-light-2": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 16,
+     "archive.put.bytes": 895468,
+     "span.apply_batch_reusing": 1,
+     "span.buffer_records": 2,
+     "span.commit": 1,
+     "span.resolve_bundle": 4,
+     "span.resolve_rules": 7,
+     "span.seal_batch": 1,
+     "span.settle": 1,
+     "span.write_instructions": 1
+    },
+    "instructions": [
+     1451941643,
+     1452825467,
+     1453745517
+    ],
+    "outcome": {
+     "facts": 1000
+    },
+    "size": 500
+   },
+   "heads-wide-heavy-4": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 26,
+     "archive.put.bytes": 1464380,
+     "span.apply_batch_reusing": 1,
+     "span.buffer_records": 2,
+     "span.commit": 1,
+     "span.resolve_bundle": 9,
+     "span.resolve_rules": 12,
+     "span.seal_batch": 1,
+     "span.settle": 1,
+     "span.write_instructions": 1
+    },
+    "instructions": [
+     1562463399,
+     1562846233,
+     1561482993
+    ],
+    "outcome": {
+     "facts": 2000
+    },
+    "size": 500
+   },
+   "heads-wide-light-2": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 16,
+     "archive.put.bytes": 889356,
+     "span.apply_batch_reusing": 1,
+     "span.buffer_records": 2,
+     "span.commit": 1,
+     "span.resolve_bundle": 4,
+     "span.resolve_rules": 7,
+     "span.seal_batch": 1,
+     "span.settle": 1,
+     "span.write_instructions": 1
+    },
+    "instructions": [
+     902458858,
+     901367338,
+     901703603
+    ],
+    "outcome": {
+     "facts": 1000
+    },
+    "size": 500
+   }
+  },
+  "plan": {
+   "heads-each-named-heavy-4": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 142,
+     "archive.put.bytes": 6328768,
+     "heads.cold": 0,
+     "heads.todos": 500,
+     "span.apply_batch_reusing": 100,
+     "span.buffer_records": 200,
+     "span.commit": 100,
+     "span.resolve_bundle": 0,
+     "span.resolve_rules": 0,
+     "span.seal_batch": 100,
+     "span.settle": 100,
+     "span.settle_cell": 400,
+     "span.write_instructions": 100
+    },
+    "instructions": [
+     770666571,
+     770718217,
+     770420697
+    ],
+    "outcome": {
+     "commits": 100,
+     "facts": 400
+    },
+    "size": 100
+   },
+   "heads-each-named-light-2": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 125,
+     "archive.put.bytes": 5338348,
+     "heads.cold": 0,
+     "heads.todos": 500,
+     "span.apply_batch_reusing": 100,
+     "span.buffer_records": 200,
+     "span.commit": 100,
+     "span.resolve_bundle": 0,
+     "span.resolve_rules": 0,
+     "span.seal_batch": 100,
+     "span.settle": 100,
+     "span.settle_cell": 200,
+     "span.write_instructions": 100
+    },
+    "instructions": [
+     523842580,
+     523986108,
+     524262936
+    ],
+    "outcome": {
+     "commits": 100,
+     "facts": 200
+    },
+    "size": 100
+   },
+   "heads-each-repeat-heavy-4": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 137,
+     "archive.put.bytes": 6051288,
+     "heads.cold": 0,
+     "heads.todos": 500,
+     "span.apply_batch_reusing": 100,
+     "span.buffer_records": 200,
+     "span.commit": 100,
+     "span.resolve_bundle": 0,
+     "span.resolve_rules": 0,
+     "span.seal_batch": 100,
+     "span.settle": 100,
+     "span.write_instructions": 100
+    },
+    "instructions": [
+     1100260769,
+     1100138904,
+     1100271548
+    ],
+    "outcome": {
+     "commits": 100,
+     "facts": 400
+    },
+    "size": 100
+   },
+   "heads-each-repeat-light-2": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 125,
+     "archive.put.bytes": 5334088,
+     "heads.cold": 0,
+     "heads.todos": 500,
+     "span.apply_batch_reusing": 100,
+     "span.buffer_records": 200,
+     "span.commit": 100,
+     "span.resolve_bundle": 0,
+     "span.resolve_rules": 0,
+     "span.seal_batch": 100,
+     "span.settle": 100,
+     "span.write_instructions": 100
+    },
+    "instructions": [
+     564912409,
+     564702788,
+     565011128
+    ],
+    "outcome": {
+     "commits": 100,
+     "facts": 200
+    },
+    "size": 100
+   },
+   "heads-each-wide-heavy-4": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 141,
+     "archive.put.bytes": 6156200,
+     "heads.cold": 0,
+     "heads.todos": 500,
+     "span.apply_batch_reusing": 100,
+     "span.buffer_records": 200,
+     "span.commit": 100,
+     "span.resolve_bundle": 0,
+     "span.resolve_rules": 0,
+     "span.seal_batch": 100,
+     "span.settle": 100,
+     "span.write_instructions": 100
+    },
+    "instructions": [
+     608693421,
+     608222072,
+     608752907
+    ],
+    "outcome": {
+     "commits": 100,
+     "facts": 400
+    },
+    "size": 100
+   },
+   "heads-each-wide-light-2": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 125,
+     "archive.put.bytes": 5350028,
+     "heads.cold": 0,
+     "heads.todos": 500,
+     "span.apply_batch_reusing": 100,
+     "span.buffer_records": 200,
+     "span.commit": 100,
+     "span.resolve_bundle": 0,
+     "span.resolve_rules": 0,
+     "span.seal_batch": 100,
+     "span.settle": 100,
+     "span.write_instructions": 100
+    },
+    "instructions": [
+     446696060,
+     446603094,
+     446847945
+    ],
+    "outcome": {
+     "commits": 100,
+     "facts": 200
+    },
+    "size": 100
+   },
+   "heads-named-heavy-4": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 26,
+     "archive.put.bytes": 1476556,
+     "span.apply_batch_reusing": 1,
+     "span.buffer_records": 2,
+     "span.commit": 1,
+     "span.resolve_bundle": 13,
+     "span.resolve_rules": 16,
+     "span.seal_batch": 1,
+     "span.settle": 1,
+     "span.settle_cell": 2000,
+     "span.write_instructions": 1
+    },
+    "instructions": [
+     1973861788,
+     1973326194,
+     1970862665
+    ],
+    "outcome": {
+     "facts": 2000
+    },
+    "size": 500
+   },
+   "heads-named-light-2": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 16,
+     "archive.put.bytes": 895948,
+     "span.apply_batch_reusing": 1,
+     "span.buffer_records": 2,
+     "span.commit": 1,
+     "span.resolve_bundle": 6,
+     "span.resolve_rules": 9,
+     "span.seal_batch": 1,
+     "span.settle": 1,
+     "span.settle_cell": 1000,
+     "span.write_instructions": 1
+    },
+    "instructions": [
+     1102487453,
+     1101497723,
+     1102793754
+    ],
+    "outcome": {
+     "facts": 1000
+    },
+    "size": 500
+   },
+   "heads-repeat-heavy-4": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 26,
+     "archive.put.bytes": 1490740,
+     "span.apply_batch_reusing": 1,
+     "span.buffer_records": 2,
+     "span.commit": 1,
+     "span.resolve_bundle": 9,
+     "span.resolve_rules": 12,
+     "span.seal_batch": 1,
+     "span.settle": 1,
+     "span.write_instructions": 1
+    },
+    "instructions": [
+     3544084438,
+     3544381950,
+     3543365340
+    ],
+    "outcome": {
+     "facts": 2000
+    },
+    "size": 500
+   },
+   "heads-repeat-light-2": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 16,
+     "archive.put.bytes": 895468,
+     "span.apply_batch_reusing": 1,
+     "span.buffer_records": 2,
+     "span.commit": 1,
+     "span.resolve_bundle": 4,
+     "span.resolve_rules": 7,
+     "span.seal_batch": 1,
+     "span.settle": 1,
+     "span.write_instructions": 1
+    },
+    "instructions": [
+     1404630445,
+     1405368368,
+     1405234073
+    ],
+    "outcome": {
+     "facts": 1000
+    },
+    "size": 500
+   },
+   "heads-wide-heavy-4": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 26,
+     "archive.put.bytes": 1464380,
+     "span.apply_batch_reusing": 1,
+     "span.buffer_records": 2,
+     "span.commit": 1,
+     "span.resolve_bundle": 9,
+     "span.resolve_rules": 12,
+     "span.seal_batch": 1,
+     "span.settle": 1,
+     "span.write_instructions": 1
+    },
+    "instructions": [
+     1481525982,
+     1480961176,
+     1480160625
+    ],
+    "outcome": {
+     "facts": 2000
+    },
+    "size": 500
+   },
+   "heads-wide-light-2": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 16,
+     "archive.put.bytes": 889356,
+     "span.apply_batch_reusing": 1,
+     "span.buffer_records": 2,
+     "span.commit": 1,
+     "span.resolve_bundle": 4,
+     "span.resolve_rules": 7,
+     "span.seal_batch": 1,
+     "span.settle": 1,
+     "span.write_instructions": 1
+    },
+    "instructions": [
+     881776275,
+     881444662,
+     880871738
+    ],
+    "outcome": {
+     "facts": 1000
+    },
+    "size": 500
+   }
+  },
+  "share": {
+   "heads-each-named-heavy-4": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 142,
+     "archive.put.bytes": 6328768,
+     "heads.cold": 0,
+     "heads.todos": 500,
+     "span.apply_batch_reusing": 100,
+     "span.buffer_records": 200,
+     "span.commit": 100,
+     "span.resolve_bundle": 0,
+     "span.resolve_rules": 0,
+     "span.seal_batch": 100,
+     "span.settle": 100,
+     "span.settle_cell": 400,
+     "span.write_instructions": 100
+    },
+    "instructions": [
+     790876158,
+     791156650,
+     791153679
+    ],
+    "outcome": {
+     "commits": 100,
+     "facts": 400
+    },
+    "size": 100
+   },
+   "heads-each-named-light-2": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 125,
+     "archive.put.bytes": 5338348,
+     "heads.cold": 0,
+     "heads.todos": 500,
+     "span.apply_batch_reusing": 100,
+     "span.buffer_records": 200,
+     "span.commit": 100,
+     "span.resolve_bundle": 0,
+     "span.resolve_rules": 0,
+     "span.seal_batch": 100,
+     "span.settle": 100,
+     "span.settle_cell": 200,
+     "span.write_instructions": 100
+    },
+    "instructions": [
+     530165750,
+     530807065,
+     530870243
+    ],
+    "outcome": {
+     "commits": 100,
+     "facts": 200
+    },
+    "size": 100
+   },
+   "heads-each-repeat-heavy-4": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 137,
+     "archive.put.bytes": 6051288,
+     "heads.cold": 0,
+     "heads.todos": 500,
+     "span.apply_batch_reusing": 100,
+     "span.buffer_records": 200,
+     "span.commit": 100,
+     "span.resolve_bundle": 0,
+     "span.resolve_rules": 0,
+     "span.seal_batch": 100,
+     "span.settle": 100,
+     "span.write_instructions": 100
+    },
+    "instructions": [
+     665655919,
+     665755601,
+     665399332
+    ],
+    "outcome": {
+     "commits": 100,
+     "facts": 400
+    },
+    "size": 100
+   },
+   "heads-each-repeat-light-2": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 125,
+     "archive.put.bytes": 5334088,
+     "heads.cold": 0,
+     "heads.todos": 500,
+     "span.apply_batch_reusing": 100,
+     "span.buffer_records": 200,
+     "span.commit": 100,
+     "span.resolve_bundle": 0,
+     "span.resolve_rules": 0,
+     "span.seal_batch": 100,
+     "span.settle": 100,
+     "span.write_instructions": 100
+    },
+    "instructions": [
+     461022931,
+     460551971,
+     461067906
+    ],
+    "outcome": {
+     "commits": 100,
+     "facts": 200
+    },
+    "size": 100
+   },
+   "heads-each-wide-heavy-4": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 141,
+     "archive.put.bytes": 6156200,
+     "heads.cold": 0,
+     "heads.todos": 500,
+     "span.apply_batch_reusing": 100,
+     "span.buffer_records": 200,
+     "span.commit": 100,
+     "span.resolve_bundle": 0,
+     "span.resolve_rules": 0,
+     "span.seal_batch": 100,
+     "span.settle": 100,
+     "span.write_instructions": 100
+    },
+    "instructions": [
+     625549276,
+     625638779,
+     625479018
+    ],
+    "outcome": {
+     "commits": 100,
+     "facts": 400
+    },
+    "size": 100
+   },
+   "heads-each-wide-light-2": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 125,
+     "archive.put.bytes": 5350028,
+     "heads.cold": 0,
+     "heads.todos": 500,
+     "span.apply_batch_reusing": 100,
+     "span.buffer_records": 200,
+     "span.commit": 100,
+     "span.resolve_bundle": 0,
+     "span.resolve_rules": 0,
+     "span.seal_batch": 100,
+     "span.settle": 100,
+     "span.write_instructions": 100
+    },
+    "instructions": [
+     451860341,
+     451325127,
+     451677013
+    ],
+    "outcome": {
+     "commits": 100,
+     "facts": 200
+    },
+    "size": 100
+   },
+   "heads-named-heavy-4": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 26,
+     "archive.put.bytes": 1476556,
+     "span.apply_batch_reusing": 1,
+     "span.buffer_records": 2,
+     "span.commit": 1,
+     "span.resolve_bundle": 13,
+     "span.resolve_rules": 16,
+     "span.seal_batch": 1,
+     "span.settle": 1,
+     "span.settle_cell": 2000,
+     "span.write_instructions": 1
+    },
+    "instructions": [
+     2082118009,
+     2076391724,
+     2079204973
+    ],
+    "outcome": {
+     "facts": 2000
+    },
+    "size": 500
+   },
+   "heads-named-light-2": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 16,
+     "archive.put.bytes": 895948,
+     "span.apply_batch_reusing": 1,
+     "span.buffer_records": 2,
+     "span.commit": 1,
+     "span.resolve_bundle": 6,
+     "span.resolve_rules": 9,
+     "span.seal_batch": 1,
+     "span.settle": 1,
+     "span.settle_cell": 1000,
+     "span.write_instructions": 1
+    },
+    "instructions": [
+     1140095683,
+     1140013951,
+     1141803010
+    ],
+    "outcome": {
+     "facts": 1000
+    },
+    "size": 500
+   },
+   "heads-repeat-heavy-4": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 26,
+     "archive.put.bytes": 1490740,
+     "span.apply_batch_reusing": 1,
+     "span.buffer_records": 2,
+     "span.commit": 1,
+     "span.resolve_bundle": 9,
+     "span.resolve_rules": 12,
+     "span.seal_batch": 1,
+     "span.settle": 1,
+     "span.write_instructions": 1
+    },
+    "instructions": [
+     1612659267,
+     1611929081,
+     1612949309
+    ],
+    "outcome": {
+     "facts": 2000
+    },
+    "size": 500
+   },
+   "heads-repeat-light-2": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 16,
+     "archive.put.bytes": 895468,
+     "span.apply_batch_reusing": 1,
+     "span.buffer_records": 2,
+     "span.commit": 1,
+     "span.resolve_bundle": 4,
+     "span.resolve_rules": 7,
+     "span.seal_batch": 1,
+     "span.settle": 1,
+     "span.write_instructions": 1
+    },
+    "instructions": [
+     911616897,
+     911163724,
+     910308255
+    ],
+    "outcome": {
+     "facts": 1000
+    },
+    "size": 500
+   },
+   "heads-wide-heavy-4": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 26,
+     "archive.put.bytes": 1464380,
+     "span.apply_batch_reusing": 1,
+     "span.buffer_records": 2,
+     "span.commit": 1,
+     "span.resolve_bundle": 9,
+     "span.resolve_rules": 12,
+     "span.seal_batch": 1,
+     "span.settle": 1,
+     "span.write_instructions": 1
+    },
+    "instructions": [
+     1563260444,
+     1562832081,
+     1562501038
+    ],
+    "outcome": {
+     "facts": 2000
+    },
+    "size": 500
+   },
+   "heads-wide-light-2": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 16,
+     "archive.put.bytes": 889356,
+     "span.apply_batch_reusing": 1,
+     "span.buffer_records": 2,
+     "span.commit": 1,
+     "span.resolve_bundle": 4,
+     "span.resolve_rules": 7,
+     "span.seal_batch": 1,
+     "span.settle": 1,
+     "span.write_instructions": 1
+    },
+    "instructions": [
+     902855429,
+     903031699,
+     902075059
+    ],
+    "outcome": {
+     "facts": 1000
+    },
+    "size": 500
+   }
+  },
+  "subject": {
+   "heads-each-named-heavy-4": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 142,
+     "archive.put.bytes": 6328768,
+     "heads.cold": 0,
+     "heads.todos": 500,
+     "span.apply_batch_reusing": 100,
+     "span.buffer_records": 200,
+     "span.commit": 100,
+     "span.resolve_bundle": 0,
+     "span.resolve_rules": 0,
+     "span.seal_batch": 100,
+     "span.settle": 100,
+     "span.settle_cell": 400,
+     "span.write_instructions": 100
+    },
+    "instructions": [
+     711287860,
+     710785201,
+     710771798
+    ],
+    "outcome": {
+     "commits": 100,
+     "facts": 400
+    },
+    "size": 100
+   },
+   "heads-each-named-light-2": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 125,
+     "archive.put.bytes": 5338348,
+     "heads.cold": 0,
+     "heads.todos": 500,
+     "span.apply_batch_reusing": 100,
+     "span.buffer_records": 200,
+     "span.commit": 100,
+     "span.resolve_bundle": 0,
+     "span.resolve_rules": 0,
+     "span.seal_batch": 100,
+     "span.settle": 100,
+     "span.settle_cell": 200,
+     "span.write_instructions": 100
+    },
+    "instructions": [
+     460113583,
+     460045795,
+     460244492
+    ],
+    "outcome": {
+     "commits": 100,
+     "facts": 200
+    },
+    "size": 100
+   },
+   "heads-each-repeat-heavy-4": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 137,
+     "archive.put.bytes": 6051288,
+     "heads.cold": 0,
+     "heads.todos": 500,
+     "span.apply_batch_reusing": 100,
+     "span.buffer_records": 200,
+     "span.commit": 100,
+     "span.resolve_bundle": 0,
+     "span.resolve_rules": 0,
+     "span.seal_batch": 100,
+     "span.settle": 100,
+     "span.write_instructions": 100
+    },
+    "instructions": [
+     841927743,
+     841636241,
+     842607006
+    ],
+    "outcome": {
+     "commits": 100,
+     "facts": 400
+    },
+    "size": 100
+   },
+   "heads-each-repeat-light-2": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 125,
+     "archive.put.bytes": 5334088,
+     "heads.cold": 0,
+     "heads.todos": 500,
+     "span.apply_batch_reusing": 100,
+     "span.buffer_records": 200,
+     "span.commit": 100,
+     "span.resolve_bundle": 0,
+     "span.resolve_rules": 0,
+     "span.seal_batch": 100,
+     "span.settle": 100,
+     "span.write_instructions": 100
+    },
+    "instructions": [
+     430307550,
+     430005352,
+     430639182
+    ],
+    "outcome": {
+     "commits": 100,
+     "facts": 200
+    },
+    "size": 100
+   },
+   "heads-each-wide-heavy-4": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 141,
+     "archive.put.bytes": 6156200,
+     "heads.cold": 0,
+     "heads.todos": 500,
+     "span.apply_batch_reusing": 100,
+     "span.buffer_records": 200,
+     "span.commit": 100,
+     "span.resolve_bundle": 0,
+     "span.resolve_rules": 0,
+     "span.seal_batch": 100,
+     "span.settle": 100,
+     "span.write_instructions": 100
+    },
+    "instructions": [
+     544774256,
+     544849359,
+     544409874
+    ],
+    "outcome": {
+     "commits": 100,
+     "facts": 400
+    },
+    "size": 100
+   },
+   "heads-each-wide-light-2": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 125,
+     "archive.put.bytes": 5350028,
+     "heads.cold": 0,
+     "heads.todos": 500,
+     "span.apply_batch_reusing": 100,
+     "span.buffer_records": 200,
+     "span.commit": 100,
+     "span.resolve_bundle": 0,
+     "span.resolve_rules": 0,
+     "span.seal_batch": 100,
+     "span.settle": 100,
+     "span.write_instructions": 100
+    },
+    "instructions": [
+     379660628,
+     379769857,
+     379431514
+    ],
+    "outcome": {
+     "commits": 100,
+     "facts": 200
+    },
+    "size": 100
+   },
+   "heads-named-heavy-4": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 26,
+     "archive.put.bytes": 1476556,
+     "span.apply_batch_reusing": 1,
+     "span.buffer_records": 2,
+     "span.commit": 1,
+     "span.resolve_bundle": 13,
+     "span.resolve_rules": 16,
+     "span.seal_batch": 1,
+     "span.settle": 1,
+     "span.settle_cell": 2000,
+     "span.write_instructions": 1
+    },
+    "instructions": [
+     1740482915,
+     1740493489,
+     1734493956
+    ],
+    "outcome": {
+     "facts": 2000
+    },
+    "size": 500
+   },
+   "heads-named-light-2": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 16,
+     "archive.put.bytes": 895948,
+     "span.apply_batch_reusing": 1,
+     "span.buffer_records": 2,
+     "span.commit": 1,
+     "span.resolve_bundle": 6,
+     "span.resolve_rules": 9,
+     "span.seal_batch": 1,
+     "span.settle": 1,
+     "span.settle_cell": 1000,
+     "span.write_instructions": 1
+    },
+    "instructions": [
+     800525544,
+     801484524,
+     801196914
+    ],
+    "outcome": {
+     "facts": 1000
+    },
+    "size": 500
+   },
+   "heads-repeat-heavy-4": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 26,
+     "archive.put.bytes": 1490740,
+     "span.apply_batch_reusing": 1,
+     "span.buffer_records": 2,
+     "span.commit": 1,
+     "span.resolve_bundle": 9,
+     "span.resolve_rules": 12,
+     "span.seal_batch": 1,
+     "span.settle": 1,
+     "span.write_instructions": 1
+    },
+    "instructions": [
+     2501978533,
+     2502051851,
+     2502124379
+    ],
+    "outcome": {
+     "facts": 2000
+    },
+    "size": 500
+   },
+   "heads-repeat-light-2": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 16,
+     "archive.put.bytes": 895468,
+     "span.apply_batch_reusing": 1,
+     "span.buffer_records": 2,
+     "span.commit": 1,
+     "span.resolve_bundle": 4,
+     "span.resolve_rules": 7,
+     "span.seal_batch": 1,
+     "span.settle": 1,
+     "span.write_instructions": 1
+    },
+    "instructions": [
+     770509885,
+     770711420,
+     770568652
+    ],
+    "outcome": {
+     "facts": 1000
+    },
+    "size": 500
+   },
+   "heads-wide-heavy-4": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 26,
+     "archive.put.bytes": 1464380,
+     "span.apply_batch_reusing": 1,
+     "span.buffer_records": 2,
+     "span.commit": 1,
+     "span.resolve_bundle": 9,
+     "span.resolve_rules": 12,
+     "span.seal_batch": 1,
+     "span.settle": 1,
+     "span.write_instructions": 1
+    },
+    "instructions": [
+     1220351674,
+     1221971034,
+     1219900858
+    ],
+    "outcome": {
+     "facts": 2000
+    },
+    "size": 500
+   },
+   "heads-wide-light-2": {
+    "counters": {
+     "archive.get": 0,
+     "archive.get.bytes": 0,
+     "archive.put": 16,
+     "archive.put.bytes": 889356,
+     "span.apply_batch_reusing": 1,
+     "span.buffer_records": 2,
+     "span.commit": 1,
+     "span.resolve_bundle": 4,
+     "span.resolve_rules": 7,
+     "span.seal_batch": 1,
+     "span.settle": 1,
+     "span.write_instructions": 1
+    },
+    "instructions": [
+     562773036,
+     563705669,
+     564106639
+    ],
+    "outcome": {
+     "facts": 1000
+    },
+    "size": 500
+   }
+  }
+ }
+}

@@ -1,5 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 498" width="920" height="498" font-family="system-ui, -apple-system, Segoe UI, sans-serif">
-<rect width="920" height="498" fill="#fcfcfb"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 510" width="920" height="510" font-family="system-ui, -apple-system, Segoe UI, sans-serif">
+<rect width="920" height="510" fill="#fcfcfb"/>
 <text x="64" y="26" font-size="16" font-weight="600" fill="#0b0b0b">Instructions one commit of one move command retires, in millions</text>
 <text x="64" y="46" font-size="12" fill="#52514e">main dd19d6c, callgrind, 100 commits over 500 to-dos, median of three runs; the percentage is over the wide head</text>
 <rect x="64" y="64" width="12" height="12" rx="2" fill="#8a8985"/>
@@ -30,7 +30,7 @@
 <path d="M215.5,452 V309.8 Q215.5,305.8 219.5,305.8 H255.5 Q259.5,305.8 259.5,309.8 V452 Z" fill="#1baf7a"><title>a rule a head, the body written again, 1 read, 2 heads: 5.733</title></path>
 <text x="237.5" y="299.8" font-size="10" text-anchor="middle" fill="#0b0b0b">5.73</text>
 <text x="237.5" y="287.8" font-size="9" text-anchor="middle" fill="#52514e">+27%</text>
-<text x="168.5" y="480" font-size="12" text-anchor="middle" fill="#0b0b0b">1 read, 2 heads</text>
+<text x="168.5" y="476" font-size="12" text-anchor="middle" fill="#0b0b0b">1 read, 2 heads</text>
 <path d="M286.5,452 V353.6 Q286.5,349.6 290.5,349.6 H326.5 Q330.5,349.6 330.5,353.6 V452 Z" fill="#8a8985"><title>no rule: the transaction asserts the facts itself, 1 read, 4 heads: 4.017</title></path>
 <text x="308.5" y="343.6" font-size="10" text-anchor="middle" fill="#0b0b0b">4.02</text>
 <path d="M332.5,452 V307.5 Q332.5,303.5 336.5,303.5 H372.5 Q376.5,303.5 376.5,307.5 V452 Z" fill="#2a78d6"><title>one rule, one wide head (stands in for several heads), 1 read, 4 heads: 5.825</title></path>
@@ -41,7 +41,7 @@
 <path d="M424.5,452 V193.5 Q424.5,189.5 428.5,189.5 H464.5 Q468.5,189.5 468.5,193.5 V452 Z" fill="#1baf7a"><title>a rule a head, the body written again, 1 read, 4 heads: 10.296</title></path>
 <text x="446.5" y="183.5" font-size="10" text-anchor="middle" fill="#0b0b0b">10.30</text>
 <text x="446.5" y="171.5" font-size="9" text-anchor="middle" fill="#52514e">+77%</text>
-<text x="377.5" y="480" font-size="12" text-anchor="middle" fill="#0b0b0b">1 read, 4 heads</text>
+<text x="377.5" y="476" font-size="12" text-anchor="middle" fill="#0b0b0b">1 read, 4 heads</text>
 <path d="M495.5,452 V381.8 Q495.5,377.8 499.5,377.8 H535.5 Q539.5,377.8 539.5,381.8 V452 Z" fill="#8a8985"><title>no rule: the transaction asserts the facts itself, 4 reads, 2 heads: 2.909</title></path>
 <text x="517.5" y="371.8" font-size="10" text-anchor="middle" fill="#0b0b0b">2.91</text>
 <path d="M541.5,452 V330.1 Q541.5,326.1 545.5,326.1 H581.5 Q585.5,326.1 585.5,330.1 V452 Z" fill="#2a78d6"><title>one rule, one wide head (stands in for several heads), 4 reads, 2 heads: 4.936</title></path>
@@ -52,7 +52,7 @@
 <path d="M633.5,452 V284.6 Q633.5,280.6 637.5,280.6 H673.5 Q677.5,280.6 677.5,284.6 V452 Z" fill="#1baf7a"><title>a rule a head, the body written again, 4 reads, 2 heads: 6.720</title></path>
 <text x="655.5" y="274.6" font-size="10" text-anchor="middle" fill="#0b0b0b">6.72</text>
 <text x="655.5" y="262.6" font-size="9" text-anchor="middle" fill="#52514e">+36%</text>
-<text x="586.5" y="480" font-size="12" text-anchor="middle" fill="#0b0b0b">4 reads, 2 heads</text>
+<text x="586.5" y="476" font-size="12" text-anchor="middle" fill="#0b0b0b">4 reads, 2 heads</text>
 <path d="M704.5,452 V353.6 Q704.5,349.6 708.5,349.6 H744.5 Q748.5,349.6 748.5,353.6 V452 Z" fill="#8a8985"><title>no rule: the transaction asserts the facts itself, 4 reads, 4 heads: 4.017</title></path>
 <text x="726.5" y="343.6" font-size="10" text-anchor="middle" fill="#0b0b0b">4.02</text>
 <path d="M750.5,452 V296.5 Q750.5,292.5 754.5,292.5 H790.5 Q794.5,292.5 794.5,296.5 V452 Z" fill="#2a78d6"><title>one rule, one wide head (stands in for several heads), 4 reads, 4 heads: 6.254</title></path>
@@ -63,6 +63,6 @@
 <path d="M842.5,452 V158.6 Q842.5,154.6 846.5,154.6 H882.5 Q886.5,154.6 886.5,158.6 V452 Z" fill="#1baf7a"><title>a rule a head, the body written again, 4 reads, 4 heads: 11.663</title></path>
 <text x="864.5" y="148.6" font-size="10" text-anchor="middle" fill="#0b0b0b">11.66</text>
 <text x="864.5" y="136.6" font-size="9" text-anchor="middle" fill="#52514e">+86%</text>
-<text x="795.5" y="480" font-size="12" text-anchor="middle" fill="#0b0b0b">4 reads, 4 heads</text>
+<text x="795.5" y="476" font-size="12" text-anchor="middle" fill="#0b0b0b">4 reads, 4 heads</text>
 <line x1="64" x2="900" y1="452" y2="452" stroke="#52514e" stroke-width="1"/>
 </svg>

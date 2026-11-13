@@ -2,15 +2,18 @@
 
 `spec` holds `title`, `subtitle`, `groups` (the labels along the x axis),
 `series` (each a `name`, a `color` and a value a group), `top` (the y
-axis's end), `ticks` (how many gridlines) and, optionally, `over`: the
-index of the series the others' percentages are over."""
+axis's end), `ticks` (how many gridlines) and, optionally, `over` (the
+index of the series the others' percentages are over), `digits` (of a
+bar's value, 2 unless given) and `small` (a smaller value above a bar,
+for many narrow bars). A group's label may be two lines, split at `|`."""
 
 INK, MUTED, GRID, SURFACE = "#0b0b0b", "#52514e", "#e4e3df", "#fcfcfb"
 
 
 def bars(path, spec):
     series, groups = spec["series"], spec["groups"]
-    W, LEFT, BOTTOM, RIGHT = 920, 64, 46, 20
+    W, LEFT, BOTTOM, RIGHT = 920, 64, 58, 20
+    digits, size = spec.get("digits", 2), 9 if spec.get("small") else 10
     TOP = 64 + len(series) * 17 + 14
     H = TOP + 306 + BOTTOM
     plot_w, plot_h = W - LEFT - RIGHT, H - TOP - BOTTOM
@@ -41,15 +44,16 @@ def bars(path, spec):
             out.append(f'<path d="M{x:.1f},{TOP + plot_h} V{y + 4:.1f} Q{x:.1f},{y:.1f} {x + 4:.1f},{y:.1f} '
                        f'H{x + bar - 4:.1f} Q{x + bar:.1f},{y:.1f} {x + bar:.1f},{y + 4:.1f} V{TOP + plot_h} Z" '
                        f'fill="{each["color"]}"><title>{each["name"]}, {label}: {value:.3f}</title></path>')
-            out.append(f'<text x="{x + bar / 2:.1f}" y="{y - 6:.1f}" font-size="10" text-anchor="middle" '
-                       f'fill="{INK}">{value:.2f}</text>')
+            out.append(f'<text x="{x + bar / 2:.1f}" y="{y - 6:.1f}" font-size="{size}" text-anchor="middle" '
+                       f'fill="{INK}">{value:.{digits}f}</text>')
             over = spec.get("over")
             if over is not None and s > over:
                 base = series[over]["values"][g]
                 out.append(f'<text x="{x + bar / 2:.1f}" y="{y - 18:.1f}" font-size="9" text-anchor="middle" '
                            f'fill="{MUTED}">{(value / base - 1) * 100:+.0f}%</text>')
-        out.append(f'<text x="{LEFT + g * group + group / 2:.1f}" y="{H - 18}" font-size="12" '
-                   f'text-anchor="middle" fill="{INK}">{label}</text>')
+        for line, text in enumerate(label.split("|")):
+            out.append(f'<text x="{LEFT + g * group + group / 2:.1f}" y="{H - 34 + line * 16}" font-size="12" '
+                       f'text-anchor="middle" fill="{INK if line == 0 else MUTED}">{text}</text>')
     out.append(f'<line x1="{LEFT}" x2="{W - RIGHT}" y1="{TOP + plot_h}" y2="{TOP + plot_h}" stroke="{MUTED}" stroke-width="1"/>')
     out.append("</svg>")
     open(path, "w").write("\n".join(out) + "\n")
