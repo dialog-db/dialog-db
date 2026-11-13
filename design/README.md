@@ -80,8 +80,8 @@ Backtracking moves a topic to an earlier phase and says so in its journal.
   again. The objective is confirmed; its bounds (how large, on what
   machine, within what memory and time) are not yet stated.
 - [A rule that leaves a premise's subject unnamed is seeded by value alone](seed-subject.md):
-  **Describing.** At commit a written row is bound into the premise that
+  **Designing.** At commit a written row is bound into the premise that
   reads it, and its entity only where the premise names `this`. Left
   unnamed, the rule fires for every entity that holds the same value, and
-  each field's read is estimated before it is made: a third of a commit of
-  500 commands.
+  writes for them again. Reproduced on main; an approach is built on #791
+  for the maintainer to decide, since it changes what a commit writes.
