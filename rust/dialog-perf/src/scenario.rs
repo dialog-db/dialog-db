@@ -14,6 +14,7 @@ use crate::env::{Env, assert_all, concept, entity, fact, text};
 
 mod commit;
 mod export;
+mod heads;
 mod member;
 mod number;
 mod read;
@@ -334,6 +335,118 @@ pub fn catalog() -> Vec<Spec> {
             volatile: false,
             cross_cpu_pct: 0.0,
             prepare: |size| Box::pin(export::walk(size)),
+        },
+        Spec {
+            name: "heads-wide-light-2",
+            size: 500,
+            about: "one rule of one head that writes two facts a command, the whole body: a stand-in for a rule of several heads, a body of one read (research/rule-heads.md)",
+            volatile: false,
+            cross_cpu_pct: 0.0,
+            prepare: |size| Box::pin(heads::writing(size, heads::Shape::Wide, false, 2)),
+        },
+        Spec {
+            name: "heads-repeat-light-2",
+            size: 500,
+            about: "two rules of one head, each with the whole body: what a rule of several heads is compiled to, a body of one read (research/rule-heads.md)",
+            volatile: false,
+            cross_cpu_pct: 0.0,
+            prepare: |size| Box::pin(heads::writing(size, heads::Shape::Repeat, false, 2)),
+        },
+        Spec {
+            name: "heads-named-light-2",
+            size: 500,
+            about: "one rule issues a command carrying what the body bound, and two rules of one head read it a round later, a body of one read (research/rule-heads.md)",
+            volatile: false,
+            cross_cpu_pct: 0.0,
+            prepare: |size| Box::pin(heads::writing(size, heads::Shape::Named, false, 2)),
+        },
+        Spec {
+            name: "heads-wide-light-4",
+            size: 500,
+            about: "one rule of one head that writes four facts a command, the whole body: a stand-in for a rule of several heads, a body of one read (research/rule-heads.md)",
+            volatile: false,
+            cross_cpu_pct: 0.0,
+            prepare: |size| Box::pin(heads::writing(size, heads::Shape::Wide, false, 4)),
+        },
+        Spec {
+            name: "heads-repeat-light-4",
+            size: 500,
+            about: "four rules of one head, each with the whole body: what a rule of several heads is compiled to, a body of one read (research/rule-heads.md)",
+            volatile: false,
+            cross_cpu_pct: 0.0,
+            prepare: |size| Box::pin(heads::writing(size, heads::Shape::Repeat, false, 4)),
+        },
+        Spec {
+            name: "heads-named-light-4",
+            size: 500,
+            about: "one rule issues a command carrying what the body bound, and four rules of one head read it a round later, a body of one read (research/rule-heads.md)",
+            volatile: false,
+            cross_cpu_pct: 0.0,
+            prepare: |size| Box::pin(heads::writing(size, heads::Shape::Named, false, 4)),
+        },
+        Spec {
+            name: "heads-wide-heavy-2",
+            size: 500,
+            about: "one rule of one head that writes two facts a command, the whole body: a stand-in for a rule of several heads, a body of four reads (research/rule-heads.md)",
+            volatile: false,
+            cross_cpu_pct: 0.0,
+            prepare: |size| Box::pin(heads::writing(size, heads::Shape::Wide, true, 2)),
+        },
+        Spec {
+            name: "heads-repeat-heavy-2",
+            size: 500,
+            about: "two rules of one head, each with the whole body: what a rule of several heads is compiled to, a body of four reads (research/rule-heads.md)",
+            volatile: false,
+            cross_cpu_pct: 0.0,
+            prepare: |size| Box::pin(heads::writing(size, heads::Shape::Repeat, true, 2)),
+        },
+        Spec {
+            name: "heads-named-heavy-2",
+            size: 500,
+            about: "one rule issues a command carrying what the body bound, and two rules of one head read it a round later, a body of four reads (research/rule-heads.md)",
+            volatile: false,
+            cross_cpu_pct: 0.0,
+            prepare: |size| Box::pin(heads::writing(size, heads::Shape::Named, true, 2)),
+        },
+        Spec {
+            name: "heads-wide-heavy-4",
+            size: 500,
+            about: "one rule of one head that writes four facts a command, the whole body: a stand-in for a rule of several heads, a body of four reads (research/rule-heads.md)",
+            volatile: false,
+            cross_cpu_pct: 0.0,
+            prepare: |size| Box::pin(heads::writing(size, heads::Shape::Wide, true, 4)),
+        },
+        Spec {
+            name: "heads-repeat-heavy-4",
+            size: 500,
+            about: "four rules of one head, each with the whole body: what a rule of several heads is compiled to, a body of four reads (research/rule-heads.md)",
+            volatile: false,
+            cross_cpu_pct: 0.0,
+            prepare: |size| Box::pin(heads::writing(size, heads::Shape::Repeat, true, 4)),
+        },
+        Spec {
+            name: "heads-named-heavy-4",
+            size: 500,
+            about: "one rule issues a command carrying what the body bound, and four rules of one head read it a round later, a body of four reads (research/rule-heads.md)",
+            volatile: false,
+            cross_cpu_pct: 0.0,
+            prepare: |size| Box::pin(heads::writing(size, heads::Shape::Named, true, 4)),
+        },
+        Spec {
+            name: "heads-move-repeat",
+            size: 500,
+            about: "a to-do moved by a command, the list it goes to asserted and the one it was on retracted: two rules, each with the whole body (research/rule-heads.md)",
+            volatile: false,
+            cross_cpu_pct: 0.0,
+            prepare: |size| Box::pin(heads::moved(size, heads::Shape::Repeat)),
+        },
+        Spec {
+            name: "heads-move-named",
+            size: 500,
+            about: "a to-do moved by a command, the list it goes to asserted and the one it was on retracted: a command the condition issues and two rules that read it (research/rule-heads.md)",
+            volatile: false,
+            cross_cpu_pct: 0.0,
+            prepare: |size| Box::pin(heads::moved(size, heads::Shape::Named)),
         },
     ]
 }
